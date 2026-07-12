@@ -1,3 +1,5 @@
+// Copyright (C) 2026 OpenStd Inc.
+
 namespace OpenKache;
 
 public class Client

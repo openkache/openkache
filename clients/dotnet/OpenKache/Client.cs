@@ -1,3 +1,5 @@
+// Copyright (C) 2026 OpenStd Inc.
+
 #nullable enable
 using System;
 using System.Net.Sockets;

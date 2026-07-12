@@ -1,3 +1,5 @@
+// Copyright (C) 2026 OpenStd Inc.
+
 using System;
 using System.Collections.Concurrent;
 using System.Net;
