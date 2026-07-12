@@ -16,9 +16,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - run: dotnet pack clients/dotnet/OpenKache.Client.csproj -c Release -o out
+      - run: dotnet pack clients/dotnet/openkache/openkache.csproj -c Release -o out
+      - run: dotnet pack clients/dotnet/OpenKache.Client.csproj -c Release -o out-client
       - uses: NuGet/login@v1
         id: nugetlogin
         with:
           user: kkimdev
-      - run: dotnet nuget push out/*.nupkg --api-key "${{ steps.nugetlogin.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json
+      - run: dotnet nuget push out/*.nupkg --api-key "${{ steps.nugetlogin.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
+      - run: dotnet nuget push out-client/*.nupkg --api-key "${{ steps.nugetlogin.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
