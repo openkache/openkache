@@ -1,7 +1,10 @@
+using System;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading.Tasks;
+using Xunit;
 
 namespace OpenKache.Tests;
 
