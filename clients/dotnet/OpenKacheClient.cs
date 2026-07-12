@@ -8,3 +8,4 @@ public class Client
     public bool Delete(string key) => false;
     public void Close() {}
 }
+
