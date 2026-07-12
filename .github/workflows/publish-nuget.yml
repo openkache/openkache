@@ -1,0 +1,19 @@
+name: Publish NuGet
+
+on:
+  push:
+    branches: [main]
+    paths: ["clients/dotnet/**"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet pack clients/dotnet/OpenKache.Client.csproj -c Release -o out
+      - run: dotnet nuget push out/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json
