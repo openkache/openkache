@@ -22,4 +22,4 @@ jobs:
         id: nugetlogin
         with:
           user: kkimdev
-      - run: dotnet nuget push out/*.nupkg --api-key "${{ steps.nugetlogin.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json
+      - run: dotnet nuget push out/*.nupkg --api-key "${{ steps.nugetlogin.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate
