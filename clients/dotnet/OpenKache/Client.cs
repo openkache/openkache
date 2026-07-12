@@ -26,12 +26,22 @@ public class Client : IDisposable
     {
         if (_tcp?.Connected == true) return;
         _tcp = new TcpClient();
-        var task = _tcp.ConnectAsync(_host, _port);
-        if (!task.Wait(_timeoutMs))
+        try
+        {
+            var task = _tcp.ConnectAsync(_host, _port);
+            if (!task.Wait(_timeoutMs))
+            {
+                _tcp.Dispose();
+                _tcp = null;
+                throw new OpenKacheException("TIMEOUT", "Connection timeout");
+            }
+        }
+        catch (AggregateException ae)
         {
             _tcp.Dispose();
             _tcp = null;
-            throw new OpenKacheException("TIMEOUT", "Connection timeout");
+            var inner = ae.InnerException;
+            throw new OpenKacheException("CONNECTION_REFUSED", inner?.Message ?? ae.Message);
         }
         _stream = _tcp.GetStream();
         _stream.ReadTimeout = _timeoutMs;
