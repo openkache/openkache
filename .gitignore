@@ -5,3 +5,6 @@
 
 # Rust output
 target/
+
+# Local research papers
+papers/
