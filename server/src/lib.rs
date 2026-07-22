@@ -6,6 +6,8 @@
 )]
 
 /// Approximate membership filtering based on the BCF53 breadcrumb filter.
+pub mod allocators;
+
 pub mod breadcrumb;
 
 /// Shared key, value, and fixed-size hashed-key types.
