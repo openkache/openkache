@@ -1,6 +1,6 @@
 ---
 name: commit
-description: xxxxxxxxxxxxxxxxxx Standards for git commit messages, atomic commit principles, and the /commit workflow. Consult before committing code to ensure format compliance and proper change granularity.
+description: Standards for git commit messages, atomic commit principles, and the /commit workflow. Consult before committing code to ensure format compliance and proper change granularity.
 ---
 
 # Git Commit Standards & Workflow
