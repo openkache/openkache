@@ -16,7 +16,7 @@ thiserror = "*"
 
 # --- Quinn backend ---
 quinn = { version = "*", optional = true }
-rustls = { version = "*", optional = true, features = ["ring"] }
+rustls = { version = "*", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "*", features = ["net", "io-util", "macros", "rt"], optional = true }
 
 # --- Noq backend ---
