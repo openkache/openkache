@@ -35,7 +35,8 @@ pub type Result<T> = std::result::Result<T, MemoryError>;
 
 #[cfg(unix)]
 use libc::{
-    MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE, mmap, mprotect, munmap,
+    madvise, MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE, mmap, mprotect,
+    munmap,
 };
 
 // Linux-specific flags if not in libc
@@ -304,8 +305,11 @@ pub unsafe fn commit(addr: *mut u8, size: usize, flags: MemoryFlags) -> Result<(
             };
             if result != 0 {
                 let err = std::io::Error::last_os_error();
-                // mbind failure is non-fatal; NUMA binding is best-effort.
-                let _ = err;
+                eprintln!(
+                    "WARN: mbind NUMA binding for node {} failed ({}). \
+                     Memory will not be bound to the preferred NUMA node.",
+                    node, err
+                );
             }
         }
     }
@@ -356,6 +360,16 @@ pub unsafe fn decommit(addr: *mut u8, size: usize) -> Result<()> {
                 addr,
                 source: std::io::Error::last_os_error(),
             });
+        }
+
+        // MADV_DONTNEED immediately frees physical pages, ensuring that
+        // subsequent recommit + access provides zero-filled pages.
+        // Without this, mprotect(PROT_NONE) only changes page permissions
+        // and does **not** release physical memory on Linux, breaking the
+        // zero-fill contract relied on by Slab.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            madvise(addr as *mut libc::c_void, size, libc::MADV_DONTNEED);
         }
     }
     #[cfg(windows)]

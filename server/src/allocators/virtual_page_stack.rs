@@ -219,8 +219,15 @@ impl VirtualPageStack {
 
     /// Adjusts the number of committed physical pages.
     ///
-    /// Newly committed pages are UNINITIALIZED — consumers MUST NOT assume zero-fill.
-    /// Decommitting a page causes immediate data loss; re-committing returns fresh memory.
+    /// Newly committed pages are **guaranteed zero-filled**:
+    /// - On first commit (freshly reserved pages): OS always provides zero-fill
+    ///   (`mmap MAP_ANONYMOUS` / `VirtualAlloc`).
+    /// - After decommit+recommit: `madvise(MADV_DONTNEED)` on Linux /
+    ///   `MEM_DECOMMIT` on Windows ensures physical pages are released and
+    ///   re-faulted pages are zero-filled.
+    ///
+    /// Decommitting a page causes immediate data loss; re-committing returns fresh,
+    /// zero-filled memory.
     ///
     /// # Arguments
     ///
