@@ -1,0 +1,11 @@
+[package]
+name = "openkache"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Forces the portable lookup paths for cross-architecture benchmarking.
+force-scalar = []
+
+[dependencies]
+sha2 = "0.11.0"
