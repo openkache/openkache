@@ -38,6 +38,8 @@ This workflow covers **all git repositories** in the workspace, including nested
 
 2. **Check Status & Diff**:
    In each modified repo, inspect `git status` and `git diff` to review all changed and untracked files.
+   - **Scan for local/personal paths**: Check the diff for any absolute paths containing usernames, local SSH key paths, Nix store paths, or other machine-specific identifiers. These must NEVER be committed.
+   - Also verify no secrets, tokens, or credentials are present in the diff.
 
 3. **Atomic Splitting**:
    Separate changes covering multiple logical features, bug fixes, or refactors into distinct commit boundaries.
