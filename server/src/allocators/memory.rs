@@ -134,10 +134,10 @@ pub fn get_total_physical_memory() -> usize {
 pub fn check_overcommit_policy() -> Option<String> {
     #[cfg(all(unix, target_os = "linux"))]
     {
-        if let Ok(content) = std::fs::read_to_string("/proc/sys/vm/overcommit_memory") {
-            if content.trim() == "2" {
-                return Some("Strict overcommit policy (vm.overcommit_memory=2) detected. Large virtual memory reservations may fail unless 'no_reserve' flag is used.".to_string());
-            }
+        if let Ok(content) = std::fs::read_to_string("/proc/sys/vm/overcommit_memory")
+            && content.trim() == "2"
+        {
+            return Some("Strict overcommit policy (vm.overcommit_memory=2) detected. Large virtual memory reservations may fail unless 'no_reserve' flag is used.".to_string());
         }
     }
     None
@@ -168,23 +168,21 @@ fn discover_supported_page_sizes() -> Vec<PageSizeInfo> {
     {
         if let Ok(entries) = std::fs::read_dir("/sys/kernel/mm/hugepages/") {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if let Some(rest) = name.strip_prefix("hugepages-") {
-                        if let Some(kb) = rest.strip_suffix("kB") {
-                            if let Ok(size_kb) = kb.parse::<usize>() {
-                                let size_bytes = size_kb * 1024;
-                                infos.push(PageSizeInfo {
-                                    size: size_bytes,
-                                    flags: MemoryFlags {
-                                        huge_pages: true,
-                                        huge_page_size_log2: size_bytes.trailing_zeros() as u8,
-                                        no_reserve: false,
-                                        numa_node: None,
-                                    },
-                                });
-                            }
-                        }
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && let Some(rest) = name.strip_prefix("hugepages-")
+                    && let Some(kb) = rest.strip_suffix("kB")
+                    && let Ok(size_kb) = kb.parse::<usize>()
+                {
+                    let size_bytes = size_kb * 1024;
+                    infos.push(PageSizeInfo {
+                        size: size_bytes,
+                        flags: MemoryFlags {
+                            huge_pages: true,
+                            huge_page_size_log2: size_bytes.trailing_zeros() as u8,
+                            no_reserve: false,
+                            numa_node: None,
+                        },
+                    });
                 }
             }
         }
@@ -218,6 +216,10 @@ fn discover_supported_page_sizes() -> Vec<PageSizeInfo> {
 }
 
 /// Reserves a range of virtual address space.
+/// # Safety
+///
+/// The caller must ensure that `capacity` is non-zero and that the returned
+/// memory range is not accessed before `commit` is called.
 pub unsafe fn reserve(capacity: usize, flags: MemoryFlags) -> Result<NonNull<u8>> {
     #[cfg(unix)]
     {
@@ -271,6 +273,10 @@ pub unsafe fn reserve(capacity: usize, flags: MemoryFlags) -> Result<NonNull<u8>
 /// While some OS implementations (like Windows `MEM_COMMIT`) may technically
 /// allow partial success in extremely rare failure modes, this abstraction
 /// treats failures as hard errors that require the caller to handle state consistency.
+/// # Safety
+///
+/// The caller must ensure that `addr` and `size` refer to a previously
+/// reserved range and that the range is not aliased in an invalid way.
 pub unsafe fn commit(addr: *mut u8, size: usize, flags: MemoryFlags) -> Result<()> {
     #[cfg(unix)]
     {
@@ -337,6 +343,10 @@ pub unsafe fn commit(addr: *mut u8, size: usize, flags: MemoryFlags) -> Result<(
 }
 
 /// Decommits physical memory from a range of virtual addresses.
+/// # Safety
+///
+/// The caller must ensure that `addr` and `size` refer to a previously
+/// committed range and that no accesses occur after decommit.
 pub unsafe fn decommit(addr: *mut u8, size: usize) -> Result<()> {
     #[cfg(unix)]
     {
@@ -363,6 +373,10 @@ pub unsafe fn decommit(addr: *mut u8, size: usize) -> Result<()> {
 
 /// Sets a range of virtual addresses to NOACCESS, ensuring any access triggers a hardware fault.
 /// This is used for guard pages and should be independent of reservation/commitment semantics.
+/// # Safety
+///
+/// The caller must ensure that `addr` and `size` are within a valid
+/// reserved range and that no code will subsequently access it.
 pub unsafe fn protect_noaccess(addr: *mut u8, size: usize) -> Result<()> {
     #[cfg(unix)]
     {
@@ -397,6 +411,10 @@ pub unsafe fn protect_noaccess(addr: *mut u8, size: usize) -> Result<()> {
 }
 
 /// Releases a reserved range of virtual address space.
+/// # Safety
+///
+/// The caller must ensure that `addr` and `capacity` match exactly the
+/// values passed to `reserve`, and that the memory is no longer used.
 pub unsafe fn release(addr: *mut u8, capacity: usize) -> Result<()> {
     #[cfg(unix)]
     {

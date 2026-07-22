@@ -9,10 +9,6 @@ use thiserror::Error;
 pub enum VirtualPageStackError {
     #[error("Capacity calculation overflowed usize")]
     CapacityOverflow,
-    #[error("Address offset overflowed usize")]
-    OffsetOverflow,
-    #[error("Address size overflowed usize")]
-    SizeOverflow,
     #[error("Committed page count {0} exceeds capacity {1}")]
     CommitExceedsCapacity(usize, usize),
     #[error("Access index {0} is out of bounds (committed: {1})")]
@@ -37,45 +33,85 @@ pub enum VirtualPageStackError {
 /// committing and decommitting physical memory pages on-demand in a contiguous
 /// range starting from index 0.
 ///
-/// # Invariants
-/// - **Commit Granularity**: Any commitment or decommitment operation MUST align
-///   exactly with the `page_size`. No partial page operations are allowed.
-/// - **NUMA Policy**: The NUMA affinity (if specified) is frozen at construction
-///   and applies to all subsequent commitment operations.
-///
 /// This implementation is strictly single-threaded.
+///
+/// # Examples
+///
+/// ```
+/// use openkache::allocators::virtual_page_stack::VirtualPageStack;
+///
+/// let mut stack = VirtualPageStack::new(
+///     VirtualPageStack::get_default_page_size()
+/// ).unwrap();
+///
+/// // Commit 3 pages of physical memory.
+/// stack.set_committed_pages(3).unwrap();
+/// assert_eq!(stack.committed_pages(), 3);
+///
+/// // Write to the first and third pages.
+/// unsafe {
+///     let p0 = stack.page_ptr_mut_unchecked(0);
+///     let p2 = stack.page_ptr_mut_unchecked(2);
+///     *p0 = 42;
+///     *p2 = 99;
+/// }
+///
+/// // Shrink back to 1 page.
+/// stack.set_committed_pages(1).unwrap();
+/// assert_eq!(stack.committed_pages(), 1);
+/// ```
 pub struct VirtualPageStack {
     base: NonNull<u8>,
     max_pages: usize,
     page_size: usize,
     reserved_size: usize,
     flags: MemoryFlags,
-    /// The number of currently committed pages (0..N range).
     committed_count: usize,
-    /// Marker to enforce !Sync. This implementation is strictly single-threaded
-    /// and relies on &mut self for exclusive access to the virtual range.
     _marker: PhantomData<*const u8>,
 }
 
 impl VirtualPageStack {
     /// Creates a new VirtualPageStack by reserving virtual address space.
     ///
-    /// The `PageSizeInfo` determines the page size and any necessary OS-specific flags.
-    /// Capacity is automatically aligned with the host's physical RAM.
-    /// No physical memory is committed at this point.
+    /// Capacity is automatically sized to the host's physical RAM.
+    /// A guard page is placed at the end of the range as a hardware trap
+    /// for out-of-bounds access. No physical memory is committed yet.
     ///
-    /// # Invariants
-    /// - `PageSizeInfo.size` defines the mandatory commitment granularity.
-    /// - Reserved `base` address is guaranteed to be aligned to `page_size`.
+    /// # Arguments
+    ///
+    /// * `info` - Page size and associated flags (huge pages, NUMA, etc.).
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Self)` on success.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `info.size` is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CapacityOverflow` if `total_ram / info.size + 1` overflows `usize`.
+    /// Returns `ReservationFailed` if the OS cannot reserve the virtual address range
+    /// or if it fails to align to the requested page size.
+    /// Returns `GuardProtectFailed` if the guard page cannot be set to NOACCESS.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use openkache::allocators::virtual_page_stack::VirtualPageStack;
+    ///
+    /// let stack = VirtualPageStack::new(
+    ///     VirtualPageStack::get_default_page_size()
+    /// ).unwrap();
+    /// assert_eq!(stack.committed_pages(), 0);
+    /// ```
     pub fn new(info: PageSizeInfo) -> Result<Self, VirtualPageStackError> {
-        // We require it to be positive to avoid ZST division-by-zero or pointer arithmetic bugs.
         assert!(info.size > 0, "Page size must be positive");
 
         let total_ram = memory::get_total_physical_memory();
         let max_pages = total_ram / info.size;
 
-        // Invariant: Reserve one extra page as a guard page (never committed).
-        // This provides a hardware-level trap for out-of-bounds access.
         let reserved_pages = max_pages
             .checked_add(1)
             .ok_or(VirtualPageStackError::CapacityOverflow)?;
@@ -90,18 +126,13 @@ impl VirtualPageStack {
                     size: capacity,
                     source: match e {
                         memory::MemoryError::ReserveFailed { source, .. } => source,
-                        _ => std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                        _ => std::io::Error::other(e.to_string()),
                     },
                 }
             })?
         };
 
-        // Invariant: Ensure the OS granted reservation is aligned to our page size.
-        // This is critical for contiguous math and huge page backing. Some OS-level
-        // calls can return page-aligned but not huge-page-aligned addresses if
-        // the alignment hint is ignored or unsupported.
-        if base.as_ptr() as usize % info.size != 0 {
-            // Explicitly release and error out if the OS didn't respect alignment
+        if !(base.as_ptr() as usize).is_multiple_of(info.size) {
             unsafe {
                 let _ = memory::release(base.as_ptr(), capacity);
             }
@@ -117,10 +148,6 @@ impl VirtualPageStack {
             });
         }
 
-        // Invariant: The guard page is reserved at the end of the range [max_pages, max_pages + 1).
-        // It is never touched by commit/decommit as committed_count <= max_pages.
-        // We explicitly protect it here to ensure it is in a NOACCESS state,
-        // providing a hardware-level trap regardless of platform-specific reserve behavior.
         unsafe {
             let guard_off = max_pages * info.size;
             let guard_addr = base.as_ptr().add(guard_off);
@@ -139,17 +166,42 @@ impl VirtualPageStack {
         })
     }
 
-    /// Returns the standard system page size info.
+    /// Returns the standard (non-huge) system page size info.
     ///
     /// The result is cached after the first successful discovery.
+    ///
+    /// # Returns
+    ///
+    /// The smallest non-hugepage `PageSizeInfo` available on the host.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no standard page size is discovered (unlikely on real hardware).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use openkache::allocators::virtual_page_stack::VirtualPageStack;
+    ///
+    /// let info = VirtualPageStack::get_default_page_size();
+    /// assert!(info.size > 0);
+    /// assert!(!info.flags.huge_pages);
+    /// ```
     pub fn get_default_page_size() -> PageSizeInfo {
         Self::try_default_page_size().expect("No standard page size discovered")
     }
 
     /// Fallible version of `get_default_page_size`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(PageSizeInfo)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NoSupportedPageSize` if no standard (non-huge) page size is found.
     pub fn try_default_page_size() -> Result<PageSizeInfo, VirtualPageStackError> {
         static CACHE: OnceLock<PageSizeInfo> = OnceLock::new();
-        // Thread-safe initialization using get_or_init for cleaner semantics.
         Ok(*CACHE.get_or_init(|| {
             Self::supported_page_sizes()
                 .iter()
@@ -160,18 +212,50 @@ impl VirtualPageStack {
         }))
     }
 
-    /// Returns the number of currently committed pages (0..N range).
+    /// Returns the number of currently committed (physically backed) pages.
     pub fn committed_pages(&self) -> usize {
         self.committed_count
     }
 
     /// Adjusts the number of committed physical pages.
     ///
-    /// # Semantics
-    /// - **Initialization**: Newly committed pages are considered UNINITIALIZED. While most OSs
-    ///   provide zeroed memory for security, consumers MUST NOT rely on this behavior.
-    /// - **Content Loss**: Decommitting a page results in immediate data loss. Re-committing
-    ///   the same address range will return fresh, uninitialized memory.
+    /// Newly committed pages are UNINITIALIZED — consumers MUST NOT assume zero-fill.
+    /// Decommitting a page causes immediate data loss; re-committing returns fresh memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_count` - Target number of committed pages. Growing commits pages at the
+    ///   end of the current range; shrinking decommits from the end.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CommitExceedsCapacity` if `new_count` exceeds the stack's capacity.
+    /// Returns `CommitFailed` if the OS fails to back the pages with physical memory.
+    /// Returns `DecommitFailed` if the OS fails to release physical memory.
+    /// Returns `CapacityOverflow` if internal arithmetic overflows `usize` (should not
+    /// happen with realistic `new_count` values).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use openkache::allocators::virtual_page_stack::VirtualPageStack;
+    ///
+    /// let mut stack = VirtualPageStack::new(
+    ///     VirtualPageStack::get_default_page_size()
+    /// ).unwrap();
+    ///
+    /// // Grow from 0 to 10 committed pages.
+    /// stack.set_committed_pages(10).unwrap();
+    /// assert_eq!(stack.committed_pages(), 10);
+    ///
+    /// // Shrink from 10 to 3 committed pages.
+    /// stack.set_committed_pages(3).unwrap();
+    /// assert_eq!(stack.committed_pages(), 3);
+    ///
+    /// // Setting to the same value is a no-op.
+    /// stack.set_committed_pages(3).unwrap();
+    /// assert_eq!(stack.committed_pages(), 3);
+    /// ```
     pub fn set_committed_pages(&mut self, new_count: usize) -> Result<(), VirtualPageStackError> {
         let current = self.committed_count;
         match new_count.cmp(&current) {
@@ -181,11 +265,8 @@ impl VirtualPageStack {
         }
     }
 
-    /// Monotonic growth: Commits `delta` additional pages.
-    ///
-    /// This is a hot path for contiguous allocation that avoids general branching.
     #[inline]
-    pub fn grow(&mut self, delta: usize) -> Result<(), VirtualPageStackError> {
+    fn grow(&mut self, delta: usize) -> Result<(), VirtualPageStackError> {
         if delta == 0 {
             return Ok(());
         }
@@ -218,11 +299,8 @@ impl VirtualPageStack {
         ))
     }
 
-    /// Monotonic shrink: Decommits `delta` pages from the end.
-    ///
-    /// This is a fast path for contiguous deallocation.
     #[inline]
-    pub fn shrink(&mut self, delta: usize) -> Result<(), VirtualPageStackError> {
+    fn shrink(&mut self, delta: usize) -> Result<(), VirtualPageStackError> {
         if delta == 0 {
             return Ok(());
         }
@@ -253,11 +331,8 @@ impl VirtualPageStack {
         Err(VirtualPageStackError::ShrinkUnderflow { delta, committed })
     }
 
-    /// Centralized offset calculation without bounds check.
     #[inline(always)]
     fn bytes_for_pages_unchecked(&self, pages: usize) -> usize {
-        // Invariant check: The total size must fit within usize.
-        // This is guaranteed at construction as (max_pages + 1) * page_size is verified.
         let off = pages * self.page_size;
         debug_assert_eq!(
             off / self.page_size,
@@ -267,14 +342,12 @@ impl VirtualPageStack {
         off
     }
 
-    /// Centralized pointer resolution without bounds check.
     #[inline(always)]
     fn ptr_at_unchecked(&self, index: usize) -> *mut u8 {
         let off = self.bytes_for_pages_unchecked(index);
         unsafe { self.base.as_ptr().add(off) }
     }
 
-    /// Centralized bounds check logic.
     #[inline]
     fn check_bounds(&self, index: usize) -> Result<(), VirtualPageStackError> {
         if index >= self.committed_count {
@@ -286,46 +359,41 @@ impl VirtualPageStack {
         Ok(())
     }
 
-    /// Returns a constant pointer to the start of the page at `index`.
+    /// Returns a pointer to the start of the page at `index`.
+    /// Bounds check is performed only in debug builds.
     ///
-    /// # Contract & Safety
-    /// - **Validity**: The returned pointer remains valid until the next `shrink`, `set_committed_pages`, or `Drop`.
-    /// - **Aliasing**: Multiple pointers to the same page are permitted.
-    /// - **UB**: Reading from a pointer after the page has been decommitted or the stack dropped is undefined behavior.
+    /// # Arguments
     ///
-    /// The caller must ensure that the index is within the committed range.
-    #[inline]
-    pub unsafe fn page_ptr(&self, index: usize) -> *const u8 {
-        unsafe { self.page_ptr_unchecked(index) }
-    }
-
-    /// Returns a mutable pointer to the start of the page at `index`.
+    /// * `index` - Page index. Must be `< committed_pages()` in release builds.
     ///
-    /// # Contract & Safety
-    /// - **Exclusivity**: Requires `&mut self` to ensure no other references (immutable or mutable)
-    ///   exist to the stack during the acquisition of this mutable pointer.
-    /// - **Aliasing**: Multiple pointers derived from this mutable reference are permitted,
-    ///   but the user must ensure they do not violate Rust's aliasing rules when dereferencing.
-    #[inline]
-    pub unsafe fn page_ptr_mut(&mut self, index: usize) -> *mut u8 {
-        unsafe { self.page_ptr_mut_unchecked(index) }
-    }
-
-    /// Checked version of `page_ptr`.
-    #[inline]
-    pub fn page_ptr_at(&self, index: usize) -> Result<*const u8, VirtualPageStackError> {
-        self.check_bounds(index)?;
-        Ok(self.ptr_at_unchecked(index) as *const u8)
-    }
-
-    /// Checked version of `page_ptr_mut`.
-    #[inline]
-    pub fn page_ptr_at_mut(&mut self, index: usize) -> Result<*mut u8, VirtualPageStackError> {
-        self.check_bounds(index)?;
-        Ok(self.ptr_at_unchecked(index))
-    }
-
-    /// Optimized version for hot paths; bounds check only in debug builds.
+    /// # Returns
+    ///
+    /// A raw `*const u8` pointer to the page. Adjacent pages are contiguous in
+    /// virtual address space (gap equals `page_size()`).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `index < committed_pages()` in release builds
+    /// and that the returned pointer is not used after the page is decommitted.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use openkache::allocators::virtual_page_stack::VirtualPageStack;
+    ///
+    /// let mut stack = VirtualPageStack::new(
+    ///     VirtualPageStack::get_default_page_size()
+    /// ).unwrap();
+    /// stack.set_committed_pages(2).unwrap();
+    ///
+    /// unsafe {
+    ///     let p0 = stack.page_ptr_unchecked(0);
+    ///     let p1 = stack.page_ptr_unchecked(1);
+    ///     // Pages are initially uninitialised, but the pointers are valid.
+    ///     assert_ne!(p0, p1);
+    ///     assert_eq!((p1 as usize) - (p0 as usize), stack.page_size());
+    /// }
+    /// ```
     #[inline(always)]
     pub unsafe fn page_ptr_unchecked(&self, index: usize) -> *const u8 {
         debug_assert!(
@@ -338,7 +406,22 @@ impl VirtualPageStack {
         self.ptr_at_unchecked(index) as *const u8
     }
 
-    /// Optimized mutable version for hot paths; bounds check only in debug builds.
+    /// Returns a mutable pointer to the start of the page at `index`.
+    /// Bounds check is performed only in debug builds.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Page index. Must be `< committed_pages()` in release builds.
+    ///
+    /// # Returns
+    ///
+    /// A raw `*mut u8` pointer to the page.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `index < committed_pages()` in release builds,
+    /// that the returned pointer does not alias any live reference,
+    /// and that it is not used after the page is decommitted.
     #[inline(always)]
     pub unsafe fn page_ptr_mut_unchecked(&mut self, index: usize) -> *mut u8 {
         debug_assert!(
@@ -351,7 +434,57 @@ impl VirtualPageStack {
         self.ptr_at_unchecked(index)
     }
 
-    /// Returns a immutable slice to the page at `index`.
+    /// Checked version — returns a pointer to the page at `index` or an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Page index.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(*const u8)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexOutOfBounds` if `index >= committed_pages()`.
+    #[inline]
+    pub fn page_ptr_at(&self, index: usize) -> Result<*const u8, VirtualPageStackError> {
+        self.check_bounds(index)?;
+        Ok(self.ptr_at_unchecked(index) as *const u8)
+    }
+
+    /// Checked version — returns a mutable pointer to the page at `index` or an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Page index.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(*mut u8)` on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexOutOfBounds` if `index >= committed_pages()`.
+    #[inline]
+    pub fn page_ptr_at_mut(&mut self, index: usize) -> Result<*mut u8, VirtualPageStackError> {
+        self.check_bounds(index)?;
+        Ok(self.ptr_at_unchecked(index))
+    }
+
+    /// Returns an immutable byte slice covering the page at `index`.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Page index.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(&[u8])` of length `page_size()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexOutOfBounds` if `index >= committed_pages()`.
     pub fn page_slice(&self, index: usize) -> Result<&[u8], VirtualPageStackError> {
         self.check_bounds(index)?;
         unsafe {
@@ -360,7 +493,19 @@ impl VirtualPageStack {
         }
     }
 
-    /// Returns a mutable slice to the page at `index`.
+    /// Returns a mutable byte slice covering the page at `index`.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Page index.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(&mut [u8])` of length `page_size()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `IndexOutOfBounds` if `index >= committed_pages()`.
     pub fn page_slice_mut(&mut self, index: usize) -> Result<&mut [u8], VirtualPageStackError> {
         self.check_bounds(index)?;
         unsafe {
@@ -389,12 +534,27 @@ impl VirtualPageStack {
         self.committed_count * self.page_size
     }
 
-    /// Returns a list of supported page sizes on the host system.
+    /// Returns the list of page sizes the host OS supports (cached after first call).
+    ///
+    /// Includes both standard pages and any available hugepage sizes.
+    /// Sorted by increasing size, deduplicated.
     pub fn supported_page_sizes() -> &'static [PageSizeInfo] {
         memory::get_supported_page_sizes()
     }
 
-    /// Finds the largest supported page size that is less than or equal to `max_size`.
+    /// Finds the largest supported page size ≤ `max_size`.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_size` - Upper bound in bytes.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(PageSizeInfo)` for the largest supported page size not exceeding `max_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NoSupportedPageSize` if every supported page size is larger than `max_size`.
     pub fn find_largest_page_size(max_size: usize) -> Result<PageSizeInfo, VirtualPageStackError> {
         Self::supported_page_sizes()
             .iter()
@@ -407,13 +567,8 @@ impl VirtualPageStack {
 
 impl Drop for VirtualPageStack {
     fn drop(&mut self) {
-        // Best-effort: Ensure the size passed to release matches the exact size passed to reserve.
-        // The reserved_size includes the guard page.
-        // Failure here is a critical resource leak, but we avoid panicking in Drop.
         unsafe {
             if let Err(_e) = memory::release(self.base.as_ptr(), self.reserved_size) {
-                // In system components, we rely on debug_assert to catch teardown issues
-                // without introducing complex logging dependencies in global allocators.
                 debug_assert!(
                     false,
                     "Failed to release virtual memory during Drop: {:?}",
@@ -434,21 +589,19 @@ mod tests {
 
         assert_eq!(stack.committed_pages(), 0);
 
-        // Commit 5 pages
         stack.set_committed_pages(5).expect("Commit failed");
         assert_eq!(stack.committed_pages(), 5);
 
         unsafe {
-            let ptr0 = stack.page_ptr_mut(0);
+            let ptr0 = stack.page_ptr_mut_unchecked(0);
             *ptr0 = 42;
             assert_eq!(*ptr0, 42);
 
-            let ptr4 = stack.page_ptr_mut(4);
+            let ptr4 = stack.page_ptr_mut_unchecked(4);
             *ptr4 = 133;
             assert_eq!(*ptr4, 133);
         }
 
-        // Shrink to 2 pages
         stack.set_committed_pages(2).expect("Shrink failed");
         assert_eq!(stack.committed_pages(), 2);
     }
@@ -476,16 +629,14 @@ mod tests {
     #[test]
     fn test_page_slices() {
         let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
-        stack.grow(1).unwrap();
+        stack.set_committed_pages(1).unwrap();
 
-        // Mutable slice access
         {
             let slice = stack.page_slice_mut(0).expect("Slice access failed");
             slice[0] = 77;
             slice[1] = 88;
         }
 
-        // Immutable slice access
         {
             let slice = stack.page_slice(0).expect("Slice access failed");
             assert_eq!(slice[0], 77);
@@ -493,16 +644,14 @@ mod tests {
             assert_eq!(slice.len(), stack.page_size());
         }
 
-        // Out of bounds check
         assert!(stack.page_slice(1).is_err());
         assert!(stack.page_slice_mut(1).is_err());
     }
 
     #[test]
     fn test_page_size_fallback() {
-        let limit = 1024; // Too small for standard 4KB
+        let limit = 1024;
 
-        // Demonstrate fallback pattern
         let info = VirtualPageStack::find_largest_page_size(limit)
             .unwrap_or_else(|_| VirtualPageStack::get_default_page_size());
 
@@ -510,35 +659,98 @@ mod tests {
     }
 
     #[test]
-    fn test_grow_shrink() {
+    fn test_set_committed() {
         let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
 
-        // Grow by 3 pages
-        stack.grow(3).expect("Grow failed");
+        stack.set_committed_pages(3).expect("set_committed_pages failed");
         assert_eq!(stack.committed_pages(), 3);
 
-        // Grow by 2 more pages
-        stack.grow(2).expect("Grow failed");
+        stack.set_committed_pages(5).expect("set_committed_pages failed");
         assert_eq!(stack.committed_pages(), 5);
 
-        // Shrink by 2 pages
-        stack.shrink(2).expect("Shrink failed");
-        assert_eq!(stack.committed_pages(), 3);
+        stack.set_committed_pages(2).expect("set_committed_pages failed");
+        assert_eq!(stack.committed_pages(), 2);
 
-        // Shrink by everything
-        stack.shrink(3).expect("Shrink failed");
+        stack.set_committed_pages(0).expect("set_committed_pages failed");
         assert_eq!(stack.committed_pages(), 0);
     }
 
     #[test]
     fn test_numa_initialization() {
-        // Enforce the "specified once at construction" invariant.
         let info = VirtualPageStack::get_default_page_size().with_numa_node(0);
         let mut stack = VirtualPageStack::new(info).unwrap();
 
-        // All subsequent commitments now automatically use node 0.
-        stack.grow(1).expect("grow failed");
+        stack.set_committed_pages(1).expect("grow failed");
         assert_eq!(stack.committed_pages(), 1);
+    }
+
+    #[test]
+    fn test_page_ptr_at_out_of_bounds() {
+        let stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+        assert!(stack.page_ptr_at(0).is_err());
+        assert!(stack.page_ptr_at(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn test_page_slice_out_of_bounds() {
+        let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+        stack.set_committed_pages(2).unwrap();
+        assert!(stack.page_slice(2).is_err());
+        assert!(stack.page_slice_mut(2).is_err());
+    }
+
+    #[test]
+    fn test_capacity_and_committed_bytes() {
+        let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+        let ps = stack.page_size();
+        assert!(ps.is_power_of_two());
+
+        assert!(stack.capacity_pages() > 0);
+        assert!(stack.capacity_bytes() > 0);
+        assert_eq!(stack.capacity_bytes(), stack.capacity_pages() * ps);
+        assert_eq!(stack.committed_bytes(), 0);
+
+        stack.set_committed_pages(3).unwrap();
+        assert_eq!(stack.committed_bytes(), 3 * ps);
+    }
+
+    #[test]
+    fn test_zero_operations_noop() {
+        let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+        assert!(stack.set_committed_pages(0).is_ok());
+        assert_eq!(stack.committed_pages(), 0);
+    }
+
+    #[test]
+    fn test_commit_exceeds_capacity() {
+        let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+        // usize::MAX > max_pages => CommitExceedsCapacity
+        assert!(matches!(
+            stack.set_committed_pages(usize::MAX),
+            Err(VirtualPageStackError::CommitExceedsCapacity(..))
+        ));
+    }
+
+    #[test]
+    fn test_multiple_set_cycles() {
+        let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+
+        for &pages in &[1, 2, 1, 3, 0, 4, 0] {
+            stack.set_committed_pages(pages).unwrap();
+            assert_eq!(stack.committed_pages(), pages);
+        }
+    }
+
+    #[test]
+    fn test_page_ptr_at_valid() {
+        let mut stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
+        stack.set_committed_pages(1).unwrap();
+
+        let ptr = stack.page_ptr_at(0).expect("page_ptr_at(0) failed");
+        let ptr_mut = stack
+            .page_ptr_at_mut(0)
+            .expect("page_ptr_at_mut(0) failed");
+        assert_eq!(ptr, ptr_mut as *const u8);
     }
 
     #[test]
@@ -547,8 +759,6 @@ mod tests {
         use std::os::unix::process::ExitStatusExt;
         use std::process::Command;
 
-        // We run this specific test in a subprocess because it's expected to segfault.
-        // If we ran it in the main test runner, it would crash the whole suite.
         let status = Command::new(std::env::current_exe().unwrap())
             .arg("allocators::virtual_page_stack::tests::identity_guard_trap")
             .arg("--ignored")
@@ -556,18 +766,16 @@ mod tests {
             .status()
             .expect("failed to execute subprocess");
 
-        // On Unix, segfault is signal 11.
         assert_eq!(status.signal(), Some(11), "Expected segfault (signal 11)");
     }
 
     #[test]
-    #[ignore] // Helper for test_guard_page_trap
+    #[ignore]
     fn identity_guard_trap() {
         let stack = VirtualPageStack::new(VirtualPageStack::get_default_page_size()).unwrap();
         let max_pages = stack.capacity_pages();
 
         unsafe {
-            // Accessing page at index max_pages (the guard page)
             let guard_ptr = stack.base.as_ptr().add(max_pages * stack.page_size);
             let _val = std::ptr::read_volatile(guard_ptr);
         }
