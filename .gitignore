@@ -1,1 +1,7 @@
 .direnv/
+
+*.local.*
+*_local/
+
+# Rust output
+target/
