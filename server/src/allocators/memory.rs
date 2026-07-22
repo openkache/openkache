@@ -35,7 +35,7 @@ pub type Result<T> = std::result::Result<T, MemoryError>;
 
 #[cfg(unix)]
 use libc::{
-    madvise, MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE, mmap, mprotect,
+    MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE, madvise, mmap, mprotect,
     munmap,
 };
 

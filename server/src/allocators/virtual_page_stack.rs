@@ -585,4 +585,3 @@ impl Drop for VirtualPageStack {
         }
     }
 }
-
