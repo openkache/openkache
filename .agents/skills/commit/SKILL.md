@@ -50,10 +50,9 @@ This workflow covers **all git repositories** in the workspace, including nested
 
 5. **Push All Repos**:
    Once all logical units are committed across all repos, run `git push` in each repo.
-   *Note: If SSH path/config errors occur, use `GIT_SSH_COMMAND="/nix/store/71zy9jmcszcfmmn4zf68sm8vywryybhp-openssh-10.3p1/bin/ssh -F /dev/null -i /home/kkimdev/.ssh/id_ed25519"`.*
 
 6. **Verify**:
-   Ensure all pushes succeeded and all repos are in a clean working state (excluding `.local.` files).
+   Ensure all pushes succeeded and all repos are in a clean working state.
 
 ---
 
