@@ -139,6 +139,8 @@ cargo test --target aarch64-unknown-linux-musl  # cross via QEMU
 
 ## Project status
 
+OpenKache is in **active development**. Core components are stable, the server protocol layer is being built out, and client SDKs are available for Rust and .NET.
+
 | Component | Status | Notes |
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
@@ -150,6 +152,19 @@ cargo test --target aarch64-unknown-linux-musl  # cross via QEMU
 
 ---
 
+## Roadmap
+
+| Milestone | Target | Focus |
+|---|---|---|
+| v0.1 — Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
+| v0.2 — Server protocol | 🚧 In progress | QUIC server, command dispatch, KV engine, SSD engine |
+| v0.3 — Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
+| v0.4 — E2E encryption | ⏳ Planned | Client-side encryption, zero-trust server architecture |
+| v0.5 — Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
+| v1.0 — General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
+
+---
+
 ## Project structure
 
 | Path | Contents |
@@ -157,8 +172,7 @@ cargo test --target aarch64-unknown-linux-musl  # cross via QEMU
 | `server/` | Core cache server (BCF53, allocators, types) |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/dotnet/` | .NET / C# client SDK |
-| `tests/` | Integration and unit tests |
-| `docs/` | Technical documentation |
+| `clients/dotnet/OpenKache.Tests/` | .NET client unit tests |
 
 ---
 
