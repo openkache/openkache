@@ -47,6 +47,7 @@
             pkgs.cargo-zigbuild
             pkgs.cargo-llvm-cov
             pkgs.zig
+            pkgs.qemu-user
             # gemini-cli expect s `agy` binary to detect Antigravity IDE.
             # Reference: https://github.com/google-gemini/gemini-cli/issues/15553
             (pkgs.writeShellScriptBin "aipl" ''
@@ -72,7 +73,6 @@
             pkgs.libxml2
             pkgs.pkg-config
             pkgs.openssl
-            pkgs.qemu-user
             pkgs.claude-code
             pkgs.redis
             pkgs.awscli2 # `aws` command
