@@ -8,6 +8,11 @@ edition = "2024"
 force-scalar = []
 
 [dependencies]
+compio = { version = "*", default-features = false, features = ["fs", "io-uring", "runtime", "time"] }
+flume = "*"
+futures-util = "*"
+serde = { version = "*", features = ["derive"] }
 sha2 = "0.11.0"
 thiserror = "*"
 libc = "*"
+toml = "*"
