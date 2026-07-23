@@ -5,7 +5,14 @@ fn main() {
     .expect("Cargo.toml not found");
 
     let forbidden = [
-        "libc", "napi", "napi-derive", "cxx", "cxxbridge", "bindgen", "cmake", "pkg-config",
+        "libc",
+        "napi",
+        "napi-derive",
+        "cxx",
+        "cxxbridge",
+        "bindgen",
+        "cmake",
+        "pkg-config",
         "vcpkg",
     ];
 
@@ -15,8 +22,7 @@ fn main() {
             continue;
         }
         for dep in &forbidden {
-            if trimmed.starts_with(&format!("{dep} =")) || trimmed.starts_with(&format!("{dep}."))
-            {
+            if trimmed.starts_with(&format!("{dep} =")) || trimmed.starts_with(&format!("{dep}.")) {
                 panic!(
                     "\n❌ C dependency detected in Cargo.toml: '{dep}'\n\
                      The `openkache-client` crate must remain pure Rust.\n\
