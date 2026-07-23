@@ -46,6 +46,7 @@
             pkgs.sqlite
             pkgs.cargo-zigbuild
             pkgs.cargo-llvm-cov
+            pkgs.sccache
             pkgs.zig
             pkgs.qemu-user
             # gemini-cli expect s `agy` binary to detect Antigravity IDE.
@@ -87,6 +88,8 @@
 
           shellHook = ''
           # inside shellHook
+
+          export RUSTC_WRAPPER=sccache
 
           # Add wrapper scripts to PATH to prevent npm/npx usage
           export PATH="$PWD/.devshell:$PATH"
