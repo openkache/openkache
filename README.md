@@ -6,7 +6,7 @@
 
 **10× cheaper and faster than Redis.**
 
-Open-source · Rust · QUIC · SIMD-accelerated · Zero C dependencies
+Open-source · Rust · QUIC · SIMD-accelerated · SSD-first
 
 <!-- TODO: Replace # with actual URLs -->
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
