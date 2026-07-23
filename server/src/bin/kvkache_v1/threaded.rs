@@ -1,0 +1,326 @@
+// Thread-per-core startup, affinity, routing, request deadlines, and shutdown.
+
+struct WorkerHandle {
+    sender: flume::Sender<WorkerRequest>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+pub(crate) struct ThreadedKvkache {
+    config: AppConfig,
+    workers: Vec<WorkerHandle>,
+}
+
+impl ThreadedKvkache {
+    pub(crate) fn start(config: AppConfig) -> Result<Self> {
+        config.validate()?;
+        fs::create_dir_all(&config.storage.directory)?;
+        let (started_tx, started_rx) =
+            flume::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
+        let queue_capacity = config
+            .io_uring
+            .batch_size
+            .saturating_mul(config.io_uring.max_inflight_per_worker)
+            .max(64);
+        let mut workers = Vec::with_capacity(config.runtime.thread_count);
+
+        for thread_id in 0..config.runtime.thread_count {
+            let (sender, receiver) = flume::bounded(queue_capacity);
+            let started_tx = started_tx.clone();
+            let shard_config = config.worker_config(thread_id);
+            let io_config = config.io_uring.clone();
+            let cpu_id = config.runtime.cpu_ids[thread_id];
+            let event_interval = config.runtime.event_interval;
+            let thread = std::thread::Builder::new()
+                .name(format!("kvkache-worker-{thread_id}"))
+                .spawn(move || {
+                    let mut proactor = ProactorBuilder::new();
+                    proactor.capacity(io_config.entries_per_worker);
+                    let cpus = HashSet::from([cpu_id]);
+                    let runtime = RuntimeBuilder::new()
+                        .with_proactor(proactor)
+                        .thread_affinity(cpus)
+                        .event_interval(event_interval)
+                        .build();
+                    let runtime = match runtime {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ = started_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
+                    runtime.block_on(async move {
+                        let actual_cpu = unsafe { libc::sched_getcpu() };
+                        if actual_cpu < 0 || actual_cpu as usize != cpu_id {
+                            let _ = started_tx.send(Err(format!(
+                                "thread {thread_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
+                            )));
+                            return;
+                        }
+                        let cache = match Kvkache::open(shard_config).await {
+                            Ok(cache) => cache,
+                            Err(error) => {
+                                let _ = started_tx.send(Err(error.to_string()));
+                                return;
+                            }
+                        };
+                        let _ = started_tx.send(Ok(()));
+                        if let Err(error) = worker_loop(cache, receiver, io_config).await {
+                            eprintln!("worker {thread_id} stopped: {error}");
+                        }
+                    });
+                })?;
+            workers.push(WorkerHandle {
+                sender,
+                thread: Some(thread),
+            });
+        }
+        drop(started_tx);
+
+        for _ in 0..config.runtime.thread_count {
+            match started_rx
+                .recv()
+                .map_err(|_| KvError::Worker("worker startup channel closed".into()))?
+            {
+                Ok(()) => {}
+                Err(message) => {
+                    for worker in &workers {
+                        let (response, _) = flume::bounded(1);
+                        let _ = worker.sender.send(WorkerRequest::Shutdown { response });
+                    }
+                    for worker in &mut workers {
+                        if let Some(thread) = worker.thread.take() {
+                            let _ = thread.join();
+                        }
+                    }
+                    return Err(KvError::Worker(message));
+                }
+            }
+        }
+
+        Ok(Self { config, workers })
+    }
+
+    pub(crate) fn owner(&self, key: &[u8]) -> usize {
+        let hash = Key::from(key).hashed_key().into_bytes();
+        u64::from_le_bytes(hash[..8].try_into().unwrap()) as usize % self.workers.len()
+    }
+
+    fn request(
+        &self,
+        worker: usize,
+        build: impl FnOnce(flume::Sender<Result<WorkerResponse>>) -> WorkerRequest,
+    ) -> Result<WorkerResponse> {
+        let (response_tx, response_rx) = flume::bounded(1);
+        let request_started = std::time::Instant::now();
+        self.workers[worker]
+            .sender
+            .send_timeout(
+                build(response_tx),
+                Duration::from_micros(self.config.timeouts.input_max_time_us),
+            )
+            .map_err(|_| KvError::Timeout("request input"))?;
+        let elapsed = request_started.elapsed();
+        let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
+        let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
+        let remaining = request_limit.saturating_sub(elapsed).min(output_limit);
+        response_rx
+            .recv_timeout(remaining)
+            .map_err(|_| KvError::Timeout("request output"))?
+    }
+
+    pub(crate) fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let worker = self.owner(&key);
+        match self.request(worker, |response| WorkerRequest::Get { key, response })? {
+            WorkerResponse::Value(value) => Ok(value),
+            response => Err(KvError::Worker(format!(
+                "unexpected get response: {response:?}"
+            ))),
+        }
+    }
+
+    pub(crate) fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<SetOutcome> {
+        let worker = self.owner(&key);
+        match self.request(worker, |response| WorkerRequest::Set {
+            key,
+            value,
+            response,
+        })? {
+            WorkerResponse::Set(outcome) => Ok(outcome),
+            response => Err(KvError::Worker(format!(
+                "unexpected set response: {response:?}"
+            ))),
+        }
+    }
+
+    pub(crate) fn delete(&self, key: Vec<u8>) -> Result<bool> {
+        let worker = self.owner(&key);
+        match self.request(worker, |response| WorkerRequest::Delete { key, response })? {
+            WorkerResponse::Deleted(deleted) => Ok(deleted),
+            response => Err(KvError::Worker(format!(
+                "unexpected delete response: {response:?}"
+            ))),
+        }
+    }
+
+    pub(crate) fn run_benchmark_batch(
+        &self,
+        operations: Vec<BenchmarkOperation>,
+        max_outstanding_per_worker: usize,
+    ) -> Result<BenchmarkBatchStats> {
+        if max_outstanding_per_worker == 0 {
+            return Err(KvError::InvalidConfig(
+                "benchmark max outstanding per worker must be non-zero".into(),
+            ));
+        }
+        let max_outstanding = max_outstanding_per_worker
+            .checked_mul(self.workers.len())
+            .ok_or_else(|| KvError::InvalidConfig("benchmark window is too large".into()))?;
+        let mut pending = VecDeque::with_capacity(max_outstanding);
+        let mut stats = BenchmarkBatchStats {
+            latency_ns: Vec::with_capacity(operations.len()),
+            ..BenchmarkBatchStats::default()
+        };
+
+        for operation in operations {
+            if pending.len() == max_outstanding {
+                self.finish_benchmark_request(pending.pop_front().unwrap(), &mut stats)?;
+            }
+            let worker = self.owner(operation.key());
+            let (response_tx, response_rx) = flume::bounded(1);
+            let (request, kind) = match operation {
+                BenchmarkOperation::Get(key) => (
+                    WorkerRequest::Get {
+                        key,
+                        response: response_tx,
+                    },
+                    BenchmarkResponseKind::Get,
+                ),
+                BenchmarkOperation::Set(key, value) => (
+                    WorkerRequest::Set {
+                        key,
+                        value,
+                        response: response_tx,
+                    },
+                    BenchmarkResponseKind::Set,
+                ),
+                BenchmarkOperation::Delete(key) => (
+                    WorkerRequest::Delete {
+                        key,
+                        response: response_tx,
+                    },
+                    BenchmarkResponseKind::Delete,
+                ),
+            };
+            let started = std::time::Instant::now();
+            self.workers[worker]
+                .sender
+                .send_timeout(
+                    request,
+                    Duration::from_micros(self.config.timeouts.input_max_time_us),
+                )
+                .map_err(|_| KvError::Timeout("benchmark request input"))?;
+            pending.push_back(PendingBenchmarkRequest {
+                response: response_rx,
+                kind,
+                started,
+            });
+        }
+        while let Some(request) = pending.pop_front() {
+            self.finish_benchmark_request(request, &mut stats)?;
+        }
+        Ok(stats)
+    }
+
+    fn finish_benchmark_request(
+        &self,
+        pending: PendingBenchmarkRequest,
+        stats: &mut BenchmarkBatchStats,
+    ) -> Result<()> {
+        let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
+        let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
+        let remaining = request_limit
+            .saturating_sub(pending.started.elapsed())
+            .min(output_limit);
+        let response = pending
+            .response
+            .recv_timeout(remaining)
+            .map_err(|_| KvError::Timeout("benchmark request output"))??;
+        stats.operations += 1;
+        stats
+            .latency_ns
+            .push(pending.started.elapsed().as_nanos() as u64);
+        match (pending.kind, response) {
+            (BenchmarkResponseKind::Get, WorkerResponse::Value(value)) => {
+                stats.gets += 1;
+                stats.hits += value.is_some() as usize;
+            }
+            (BenchmarkResponseKind::Set, WorkerResponse::Set(outcome)) => {
+                stats.sets += 1;
+                match outcome {
+                    SetOutcome::Created => stats.creates += 1,
+                    SetOutcome::Replaced => stats.replaces += 1,
+                }
+            }
+            (BenchmarkResponseKind::Delete, WorkerResponse::Deleted(deleted)) => {
+                stats.deletes += 1;
+                stats.deleted += deleted as usize;
+            }
+            (_, response) => {
+                return Err(KvError::Worker(format!(
+                    "unexpected benchmark response: {response:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stats(&self) -> Result<Vec<String>> {
+        self.workers
+            .iter()
+            .enumerate()
+            .map(|(thread_id, _)| {
+                match self.request(thread_id, |response| WorkerRequest::Stats { response })? {
+                    WorkerResponse::Stats(stats) => Ok(format!("thread={thread_id} {stats}")),
+                    response => Err(KvError::Worker(format!(
+                        "unexpected stats response: {response:?}"
+                    ))),
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) fn sync(&self) -> Result<()> {
+        for thread_id in 0..self.workers.len() {
+            match self.request(thread_id, |response| WorkerRequest::Sync { response })? {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn shutdown(&mut self) -> Result<()> {
+        for thread_id in 0..self.workers.len() {
+            match self.request(thread_id, |response| WorkerRequest::Shutdown { response })? {
+                WorkerResponse::Shutdown => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected shutdown response: {response:?}"
+                    )));
+                }
+            }
+        }
+        for worker in &mut self.workers {
+            if let Some(thread) = worker.thread.take() {
+                thread
+                    .join()
+                    .map_err(|_| KvError::Worker("worker thread panicked".into()))?;
+            }
+        }
+        Ok(())
+    }
+}
