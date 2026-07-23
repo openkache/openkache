@@ -8,6 +8,7 @@ edition = "2024"
 force-scalar = []
 
 [dependencies]
+clap = { version = "*", features = ["derive"] }
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "runtime", "time"] }
 flume = "*"
 futures-util = "*"

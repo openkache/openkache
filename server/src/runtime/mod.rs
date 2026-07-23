@@ -1,17 +1,31 @@
-// Thread-per-core startup, affinity, routing, request deadlines, and shutdown.
+//! Multi-threaded KV cache runtime. [`ThreadedKvkache`] manages a pool of
+//! thread-per-core workers, each running a `compio`-based event loop. Handles
+//! request routing by key hash, benchmark batch execution, and graceful shutdown.
+
+use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::time::Duration;
+
+use compio::driver::ProactorBuilder;
+use compio::runtime::RuntimeBuilder;
+
+use crate::*;
+
+mod worker;
+pub use worker::*;
 
 struct WorkerHandle {
     sender: flume::Sender<WorkerRequest>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-pub(crate) struct ThreadedKvkache {
-    config: AppConfig,
+pub struct ThreadedKvkache {
+    config: crate::config::AppConfig,
     workers: Vec<WorkerHandle>,
 }
 
 impl ThreadedKvkache {
-    pub(crate) fn start(config: AppConfig) -> Result<Self> {
+    pub fn start(config: crate::config::AppConfig) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
         let (started_tx, started_rx) =
@@ -100,8 +114,8 @@ impl ThreadedKvkache {
         Ok(Self { config, workers })
     }
 
-    pub(crate) fn owner(&self, key: &[u8]) -> usize {
-        let hash = Key::from(key).hashed_key().into_bytes();
+    pub fn owner(&self, key: &[u8]) -> usize {
+        let hash = crate::Key::from(key).hashed_key().into_bytes();
         u64::from_le_bytes(hash[..8].try_into().unwrap()) as usize % self.workers.len()
     }
 
@@ -128,7 +142,7 @@ impl ThreadedKvkache {
             .map_err(|_| KvError::Timeout("request output"))?
     }
 
-    pub(crate) fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+    pub fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         let worker = self.owner(&key);
         match self.request(worker, |response| WorkerRequest::Get { key, response })? {
             WorkerResponse::Value(value) => Ok(value),
@@ -138,7 +152,7 @@ impl ThreadedKvkache {
         }
     }
 
-    pub(crate) fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<SetOutcome> {
+    pub fn set(&self, key: Vec<u8>, value: Vec<u8>) -> Result<SetOutcome> {
         let worker = self.owner(&key);
         match self.request(worker, |response| WorkerRequest::Set {
             key,
@@ -152,7 +166,7 @@ impl ThreadedKvkache {
         }
     }
 
-    pub(crate) fn delete(&self, key: Vec<u8>) -> Result<bool> {
+    pub fn delete(&self, key: Vec<u8>) -> Result<bool> {
         let worker = self.owner(&key);
         match self.request(worker, |response| WorkerRequest::Delete { key, response })? {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
@@ -162,7 +176,32 @@ impl ThreadedKvkache {
         }
     }
 
-    pub(crate) fn run_benchmark_batch(
+    pub fn for_trace_benchmark(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_sg_count: usize,
+        total_index_capacity: usize,
+    ) -> Result<Self> {
+        let thread_count = cpu_ids.len();
+        if thread_count == 0 {
+            return Err(KvError::InvalidConfig(
+                "benchmark requires at least one CPU".into(),
+            ));
+        }
+        if total_index_capacity / thread_count.max(1) > 750_000 {
+            return Err(KvError::InvalidConfig(
+                "benchmark window is too large".into(),
+            ));
+        }
+        Self::start(crate::config::AppConfig::for_trace_benchmark(
+            directory,
+            cpu_ids,
+            total_sg_count,
+            total_index_capacity,
+        )?)
+    }
+
+    pub fn run_benchmark_batch(
         &self,
         operations: Vec<BenchmarkOperation>,
         max_outstanding_per_worker: usize,
@@ -274,7 +313,7 @@ impl ThreadedKvkache {
         Ok(())
     }
 
-    pub(crate) fn stats(&self) -> Result<Vec<String>> {
+    pub fn stats(&self) -> Result<Vec<String>> {
         self.workers
             .iter()
             .enumerate()
@@ -289,7 +328,7 @@ impl ThreadedKvkache {
             .collect()
     }
 
-    pub(crate) fn sync(&self) -> Result<()> {
+    pub fn sync(&self) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self.request(thread_id, |response| WorkerRequest::Sync { response })? {
                 WorkerResponse::Synced => {}
@@ -303,7 +342,7 @@ impl ThreadedKvkache {
         Ok(())
     }
 
-    pub(crate) fn shutdown(&mut self) -> Result<()> {
+    pub fn shutdown(&mut self) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self.request(thread_id, |response| WorkerRequest::Shutdown { response })? {
                 WorkerResponse::Shutdown => {}

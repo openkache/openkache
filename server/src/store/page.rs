@@ -1,37 +1,55 @@
-// Mutable SG placement plus packed page record encoding, compaction, and checksums.
+//! Page format constants (`PAGE_HEADER`, `RECORD_HEADER`, etc.), checksum functions,
+//! page-level verification, record encoding/decoding, and the `MutableSg` in-memory
+//! slot-group buffer used by the cache engine for staged writes.
+
+use super::codec::*;
+use crate::*;
+
+pub(crate) const PAGE_MAGIC: u32 = 0x4b56_5031;
+pub(crate) const PAGE_VERSION: u16 = 1;
+
+pub(crate) const PAGE_HEADER: usize = 32;
+pub(crate) const RECORD_HEADER: usize = 16;
+pub(crate) const RECORD_SET: u8 = 1;
+pub(crate) const RECORD_DELETE: u8 = 2;
+pub(crate) const PAGE_HEADER_SIZE_OFFSET: usize = 6;
+pub(crate) const PAGE_GENERATION_OFFSET: usize = 8;
+pub(crate) const PAGE_USED_OFFSET: usize = 16;
+pub(crate) const PAGE_RECORD_COUNT_OFFSET: usize = 18;
+pub(crate) const PAGE_CHECKSUM_OFFSET: usize = 20;
 
 #[derive(Clone, Debug)]
-struct Record {
-    kind: u8,
-    page_choice: u8,
-    sequence: u64,
-    key: Vec<u8>,
-    value: Vec<u8>,
+pub(crate) struct Record {
+    pub(crate) kind: u8,
+    pub(crate) page_choice: u8,
+    pub(crate) sequence: u64,
+    pub(crate) key: Vec<u8>,
+    pub(crate) value: Vec<u8>,
 }
 
 impl Record {
-    fn encoded_len(&self) -> usize {
+    pub(crate) fn encoded_len(&self) -> usize {
         RECORD_HEADER + self.key.len() + self.value.len()
     }
 }
 
-struct MutableSg {
-    bytes: Vec<u8>,
-    region: usize,
-    generation: u64,
-    page_size: usize,
-    record_count: usize,
-    logical_bytes: u64,
+pub(crate) struct MutableSg {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) region: usize,
+    pub(crate) generation: u64,
+    pub(crate) page_size: usize,
+    pub(crate) record_count: usize,
+    pub(crate) logical_bytes: u64,
 }
 
-enum MutableReplace {
+pub(crate) enum MutableReplace {
     NotFound,
     Replaced(Location),
     NoSpace,
 }
 
 impl MutableSg {
-    fn new(config: &Config, region: usize, generation: u64) -> Self {
+    pub(crate) fn new(config: &Config, region: usize, generation: u64) -> Self {
         let mut sg = Self {
             bytes: vec![0; config.sg_size],
             region,
@@ -56,7 +74,7 @@ impl MutableSg {
         &mut self.bytes[start..start + self.page_size]
     }
 
-    fn choose_page(&self, hash: &[u8; 32], record_len: usize) -> Option<(usize, u8)> {
+    pub(crate) fn choose_page(&self, hash: &[u8; 32], record_len: usize) -> Option<(usize, u8)> {
         let pages = self.bytes.len() / self.page_size;
         let first = page_hash(hash, 0, pages);
         let second = page_hash(hash, 1, pages);
@@ -73,7 +91,7 @@ impl MutableSg {
         }
     }
 
-    fn append(&mut self, mut record: Record, count_logical: bool) -> Option<Location> {
+    pub(crate) fn append(&mut self, mut record: Record, count_logical: bool) -> Option<Location> {
         let (page, choice) = self.choose_page(
             &Key::from(record.key.as_slice()).hashed_key().into_bytes(),
             record.encoded_len(),
@@ -90,7 +108,7 @@ impl MutableSg {
         })
     }
 
-    fn replace(
+    pub(crate) fn replace(
         &mut self,
         hash: &[u8; 32],
         mut record: Record,
@@ -154,12 +172,12 @@ impl MutableSg {
         MutableReplace::NoSpace
     }
 
-    fn find(&self, hash: &[u8; 32], key: &[u8], choice: u8) -> Option<Record> {
+    pub(crate) fn find(&self, hash: &[u8; 32], key: &[u8], choice: u8) -> Option<Record> {
         let page = page_hash(hash, choice, self.bytes.len() / self.page_size);
         latest_in_page(self.page(page), key)
     }
 
-    fn finalize(&mut self) {
+    pub(crate) fn finalize(&mut self) {
         let pages = self.bytes.len() / self.page_size;
         for page in 0..pages {
             finalize_page(self.page_mut(page));
@@ -167,42 +185,46 @@ impl MutableSg {
     }
 }
 
-fn initialize_page(page: &mut [u8], generation: u64) {
+pub(crate) fn initialize_page(page: &mut [u8], generation: u64) {
     page.fill(0);
     put_u32(page, 0, PAGE_MAGIC);
     put_u16(page, 4, PAGE_VERSION);
-    put_u16(page, 6, PAGE_HEADER as u16);
-    put_u64(page, 8, generation);
-    put_u16(page, 16, PAGE_HEADER as u16);
-    put_u16(page, 18, 0);
-    put_u64(page, 20, 0);
+    put_u16(page, PAGE_HEADER_SIZE_OFFSET, PAGE_HEADER as u16);
+    put_u64(page, PAGE_GENERATION_OFFSET, generation);
+    put_u16(page, PAGE_USED_OFFSET, PAGE_HEADER as u16);
+    put_u16(page, PAGE_RECORD_COUNT_OFFSET, 0);
+    put_u64(page, PAGE_CHECKSUM_OFFSET, 0);
 }
 
-fn page_used(page: &[u8]) -> usize {
-    get_u16(page, 16) as usize
+pub(crate) fn page_used(page: &[u8]) -> usize {
+    get_u16(page, PAGE_USED_OFFSET) as usize
 }
 
 #[derive(Clone, Copy)]
-struct RecordSpan {
-    start: usize,
-    end: usize,
-    sequence: u64,
-    page_choice: u8,
+pub(crate) struct RecordSpan {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) sequence: u64,
+    pub(crate) page_choice: u8,
 }
 
 impl RecordSpan {
-    fn len(self) -> usize {
+    pub(crate) fn len(self) -> usize {
         self.end - self.start
     }
 }
 
-fn append_page(page: &mut [u8], record: &Record) {
+pub(crate) fn append_page(page: &mut [u8], record: &Record) {
     let used = page_used(page);
     let end = used + record.encoded_len();
     write_record(page, used, record);
-    put_u16(page, 16, end as u16);
-    put_u16(page, 18, get_u16(page, 18) + 1);
-    put_u64(page, 20, 0);
+    put_u16(page, PAGE_USED_OFFSET, end as u16);
+    put_u16(
+        page,
+        PAGE_RECORD_COUNT_OFFSET,
+        get_u16(page, PAGE_RECORD_COUNT_OFFSET) + 1,
+    );
+    put_u64(page, PAGE_CHECKSUM_OFFSET, 0);
 }
 
 fn write_record(page: &mut [u8], offset: usize, record: &Record) {
@@ -217,9 +239,9 @@ fn write_record(page: &mut [u8], offset: usize, record: &Record) {
     page[key_end..end].copy_from_slice(&record.value);
 }
 
-fn matching_record_spans(page: &[u8], key: &[u8]) -> Vec<RecordSpan> {
+pub(crate) fn matching_record_spans(page: &[u8], key: &[u8]) -> Vec<RecordSpan> {
     let used = page_used(page).min(page.len());
-    let count = get_u16(page, 18) as usize;
+    let count = get_u16(page, PAGE_RECORD_COUNT_OFFSET) as usize;
     let mut offset = PAGE_HEADER;
     let mut result = Vec::new();
     for _ in 0..count {
@@ -245,7 +267,7 @@ fn matching_record_spans(page: &[u8], key: &[u8]) -> Vec<RecordSpan> {
     result
 }
 
-fn replace_page_record(page: &mut [u8], span: RecordSpan, record: &Record) {
+pub(crate) fn replace_page_record(page: &mut [u8], span: RecordSpan, record: &Record) {
     let old_used = page_used(page);
     let new_end = span.start + record.encoded_len();
     let new_used = old_used - span.len() + record.encoded_len();
@@ -254,13 +276,13 @@ fn replace_page_record(page: &mut [u8], span: RecordSpan, record: &Record) {
         page[new_used..old_used].fill(0);
     }
     write_record(page, span.start, record);
-    put_u16(page, 16, new_used as u16);
-    put_u64(page, 20, 0);
+    put_u16(page, PAGE_USED_OFFSET, new_used as u16);
+    put_u64(page, PAGE_CHECKSUM_OFFSET, 0);
 }
 
-fn remove_key_from_page(page: &mut [u8], key: &[u8]) -> usize {
+pub(crate) fn remove_key_from_page(page: &mut [u8], key: &[u8]) -> usize {
     let old_used = page_used(page).min(page.len());
-    let count = get_u16(page, 18) as usize;
+    let count = get_u16(page, PAGE_RECORD_COUNT_OFFSET) as usize;
     let mut read = PAGE_HEADER;
     let mut write = PAGE_HEADER;
     let mut removed = 0usize;
@@ -286,13 +308,13 @@ fn remove_key_from_page(page: &mut [u8], key: &[u8]) -> usize {
         read = end;
     }
     page[write..old_used].fill(0);
-    put_u16(page, 16, write as u16);
-    put_u16(page, 18, (count - removed) as u16);
-    put_u64(page, 20, 0);
+    put_u16(page, PAGE_USED_OFFSET, write as u16);
+    put_u16(page, PAGE_RECORD_COUNT_OFFSET, (count - removed) as u16);
+    put_u64(page, PAGE_CHECKSUM_OFFSET, 0);
     removed
 }
 
-fn records(page: &[u8]) -> Vec<Record> {
+pub(crate) fn records(page: &[u8]) -> Vec<Record> {
     if page.len() < PAGE_HEADER
         || get_u32(page, 0) != PAGE_MAGIC
         || get_u16(page, 4) != PAGE_VERSION
@@ -300,7 +322,7 @@ fn records(page: &[u8]) -> Vec<Record> {
         return Vec::new();
     }
     let used = page_used(page).min(page.len());
-    let count = get_u16(page, 18) as usize;
+    let count = get_u16(page, PAGE_RECORD_COUNT_OFFSET) as usize;
     let mut offset = PAGE_HEADER;
     let mut result = Vec::with_capacity(count);
     for _ in 0..count {
@@ -326,32 +348,30 @@ fn records(page: &[u8]) -> Vec<Record> {
     result
 }
 
-fn latest_in_page(page: &[u8], key: &[u8]) -> Option<Record> {
+pub(crate) fn latest_in_page(page: &[u8], key: &[u8]) -> Option<Record> {
     records(page)
         .into_iter()
         .filter(|record| record.key == key)
         .max_by_key(|record| record.sequence)
 }
 
-fn finalize_page(page: &mut [u8]) {
-    put_u64(page, 20, 0);
+pub(crate) fn finalize_page(page: &mut [u8]) {
+    put_u64(page, PAGE_CHECKSUM_OFFSET, 0);
     let checksum = checksum64(page);
-    put_u64(page, 20, checksum);
+    put_u64(page, PAGE_CHECKSUM_OFFSET, checksum);
 }
 
-fn verify_page(page: &[u8]) -> bool {
+pub(crate) fn verify_page(page: &[u8]) -> bool {
     if page.len() < PAGE_HEADER || get_u32(page, 0) != PAGE_MAGIC {
         return false;
     }
-    let expected = get_u64(page, 20);
+    let expected = get_u64(page, PAGE_CHECKSUM_OFFSET);
     let mut copy = page.to_vec();
-    put_u64(&mut copy, 20, 0);
+    put_u64(&mut copy, PAGE_CHECKSUM_OFFSET, 0);
     expected != 0 && expected == checksum64(&copy)
 }
 
-fn page_hash(hash: &[u8; 32], choice: u8, pages: usize) -> usize {
-    // hash[0..8] routes to a worker and hash[8..16] feeds the Breadcrumb.
-    // The two page choices use independent portions of the digest.
+pub(crate) fn page_hash(hash: &[u8; 32], choice: u8, pages: usize) -> usize {
     let start = if choice == 0 { 16 } else { 24 };
     u64::from_le_bytes(hash[start..start + 8].try_into().unwrap()) as usize % pages
 }

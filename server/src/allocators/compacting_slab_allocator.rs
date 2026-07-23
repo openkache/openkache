@@ -1,3 +1,10 @@
+//! Compacting slab allocator for efficient memory allocation.
+//!
+//! Provides a handle-based slab allocator ([`Slab`]) built on top of
+//! [`VirtualPageStack`]. Values are stored in contiguous slots with compacting
+//! deletion (swap-remove). Each slot holds a back-pointer to its [`Handle`],
+//! enabling O(1) relocation during compaction and constant-time access.
+
 use std::cell::{Cell, UnsafeCell};
 use std::marker::{PhantomData, PhantomPinned};
 use std::mem::{ManuallyDrop, MaybeUninit};
@@ -57,9 +64,6 @@ pub(crate) struct Slot<T> {
     pub(crate) handle_header: NonNull<HandleHeader<T>>,
     pub(crate) value: ManuallyDrop<T>,
 }
-
-// LenCap removed for better performance (splitting into separate cells)
-
 /// A contiguous, high-performance memory store where every element is tracked
 /// by exactly one pinned [`Handle`].
 ///
@@ -300,7 +304,9 @@ impl<T> Slab<T> {
                     required.max(current_cap.saturating_mul(2))
                 };
                 let needed_pages = target_slots.div_ceil(slots_per_page);
-                let new_cap = needed_pages * slots_per_page;
+                let new_cap = needed_pages
+                    .checked_mul(slots_per_page)
+                    .expect("capacity overflow");
 
                 stack.set_committed_pages(needed_pages)?;
 
@@ -343,7 +349,9 @@ impl<T> Slab<T> {
 
             // Minimum needed pages to hold current_len slots.
             let needed_pages = current_len.div_ceil(slots_per_page);
-            let new_cap = needed_pages * slots_per_page;
+            let new_cap = needed_pages
+                .checked_mul(slots_per_page)
+                .expect("capacity overflow");
 
             // Only shrink if it actually reduces capacity.
             if new_cap < self.cap.get() {

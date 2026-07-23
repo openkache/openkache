@@ -1,3 +1,10 @@
+//! Virtual page stack implementation for managing virtual memory pages.
+//!
+//! Provides [`VirtualPageStack`], which reserves a large contiguous range of
+//! virtual address space and supports on-demand commitment and decommitment of
+//! physical pages. A guard page is placed at the end of the range to catch
+//! out-of-bounds access via a hardware trap.
+
 use super::memory::{self, MemoryFlags, PageSizeInfo};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
@@ -340,13 +347,9 @@ impl VirtualPageStack {
 
     #[inline(always)]
     fn bytes_for_pages_unchecked(&self, pages: usize) -> usize {
-        let off = pages * self.page_size;
-        debug_assert_eq!(
-            off / self.page_size,
-            pages,
-            "Pointer offset overflowed usize"
-        );
-        off
+        pages
+            .checked_mul(self.page_size)
+            .expect("page offset overflow")
     }
 
     #[inline(always)]
@@ -533,12 +536,16 @@ impl VirtualPageStack {
 
     /// Returns the total number of usable reserved bytes (excluding guard page).
     pub fn capacity_bytes(&self) -> usize {
-        self.max_pages * self.page_size
+        self.max_pages
+            .checked_mul(self.page_size)
+            .expect("capacity overflow")
     }
 
     /// Returns the number of currently committed bytes.
     pub fn committed_bytes(&self) -> usize {
-        self.committed_count * self.page_size
+        self.committed_count
+            .checked_mul(self.page_size)
+            .expect("capacity overflow")
     }
 
     /// Returns the list of page sizes the host OS supports (cached after first call).

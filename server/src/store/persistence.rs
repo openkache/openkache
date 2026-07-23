@@ -1,7 +1,22 @@
-// SG eviction, asynchronous page I/O, checkpoint recovery, and engine statistics.
+//! Persistence layer for `Kvkache`: checkpoint save/load, page-level read/write,
+//! slot-group scanning, region eviction, and full recovery from data pages.
+//! Implements the durable storage contract (index + data) for the cache engine.
+
+use std::collections::HashMap;
+use std::io;
+use std::time::Duration;
+
+use crate::*;
+use compio::BufResult;
+use compio::fs::OpenOptions;
+use compio::io::{AsyncReadAtExt, AsyncWriteAtExt};
+
+pub(crate) const CHECKPOINT_MAGIC: &[u8; 8] = b"KVKIDX01";
+pub(crate) const CHECKPOINT_VERSION: u32 = 1;
+pub(crate) const NONE_GENERATION: u64 = u64::MAX;
 
 impl Kvkache {
-    async fn evict_region(&mut self, region: usize) -> Result<()> {
+    pub(crate) async fn evict_region(&mut self, region: usize) -> Result<()> {
         let records = self.read_sg_records(region).await?;
         let mut newest = HashMap::<Vec<u8>, Record>::new();
         for record in records {
@@ -36,7 +51,7 @@ impl Kvkache {
         Ok(())
     }
 
-    async fn read_page(&self, region: usize, page: usize) -> Result<Vec<u8>> {
+    pub(super) async fn read_page(&self, region: usize, page: usize) -> Result<Vec<u8>> {
         let offset =
             region as u64 * self.config.sg_size as u64 + page as u64 * self.config.page_size as u64;
         let read = self
@@ -81,7 +96,7 @@ impl Kvkache {
         Ok(Some(generation))
     }
 
-    async fn rebuild_from_data(&mut self) -> Result<()> {
+    pub(super) async fn rebuild_from_data(&mut self) -> Result<()> {
         let mut occupied = Vec::new();
         for region in 0..self.config.sg_count {
             if let Some(generation) = self.scan_slot_generation(region).await? {
@@ -121,7 +136,7 @@ impl Kvkache {
         Ok(())
     }
 
-    async fn save_checkpoint(&self) -> Result<()> {
+    pub(super) async fn save_checkpoint(&self) -> Result<()> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(CHECKPOINT_MAGIC);
         push_u32(&mut bytes, CHECKPOINT_VERSION);
@@ -183,7 +198,7 @@ impl Kvkache {
         Ok(())
     }
 
-    async fn load_checkpoint(&mut self) -> Result<bool> {
+    pub(super) async fn load_checkpoint(&mut self) -> Result<bool> {
         let checkpoint_read = compio::fs::read(&self.config.index_path);
         let mut bytes = match compio::runtime::time::timeout(
             Duration::from_micros(self.config.read_max_time_us),
@@ -261,7 +276,7 @@ impl Kvkache {
         let io = self.io_stats();
         format!(
             "keys={} index_load={:.2}% index_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_buckets={} front_capacity={} back_buckets={} back_capacity={} next_slot={} generations={} flushes={} evictions={} data_read={} data_written={} index_read={} index_written={}",
-            self.index.len(),
+            self.index.len,
             self.index.load_factor() * 100.0,
             self.index.memory_bytes() as f64 / (1024.0 * 1024.0),
             self.index.memory_bytes() as f64 / self.config.index_capacity as f64,
@@ -281,17 +296,7 @@ impl Kvkache {
         )
     }
 
-    // Used by the cross-prototype benchmark; the standalone CLI only reports
-    // cumulative counters and therefore does not reset them.
-    #[allow(dead_code)]
-    pub(crate) fn reset_io_stats(&self) {
-        self.io.data_written.set(0);
-        self.io.data_read.set(0);
-        self.io.index_written.set(0);
-        self.io.index_read.set(0);
-    }
-
-    pub(crate) fn io_stats(&self) -> KvkacheIoStats {
+    pub(super) fn io_stats(&self) -> KvkacheIoStats {
         KvkacheIoStats {
             data_written: self.io.data_written.get(),
             data_read: self.io.data_read.get(),
@@ -300,10 +305,8 @@ impl Kvkache {
         }
     }
 
-    pub(crate) fn memory_bytes(&self) -> usize {
+    pub(super) fn memory_bytes(&self) -> usize {
         self.index.memory_bytes()
-            // One mutable SG is the steady-state write buffer. It is released
-            // after `sync`, but must be budgeted for active operation.
             + self.config.sg_size
             + self.slot_generations.capacity() * std::mem::size_of::<Option<u64>>()
     }

@@ -1,7 +1,28 @@
-// Cache API and mutable-SG lifecycle, including compacting hot-key updates.
+//! Core cache engine: `Kvkache` struct, public API (`get`, `set`, `delete`, `open`),
+//! `SetOutcome` enum, `MutableSg` management, and the `flush_active` method.
+//! This module drives the main cache lifecycle — lookups, mutations, slot-group management,
+//! and I/O statistics collection.
+
+use std::cell::Cell;
+use std::fs;
+use std::time::Duration;
+
+use compio::BufResult;
+use compio::fs::{File, OpenOptions};
+use compio::io::AsyncWriteAtExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+
+use crate::*;
+
+mod codec;
+mod page;
+mod persistence;
+
+pub(crate) use self::codec::*;
+pub(crate) use self::page::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SetOutcome {
+pub enum SetOutcome {
     Created,
     Replaced,
 }
@@ -96,7 +117,7 @@ impl Kvkache {
             .map(|located| located.record.value))
     }
 
-    async fn get_many(&self, keys: Vec<Vec<u8>>) -> Vec<Result<Option<Vec<u8>>>> {
+    pub(crate) async fn get_many(&self, keys: Vec<Vec<u8>>) -> Vec<Result<Option<Vec<u8>>>> {
         let count = keys.len();
         let mut pending = FuturesUnordered::new();
         for (index, key) in keys.into_iter().enumerate() {
@@ -113,12 +134,6 @@ impl Kvkache {
     }
 
     pub(crate) async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
-        if key.len() > u16::MAX as usize || value.len() > u32::MAX as usize {
-            return Err(KvError::RecordTooLarge {
-                bytes: RECORD_HEADER + key.len() + value.len(),
-                capacity: self.config.page_size - PAGE_HEADER,
-            });
-        }
         let record_len = RECORD_HEADER + key.len() + value.len();
         if record_len > self.config.page_size - PAGE_HEADER {
             return Err(KvError::RecordTooLarge {

@@ -1,3 +1,9 @@
+//! Low-level memory management wrappers for OS memory operations.
+//!
+//! Provides safe-ish abstractions over `mmap`/`mprotect`/`munmap` (Unix) and
+//! `VirtualAlloc`/`VirtualFree` (Windows), including reservation, commitment,
+//! decommitment, guard-page protection, and page-size discovery.
+
 use std::ptr::{self, NonNull};
 use std::sync::OnceLock;
 use thiserror::Error;
@@ -131,19 +137,6 @@ pub fn get_total_physical_memory() -> usize {
     }
 }
 
-/// Returns information about the OS overcommit policy.
-pub fn check_overcommit_policy() -> Option<String> {
-    #[cfg(all(unix, target_os = "linux"))]
-    {
-        if let Ok(content) = std::fs::read_to_string("/proc/sys/vm/overcommit_memory")
-            && content.trim() == "2"
-        {
-            return Some("Strict overcommit policy (vm.overcommit_memory=2) detected. Large virtual memory reservations may fail unless 'no_reserve' flag is used.".to_string());
-        }
-    }
-    None
-}
-
 /// Returns a list of supported page sizes on the host system.
 pub fn get_supported_page_sizes() -> &'static [PageSizeInfo] {
     SUPPORTED_PAGE_SIZES
@@ -174,7 +167,9 @@ fn discover_supported_page_sizes() -> Vec<PageSizeInfo> {
                     && let Some(kb) = rest.strip_suffix("kB")
                     && let Ok(size_kb) = kb.parse::<usize>()
                 {
-                    let size_bytes = size_kb * 1024;
+                    let Some(size_bytes) = size_kb.checked_mul(1024) else {
+                        continue;
+                    };
                     infos.push(PageSizeInfo {
                         size: size_bytes,
                         flags: MemoryFlags {
@@ -291,7 +286,14 @@ pub unsafe fn commit(addr: *mut u8, size: usize, flags: MemoryFlags) -> Result<(
 
         #[cfg(target_os = "linux")]
         if let Some(node) = flags.numa_node {
-            let nodemask: usize = 1 << node;
+            let Some(nodemask) = 1usize.checked_shl(node as u32) else {
+                let err = std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("NUMA node {node} exceeds usize bit width"),
+                );
+                eprintln!("WARN: NUMA node {} too large for shift: {}", node, err);
+                return Ok(());
+            };
             let result = unsafe {
                 libc::syscall(
                     libc::SYS_mbind,

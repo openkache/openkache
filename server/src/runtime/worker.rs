@@ -1,6 +1,13 @@
-// Worker request protocol, bounded batches, and benchmark request aggregation.
+//! Per-worker request/response types, the worker event loop ([`worker_loop`]),
+//! batch processing ([`process_worker_batch`]), and benchmark support types
+//! ([`BenchmarkOperation`], [`BenchmarkBatchStats`]).
 
-enum WorkerRequest {
+use std::collections::VecDeque;
+use std::time::Duration;
+
+use crate::*;
+
+pub(super) enum WorkerRequest {
     Get {
         key: Vec<u8>,
         response: flume::Sender<Result<WorkerResponse>>,
@@ -26,7 +33,7 @@ enum WorkerRequest {
 }
 
 #[derive(Debug)]
-enum WorkerResponse {
+pub(super) enum WorkerResponse {
     Value(Option<Vec<u8>>),
     Set(SetOutcome),
     Deleted(bool),
@@ -36,14 +43,14 @@ enum WorkerResponse {
 }
 
 #[derive(Debug)]
-pub(crate) enum BenchmarkOperation {
+pub enum BenchmarkOperation {
     Get(Vec<u8>),
     Set(Vec<u8>, Vec<u8>),
     Delete(Vec<u8>),
 }
 
 impl BenchmarkOperation {
-    fn key(&self) -> &[u8] {
+    pub(crate) fn key(&self) -> &[u8] {
         match self {
             Self::Get(key) | Self::Delete(key) | Self::Set(key, _) => key,
         }
@@ -51,20 +58,20 @@ impl BenchmarkOperation {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct BenchmarkBatchStats {
-    pub(crate) operations: usize,
-    pub(crate) gets: usize,
-    pub(crate) hits: usize,
-    pub(crate) sets: usize,
-    pub(crate) creates: usize,
-    pub(crate) replaces: usize,
-    pub(crate) deletes: usize,
-    pub(crate) deleted: usize,
-    pub(crate) latency_ns: Vec<u64>,
+pub struct BenchmarkBatchStats {
+    pub operations: usize,
+    pub gets: usize,
+    pub hits: usize,
+    pub sets: usize,
+    pub creates: usize,
+    pub replaces: usize,
+    pub deletes: usize,
+    pub deleted: usize,
+    pub latency_ns: Vec<u64>,
 }
 
 impl BenchmarkBatchStats {
-    pub(crate) fn merge(&mut self, mut other: Self) {
+    pub fn merge(&mut self, mut other: Self) {
         self.operations += other.operations;
         self.gets += other.gets;
         self.hits += other.hits;
@@ -78,19 +85,19 @@ impl BenchmarkBatchStats {
 }
 
 #[derive(Clone, Copy)]
-enum BenchmarkResponseKind {
+pub(super) enum BenchmarkResponseKind {
     Get,
     Set,
     Delete,
 }
 
-struct PendingBenchmarkRequest {
-    response: flume::Receiver<Result<WorkerResponse>>,
-    kind: BenchmarkResponseKind,
-    started: std::time::Instant,
+pub(super) struct PendingBenchmarkRequest {
+    pub(super) response: flume::Receiver<Result<WorkerResponse>>,
+    pub(super) kind: BenchmarkResponseKind,
+    pub(super) started: std::time::Instant,
 }
 
-async fn worker_loop(
+pub(super) async fn worker_loop(
     mut cache: Kvkache,
     receiver: flume::Receiver<WorkerRequest>,
     io_config: IoUringConfig,

@@ -841,6 +841,7 @@ fn byte_matches<T>(bucket: &T, needle: u8, backend: SimdBackend) -> u64 {
 ///
 /// `pointer` must be valid to read exactly 64 bytes.
 unsafe fn byte_matches_scalar(pointer: *const u8, needle: u8) -> u64 {
+    // SAFETY: caller guarantees pointer is valid for 64 bytes
     let bytes = unsafe { std::slice::from_raw_parts(pointer, 64) };
     bytes.iter().enumerate().fold(0u64, |mask, (index, byte)| {
         mask | (u64::from(*byte == needle) << index)
@@ -857,6 +858,7 @@ unsafe fn byte_matches_scalar(pointer: *const u8, needle: u8) -> u64 {
 /// 64-byte-aligned readable cache line.
 unsafe fn byte_matches_neon(pointer: *const u8, needle: u8) -> u64 {
     let target = vdupq_n_u8(needle);
+    // SAFETY: caller guarantees NEON support and valid pointer
     let weights = unsafe { vld1q_u8(NEON_MOVEMASK_WEIGHTS.as_ptr()) };
     let mut mask = 0u64;
 
