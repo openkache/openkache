@@ -17,13 +17,13 @@ Open-source · Rust · QUIC · SIMD-accelerated · Zero C dependencies
 </div>
 
 
-## Features
+## ✨ Features
 
-### SSD-first architecture
+### 💾 SSD-first architecture
 
 OpenKache uses **SSD as primary storage**, not a secondary tier. This eliminates the DRAM cost bottleneck while delivering higher throughput and lower latency than Redis.
 
-### Index: SIMD-accelerated BCF53 Breadcrumb Filter
+### 🔍 Index: SIMD-accelerated BCF53 Breadcrumb Filter
 
 The first production-grade Rust implementation of the state-of-the-art BCF53 Breadcrumb Filter.
 
@@ -31,32 +31,32 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 - **Compact bit packing**: 53 mini-buckets, 8-bit tags — 51 single-choice + 35 two-choice entries per cacheline.
 - **32+ million ops/sec per core** (AVX2).
 
-### Transport: QUIC, not TCP
+### 📡 Transport: QUIC, not TCP
 
 - **Multiplexed, connection-oriented**: Hundreds of concurrent streams over a single connection. No connection pool needed, no head-of-line blocking.
 - **TLS 1.3 baked in**: Every connection is encrypted by default.
 - **Pluggable backends**: Choose between Quinn, Noq, or Quiche — swap with a feature flag.
 - **Zero C dependencies**: Enforced at compile time — pure Rust throughout.
 
-### End-to-end encryption
+### 🔒 End-to-end encryption
 
 The server has zero visibility into client data. Keys are sent as Blake3 keyed hashes, values as AES ciphertext. No plaintext leaves the client — zero trust by default. Algorithm is configurable.
 
-### Transparent compression
+### 📦 Transparent compression
 
 Large values are automatically compressed with zstd before storage and decompressed on retrieval. Transparent to the client, algorithm is configurable.
 
-### Multi-language SDKs
+### 📚 Multi-language SDKs
 
 First-class client libraries for Rust and .NET, with more on the way. Idiomatic, typed APIs — no C bindings, no FFI overhead.
 
-### Single binary distribution
+### 📦 Single binary distribution
 
 One statically linked binary. No shared libraries, no runtime dependencies, no package manager required. Copy it anywhere and run.
 
 ---
 
-## Quick start
+## 🚀 Quick start
 
 ```bash
 # Enter the dev shell (Nix)
@@ -68,7 +68,7 @@ cargo run --package openkache --bin breadcrumb --release
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ```
 ┌──────────────┐         QUIC (UDP, TLS 1.3)         ┌──────────────────────┐
@@ -92,7 +92,7 @@ cargo run --package openkache --bin breadcrumb --release
 
 ---
 
-## Comparison
+## ⚔️ Comparison
 
 | | Redis | OpenKache |
 |---|---|---|
@@ -104,7 +104,7 @@ cargo run --package openkache --bin breadcrumb --release
 
 ---
 
-## Build
+## 🛠️ Build
 
 ### Native (fast iteration)
 
@@ -127,7 +127,7 @@ cargo release-all
 
 ---
 
-## Test
+## 🧪 Test
 
 ```bash
 cargo test                    # native
@@ -137,7 +137,7 @@ cargo test --target aarch64-unknown-linux-musl  # cross via QEMU
 
 ---
 
-## Project status
+## 📊 Project status
 
 OpenKache is in **active development**. Core components are stable, the server protocol layer is being built out, and client SDKs are available for Rust and .NET.
 
@@ -152,7 +152,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 ---
 
-## Roadmap
+## 🗺️ Roadmap
 
 | Milestone | Target | Focus |
 |---|---|---|
@@ -165,7 +165,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 ---
 
-## Project structure
+## 📁 Project structure
 
 | Path | Contents |
 |---|---|
@@ -176,7 +176,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 ---
 
-## License
+## ⚖️ License
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![OSI Approved](https://img.shields.io/badge/OSI-Approved-brightgreen.svg)](https://opensource.org/licenses/AGPL-3.0)
