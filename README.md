@@ -36,7 +36,6 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 - **Multiplexed, connection-oriented**: Hundreds of concurrent streams over a single connection. No connection pool needed, no head-of-line blocking.
 - **TLS 1.3 baked in**: Every connection is encrypted by default.
 - **Pluggable backends**: Choose between Quinn, Noq, or Quiche — swap with a feature flag.
-- **Zero C dependencies**: Enforced at compile time — pure Rust throughout.
 
 ### 🔒 End-to-end encryption
 
