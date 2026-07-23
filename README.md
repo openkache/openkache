@@ -172,7 +172,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | `server/` | Core cache server (BCF53, allocators, types) |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/dotnet/` | .NET / C# client SDK |
-| `clients/dotnet/OpenKache.Tests/` | .NET client unit tests |
+
 
 ---
 
