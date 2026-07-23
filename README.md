@@ -2,7 +2,7 @@
 
 # OpenKache ⚡
 
-**A next-generation open-source Rust SSD cache server.**
+**A next-generation Rust SSD cache server.**
 
 **10× cheaper and faster than Redis.**
 
