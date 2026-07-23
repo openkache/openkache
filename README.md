@@ -178,7 +178,11 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 ## License
 
-[AGPLv3](./LICENSE). Open source, always.
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![OSI Approved](https://img.shields.io/badge/OSI-Approved-brightgreen.svg)](https://opensource.org/licenses/AGPL-3.0)
+
+Licensed under the [GNU Affero General Public License v3.0](./LICENSE).
+Official text: [GNU.org](https://www.gnu.org/licenses/agpl-3.0.html) · [OSI](https://opensource.org/licenses/AGPL-3.0).
 
 ---
 
