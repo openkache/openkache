@@ -156,12 +156,12 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 | Milestone | Target | Focus |
 |---|---|---|
-| v0.1 — Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
-| v0.2 — Server protocol | 🚧 In progress | QUIC server, command dispatch, KV engine, SSD engine |
-| v0.3 — Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
-| v0.4 — E2E encryption | ⏳ Planned | Client-side encryption, zero-trust server architecture |
-| v0.5 — Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
-| v1.0 — General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
+| Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
+| Server protocol | 🚧 In progress | QUIC server, command dispatch, KV engine, SSD engine |
+| Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
+| E2E encryption | ⏳ Planned | Client-side encryption, zero-trust server architecture |
+| Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
+| General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
 
 ---
 
