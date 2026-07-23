@@ -12,7 +12,6 @@ Open-source · Rust · QUIC · SIMD-accelerated · SSD-first
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](https://github.com/openkache/openkache)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://rust-lang.github.io/rustup/)
-[![SIMD](https://img.shields.io/badge/simd-AVX2%20|%20AVX--512%20|%20NEON%20|%20SVE2-blueviolet)](https://github.com/openkache/openkache)
 
 </div>
 
