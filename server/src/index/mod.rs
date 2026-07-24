@@ -16,7 +16,7 @@ pub(crate) struct LocationBreadcrumb {
     ratio: usize,
     fingerprint_bits: usize,
     fingerprint_hash_offset_bits: usize,
-    region_bits: usize,
+    sg_index_bits: usize,
     pub(crate) len: usize,
 }
 
@@ -63,12 +63,12 @@ impl LocationBreadcrumb {
             ratio: config.front_back_ratio,
             fingerprint_bits: config.fingerprint_bits,
             fingerprint_hash_offset_bits: config.fingerprint_hash_offset_bits,
-            region_bits: config.region_bits,
+            sg_index_bits: config.region_bits,
             len: 0,
         })
     }
 
-    pub(crate) fn candidates(&self, hash: &[u8; 32]) -> Vec<Location> {
+    pub(crate) fn candidates(&self, hash: &[u8; 32]) -> Vec<TableLocation> {
         let (front, mini, tag) = self.fingerprint(hash);
         let front_bucket = &self.front[front];
         let mut encoded = front_bucket
@@ -92,17 +92,17 @@ impl LocationBreadcrumb {
         let mut seen = HashSet::new();
         encoded
             .into_iter()
-            .map(Location::decode)
+            .map(|encoded_location| TableLocation::decode(encoded_location, self.sg_index_bits))
             .filter(|location| seen.insert(*location))
             .collect()
     }
 
-    pub(crate) fn insert(&mut self, hash: &[u8; 32], location: Location) -> Result<()> {
+    pub(crate) fn insert(&mut self, hash: &[u8; 32], location: TableLocation) -> Result<()> {
         let (front, mini, tag) = self.fingerprint(hash);
         let entry = PackedEntry {
             mini,
             tag,
-            location: location.encode(self.region_bits),
+            location: location.encode(self.sg_index_bits),
             crumb: 0,
         };
         let saved = self.front[front].clone();
@@ -128,9 +128,9 @@ impl LocationBreadcrumb {
         Ok(())
     }
 
-    pub(crate) fn remove(&mut self, hash: &[u8; 32], location: Location) -> bool {
+    pub(crate) fn remove(&mut self, hash: &[u8; 32], location: TableLocation) -> bool {
         let (front, mini, tag) = self.fingerprint(hash);
-        let encoded = location.encode(self.region_bits);
+        let encoded = location.encode(self.sg_index_bits);
         let was_full = self.front[front].len(&self.front_layout) == self.front_layout.capacity;
         let front_slots = self.front[front].matching_slots(&self.front_layout, mini, tag, None);
         if let Some(slot) = front_slots
@@ -164,15 +164,15 @@ impl LocationBreadcrumb {
     pub(crate) fn replace_location(
         &mut self,
         hash: &[u8; 32],
-        previous: Location,
-        replacement: Location,
+        previous: TableLocation,
+        replacement: TableLocation,
     ) -> bool {
         if previous == replacement {
             return true;
         }
         let (front, mini, tag) = self.fingerprint(hash);
-        let old = previous.encode(self.region_bits);
-        let new = replacement.encode(self.region_bits);
+        let old = previous.encode(self.sg_index_bits);
+        let new = replacement.encode(self.sg_index_bits);
         let front_slots = self.front[front].matching_slots(&self.front_layout, mini, tag, None);
         if let Some(slot) = front_slots
             .into_iter()
@@ -272,3 +272,5 @@ impl LocationBreadcrumb {
         [first, second]
     }
 }
+
+pub(crate) type Table = LocationBreadcrumb;
