@@ -80,7 +80,7 @@ impl BucketLayout {
         let location_bit = fingerprint_bit + fingerprint_bytes * 8;
         let crumb_bit = location_bit + location_bytes * 8;
         Ok(Self {
-            mini_buckets: config_mini_buckets.min(capacity.max(1)),
+            mini_buckets: config_mini_buckets,
             capacity,
             fingerprint_bits,
             location_bits,
