@@ -1,38 +1,41 @@
 //! Minimal QUIC server backed by an in-memory hash map.
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use compio::BufResult;
+use compio::io::{AsyncReadExt, AsyncWriteExt};
+use compio_quic::{Endpoint, VarInt};
+use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
     ALPN, MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status,
 };
-use quinn::{Endpoint, VarInt};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio::sync::RwLock;
 
 /// In-memory storage used by the first runnable OpenKache server.
 #[derive(Default)]
 pub struct MemoryStore {
-    values: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
-    syncs: AtomicU64,
+    values: RefCell<HashMap<Vec<u8>, Vec<u8>>>,
+    syncs: Cell<u64>,
 }
 
 impl MemoryStore {
-    async fn execute(&self, request: Request) -> Response {
+    fn execute(&self, request: Request) -> Response {
         match request.opcode {
             Opcode::Ping => response(Status::Ok, b"PONG".to_vec()),
             Opcode::Get => {
-                let values = self.values.read().await;
+                let values = self.values.borrow();
                 match values.get(&request.key) {
                     Some(value) => response(Status::Ok, value.clone()),
                     None => response(Status::NotFound, Vec::new()),
                 }
             }
             Opcode::Set => {
-                let mut values = self.values.write().await;
+                let mut values = self.values.borrow_mut();
                 let status = if values.insert(request.key, request.value).is_some() {
                     Status::Replaced
                 } else {
@@ -41,7 +44,7 @@ impl MemoryStore {
                 response(status, Vec::new())
             }
             Opcode::Delete => {
-                let mut values = self.values.write().await;
+                let mut values = self.values.borrow_mut();
                 let status = if values.remove(&request.key).is_some() {
                     Status::Deleted
                 } else {
@@ -50,15 +53,15 @@ impl MemoryStore {
                 response(status, Vec::new())
             }
             Opcode::Stats => {
-                let keys = self.values.read().await.len();
-                let syncs = self.syncs.load(Ordering::Relaxed);
+                let keys = self.values.borrow().len();
+                let syncs = self.syncs.get();
                 response(
                     Status::Ok,
                     format!(r#"{{"keys":{keys},"syncs":{syncs},"storage":"memory"}}"#).into_bytes(),
                 )
             }
             Opcode::Sync => {
-                self.syncs.fetch_add(1, Ordering::Relaxed);
+                self.syncs.set(self.syncs.get().saturating_add(1));
                 response(Status::Ok, Vec::new())
             }
         }
@@ -69,12 +72,12 @@ impl MemoryStore {
 pub struct KacheServer {
     endpoint: Endpoint,
     certificate_der: CertificateDer<'static>,
-    store: Arc<MemoryStore>,
+    store: Rc<MemoryStore>,
 }
 
 impl KacheServer {
     /// Binds a server using an ephemeral self-signed certificate for `localhost`.
-    pub fn bind(address: SocketAddr) -> Result<Self> {
+    pub async fn bind(address: SocketAddr) -> Result<Self> {
         let generated = rcgen::generate_simple_self_signed(["localhost".to_string()])?;
         let certificate_der = generated.cert.der().clone();
         let private_key_der = PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der());
@@ -86,13 +89,18 @@ impl KacheServer {
                 PrivateKeyDer::Pkcs8(private_key_der),
             )?;
         tls.alpn_protocols = vec![ALPN.to_vec()];
-        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
-        let endpoint =
-            Endpoint::server(quinn::ServerConfig::with_crypto(Arc::new(crypto)), address)?;
+        let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(tls)?;
+        let socket = compio::net::UdpSocket::bind(address).await?;
+        let endpoint = Endpoint::new(
+            socket,
+            compio_quic::EndpointConfig::default(),
+            Some(compio_quic::ServerConfig::with_crypto(Arc::new(crypto))),
+            None,
+        )?;
         Ok(Self {
             endpoint,
             certificate_der,
-            store: Arc::new(MemoryStore::default()),
+            store: Rc::new(MemoryStore::default()),
         })
     }
 
@@ -108,56 +116,63 @@ impl KacheServer {
 
     /// Accepts connections until `shutdown` resolves.
     pub async fn serve(self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        tokio::pin!(shutdown);
+        let shutdown = shutdown.fuse();
+        pin_mut!(shutdown);
         loop {
-            tokio::select! {
-                incoming = self.endpoint.accept() => {
+            let incoming = self.endpoint.wait_incoming().fuse();
+            pin_mut!(incoming);
+            select! {
+                incoming = incoming => {
                     let Some(incoming) = incoming else {
                         break;
                     };
-                    let store = Arc::clone(&self.store);
-                    tokio::spawn(async move {
+                    let store = Rc::clone(&self.store);
+                    compio::runtime::spawn(async move {
                         if let Ok(connection) = incoming.await {
                             serve_connection(connection, store).await;
                         }
-                    });
+                    })
+                    .detach();
                 }
                 () = &mut shutdown => break,
             }
         }
         self.endpoint
             .close(VarInt::from_u32(0), b"server shutting down");
-        self.endpoint.wait_idle().await;
+        self.endpoint.shutdown().await?;
         Ok(())
     }
 }
 
-async fn serve_connection(connection: quinn::Connection, store: Arc<MemoryStore>) {
+async fn serve_connection(connection: compio_quic::Connection, store: Rc<MemoryStore>) {
     while let Ok((send, receive)) = connection.accept_bi().await {
         serve_stream(send, receive, &store).await;
     }
 }
 
 async fn serve_stream(
-    mut send: quinn::SendStream,
-    mut receive: quinn::RecvStream,
+    mut send: compio_quic::SendStream,
+    receive: compio_quic::RecvStream,
     store: &MemoryStore,
 ) {
-    let response = match receive.read_to_end(MAX_REQUEST_FRAME_BYTES).await {
-        Ok(frame) => match Request::decode(&frame) {
-            Ok(request) => store.execute(request).await,
-            Err(error) => protocol_error_response(error),
-        },
-        Err(quinn::ReadToEndError::TooLong) => response(
+    let mut receive = receive.take((MAX_REQUEST_FRAME_BYTES + 1) as u64);
+    let BufResult(read_result, frame) = receive.read_to_end(Vec::new()).await;
+    let response = match read_result {
+        Ok(_) if frame.len() > MAX_REQUEST_FRAME_BYTES => response(
             Status::TooLarge,
             b"request exceeds the protocol limit".to_vec(),
         ),
+        Ok(_) => match Request::decode(&frame) {
+            Ok(request) => store.execute(request),
+            Err(error) => protocol_error_response(error),
+        },
         Err(error) => response(Status::InvalidRequest, error.to_string().into_bytes()),
     };
     let Ok(frame) = response.encode() else {
         return;
     };
-    if send.write_all(&frame).await.is_ok() {
+    let BufResult(write_result, _) = send.write_all(frame).await;
+    if write_result.is_ok() {
         let _ = send.finish();
     }
 }
@@ -183,7 +198,7 @@ pub enum ServerError {
     #[error("TLS configuration failed: {0}")]
     Tls(#[from] rustls::Error),
     #[error("QUIC TLS configuration failed: {0}")]
-    QuicTls(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
+    QuicTls(#[from] compio_quic::crypto::rustls::NoInitialCipherSuite),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }
