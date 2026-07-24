@@ -1,6 +1,4 @@
-//! Two-tier front/back bucket index used for location breadcrumbs. The index maps
-//! hashed keys to storage locations via [`LocationBreadcrumb`], which maintains a front
-//! and back set of [`PackedBucket`]s and supports lookup, insert, delete, and promotion.
+use std::collections::HashSet;
 
 use crate::BUCKET_BYTES;
 use crate::config::Config;
@@ -18,6 +16,7 @@ pub(crate) struct LocationBreadcrumb {
     ratio: usize,
     fingerprint_bits: usize,
     fingerprint_hash_offset_bits: usize,
+    region_bits: usize,
     pub(crate) len: usize,
 }
 
@@ -64,138 +63,102 @@ impl LocationBreadcrumb {
             ratio: config.front_back_ratio,
             fingerprint_bits: config.fingerprint_bits,
             fingerprint_hash_offset_bits: config.fingerprint_hash_offset_bits,
+            region_bits: config.region_bits,
             len: 0,
         })
     }
 
     pub(crate) fn candidates(&self, hash: &[u8; 32]) -> Vec<Location> {
         let (front, mini, tag) = self.fingerprint(hash);
-
-        let mut results = Vec::with_capacity(3);
-
-        let extract = |entries: Vec<u16>| entries.into_iter().map(Location::decode);
-
-        results.extend(extract(self.front[front].find_entries(
-            &self.front_layout,
-            mini,
-            tag,
-        )));
-
-        let (back0, _crumb0) = self.back_location(front, 0);
-        results.extend(extract(self.back[back0].find_entries(
-            &self.back_layout,
-            mini,
-            tag,
-        )));
-        let (back1, _) = self.back_location(front, 1);
-        if back1 != back0 {
-            results.extend(extract(self.back[back1].find_entries(
-                &self.back_layout,
-                mini,
-                tag,
-            )));
+        let front_bucket = &self.front[front];
+        let mut encoded = front_bucket
+            .matching_slots(&self.front_layout, mini, tag, None)
+            .into_iter()
+            .map(|slot| front_bucket.entry(&self.front_layout, slot).location)
+            .collect::<Vec<_>>();
+        let (_, end) = front_bucket.bounds(&self.front_layout, mini);
+        if end == self.front_layout.capacity {
+            let [first, second] = self.back_locations(front);
+            for bl in [first, second] {
+                let bucket = &self.back[bl.0];
+                encoded.extend(
+                    bucket
+                        .matching_slots(&self.back_layout, mini, tag, Some(bl.1))
+                        .into_iter()
+                        .map(|slot| bucket.entry(&self.back_layout, slot).location),
+                );
+            }
         }
-        results.sort_by_key(|loc| std::cmp::Reverse((loc.region, loc.page_choice)));
-        results.dedup();
-        results
+        let mut seen = HashSet::new();
+        encoded
+            .into_iter()
+            .map(Location::decode)
+            .filter(|location| seen.insert(*location))
+            .collect()
     }
 
     pub(crate) fn insert(&mut self, hash: &[u8; 32], location: Location) -> Result<()> {
         let (front, mini, tag) = self.fingerprint(hash);
-        let entry = location.encode(self.front_layout.region_bits);
-        if self.front[front].insert_front(&self.front_layout, mini, tag, entry) {
+        let entry = PackedEntry {
+            mini,
+            tag,
+            location: location.encode(self.region_bits),
+            crumb: 0,
+        };
+        let saved = self.front[front].clone();
+        let overflow = self.front[front].insert_front(&self.front_layout, entry);
+        let Some(mut overflow) = overflow else {
             self.len += 1;
             return Ok(());
-        }
-
-        let (back0, crumb0) = self.back_location(front, 0);
-        let (back1, crumb1) = self.back_location(front, 1);
-        let (primary, primary_crumb, secondary, secondary_crumb) =
-            if self.back[back0].len(&self.back_layout) <= self.back[back1].len(&self.back_layout) {
-                (back0, crumb0, back1, crumb1)
-            } else {
-                (back1, crumb1, back0, crumb0)
-            };
-        if self.back[primary].insert_back(&self.back_layout, mini, tag, entry, primary_crumb) {
-            self.len += 1;
-            return Ok(());
-        }
-        if primary != secondary
-            && self.back[secondary].insert_back(
-                &self.back_layout,
-                mini,
-                tag,
-                entry,
-                secondary_crumb,
-            )
+        };
+        let [first, second] = self.back_locations(front);
+        let destination = if self.back[first.0].len(&self.back_layout)
+            <= self.back[second.0].len(&self.back_layout)
         {
-            self.len += 1;
-            return Ok(());
+            first
+        } else {
+            second
+        };
+        overflow.crumb = destination.1;
+        if !self.back[destination.0].insert_back(&self.back_layout, overflow) {
+            self.front[front] = saved;
+            return Err(KvError::IndexFull);
         }
-        Err(KvError::IndexFull)
+        self.len += 1;
+        Ok(())
     }
 
     pub(crate) fn remove(&mut self, hash: &[u8; 32], location: Location) -> bool {
         let (front, mini, tag) = self.fingerprint(hash);
-        let entry = location.encode(self.front_layout.region_bits);
-        let mini_was_full = self.front[front].mini_slots_free(&self.front_layout, mini) == 0;
-        if self.front[front].remove_front(&self.front_layout, mini, tag, entry) {
-            let (back0, crumb0) = self.back_location(front, 0);
-            let (back1, crumb1) = self.back_location(front, 1);
-            if mini_was_full {
-                let mut promoted = false;
-                if let Some(candidate) =
-                    self.back[back0].first_with_crumb(&self.back_layout, crumb0)
-                {
-                    let (slot, promoted_entry, promoted_tag) = candidate;
-                    let promoted_mini =
-                        slot / (self.back_layout.capacity / self.back_layout.mini_buckets);
-                    if self.front[front].mini_slots_free(&self.front_layout, promoted_mini) > 0 {
-                        self.back[back0].remove_at(&self.back_layout, slot);
-                        self.front[front].insert_front(
-                            &self.front_layout,
-                            promoted_mini,
-                            promoted_tag,
-                            promoted_entry,
-                        );
-                        promoted = true;
-                    }
-                }
-                #[allow(clippy::collapsible_if)]
-                if !promoted {
-                    if let Some(candidate) =
-                        self.back[back1].first_with_crumb(&self.back_layout, crumb1)
-                    {
-                        let (slot, promoted_entry, promoted_tag) = candidate;
-                        let promoted_mini =
-                            slot / (self.back_layout.capacity / self.back_layout.mini_buckets);
-                        if self.front[front].mini_slots_free(&self.front_layout, promoted_mini) > 0
-                        {
-                            self.back[back1].remove_at(&self.back_layout, slot);
-                            self.front[front].insert_front(
-                                &self.front_layout,
-                                promoted_mini,
-                                promoted_tag,
-                                promoted_entry,
-                            );
-                        }
-                    }
-                }
+        let encoded = location.encode(self.region_bits);
+        let was_full = self.front[front].len(&self.front_layout) == self.front_layout.capacity;
+        let front_slots = self.front[front].matching_slots(&self.front_layout, mini, tag, None);
+        if let Some(slot) = front_slots
+            .into_iter()
+            .find(|slot| self.front[front].entry(&self.front_layout, *slot).location == encoded)
+        {
+            self.front[front].remove_at(&self.front_layout, mini, slot);
+            if was_full {
+                self.promote(front);
             }
             self.len -= 1;
-            true
-        } else {
-            let (back0, crumb0) = self.back_location(front, 0);
-            let (back1, crumb1) = self.back_location(front, 1);
-            if self.back[back0].remove_back(&self.back_layout, mini, tag, crumb0, entry)
-                || self.back[back1].remove_back(&self.back_layout, mini, tag, crumb1, entry)
+            return true;
+        }
+        if !was_full {
+            return false;
+        }
+        for bl in self.back_locations(front) {
+            let slots = self.back[bl.0].matching_slots(&self.back_layout, mini, tag, Some(bl.1));
+            if let Some(slot) = slots
+                .into_iter()
+                .find(|slot| self.back[bl.0].entry(&self.back_layout, *slot).location == encoded)
             {
+                self.back[bl.0].remove_at(&self.back_layout, mini, slot);
                 self.len -= 1;
-                true
-            } else {
-                false
+                return true;
             }
         }
+        false
     }
 
     pub(crate) fn replace_location(
@@ -208,20 +171,52 @@ impl LocationBreadcrumb {
             return true;
         }
         let (front, mini, tag) = self.fingerprint(hash);
-        let old = previous.encode(self.front_layout.region_bits);
-        let new = replacement.encode(self.front_layout.region_bits);
-        if self.front[front].replace_entry(&self.front_layout, mini, tag, old, new) {
+        let old = previous.encode(self.region_bits);
+        let new = replacement.encode(self.region_bits);
+        let front_slots = self.front[front].matching_slots(&self.front_layout, mini, tag, None);
+        if let Some(slot) = front_slots
+            .into_iter()
+            .find(|slot| self.front[front].entry(&self.front_layout, *slot).location == old)
+        {
+            let mut entry = self.front[front].entry(&self.front_layout, slot);
+            entry.location = new;
+            self.front[front].write_entry(&self.front_layout, slot, entry);
             return true;
         }
-        let (back0, _) = self.back_location(front, 0);
-        let (back1, _) = self.back_location(front, 1);
-        if self.back[back0].replace_entry(&self.back_layout, mini, tag, old, new)
-            || (back1 != back0
-                && self.back[back1].replace_entry(&self.back_layout, mini, tag, old, new))
-        {
-            return true;
+        if self.front[front].len(&self.front_layout) < self.front_layout.capacity {
+            return false;
+        }
+        for bl in self.back_locations(front) {
+            let slots = self.back[bl.0].matching_slots(&self.back_layout, mini, tag, Some(bl.1));
+            if let Some(slot) = slots
+                .into_iter()
+                .find(|slot| self.back[bl.0].entry(&self.back_layout, *slot).location == old)
+            {
+                let mut entry = self.back[bl.0].entry(&self.back_layout, slot);
+                entry.location = new;
+                self.back[bl.0].write_entry(&self.back_layout, slot, entry);
+                return true;
+            }
         }
         false
+    }
+
+    fn promote(&mut self, front: usize) {
+        let [first, second] = self.back_locations(front);
+        let a = self.back[first.0].first_with_crumb(&self.back_layout, first.1);
+        let b = self.back[second.0].first_with_crumb(&self.back_layout, second.1);
+        let selected = match (a, b) {
+            (None, None) => return,
+            (Some(candidate), None) => (first.0, candidate),
+            (None, Some(candidate)) => (second.0, candidate),
+            (Some(a), Some(b)) if a.1.mini <= b.1.mini => (first.0, a),
+            (Some(_), Some(b)) => (second.0, b),
+        };
+        let (back_idx, (slot, mut entry)) = selected;
+        self.back[back_idx].remove_at(&self.back_layout, entry.mini, slot);
+        entry.crumb = 0;
+        let overflow = self.front[front].insert_front(&self.front_layout, entry);
+        debug_assert!(overflow.is_none());
     }
 
     pub(crate) fn load_factor(&self) -> f64 {
@@ -247,25 +242,33 @@ impl LocationBreadcrumb {
         let space = (quotient_count as u128) * remainder_space as u128;
         let fingerprint = (prefix as u128 % space) as u64;
         let quotient = (fingerprint / remainder_space) as usize;
-        let front = quotient / self.front_layout.mini_buckets;
+        let front_idx = quotient / self.front_layout.mini_buckets;
         let mini = quotient % self.front_layout.mini_buckets;
-        (front, mini, (fingerprint & (remainder_space - 1)) as u16)
+        (
+            front_idx,
+            mini,
+            (fingerprint & (remainder_space - 1)) as u16,
+        )
     }
 
-    fn back_location(&self, front: usize, choice: usize) -> (usize, u8) {
+    fn back_locations(&self, front: usize) -> [(usize, u8); 2] {
         let upper = front / self.ratio;
         let low = front % self.ratio;
-        let first = (upper, (low + self.ratio) as u8);
+        let first = (upper, (self.ratio + low) as u8);
         let second = (
             upper / self.ratio + low * self.back_group_count,
             (upper % self.ratio) as u8,
         );
-        let result = if choice == 0 { first } else { second };
         debug_assert!(
-            result.0 < self.back.len(),
-            "back bucket {} out of bounds (front={front}, choice={choice})",
-            result.0
+            first.0 < self.back.len(),
+            "back bucket {} out of bounds (front={front})",
+            first.0
         );
-        result
+        debug_assert!(
+            second.0 < self.back.len(),
+            "back bucket {} out of bounds (front={front})",
+            second.0
+        );
+        [first, second]
     }
 }

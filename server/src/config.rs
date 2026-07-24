@@ -76,7 +76,7 @@ impl Default for Config {
             checkpoint_on_sg_flush: true,
             recovery_enabled: true,
             fallback_to_sg_scan: true,
-            fingerprint_hash_offset_bits: 0,
+            fingerprint_hash_offset_bits: 64,
             read_max_time_us: 1_000,
             write_max_time_us: 5_000,
         }
@@ -140,9 +140,9 @@ impl Config {
                 "front-back-ratio must be a power of two between 2 and 16".into(),
             ));
         }
-        if self.fingerprint_hash_offset_bits > 64 {
+        if self.fingerprint_hash_offset_bits == 0 || self.fingerprint_hash_offset_bits > 64 {
             return Err(KvError::InvalidConfig(
-                "fingerprint hash offset must be at most 64 bits".into(),
+                "fingerprint hash offset must be between 1 and 64 bits".into(),
             ));
         }
         if self.read_max_time_us == 0 || self.write_max_time_us == 0 {
@@ -471,13 +471,18 @@ impl AppConfig {
                 cpu_ids,
                 event_interval: 31,
             },
-            io_uring: IoUringConfig::default(),
+            io_uring: IoUringConfig {
+                entries_per_worker: 256,
+                max_inflight_per_worker: 8,
+                batch_size: 16,
+                ..IoUringConfig::default()
+            },
             timeouts: TimeoutConfig {
-                input_max_time_us: 10_000,
-                output_max_time_us: 1_000_000,
-                read_max_time_us: 100_000,
-                write_max_time_us: 1_000_000,
-                request_max_time_us: 2_000_000,
+                input_max_time_us: 30_000_000,
+                output_max_time_us: 30_000_000,
+                read_max_time_us: 5_000_000,
+                write_max_time_us: 30_000_000,
+                request_max_time_us: 30_000_000,
             },
             storage: StorageConfig {
                 directory,
