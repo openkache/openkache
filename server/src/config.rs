@@ -84,7 +84,17 @@ impl Default for Config {
 }
 
 impl Config {
+    pub(crate) fn blob_path(&self) -> PathBuf {
+        self.data_path.with_extension("blob")
+    }
+
     pub fn validate(&self) -> Result<()> {
+        let blob_path = self.blob_path();
+        if blob_path == self.data_path || blob_path == self.index_path {
+            return Err(KvError::InvalidConfig(
+                "derived blob path must differ from data and index paths".into(),
+            ));
+        }
         if self.sg_count == 0 || self.sg_count > (1usize << self.region_bits) {
             return Err(KvError::InvalidConfig(format!(
                 "sg-count must be in 1..={} for {} region bits",

@@ -54,7 +54,7 @@ pub(crate) struct MutableSg {
 /// Result of replacing the one copy of a key in the mutable SG.
 pub(crate) enum MutableReplace {
     NotFound,
-    Replaced(Location),
+    Replaced(TableLocation),
     NoSpace,
 }
 
@@ -106,7 +106,11 @@ impl MutableSg {
     }
 
     /// Appends a record to one of its two candidate pages.
-    pub(crate) fn append(&mut self, mut record: Record, count_logical: bool) -> Option<Location> {
+    pub(crate) fn append(
+        &mut self,
+        mut record: Record,
+        count_logical: bool,
+    ) -> Option<TableLocation> {
         let (page, choice) = self.choose_page(&record.key, record.payload_len())?;
         record.page_choice = choice;
         if !append_page(self.page_mut(page), &record) {
@@ -116,9 +120,10 @@ impl MutableSg {
         if count_logical {
             self.logical_bytes += (HASHED_KEY_BYTES + record.value.len()) as u64;
         }
-        Some(Location {
-            region: self.region as u8,
-            page_choice: choice,
+        Some(TableLocation {
+            is_blob: false,
+            sg_index: self.region as u8,
+            bucket_hash_index: choice,
         })
     }
 
@@ -157,9 +162,10 @@ impl MutableSg {
                 if count_logical {
                     self.logical_bytes += (HASHED_KEY_BYTES + record.value.len()) as u64;
                 }
-                return MutableReplace::Replaced(Location {
-                    region: self.region as u8,
-                    page_choice: record.page_choice,
+                return MutableReplace::Replaced(TableLocation {
+                    is_blob: false,
+                    sg_index: self.region as u8,
+                    bucket_hash_index: record.page_choice,
                 });
             }
         }
