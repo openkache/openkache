@@ -19,8 +19,8 @@ pub use error::{KvError, Result};
 
 mod config;
 pub use config::{
-    AppConfig, Config, DurabilityConfig, IndexConfig, IoUringConfig, RecoveryConfig, RuntimeConfig,
-    StorageConfig, TimeoutConfig, bits_for_count, expand_thread_pattern,
+    AppConfig, Config, IoUringConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig,
+    bits_for_count, expand_thread_pattern,
 };
 
 mod cli;
@@ -32,7 +32,8 @@ pub(crate) use store::*;
 pub mod runtime;
 pub use runtime::*;
 
-pub(crate) mod index;
-pub(crate) use index::*;
+pub(crate) mod table;
+pub(crate) use table::*;
 
-pub(crate) const BUCKET_BYTES: usize = 64;
+pub(crate) const BUCKET_BYTES: usize = 4 * 1024;
+pub(crate) const SUBTABLE_BYTES: usize = 64;

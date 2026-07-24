@@ -1,7 +1,8 @@
-//! Configuration types for the KV cache server: [`AppConfig`] (top-level, deserialized from
-//! TOML), [`Config`] (per-worker resolved config), and inner config structs for runtime,
-//! I/O uring, timeouts, storage, index, durability, and recovery. Includes validation
-//! logic and helpers such as [`bits_for_count()`] and [`expand_thread_pattern()`].
+//! Application and per-worker configuration for the OpenKache server.
+//!
+//! Storage uses fixed 4 KiB Buckets inside Segments. Each worker owns one
+//! storage file and one in-memory lookup Table; restart recovery is not part of
+//! this configuration.
 
 use std::collections::HashSet;
 use std::io;
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
 
 pub fn allowed_cpu_ids() -> Result<HashSet<usize>> {
@@ -41,19 +43,14 @@ pub fn bits_for_count(count: usize) -> usize {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub data_path: PathBuf,
-    pub index_path: PathBuf,
-    pub sg_size: usize,
-    pub sg_count: usize,
-    pub page_size: usize,
-    pub index_capacity: usize,
-    pub index_target_load_percent: usize,
+    pub segment_size: usize,
+    pub segment_count: usize,
+    pub table_capacity: usize,
+    pub table_target_load_percent: usize,
     pub fingerprint_bits: usize,
-    pub mini_buckets: usize,
+    pub unary_count: usize,
     pub front_back_ratio: usize,
-    pub region_bits: usize,
-    pub checkpoint_on_sg_flush: bool,
-    pub recovery_enabled: bool,
-    pub fallback_to_sg_scan: bool,
+    pub sg_index_bits: usize,
     pub fingerprint_hash_offset_bits: usize,
     pub read_max_time_us: u64,
     pub write_max_time_us: u64,
@@ -63,19 +60,14 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_path: PathBuf::from("target/kvkache-v1/kvkache.data"),
-            index_path: PathBuf::from("target/kvkache-v1/kvkache.index"),
-            sg_size: 16 * 1024 * 1024,
-            sg_count: 64,
-            page_size: 4096,
-            index_capacity: 10_000_000,
-            index_target_load_percent: 88,
+            segment_size: 16 * 1024 * 1024,
+            segment_count: 64,
+            table_capacity: 10_000_000,
+            table_target_load_percent: 88,
             fingerprint_bits: 8,
-            mini_buckets: 32,
+            unary_count: 32,
             front_back_ratio: 8,
-            region_bits: 6,
-            checkpoint_on_sg_flush: true,
-            recovery_enabled: true,
-            fallback_to_sg_scan: true,
+            sg_index_bits: 6,
             fingerprint_hash_offset_bits: 64,
             read_max_time_us: 1_000,
             write_max_time_us: 5_000,
@@ -89,57 +81,51 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        let blob_path = self.blob_path();
-        if blob_path == self.data_path || blob_path == self.index_path {
+        if self.blob_path() == self.data_path {
             return Err(KvError::InvalidConfig(
-                "derived blob path must differ from data and index paths".into(),
+                "derived Blob path must differ from the Segment data path".into(),
             ));
         }
-        if self.sg_count == 0 || self.sg_count > (1usize << self.region_bits) {
+        if self.sg_index_bits == 0 || self.sg_index_bits > 16 {
+            return Err(KvError::InvalidConfig(
+                "sg-index-bits must be between 1 and 16".into(),
+            ));
+        }
+        if self.segment_count == 0 || self.segment_count > (1usize << self.sg_index_bits) {
             return Err(KvError::InvalidConfig(format!(
-                "sg-count must be in 1..={} for {} region bits",
-                1usize << self.region_bits,
-                self.region_bits
+                "segment-count must be in 1..={} for {} SG index bits",
+                1usize << self.sg_index_bits,
+                self.sg_index_bits
             )));
+        }
+        if self.segment_size == 0 || !self.segment_size.is_multiple_of(BUCKET_BYTES) {
+            return Err(KvError::InvalidConfig(
+                "Segment size must be a non-zero multiple of 4096 bytes".into(),
+            ));
+        }
+        if self.segment_size.checked_mul(self.segment_count).is_none() {
+            return Err(KvError::InvalidConfig(
+                "total Segment data size is too large".into(),
+            ));
+        }
+        if self.table_capacity == 0 {
+            return Err(KvError::InvalidConfig(
+                "table-capacity must be non-zero".into(),
+            ));
+        }
+        if !(1..=95).contains(&self.table_target_load_percent) {
+            return Err(KvError::InvalidConfig(
+                "table-load-percent must be between 1 and 95".into(),
+            ));
         }
         if self.fingerprint_bits > 16 {
             return Err(KvError::InvalidConfig(
                 "fingerprint-bits must be between 0 and 16".into(),
             ));
         }
-        if self.region_bits == 0 || self.region_bits > 8 {
+        if !(2..=96).contains(&self.unary_count) {
             return Err(KvError::InvalidConfig(
-                "region-bits must be between 1 and 8".into(),
-            ));
-        }
-        if self.page_size < 512 || self.page_size > 4096 {
-            return Err(KvError::InvalidConfig(
-                "page-bytes must be between 512 and 4096 for 12-bit record offsets".into(),
-            ));
-        }
-        if self.sg_size == 0 || !self.sg_size.is_multiple_of(self.page_size) {
-            return Err(KvError::InvalidConfig(
-                "SG size must be a non-zero multiple of page size".into(),
-            ));
-        }
-        if self.sg_size.checked_mul(self.sg_count).is_none() {
-            return Err(KvError::InvalidConfig(
-                "total SG data size is too large".into(),
-            ));
-        }
-        if self.index_capacity == 0 {
-            return Err(KvError::InvalidConfig(
-                "index-capacity must be non-zero".into(),
-            ));
-        }
-        if !(1..=95).contains(&self.index_target_load_percent) {
-            return Err(KvError::InvalidConfig(
-                "index-load-percent must be between 1 and 95".into(),
-            ));
-        }
-        if self.mini_buckets < 2 || self.mini_buckets > 96 {
-            return Err(KvError::InvalidConfig(
-                "mini-buckets must be between 2 and 96".into(),
+                "unary-count must be between 2 and 96".into(),
             ));
         }
         if self.front_back_ratio < 2
@@ -163,41 +149,24 @@ impl Config {
         Ok(())
     }
 
-    pub fn page_count(&self) -> usize {
-        self.sg_size / self.page_size
+    pub fn bucket_count(&self) -> usize {
+        self.segment_size / BUCKET_BYTES
     }
 
     pub fn data_bytes(&self) -> u64 {
-        (self.sg_size * self.sg_count) as u64
-    }
-
-    pub fn signature(&self) -> [u64; 10] {
-        [
-            self.sg_size as u64,
-            self.sg_count as u64,
-            self.page_size as u64,
-            self.index_capacity as u64,
-            self.index_target_load_percent as u64,
-            self.fingerprint_bits as u64,
-            self.mini_buckets as u64,
-            self.front_back_ratio as u64,
-            self.region_bits as u64,
-            self.fingerprint_hash_offset_bits as u64,
-        ]
+        (self.segment_size * self.segment_count) as u64
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
     pub runtime: RuntimeConfig,
     pub io_uring: IoUringConfig,
     pub timeouts: TimeoutConfig,
     pub storage: StorageConfig,
-    pub index: IndexConfig,
-    pub durability: DurabilityConfig,
-    pub recovery: RecoveryConfig,
+    pub table: TableConfig,
 }
 
 impl Default for AppConfig {
@@ -208,15 +177,13 @@ impl Default for AppConfig {
             io_uring: IoUringConfig::default(),
             timeouts: TimeoutConfig::default(),
             storage: StorageConfig::default(),
-            index: IndexConfig::default(),
-            durability: DurabilityConfig::default(),
-            recovery: RecoveryConfig::default(),
+            table: TableConfig::default(),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub thread_count: usize,
     pub cpu_ids: Vec<usize>,
@@ -237,7 +204,7 @@ impl Default for RuntimeConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IoUringConfig {
     pub sqpoll: bool,
     pub entries_per_worker: u32,
@@ -259,7 +226,7 @@ impl Default for IoUringConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TimeoutConfig {
     pub input_max_time_us: u64,
     pub output_max_time_us: u64,
@@ -281,14 +248,12 @@ impl Default for TimeoutConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     pub directory: PathBuf,
     pub data_file_pattern: String,
-    pub index_file_pattern: String,
-    pub sg_per_thread: usize,
-    pub sg_size_mib: usize,
-    pub page_size_bytes: usize,
+    pub segments_per_thread: usize,
+    pub segment_size_mib: usize,
 }
 
 impl Default for StorageConfig {
@@ -296,64 +261,32 @@ impl Default for StorageConfig {
         Self {
             directory: PathBuf::from("target/kvkache-v1"),
             data_file_pattern: "data-{thread_id:02}.sg".into(),
-            index_file_pattern: "index-{thread_id:02}.chk".into(),
-            sg_per_thread: 4,
-            sg_size_mib: 16,
-            page_size_bytes: 4096,
+            segments_per_thread: 4,
+            segment_size_mib: 16,
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct IndexConfig {
+#[serde(default, deny_unknown_fields)]
+pub struct TableConfig {
     pub capacity_per_thread: usize,
     pub target_load_percent: usize,
     pub fingerprint_bits: usize,
-    pub mini_buckets: usize,
+    pub unary_count: usize,
     pub front_back_ratio: usize,
     pub fingerprint_hash_offset_bits: usize,
 }
 
-impl Default for IndexConfig {
+impl Default for TableConfig {
     fn default() -> Self {
         Self {
             capacity_per_thread: 625_000,
             target_load_percent: 88,
             fingerprint_bits: 8,
-            mini_buckets: 32,
+            unary_count: 32,
             front_back_ratio: 8,
             fingerprint_hash_offset_bits: 64,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct DurabilityConfig {
-    pub checkpoint_on_sg_flush: bool,
-}
-
-impl Default for DurabilityConfig {
-    fn default() -> Self {
-        Self {
-            checkpoint_on_sg_flush: true,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-pub struct RecoveryConfig {
-    pub enabled: bool,
-    pub fallback_to_sg_scan: bool,
-}
-
-impl Default for RecoveryConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            fallback_to_sg_scan: true,
         }
     }
 }
@@ -426,35 +359,30 @@ impl AppConfig {
                 "all timeout values must be non-zero".into(),
             ));
         }
-        if self.storage.sg_per_thread == 0 || self.storage.sg_per_thread > 256 {
+        if self.storage.segments_per_thread == 0
+            || self.storage.segments_per_thread > (1usize << 16)
+        {
             return Err(KvError::InvalidConfig(
-                "storage.sg_per_thread must be between 1 and 256".into(),
+                "storage.segments_per_thread must be between 1 and 65536".into(),
             ));
         }
-        if self.storage.sg_size_mib.checked_mul(1024 * 1024).is_none() {
+        if self.storage.segment_size_mib == 0
+            || self
+                .storage
+                .segment_size_mib
+                .checked_mul(1024 * 1024)
+                .is_none()
+        {
             return Err(KvError::InvalidConfig(
-                "storage.sg_size_mib is too large".into(),
+                "storage.segment_size_mib is invalid".into(),
             ));
         }
         let data_names = (0..self.runtime.thread_count)
             .map(|thread_id| expand_thread_pattern(&self.storage.data_file_pattern, thread_id))
             .collect::<HashSet<_>>();
-        let index_names = (0..self.runtime.thread_count)
-            .map(|thread_id| expand_thread_pattern(&self.storage.index_file_pattern, thread_id))
-            .collect::<HashSet<_>>();
-        if data_names.len() != self.runtime.thread_count
-            || index_names.len() != self.runtime.thread_count
-        {
+        if data_names.len() != self.runtime.thread_count {
             return Err(KvError::InvalidConfig(
-                "storage file patterns must expand to a unique file for every thread".into(),
-            ));
-        }
-        if (0..self.runtime.thread_count).any(|thread_id| {
-            expand_thread_pattern(&self.storage.data_file_pattern, thread_id)
-                == expand_thread_pattern(&self.storage.index_file_pattern, thread_id)
-        }) {
-            return Err(KvError::InvalidConfig(
-                "data and index file patterns must not resolve to the same file".into(),
+                "storage.data_file_pattern must expand uniquely for every thread".into(),
             ));
         }
         self.worker_config(0).validate()
@@ -463,17 +391,17 @@ impl AppConfig {
     pub fn for_trace_benchmark(
         directory: PathBuf,
         cpu_ids: Vec<usize>,
-        total_sg_count: usize,
-        total_index_capacity: usize,
+        total_segment_count: usize,
+        total_table_capacity: usize,
     ) -> Result<Self> {
-        if cpu_ids.is_empty() || !total_sg_count.is_multiple_of(cpu_ids.len()) {
+        if cpu_ids.is_empty() || !total_segment_count.is_multiple_of(cpu_ids.len()) {
             return Err(KvError::InvalidConfig(
-                "trace benchmark total SG count must divide evenly across workers".into(),
+                "trace benchmark total Segment count must divide evenly across workers".into(),
             ));
         }
         let thread_count = cpu_ids.len();
-        let sg_per_thread = total_sg_count / thread_count;
-        let capacity_per_thread = total_index_capacity.div_ceil(thread_count);
+        let segments_per_thread = total_segment_count / thread_count;
+        let capacity_per_thread = total_table_capacity.div_ceil(thread_count);
         let config = Self {
             version: 1,
             runtime: RuntimeConfig {
@@ -497,25 +425,12 @@ impl AppConfig {
             storage: StorageConfig {
                 directory,
                 data_file_pattern: "data-{thread_id:02}.sg".into(),
-                index_file_pattern: "index-{thread_id:02}.chk".into(),
-                sg_per_thread,
-                sg_size_mib: 16,
-                page_size_bytes: 4096,
+                segments_per_thread,
+                segment_size_mib: 16,
             },
-            index: IndexConfig {
+            table: TableConfig {
                 capacity_per_thread,
-                target_load_percent: 88,
-                fingerprint_bits: 8,
-                mini_buckets: 32,
-                front_back_ratio: 8,
-                fingerprint_hash_offset_bits: 64,
-            },
-            durability: DurabilityConfig {
-                checkpoint_on_sg_flush: true,
-            },
-            recovery: RecoveryConfig {
-                enabled: true,
-                fallback_to_sg_scan: true,
+                ..TableConfig::default()
             },
         };
         config.validate()?;
@@ -524,23 +439,17 @@ impl AppConfig {
 
     pub fn worker_config(&self, thread_id: usize) -> Config {
         let data_name = expand_thread_pattern(&self.storage.data_file_pattern, thread_id);
-        let index_name = expand_thread_pattern(&self.storage.index_file_pattern, thread_id);
         Config {
             data_path: self.storage.directory.join(data_name),
-            index_path: self.storage.directory.join(index_name),
-            sg_size: self.storage.sg_size_mib * 1024 * 1024,
-            sg_count: self.storage.sg_per_thread,
-            page_size: self.storage.page_size_bytes,
-            index_capacity: self.index.capacity_per_thread,
-            index_target_load_percent: self.index.target_load_percent,
-            fingerprint_bits: self.index.fingerprint_bits,
-            mini_buckets: self.index.mini_buckets,
-            front_back_ratio: self.index.front_back_ratio,
-            region_bits: bits_for_count(self.storage.sg_per_thread),
-            checkpoint_on_sg_flush: self.durability.checkpoint_on_sg_flush,
-            recovery_enabled: self.recovery.enabled,
-            fallback_to_sg_scan: self.recovery.fallback_to_sg_scan,
-            fingerprint_hash_offset_bits: self.index.fingerprint_hash_offset_bits,
+            segment_size: self.storage.segment_size_mib * 1024 * 1024,
+            segment_count: self.storage.segments_per_thread,
+            table_capacity: self.table.capacity_per_thread,
+            table_target_load_percent: self.table.target_load_percent,
+            fingerprint_bits: self.table.fingerprint_bits,
+            unary_count: self.table.unary_count,
+            front_back_ratio: self.table.front_back_ratio,
+            sg_index_bits: bits_for_count(self.storage.segments_per_thread),
+            fingerprint_hash_offset_bits: self.table.fingerprint_hash_offset_bits,
             read_max_time_us: self.timeouts.read_max_time_us,
             write_max_time_us: self.timeouts.write_max_time_us,
         }

@@ -37,25 +37,22 @@ pub struct Cli {
     pub directory: Option<PathBuf>,
 
     #[arg(long, value_name = "N")]
-    pub sg_per_thread: Option<usize>,
+    pub segments_per_thread: Option<usize>,
 
     #[arg(long, value_name = "N")]
-    pub sg_mib: Option<usize>,
+    pub segment_mib: Option<usize>,
 
     #[arg(long, value_name = "N")]
-    pub page_bytes: Option<usize>,
+    pub table_capacity_per_thread: Option<usize>,
 
     #[arg(long, value_name = "N")]
-    pub index_capacity_per_thread: Option<usize>,
-
-    #[arg(long, value_name = "N")]
-    pub index_load_percent: Option<usize>,
+    pub table_load_percent: Option<usize>,
 
     #[arg(long, value_name = "N")]
     pub fingerprint_bits: Option<usize>,
 
     #[arg(long, value_name = "N")]
-    pub mini_buckets: Option<usize>,
+    pub unary_count: Option<usize>,
 
     #[arg(long, value_name = "N")]
     pub front_back_ratio: Option<usize>,
@@ -91,7 +88,7 @@ pub enum CliCommand {
     Stats,
 }
 
-fn parse_cpu_ids(value: &str) -> Result<Vec<usize>> {
+pub(crate) fn parse_cpu_ids(value: &str) -> Result<Vec<usize>> {
     value
         .split(',')
         .map(|cpu| {
@@ -164,29 +161,26 @@ impl AppConfig {
         if let Some(v) = cli.directory {
             config.storage.directory = v;
         }
-        if let Some(v) = cli.sg_per_thread {
-            config.storage.sg_per_thread = v;
+        if let Some(v) = cli.segments_per_thread {
+            config.storage.segments_per_thread = v;
         }
-        if let Some(v) = cli.sg_mib {
-            config.storage.sg_size_mib = v;
+        if let Some(v) = cli.segment_mib {
+            config.storage.segment_size_mib = v;
         }
-        if let Some(v) = cli.page_bytes {
-            config.storage.page_size_bytes = v;
+        if let Some(v) = cli.table_capacity_per_thread {
+            config.table.capacity_per_thread = v;
         }
-        if let Some(v) = cli.index_capacity_per_thread {
-            config.index.capacity_per_thread = v;
-        }
-        if let Some(v) = cli.index_load_percent {
-            config.index.target_load_percent = v;
+        if let Some(v) = cli.table_load_percent {
+            config.table.target_load_percent = v;
         }
         if let Some(v) = cli.fingerprint_bits {
-            config.index.fingerprint_bits = v;
+            config.table.fingerprint_bits = v;
         }
-        if let Some(v) = cli.mini_buckets {
-            config.index.mini_buckets = v;
+        if let Some(v) = cli.unary_count {
+            config.table.unary_count = v;
         }
         if let Some(v) = cli.front_back_ratio {
-            config.index.front_back_ratio = v;
+            config.table.front_back_ratio = v;
         }
 
         config.validate()?;

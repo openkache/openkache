@@ -179,8 +179,8 @@ impl ThreadedKvkache {
     pub fn for_trace_benchmark(
         directory: std::path::PathBuf,
         cpu_ids: Vec<usize>,
-        total_sg_count: usize,
-        total_index_capacity: usize,
+        total_segment_count: usize,
+        total_table_capacity: usize,
     ) -> Result<Self> {
         let thread_count = cpu_ids.len();
         if thread_count == 0 {
@@ -188,7 +188,7 @@ impl ThreadedKvkache {
                 "benchmark requires at least one CPU".into(),
             ));
         }
-        if total_index_capacity / thread_count.max(1) > 750_000 {
+        if total_table_capacity / thread_count.max(1) > 750_000 {
             return Err(KvError::InvalidConfig(
                 "benchmark window is too large".into(),
             ));
@@ -196,8 +196,8 @@ impl ThreadedKvkache {
         Self::start(crate::config::AppConfig::for_trace_benchmark(
             directory,
             cpu_ids,
-            total_sg_count,
-            total_index_capacity,
+            total_segment_count,
+            total_table_capacity,
         )?)
     }
 
