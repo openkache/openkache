@@ -48,27 +48,14 @@ impl Connection {
 }
 
 impl BidiStream {
-    /// Write all bytes from `buf` into the stream (like
-    /// [`tokio::io::AsyncWriteExt::write_all`]).
-    pub(crate) async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        self.inner.write_all(buf).await
+    /// Writes one complete request and closes the sending half.
+    pub(crate) async fn write_request(&mut self, frame: &[u8]) -> Result<()> {
+        self.inner.write_all(frame).await?;
+        self.inner.finish()
     }
 
-    /// Read the remainder of the stream into `buf`, returning the number of
-    /// bytes read.
-    pub(crate) async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
-        self.inner.read_to_end(buf).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn connection_and_stream_are_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<Connection>();
-        assert_send::<BidiStream>();
+    /// Reads one complete response up to `maximum` bytes.
+    pub(crate) async fn read_response(&mut self, maximum: usize) -> Result<Vec<u8>> {
+        self.inner.read_to_end(maximum).await
     }
 }

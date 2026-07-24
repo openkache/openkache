@@ -9,6 +9,7 @@
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+pub mod server;
 pub mod types;
 
 pub use types::{HashedKey, Key, Value};
