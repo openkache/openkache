@@ -135,16 +135,13 @@ cargo release-all
 
 ---
 
-## 🧪 Test
+## ✅ Verify the build
 
 ```bash
 cargo check --manifest-path server/Cargo.toml
 cargo check --manifest-path clients/rust/Cargo.toml
 cargo check --manifest-path protocol/Cargo.toml
 ```
-
-The public repository contains production source only. The full protocol and
-end-to-end test suite is maintained in the OpenKache monorepo.
 
 ---
 

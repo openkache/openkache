@@ -18,9 +18,6 @@ cargo check
 cargo fmt --check
 ```
 
-The public repository intentionally contains production source only. Protocol
-tests are maintained by the OpenKache monorepo.
-
 ## Wire format
 
 Protocol v1 uses the QUIC ALPN identifier `openkache/1`. Each bidirectional
