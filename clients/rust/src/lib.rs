@@ -21,6 +21,8 @@ pub enum Error {
     },
     #[error("unexpected PING response payload")]
     UnexpectedPingPayload,
+    #[error("response exceeds protocol limit of {maximum} bytes")]
+    ResponseTooLarge { maximum: usize },
     #[error("TLS configuration failed: {0}")]
     Tls(#[from] rustls::Error),
     #[error("protocol failed: {0}")]
@@ -127,7 +129,7 @@ impl Client {
 
     async fn request(&self, request: Request) -> Result<Response> {
         let mut stream = self.connection.open_bi().await?;
-        stream.write_request(&request.encode()?).await?;
+        stream.write_request(request.encode()?).await?;
         let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
         let response = Response::decode(&frame)?;
         if response.status.is_error() {

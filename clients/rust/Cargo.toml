@@ -4,24 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Rust client for the OpenKache cache server"
 
-[features]
-default = ["backend-quinn"]
-backend-quinn = ["quinn", "rustls", "tokio"]
-backend-noq = ["noq", "rustls", "tokio"]
-# backend-quiche requires quiche built with rustls feature for pure-Rust TLS
-# backend-quiche = ["tokio-quiche", "quiche/rustls", "rustls", "tokio"]
-
 [dependencies]
+compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime"] }
+compio-quic = { version = "*", features = ["ring"] }
 openkache-protocol = { path = "../../protocol" }
+rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 thiserror = "*"
-
-# --- Quinn backend ---
-quinn = { version = "*", optional = true }
-rustls = { version = "*", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
-tokio = { version = "*", features = ["net", "io-util", "macros", "rt"], optional = true }
-
-# --- Noq backend ---
-noq = { version = "*", optional = true, default-features = false, features = ["rustls", "runtime-tokio", "ring"] }
-
-# --- Quiche backend (future) ---
-# tokio-quiche = { version = "0.6", optional = true }
