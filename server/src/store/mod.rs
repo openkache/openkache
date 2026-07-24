@@ -1,7 +1,8 @@
-//! Core cache engine: `Kvkache` struct, public API (`get`, `set`, `delete`, `open`),
-//! `SetOutcome` enum, `MutableSg` management, and the `flush_active` method.
-//! This module drives the main cache lifecycle — lookups, mutations, slot-group management,
-//! and I/O statistics collection.
+//! Core cache engine and its Segment lifecycle.
+//!
+//! The in-memory Table is the only source of logical liveness. Deletes remove
+//! an active Item physically; Items already on SSD remain stale until their
+//! Segment is reused.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -17,13 +18,11 @@ use crate::types::HASHED_KEY_BYTES;
 use crate::*;
 
 mod blob;
-mod codec;
-mod page;
-mod persistence;
+mod bucket;
+mod segment_io;
 
 pub(crate) use self::blob::*;
-pub(crate) use self::codec::*;
-pub(crate) use self::page::*;
+pub(crate) use self::bucket::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetOutcome {
@@ -35,23 +34,17 @@ pub enum SetOutcome {
 pub(crate) struct KvkacheIoStats {
     pub(crate) data_written: u64,
     pub(crate) data_read: u64,
-    pub(crate) index_written: u64,
-    pub(crate) index_read: u64,
 }
 
 #[derive(Default)]
 struct IoCounters {
     data_written: Cell<u64>,
     data_read: Cell<u64>,
-    index_written: Cell<u64>,
-    index_read: Cell<u64>,
 }
 
-#[derive(Clone)]
 struct LocatedItem {
-    location: TableLocation,
-    generation: u64,
-    record: Record,
+    table_location: TableLocation,
+    item: Item,
 }
 
 pub(crate) struct Kvkache {
@@ -60,12 +53,11 @@ pub(crate) struct Kvkache {
     pub(crate) table: Table,
     pub(crate) blob_segment: BlobSegment,
     pub(crate) blob_refs: HashMap<[u8; HASHED_KEY_BYTES], BlobRef>,
-    active: Option<MutableSg>,
-    slot_generations: Vec<Option<u64>>,
-    next_slot: usize,
-    next_generation: u64,
-    pub(crate) data_flushes: u64,
-    evictions: u64,
+    pub(crate) active: Option<MutableSegment>,
+    pub(crate) occupied_segments: Vec<bool>,
+    next_segment_index: usize,
+    pub(crate) segment_flushes: u64,
+    pub(crate) segment_reuses: u64,
     io: IoCounters,
 }
 
@@ -73,9 +65,6 @@ impl Kvkache {
     pub(crate) async fn open(config: Config) -> Result<Self> {
         config.validate()?;
         if let Some(parent) = config.data_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if let Some(parent) = config.index_path.parent() {
             fs::create_dir_all(parent)?;
         }
         let data = OpenOptions::new()
@@ -88,41 +77,27 @@ impl Kvkache {
         data.set_len(config.data_bytes()).await?;
         let blob_segment = BlobSegment::open(&config).await?;
 
-        let mut cache = Self {
+        Ok(Self {
             table: Table::new(&config)?,
             blob_segment,
             blob_refs: HashMap::new(),
             active: None,
-            slot_generations: vec![None; config.sg_count],
-            next_slot: 0,
-            next_generation: 0,
-            data_flushes: 0,
-            evictions: 0,
+            occupied_segments: vec![false; config.segment_count],
+            next_segment_index: 0,
+            segment_flushes: 0,
+            segment_reuses: 0,
             io: IoCounters::default(),
             config,
             data,
-        };
-        if cache.config.recovery_enabled && !cache.load_checkpoint().await? {
-            if !cache.config.fallback_to_sg_scan {
-                return Err(KvError::Corrupt(
-                    "checkpoint is absent or invalid and SG fallback is disabled".into(),
-                ));
-            }
-            cache.rebuild_from_data().await?;
-            if cache.slot_generations.iter().any(Option::is_some) {
-                cache.save_checkpoint().await?;
-            }
-        }
-        Ok(cache)
+        })
     }
 
     pub(crate) async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let hash = Key::from(key).hashed_key().into_bytes();
+        let hashed_key = Key::from(key).hashed_key().into_bytes();
         Ok(self
-            .locate(&hash)
+            .locate(&hashed_key)
             .await?
-            .filter(|located| located.record.kind == RECORD_SET)
-            .map(|located| located.record.value))
+            .map(|located| located.item.value))
     }
 
     pub(crate) async fn get_many(&self, keys: Vec<Vec<u8>>) -> Vec<Result<Option<Vec<u8>>>> {
@@ -154,45 +129,44 @@ impl Kvkache {
         hashed_key: [u8; HASHED_KEY_BYTES],
         value: &[u8],
     ) -> Result<SetOutcome> {
-        let record_bytes = directory_bytes(1) + RECORD_FIXED_BYTES + value.len();
-        if PAGE_HEADER + record_bytes > self.config.page_size {
-            return Err(KvError::RecordTooLarge {
-                bytes: record_bytes,
-                capacity: self.config.page_size - PAGE_HEADER,
+        let item_bytes = item_offsets_bytes(1) + ITEM_FIXED_BYTES + value.len();
+        let capacity = BUCKET_BYTES - 1;
+        if item_bytes > capacity {
+            return Err(KvError::ItemTooLarge {
+                bytes: item_bytes,
+                capacity,
             });
         }
         let previous = self.locate(&hashed_key).await?;
-        let record = Record {
-            kind: RECORD_SET,
-            page_choice: 0,
-            key: hashed_key,
+        let item = Item {
+            hashed_key,
             value: value.to_vec(),
         };
         let replacement = self
             .active
             .as_mut()
-            .map(|active| active.replace(&hashed_key, record.clone(), true));
-        let location = match replacement {
-            Some(MutableReplace::Replaced(location)) => location,
-            Some(MutableReplace::NotFound | MutableReplace::NoSpace) | None => {
-                self.append_with_retry(record, true).await?
+            .map(|active| active.replace(&hashed_key, item.clone(), true));
+        let table_location = match replacement {
+            Some(MutableItemReplace::Replaced(table_location)) => table_location,
+            Some(MutableItemReplace::NotFound | MutableItemReplace::NoSpace) | None => {
+                self.append_with_retry(item, true).await?
             }
         };
         if let Some(previous) = &previous {
             if !self
                 .table
-                .replace_location(&hashed_key, previous.location, location)
+                .replace_location(&hashed_key, previous.table_location, table_location)
             {
-                return Err(KvError::Corrupt(
+                return Err(KvError::Worker(
                     "updated key is missing from the Table".into(),
                 ));
             }
         } else {
-            self.table.insert(&hashed_key, location)?;
+            self.table.insert(&hashed_key, table_location)?;
         }
         if previous
             .as_ref()
-            .is_some_and(|previous| previous.location.is_blob())
+            .is_some_and(|previous| previous.table_location.is_blob())
         {
             self.blob_refs.remove(&hashed_key);
         }
@@ -214,25 +188,26 @@ impl Kvkache {
             .data_written
             .set(self.io.data_written.get() + BLOB_HASHED_KEY_BYTES + blob_ref.value_len);
 
-        if previous
-            .as_ref()
-            .is_some_and(|previous| !previous.location.is_blob())
-        {
-            self.write_sg_tombstone(hashed_key).await?;
-        }
-
-        let location = TableLocation::blob();
+        let table_location = TableLocation::blob();
         if let Some(previous) = &previous {
             if !self
                 .table
-                .replace_location(&hashed_key, previous.location, location)
+                .replace_location(&hashed_key, previous.table_location, table_location)
             {
-                return Err(KvError::Corrupt(
+                return Err(KvError::Worker(
                     "updated key is missing from the Table".into(),
                 ));
             }
         } else {
-            self.table.insert(&hashed_key, location)?;
+            self.table.insert(&hashed_key, table_location)?;
+        }
+        if let Some(previous) = &previous
+            && !previous.table_location.is_blob()
+            && let Some(active) = self.active.as_mut()
+            && active.sg_index == previous.table_location.sg_index as usize
+        {
+            let removed = active.remove(&hashed_key);
+            debug_assert!(removed);
         }
         self.blob_refs.insert(hashed_key, blob_ref);
         Ok(if previous.is_some() {
@@ -247,179 +222,192 @@ impl Kvkache {
         let Some(previous) = self.locate(&hashed_key).await? else {
             return Ok(false);
         };
-        if previous.location.is_blob() {
-            let removed = self.table.remove(&hashed_key, previous.location);
+        if previous.table_location.is_blob() {
+            let removed = self.table.remove(&hashed_key, previous.table_location);
             debug_assert!(removed);
             self.blob_refs.remove(&hashed_key);
             return Ok(true);
         }
-        self.write_sg_tombstone(hashed_key).await?;
-        let removed = self.table.remove(&hashed_key, previous.location);
+        if let Some(active) = self.active.as_mut()
+            && active.sg_index == previous.table_location.sg_index as usize
+        {
+            let removed = active.remove(&hashed_key);
+            debug_assert!(removed);
+        }
+        let removed = self.table.remove(&hashed_key, previous.table_location);
         debug_assert!(removed);
         Ok(true)
     }
 
-    async fn write_sg_tombstone(&mut self, hashed_key: [u8; HASHED_KEY_BYTES]) -> Result<()> {
-        let tombstone = Record {
-            kind: RECORD_DELETE,
-            page_choice: 0,
-            key: hashed_key,
-            value: Vec::new(),
-        };
-        let replacement = self
-            .active
-            .as_mut()
-            .map(|active| active.replace(&hashed_key, tombstone.clone(), true));
-        match replacement {
-            Some(MutableReplace::Replaced(_)) => {}
-            Some(MutableReplace::NotFound | MutableReplace::NoSpace) | None => {
-                self.append_with_retry(tombstone, true).await?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) async fn sync(&mut self) -> Result<()> {
         self.blob_segment.sync().await?;
-        let checkpointed_by_flush = self.active.is_some() && self.config.checkpoint_on_sg_flush;
-        self.flush_active().await?;
-        if !checkpointed_by_flush {
-            self.save_checkpoint().await?;
-        }
-        Ok(())
+        self.flush_active_segment().await
     }
 
-    async fn locate(&self, hash: &[u8; 32]) -> Result<Option<LocatedItem>> {
-        let mut latest: Option<LocatedItem> = None;
-        for location in self.table.candidates(hash) {
-            if location.is_blob() {
-                let Some(blob_ref) = self.blob_refs.get(hash).copied() else {
+    async fn locate(&self, hashed_key: &[u8; 32]) -> Result<Option<LocatedItem>> {
+        for table_location in self.table.candidate_locations(hashed_key) {
+            if table_location.is_blob() {
+                let Some(blob_ref) = self.blob_refs.get(hashed_key).copied() else {
                     continue;
                 };
-                let value = self.blob_segment.read(hash, blob_ref).await?;
+                let value = self.blob_segment.read(hashed_key, blob_ref).await?;
                 self.io
                     .data_read
                     .set(self.io.data_read.get() + BLOB_HASHED_KEY_BYTES + blob_ref.value_len);
-                latest = Some(LocatedItem {
-                    location,
-                    generation: u64::MAX,
-                    record: Record {
-                        kind: RECORD_SET,
-                        page_choice: 0,
-                        key: *hash,
+                return Ok(Some(LocatedItem {
+                    table_location,
+                    item: Item {
+                        hashed_key: *hashed_key,
                         value,
                     },
-                });
-                continue;
+                }));
             }
             let active = self
                 .active
                 .as_ref()
-                .filter(|active| active.region == location.sg_index as usize);
-            let (generation, record) = if let Some(active) = active {
-                (
-                    active.generation,
-                    active.find(hash, location.bucket_hash_index),
-                )
+                .filter(|active| active.sg_index == table_location.sg_index as usize);
+            let item = if let Some(active) = active {
+                active.find(hashed_key, table_location.bucket_hash_index)
             } else {
-                let Some(generation) = self.slot_generations[location.sg_index as usize] else {
-                    continue;
-                };
-                (generation, self.read_location(hash, location).await?)
+                self.read_location(hashed_key, table_location).await?
             };
-            if let Some(record) = record
-                && latest
-                    .as_ref()
-                    .is_none_or(|current| generation > current.generation)
-            {
-                latest = Some(LocatedItem {
-                    location,
-                    generation,
-                    record,
-                });
+            if let Some(item) = item {
+                return Ok(Some(LocatedItem {
+                    table_location,
+                    item,
+                }));
             }
         }
-        Ok(latest)
+        Ok(None)
     }
 
     async fn read_location(
         &self,
-        hash: &[u8; 32],
-        location: TableLocation,
-    ) -> Result<Option<Record>> {
-        if self.slot_generations[location.sg_index as usize].is_none() {
+        hashed_key: &[u8; 32],
+        table_location: TableLocation,
+    ) -> Result<Option<Item>> {
+        debug_assert!(!table_location.is_blob());
+        let sg_index = table_location.sg_index as usize;
+        if !self
+            .occupied_segments
+            .get(sg_index)
+            .copied()
+            .unwrap_or(false)
+        {
             return Ok(None);
         }
-        let page = page_hash(hash, location.bucket_hash_index, self.config.page_count());
-        let bytes = self.read_page(location.sg_index as usize, page).await?;
-        let mut record = latest_in_page(&bytes, hash);
-        if let Some(record) = &mut record {
-            record.page_choice = location.bucket_hash_index;
-        }
-        Ok(record)
+        let bucket_index = bucket_hash(
+            hashed_key,
+            table_location.bucket_hash_index,
+            self.config.bucket_count(),
+        );
+        let bytes = self.read_bucket(sg_index, bucket_index).await?;
+        Ok(find_item_in_bucket(&bytes, hashed_key))
     }
 
     async fn append_with_retry(
         &mut self,
-        record: Record,
-        count_logical: bool,
+        item: Item,
+        count_accepted: bool,
     ) -> Result<TableLocation> {
         loop {
-            self.ensure_active().await?;
-            if let Some(location) = self
+            self.ensure_active_segment().await?;
+            if let Some(table_location) = self
                 .active
                 .as_mut()
                 .unwrap()
-                .append(record.clone(), count_logical)
+                .append(item.clone(), count_accepted)
             {
-                return Ok(location);
+                return Ok(table_location);
             }
-            self.flush_active().await?;
+            self.flush_active_segment().await?;
         }
     }
 
-    async fn ensure_active(&mut self) -> Result<()> {
+    async fn ensure_active_segment(&mut self) -> Result<()> {
         if self.active.is_some() {
             return Ok(());
         }
-        let region = self.next_slot;
-        if self.slot_generations[region].is_some() {
-            self.evict_region(region).await?;
+        let sg_index = self.next_segment_index;
+        if self.occupied_segments[sg_index] {
+            self.prepare_segment_for_reuse(sg_index).await?;
         }
-        let generation = self.next_generation;
-        self.next_generation += 1;
-        self.active = Some(MutableSg::new(&self.config, region, generation));
+        self.active = Some(MutableSegment::new(&self.config, sg_index));
         Ok(())
     }
 
-    async fn flush_active(&mut self) -> Result<()> {
-        let Some(mut active) = self.active.take() else {
+    async fn flush_active_segment(&mut self) -> Result<()> {
+        let Some(active) = self.active.take() else {
             return Ok(());
         };
-        if active.record_count == 0 {
+        if active.item_count == 0 {
             return Ok(());
         }
-        active.finalize();
-        let offset = active.region as u64 * self.config.sg_size as u64;
-        let bytes = active.bytes;
-        let write = self.data.write_all_at(bytes, offset);
+        let offset = active.sg_index as u64 * self.config.segment_size as u64;
+        let write = self.data.write_all_at(active.bytes, offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
             Duration::from_micros(self.config.write_max_time_us),
             write,
         )
         .await
-        .map_err(|_| KvError::Timeout("SG write"))?;
+        .map_err(|_| KvError::Timeout("Segment write"))?;
         result?;
         self.io
             .data_written
             .set(self.io.data_written.get() + bytes.len() as u64);
         self.data.sync_data().await?;
-        self.slot_generations[active.region] = Some(active.generation);
-        self.next_slot = (active.region + 1) % self.config.sg_count;
-        self.data_flushes += 1;
-        if self.config.checkpoint_on_sg_flush {
-            self.save_checkpoint().await?;
-        }
+        self.occupied_segments[active.sg_index] = true;
+        self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
+        self.segment_flushes += 1;
         Ok(())
+    }
+
+    pub(crate) fn stats(&self) -> String {
+        let io = self.io_stats();
+        format!(
+            "keys={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} blob_refs={} blob_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} segment_reuses={} data_read={} data_written={}",
+            self.table.entry_count,
+            self.table.load_factor() * 100.0,
+            self.table.memory_bytes() as f64 / (1024.0 * 1024.0),
+            self.table.memory_bytes() as f64 / self.config.table_capacity as f64,
+            self.memory_bytes() as f64 / (1024.0 * 1024.0),
+            self.table.front_table.len(),
+            self.table.front_subtable_layout.entry_capacity,
+            self.table.back_table.len(),
+            self.table.back_subtable_layout.entry_capacity,
+            self.blob_refs.len(),
+            self.blob_segment.used_bytes(),
+            self.blob_segment.capacity_bytes(),
+            self.next_segment_index,
+            self.occupied_segments
+                .iter()
+                .filter(|value| **value)
+                .count(),
+            self.segment_flushes,
+            self.segment_reuses,
+            io.data_read,
+            io.data_written,
+        )
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn reset_io_stats(&self) {
+        self.io.data_written.set(0);
+        self.io.data_read.set(0);
+    }
+
+    pub(super) fn io_stats(&self) -> KvkacheIoStats {
+        KvkacheIoStats {
+            data_written: self.io.data_written.get(),
+            data_read: self.io.data_read.get(),
+        }
+    }
+
+    pub(super) fn memory_bytes(&self) -> usize {
+        self.table.memory_bytes()
+            + self.config.segment_size
+            + self.blob_refs.capacity()
+                * (std::mem::size_of::<[u8; HASHED_KEY_BYTES]>() + std::mem::size_of::<BlobRef>())
+            + self.occupied_segments.capacity() * std::mem::size_of::<bool>()
     }
 }

@@ -42,10 +42,10 @@ impl BlobSegment {
             .write(true)
             .open(path)
             .await?;
-        file.set_len(config.sg_size as u64).await?;
+        file.set_len(config.segment_size as u64).await?;
         Ok(Self {
             file,
-            capacity_bytes: config.sg_size as u64,
+            capacity_bytes: config.segment_size as u64,
             next_item_offset: 0,
             read_max_time_us: config.read_max_time_us,
             write_max_time_us: config.write_max_time_us,
@@ -107,7 +107,7 @@ impl BlobSegment {
                 .map_err(|_| KvError::Timeout("Blob Segment read"))?;
         result?;
         if bytes[..HASHED_KEY_BYTES] != hashed_key[..] {
-            return Err(KvError::Corrupt(
+            return Err(KvError::Worker(
                 "BlobRef points to an Item with a different HashedKey".into(),
             ));
         }
@@ -131,24 +131,14 @@ impl BlobSegment {
         self.capacity_bytes - self.next_item_offset
     }
 
-    pub(crate) fn restore_used_bytes(&mut self, used_bytes: u64) -> Result<()> {
-        if used_bytes > self.capacity_bytes {
-            return Err(KvError::Corrupt(
-                "Blob Segment used bytes exceed its capacity".into(),
-            ));
-        }
-        self.next_item_offset = used_bytes;
-        Ok(())
-    }
-
     fn validate_ref(&self, blob_ref: BlobRef) -> Result<()> {
         let item_end = blob_ref
             .item_offset
             .checked_add(BLOB_HASHED_KEY_BYTES)
             .and_then(|offset| offset.checked_add(blob_ref.value_len))
-            .ok_or_else(|| KvError::Corrupt("BlobRef range overflow".into()))?;
+            .ok_or_else(|| KvError::Worker("BlobRef range overflow".into()))?;
         if item_end > self.next_item_offset {
-            return Err(KvError::Corrupt(
+            return Err(KvError::Worker(
                 "BlobRef points outside the written Blob Segment".into(),
             ));
         }
