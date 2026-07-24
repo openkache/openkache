@@ -46,6 +46,7 @@ struct IoCounters {
 #[derive(Clone)]
 struct LocatedRecord {
     location: Location,
+    generation: u64,
     record: Record,
 }
 
@@ -57,7 +58,6 @@ pub(crate) struct Kvkache {
     slot_generations: Vec<Option<u64>>,
     next_slot: usize,
     next_generation: u64,
-    next_sequence: u64,
     pub(crate) data_flushes: u64,
     evictions: u64,
     io: IoCounters,
@@ -87,7 +87,6 @@ impl Kvkache {
             slot_generations: vec![None; config.sg_count],
             next_slot: 0,
             next_generation: 0,
-            next_sequence: 0,
             data_flushes: 0,
             evictions: 0,
             io: IoCounters::default(),
@@ -111,7 +110,7 @@ impl Kvkache {
     pub(crate) async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let hash = Key::from(key).hashed_key().into_bytes();
         Ok(self
-            .locate(&hash, key)
+            .locate(&hash)
             .await?
             .filter(|located| located.record.kind == RECORD_SET)
             .map(|located| located.record.value))
@@ -134,48 +133,30 @@ impl Kvkache {
     }
 
     pub(crate) async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
-        if key.len() > u16::MAX as usize || value.len() > u32::MAX as usize {
+        let record_bytes = directory_bytes(1) + RECORD_FIXED_BYTES + value.len();
+        if PAGE_HEADER + record_bytes > self.config.page_size {
             return Err(KvError::RecordTooLarge {
-                bytes: RECORD_HEADER + key.len() + value.len(),
-                capacity: self.config.page_size - PAGE_HEADER,
-            });
-        }
-        let record_len = RECORD_HEADER + key.len() + value.len();
-        if record_len > self.config.page_size - PAGE_HEADER {
-            return Err(KvError::RecordTooLarge {
-                bytes: record_len,
+                bytes: record_bytes,
                 capacity: self.config.page_size - PAGE_HEADER,
             });
         }
         let hash = Key::from(key).hashed_key().into_bytes();
-        let previous = self.locate(&hash, key).await?;
-        let sequence = self.take_sequence();
+        let previous = self.locate(&hash).await?;
         let record = Record {
             kind: RECORD_SET,
             page_choice: 0,
-            sequence,
-            key: key.to_vec(),
+            key: hash,
             value: value.to_vec(),
         };
-        let previous_is_active = previous.as_ref().is_some_and(|previous| {
-            self.active
-                .as_ref()
-                .is_some_and(|active| active.region == previous.location.region as usize)
-        });
-        let location = if previous_is_active {
-            match self
-                .active
-                .as_mut()
-                .unwrap()
-                .replace(&hash, record.clone(), true)
-            {
-                MutableReplace::Replaced(location) => location,
-                MutableReplace::NotFound | MutableReplace::NoSpace => {
-                    self.append_with_retry(record, true).await?
-                }
+        let replacement = self
+            .active
+            .as_mut()
+            .map(|active| active.replace(&hash, record.clone(), true));
+        let location = match replacement {
+            Some(MutableReplace::Replaced(location)) => location,
+            Some(MutableReplace::NotFound | MutableReplace::NoSpace) | None => {
+                self.append_with_retry(record, true).await?
             }
-        } else {
-            self.append_with_retry(record, true).await?
         };
         if let Some(previous) = &previous {
             if !self
@@ -198,18 +179,25 @@ impl Kvkache {
 
     pub(crate) async fn delete(&mut self, key: &[u8]) -> Result<bool> {
         let hash = Key::from(key).hashed_key().into_bytes();
-        let Some(previous) = self.locate(&hash, key).await? else {
+        let Some(previous) = self.locate(&hash).await? else {
             return Ok(false);
         };
-        let sequence = self.take_sequence();
         let tombstone = Record {
             kind: RECORD_DELETE,
             page_choice: 0,
-            sequence,
-            key: key.to_vec(),
+            key: hash,
             value: Vec::new(),
         };
-        self.append_with_retry(tombstone, true).await?;
+        let replacement = self
+            .active
+            .as_mut()
+            .map(|active| active.replace(&hash, tombstone.clone(), true));
+        match replacement {
+            Some(MutableReplace::Replaced(_)) => {}
+            Some(MutableReplace::NotFound | MutableReplace::NoSpace) | None => {
+                self.append_with_retry(tombstone, true).await?;
+            }
+        }
         let removed = self.index.remove(&hash, previous.location);
         debug_assert!(removed);
         Ok(true)
@@ -224,50 +212,47 @@ impl Kvkache {
         Ok(())
     }
 
-    fn take_sequence(&mut self) -> u64 {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        sequence
-    }
-
-    async fn locate(&self, hash: &[u8; 32], key: &[u8]) -> Result<Option<LocatedRecord>> {
+    async fn locate(&self, hash: &[u8; 32]) -> Result<Option<LocatedRecord>> {
         let mut latest: Option<LocatedRecord> = None;
         for location in self.index.candidates(hash) {
-            let record = if self
+            let active = self
                 .active
                 .as_ref()
-                .is_some_and(|active| active.region == location.region as usize)
-            {
-                self.active
-                    .as_ref()
-                    .unwrap()
-                    .find(hash, key, location.page_choice)
+                .filter(|active| active.region == location.region as usize);
+            let (generation, record) = if let Some(active) = active {
+                (active.generation, active.find(hash, location.page_choice))
             } else {
-                self.read_location(hash, key, location).await?
+                let Some(generation) = self.slot_generations[location.region as usize] else {
+                    continue;
+                };
+                (generation, self.read_location(hash, location).await?)
             };
             if let Some(record) = record
                 && latest
                     .as_ref()
-                    .is_none_or(|current| record.sequence > current.record.sequence)
+                    .is_none_or(|current| generation > current.generation)
             {
-                latest = Some(LocatedRecord { location, record });
+                latest = Some(LocatedRecord {
+                    location,
+                    generation,
+                    record,
+                });
             }
         }
         Ok(latest)
     }
 
-    async fn read_location(
-        &self,
-        hash: &[u8; 32],
-        key: &[u8],
-        location: Location,
-    ) -> Result<Option<Record>> {
+    async fn read_location(&self, hash: &[u8; 32], location: Location) -> Result<Option<Record>> {
         if self.slot_generations[location.region as usize].is_none() {
             return Ok(None);
         }
         let page = page_hash(hash, location.page_choice, self.config.page_count());
         let bytes = self.read_page(location.region as usize, page).await?;
-        Ok(latest_in_page(&bytes, key))
+        let mut record = latest_in_page(&bytes, hash);
+        if let Some(record) = &mut record {
+            record.page_choice = location.page_choice;
+        }
+        Ok(record)
     }
 
     async fn append_with_retry(&mut self, record: Record, count_logical: bool) -> Result<Location> {

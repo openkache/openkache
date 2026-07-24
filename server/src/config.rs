@@ -102,9 +102,9 @@ impl Config {
                 "region-bits must be between 1 and 8".into(),
             ));
         }
-        if self.page_size < 512 || self.page_size > u16::MAX as usize {
+        if self.page_size < 512 || self.page_size > 4096 {
             return Err(KvError::InvalidConfig(
-                "page-bytes must be between 512 and 65535".into(),
+                "page-bytes must be between 512 and 4096 for 12-bit record offsets".into(),
             ));
         }
         if self.sg_size == 0 || !self.sg_size.is_multiple_of(self.page_size) {

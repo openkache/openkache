@@ -12,38 +12,37 @@ use compio::fs::OpenOptions;
 use compio::io::{AsyncReadAtExt, AsyncWriteAtExt};
 
 pub(crate) const CHECKPOINT_MAGIC: &[u8; 8] = b"KVKIDX01";
-pub(crate) const CHECKPOINT_VERSION: u32 = 1;
+pub(crate) const CHECKPOINT_VERSION: u32 = 2;
 pub(crate) const NONE_GENERATION: u64 = u64::MAX;
+
+/// Recovers the choice bit whose hash maps a stored key to `page`.
+fn page_choice_for_page(hash: &[u8; 32], page: usize, pages: usize) -> Option<u8> {
+    if page_hash(hash, 0, pages) == page {
+        Some(0)
+    } else if page_hash(hash, 1, pages) == page {
+        Some(1)
+    } else {
+        None
+    }
+}
 
 impl Kvkache {
     pub(crate) async fn evict_region(&mut self, region: usize) -> Result<()> {
         let records = self.read_sg_records(region).await?;
-        let mut newest = HashMap::<Vec<u8>, Record>::new();
-        for record in records {
-            if newest
-                .get(&record.key)
-                .is_none_or(|current| record.sequence > current.sequence)
-            {
-                newest.insert(record.key.clone(), record);
-            }
+        let mut newest = HashMap::<[u8; 32], (Record, Location)>::new();
+        for (record, location) in records {
+            newest.insert(record.key, (record, location));
         }
-        for record in newest
+        for (record, location) in newest
             .into_values()
-            .filter(|record| record.kind == RECORD_SET)
+            .filter(|(record, _)| record.kind == RECORD_SET)
         {
-            let hash = Key::from(record.key.as_slice()).hashed_key().into_bytes();
-            let location = Location {
-                region: region as u8,
-                page_choice: record.page_choice,
-            };
             if self
-                .locate(&hash, &record.key)
+                .locate(&record.key)
                 .await?
-                .is_some_and(|current| {
-                    current.location == location && current.record.sequence == record.sequence
-                })
+                .is_some_and(|current| current.location == location)
             {
-                let _ = self.index.remove(&hash, location);
+                let _ = self.index.remove(&record.key, location);
             }
         }
         self.slot_generations[region] = None;
@@ -70,12 +69,23 @@ impl Kvkache {
         Ok(bytes)
     }
 
-    async fn read_sg_records(&self, region: usize) -> Result<Vec<Record>> {
+    async fn read_sg_records(&self, region: usize) -> Result<Vec<(Record, Location)>> {
         let mut result = Vec::new();
         for page in 0..self.config.page_count() {
             let bytes = self.read_page(region, page).await?;
             if verify_page(&bytes) {
-                result.extend(records(&bytes));
+                result.extend(records(&bytes).into_iter().filter_map(|mut record| {
+                    let page_choice =
+                        page_choice_for_page(&record.key, page, self.config.page_count())?;
+                    record.page_choice = page_choice;
+                    Some((
+                        record,
+                        Location {
+                            region: region as u8,
+                            page_choice,
+                        },
+                    ))
+                }));
             }
         }
         Ok(result)
@@ -105,28 +115,16 @@ impl Kvkache {
             }
         }
         occupied.sort_unstable();
-        let mut latest = HashMap::<Vec<u8>, (Record, Location)>::new();
+        let mut latest = HashMap::<[u8; 32], (Record, Location)>::new();
         for (_, region) in &occupied {
-            for record in self.read_sg_records(*region).await? {
-                let location = Location {
-                    region: *region as u8,
-                    page_choice: record.page_choice,
-                };
-                if latest
-                    .get(&record.key)
-                    .is_none_or(|(current, _)| record.sequence > current.sequence)
-                {
-                    latest.insert(record.key.clone(), (record, location));
-                }
+            for (record, location) in self.read_sg_records(*region).await? {
+                latest.insert(record.key, (record, location));
             }
         }
         self.index = LocationBreadcrumb::new(&self.config)?;
-        self.next_sequence = 0;
         for (record, location) in latest.into_values() {
-            self.next_sequence = self.next_sequence.max(record.sequence + 1);
             if record.kind == RECORD_SET {
-                let hash = Key::from(record.key.as_slice()).hashed_key().into_bytes();
-                self.index.insert(&hash, location)?;
+                self.index.insert(&record.key, location)?;
             }
         }
         if let Some((generation, region)) = occupied.last().copied() {
@@ -145,7 +143,6 @@ impl Kvkache {
         }
         push_u64(&mut bytes, self.next_slot as u64);
         push_u64(&mut bytes, self.next_generation);
-        push_u64(&mut bytes, self.next_sequence);
         push_u64(&mut bytes, self.index.len as u64);
         push_u64(&mut bytes, self.index.front.len() as u64);
         push_u64(&mut bytes, self.index.back.len() as u64);
@@ -235,7 +232,6 @@ impl Kvkache {
         }
         let next_slot = cursor.u64()? as usize;
         let next_generation = cursor.u64()?;
-        let next_sequence = cursor.u64()?;
         let len = cursor.u64()? as usize;
         let front_count = cursor.u64()? as usize;
         let back_count = cursor.u64()? as usize;
@@ -268,7 +264,6 @@ impl Kvkache {
         self.slot_generations = generations;
         self.next_slot = next_slot;
         self.next_generation = next_generation;
-        self.next_sequence = next_sequence;
         Ok(true)
     }
 
