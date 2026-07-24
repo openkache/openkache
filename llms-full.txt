@@ -1,0 +1,105 @@
+# OpenKache
+
+A next-generation Rust SSD cache server — 10× cheaper and faster than Redis.
+
+OpenKache uses SSD as primary storage instead of DRAM, reducing storage costs from ~$3-5/GB to ~$0.05-0.10/GB. It achieves competitive latency through SIMD-accelerated BCF53 breadcrumb filtering, QUIC multiplexed transport, and end-to-end encryption by default.
+
+## Features
+
+- **SSD-first architecture** — SSD as primary storage, not a secondary tier
+- **SIMD-accelerated BCF53 filter** — 32+ million ops/sec per core, runtime SIMD dispatch (AVX-512, AVX2, SVE2, NEON)
+- **QUIC transport** — Multiplexed streams, TLS 1.3 baked in, no head-of-line blocking
+- **E2E encryption** — Zero-trust by default, configurable algorithm
+- **Transparent compression** — zstd for large values
+- **Multi-language SDKs** — Rust, .NET
+
+## Getting Started
+
+### Prerequisites
+
+- Linux x86_64 or aarch64
+- Rust toolchain
+- NVMe SSD recommended
+
+### Build
+
+```bash
+git clone https://github.com/openkache/openkache
+cd openkache
+nix develop   # or: cargo build --release
+```
+
+### Run benchmark
+
+```bash
+cargo run --package openkache --bin breadcrumb --release
+```
+
+### Use the Rust SDK
+
+```rust
+use openkache::prelude::*;
+
+let client = OpenKacheClient::new("localhost:9000").await?;
+client.set("mykey", b"myvalue").await?;
+let value = client.get("mykey").await?;
+```
+
+## Architecture
+
+```
+┌──────────────┐         QUIC (UDP, TLS 1.3)         ┌──────────────────────┐
+│  openkache-  │ ──────────────────────────────────▶ │     OpenKache        │
+│  client      │   Multiplexed streams, 0-RTT        │  (single binary)     │
+│  (Rust/.NET) │                                     │                      │
+└──────────────┘                                     │  ┌────────────────┐  │
+                                                     │  │ BCF53 Filter   │  │
+┌──────────────┐                                     │  │ (SIMD, AVX2)   │  │
+│  Any QUIC    │                                     │  ├────────────────┤  │
+│  client      │                                     │  │ Compacting Slab│  │
+└──────────────┘                                     │  │ (Hugepage/NUMA)│  │
+                                                     │  ├────────────────┤  │
+                                                     │  │ KV Engine      │  │
+                                                     │  │ (SHA-256 keys) │  │
+                                                     │  ├────────────────┤  │
+                                                     │  │ SSD Engine     │  │
+                                                     │  └────────────────┘  │
+                                                     └──────────────────────┘
+```
+
+## Comparison
+
+| | Redis | OpenKache |
+|---|---|---|
+| **Cost per GB** | DRAM (~$3–5/GB) | SSD (~$0.05–0.10/GB) |
+| **P99 latency** | <1 ms | <1 ms |
+| **Throughput** | ~100K ops/s (single node) | 1M+ ops/s (single node) |
+| **Transport** | TCP (HOL blocking) | QUIC (TLS 1.3, multiplexed, 0-RTT) |
+| **Security** | TLS optional, no E2E | E2E encrypted by default, zero trust |
+
+## AI coding agents
+
+OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.txt) for LLM-friendly documentation.
+
+## Project status
+
+| Component | Status |
+|---|---|
+| Memory allocators | Stable |
+| Breadcrumb filter (BCF53) | Stable |
+| QUIC client (Rust) | Stable |
+| QUIC server | In progress |
+| .NET client | Stable |
+| Clustering | Not started |
+
+## Project structure
+
+| Path | Contents |
+|---|---|
+| `server/` | Core cache server (BCF53, allocators, types) |
+| `clients/rust/` | Rust client SDK over QUIC |
+| `clients/dotnet/` | .NET / C# client SDK |
+
+## License
+
+AGPL-3.0. See [LICENSE](./LICENSE).

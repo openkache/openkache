@@ -1,0 +1,11 @@
+# OpenKache
+
+> A next-generation Rust SSD cache server — 10× cheaper and faster than Redis.
+
+OpenKache is an open-source SSD-first cache server with SIMD-accelerated BCF53 breadcrumb filtering, QUIC transport, end-to-end encryption, and multi-language SDKs. Core components (allocators, index, client SDKs) are stable; the server protocol layer is in progress.
+
+## Docs
+
+- [Getting Started](docs/getting-started.md): Install, build, and run your first benchmark.
+- [FAQ](docs/faq.md): General questions, SSD concerns, usage guide.
+- [README](README.md): Full overview, features, architecture, comparison table, roadmap.

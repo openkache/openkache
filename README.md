@@ -164,6 +164,12 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 ---
 
+## 🤖 AI coding agents
+
+OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.txt) for LLM-friendly documentation.
+
+---
+
 ## 📁 Project structure
 
 | Path | Contents |
