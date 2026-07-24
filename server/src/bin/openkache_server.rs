@@ -16,10 +16,17 @@ struct Arguments {
     certificate_out: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = compio::runtime::Runtime::new()?;
+    if !runtime.driver_type().is_iouring() {
+        return Err(std::io::Error::other("openkache-server requires the io_uring driver").into());
+    }
+    runtime.block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
-    let server = KacheServer::bind(arguments.listen)?;
+    let server = KacheServer::bind(arguments.listen).await?;
     let address = server.local_addr()?;
     if let Some(parent) = arguments.certificate_out.parent() {
         std::fs::create_dir_all(parent)?;
@@ -32,11 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         arguments.certificate_out.display()
     );
     println!("Storage: in-memory HashMap (SYNC is a no-op)");
+    println!("Runtime: Compio (io_uring)");
     println!("Press Ctrl-C to stop");
 
     server
         .serve(async {
-            let _ = tokio::signal::ctrl_c().await;
+            let _ = compio::signal::ctrl_c().await;
         })
         .await?;
     Ok(())

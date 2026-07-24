@@ -13,16 +13,15 @@ path = "src/bin/openkache_server.rs"
 
 [dependencies]
 clap = { version = "*", features = ["derive"] }
-compio = { version = "*", default-features = false, features = ["fs", "io-uring", "runtime", "time"] }
+compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "runtime", "signal", "time"] }
+compio-quic = { version = "*", features = ["ring"] }
 flume = "*"
 futures-util = "*"
 openkache-protocol = { path = "../protocol" }
-quinn = "*"
 rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 serde = { version = "*", features = ["derive"] }
 sha2 = "*"
 thiserror = "*"
 libc = "*"
-tokio = { version = "*", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 toml = "*"
