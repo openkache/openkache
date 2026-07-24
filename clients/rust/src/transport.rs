@@ -1,31 +1,24 @@
-//! Pluggable QUIC transport layer.
-//!
-//! Re-exports the currently selected backend (quinn / noq) as a uniform
-//! [`Connection`] / [`BidiStream`] pair so that the rest of the client
-//! crate does not depend on any particular QUIC implementation.
+//! Compio QUIC transport for the OpenKache client.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-#[cfg(feature = "backend-quinn")]
-mod quinn_impl;
-#[cfg(feature = "backend-quinn")]
-use quinn_impl as backend;
+use compio::BufResult;
+use compio::io::AsyncWriteExt;
+use compio_quic::{Endpoint, RecvStream, SendStream};
 
-#[cfg(all(feature = "backend-noq", not(feature = "backend-quinn")))]
-mod noq_impl;
-#[cfg(all(feature = "backend-noq", not(feature = "backend-quinn")))]
-use noq_impl as backend;
+use crate::{Error, Result};
 
-use crate::Result;
-
-/// Wraps a backend-specific QUIC connection.
+/// Keeps the Compio endpoint alive alongside its QUIC connection.
 pub(crate) struct Connection {
-    inner: backend::BackendConnection,
+    _endpoint: Endpoint,
+    inner: compio_quic::Connection,
 }
 
-/// Wraps a backend-specific bidirectional QUIC stream.
+/// A Compio bidirectional QUIC stream.
 pub(crate) struct BidiStream {
-    inner: backend::BackendStream,
+    send: SendStream,
+    receive: RecvStream,
 }
 
 /// Open a QUIC connection to `addr`, authenticating as `server_name` with the
@@ -35,27 +28,62 @@ pub(crate) async fn connect(
     server_name: &str,
     tls: rustls::ClientConfig,
 ) -> Result<Connection> {
-    let inner = backend::connect(addr, server_name, tls).await?;
-    Ok(Connection { inner })
+    let crypto = compio_quic::crypto::rustls::QuicClientConfig::try_from(tls)
+        .map_err(|error| Error::Connection(error.to_string()))?;
+    let config = compio_quic::ClientConfig::new(Arc::new(crypto));
+    let local_address = if addr.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    let endpoint = Endpoint::client(local_address).await?;
+    let inner = endpoint
+        .connect(addr, server_name, Some(config))
+        .map_err(|error| Error::Connection(error.to_string()))?
+        .await
+        .map_err(|error| Error::Connection(error.to_string()))?;
+    Ok(Connection {
+        _endpoint: endpoint,
+        inner,
+    })
 }
 
 impl Connection {
     /// Open a new bidirectional stream over the QUIC connection.
     pub(crate) async fn open_bi(&self) -> Result<BidiStream> {
-        let inner = self.inner.open_bi().await?;
-        Ok(BidiStream { inner })
+        let (send, receive) = self
+            .inner
+            .open_bi_wait()
+            .await
+            .map_err(|error| Error::Connection(error.to_string()))?;
+        Ok(BidiStream { send, receive })
     }
 }
 
 impl BidiStream {
     /// Writes one complete request and closes the sending half.
-    pub(crate) async fn write_request(&mut self, frame: &[u8]) -> Result<()> {
-        self.inner.write_all(frame).await?;
-        self.inner.finish()
+    pub(crate) async fn write_request(&mut self, frame: Vec<u8>) -> Result<()> {
+        let BufResult(result, _) = self.send.write_all(frame).await;
+        result?;
+        self.send
+            .finish()
+            .map_err(|error| Error::Connection(error.to_string()))
     }
 
     /// Reads one complete response up to `maximum` bytes.
     pub(crate) async fn read_response(&mut self, maximum: usize) -> Result<Vec<u8>> {
-        self.inner.read_to_end(maximum).await
+        let mut frame = Vec::new();
+        while let Some(chunk) = self
+            .receive
+            .read_chunk(maximum.saturating_add(1), true)
+            .await
+            .map_err(|error| Error::Connection(error.to_string()))?
+        {
+            if frame.len().saturating_add(chunk.bytes.len()) > maximum {
+                return Err(Error::ResponseTooLarge { maximum });
+            }
+            frame.extend_from_slice(&chunk.bytes);
+        }
+        Ok(frame)
     }
 }
