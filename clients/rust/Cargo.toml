@@ -12,6 +12,7 @@ backend-noq = ["noq", "rustls", "tokio"]
 # backend-quiche = ["tokio-quiche", "quiche/rustls", "rustls", "tokio"]
 
 [dependencies]
+openkache-protocol = { path = "../../protocol" }
 thiserror = "*"
 
 # --- Quinn backend ---

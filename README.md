@@ -61,9 +61,16 @@ One statically linked binary. No shared libraries, no runtime dependencies, no p
 # Enter the dev shell (Nix)
 nix develop
 
-# Run the BCF53 benchmark
-cargo run --package openkache --bin breadcrumb --release
+# Start the local in-memory QUIC server
+cargo run --manifest-path server/Cargo.toml --bin openkache-server
 ```
+
+The smoke server listens on `127.0.0.1:4433` and writes an ephemeral
+self-signed certificate to
+`target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
+`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/1` QUIC
+protocol. `SYNC` is currently an acknowledged no-op because this first server
+uses an in-memory HashMap.
 
 ---
 
@@ -108,7 +115,9 @@ cargo run --package openkache --bin breadcrumb --release
 ### Native (fast iteration)
 
 ```bash
-cargo build
+cargo build --manifest-path server/Cargo.toml
+cargo build --manifest-path clients/rust/Cargo.toml
+cargo build --manifest-path protocol/Cargo.toml
 ```
 
 ### Static musl (x86_64 / aarch64)
@@ -129,10 +138,13 @@ cargo release-all
 ## 🧪 Test
 
 ```bash
-cargo test                    # native
-cargo test --target x86_64-unknown-linux-musl   # cross via QEMU
-cargo test --target aarch64-unknown-linux-musl  # cross via QEMU
+cargo check --manifest-path server/Cargo.toml
+cargo check --manifest-path clients/rust/Cargo.toml
+cargo check --manifest-path protocol/Cargo.toml
 ```
+
+The public repository contains production source only. The full protocol and
+end-to-end test suite is maintained in the OpenKache monorepo.
 
 ---
 
@@ -144,8 +156,8 @@ OpenKache is in **active development**. Core components are stable, the server p
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
-| QUIC client (Rust) | ✅ Stable | Quinn + Noq backends |
-| QUIC server | 🚧 In progress | Protocol parsing and command dispatch |
+| QUIC client (Rust) | 🚧 Preview | Quinn + Noq backends, binary protocol v1 |
+| QUIC server | 🚧 Preview | Runnable HashMap smoke server over QUIC |
 | .NET client | ✅ Stable | TCP-based, NuGet published |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
 
@@ -174,7 +186,8 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 
 | Path | Contents |
 |---|---|
-| `server/` | Core cache server (BCF53, allocators, types) |
+| `protocol/` | Shared binary request, response, opcode, and status definitions |
+| `server/` | Core cache server plus the runnable QUIC smoke server |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/dotnet/` | .NET / C# client SDK |
 

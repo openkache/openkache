@@ -66,32 +66,18 @@ impl BackendStream {
         Ok(())
     }
 
-    /// Read all remaining data from the receive stream.
-    pub(crate) async fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
-        let data = self
-            .recv
-            .read_to_end(usize::MAX)
+    /// Closes the sending half after one request frame.
+    pub(crate) fn finish(&mut self) -> Result<()> {
+        self.send
+            .finish()
+            .map_err(|error| Error::Connection(error.to_string()))
+    }
+
+    /// Reads the complete response with a fixed upper bound.
+    pub(crate) async fn read_to_end(&mut self, maximum: usize) -> Result<Vec<u8>> {
+        self.recv
+            .read_to_end(maximum)
             .await
-            .map_err(|e| Error::Connection(e.to_string()))?;
-        buf.extend_from_slice(&data);
-        Ok(data.len())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn backend_connection_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<BackendConnection>();
-        assert_send::<BackendStream>();
-    }
-
-    #[test]
-    fn error_type_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<crate::Error>();
+            .map_err(|error| Error::Connection(error.to_string()))
     }
 }
