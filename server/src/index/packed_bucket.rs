@@ -4,6 +4,7 @@
 //! [`PackedEntry`] (decoded tag + location).
 
 use crate::BUCKET_BYTES;
+use crate::error::{KvError, Result};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct Location {
@@ -30,6 +31,7 @@ impl Location {
 pub(crate) struct BucketLayout {
     pub(crate) fingerprint_bits: usize,
     pub(crate) region_bits: usize,
+    pub(crate) location_bits: usize,
     pub(crate) mini_buckets: usize,
     pub(crate) capacity: usize,
     pub(crate) metadata_bits: usize,
@@ -39,50 +41,52 @@ pub(crate) struct BucketLayout {
 
 impl BucketLayout {
     pub(crate) fn new(
-        target_load_percent: usize,
+        _target_load_percent: usize,
         fingerprint_bits: usize,
         front_back_ratio: usize,
         is_back: bool,
-    ) -> Self {
-        let location_bytes = std::mem::size_of::<u16>();
+        config_mini_buckets: usize,
+        region_bits: usize,
+    ) -> Result<Self> {
+        let location_bits = region_bits + 1;
         let crumb_bits = if is_back {
             front_back_ratio.ilog2() as usize + 1
         } else {
             0
         };
-        let _crumb_bytes = if is_back {
-            (BUCKET_BYTES * 8 * crumb_bits).div_ceil(8)
-        } else {
-            0
-        };
-        let tag_bits = fingerprint_bits;
-        let entry_bits = tag_bits + location_bytes * 8 + crumb_bits;
-        let capacity = (BUCKET_BYTES * 8 * target_load_percent / 100) / entry_bits;
-        let metadata_bits = capacity + 1;
-        let metadata_bytes = metadata_bits.div_ceil(8);
-        let used_bytes = metadata_bytes + capacity * entry_bits / 8;
-        let mut mini_buckets = 1;
-        while mini_buckets * used_bytes < BUCKET_BYTES {
-            mini_buckets *= 2;
+        let mut chosen = None;
+        for capacity in 1..=64 {
+            let metadata_bits = config_mini_buckets + capacity;
+            if metadata_bits > 128 {
+                break;
+            }
+            let metadata_bytes = metadata_bits.div_ceil(8);
+            let fingerprint_bytes = (capacity * fingerprint_bits).div_ceil(8);
+            let location_bytes = (capacity * location_bits).div_ceil(8);
+            let crumb_bytes = (capacity * crumb_bits).div_ceil(8);
+            if metadata_bytes + fingerprint_bytes + location_bytes + crumb_bytes <= BUCKET_BYTES {
+                chosen = Some(capacity);
+            }
         }
-        mini_buckets = if mini_buckets <= 1 {
-            1
-        } else {
-            mini_buckets / 2
+        let Some(capacity) = chosen else {
+            return Err(KvError::InvalidConfig(
+                "fingerprint/location/mini-bucket fields do not fit in 64-byte buckets".into(),
+            ));
         };
+        let mini_buckets = config_mini_buckets.min(capacity.max(1));
         let adjusted_capacity = capacity / mini_buckets * mini_buckets;
-        let adjusted_metadata_bits = adjusted_capacity + 1;
-        let adjusted_metadata_bytes = adjusted_metadata_bits.div_ceil(8);
-        let region_bits = if fingerprint_bits > 0 { 8 } else { 0 };
-        Self {
+        let metadata_bits = adjusted_capacity;
+        let metadata_bytes = metadata_bits.div_ceil(8);
+        Ok(Self {
             fingerprint_bits,
             region_bits,
+            location_bits,
             mini_buckets,
             capacity: adjusted_capacity,
-            metadata_bits: adjusted_metadata_bits,
-            metadata_bytes: adjusted_metadata_bytes,
+            metadata_bits,
+            metadata_bytes,
             crumb_bits,
-        }
+        })
     }
 }
 
@@ -95,6 +99,7 @@ pub(crate) struct PackedEntry {
     pub(crate) page_choice: u8,
 }
 
+#[repr(C, align(64))]
 #[derive(Clone)]
 pub(crate) struct PackedBucket {
     pub(crate) bytes: [u8; BUCKET_BYTES],
@@ -122,7 +127,7 @@ impl PackedBucket {
     }
 
     pub(crate) fn entry(&self, layout: &BucketLayout, slot: usize) -> PackedEntry {
-        let entry_bits = layout.fingerprint_bits + 16 + layout.crumb_bits;
+        let entry_bits = layout.fingerprint_bits + layout.location_bits + layout.crumb_bits;
         let bit_offset = slot * entry_bits;
         let byte_offset = bit_offset / 8 + layout.metadata_bytes;
         let bit_remainder = bit_offset % 8;
@@ -136,10 +141,12 @@ impl PackedBucket {
         }
         let value = raw >> bit_remainder;
         let tag = (value & ((1u64 << layout.fingerprint_bits) - 1)) as u16;
-        let entry = (value >> layout.fingerprint_bits) as u16;
+        let entry =
+            ((value >> layout.fingerprint_bits) & ((1u64 << layout.location_bits) - 1)) as u16;
         let location = Location::decode(entry);
         let crumb = if layout.crumb_bits > 0 {
-            ((value >> (layout.fingerprint_bits + 16)) & ((1u64 << layout.crumb_bits) - 1)) as u8
+            ((value >> (layout.fingerprint_bits + layout.location_bits))
+                & ((1u64 << layout.crumb_bits) - 1)) as u8
         } else {
             0
         };
@@ -152,16 +159,17 @@ impl PackedBucket {
     }
 
     fn set_entry(&mut self, layout: &BucketLayout, slot: usize, entry: u16, tag: u16, crumb: u8) {
-        let entry_bits = layout.fingerprint_bits + 16 + layout.crumb_bits;
+        let entry_bits = layout.fingerprint_bits + layout.location_bits + layout.crumb_bits;
         let tag_mask = (1u64 << layout.fingerprint_bits).wrapping_sub(1);
+        let location_mask = (1u64 << layout.location_bits).wrapping_sub(1);
         let crumb_mask = if layout.crumb_bits > 0 {
             (1u64 << layout.crumb_bits).wrapping_sub(1)
         } else {
             0
         };
         let combined = ((tag as u64) & tag_mask)
-            | ((entry as u64) << layout.fingerprint_bits)
-            | (((crumb as u64) & crumb_mask) << (layout.fingerprint_bits + 16));
+            | (((entry as u64) & location_mask) << layout.fingerprint_bits)
+            | (((crumb as u64) & crumb_mask) << (layout.fingerprint_bits + layout.location_bits));
         let bit_offset = slot * entry_bits;
         let byte_offset = bit_offset / 8 + layout.metadata_bytes;
         let bit_remainder = bit_offset % 8;
@@ -207,8 +215,13 @@ impl PackedBucket {
         byte_index < layout.metadata_bytes && (self.bytes[byte_index] & (1 << bit_index)) != 0
     }
 
-    fn allocate_slot(&mut self, layout: &BucketLayout) -> Option<usize> {
-        for i in 0..layout.capacity {
+    fn first_free_in_range(
+        &mut self,
+        layout: &BucketLayout,
+        start: usize,
+        end: usize,
+    ) -> Option<usize> {
+        for i in start..end {
             if !self.metadata_is_set(layout, i) {
                 self.metadata_set(layout, i);
                 return Some(i);
@@ -217,12 +230,15 @@ impl PackedBucket {
         None
     }
 
-    pub(crate) fn find_entries(&self, layout: &BucketLayout, _mini: usize, tag: u8) -> Vec<u16> {
+    pub(crate) fn find_entries(&self, layout: &BucketLayout, mini: usize, tag: u16) -> Vec<u16> {
+        let slots_per_mini = layout.capacity / layout.mini_buckets;
+        let start = mini * slots_per_mini;
+        let end = start + slots_per_mini;
         let mut results = Vec::new();
-        for slot in 0..layout.capacity {
+        for slot in start..end {
             if self.metadata_is_set(layout, slot) {
                 let entry = self.entry(layout, slot);
-                if entry.tag as u8 == tag || layout.fingerprint_bits == 0 {
+                if entry.tag == tag || layout.fingerprint_bits == 0 {
                     results.push(entry.location);
                 }
             }
@@ -230,49 +246,56 @@ impl PackedBucket {
         results
     }
 
+    fn mini_range(&self, layout: &BucketLayout, mini: usize) -> (usize, usize) {
+        let slots_per_mini = layout.capacity / layout.mini_buckets;
+        let start = mini * slots_per_mini;
+        (start, start + slots_per_mini)
+    }
+
     pub(crate) fn insert_front(
         &mut self,
         layout: &BucketLayout,
-        _mini: usize,
-        tag: u8,
+        mini: usize,
+        tag: u16,
         entry: u16,
     ) -> bool {
-        match self.allocate_slot(layout) {
-            Some(slot) => {
-                self.set_entry(layout, slot, entry, tag.into(), 0);
-                true
-            }
-            None => false,
-        }
+        let (start, end) = self.mini_range(layout, mini);
+        self.first_free_in_range(layout, start, end)
+            .map(|slot| {
+                self.set_entry(layout, slot, entry, tag, 0);
+            })
+            .is_some()
     }
 
     pub(crate) fn insert_back(
         &mut self,
         layout: &BucketLayout,
-        _mini: usize,
-        tag: u8,
+        mini: usize,
+        tag: u16,
         entry: u16,
         crumb: u8,
     ) -> bool {
-        let Some(slot) = self.allocate_slot(layout) else {
-            return false;
-        };
-        self.set_entry(layout, slot, entry, tag.into(), crumb);
-        true
+        let (start, end) = self.mini_range(layout, mini);
+        self.first_free_in_range(layout, start, end)
+            .map(|slot| {
+                self.set_entry(layout, slot, entry, tag, crumb);
+            })
+            .is_some()
     }
 
     pub(crate) fn remove_front(
         &mut self,
         layout: &BucketLayout,
-        _mini: usize,
-        tag: u8,
+        mini: usize,
+        tag: u16,
         target_entry: u16,
     ) -> bool {
-        for slot in 0..layout.capacity {
+        let (start, end) = self.mini_range(layout, mini);
+        for slot in start..end {
             if self.metadata_is_set(layout, slot) {
                 let stored = self.entry(layout, slot);
                 if stored.location == target_entry
-                    && (stored.tag as u8 == tag || layout.fingerprint_bits == 0)
+                    && (stored.tag == tag || layout.fingerprint_bits == 0)
                 {
                     self.metadata_clear(layout, slot);
                     return true;
@@ -285,16 +308,17 @@ impl PackedBucket {
     pub(crate) fn remove_back(
         &mut self,
         layout: &BucketLayout,
-        _mini: usize,
-        tag: u8,
+        mini: usize,
+        tag: u16,
         crumb: u8,
         target_entry: u16,
     ) -> bool {
-        for slot in 0..layout.capacity {
+        let (start, end) = self.mini_range(layout, mini);
+        for slot in start..end {
             if self.metadata_is_set(layout, slot) {
                 let stored = self.entry(layout, slot);
                 if stored.location == target_entry
-                    && (stored.tag as u8 == tag
+                    && (stored.tag == tag
                         || (layout.fingerprint_bits == 0 && stored.region == crumb))
                 {
                     self.metadata_clear(layout, slot);
@@ -303,10 +327,6 @@ impl PackedBucket {
             }
         }
         false
-    }
-
-    pub(crate) fn should_promote(&self, layout: &BucketLayout) -> bool {
-        self.len(layout) < layout.capacity / 2
     }
 
     pub(crate) fn first_with_crumb(
@@ -325,9 +345,40 @@ impl PackedBucket {
         None
     }
 
+    pub(crate) fn mini_slots_free(&self, layout: &BucketLayout, mini: usize) -> usize {
+        let slots_per_mini = layout.capacity / layout.mini_buckets;
+        let start = mini * slots_per_mini;
+        (start..start + slots_per_mini)
+            .filter(|i| !self.metadata_is_set(layout, *i))
+            .count()
+    }
+
     pub(crate) fn remove_at(&mut self, layout: &BucketLayout, slot: usize) -> u16 {
         let entry = self.entry(layout, slot);
         self.metadata_clear(layout, slot);
         entry.location
+    }
+
+    pub(crate) fn replace_entry(
+        &mut self,
+        layout: &BucketLayout,
+        mini: usize,
+        tag: u16,
+        old_entry: u16,
+        new_entry: u16,
+    ) -> bool {
+        let (start, end) = self.mini_range(layout, mini);
+        for slot in start..end {
+            if self.metadata_is_set(layout, slot) {
+                let stored = self.entry(layout, slot);
+                if stored.location == old_entry
+                    && (stored.tag == tag || layout.fingerprint_bits == 0)
+                {
+                    self.set_entry(layout, slot, new_entry, tag, stored.region);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }

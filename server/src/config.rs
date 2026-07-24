@@ -302,6 +302,7 @@ pub struct IndexConfig {
     pub fingerprint_bits: usize,
     pub mini_buckets: usize,
     pub front_back_ratio: usize,
+    pub fingerprint_hash_offset_bits: usize,
 }
 
 impl Default for IndexConfig {
@@ -312,6 +313,7 @@ impl Default for IndexConfig {
             fingerprint_bits: 8,
             mini_buckets: 32,
             front_back_ratio: 8,
+            fingerprint_hash_offset_bits: 64,
         }
     }
 }
@@ -454,9 +456,14 @@ impl AppConfig {
         total_sg_count: usize,
         total_index_capacity: usize,
     ) -> Result<Self> {
+        if cpu_ids.is_empty() || !total_sg_count.is_multiple_of(cpu_ids.len()) {
+            return Err(KvError::InvalidConfig(
+                "trace benchmark total SG count must divide evenly across workers".into(),
+            ));
+        }
         let thread_count = cpu_ids.len();
-        let sg_per_thread = total_sg_count / thread_count.max(1);
-        let capacity_per_thread = total_index_capacity / thread_count.max(1);
+        let sg_per_thread = total_sg_count / thread_count;
+        let capacity_per_thread = total_index_capacity.div_ceil(thread_count);
         let config = Self {
             version: 1,
             runtime: RuntimeConfig {
@@ -468,8 +475,8 @@ impl AppConfig {
             timeouts: TimeoutConfig {
                 input_max_time_us: 10_000,
                 output_max_time_us: 1_000_000,
-                read_max_time_us: 1_000,
-                write_max_time_us: 100_000,
+                read_max_time_us: 100_000,
+                write_max_time_us: 1_000_000,
                 request_max_time_us: 2_000_000,
             },
             storage: StorageConfig {
@@ -486,6 +493,7 @@ impl AppConfig {
                 fingerprint_bits: 8,
                 mini_buckets: 32,
                 front_back_ratio: 8,
+                fingerprint_hash_offset_bits: 64,
             },
             durability: DurabilityConfig {
                 checkpoint_on_sg_flush: true,
@@ -517,7 +525,7 @@ impl AppConfig {
             checkpoint_on_sg_flush: self.durability.checkpoint_on_sg_flush,
             recovery_enabled: self.recovery.enabled,
             fallback_to_sg_scan: self.recovery.fallback_to_sg_scan,
-            fingerprint_hash_offset_bits: 64,
+            fingerprint_hash_offset_bits: self.index.fingerprint_hash_offset_bits,
             read_max_time_us: self.timeouts.read_max_time_us,
             write_max_time_us: self.timeouts.write_max_time_us,
         }

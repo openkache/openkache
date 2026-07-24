@@ -156,7 +156,9 @@ impl VirtualPageStack {
         }
 
         unsafe {
-            let guard_off = max_pages * info.size;
+            let guard_off = max_pages
+                .checked_mul(info.size)
+                .expect("guard page offset overflow");
             let guard_addr = base.as_ptr().add(guard_off);
             memory::protect_noaccess(guard_addr, info.size)
                 .map_err(VirtualPageStackError::GuardProtectFailed)?;

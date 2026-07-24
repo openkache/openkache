@@ -199,9 +199,15 @@ pub struct Handle<'a, T> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
+/// use openkache::allocators::compacting_slab_allocator::{Handle, HandleStorage, Slab};
+///
+/// let slab = Slab::new();
 /// let mut storage = HandleStorage::uninit();
 /// let handle_pin = slab.insert_into(42, &mut storage);
+/// assert_eq!(**handle_pin, 42);
+/// // SAFETY: Handle was initialized by insert_into; must be dropped before Slab.
+/// unsafe { std::ptr::drop_in_place(storage.as_mut_ptr().cast::<Handle<'_, i32>>()); }
 /// ```
 pub type HandleStorage<'a, T> = MaybeUninit<Handle<'a, T>>;
 
@@ -509,10 +515,15 @@ impl<T> Slab<T> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// use openkache::allocators::compacting_slab_allocator::{Handle, HandleStorage, Slab};
+    ///
+    /// let slab = Slab::new();
     /// let mut storage = HandleStorage::uninit();
     /// let handle_pin = slab.insert_into(42, &mut storage);
     /// assert_eq!(**handle_pin, 42);
+    /// // SAFETY: Handle was initialized by insert_into; must be dropped before Slab.
+    /// unsafe { std::ptr::drop_in_place(storage.as_mut_ptr().cast::<Handle<'_, i32>>()); }
     /// ```
     pub fn insert_into<'a, 'b>(
         &'a self,

@@ -134,6 +134,12 @@ impl Kvkache {
     }
 
     pub(crate) async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
+        if key.len() > u16::MAX as usize || value.len() > u32::MAX as usize {
+            return Err(KvError::RecordTooLarge {
+                bytes: RECORD_HEADER + key.len() + value.len(),
+                capacity: self.config.page_size - PAGE_HEADER,
+            });
+        }
         let record_len = RECORD_HEADER + key.len() + value.len();
         if record_len > self.config.page_size - PAGE_HEADER {
             return Err(KvError::RecordTooLarge {

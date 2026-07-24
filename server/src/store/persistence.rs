@@ -296,6 +296,16 @@ impl Kvkache {
         )
     }
 
+    #[allow(dead_code)]
+    // Used by the cross-prototype benchmark; the standalone CLI only reports
+    // cumulative counters and therefore does not reset them.
+    pub(crate) fn reset_io_stats(&self) {
+        self.io.data_written.set(0);
+        self.io.data_read.set(0);
+        self.io.index_written.set(0);
+        self.io.index_read.set(0);
+    }
+
     pub(super) fn io_stats(&self) -> KvkacheIoStats {
         KvkacheIoStats {
             data_written: self.io.data_written.get(),
