@@ -20,6 +20,13 @@ pub enum KvError {
     IndexFull,
     #[error("record requires {bytes} bytes but one empty page has {capacity} bytes")]
     RecordTooLarge { bytes: usize, capacity: usize },
+    #[error(
+        "blob item requires {required_bytes} bytes but the Segment has {remaining_bytes} bytes remaining"
+    )]
+    BlobSegmentFull {
+        required_bytes: u64,
+        remaining_bytes: u64,
+    },
     #[error("{0} timed out")]
     Timeout(&'static str),
     #[error("worker error: {0}")]

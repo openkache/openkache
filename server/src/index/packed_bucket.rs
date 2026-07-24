@@ -1,22 +1,49 @@
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
 
+/// Candidate location returned by the Table.
+///
+/// A Blob location uses the extra medium bit and has no Segment/Bucket
+/// coordinates.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct Location {
-    pub(crate) region: u8,
-    pub(crate) page_choice: u8,
+pub(crate) struct TableLocation {
+    pub(crate) is_blob: bool,
+    pub(crate) sg_index: u8,
+    pub(crate) bucket_hash_index: u8,
 }
 
-impl Location {
-    pub(crate) fn encode(self, region_bits: usize) -> u16 {
-        debug_assert!((self.region as usize) < (1usize << region_bits));
-        ((self.region as u16) << 1) | self.page_choice as u16
+impl TableLocation {
+    pub(crate) const fn blob() -> Self {
+        Self {
+            is_blob: true,
+            sg_index: 0,
+            bucket_hash_index: 0,
+        }
     }
 
-    pub(crate) fn decode(value: u16) -> Self {
+    pub(crate) const fn is_blob(self) -> bool {
+        self.is_blob
+    }
+
+    pub(crate) fn encode(self, sg_index_bits: usize) -> u16 {
+        let blob_bit = 1u16 << (sg_index_bits + 1);
+        if self.is_blob() {
+            return blob_bit;
+        }
+        debug_assert!((self.sg_index as usize) < (1usize << sg_index_bits));
+        debug_assert!(self.bucket_hash_index <= 1);
+        ((self.sg_index as u16) << 1) | self.bucket_hash_index as u16
+    }
+
+    pub(crate) fn decode(value: u16, sg_index_bits: usize) -> Self {
+        let blob_bit = 1u16 << (sg_index_bits + 1);
+        if value & blob_bit != 0 {
+            return Self::blob();
+        }
         Self {
-            region: (value >> 1) as u8,
-            page_choice: (value & 1) as u8,
+            is_blob: false,
+            sg_index: (value >> 1) as u8,
+            bucket_hash_index: (value & 1) as u8,
         }
     }
 }
@@ -49,9 +76,9 @@ impl BucketLayout {
         front_back_ratio: usize,
         is_back: bool,
         config_mini_buckets: usize,
-        region_bits: usize,
+        sg_index_bits: usize,
     ) -> Result<Self> {
-        let location_bits = region_bits + 1;
+        let location_bits = sg_index_bits + 2;
         let crumb_bits = if is_back {
             front_back_ratio.ilog2() as usize + 1
         } else {
