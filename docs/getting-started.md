@@ -16,13 +16,6 @@ cd openkache
 cargo build --release
 ```
 
-### Using Nix
-
-```bash
-nix develop  # enter dev shell
-cargo build --release
-```
-
 ## Quickstart
 
 ### Run the SSD-backed QUIC server
