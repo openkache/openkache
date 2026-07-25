@@ -58,9 +58,6 @@ One statically linked binary. No shared libraries, no runtime dependencies, no p
 ## 🚀 Quick start
 
 ```bash
-# Enter the dev shell (Nix)
-nix develop
-
 # Start the local SSD-backed QUIC server
 cargo run --manifest-path server/Cargo.toml --bin openkache-server
 ```

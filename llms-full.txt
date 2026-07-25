@@ -26,7 +26,7 @@ OpenKache uses SSD as primary storage instead of DRAM, reducing storage costs fr
 ```bash
 git clone https://github.com/openkache/openkache
 cd openkache
-nix develop   # or: cargo build --release
+cargo build --release
 ```
 
 ### Run benchmark
