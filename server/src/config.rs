@@ -192,12 +192,14 @@ pub struct RuntimeConfig {
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        let thread_count = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1);
+        let mut cpu_ids = allowed_cpu_ids()
+            .map(|allowed| allowed.into_iter().collect::<Vec<_>>())
+            .unwrap_or_else(|_| vec![0]);
+        cpu_ids.sort_unstable();
+        let thread_count = cpu_ids.len();
         Self {
             thread_count,
-            cpu_ids: (0..thread_count).collect(),
+            cpu_ids,
             event_interval: 31,
         }
     }

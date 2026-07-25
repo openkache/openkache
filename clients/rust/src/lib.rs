@@ -118,8 +118,6 @@ impl Client {
     }
 
     /// Requests a durability barrier.
-    ///
-    /// The initial in-memory smoke server acknowledges this as a no-op.
     pub async fn sync(&self) -> Result<()> {
         let response = self
             .request(Request::new(Opcode::Sync, Vec::new(), Vec::new())?)

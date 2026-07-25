@@ -88,7 +88,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | Memory allocators | Stable |
 | Breadcrumb filter (BCF53) | Stable |
 | QUIC client (Rust) | Stable |
-| QUIC server | In progress |
+| QUIC server | Preview — SSD-backed worker shards over multiplexed streams |
 | .NET client | Stable |
 | Clustering | Not started |
 

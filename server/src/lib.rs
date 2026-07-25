@@ -20,7 +20,7 @@ pub use error::{KvError, Result};
 mod config;
 pub use config::{
     AppConfig, Config, IoUringConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig,
-    bits_for_count, expand_thread_pattern,
+    allowed_cpu_ids, bits_for_count, expand_thread_pattern,
 };
 
 mod cli;
