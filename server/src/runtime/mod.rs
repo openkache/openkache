@@ -142,9 +142,48 @@ impl ThreadedKvkache {
             .map_err(|_| KvError::Timeout("request output"))?
     }
 
+    /// Sends one worker request using async channel operations and bounded timeouts.
+    async fn request_async(
+        &self,
+        worker: usize,
+        build: impl FnOnce(flume::Sender<Result<WorkerResponse>>) -> WorkerRequest,
+    ) -> Result<WorkerResponse> {
+        let (response_tx, response_rx) = flume::bounded(1);
+        let request_started = std::time::Instant::now();
+        compio::runtime::time::timeout(
+            Duration::from_micros(self.config.timeouts.input_max_time_us),
+            self.workers[worker].sender.send_async(build(response_tx)),
+        )
+        .await
+        .map_err(|_| KvError::Timeout("request input"))?
+        .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
+        let elapsed = request_started.elapsed();
+        let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
+        let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
+        let remaining = request_limit.saturating_sub(elapsed).min(output_limit);
+        compio::runtime::time::timeout(remaining, response_rx.recv_async())
+            .await
+            .map_err(|_| KvError::Timeout("request output"))?
+            .map_err(|_| KvError::Worker("response queue disconnected".into()))?
+    }
+
     pub fn get(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
         let worker = self.owner(&key);
         match self.request(worker, |response| WorkerRequest::Get { key, response })? {
+            WorkerResponse::Value(value) => Ok(value),
+            response => Err(KvError::Worker(format!(
+                "unexpected get response: {response:?}"
+            ))),
+        }
+    }
+
+    /// Retrieves a value without blocking the caller's async executor thread.
+    pub(crate) async fn get_async(&self, key: Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let worker = self.owner(&key);
+        match self
+            .request_async(worker, |response| WorkerRequest::Get { key, response })
+            .await?
+        {
             WorkerResponse::Value(value) => Ok(value),
             response => Err(KvError::Worker(format!(
                 "unexpected get response: {response:?}"
@@ -166,9 +205,41 @@ impl ThreadedKvkache {
         }
     }
 
+    /// Stores a value without blocking the caller's async executor thread.
+    pub(crate) async fn set_async(&self, key: Vec<u8>, value: Vec<u8>) -> Result<SetOutcome> {
+        let worker = self.owner(&key);
+        match self
+            .request_async(worker, |response| WorkerRequest::Set {
+                key,
+                value,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Set(outcome) => Ok(outcome),
+            response => Err(KvError::Worker(format!(
+                "unexpected set response: {response:?}"
+            ))),
+        }
+    }
+
     pub fn delete(&self, key: Vec<u8>) -> Result<bool> {
         let worker = self.owner(&key);
         match self.request(worker, |response| WorkerRequest::Delete { key, response })? {
+            WorkerResponse::Deleted(deleted) => Ok(deleted),
+            response => Err(KvError::Worker(format!(
+                "unexpected delete response: {response:?}"
+            ))),
+        }
+    }
+
+    /// Deletes a value without blocking the caller's async executor thread.
+    pub(crate) async fn delete_async(&self, key: Vec<u8>) -> Result<bool> {
+        let worker = self.owner(&key);
+        match self
+            .request_async(worker, |response| WorkerRequest::Delete { key, response })
+            .await?
+        {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
             response => Err(KvError::Worker(format!(
                 "unexpected delete response: {response:?}"
@@ -328,9 +399,48 @@ impl ThreadedKvkache {
             .collect()
     }
 
+    /// Collects worker statistics without blocking the caller's async executor thread.
+    pub(crate) async fn stats_async(&self) -> Result<Vec<String>> {
+        let mut stats = Vec::with_capacity(self.workers.len());
+        for thread_id in 0..self.workers.len() {
+            match self
+                .request_async(thread_id, |response| WorkerRequest::Stats { response })
+                .await?
+            {
+                WorkerResponse::Stats(worker_stats) => {
+                    stats.push(format!("thread={thread_id} {worker_stats}"));
+                }
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected stats response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(stats)
+    }
+
     pub fn sync(&self) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self.request(thread_id, |response| WorkerRequest::Sync { response })? {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes every worker without blocking the caller's async executor thread.
+    pub(crate) async fn sync_async(&self) -> Result<()> {
+        for thread_id in 0..self.workers.len() {
+            match self
+                .request_async(thread_id, |response| WorkerRequest::Sync { response })
+                .await?
+            {
                 WorkerResponse::Synced => {}
                 response => {
                     return Err(KvError::Worker(format!(

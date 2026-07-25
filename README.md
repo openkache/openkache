@@ -61,16 +61,17 @@ One statically linked binary. No shared libraries, no runtime dependencies, no p
 # Enter the dev shell (Nix)
 nix develop
 
-# Start the local in-memory QUIC server
+# Start the local SSD-backed QUIC server
 cargo run --manifest-path server/Cargo.toml --bin openkache-server
 ```
 
-The smoke server listens on `127.0.0.1:4433` and writes an ephemeral
+The server listens on `127.0.0.1:4433`, stores shard files under
+`target/kvkache-v1`, and writes an ephemeral
 self-signed certificate to
 `target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
 `SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/1` QUIC
-protocol. `SYNC` is currently an acknowledged no-op because this first server
-uses an in-memory HashMap.
+protocol. `SYNC` flushes each SSD worker before acknowledging the request.
+Pass `--config <path>` to load an explicit TOML cache configuration.
 
 ---
 
@@ -154,7 +155,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
 | QUIC client (Rust) | 🚧 Preview | Quinn + Noq backends, binary protocol v1 |
-| QUIC server | 🚧 Preview | Runnable HashMap smoke server over QUIC |
+| QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | .NET client | ✅ Stable | TCP-based, NuGet published |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
 
@@ -165,7 +166,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Milestone | Target | Focus |
 |---|---|---|
 | Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
-| Server protocol | 🚧 In progress | QUIC server, command dispatch, KV engine, SSD engine |
+| Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
 | E2E encryption | ⏳ Planned | Client-side encryption, zero-trust server architecture |
 | Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
@@ -184,7 +185,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | Path | Contents |
 |---|---|
 | `protocol/` | Shared binary request, response, opcode, and status definitions |
-| `server/` | Core cache server plus the runnable QUIC smoke server |
+| `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/dotnet/` | .NET / C# client SDK |
 

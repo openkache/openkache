@@ -25,6 +25,17 @@ cargo build --release
 
 ## Quickstart
 
+### Run the SSD-backed QUIC server
+
+```bash
+cargo run --manifest-path server/Cargo.toml --bin openkache-server
+```
+
+The server listens on `127.0.0.1:4433`, stores shard files under
+`target/kvkache-v1`, and writes its generated certificate to
+`target/openkache-local/certificate.local.der`. Use `--config <path>` to load
+an explicit TOML cache configuration.
+
 ### Run the BCF53 benchmark
 
 ```bash

@@ -17,7 +17,7 @@ An open-source, SSD-first cache server. It uses NVMe SSD as primary storage inst
 
 ### Is it production-ready?
 
-Core components (allocators, BCF53 filter, Rust/.NET SDKs) are stable. The server protocol layer is in progress.
+Core components are under active development. The QUIC server dispatches requests to the SSD-backed worker runtime; recovery and production hardening remain in progress.
 
 ## SSD
 
