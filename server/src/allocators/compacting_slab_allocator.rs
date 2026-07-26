@@ -17,7 +17,7 @@ use crate::allocators::virtual_page_stack::{VirtualPageStack, VirtualPageStackEr
 /// The header part of a Handle that is tracked by the Slab.
 ///
 /// This provides a stable memory location for the index that the Slab can
-/// update during compactions without needing to know the full layout of Handle<T>.
+/// update during compactions without needing to know the full layout of `Handle<T>`.
 #[repr(C)]
 pub struct HandleHeader<T> {
     pub index: Cell<usize>,
