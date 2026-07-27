@@ -5,20 +5,22 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use openkache_protocol::ClientKeyDigest;
+
 use crate::*;
 
 pub(super) enum WorkerRequest {
     Get {
-        key: Vec<u8>,
+        storage_key: StorageKey,
         response: flume::Sender<Result<WorkerResponse>>,
     },
     Set {
-        key: Vec<u8>,
+        storage_key: StorageKey,
         value: Vec<u8>,
         response: flume::Sender<Result<WorkerResponse>>,
     },
     Delete {
-        key: Vec<u8>,
+        storage_key: StorageKey,
         response: flume::Sender<Result<WorkerResponse>>,
     },
     Stats {
@@ -44,15 +46,17 @@ pub(super) enum WorkerResponse {
 
 #[derive(Debug)]
 pub enum BenchmarkOperation {
-    Get(Vec<u8>),
-    Set(Vec<u8>, Vec<u8>),
-    Delete(Vec<u8>),
+    Get(ClientKeyDigest),
+    Set(ClientKeyDigest, Vec<u8>),
+    Delete(ClientKeyDigest),
 }
 
 impl BenchmarkOperation {
-    pub(crate) fn key(&self) -> &[u8] {
+    pub(crate) fn client_key_digest(&self) -> ClientKeyDigest {
         match self {
-            Self::Get(key) | Self::Delete(key) | Self::Set(key, _) => key,
+            Self::Get(client_key_digest)
+            | Self::Delete(client_key_digest)
+            | Self::Set(client_key_digest, _) => *client_key_digest,
         }
     }
 }
@@ -143,29 +147,36 @@ async fn process_worker_batch(
 
     while let Some(request) = batch.pop_front() {
         match request {
-            WorkerRequest::Get { key, response } => {
-                let mut keys = vec![key];
+            WorkerRequest::Get {
+                storage_key,
+                response,
+            } => {
+                let mut storage_keys = vec![storage_key];
                 let mut responses = vec![response];
-                while keys.len() < max_inflight {
+                while storage_keys.len() < max_inflight {
                     let Some(WorkerRequest::Get { .. }) = batch.front() else {
                         break;
                     };
-                    let WorkerRequest::Get { key, response } = batch.pop_front().unwrap() else {
+                    let WorkerRequest::Get {
+                        storage_key,
+                        response,
+                    } = batch.pop_front().unwrap()
+                    else {
                         unreachable!()
                     };
-                    keys.push(key);
+                    storage_keys.push(storage_key);
                     responses.push(response);
                 }
-                let results = cache.get_many(keys).await;
+                let results = cache.get_many(storage_keys).await;
                 for (response, result) in responses.into_iter().zip(results) {
                     let _ = response.send(result.map(WorkerResponse::Value));
                 }
             }
             WorkerRequest::Set {
-                key,
+                storage_key,
                 value,
                 response,
-            } => match cache.set(&key, &value).await {
+            } => match cache.set(storage_key, &value).await {
                 Ok(outcome) => {
                     let _ = response.send(Ok(WorkerResponse::Set(outcome)));
                 }
@@ -173,7 +184,10 @@ async fn process_worker_batch(
                     let _ = response.send(Err(error));
                 }
             },
-            WorkerRequest::Delete { key, response } => match cache.delete(&key).await {
+            WorkerRequest::Delete {
+                storage_key,
+                response,
+            } => match cache.delete(&storage_key).await {
                 Ok(deleted) => {
                     let _ = response.send(Ok(WorkerResponse::Deleted(deleted)));
                 }

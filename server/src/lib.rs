@@ -1,5 +1,5 @@
 //! Crate root for the `openkache` server library. Declares all public modules and
-//! re-exports the public API types: [`Key`], [`Value`], [`HashedKey`], [`KvError`],
+//! re-exports the public API types: [`StorageKey`], [`Value`], [`KvError`],
 //! [`Result`], config types, [`Command`], and runtime items.
 
 #![cfg_attr(
@@ -12,7 +12,7 @@ pub mod breadcrumb_filter;
 pub mod server;
 pub mod types;
 
-pub use types::{HashedKey, Key, Value};
+pub use types::{StorageKey, Value};
 
 mod error;
 pub use error::{KvError, Result};

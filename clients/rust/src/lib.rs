@@ -4,7 +4,9 @@ mod transport;
 
 use std::net::SocketAddr;
 
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status};
+use openkache_protocol::{
+    ClientKeyDigest, MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status,
+};
 use rustls::pki_types::CertificateDer;
 
 /// All client-level errors.
@@ -63,7 +65,7 @@ impl Client {
     /// Verifies that the server is reachable and speaks protocol v1.
     pub async fn ping(&self) -> Result<()> {
         let response = self
-            .request(Request::new(Opcode::Ping, Vec::new(), Vec::new())?)
+            .request(Request::new(Opcode::Ping, None, Vec::new())?)
             .await?;
         expect_status("PING", response.status, &[Status::Ok])?;
         if response.payload != b"PONG" {
@@ -74,8 +76,13 @@ impl Client {
 
     /// Retrieves a value, returning `None` when the key does not exist.
     pub async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let client_key_digest = ClientKeyDigest::from_user_key(key);
         let response = self
-            .request(Request::new(Opcode::Get, key.to_vec(), Vec::new())?)
+            .request(Request::new(
+                Opcode::Get,
+                Some(client_key_digest),
+                Vec::new(),
+            )?)
             .await?;
         match response.status {
             Status::Ok => Ok(Some(response.payload)),
@@ -86,8 +93,13 @@ impl Client {
 
     /// Stores a value and reports whether it created or replaced the key.
     pub async fn set(&self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
+        let client_key_digest = ClientKeyDigest::from_user_key(key);
         let response = self
-            .request(Request::new(Opcode::Set, key.to_vec(), value.to_vec())?)
+            .request(Request::new(
+                Opcode::Set,
+                Some(client_key_digest),
+                value.to_vec(),
+            )?)
             .await?;
         match response.status {
             Status::Created => Ok(SetOutcome::Created),
@@ -98,8 +110,13 @@ impl Client {
 
     /// Deletes a key and returns whether it existed.
     pub async fn delete(&self, key: &[u8]) -> Result<bool> {
+        let client_key_digest = ClientKeyDigest::from_user_key(key);
         let response = self
-            .request(Request::new(Opcode::Delete, key.to_vec(), Vec::new())?)
+            .request(Request::new(
+                Opcode::Delete,
+                Some(client_key_digest),
+                Vec::new(),
+            )?)
             .await?;
         match response.status {
             Status::Deleted => Ok(true),
@@ -111,7 +128,7 @@ impl Client {
     /// Returns the server's JSON statistics payload.
     pub async fn stats(&self) -> Result<String> {
         let response = self
-            .request(Request::new(Opcode::Stats, Vec::new(), Vec::new())?)
+            .request(Request::new(Opcode::Stats, None, Vec::new())?)
             .await?;
         expect_status("STATS", response.status, &[Status::Ok])?;
         Ok(String::from_utf8(response.payload)?)
@@ -120,7 +137,7 @@ impl Client {
     /// Requests a durability barrier.
     pub async fn sync(&self) -> Result<()> {
         let response = self
-            .request(Request::new(Opcode::Sync, Vec::new(), Vec::new())?)
+            .request(Request::new(Opcode::Sync, None, Vec::new())?)
             .await?;
         expect_status("SYNC", response.status, &[Status::Ok])
     }

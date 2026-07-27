@@ -24,12 +24,14 @@ Protocol v1 uses the QUIC ALPN identifier `openkache/1`. Each bidirectional
 stream carries one request and one response.
 
 ```text
-request  = opcode:u8 | key_len:u32be | value_len:u32be | key | value
+request  = opcode:u8 | key_len:u32be | value_len:u32be | client_key_digest | value
 response = status:u8 | payload_len:u32be | payload
 ```
 
 Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
-Keys are limited to 65,535 bytes and values or response payloads to 16 MiB.
+Clients encode KV keys as the 32-byte SHA-256 digest of the exact user-key
+bytes. The server rejects every other key length. Values and response payloads
+are limited to 16 MiB.
 
 ## Core components
 

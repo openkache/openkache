@@ -271,21 +271,34 @@ async fn serve_stream(
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
 async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response {
-    let result =
-        match request.opcode {
-            Opcode::Ping => return response(Status::Ok, b"PONG".to_vec()),
-            Opcode::Get => cache.get_async(request.key).await.map(|value| match value {
+    let Request {
+        opcode,
+        client_key_digest,
+        value,
+    } = request;
+    let result = match opcode {
+        Opcode::Ping => return response(Status::Ok, b"PONG".to_vec()),
+        Opcode::Get => cache
+            .get_async(client_key_digest.expect("GET requests have a validated key digest"))
+            .await
+            .map(|value| match value {
                 Some(value) => response(Status::Ok, value),
                 None => response(Status::NotFound, Vec::new()),
             }),
-            Opcode::Set => cache
-                .set_async(request.key, request.value)
-                .await
-                .map(|outcome| match outcome {
-                    SetOutcome::Created => response(Status::Created, Vec::new()),
-                    SetOutcome::Replaced => response(Status::Replaced, Vec::new()),
-                }),
-            Opcode::Delete => cache.delete_async(request.key).await.map(|deleted| {
+        Opcode::Set => cache
+            .set_async(
+                client_key_digest.expect("SET requests have a validated key digest"),
+                value,
+            )
+            .await
+            .map(|outcome| match outcome {
+                SetOutcome::Created => response(Status::Created, Vec::new()),
+                SetOutcome::Replaced => response(Status::Replaced, Vec::new()),
+            }),
+        Opcode::Delete => cache
+            .delete_async(client_key_digest.expect("DELETE requests have a validated key digest"))
+            .await
+            .map(|deleted| {
                 response(
                     if deleted {
                         Status::Deleted
@@ -295,22 +308,22 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
                     Vec::new(),
                 )
             }),
-            Opcode::Stats => cache.stats_async().await.map(|workers| {
-                let workers = workers
-                    .into_iter()
-                    .map(|worker| format!("{worker:?}"))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                response(
-                    Status::Ok,
-                    format!(r#"{{"storage":"ssd","workers":[{workers}]}}"#).into_bytes(),
-                )
-            }),
-            Opcode::Sync => cache
-                .sync_async()
-                .await
-                .map(|()| response(Status::Ok, Vec::new())),
-        };
+        Opcode::Stats => cache.stats_async().await.map(|workers| {
+            let workers = workers
+                .into_iter()
+                .map(|worker| format!("{worker:?}"))
+                .collect::<Vec<_>>()
+                .join(",");
+            response(
+                Status::Ok,
+                format!(r#"{{"storage":"ssd","workers":[{workers}]}}"#).into_bytes(),
+            )
+        }),
+        Opcode::Sync => cache
+            .sync_async()
+            .await
+            .map(|()| response(Status::Ok, Vec::new())),
+    };
     result.unwrap_or_else(cache_error_response)
 }
 
@@ -331,7 +344,7 @@ fn cache_error_response(error: KvError) -> Response {
 fn protocol_error_response(error: ProtocolError) -> Response {
     let status = match error {
         ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        ProtocolError::KeyTooLarge { .. } | ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
         _ => Status::InvalidRequest,
     };
     response(status, error.to_string().into_bytes())

@@ -37,7 +37,7 @@ impl Kvkache {
             let bytes = self.read_bucket(sg_index, bucket_index).await?;
             result.extend(items(&bytes).into_iter().filter_map(|item| {
                 let bucket_hash_index = bucket_hash_index_for_bucket(
-                    &item.hashed_key,
+                    &item.storage_key,
                     bucket_index,
                     self.config.bucket_count(),
                 )?;
@@ -60,7 +60,7 @@ impl Kvkache {
             // Exact SSD Item liveness must be added before a colliding stale
             // Item can be distinguished from a live entry at the same
             // candidate location.
-            let _ = self.table.remove(&item.hashed_key, table_location);
+            let _ = self.table.remove(&item.storage_key, table_location);
         }
         self.occupied_segments[sg_index] = false;
         self.segment_reuses += 1;
@@ -69,13 +69,13 @@ impl Kvkache {
 }
 
 fn bucket_hash_index_for_bucket(
-    hashed_key: &[u8; 32],
+    storage_key: &StorageKey,
     bucket_index: usize,
     bucket_count: usize,
 ) -> Option<u8> {
-    if bucket_hash(hashed_key, 0, bucket_count) == bucket_index {
+    if bucket_hash(storage_key, 0, bucket_count) == bucket_index {
         Some(0)
-    } else if bucket_hash(hashed_key, 1, bucket_count) == bucket_index {
+    } else if bucket_hash(storage_key, 1, bucket_count) == bucket_index {
         Some(1)
     } else {
         None
