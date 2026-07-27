@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aes::{
     Aes256,
-    cipher::{BlockCipherEncrypt, KeyInit},
+    cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
@@ -28,17 +28,23 @@ pub(crate) fn derive_storage_key(
     server_cipher: &Aes256,
     client_key_digest: ClientKeyDigest,
 ) -> StorageKey {
-    let digest = client_key_digest.as_bytes();
-    let mut blocks = [
-        digest[..16].try_into().unwrap(),
-        digest[16..].try_into().unwrap(),
-    ];
-    server_cipher.encrypt_blocks(&mut blocks);
+    let mut bytes = client_key_digest.into_bytes();
 
-    let mut storage_key = client_key_digest.into_bytes();
-    storage_key[..16].copy_from_slice(&blocks[0]);
-    storage_key[16..].copy_from_slice(&blocks[1]);
-    StorageKey::new(storage_key)
+    // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks exactly cover
+    // the 32-byte digest buffer while preserving its alignment and exclusive borrow.
+    let blocks = unsafe { &mut *(bytes.as_mut_ptr() as *mut [Block<Aes256>; 2]) };
+
+    server_cipher.encrypt_blocks(blocks);
+
+    for index in 0..16 {
+        let first = blocks[0][index];
+        blocks[0][index] ^= blocks[1][(index + 1) % 16];
+        blocks[1][index] ^= first;
+    }
+
+    server_cipher.encrypt_blocks(blocks);
+
+    StorageKey::new(bytes)
 }
 
 pub struct ThreadedKvkache {
