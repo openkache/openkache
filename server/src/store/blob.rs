@@ -6,8 +6,8 @@
 use std::time::Duration;
 
 use compio::BufResult;
-use compio::fs::{File, OpenOptions};
-use compio::io::{AsyncReadAtExt, AsyncWriteAtExt};
+use compio::fs::File;
+use compio::io::{AsyncReadAt, AsyncWriteAt};
 
 use crate::types::STORAGE_KEY_BYTES;
 use crate::*;
@@ -19,6 +19,7 @@ pub(crate) const BLOB_STORAGE_KEY_BYTES: u64 = STORAGE_KEY_BYTES as u64;
 pub(crate) struct BlobRef {
     pub(crate) item_offset: u64,
     pub(crate) value_len: u64,
+    pub(crate) extent_len: u64,
 }
 
 pub(crate) struct BlobSegment {
@@ -35,13 +36,7 @@ impl BlobSegment {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)
-            .await?;
+        let file = open_direct_file(&path).await?;
         file.set_len(config.segment_size as u64).await?;
         Ok(Self {
             file,
@@ -59,34 +54,38 @@ impl BlobSegment {
     ) -> Result<BlobRef> {
         let value_len = u64::try_from(value.len())
             .map_err(|_| KvError::Usage("blob value length does not fit in u64".into()))?;
-        let encoded_len = BLOB_STORAGE_KEY_BYTES
+        let logical_len = BLOB_STORAGE_KEY_BYTES
             .checked_add(value_len)
             .ok_or_else(|| KvError::Usage("blob Item length overflow".into()))?;
+        let extent_len = logical_len
+            .checked_next_multiple_of(BUCKET_BYTES as u64)
+            .ok_or_else(|| KvError::Usage("blob Item extent length overflow".into()))?;
         let item_end = self
             .next_item_offset
-            .checked_add(encoded_len)
+            .checked_add(extent_len)
             .ok_or_else(|| KvError::Usage("blob Segment offset overflow".into()))?;
         if item_end > self.capacity_bytes {
             return Err(KvError::BlobSegmentFull {
-                required_bytes: encoded_len,
+                required_bytes: extent_len,
                 remaining_bytes: self.remaining_bytes(),
             });
         }
 
-        let mut bytes = Vec::with_capacity(encoded_len as usize);
-        bytes.extend_from_slice(storage_key.as_bytes());
-        bytes.extend_from_slice(value);
+        let mut bytes = DirectIoBuffer::zeroed(extent_len as usize);
+        bytes[..STORAGE_KEY_BYTES].copy_from_slice(storage_key.as_bytes());
+        bytes[STORAGE_KEY_BYTES..logical_len as usize].copy_from_slice(value);
         let item_offset = self.next_item_offset;
-        let write = self.file.write_all_at(bytes, item_offset);
+        let write = self.file.write_at(bytes, item_offset);
         let BufResult(result, _) =
             compio::runtime::time::timeout(Duration::from_micros(self.write_max_time_us), write)
                 .await
                 .map_err(|_| KvError::Timeout("Blob Segment write"))?;
-        result?;
+        require_complete_direct_io("Blob Segment write", result?, extent_len as usize)?;
         self.next_item_offset = item_end;
         Ok(BlobRef {
             item_offset,
             value_len,
+            extent_len,
         })
     }
 
@@ -96,22 +95,22 @@ impl BlobSegment {
         blob_ref: BlobRef,
     ) -> Result<Vec<u8>> {
         self.validate_ref(blob_ref)?;
-        let encoded_len = BLOB_STORAGE_KEY_BYTES + blob_ref.value_len;
-        let read = self.file.read_exact_at(
-            Vec::with_capacity(encoded_len as usize),
+        let read = self.file.read_at(
+            DirectIoBuffer::for_read(blob_ref.extent_len as usize),
             blob_ref.item_offset,
         );
         let BufResult(result, bytes) =
             compio::runtime::time::timeout(Duration::from_micros(self.read_max_time_us), read)
                 .await
                 .map_err(|_| KvError::Timeout("Blob Segment read"))?;
-        result?;
+        require_complete_direct_io("Blob Segment read", result?, blob_ref.extent_len as usize)?;
         if bytes[..STORAGE_KEY_BYTES] != storage_key.as_bytes()[..] {
             return Err(KvError::Worker(
                 "BlobRef points to an Item with a different StorageKey".into(),
             ));
         }
-        Ok(bytes[STORAGE_KEY_BYTES..].to_vec())
+        let value_end = STORAGE_KEY_BYTES + blob_ref.value_len as usize;
+        Ok(bytes[STORAGE_KEY_BYTES..value_end].to_vec())
     }
 
     pub(crate) async fn sync(&self) -> Result<()> {
@@ -134,10 +133,16 @@ impl BlobSegment {
     fn validate_ref(&self, blob_ref: BlobRef) -> Result<()> {
         let item_end = blob_ref
             .item_offset
-            .checked_add(BLOB_STORAGE_KEY_BYTES)
-            .and_then(|offset| offset.checked_add(blob_ref.value_len))
+            .checked_add(blob_ref.extent_len)
             .ok_or_else(|| KvError::Worker("BlobRef range overflow".into()))?;
-        if item_end > self.next_item_offset {
+        if !blob_ref.item_offset.is_multiple_of(BUCKET_BYTES as u64)
+            || blob_ref.extent_len == 0
+            || !blob_ref.extent_len.is_multiple_of(BUCKET_BYTES as u64)
+            || BLOB_STORAGE_KEY_BYTES
+                .checked_add(blob_ref.value_len)
+                .is_none_or(|logical_len| logical_len > blob_ref.extent_len)
+            || item_end > self.next_item_offset
+        {
             return Err(KvError::Worker(
                 "BlobRef points outside the written Blob Segment".into(),
             ));

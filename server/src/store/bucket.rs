@@ -26,7 +26,7 @@ impl Item {
 }
 
 pub(crate) struct MutableSegment {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: DirectIoBuffer,
     pub(crate) sg_index: usize,
     pub(crate) item_count: usize,
     pub(crate) accepted_item_bytes: u64,
@@ -41,7 +41,7 @@ pub(crate) enum MutableItemReplace {
 impl MutableSegment {
     pub(crate) fn new(config: &Config, sg_index: usize) -> Self {
         Self {
-            bytes: vec![0; config.segment_size],
+            bytes: DirectIoBuffer::zeroed(config.segment_size),
             sg_index,
             item_count: 0,
             accepted_item_bytes: 0,
