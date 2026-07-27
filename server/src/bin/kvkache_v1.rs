@@ -5,6 +5,7 @@
 use std::error::Error;
 
 use openkache::{AppConfig, Command, KvError, ThreadedKvkache};
+use openkache_protocol::ClientKeyDigest;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let (config, command) = match AppConfig::parse() {
@@ -18,15 +19,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut cache = ThreadedKvkache::start(config)?;
     let operation = (|| -> Result<(), Box<dyn Error>> {
         match command {
-            Command::Get(key) => match cache.get(key)? {
+            Command::Get(key) => match cache.get(ClientKeyDigest::from_user_key(&key))? {
                 Some(value) => println!("{}", String::from_utf8_lossy(&value)),
                 None => println!("(nil)"),
             },
-            Command::Set(key, value) => println!("{:?}", cache.set(key, value)?),
+            Command::Set(key, value) => println!(
+                "{:?}",
+                cache.set(ClientKeyDigest::from_user_key(&key), value)?
+            ),
             Command::Delete(key) => {
                 println!(
                     "{}",
-                    if cache.delete(key)? {
+                    if cache.delete(ClientKeyDigest::from_user_key(&key))? {
                         "Deleted"
                     } else {
                         "NotFound"

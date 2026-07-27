@@ -5,4 +5,5 @@ edition = "2024"
 description = "Wire protocol types and codecs for OpenKache"
 
 [dependencies]
+sha2 = "*"
 thiserror = "*"

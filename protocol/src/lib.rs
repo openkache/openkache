@@ -1,17 +1,20 @@
 //! Binary request and response framing shared by OpenKache clients and servers.
 
+use sha2::{Digest, Sha256};
+
 /// QUIC application protocol identifier for the first OpenKache wire format.
 pub const ALPN: &[u8] = b"openkache/1";
 /// Bytes in an encoded request header.
 pub const REQUEST_HEADER_BYTES: usize = 9;
 /// Bytes in an encoded response header.
 pub const RESPONSE_HEADER_BYTES: usize = 5;
-/// Maximum key size accepted by protocol v1.
-pub const MAX_KEY_BYTES: usize = u16::MAX as usize;
+/// Bytes in every client-computed SHA-256 key digest.
+pub const CLIENT_KEY_DIGEST_BYTES: usize = 32;
 /// Maximum value or response payload size accepted by the smoke server.
 pub const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum complete request frame size.
-pub const MAX_REQUEST_FRAME_BYTES: usize = REQUEST_HEADER_BYTES + MAX_KEY_BYTES + MAX_VALUE_BYTES;
+pub const MAX_REQUEST_FRAME_BYTES: usize =
+    REQUEST_HEADER_BYTES + CLIENT_KEY_DIGEST_BYTES + MAX_VALUE_BYTES;
 /// Maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_VALUE_BYTES;
 
@@ -88,32 +91,81 @@ impl TryFrom<u8> for Status {
     }
 }
 
+/// The fixed-size SHA-256 digest sent by clients instead of a user-provided key.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ClientKeyDigest([u8; CLIENT_KEY_DIGEST_BYTES]);
+
+impl ClientKeyDigest {
+    /// Hashes the exact user-key bytes into the protocol's canonical wire key.
+    pub fn from_user_key(user_key: &[u8]) -> Self {
+        Self(Sha256::digest(user_key).into())
+    }
+
+    /// Wraps an already-computed client key digest.
+    pub const fn new(bytes: [u8; CLIENT_KEY_DIGEST_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the complete digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; CLIENT_KEY_DIGEST_BYTES] {
+        &self.0
+    }
+
+    /// Consumes the digest and returns its bytes.
+    pub const fn into_bytes(self) -> [u8; CLIENT_KEY_DIGEST_BYTES] {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for ClientKeyDigest {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 /// A decoded OpenKache request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub opcode: Opcode,
-    pub key: Vec<u8>,
+    pub client_key_digest: Option<ClientKeyDigest>,
     pub value: Vec<u8>,
 }
 
 impl Request {
     /// Creates and validates a request.
-    pub fn new(opcode: Opcode, key: Vec<u8>, value: Vec<u8>) -> Result<Self> {
-        validate_lengths(key.len(), value.len())?;
-        validate_request_shape(opcode, key.len(), value.len())?;
-        Ok(Self { opcode, key, value })
+    pub fn new(
+        opcode: Opcode,
+        client_key_digest: Option<ClientKeyDigest>,
+        value: Vec<u8>,
+    ) -> Result<Self> {
+        validate_lengths(value.len())?;
+        validate_request_shape(opcode, client_key_digest.is_some(), value.len())?;
+        Ok(Self {
+            opcode,
+            client_key_digest,
+            value,
+        })
     }
 
     /// Encodes this request into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        validate_lengths(self.key.len(), self.value.len())?;
-        validate_request_shape(self.opcode, self.key.len(), self.value.len())?;
-        let mut frame =
-            Vec::with_capacity(REQUEST_HEADER_BYTES + self.key.len() + self.value.len());
+        validate_lengths(self.value.len())?;
+        validate_request_shape(
+            self.opcode,
+            self.client_key_digest.is_some(),
+            self.value.len(),
+        )?;
+        let key_len = self
+            .client_key_digest
+            .map_or(0, |_| CLIENT_KEY_DIGEST_BYTES);
+        let mut frame = Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + self.value.len());
         frame.push(self.opcode as u8);
-        frame.extend_from_slice(&(self.key.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&(key_len as u32).to_be_bytes());
         frame.extend_from_slice(&(self.value.len() as u32).to_be_bytes());
-        frame.extend_from_slice(&self.key);
+        if let Some(client_key_digest) = self.client_key_digest {
+            frame.extend_from_slice(client_key_digest.as_bytes());
+        }
         frame.extend_from_slice(&self.value);
         Ok(frame)
     }
@@ -129,7 +181,8 @@ impl Request {
         let opcode = Opcode::try_from(frame[0])?;
         let key_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
         let value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap()) as usize;
-        validate_lengths(key_len, value_len)?;
+        validate_lengths(value_len)?;
+        validate_wire_key_length(opcode, key_len)?;
         let expected = REQUEST_HEADER_BYTES
             .checked_add(key_len)
             .and_then(|size| size.checked_add(value_len))
@@ -140,11 +193,20 @@ impl Request {
                 actual: frame.len(),
             });
         }
-        validate_request_shape(opcode, key_len, value_len)?;
+        validate_request_shape(opcode, key_len != 0, value_len)?;
         let key_end = REQUEST_HEADER_BYTES + key_len;
+        let client_key_digest = if key_len == 0 {
+            None
+        } else {
+            Some(ClientKeyDigest::new(
+                frame[REQUEST_HEADER_BYTES..key_end]
+                    .try_into()
+                    .expect("validated client key digest length"),
+            ))
+        };
         Ok(Self {
             opcode,
-            key: frame[REQUEST_HEADER_BYTES..key_end].to_vec(),
+            client_key_digest,
             value: frame[key_end..].to_vec(),
         })
     }
@@ -229,8 +291,12 @@ pub enum ProtocolError {
     FrameLength { expected: usize, actual: usize },
     #[error("frame length overflow")]
     FrameLengthOverflow,
-    #[error("key is too large: {size} bytes exceeds {maximum}")]
-    KeyTooLarge { size: usize, maximum: usize },
+    #[error("{opcode:?} requires a {expected}-byte client key digest, received {actual} key bytes")]
+    InvalidClientKeyLength {
+        opcode: Opcode,
+        expected: usize,
+        actual: usize,
+    },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
     #[error("{opcode:?} requires key_len={expected_key} and value_len={expected_value}")]
@@ -244,13 +310,7 @@ pub enum ProtocolError {
 /// Convenience result type for protocol operations.
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
-fn validate_lengths(key_len: usize, value_len: usize) -> Result<()> {
-    if key_len > MAX_KEY_BYTES {
-        return Err(ProtocolError::KeyTooLarge {
-            size: key_len,
-            maximum: MAX_KEY_BYTES,
-        });
-    }
+fn validate_lengths(value_len: usize) -> Result<()> {
     if value_len > MAX_VALUE_BYTES {
         return Err(ProtocolError::ValueTooLarge {
             size: value_len,
@@ -260,19 +320,35 @@ fn validate_lengths(key_len: usize, value_len: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate_request_shape(opcode: Opcode, key_len: usize, value_len: usize) -> Result<()> {
+fn validate_wire_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
+    let expected = match opcode {
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => 0,
+        Opcode::Get | Opcode::Set | Opcode::Delete => CLIENT_KEY_DIGEST_BYTES,
+    };
+    if key_len == expected {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidClientKeyLength {
+            opcode,
+            expected,
+            actual: key_len,
+        })
+    }
+}
+
+fn validate_request_shape(opcode: Opcode, has_client_key: bool, value_len: usize) -> Result<()> {
     let valid = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => key_len == 0 && value_len == 0,
-        Opcode::Get | Opcode::Delete => value_len == 0,
-        Opcode::Set => true,
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_client_key && value_len == 0,
+        Opcode::Get | Opcode::Delete => has_client_key && value_len == 0,
+        Opcode::Set => has_client_key,
     };
     if valid {
         return Ok(());
     }
     let (expected_key, expected_value) = match opcode {
         Opcode::Ping | Opcode::Stats | Opcode::Sync => ("0", "0"),
-        Opcode::Get | Opcode::Delete => ("any", "0"),
-        Opcode::Set => ("any", "any"),
+        Opcode::Get | Opcode::Delete => ("32", "0"),
+        Opcode::Set => ("32", "any"),
     };
     Err(ProtocolError::InvalidRequestShape {
         opcode,

@@ -3,7 +3,7 @@
 //! It follows the [SALT Systems Lab reference implementation][reference]
 //! (BSD-3-Clause, Copyright 2026 SALT Systems Lab).
 //!
-//! The public API consumes an already-computed [`HashedKey`] and turns its
+//! The public API consumes an already-computed [`StorageKey`] and turns its
 //! first 64 bits directly into the `(front bucket, mini bucket, remainder)`
 //! fingerprint used by the paper. It never hashes a key a second time.
 //! Enabling the `force-scalar` Cargo feature disables architecture-specific
@@ -14,7 +14,7 @@
 use std::fmt;
 use std::mem::size_of;
 
-use crate::HashedKey;
+use crate::StorageKey;
 
 #[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
 use std::arch::x86_64::*;
@@ -444,22 +444,22 @@ impl BreadcrumbFilter {
     ///
     /// Rebuild the filter with a larger capacity if both backyard candidates
     /// are full and this method returns [`InsertError`].
-    pub fn insert(&mut self, hashed_key: &HashedKey) -> Result<(), InsertError> {
-        self.insert_fingerprint(self.fingerprint(hashed_key))
+    pub fn insert(&mut self, storage_key: &StorageKey) -> Result<(), InsertError> {
+        self.insert_fingerprint(self.fingerprint(storage_key))
     }
 
     /// Returns `true` when the hashed key may be present and `false` when absent.
     ///
     /// A `true` result is probabilistic and can be a false positive.
-    pub fn contains(&self, hashed_key: &HashedKey) -> bool {
-        self.contains_fingerprint(self.fingerprint(hashed_key))
+    pub fn contains(&self, storage_key: &StorageKey) -> bool {
+        self.contains_fingerprint(self.fingerprint(storage_key))
     }
 
     /// Deletion is safe for keys known to have been inserted. As with other
     /// fingerprint filters, deleting an arbitrary false positive can remove a
     /// colliding fingerprint.
-    pub fn remove(&mut self, hashed_key: &HashedKey) -> bool {
-        let fingerprint = self.fingerprint(hashed_key);
+    pub fn remove(&mut self, storage_key: &StorageKey) -> bool {
+        let fingerprint = self.fingerprint(storage_key);
         let was_full = self.front[fingerprint.front].is_full();
         if self.front[fingerprint.front].remove(
             fingerprint.mini,
@@ -601,10 +601,10 @@ impl BreadcrumbFilter {
     }
 
     /// Maps the first 64 hash bits directly into a BCF53 fingerprint.
-    fn fingerprint(&self, hashed_key: &HashedKey) -> Fingerprint {
+    fn fingerprint(&self, storage_key: &StorageKey) -> Fingerprint {
         let quotient_count = self.front.len() * MINI_BUCKETS;
         let fingerprint_space = quotient_count as u64 * 256;
-        let bytes = hashed_key.as_bytes();
+        let bytes = storage_key.as_bytes();
         let hash_prefix = u64::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);

@@ -1,12 +1,13 @@
-//! Two-tier lookup Table mapping hashed keys to candidate storage locations.
+//! Two-tier lookup Table mapping storage keys to candidate storage locations.
 //!
 //! The quotient selects a Subtable and unary position. Entries store only the
 //! fingerprint and candidate Segment/Bucket-hash location; storage verifies the
-//! complete hashed key.
+//! complete storage key.
 
 use std::collections::HashSet;
 
 use crate::SUBTABLE_BYTES;
+use crate::StorageKey;
 use crate::config::Config;
 use crate::error::{KvError, Result};
 
@@ -72,8 +73,8 @@ impl Table {
         })
     }
 
-    pub(crate) fn candidate_locations(&self, hashed_key: &[u8; 32]) -> Vec<TableLocation> {
-        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(hashed_key);
+    pub(crate) fn candidate_locations(&self, storage_key: &StorageKey) -> Vec<TableLocation> {
+        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
         let front_subtable = &self.front_table[front_subtable_index];
         let mut encoded = front_subtable
             .matching_entry_slots(&self.front_subtable_layout, unary_index, fingerprint, None)
@@ -115,7 +116,7 @@ impl Table {
 
     pub(crate) fn insert(
         &mut self,
-        hashed_key: &[u8; 32],
+        storage_key: &StorageKey,
         table_location: TableLocation,
     ) -> Result<()> {
         if !table_location.is_valid(self.sg_index_bits) {
@@ -123,7 +124,7 @@ impl Table {
                 "Table Location does not fit configured Segment/Bucket-hash fields".into(),
             ));
         }
-        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(hashed_key);
+        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
         let entry = SubtableEntry {
             unary_index,
             fingerprint,
@@ -154,11 +155,15 @@ impl Table {
         Ok(())
     }
 
-    pub(crate) fn remove(&mut self, hashed_key: &[u8; 32], table_location: TableLocation) -> bool {
+    pub(crate) fn remove(
+        &mut self,
+        storage_key: &StorageKey,
+        table_location: TableLocation,
+    ) -> bool {
         if !table_location.is_valid(self.sg_index_bits) {
             return false;
         }
-        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(hashed_key);
+        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
         let encoded = table_location.encode(self.sg_index_bits);
         let was_full = self.front_table[front_subtable_index]
             .entry_count(&self.front_subtable_layout)
@@ -216,7 +221,7 @@ impl Table {
 
     pub(crate) fn replace_location(
         &mut self,
-        hashed_key: &[u8; 32],
+        storage_key: &StorageKey,
         previous: TableLocation,
         replacement: TableLocation,
     ) -> bool {
@@ -226,7 +231,7 @@ impl Table {
         if previous == replacement {
             return true;
         }
-        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(hashed_key);
+        let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
         let old = previous.encode(self.sg_index_bits);
         let new = replacement.encode(self.sg_index_bits);
         let front_entry_slots = self.front_table[front_subtable_index].matching_entry_slots(
@@ -320,8 +325,9 @@ impl Table {
         (self.front_table.len() + self.back_table.len()) * SUBTABLE_BYTES
     }
 
-    fn table_coordinates(&self, hashed_key: &[u8; 32]) -> (usize, usize, u16) {
-        let prefix = u128::from_le_bytes(hashed_key[..16].try_into().unwrap())
+    fn table_coordinates(&self, storage_key: &StorageKey) -> (usize, usize, u16) {
+        let storage_key = storage_key.as_bytes();
+        let prefix = u128::from_le_bytes(storage_key[..16].try_into().unwrap())
             >> self.fingerprint_hash_offset_bits;
         let prefix = prefix as u64;
         let quotient_count = self.front_table.len() * self.front_subtable_layout.unary_count;

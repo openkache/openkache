@@ -1,21 +1,21 @@
 //! Fixed 4 KiB Buckets and the active in-memory Segment.
 //!
 //! A Bucket begins with a one-byte Item count. Packed 20-bit Item Offsets
-//! follow immediately: the first hashed-key byte is stored in 8 bits and the
+//! follow immediately: the first storage-key byte is stored in 8 bits and the
 //! Item byte offset in 12 bits. Item bodies grow backward from the end and
-//! contain the remaining 31 hashed-key bytes followed by the value.
+//! contain the remaining 31 storage-key bytes followed by the value.
 
-use crate::types::HASHED_KEY_BYTES;
+use crate::types::STORAGE_KEY_BYTES;
 use crate::*;
 
 pub(crate) const ITEM_OFFSET_BITS: usize = 20;
 pub(crate) const ITEM_KEY_PREFIX_BITS: usize = 8;
 pub(crate) const ITEM_BYTE_OFFSET_BITS: usize = 12;
-pub(crate) const ITEM_FIXED_BYTES: usize = HASHED_KEY_BYTES - 1;
+pub(crate) const ITEM_FIXED_BYTES: usize = STORAGE_KEY_BYTES - 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Item {
-    pub(crate) hashed_key: [u8; HASHED_KEY_BYTES],
+    pub(crate) storage_key: StorageKey,
     pub(crate) value: Vec<u8>,
 }
 
@@ -60,12 +60,12 @@ impl MutableSegment {
 
     pub(crate) fn choose_bucket(
         &self,
-        hashed_key: &[u8; HASHED_KEY_BYTES],
+        storage_key: &StorageKey,
         encoded_len: usize,
     ) -> Option<(usize, u8)> {
         let bucket_count = self.bytes.len() / BUCKET_BYTES;
-        let first = bucket_hash(hashed_key, 0, bucket_count);
-        let second = bucket_hash(hashed_key, 1, bucket_count);
+        let first = bucket_hash(storage_key, 0, bucket_count);
+        let second = bucket_hash(storage_key, 1, bucket_count);
         let first_used = bucket_used_bytes(self.bucket(first));
         let second_used = bucket_used_bytes(self.bucket(second));
         let first_fits = bucket_can_fit(self.bucket(first), encoded_len);
@@ -81,13 +81,13 @@ impl MutableSegment {
 
     pub(crate) fn append(&mut self, item: Item, count_accepted: bool) -> Option<TableLocation> {
         let (bucket_index, bucket_hash_index) =
-            self.choose_bucket(&item.hashed_key, item.encoded_len())?;
+            self.choose_bucket(&item.storage_key, item.encoded_len())?;
         if !append_item_to_bucket(self.bucket_mut(bucket_index), &item) {
             return None;
         }
         self.item_count += 1;
         if count_accepted {
-            self.accepted_item_bytes += (HASHED_KEY_BYTES + item.value.len()) as u64;
+            self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
         }
         Some(TableLocation {
             is_blob: false,
@@ -98,13 +98,13 @@ impl MutableSegment {
 
     pub(crate) fn replace(
         &mut self,
-        hashed_key: &[u8; HASHED_KEY_BYTES],
+        storage_key: &StorageKey,
         item: Item,
         count_accepted: bool,
     ) -> MutableItemReplace {
         let bucket_count = self.bytes.len() / BUCKET_BYTES;
-        let first = bucket_hash(hashed_key, 0, bucket_count);
-        let second = bucket_hash(hashed_key, 1, bucket_count);
+        let first = bucket_hash(storage_key, 0, bucket_count);
+        let second = bucket_hash(storage_key, 1, bucket_count);
         let mut candidate_buckets = vec![first];
         if second != first {
             candidate_buckets.push(second);
@@ -112,7 +112,7 @@ impl MutableSegment {
         let matches = candidate_buckets
             .iter()
             .flat_map(|&bucket_index| {
-                matching_item_spans(self.bucket(bucket_index), hashed_key)
+                matching_item_spans(self.bucket(bucket_index), storage_key)
                     .into_iter()
                     .map(move |span| (bucket_index, span))
             })
@@ -126,7 +126,7 @@ impl MutableSegment {
             if replace_bucket_item(&mut replacement, span, &item) {
                 self.bucket_mut(bucket_index).copy_from_slice(&replacement);
                 if count_accepted {
-                    self.accepted_item_bytes += (HASHED_KEY_BYTES + item.value.len()) as u64;
+                    self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
                 }
                 return MutableItemReplace::Replaced(TableLocation {
                     is_blob: false,
@@ -144,7 +144,7 @@ impl MutableSegment {
         let saved_accepted_item_bytes = self.accepted_item_bytes;
         let removed = candidate_buckets
             .iter()
-            .map(|&bucket_index| remove_key_from_bucket(self.bucket_mut(bucket_index), hashed_key))
+            .map(|&bucket_index| remove_key_from_bucket(self.bucket_mut(bucket_index), storage_key))
             .sum::<usize>();
         self.item_count -= removed;
 
@@ -159,31 +159,27 @@ impl MutableSegment {
         MutableItemReplace::NoSpace
     }
 
-    pub(crate) fn remove(&mut self, hashed_key: &[u8; HASHED_KEY_BYTES]) -> bool {
+    pub(crate) fn remove(&mut self, storage_key: &StorageKey) -> bool {
         let bucket_count = self.bytes.len() / BUCKET_BYTES;
-        let first = bucket_hash(hashed_key, 0, bucket_count);
-        let second = bucket_hash(hashed_key, 1, bucket_count);
-        let removed = remove_key_from_bucket(self.bucket_mut(first), hashed_key)
+        let first = bucket_hash(storage_key, 0, bucket_count);
+        let second = bucket_hash(storage_key, 1, bucket_count);
+        let removed = remove_key_from_bucket(self.bucket_mut(first), storage_key)
             + if second == first {
                 0
             } else {
-                remove_key_from_bucket(self.bucket_mut(second), hashed_key)
+                remove_key_from_bucket(self.bucket_mut(second), storage_key)
             };
         self.item_count -= removed;
         removed > 0
     }
 
-    pub(crate) fn find(
-        &self,
-        hashed_key: &[u8; HASHED_KEY_BYTES],
-        bucket_hash_index: u8,
-    ) -> Option<Item> {
+    pub(crate) fn find(&self, storage_key: &StorageKey, bucket_hash_index: u8) -> Option<Item> {
         let bucket_index = bucket_hash(
-            hashed_key,
+            storage_key,
             bucket_hash_index,
             self.bytes.len() / BUCKET_BYTES,
         );
-        find_item_in_bucket(self.bucket(bucket_index), hashed_key)
+        find_item_in_bucket(self.bucket(bucket_index), storage_key)
     }
 }
 
@@ -303,11 +299,11 @@ fn item_span(bucket: &[u8], item_slot: usize) -> Option<ItemSpan> {
 fn item_at(bucket: &[u8], item_slot: usize) -> Option<Item> {
     let entry = item_offset(bucket, item_slot)?;
     let span = item_span(bucket, item_slot)?;
-    let mut hashed_key = [0u8; HASHED_KEY_BYTES];
-    hashed_key[0] = entry.key_prefix;
-    hashed_key[1..].copy_from_slice(&bucket[span.start..span.start + ITEM_FIXED_BYTES]);
+    let mut storage_key_bytes = [0u8; STORAGE_KEY_BYTES];
+    storage_key_bytes[0] = entry.key_prefix;
+    storage_key_bytes[1..].copy_from_slice(&bucket[span.start..span.start + ITEM_FIXED_BYTES]);
     Some(Item {
-        hashed_key,
+        storage_key: StorageKey::new(storage_key_bytes),
         value: bucket[span.start + ITEM_FIXED_BYTES..span.end].to_vec(),
     })
 }
@@ -319,13 +315,13 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
     let count = bucket_item_count(bucket);
     let end = items_start(bucket, count);
     let start = end - item.encoded_len();
-    bucket[start..start + ITEM_FIXED_BYTES].copy_from_slice(&item.hashed_key[1..]);
+    bucket[start..start + ITEM_FIXED_BYTES].copy_from_slice(&item.storage_key.as_bytes()[1..]);
     bucket[start + ITEM_FIXED_BYTES..end].copy_from_slice(&item.value);
     write_item_offset(
         bucket,
         count,
         ItemOffset {
-            key_prefix: item.hashed_key[0],
+            key_prefix: item.storage_key.as_bytes()[0],
             item_byte_offset: start,
         },
     );
@@ -333,18 +329,16 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
     true
 }
 
-pub(crate) fn matching_item_spans(
-    bucket: &[u8],
-    hashed_key: &[u8; HASHED_KEY_BYTES],
-) -> Vec<ItemSpan> {
+pub(crate) fn matching_item_spans(bucket: &[u8], storage_key: &StorageKey) -> Vec<ItemSpan> {
+    let storage_key = storage_key.as_bytes();
     (0..bucket_item_count(bucket))
         .filter_map(|slot| {
             let entry = item_offset(bucket, slot)?;
-            if entry.key_prefix != hashed_key[0] {
+            if entry.key_prefix != storage_key[0] {
                 return None;
             }
             let span = item_span(bucket, slot)?;
-            (bucket[span.start..span.start + ITEM_FIXED_BYTES] == hashed_key[1..]).then_some(span)
+            (bucket[span.start..span.start + ITEM_FIXED_BYTES] == storage_key[1..]).then_some(span)
         })
         .collect()
 }
@@ -368,13 +362,10 @@ pub(crate) fn replace_bucket_item(bucket: &mut [u8], span: ItemSpan, item: &Item
     true
 }
 
-pub(crate) fn remove_key_from_bucket(
-    bucket: &mut [u8],
-    hashed_key: &[u8; HASHED_KEY_BYTES],
-) -> usize {
+pub(crate) fn remove_key_from_bucket(bucket: &mut [u8], storage_key: &StorageKey) -> usize {
     let mut decoded = items(bucket);
     let old_len = decoded.len();
-    decoded.retain(|item| item.hashed_key != *hashed_key);
+    decoded.retain(|item| item.storage_key != *storage_key);
     let removed = old_len - decoded.len();
     if removed > 0 {
         let rebuilt = rebuild_bucket(bucket, &decoded);
@@ -392,19 +383,17 @@ pub(crate) fn items(bucket: &[u8]) -> Vec<Item> {
         .collect()
 }
 
-pub(crate) fn find_item_in_bucket(
-    bucket: &[u8],
-    hashed_key: &[u8; HASHED_KEY_BYTES],
-) -> Option<Item> {
-    let slot = matching_item_spans(bucket, hashed_key).last()?.item_slot;
+pub(crate) fn find_item_in_bucket(bucket: &[u8], storage_key: &StorageKey) -> Option<Item> {
+    let slot = matching_item_spans(bucket, storage_key).last()?.item_slot;
     item_at(bucket, slot)
 }
 
 pub(crate) fn bucket_hash(
-    hashed_key: &[u8; HASHED_KEY_BYTES],
+    storage_key: &StorageKey,
     bucket_hash_index: u8,
     bucket_count: usize,
 ) -> usize {
     let start = if bucket_hash_index == 0 { 16 } else { 24 };
-    u64::from_le_bytes(hashed_key[start..start + 8].try_into().unwrap()) as usize % bucket_count
+    let storage_key = storage_key.as_bytes();
+    u64::from_le_bytes(storage_key[start..start + 8].try_into().unwrap()) as usize % bucket_count
 }

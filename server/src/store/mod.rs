@@ -14,7 +14,6 @@ use compio::fs::{File, OpenOptions};
 use compio::io::AsyncWriteAtExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
-use crate::types::HASHED_KEY_BYTES;
 use crate::*;
 
 mod blob;
@@ -52,7 +51,7 @@ pub(crate) struct Kvkache {
     data: File,
     pub(crate) table: Table,
     pub(crate) blob_segment: BlobSegment,
-    pub(crate) blob_refs: HashMap<[u8; HASHED_KEY_BYTES], BlobRef>,
+    pub(crate) blob_refs: HashMap<StorageKey, BlobRef>,
     pub(crate) active: Option<MutableSegment>,
     pub(crate) occupied_segments: Vec<bool>,
     next_segment_index: usize,
@@ -92,19 +91,21 @@ impl Kvkache {
         })
     }
 
-    pub(crate) async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let hashed_key = Key::from(key).hashed_key().into_bytes();
+    pub(crate) async fn get(&self, storage_key: &StorageKey) -> Result<Option<Vec<u8>>> {
         Ok(self
-            .locate(&hashed_key)
+            .locate(storage_key)
             .await?
             .map(|located| located.item.value))
     }
 
-    pub(crate) async fn get_many(&self, keys: Vec<Vec<u8>>) -> Vec<Result<Option<Vec<u8>>>> {
-        let count = keys.len();
+    pub(crate) async fn get_many(
+        &self,
+        storage_keys: Vec<StorageKey>,
+    ) -> Vec<Result<Option<Vec<u8>>>> {
+        let count = storage_keys.len();
         let mut pending = FuturesUnordered::new();
-        for (index, key) in keys.into_iter().enumerate() {
-            pending.push(async move { (index, self.get(&key).await) });
+        for (index, storage_key) in storage_keys.into_iter().enumerate() {
+            pending.push(async move { (index, self.get(&storage_key).await) });
         }
         let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
         while let Some((index, result)) = pending.next().await {
@@ -116,17 +117,20 @@ impl Kvkache {
             .collect()
     }
 
-    pub(crate) async fn set(&mut self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
-        let hashed_key = Key::from(key).hashed_key().into_bytes();
-        if is_blob_item(key, value) {
-            return self.set_blob(hashed_key, value).await;
+    pub(crate) async fn set(
+        &mut self,
+        storage_key: StorageKey,
+        value: &[u8],
+    ) -> Result<SetOutcome> {
+        if is_blob_item(value) {
+            return self.set_blob(storage_key, value).await;
         }
-        self.set_bucket_item(hashed_key, value).await
+        self.set_bucket_item(storage_key, value).await
     }
 
     async fn set_bucket_item(
         &mut self,
-        hashed_key: [u8; HASHED_KEY_BYTES],
+        storage_key: StorageKey,
         value: &[u8],
     ) -> Result<SetOutcome> {
         let item_bytes = item_offsets_bytes(1) + ITEM_FIXED_BYTES + value.len();
@@ -137,15 +141,15 @@ impl Kvkache {
                 capacity,
             });
         }
-        let previous = self.locate(&hashed_key).await?;
+        let previous = self.locate(&storage_key).await?;
         let item = Item {
-            hashed_key,
+            storage_key,
             value: value.to_vec(),
         };
         let replacement = self
             .active
             .as_mut()
-            .map(|active| active.replace(&hashed_key, item.clone(), true));
+            .map(|active| active.replace(&storage_key, item.clone(), true));
         let table_location = match replacement {
             Some(MutableItemReplace::Replaced(table_location)) => table_location,
             Some(MutableItemReplace::NotFound | MutableItemReplace::NoSpace) | None => {
@@ -155,20 +159,20 @@ impl Kvkache {
         if let Some(previous) = &previous {
             if !self
                 .table
-                .replace_location(&hashed_key, previous.table_location, table_location)
+                .replace_location(&storage_key, previous.table_location, table_location)
             {
                 return Err(KvError::Worker(
                     "updated key is missing from the Table".into(),
                 ));
             }
         } else {
-            self.table.insert(&hashed_key, table_location)?;
+            self.table.insert(&storage_key, table_location)?;
         }
         if previous
             .as_ref()
             .is_some_and(|previous| previous.table_location.is_blob())
         {
-            self.blob_refs.remove(&hashed_key);
+            self.blob_refs.remove(&storage_key);
         }
         Ok(if previous.is_some() {
             SetOutcome::Replaced
@@ -177,39 +181,35 @@ impl Kvkache {
         })
     }
 
-    async fn set_blob(
-        &mut self,
-        hashed_key: [u8; HASHED_KEY_BYTES],
-        value: &[u8],
-    ) -> Result<SetOutcome> {
-        let previous = self.locate(&hashed_key).await?;
-        let blob_ref = self.blob_segment.append(&hashed_key, value).await?;
+    async fn set_blob(&mut self, storage_key: StorageKey, value: &[u8]) -> Result<SetOutcome> {
+        let previous = self.locate(&storage_key).await?;
+        let blob_ref = self.blob_segment.append(&storage_key, value).await?;
         self.io
             .data_written
-            .set(self.io.data_written.get() + BLOB_HASHED_KEY_BYTES + blob_ref.value_len);
+            .set(self.io.data_written.get() + BLOB_STORAGE_KEY_BYTES + blob_ref.value_len);
 
         let table_location = TableLocation::blob();
         if let Some(previous) = &previous {
             if !self
                 .table
-                .replace_location(&hashed_key, previous.table_location, table_location)
+                .replace_location(&storage_key, previous.table_location, table_location)
             {
                 return Err(KvError::Worker(
                     "updated key is missing from the Table".into(),
                 ));
             }
         } else {
-            self.table.insert(&hashed_key, table_location)?;
+            self.table.insert(&storage_key, table_location)?;
         }
         if let Some(previous) = &previous
             && !previous.table_location.is_blob()
             && let Some(active) = self.active.as_mut()
             && active.sg_index == previous.table_location.sg_index as usize
         {
-            let removed = active.remove(&hashed_key);
+            let removed = active.remove(&storage_key);
             debug_assert!(removed);
         }
-        self.blob_refs.insert(hashed_key, blob_ref);
+        self.blob_refs.insert(storage_key, blob_ref);
         Ok(if previous.is_some() {
             SetOutcome::Replaced
         } else {
@@ -217,24 +217,23 @@ impl Kvkache {
         })
     }
 
-    pub(crate) async fn delete(&mut self, key: &[u8]) -> Result<bool> {
-        let hashed_key = Key::from(key).hashed_key().into_bytes();
-        let Some(previous) = self.locate(&hashed_key).await? else {
+    pub(crate) async fn delete(&mut self, storage_key: &StorageKey) -> Result<bool> {
+        let Some(previous) = self.locate(storage_key).await? else {
             return Ok(false);
         };
         if previous.table_location.is_blob() {
-            let removed = self.table.remove(&hashed_key, previous.table_location);
+            let removed = self.table.remove(storage_key, previous.table_location);
             debug_assert!(removed);
-            self.blob_refs.remove(&hashed_key);
+            self.blob_refs.remove(storage_key);
             return Ok(true);
         }
         if let Some(active) = self.active.as_mut()
             && active.sg_index == previous.table_location.sg_index as usize
         {
-            let removed = active.remove(&hashed_key);
+            let removed = active.remove(storage_key);
             debug_assert!(removed);
         }
-        let removed = self.table.remove(&hashed_key, previous.table_location);
+        let removed = self.table.remove(storage_key, previous.table_location);
         debug_assert!(removed);
         Ok(true)
     }
@@ -244,20 +243,20 @@ impl Kvkache {
         self.flush_active_segment().await
     }
 
-    async fn locate(&self, hashed_key: &[u8; 32]) -> Result<Option<LocatedItem>> {
-        for table_location in self.table.candidate_locations(hashed_key) {
+    async fn locate(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
+        for table_location in self.table.candidate_locations(storage_key) {
             if table_location.is_blob() {
-                let Some(blob_ref) = self.blob_refs.get(hashed_key).copied() else {
+                let Some(blob_ref) = self.blob_refs.get(storage_key).copied() else {
                     continue;
                 };
-                let value = self.blob_segment.read(hashed_key, blob_ref).await?;
+                let value = self.blob_segment.read(storage_key, blob_ref).await?;
                 self.io
                     .data_read
-                    .set(self.io.data_read.get() + BLOB_HASHED_KEY_BYTES + blob_ref.value_len);
+                    .set(self.io.data_read.get() + BLOB_STORAGE_KEY_BYTES + blob_ref.value_len);
                 return Ok(Some(LocatedItem {
                     table_location,
                     item: Item {
-                        hashed_key: *hashed_key,
+                        storage_key: *storage_key,
                         value,
                     },
                 }));
@@ -267,9 +266,9 @@ impl Kvkache {
                 .as_ref()
                 .filter(|active| active.sg_index == table_location.sg_index as usize);
             let item = if let Some(active) = active {
-                active.find(hashed_key, table_location.bucket_hash_index)
+                active.find(storage_key, table_location.bucket_hash_index)
             } else {
-                self.read_location(hashed_key, table_location).await?
+                self.read_location(storage_key, table_location).await?
             };
             if let Some(item) = item {
                 return Ok(Some(LocatedItem {
@@ -283,7 +282,7 @@ impl Kvkache {
 
     async fn read_location(
         &self,
-        hashed_key: &[u8; 32],
+        storage_key: &StorageKey,
         table_location: TableLocation,
     ) -> Result<Option<Item>> {
         debug_assert!(!table_location.is_blob());
@@ -297,12 +296,12 @@ impl Kvkache {
             return Ok(None);
         }
         let bucket_index = bucket_hash(
-            hashed_key,
+            storage_key,
             table_location.bucket_hash_index,
             self.config.bucket_count(),
         );
         let bytes = self.read_bucket(sg_index, bucket_index).await?;
-        Ok(find_item_in_bucket(&bytes, hashed_key))
+        Ok(find_item_in_bucket(&bytes, storage_key))
     }
 
     async fn append_with_retry(
@@ -407,7 +406,7 @@ impl Kvkache {
         self.table.memory_bytes()
             + self.config.segment_size
             + self.blob_refs.capacity()
-                * (std::mem::size_of::<[u8; HASHED_KEY_BYTES]>() + std::mem::size_of::<BlobRef>())
+                * (std::mem::size_of::<StorageKey>() + std::mem::size_of::<BlobRef>())
             + self.occupied_segments.capacity() * std::mem::size_of::<bool>()
     }
 }
