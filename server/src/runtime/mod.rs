@@ -4,6 +4,9 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::Path;
 use std::time::Duration;
 
 use aes::{
@@ -18,6 +21,17 @@ use crate::*;
 
 mod worker;
 pub use worker::*;
+
+pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
+const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
+const SERVER_KEY_VERSION: u32 = 1;
+const SERVER_KEY_FILE_BYTES: usize = 64;
+
+#[derive(Clone, Copy)]
+pub(crate) struct ServerSecret {
+    pub(crate) id: [u8; 16],
+    pub(crate) key: [u8; 32],
+}
 
 struct WorkerHandle {
     sender: flume::Sender<WorkerRequest>,
@@ -67,7 +81,13 @@ impl ThreadedKvkache {
     pub fn start(config: crate::config::AppConfig) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
-        let server_cipher = Aes256::new(&rand::random::<[u8; 32]>().into());
+        let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
+            let worker = config.worker_config(thread_id);
+            worker.data_path.exists() || worker.blob_path().exists()
+        });
+        let server_secret =
+            load_or_create_server_secret(&config.storage.directory, existing_storage)?;
+        let server_cipher = Aes256::new(&server_secret.key.into());
         let (started_tx, started_rx) =
             flume::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
         let queue_capacity = config
@@ -84,6 +104,7 @@ impl ThreadedKvkache {
             let io_config = config.io_uring.clone();
             let cpu_id = config.runtime.cpu_ids[thread_id];
             let event_interval = config.runtime.event_interval;
+            let storage_key_id = server_secret.id;
             let thread = std::thread::Builder::new()
                 .name(format!("kvkache-worker-{thread_id}"))
                 .spawn(move || {
@@ -110,7 +131,12 @@ impl ThreadedKvkache {
                             )));
                             return;
                         }
-                        let cache = match Kvkache::open(shard_config).await {
+                        let cache = match Kvkache::open_with_storage_key_id(
+                            shard_config,
+                            storage_key_id,
+                        )
+                        .await
+                        {
                             Ok(cache) => cache,
                             Err(error) => {
                                 let _ = started_tx.send(Err(error.to_string()));
@@ -546,4 +572,82 @@ impl ThreadedKvkache {
         }
         Ok(())
     }
+}
+
+pub(crate) fn load_or_create_server_secret(
+    directory: &Path,
+    existing_storage: bool,
+) -> Result<ServerSecret> {
+    let path = directory.join(SERVER_KEY_FILE);
+    if path.exists() {
+        let permissions = fs::metadata(&path)?.permissions().mode() & 0o777;
+        if permissions & 0o077 != 0 {
+            return Err(KvError::Worker(format!(
+                "server key file {} must not be accessible by group or other users",
+                path.display()
+            )));
+        }
+        return decode_server_secret(&fs::read(&path)?);
+    }
+    if existing_storage {
+        return Err(KvError::Worker(format!(
+            "server key file {} is missing for existing storage",
+            path.display()
+        )));
+    }
+
+    let secret = ServerSecret {
+        id: rand::random(),
+        key: rand::random(),
+    };
+    let bytes = encode_server_secret(secret);
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    fs::OpenOptions::new()
+        .read(true)
+        .open(directory)?
+        .sync_all()?;
+    Ok(secret)
+}
+
+fn encode_server_secret(secret: ServerSecret) -> [u8; SERVER_KEY_FILE_BYTES] {
+    let mut bytes = [0; SERVER_KEY_FILE_BYTES];
+    bytes[..8].copy_from_slice(SERVER_KEY_MAGIC);
+    bytes[8..12].copy_from_slice(&SERVER_KEY_VERSION.to_le_bytes());
+    bytes[12..28].copy_from_slice(&secret.id);
+    bytes[28..60].copy_from_slice(&secret.key);
+    let checksum = server_key_checksum(&bytes[..60]);
+    bytes[60..64].copy_from_slice(&checksum.to_le_bytes());
+    bytes
+}
+
+fn decode_server_secret(bytes: &[u8]) -> Result<ServerSecret> {
+    if bytes.len() != SERVER_KEY_FILE_BYTES
+        || &bytes[..8] != SERVER_KEY_MAGIC
+        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != SERVER_KEY_VERSION
+        || server_key_checksum(&bytes[..60])
+            != u32::from_le_bytes(bytes[60..64].try_into().unwrap())
+    {
+        return Err(KvError::Worker("server key file is invalid".into()));
+    }
+    Ok(ServerSecret {
+        id: bytes[12..28].try_into().unwrap(),
+        key: bytes[28..60].try_into().unwrap(),
+    })
+}
+
+fn server_key_checksum(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    !crc
 }
