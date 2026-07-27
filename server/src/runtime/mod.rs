@@ -34,6 +34,10 @@ pub(crate) fn derive_storage_key(
     // the 32-byte digest buffer while preserving its alignment and exclusive borrow.
     let blocks = unsafe { &mut *(bytes.as_mut_ptr() as *mut [Block<Aes256>; 2]) };
 
+    // AES-MDS-AES keeps this fixed-size derivation in place and on the AES hardware path: two
+    // parallel AES passes surround an invertible MDS layer so each digest half influences both
+    // output blocks. Keyed BLAKE3 is the simpler non-permutation alternative when portability
+    // and a conventional keyed hash matter more than minimizing AES-backed latency.
     server_cipher.encrypt_blocks(blocks);
 
     let [first_block, second_block] = blocks;
