@@ -1,8 +1,8 @@
 //! Application and per-worker configuration for the OpenKache server.
 //!
-//! Storage uses fixed 4 KiB Buckets inside Segments. Each worker owns one
-//! storage file and one in-memory lookup Table; restart recovery is not part of
-//! this configuration.
+//! Storage uses fixed 4 KiB Buckets inside Segments plus a paired circular Blob
+//! file. Each worker owns both files and one in-memory lookup Table; restart
+//! recovery is not part of this configuration.
 
 use std::collections::HashSet;
 use std::io;

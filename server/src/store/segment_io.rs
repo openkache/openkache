@@ -55,18 +55,37 @@ impl Kvkache {
     }
 
     pub(super) async fn prepare_segment_for_reuse(&mut self, sg_index: usize) -> Result<()> {
-        for (item, table_location) in self.read_segment_items(sg_index).await? {
-            let is_latest = self
-                .locate(&item.storage_key)
-                .await?
-                .is_some_and(|located| {
-                    located.table_location == table_location && located.item == item
-                });
-            if is_latest {
-                let removed = self.table.remove(&item.storage_key, table_location);
-                debug_assert!(removed);
+        if self.regular_segment_occupied[sg_index] {
+            for (item, table_location) in self.read_segment_items(sg_index).await? {
+                let is_latest = self
+                    .locate(&item.storage_key)
+                    .await?
+                    .is_some_and(|located| {
+                        located.table_location == table_location && located.item == item
+                    });
+                if is_latest {
+                    let removed = self.table.remove(&item.storage_key, table_location);
+                    debug_assert!(removed);
+                }
             }
         }
+        let blob_logical_len = self.blob_segment_used_bytes[sg_index];
+        if blob_logical_len != 0 {
+            let (blob_refs, bytes_read) = self
+                .blob_segment
+                .read_segment_refs(sg_index, blob_logical_len)
+                .await?;
+            self.io.data_read.set(self.io.data_read.get() + bytes_read);
+            for (storage_key, blob_ref) in blob_refs {
+                if self.blob_refs.get(&storage_key) == Some(&blob_ref) {
+                    let removed = self.table.remove(&storage_key, TableLocation::blob());
+                    debug_assert!(removed);
+                    self.blob_refs.remove(&storage_key);
+                }
+            }
+        }
+        self.regular_segment_occupied[sg_index] = false;
+        self.blob_segment_used_bytes[sg_index] = 0;
         self.occupied_segments[sg_index] = false;
         self.segment_reuses += 1;
         Ok(())
