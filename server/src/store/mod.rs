@@ -163,7 +163,10 @@ pub(crate) struct Kvkache {
     pub(crate) blob_segment: BlobSegment,
     pub(crate) blob_refs: HashMap<StorageKey, BlobRef>,
     pub(crate) active: Option<MutableSegment>,
+    pub(crate) active_blob: Option<MutableBlobSegment>,
     pub(crate) occupied_segments: Vec<bool>,
+    pub(crate) regular_segment_occupied: Vec<bool>,
+    pub(crate) blob_segment_used_bytes: Vec<usize>,
     next_segment_index: usize,
     pub(crate) segment_flushes: u64,
     pub(crate) segment_reuses: u64,
@@ -185,7 +188,10 @@ impl Kvkache {
             blob_segment,
             blob_refs: HashMap::new(),
             active: None,
+            active_blob: None,
             occupied_segments: vec![false; config.segment_count],
+            regular_segment_occupied: vec![false; config.segment_count],
+            blob_segment_used_bytes: vec![0; config.segment_count],
             next_segment_index: 0,
             segment_flushes: 0,
             segment_reuses: 0,
@@ -282,8 +288,9 @@ impl Kvkache {
         if previous
             .as_ref()
             .is_some_and(|previous| previous.table_location.is_blob())
+            && let Some(blob_ref) = self.blob_refs.remove(&storage_key)
         {
-            self.blob_refs.remove(&storage_key);
+            self.remove_active_blob(&storage_key, blob_ref);
         }
         Ok(if was_live {
             SetOutcome::Replaced
@@ -297,23 +304,41 @@ impl Kvkache {
         let was_live = previous
             .as_ref()
             .is_some_and(|located| !located.item.is_tombstone);
-        let blob_ref = self.blob_segment.append(&storage_key, value).await?;
-        self.io
-            .data_written
-            .set(self.io.data_written.get() + blob_ref.extent_len);
+        let previous_blob_ref = self.blob_refs.get(&storage_key).copied();
+        let replacement = previous_blob_ref.map_or(MutableBlobReplace::NotFound, |blob_ref| {
+            self.active_blob
+                .as_mut()
+                .map_or(MutableBlobReplace::NotFound, |active| {
+                    active.replace(&storage_key, blob_ref, value)
+                })
+        });
+        let blob_ref = match replacement {
+            MutableBlobReplace::Replaced => previous_blob_ref.expect("replacement has a BlobRef"),
+            MutableBlobReplace::NotFound | MutableBlobReplace::NoSpace => {
+                self.append_blob_with_retry(storage_key, value).await?
+            }
+        };
+        // A rotation while appending can convert the previous active reference
+        // to a stored reference. Read it again before publishing the replacement.
+        let superseded_blob_ref = self.blob_refs.get(&storage_key).copied();
 
         let table_location = TableLocation::blob();
         if let Some(previous) = &previous {
             if !self
                 .table
                 .replace_location(&storage_key, previous.table_location, table_location)
+                && let Err(error) = self.table.insert(&storage_key, table_location)
             {
-                return Err(KvError::Worker(
-                    "updated key is missing from the Table".into(),
-                ));
+                if superseded_blob_ref != Some(blob_ref) {
+                    self.remove_active_blob(&storage_key, blob_ref);
+                }
+                return Err(error);
             }
         } else {
-            self.table.insert(&storage_key, table_location)?;
+            if let Err(error) = self.table.insert(&storage_key, table_location) {
+                self.remove_active_blob(&storage_key, blob_ref);
+                return Err(error);
+            }
         }
         if let Some(previous) = &previous
             && !previous.table_location.is_blob()
@@ -322,6 +347,11 @@ impl Kvkache {
         {
             let removed = active.remove(&storage_key);
             debug_assert!(removed);
+        }
+        if let Some(previous_blob_ref) = superseded_blob_ref
+            && previous_blob_ref != blob_ref
+        {
+            self.remove_active_blob(&storage_key, previous_blob_ref);
         }
         self.blob_refs.insert(storage_key, blob_ref);
         Ok(if was_live {
@@ -364,14 +394,15 @@ impl Kvkache {
                 return Err(error);
             }
         }
-        if previous.table_location.is_blob() {
-            self.blob_refs.remove(storage_key);
+        if previous.table_location.is_blob()
+            && let Some(blob_ref) = self.blob_refs.remove(storage_key)
+        {
+            self.remove_active_blob(storage_key, blob_ref);
         }
         Ok(true)
     }
 
     pub(crate) async fn sync(&mut self) -> Result<()> {
-        self.blob_segment.sync().await?;
         self.flush_active_segment().await
     }
 
@@ -392,10 +423,25 @@ impl Kvkache {
         if candidates.iter().any(|location| location.is_blob())
             && let Some(blob_ref) = self.blob_refs.get(storage_key).copied()
         {
-            let value = self.blob_segment.read(storage_key, blob_ref).await?;
-            self.io
-                .data_read
-                .set(self.io.data_read.get() + blob_ref.extent_len);
+            let value = match blob_ref {
+                BlobRef::Active { .. } => self
+                    .active_blob
+                    .as_ref()
+                    .ok_or_else(|| KvError::Worker("active Blob SG is missing".into()))?
+                    .read(storage_key, blob_ref)?,
+                BlobRef::Stored { sg_index, .. } => {
+                    let (value, bytes_read) = self
+                        .blob_segment
+                        .read(
+                            storage_key,
+                            blob_ref,
+                            self.blob_segment_used_bytes[sg_index as usize],
+                        )
+                        .await?;
+                    self.io.data_read.set(self.io.data_read.get() + bytes_read);
+                    value
+                }
+            };
             return Ok(Some(LocatedItem {
                 table_location: TableLocation::blob(),
                 item: Item::live(*storage_key, value),
@@ -443,7 +489,7 @@ impl Kvkache {
         debug_assert!(!table_location.is_blob());
         let sg_index = table_location.sg_index as usize;
         if !self
-            .occupied_segments
+            .regular_segment_occupied
             .get(sg_index)
             .copied()
             .unwrap_or(false)
@@ -478,6 +524,34 @@ impl Kvkache {
         }
     }
 
+    async fn append_blob_with_retry(
+        &mut self,
+        storage_key: StorageKey,
+        value: &[u8],
+    ) -> Result<BlobRef> {
+        let required_bytes = BLOB_ITEM_FIXED_BYTES
+            .checked_add(value.len())
+            .ok_or_else(|| KvError::Usage("Blob Item length overflow".into()))?;
+        if required_bytes > self.config.segment_size {
+            return Err(KvError::BlobSegmentFull {
+                required_bytes: required_bytes as u64,
+                remaining_bytes: self.config.segment_size as u64,
+            });
+        }
+        loop {
+            self.ensure_active_segment().await?;
+            if let Some(blob_ref) = self
+                .active_blob
+                .as_mut()
+                .expect("active Blob SG accompanies active Bucket SG")
+                .append(storage_key, value)
+            {
+                return Ok(blob_ref);
+            }
+            self.flush_active_segment().await?;
+        }
+    }
+
     async fn ensure_active_segment(&mut self) -> Result<()> {
         if self.active.is_some() {
             return Ok(());
@@ -487,34 +561,73 @@ impl Kvkache {
             self.prepare_segment_for_reuse(sg_index).await?;
         }
         self.active = Some(MutableSegment::new(&self.config, sg_index));
+        self.active_blob = Some(MutableBlobSegment::new(&self.config, sg_index));
         Ok(())
     }
 
     async fn flush_active_segment(&mut self) -> Result<()> {
         let Some(active) = self.active.take() else {
+            debug_assert!(self.active_blob.is_none());
             return Ok(());
         };
-        if active.item_count == 0 {
+        let active_blob = self
+            .active_blob
+            .take()
+            .expect("active Blob SG accompanies active Bucket SG");
+        debug_assert_eq!(active.sg_index, active_blob.sg_index);
+        if active.item_count == 0 && active_blob.is_empty() {
             return Ok(());
         }
-        let offset = active.sg_index as u64 * self.config.segment_size as u64;
-        let expected = active.bytes.len();
-        let write = self.data.write_at(active.bytes, offset);
-        let BufResult(result, bytes) = compio::runtime::time::timeout(
-            Duration::from_micros(self.config.write_max_time_us),
-            write,
-        )
-        .await
-        .map_err(|_| KvError::Timeout("Segment write"))?;
-        require_complete_direct_io("Segment write", result?, expected)?;
-        self.io
-            .data_written
-            .set(self.io.data_written.get() + bytes.len() as u64);
-        self.data.sync_data().await?;
-        self.occupied_segments[active.sg_index] = true;
-        self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
+        let sg_index = active.sg_index;
+        let regular_occupied = active.item_count != 0;
+        if regular_occupied {
+            let offset = sg_index as u64 * self.config.segment_size as u64;
+            let expected = active.bytes.len();
+            let write = self.data.write_at(active.bytes, offset);
+            let BufResult(result, bytes) = compio::runtime::time::timeout(
+                Duration::from_micros(self.config.write_max_time_us),
+                write,
+            )
+            .await
+            .map_err(|_| KvError::Timeout("Segment write"))?;
+            require_complete_direct_io("Segment write", result?, expected)?;
+            self.io
+                .data_written
+                .set(self.io.data_written.get() + bytes.len() as u64);
+            self.data.sync_data().await?;
+        }
+
+        let encoded_blob = active_blob.encode()?;
+        let blob_logical_len = encoded_blob
+            .as_ref()
+            .map_or(0, |encoded| encoded.logical_len);
+        if let Some(encoded_blob) = encoded_blob {
+            let bytes_written = self
+                .blob_segment
+                .write_segment(sg_index, encoded_blob.bytes)
+                .await?;
+            self.io
+                .data_written
+                .set(self.io.data_written.get() + bytes_written);
+            self.blob_segment.sync().await?;
+            for (storage_key, active_ref, stored_ref) in encoded_blob.refs {
+                if self.blob_refs.get(&storage_key) == Some(&active_ref) {
+                    self.blob_refs.insert(storage_key, stored_ref);
+                }
+            }
+        }
+        self.regular_segment_occupied[sg_index] = regular_occupied;
+        self.blob_segment_used_bytes[sg_index] = blob_logical_len;
+        self.occupied_segments[sg_index] = true;
+        self.next_segment_index = (sg_index + 1) % self.config.segment_count;
         self.segment_flushes += 1;
         Ok(())
+    }
+
+    fn remove_active_blob(&mut self, storage_key: &StorageKey, blob_ref: BlobRef) {
+        if let Some(active_blob) = self.active_blob.as_mut() {
+            active_blob.remove(storage_key, blob_ref);
+        }
     }
 
     pub(crate) fn stats(&self) -> String {
@@ -531,7 +644,7 @@ impl Kvkache {
             self.table.back_table.len(),
             self.table.back_subtable_layout.entry_capacity,
             self.blob_refs.len(),
-            self.blob_segment.used_bytes(),
+            self.blob_used_bytes(),
             self.blob_segment.capacity_bytes(),
             self.next_segment_index,
             self.occupied_segments
@@ -560,9 +673,24 @@ impl Kvkache {
 
     pub(super) fn memory_bytes(&self) -> usize {
         self.table.memory_bytes()
-            + self.config.segment_size
+            + self.config.segment_size * 2
             + self.blob_refs.capacity()
                 * (std::mem::size_of::<StorageKey>() + std::mem::size_of::<BlobRef>())
             + self.occupied_segments.capacity() * std::mem::size_of::<bool>()
+            + self.regular_segment_occupied.capacity() * std::mem::size_of::<bool>()
+            + self.blob_segment_used_bytes.capacity() * std::mem::size_of::<usize>()
+    }
+
+    fn blob_used_bytes(&self) -> u64 {
+        let stored = self
+            .blob_segment_used_bytes
+            .iter()
+            .copied()
+            .map(|len| len.next_multiple_of(BUCKET_BYTES) as u64)
+            .sum::<u64>();
+        let active = self.active_blob.as_ref().map_or(0, |active| {
+            active.logical_len().next_multiple_of(BUCKET_BYTES) as u64
+        });
+        stored + active
     }
 }
