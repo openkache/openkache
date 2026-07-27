@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: [self-hosted, Linux, openkache-ci]
+    timeout-minutes: 5
+    steps:
+      - name: Ready
+        run: ":"
