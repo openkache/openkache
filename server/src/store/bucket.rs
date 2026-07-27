@@ -3,7 +3,8 @@
 //! A Bucket begins with a one-byte Item count. Packed 20-bit Item Offsets
 //! follow immediately: the first storage-key byte is stored in 8 bits and the
 //! Item byte offset in 12 bits. Item bodies grow backward from the end and
-//! contain the remaining 31 storage-key bytes followed by the value.
+//! contain the remaining 31 storage-key bytes, a one-byte live/Tombstone
+//! marker, and the value.
 
 use crate::types::STORAGE_KEY_BYTES;
 use crate::*;
@@ -11,15 +12,36 @@ use crate::*;
 pub(crate) const ITEM_OFFSET_BITS: usize = 20;
 pub(crate) const ITEM_KEY_PREFIX_BITS: usize = 8;
 pub(crate) const ITEM_BYTE_OFFSET_BITS: usize = 12;
-pub(crate) const ITEM_FIXED_BYTES: usize = STORAGE_KEY_BYTES - 1;
+pub(crate) const ITEM_STORAGE_KEY_SUFFIX_BYTES: usize = STORAGE_KEY_BYTES - 1;
+pub(crate) const ITEM_KIND_BYTES: usize = 1;
+pub(crate) const ITEM_FIXED_BYTES: usize = ITEM_STORAGE_KEY_SUFFIX_BYTES + ITEM_KIND_BYTES;
+pub(crate) const TOMBSTONE_KIND: u8 = 0;
+pub(crate) const LIVE_KIND: u8 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Item {
     pub(crate) storage_key: StorageKey,
     pub(crate) value: Vec<u8>,
+    pub(crate) is_tombstone: bool,
 }
 
 impl Item {
+    pub(crate) fn live(storage_key: StorageKey, value: Vec<u8>) -> Self {
+        Self {
+            storage_key,
+            value,
+            is_tombstone: false,
+        }
+    }
+
+    pub(crate) fn tombstone(storage_key: StorageKey) -> Self {
+        Self {
+            storage_key,
+            value: Vec::new(),
+            is_tombstone: true,
+        }
+    }
+
     pub(crate) fn encoded_len(&self) -> usize {
         ITEM_FIXED_BYTES + self.value.len()
     }
@@ -301,10 +323,17 @@ fn item_at(bucket: &[u8], item_slot: usize) -> Option<Item> {
     let span = item_span(bucket, item_slot)?;
     let mut storage_key_bytes = [0u8; STORAGE_KEY_BYTES];
     storage_key_bytes[0] = entry.key_prefix;
-    storage_key_bytes[1..].copy_from_slice(&bucket[span.start..span.start + ITEM_FIXED_BYTES]);
+    let storage_key_end = span.start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
+    storage_key_bytes[1..].copy_from_slice(&bucket[span.start..storage_key_end]);
+    let is_tombstone = match bucket[storage_key_end] {
+        TOMBSTONE_KIND => true,
+        LIVE_KIND => false,
+        _ => return None,
+    };
     Some(Item {
         storage_key: StorageKey::new(storage_key_bytes),
-        value: bucket[span.start + ITEM_FIXED_BYTES..span.end].to_vec(),
+        value: bucket[storage_key_end + ITEM_KIND_BYTES..span.end].to_vec(),
+        is_tombstone,
     })
 }
 
@@ -315,8 +344,14 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
     let count = bucket_item_count(bucket);
     let end = items_start(bucket, count);
     let start = end - item.encoded_len();
-    bucket[start..start + ITEM_FIXED_BYTES].copy_from_slice(&item.storage_key.as_bytes()[1..]);
-    bucket[start + ITEM_FIXED_BYTES..end].copy_from_slice(&item.value);
+    let storage_key_end = start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
+    bucket[start..storage_key_end].copy_from_slice(&item.storage_key.as_bytes()[1..]);
+    bucket[storage_key_end] = if item.is_tombstone {
+        TOMBSTONE_KIND
+    } else {
+        LIVE_KIND
+    };
+    bucket[storage_key_end + ITEM_KIND_BYTES..end].copy_from_slice(&item.value);
     write_item_offset(
         bucket,
         count,
@@ -338,7 +373,8 @@ pub(crate) fn matching_item_spans(bucket: &[u8], storage_key: &StorageKey) -> Ve
                 return None;
             }
             let span = item_span(bucket, slot)?;
-            (bucket[span.start..span.start + ITEM_FIXED_BYTES] == storage_key[1..]).then_some(span)
+            (bucket[span.start..span.start + ITEM_STORAGE_KEY_SUFFIX_BYTES] == storage_key[1..])
+                .then_some(span)
         })
         .collect()
 }
