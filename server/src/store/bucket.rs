@@ -1,9 +1,10 @@
-//! Fixed 4 KiB Buckets and the active in-memory Segment.
+//! Fixed 4 KiB Buckets and flush-time mutable Segment construction.
 //!
 //! A Bucket begins with a one-byte Item count. Packed 20-bit Item Offsets
 //! follow immediately: the first storage-key byte is stored in 8 bits and the
 //! Item byte offset in 12 bits. Item bodies grow backward from the end and
-//! contain the remaining 31 storage-key bytes followed by the value.
+//! contain the remaining 31 storage-key bytes followed by the encoded stored
+//! value.
 
 use crate::types::STORAGE_KEY_BYTES;
 use crate::*;
@@ -30,12 +31,8 @@ pub(crate) struct MutableSegment {
     pub(crate) sg_index: usize,
     pub(crate) item_count: usize,
     pub(crate) accepted_item_bytes: u64,
-}
-
-pub(crate) enum MutableItemReplace {
-    NotFound,
-    Replaced(TableLocation),
-    NoSpace,
+    bucket_choice_count: usize,
+    bucket_selection_policy: BucketSelectionPolicy,
 }
 
 impl MutableSegment {
@@ -45,6 +42,8 @@ impl MutableSegment {
             sg_index,
             item_count: 0,
             accepted_item_bytes: 0,
+            bucket_choice_count: config.bucket_choice_count,
+            bucket_selection_policy: config.bucket_selection_policy,
         }
     }
 
@@ -58,25 +57,36 @@ impl MutableSegment {
         &mut self.bytes[start..start + BUCKET_BYTES]
     }
 
+    pub(crate) fn used_bytes(&self) -> usize {
+        let (buckets, remainder) = self.bytes.as_chunks::<BUCKET_BYTES>();
+        debug_assert!(remainder.is_empty());
+        buckets.iter().map(|bucket| bucket_used_bytes(bucket)).sum()
+    }
+
     pub(crate) fn choose_bucket(
         &self,
         storage_key: &StorageKey,
         encoded_len: usize,
     ) -> Option<(usize, u8)> {
         let bucket_count = self.bytes.len() / BUCKET_BYTES;
-        let first = bucket_hash(storage_key, 0, bucket_count);
-        let second = bucket_hash(storage_key, 1, bucket_count);
-        let first_used = bucket_used_bytes(self.bucket(first));
-        let second_used = bucket_used_bytes(self.bucket(second));
-        let first_fits = bucket_can_fit(self.bucket(first), encoded_len);
-        let second_fits = bucket_can_fit(self.bucket(second), encoded_len);
-        match (first_fits, second_fits) {
-            (false, false) => None,
-            (true, false) => Some((first, 0)),
-            (false, true) => Some((second, 1)),
-            (true, true) if first_used <= second_used => Some((first, 0)),
-            (true, true) => Some((second, 1)),
+        let mut best = None;
+        for bucket_hash_index in 0..self.bucket_choice_count as u8 {
+            let bucket_index = bucket_hash(storage_key, bucket_hash_index, bucket_count);
+            let bucket = self.bucket(bucket_index);
+            if !bucket_can_fit(bucket, encoded_len) {
+                continue;
+            }
+            let used = bucket_used_bytes(bucket);
+            let preferred =
+                best.is_none_or(|(_, _, best_used)| match self.bucket_selection_policy {
+                    BucketSelectionPolicy::LeastUsed => used < best_used,
+                    BucketSelectionPolicy::MostUsed => used > best_used,
+                });
+            if preferred {
+                best = Some((bucket_index, bucket_hash_index, used));
+            }
         }
+        best.map(|(bucket_index, bucket_hash_index, _)| (bucket_index, bucket_hash_index))
     }
 
     pub(crate) fn append(&mut self, item: Item, count_accepted: bool) -> Option<TableLocation> {
@@ -90,96 +100,9 @@ impl MutableSegment {
             self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
         }
         Some(TableLocation {
-            is_blob: false,
             sg_index: self.sg_index as u16,
             bucket_hash_index,
         })
-    }
-
-    pub(crate) fn replace(
-        &mut self,
-        storage_key: &StorageKey,
-        item: Item,
-        count_accepted: bool,
-    ) -> MutableItemReplace {
-        let bucket_count = self.bytes.len() / BUCKET_BYTES;
-        let first = bucket_hash(storage_key, 0, bucket_count);
-        let second = bucket_hash(storage_key, 1, bucket_count);
-        let mut candidate_buckets = vec![first];
-        if second != first {
-            candidate_buckets.push(second);
-        }
-        let matches = candidate_buckets
-            .iter()
-            .flat_map(|&bucket_index| {
-                matching_item_spans(self.bucket(bucket_index), storage_key)
-                    .into_iter()
-                    .map(move |span| (bucket_index, span))
-            })
-            .collect::<Vec<_>>();
-        let Some(&(bucket_index, span)) = matches.last() else {
-            return MutableItemReplace::NotFound;
-        };
-
-        if matches.len() == 1 {
-            let mut replacement = self.bucket(bucket_index).to_vec();
-            if replace_bucket_item(&mut replacement, span, &item) {
-                self.bucket_mut(bucket_index).copy_from_slice(&replacement);
-                if count_accepted {
-                    self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
-                }
-                return MutableItemReplace::Replaced(TableLocation {
-                    is_blob: false,
-                    sg_index: self.sg_index as u16,
-                    bucket_hash_index: if bucket_index == first { 0 } else { 1 },
-                });
-            }
-        }
-
-        let saved_buckets = candidate_buckets
-            .iter()
-            .map(|&bucket_index| (bucket_index, self.bucket(bucket_index).to_vec()))
-            .collect::<Vec<_>>();
-        let saved_item_count = self.item_count;
-        let saved_accepted_item_bytes = self.accepted_item_bytes;
-        let removed = candidate_buckets
-            .iter()
-            .map(|&bucket_index| remove_key_from_bucket(self.bucket_mut(bucket_index), storage_key))
-            .sum::<usize>();
-        self.item_count -= removed;
-
-        if let Some(location) = self.append(item, count_accepted) {
-            return MutableItemReplace::Replaced(location);
-        }
-        for (bucket_index, bytes) in saved_buckets {
-            self.bucket_mut(bucket_index).copy_from_slice(&bytes);
-        }
-        self.item_count = saved_item_count;
-        self.accepted_item_bytes = saved_accepted_item_bytes;
-        MutableItemReplace::NoSpace
-    }
-
-    pub(crate) fn remove(&mut self, storage_key: &StorageKey) -> bool {
-        let bucket_count = self.bytes.len() / BUCKET_BYTES;
-        let first = bucket_hash(storage_key, 0, bucket_count);
-        let second = bucket_hash(storage_key, 1, bucket_count);
-        let removed = remove_key_from_bucket(self.bucket_mut(first), storage_key)
-            + if second == first {
-                0
-            } else {
-                remove_key_from_bucket(self.bucket_mut(second), storage_key)
-            };
-        self.item_count -= removed;
-        removed > 0
-    }
-
-    pub(crate) fn find(&self, storage_key: &StorageKey, bucket_hash_index: u8) -> Option<Item> {
-        let bucket_index = bucket_hash(
-            storage_key,
-            bucket_hash_index,
-            self.bytes.len() / BUCKET_BYTES,
-        );
-        find_item_in_bucket(self.bucket(bucket_index), storage_key)
     }
 }
 
@@ -343,37 +266,6 @@ pub(crate) fn matching_item_spans(bucket: &[u8], storage_key: &StorageKey) -> Ve
         .collect()
 }
 
-fn rebuild_bucket(bucket: &mut [u8], items: &[Item]) -> bool {
-    bucket.fill(0);
-    items.iter().all(|item| append_item_to_bucket(bucket, item))
-}
-
-pub(crate) fn replace_bucket_item(bucket: &mut [u8], span: ItemSpan, item: &Item) -> bool {
-    let mut decoded = items(bucket);
-    if span.item_slot >= decoded.len() {
-        return false;
-    }
-    decoded[span.item_slot] = item.clone();
-    let mut rebuilt = vec![0; bucket.len()];
-    if !rebuild_bucket(&mut rebuilt, &decoded) {
-        return false;
-    }
-    bucket.copy_from_slice(&rebuilt);
-    true
-}
-
-pub(crate) fn remove_key_from_bucket(bucket: &mut [u8], storage_key: &StorageKey) -> usize {
-    let mut decoded = items(bucket);
-    let old_len = decoded.len();
-    decoded.retain(|item| item.storage_key != *storage_key);
-    let removed = old_len - decoded.len();
-    if removed > 0 {
-        let rebuilt = rebuild_bucket(bucket, &decoded);
-        debug_assert!(rebuilt);
-    }
-    removed
-}
-
 pub(crate) fn items(bucket: &[u8]) -> Vec<Item> {
     if bucket.len() != BUCKET_BYTES {
         return Vec::new();
@@ -393,7 +285,13 @@ pub(crate) fn bucket_hash(
     bucket_hash_index: u8,
     bucket_count: usize,
 ) -> usize {
-    let start = if bucket_hash_index == 0 { 16 } else { 24 };
     let storage_key = storage_key.as_bytes();
-    u64::from_le_bytes(storage_key[start..start + 8].try_into().unwrap()) as usize % bucket_count
+    let first = u64::from_le_bytes(storage_key[16..24].try_into().unwrap());
+    let second = u64::from_le_bytes(storage_key[24..32].try_into().unwrap());
+    let hash = match bucket_hash_index {
+        0 => first,
+        1 => second,
+        index => first.wrapping_add(u64::from(index).wrapping_mul(second.rotate_left(32) | 1)),
+    };
+    hash as usize % bucket_count
 }

@@ -1,8 +1,8 @@
 //! Application and per-worker configuration for the OpenKache server.
 //!
-//! Storage uses fixed 4 KiB Buckets inside Segments. Each worker owns one
-//! storage file and one in-memory lookup Table; restart recovery is not part of
-//! this configuration.
+//! Storage uses fixed 4 KiB Buckets inside Segments. Each worker owns paired
+//! Segment and Blob files plus one in-memory lookup Table; restart recovery is
+//! not part of this configuration.
 
 use std::collections::HashSet;
 use std::io;
@@ -12,6 +12,24 @@ use serde::Deserialize;
 
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BucketSelectionPolicy {
+    #[default]
+    LeastUsed,
+    MostUsed,
+}
+
+impl BucketSelectionPolicy {
+    /// Returns the stable configuration and statistics label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LeastUsed => "least_used",
+            Self::MostUsed => "most_used",
+        }
+    }
+}
 
 pub fn allowed_cpu_ids() -> Result<HashSet<usize>> {
     let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
@@ -44,12 +62,15 @@ pub fn bits_for_count(count: usize) -> usize {
 pub struct Config {
     pub data_path: PathBuf,
     pub segment_size: usize,
+    pub blob_segment_size: usize,
     pub segment_count: usize,
     pub table_capacity: usize,
     pub table_target_load_percent: usize,
     pub fingerprint_bits: usize,
     pub unary_count: usize,
     pub front_back_ratio: usize,
+    pub bucket_choice_count: usize,
+    pub bucket_selection_policy: BucketSelectionPolicy,
     pub sg_index_bits: usize,
     pub fingerprint_hash_offset_bits: usize,
     pub read_max_time_us: u64,
@@ -61,12 +82,15 @@ impl Default for Config {
         Self {
             data_path: PathBuf::from("target/kvkache-v1/kvkache.data"),
             segment_size: 16 * 1024 * 1024,
+            blob_segment_size: 64 * 1024 * 1024,
             segment_count: 64,
             table_capacity: 10_000_000,
             table_target_load_percent: 88,
             fingerprint_bits: 8,
             unary_count: 32,
             front_back_ratio: 8,
+            bucket_choice_count: 2,
+            bucket_selection_policy: BucketSelectionPolicy::LeastUsed,
             sg_index_bits: 6,
             fingerprint_hash_offset_bits: 64,
             read_max_time_us: 1_000,
@@ -108,6 +132,23 @@ impl Config {
                 "total Segment data size is too large".into(),
             ));
         }
+        if self.blob_segment_size == 0
+            || !self.blob_segment_size.is_multiple_of(BUCKET_BYTES)
+            || self.blob_segment_size > u32::MAX as usize
+        {
+            return Err(KvError::InvalidConfig(
+                "Blob Segment size must be a 4096-byte multiple no larger than u32::MAX".into(),
+            ));
+        }
+        if self
+            .blob_segment_size
+            .checked_mul(self.segment_count)
+            .is_none()
+        {
+            return Err(KvError::InvalidConfig(
+                "total Blob Segment data size is too large".into(),
+            ));
+        }
         if self.table_capacity == 0 {
             return Err(KvError::InvalidConfig(
                 "table-capacity must be non-zero".into(),
@@ -136,6 +177,13 @@ impl Config {
                 "front-back-ratio must be a power of two between 2 and 16".into(),
             ));
         }
+        if !(1..=32).contains(&self.bucket_choice_count)
+            || !self.bucket_choice_count.is_power_of_two()
+        {
+            return Err(KvError::InvalidConfig(
+                "bucket-choice-count must be a power of two between 1 and 32".into(),
+            ));
+        }
         if self.fingerprint_hash_offset_bits == 0 || self.fingerprint_hash_offset_bits > 64 {
             return Err(KvError::InvalidConfig(
                 "fingerprint hash offset must be between 1 and 64 bits".into(),
@@ -153,8 +201,16 @@ impl Config {
         self.segment_size / BUCKET_BYTES
     }
 
+    pub fn bucket_choice_bits(&self) -> usize {
+        self.bucket_choice_count.ilog2() as usize
+    }
+
     pub fn data_bytes(&self) -> u64 {
         (self.segment_size * self.segment_count) as u64
+    }
+
+    pub fn blob_bytes(&self) -> u64 {
+        (self.blob_segment_size * self.segment_count) as u64
     }
 }
 
@@ -256,6 +312,7 @@ pub struct StorageConfig {
     pub data_file_pattern: String,
     pub segments_per_thread: usize,
     pub segment_size_mib: usize,
+    pub blob_segment_size_mib: usize,
 }
 
 impl Default for StorageConfig {
@@ -265,6 +322,7 @@ impl Default for StorageConfig {
             data_file_pattern: "data-{thread_id:02}.sg".into(),
             segments_per_thread: 4,
             segment_size_mib: 16,
+            blob_segment_size_mib: 64,
         }
     }
 }
@@ -277,6 +335,8 @@ pub struct TableConfig {
     pub fingerprint_bits: usize,
     pub unary_count: usize,
     pub front_back_ratio: usize,
+    pub bucket_choice_count: usize,
+    pub bucket_selection_policy: BucketSelectionPolicy,
     pub fingerprint_hash_offset_bits: usize,
 }
 
@@ -288,6 +348,8 @@ impl Default for TableConfig {
             fingerprint_bits: 8,
             unary_count: 32,
             front_back_ratio: 8,
+            bucket_choice_count: 2,
+            bucket_selection_policy: BucketSelectionPolicy::LeastUsed,
             fingerprint_hash_offset_bits: 64,
         }
     }
@@ -379,6 +441,17 @@ impl AppConfig {
                 "storage.segment_size_mib is invalid".into(),
             ));
         }
+        if self.storage.blob_segment_size_mib == 0
+            || self
+                .storage
+                .blob_segment_size_mib
+                .checked_mul(1024 * 1024)
+                .is_none_or(|bytes| bytes > u32::MAX as usize)
+        {
+            return Err(KvError::InvalidConfig(
+                "storage.blob_segment_size_mib is invalid".into(),
+            ));
+        }
         let data_names = (0..self.runtime.thread_count)
             .map(|thread_id| expand_thread_pattern(&self.storage.data_file_pattern, thread_id))
             .collect::<HashSet<_>>();
@@ -429,6 +502,7 @@ impl AppConfig {
                 data_file_pattern: "data-{thread_id:02}.sg".into(),
                 segments_per_thread,
                 segment_size_mib: 16,
+                blob_segment_size_mib: 64,
             },
             table: TableConfig {
                 capacity_per_thread,
@@ -444,12 +518,15 @@ impl AppConfig {
         Config {
             data_path: self.storage.directory.join(data_name),
             segment_size: self.storage.segment_size_mib * 1024 * 1024,
+            blob_segment_size: self.storage.blob_segment_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,
             table_capacity: self.table.capacity_per_thread,
             table_target_load_percent: self.table.target_load_percent,
             fingerprint_bits: self.table.fingerprint_bits,
             unary_count: self.table.unary_count,
             front_back_ratio: self.table.front_back_ratio,
+            bucket_choice_count: self.table.bucket_choice_count,
+            bucket_selection_policy: self.table.bucket_selection_policy,
             sg_index_bits: bits_for_count(self.storage.segments_per_thread),
             fingerprint_hash_offset_bits: self.table.fingerprint_hash_offset_bits,
             read_max_time_us: self.timeouts.read_max_time_us,

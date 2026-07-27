@@ -40,11 +40,11 @@ impl Kvkache {
                     &item.storage_key,
                     bucket_index,
                     self.config.bucket_count(),
+                    self.config.bucket_choice_count,
                 )?;
                 Some((
                     item,
                     TableLocation {
-                        is_blob: false,
                         sg_index: sg_index as u16,
                         bucket_hash_index,
                     },
@@ -63,6 +63,7 @@ impl Kvkache {
             let _ = self.table.remove(&item.storage_key, table_location);
         }
         self.occupied_segments[sg_index] = false;
+        self.blob_segment.release_segment(sg_index);
         self.segment_reuses += 1;
         Ok(())
     }
@@ -72,12 +73,8 @@ fn bucket_hash_index_for_bucket(
     storage_key: &StorageKey,
     bucket_index: usize,
     bucket_count: usize,
+    bucket_choice_count: usize,
 ) -> Option<u8> {
-    if bucket_hash(storage_key, 0, bucket_count) == bucket_index {
-        Some(0)
-    } else if bucket_hash(storage_key, 1, bucket_count) == bucket_index {
-        Some(1)
-    } else {
-        None
-    }
+    (0..bucket_choice_count as u8)
+        .find(|&index| bucket_hash(storage_key, index, bucket_count) == bucket_index)
 }
