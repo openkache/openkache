@@ -12,7 +12,7 @@ name = "openkache-server"
 path = "src/bin/openkache_server.rs"
 
 [dependencies]
-blake3 = "*"
+aes = "*"
 clap = { version = "*", features = ["derive"] }
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "runtime", "signal", "time"] }
 compio-quic = { version = "*", features = ["ring"] }

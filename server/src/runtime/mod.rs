@@ -6,6 +6,10 @@ use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::time::Duration;
 
+use aes::{
+    Aes256,
+    cipher::{BlockCipherEncrypt, KeyInit},
+};
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
 use openkache_protocol::ClientKeyDigest;
@@ -21,23 +25,33 @@ struct WorkerHandle {
 }
 
 pub(crate) fn derive_storage_key(
-    server_hash_key: &[u8; blake3::KEY_LEN],
+    server_cipher: &Aes256,
     client_key_digest: ClientKeyDigest,
 ) -> StorageKey {
-    StorageKey::new(*blake3::keyed_hash(server_hash_key, client_key_digest.as_bytes()).as_bytes())
+    let digest = client_key_digest.as_bytes();
+    let mut blocks = [
+        digest[..16].try_into().unwrap(),
+        digest[16..].try_into().unwrap(),
+    ];
+    server_cipher.encrypt_blocks(&mut blocks);
+
+    let mut storage_key = client_key_digest.into_bytes();
+    storage_key[..16].copy_from_slice(&blocks[0]);
+    storage_key[16..].copy_from_slice(&blocks[1]);
+    StorageKey::new(storage_key)
 }
 
 pub struct ThreadedKvkache {
     config: crate::config::AppConfig,
     workers: Vec<WorkerHandle>,
-    server_hash_key: [u8; blake3::KEY_LEN],
+    server_cipher: Aes256,
 }
 
 impl ThreadedKvkache {
     pub fn start(config: crate::config::AppConfig) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
-        let server_hash_key = rand::random::<[u8; blake3::KEY_LEN]>();
+        let server_cipher = Aes256::new(&rand::random::<[u8; 32]>().into());
         let (started_tx, started_rx) =
             flume::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
         let queue_capacity = config
@@ -124,7 +138,7 @@ impl ThreadedKvkache {
         Ok(Self {
             config,
             workers,
-            server_hash_key,
+            server_cipher,
         })
     }
 
@@ -134,7 +148,7 @@ impl ThreadedKvkache {
     }
 
     fn storage_key(&self, client_key_digest: ClientKeyDigest) -> StorageKey {
-        derive_storage_key(&self.server_hash_key, client_key_digest)
+        derive_storage_key(&self.server_cipher, client_key_digest)
     }
 
     fn request(
