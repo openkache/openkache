@@ -56,11 +56,16 @@ impl Kvkache {
 
     pub(super) async fn prepare_segment_for_reuse(&mut self, sg_index: usize) -> Result<()> {
         for (item, table_location) in self.read_segment_items(sg_index).await? {
-            // TODO(storage-table-refactor): Table entries are probabilistic.
-            // Exact SSD Item liveness must be added before a colliding stale
-            // Item can be distinguished from a live entry at the same
-            // candidate location.
-            let _ = self.table.remove(&item.storage_key, table_location);
+            let is_latest = self
+                .locate(&item.storage_key)
+                .await?
+                .is_some_and(|located| {
+                    located.table_location == table_location && located.item == item
+                });
+            if is_latest {
+                let removed = self.table.remove(&item.storage_key, table_location);
+                debug_assert!(removed);
+            }
         }
         self.occupied_segments[sg_index] = false;
         self.segment_reuses += 1;

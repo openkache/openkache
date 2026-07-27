@@ -1,8 +1,8 @@
 //! Core cache engine and its Segment lifecycle.
 //!
-//! The in-memory Table is the only source of logical liveness. Deletes remove
-//! an active Item physically; Items already on SSD remain stale until their
-//! Segment is reused.
+//! Live Items and Tombstones form a circular append log. The active RAM
+//! Segment is newest; immutable SSD records are ordered by their circular
+//! distance behind the write cursor.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -199,7 +199,7 @@ impl Kvkache {
         Ok(self
             .locate(storage_key)
             .await?
-            .map(|located| located.item.value))
+            .and_then(|located| (!located.item.is_tombstone).then_some(located.item.value)))
     }
 
     pub(crate) async fn get_many(
@@ -246,10 +246,10 @@ impl Kvkache {
             });
         }
         let previous = self.locate(&storage_key).await?;
-        let item = Item {
-            storage_key,
-            value: value.to_vec(),
-        };
+        let was_live = previous
+            .as_ref()
+            .is_some_and(|located| !located.item.is_tombstone);
+        let item = Item::live(storage_key, value.to_vec());
         let replacement = self
             .active
             .as_mut()
@@ -265,9 +265,16 @@ impl Kvkache {
                 .table
                 .replace_location(&storage_key, previous.table_location, table_location)
             {
-                return Err(KvError::Worker(
-                    "updated key is missing from the Table".into(),
-                ));
+                // Opening the next active Segment can reuse the Segment that held
+                // `previous`, removing its Table entry before this append finishes.
+                if let Err(error) = self.table.insert(&storage_key, table_location) {
+                    if table_location != previous.table_location
+                        && let Some(active) = self.active.as_mut()
+                    {
+                        active.remove(&storage_key);
+                    }
+                    return Err(error);
+                }
             }
         } else {
             self.table.insert(&storage_key, table_location)?;
@@ -278,7 +285,7 @@ impl Kvkache {
         {
             self.blob_refs.remove(&storage_key);
         }
-        Ok(if previous.is_some() {
+        Ok(if was_live {
             SetOutcome::Replaced
         } else {
             SetOutcome::Created
@@ -287,6 +294,9 @@ impl Kvkache {
 
     async fn set_blob(&mut self, storage_key: StorageKey, value: &[u8]) -> Result<SetOutcome> {
         let previous = self.locate(&storage_key).await?;
+        let was_live = previous
+            .as_ref()
+            .is_some_and(|located| !located.item.is_tombstone);
         let blob_ref = self.blob_segment.append(&storage_key, value).await?;
         self.io
             .data_written
@@ -314,7 +324,7 @@ impl Kvkache {
             debug_assert!(removed);
         }
         self.blob_refs.insert(storage_key, blob_ref);
-        Ok(if previous.is_some() {
+        Ok(if was_live {
             SetOutcome::Replaced
         } else {
             SetOutcome::Created
@@ -325,20 +335,38 @@ impl Kvkache {
         let Some(previous) = self.locate(storage_key).await? else {
             return Ok(false);
         };
-        if previous.table_location.is_blob() {
-            let removed = self.table.remove(storage_key, previous.table_location);
-            debug_assert!(removed);
-            self.blob_refs.remove(storage_key);
-            return Ok(true);
+        if previous.item.is_tombstone {
+            return Ok(false);
         }
-        if let Some(active) = self.active.as_mut()
-            && active.sg_index == previous.table_location.sg_index as usize
+        let tombstone = Item::tombstone(*storage_key);
+        let replacement = self
+            .active
+            .as_mut()
+            .map(|active| active.replace(storage_key, tombstone.clone(), false));
+        let table_location = match replacement {
+            Some(MutableItemReplace::Replaced(table_location)) => table_location,
+            Some(MutableItemReplace::NotFound | MutableItemReplace::NoSpace) | None => {
+                self.append_with_retry(tombstone, false).await?
+            }
+        };
+        if !self
+            .table
+            .replace_location(storage_key, previous.table_location, table_location)
         {
-            let removed = active.remove(storage_key);
-            debug_assert!(removed);
+            // The circular reuse needed to open this active Segment may have
+            // removed `previous`; in that case the Tombstone becomes a new entry.
+            if let Err(error) = self.table.insert(storage_key, table_location) {
+                if table_location != previous.table_location
+                    && let Some(active) = self.active.as_mut()
+                {
+                    active.remove(storage_key);
+                }
+                return Err(error);
+            }
         }
-        let removed = self.table.remove(storage_key, previous.table_location);
-        debug_assert!(removed);
+        if previous.table_location.is_blob() {
+            self.blob_refs.remove(storage_key);
+        }
         Ok(true)
     }
 
@@ -348,40 +376,63 @@ impl Kvkache {
     }
 
     async fn locate(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
-        for table_location in self.table.candidate_locations(storage_key) {
-            if table_location.is_blob() {
-                let Some(blob_ref) = self.blob_refs.get(storage_key).copied() else {
-                    continue;
-                };
-                let value = self.blob_segment.read(storage_key, blob_ref).await?;
-                self.io
-                    .data_read
-                    .set(self.io.data_read.get() + blob_ref.extent_len);
-                return Ok(Some(LocatedItem {
-                    table_location,
-                    item: Item {
-                        storage_key: *storage_key,
-                        value,
-                    },
-                }));
-            }
-            let active = self
-                .active
-                .as_ref()
-                .filter(|active| active.sg_index == table_location.sg_index as usize);
-            let item = if let Some(active) = active {
-                active.find(storage_key, table_location.bucket_hash_index)
-            } else {
-                self.read_location(storage_key, table_location).await?
-            };
-            if let Some(item) = item {
-                return Ok(Some(LocatedItem {
-                    table_location,
-                    item,
-                }));
+        let candidates = self.table.candidate_locations(storage_key);
+        if let Some(active) = &self.active {
+            for table_location in candidates.iter().copied().filter(|location| {
+                !location.is_blob() && location.sg_index as usize == active.sg_index
+            }) {
+                if let Some(item) = active.find(storage_key, table_location.bucket_hash_index) {
+                    return Ok(Some(LocatedItem {
+                        table_location,
+                        item,
+                    }));
+                }
             }
         }
-        Ok(None)
+        if candidates.iter().any(|location| location.is_blob())
+            && let Some(blob_ref) = self.blob_refs.get(storage_key).copied()
+        {
+            let value = self.blob_segment.read(storage_key, blob_ref).await?;
+            self.io
+                .data_read
+                .set(self.io.data_read.get() + blob_ref.extent_len);
+            return Ok(Some(LocatedItem {
+                table_location: TableLocation::blob(),
+                item: Item::live(*storage_key, value),
+            }));
+        }
+        let mut newest: Option<(usize, LocatedItem)> = None;
+        for table_location in candidates.into_iter().filter(|location| {
+            !location.is_blob()
+                && self
+                    .active
+                    .as_ref()
+                    .is_none_or(|active| location.sg_index as usize != active.sg_index)
+        }) {
+            let Some(item) = self.read_location(storage_key, table_location).await? else {
+                continue;
+            };
+            let age = self.ssd_segment_age(table_location.sg_index as usize);
+            if newest
+                .as_ref()
+                .is_none_or(|(newest_age, _)| age < *newest_age)
+            {
+                newest = Some((
+                    age,
+                    LocatedItem {
+                        table_location,
+                        item,
+                    },
+                ));
+            }
+        }
+        Ok(newest.map(|(_, located)| located))
+    }
+
+    fn ssd_segment_age(&self, sg_index: usize) -> usize {
+        let count = self.config.segment_count;
+        let newest_ssd = (self.next_segment_index + count - 1) % count;
+        (newest_ssd + count - sg_index) % count
     }
 
     async fn read_location(
