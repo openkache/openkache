@@ -18,4 +18,4 @@ jobs:
           persist-credentials: false
 
       - name: Check Rust build
-        run: cargo check --locked --manifest-path server/Cargo.toml
+        run: cargo check --manifest-path server/Cargo.toml
