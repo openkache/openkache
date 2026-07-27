@@ -1,5 +1,6 @@
-//! SSD Bucket reads and circular Segment reuse.
+//! SSD Bucket reads and collision-safe circular Segment reuse.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use compio::BufResult;
@@ -54,18 +55,36 @@ impl Kvkache {
         Ok(result)
     }
 
-    pub(super) async fn prepare_segment_for_reuse(&mut self, sg_index: usize) -> Result<()> {
+    pub(super) async fn prepare_segment_for_reuse(
+        &mut self,
+        sg_index: usize,
+    ) -> Result<HashSet<StorageKey>> {
+        let mut latest = Vec::new();
         for (item, table_location) in self.read_segment_items(sg_index).await? {
-            // TODO(storage-table-refactor): Table entries are probabilistic.
-            // Exact SSD Item liveness must be added before a colliding stale
-            // Item can be distinguished from a live entry at the same
-            // candidate location.
-            let _ = self.table.remove(&item.storage_key, table_location);
+            let is_latest = self
+                .locate_stable_record(&item.storage_key)
+                .await?
+                .is_some_and(|located| {
+                    located.table_location == table_location && located.item == item
+                });
+            if is_latest {
+                latest.push((item, table_location));
+            }
+        }
+
+        let mut evicted = HashSet::with_capacity(latest.len());
+        for (item, table_location) in latest {
+            let removed = self.table.remove(&item.storage_key, table_location);
+            debug_assert!(removed);
+            if !item.is_tombstone {
+                self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
+            }
+            evicted.insert(item.storage_key);
         }
         self.occupied_segments[sg_index] = false;
         self.blob_segment.release_segment(sg_index);
         self.segment_reuses += 1;
-        Ok(())
+        Ok(evicted)
     }
 }
 

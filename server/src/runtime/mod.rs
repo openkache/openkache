@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use aes::{
     Aes256,
-    cipher::{BlockCipherEncrypt, KeyInit},
+    cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
@@ -28,17 +28,33 @@ pub(crate) fn derive_storage_key(
     server_cipher: &Aes256,
     client_key_digest: ClientKeyDigest,
 ) -> StorageKey {
-    let digest = client_key_digest.as_bytes();
-    let mut blocks = [
-        digest[..16].try_into().unwrap(),
-        digest[16..].try_into().unwrap(),
-    ];
-    server_cipher.encrypt_blocks(&mut blocks);
+    let mut bytes = client_key_digest.into_bytes();
 
-    let mut storage_key = client_key_digest.into_bytes();
-    storage_key[..16].copy_from_slice(&blocks[0]);
-    storage_key[16..].copy_from_slice(&blocks[1]);
-    StorageKey::new(storage_key)
+    // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks exactly cover
+    // the 32-byte digest buffer while preserving its alignment and exclusive borrow.
+    let blocks = unsafe { &mut *(bytes.as_mut_ptr() as *mut [Block<Aes256>; 2]) };
+
+    // AES-MDS-AES keeps this fixed-size derivation in place and on the AES hardware path: two
+    // parallel AES passes surround an invertible MDS layer so each digest half influences both
+    // output blocks. Keyed BLAKE3 is the simpler non-permutation alternative when portability
+    // and a conventional keyed hash matter more than minimizing AES-backed latency.
+    server_cipher.encrypt_blocks(blocks);
+
+    let [first_block, second_block] = blocks;
+    for (first, second) in first_block.iter_mut().zip(second_block.iter_mut()) {
+        let first_byte = *first;
+        let second_byte = *second;
+        *first = first_byte ^ second_byte;
+        *second = first_byte ^ gf_double(second_byte);
+    }
+
+    server_cipher.encrypt_blocks(blocks);
+
+    StorageKey::new(bytes)
+}
+
+fn gf_double(byte: u8) -> u8 {
+    (byte << 1) ^ (0x1b & 0u8.wrapping_sub(byte >> 7))
 }
 
 pub struct ThreadedKvkache {

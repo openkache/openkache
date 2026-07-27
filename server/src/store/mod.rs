@@ -1,8 +1,8 @@
 //! Core cache engine and its Segment lifecycle.
 //!
-//! A bounded pending map coalesces the latest writes before flush. The Table
-//! indexes stable SG Items; superseded bytes remain stale until their paired
-//! SG/Blob generation is reused.
+//! A bounded pending map coalesces the latest writes before flush. Live Items
+//! and Tombstones form a circular SG log; each SG is reused with its paired
+//! dense Blob generation.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -162,19 +162,22 @@ enum SegmentFlushReason {
 }
 
 struct LocatedItem {
-    value: Vec<u8>,
+    table_location: TableLocation,
+    item: Item,
 }
 
 #[derive(Debug)]
 pub(crate) struct PendingItem {
     pub(crate) value: Option<Vec<u8>>,
     pub(crate) previous: Option<TableLocation>,
+    pub(crate) previous_live: bool,
 }
 
 struct FlushRecord {
     storage_key: StorageKey,
-    value: Vec<u8>,
+    value: Option<Vec<u8>>,
     previous: Option<TableLocation>,
+    previous_live: bool,
     table_location: Option<TableLocation>,
     blob_ref: Option<BlobRef>,
 }
@@ -188,6 +191,7 @@ pub(crate) struct Kvkache {
     pub(crate) pending_sg_bytes: usize,
     pub(crate) pending_blob_bytes: usize,
     pub(crate) occupied_segments: Vec<bool>,
+    stable_live_keys: usize,
     next_segment_index: usize,
     pub(crate) segment_flushes: u64,
     pub(crate) segment_capacity_flushes: u64,
@@ -219,6 +223,7 @@ impl Kvkache {
             pending_sg_bytes: 0,
             pending_blob_bytes: 0,
             occupied_segments: vec![false; config.segment_count],
+            stable_live_keys: 0,
             next_segment_index: 0,
             segment_flushes: 0,
             segment_capacity_flushes: 0,
@@ -240,10 +245,15 @@ impl Kvkache {
         if let Some(pending) = self.pending.get(storage_key) {
             return Ok(pending.value.clone());
         }
-        Ok(self
-            .locate_stable(storage_key)
-            .await?
-            .map(|located| located.value))
+        let Some(located) = self.locate_stable_record(storage_key).await? else {
+            return Ok(None);
+        };
+        if located.item.is_tombstone {
+            return Ok(None);
+        }
+        self.read_stored_value(located.table_location, &located.item.value)
+            .await
+            .map(Some)
     }
 
     pub(crate) async fn get_many(
@@ -271,27 +281,33 @@ impl Kvkache {
         value: &[u8],
     ) -> Result<SetOutcome> {
         self.validate_value(value)?;
-        let (previous, outcome) = if let Some(pending) = self.take_pending(&storage_key) {
-            let outcome = if pending.value.is_some() {
-                SetOutcome::Replaced
+        let (previous, previous_live, outcome) =
+            if let Some(pending) = self.take_pending(&storage_key) {
+                let outcome = if pending.value.is_some() {
+                    SetOutcome::Replaced
+                } else {
+                    SetOutcome::Created
+                };
+                (pending.previous, pending.previous_live, outcome)
             } else {
-                SetOutcome::Created
+                let previous = self.locate_stable_record(&storage_key).await?;
+                let previous_live = previous
+                    .as_ref()
+                    .is_some_and(|located| !located.item.is_tombstone);
+                let location = previous.map(|located| located.table_location);
+                let outcome = if previous_live {
+                    SetOutcome::Replaced
+                } else {
+                    SetOutcome::Created
+                };
+                (location, previous_live, outcome)
             };
-            (pending.previous, outcome)
-        } else {
-            let previous = self.locate_stable_location(&storage_key).await?;
-            let outcome = if previous.is_some() {
-                SetOutcome::Replaced
-            } else {
-                SetOutcome::Created
-            };
-            (previous, outcome)
-        };
         self.insert_pending(
             storage_key,
             PendingItem {
                 value: Some(value.to_vec()),
                 previous,
+                previous_live,
             },
         );
         if self.pending_should_flush() {
@@ -315,14 +331,18 @@ impl Kvkache {
             }
             return Ok(true);
         }
-        let Some(previous) = self.locate_stable_location(storage_key).await? else {
+        let Some(previous) = self.locate_stable_record(storage_key).await? else {
             return Ok(false);
         };
+        if previous.item.is_tombstone {
+            return Ok(false);
+        }
         self.insert_pending(
             *storage_key,
             PendingItem {
                 value: None,
-                previous: Some(previous),
+                previous: Some(previous.table_location),
+                previous_live: true,
             },
         );
         if self.pending_should_flush() {
@@ -338,47 +358,57 @@ impl Kvkache {
         Ok(())
     }
 
-    async fn locate_stable(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
+    async fn locate_stable_record(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
+        let mut newest: Option<(usize, LocatedItem)> = None;
         for table_location in self.table.candidate_locations(storage_key) {
-            let item = self.read_location(storage_key, table_location).await?;
-            if let Some(item) = item {
-                let value = match decode_stored_value(&item.value)? {
-                    StoredValue::Inline(value) => value.to_vec(),
-                    StoredValue::Blob(blob_ref) => {
-                        let value = self
-                            .blob_segment
-                            .read(table_location.sg_index as usize, blob_ref)
-                            .await?;
-                        let physical_bytes = self.blob_segment.physical_read_bytes(blob_ref);
-                        self.io
-                            .data_read
-                            .set(self.io.data_read.get() + physical_bytes);
-                        self.io
-                            .blob_data_read
-                            .set(self.io.blob_data_read.get() + physical_bytes);
-                        value
-                    }
-                };
-                return Ok(Some(LocatedItem { value }));
+            let Some(item) = self.read_location(storage_key, table_location).await? else {
+                continue;
+            };
+            let age = self.ssd_segment_age(table_location.sg_index as usize);
+            if newest
+                .as_ref()
+                .is_none_or(|(newest_age, _)| age < *newest_age)
+            {
+                newest = Some((
+                    age,
+                    LocatedItem {
+                        table_location,
+                        item,
+                    },
+                ));
             }
         }
-        Ok(None)
+        Ok(newest.map(|(_, located)| located))
     }
 
-    async fn locate_stable_location(
+    async fn read_stored_value(
         &self,
-        storage_key: &StorageKey,
-    ) -> Result<Option<TableLocation>> {
-        for table_location in self.table.candidate_locations(storage_key) {
-            if self
-                .read_location(storage_key, table_location)
-                .await?
-                .is_some()
-            {
-                return Ok(Some(table_location));
+        table_location: TableLocation,
+        encoded: &[u8],
+    ) -> Result<Vec<u8>> {
+        match decode_stored_value(encoded)? {
+            StoredValue::Inline(value) => Ok(value.to_vec()),
+            StoredValue::Blob(blob_ref) => {
+                let value = self
+                    .blob_segment
+                    .read(table_location.sg_index as usize, blob_ref)
+                    .await?;
+                let physical_bytes = self.blob_segment.physical_read_bytes(blob_ref);
+                self.io
+                    .data_read
+                    .set(self.io.data_read.get() + physical_bytes);
+                self.io
+                    .blob_data_read
+                    .set(self.io.blob_data_read.get() + physical_bytes);
+                Ok(value)
             }
         }
-        Ok(None)
+    }
+
+    fn ssd_segment_age(&self, sg_index: usize) -> usize {
+        let count = self.config.segment_count;
+        let newest_ssd = (self.next_segment_index + count - 1) % count;
+        (newest_ssd + count - sg_index) % count
     }
 
     async fn read_location(
@@ -411,25 +441,25 @@ impl Kvkache {
         let pending = std::mem::take(&mut self.pending);
         self.pending_sg_bytes = 0;
         self.pending_blob_bytes = 0;
-        let mut remaining = Vec::with_capacity(pending.len());
-        for (storage_key, pending) in pending {
-            if let Some(value) = pending.value {
-                remaining.push(FlushRecord {
+        let mut remaining = pending
+            .into_iter()
+            .filter_map(|(storage_key, pending)| {
+                (pending.value.is_some() || pending.previous.is_some()).then_some(FlushRecord {
                     storage_key,
-                    value,
+                    value: pending.value,
                     previous: pending.previous,
+                    previous_live: pending.previous_live,
                     table_location: None,
                     blob_ref: None,
-                });
-            } else if let Some(previous) = pending.previous {
-                let _ = self.table.remove(&storage_key, previous);
-            }
-        }
+                })
+            })
+            .collect::<Vec<_>>();
         remaining.sort_unstable_by(|left, right| {
             right
                 .value
-                .len()
-                .cmp(&left.value.len())
+                .as_ref()
+                .map_or(0, Vec::len)
+                .cmp(&left.value.as_ref().map_or(0, Vec::len))
                 .then_with(|| left.storage_key.cmp(&right.storage_key))
         });
 
@@ -441,30 +471,40 @@ impl Kvkache {
             let mut blob_used = 0usize;
 
             for mut record in remaining {
-                let (stored_value, blob_ref) = if is_blob_item(&record.value) {
-                    let Some(blob_end) = blob_used.checked_add(record.value.len()) else {
-                        deferred.push(record);
-                        continue;
-                    };
-                    if blob_end > self.config.blob_segment_size {
-                        deferred.push(record);
-                        continue;
+                let (item, blob_ref) = match record.value.as_deref() {
+                    None => (Item::tombstone(record.storage_key), None),
+                    Some(value) if is_blob_item(value) => {
+                        let Some(blob_end) = blob_used.checked_add(value.len()) else {
+                            deferred.push(record);
+                            continue;
+                        };
+                        if blob_end > self.config.blob_segment_size {
+                            deferred.push(record);
+                            continue;
+                        }
+                        let blob_ref = BlobRef::new(blob_used, value.len())?;
+                        (
+                            Item::live(record.storage_key, encode_blob_ref(blob_ref)),
+                            Some(blob_ref),
+                        )
                     }
-                    let blob_ref = BlobRef::new(blob_used, record.value.len())?;
-                    (encode_blob_ref(blob_ref), Some(blob_ref))
-                } else {
-                    (encode_inline_value(&record.value), None)
-                };
-                let item = Item {
-                    storage_key: record.storage_key,
-                    value: stored_value,
+                    Some(value) => (
+                        Item::live(record.storage_key, encode_inline_value(value)),
+                        None,
+                    ),
                 };
                 if let Some(table_location) = active.append(item, false) {
                     if blob_ref.is_some() {
-                        blob_used += record.value.len();
+                        blob_used += record
+                            .value
+                            .as_ref()
+                            .expect("Blob record has a live value")
+                            .len();
                     }
-                    active.accepted_item_bytes +=
-                        (crate::types::STORAGE_KEY_BYTES + record.value.len()) as u64;
+                    if let Some(value) = &record.value {
+                        active.accepted_item_bytes +=
+                            (crate::types::STORAGE_KEY_BYTES + value.len()) as u64;
+                    }
                     record.table_location = Some(table_location);
                     record.blob_ref = blob_ref;
                     planned.push(record);
@@ -479,17 +519,33 @@ impl Kvkache {
                     "pending Item cannot fit in an empty Segment generation".into(),
                 ));
             }
-            if self.occupied_segments[sg_index]
-                && let Err(error) = self.prepare_segment_for_reuse(sg_index).await
-            {
-                self.restore_flush_records(planned.into_iter().chain(deferred));
-                return Err(error);
+            if self.occupied_segments[sg_index] {
+                let evicted = match self.prepare_segment_for_reuse(sg_index).await {
+                    Ok(evicted) => evicted,
+                    Err(error) => {
+                        self.restore_flush_records(planned.into_iter().chain(deferred));
+                        return Err(error);
+                    }
+                };
+                if !evicted.is_empty() {
+                    for record in planned.iter_mut().chain(&mut deferred) {
+                        if evicted.contains(&record.storage_key) {
+                            record.previous = None;
+                            record.previous_live = false;
+                        }
+                    }
+                }
             }
 
             let blob_values = planned
                 .iter()
                 .filter(|record| record.blob_ref.is_some())
-                .map(|record| record.value.as_slice())
+                .map(|record| {
+                    record
+                        .value
+                        .as_deref()
+                        .expect("Blob record has a live value")
+                })
                 .collect::<Vec<_>>();
             let blob_physical_bytes = match self
                 .blob_segment
@@ -518,15 +574,24 @@ impl Kvkache {
             let mut publish_error = None;
             for record in &planned {
                 let table_location = record.table_location.unwrap();
+                let new_live = record.value.is_some();
                 let replaced = record.previous.is_some_and(|previous| {
                     self.table
                         .replace_location(&record.storage_key, previous, table_location)
                 });
-                if !replaced
-                    && let Err(error) = self.table.insert(&record.storage_key, table_location)
-                {
+                if replaced {
+                    match (record.previous_live, new_live) {
+                        (true, false) => {
+                            self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
+                        }
+                        (false, true) => self.stable_live_keys += 1,
+                        _ => {}
+                    }
+                } else if let Err(error) = self.table.insert(&record.storage_key, table_location) {
                     publish_error = Some(error);
                     break;
+                } else if new_live {
+                    self.stable_live_keys += 1;
                 }
                 published += 1;
             }
@@ -631,8 +696,9 @@ impl Kvkache {
             self.insert_pending(
                 record.storage_key,
                 PendingItem {
-                    value: Some(record.value),
+                    value: record.value,
                     previous: record.previous,
+                    previous_live: record.previous_live,
                 },
             );
         }
@@ -649,7 +715,7 @@ impl Kvkache {
         format!(
             "keys={} stable_keys={} pending_items={} pending_value_bytes={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
             self.logical_key_count(),
-            self.table.entry_count,
+            self.stable_live_keys,
             self.pending.len(),
             self.pending_value_bytes(),
             self.table.load_factor() * 100.0,
@@ -717,11 +783,11 @@ impl Kvkache {
     }
 
     fn logical_key_count(&self) -> usize {
-        let mut count = self.table.entry_count;
+        let mut count = self.stable_live_keys;
         for pending in self.pending.values() {
-            match (pending.previous, pending.value.as_ref()) {
-                (None, Some(_)) => count += 1,
-                (Some(_), None) => count = count.saturating_sub(1),
+            match (pending.previous_live, pending.value.is_some()) {
+                (true, false) => count = count.saturating_sub(1),
+                (false, true) => count += 1,
                 _ => {}
             }
         }
@@ -747,10 +813,7 @@ fn stored_payload_len(value: &[u8]) -> usize {
 
 fn pending_accounted_bytes(value: Option<&[u8]>) -> (usize, usize) {
     let Some(value) = value else {
-        return (
-            crate::types::STORAGE_KEY_BYTES + std::mem::size_of::<TableLocation>(),
-            0,
-        );
+        return (item_offsets_bytes(1) + ITEM_FIXED_BYTES, 0);
     };
     let sg_bytes = item_offsets_bytes(1) + ITEM_FIXED_BYTES + stored_payload_len(value);
     let blob_bytes = if is_blob_item(value) { value.len() } else { 0 };
