@@ -36,15 +36,21 @@ pub(crate) fn derive_storage_key(
 
     server_cipher.encrypt_blocks(blocks);
 
-    for index in 0..16 {
-        let first = blocks[0][index];
-        blocks[0][index] ^= blocks[1][(index + 1) % 16];
-        blocks[1][index] ^= first;
+    let [first_block, second_block] = blocks;
+    for (first, second) in first_block.iter_mut().zip(second_block.iter_mut()) {
+        let first_byte = *first;
+        let second_byte = *second;
+        *first = first_byte ^ second_byte;
+        *second = first_byte ^ gf_double(second_byte);
     }
 
     server_cipher.encrypt_blocks(blocks);
 
     StorageKey::new(bytes)
+}
+
+fn gf_double(byte: u8) -> u8 {
+    (byte << 1) ^ (0x1b & 0u8.wrapping_sub(byte >> 7))
 }
 
 pub struct ThreadedKvkache {
