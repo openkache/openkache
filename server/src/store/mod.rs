@@ -7,11 +7,15 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
+use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut};
+use std::path::Path;
 use std::time::Duration;
 
 use compio::BufResult;
+use compio::buf::{IoBuf, IoBufMut, SetLen};
 use compio::fs::{File, OpenOptions};
-use compio::io::AsyncWriteAtExt;
+use compio::io::AsyncWriteAt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use crate::*;
@@ -22,6 +26,112 @@ mod segment_io;
 
 pub(crate) use self::blob::*;
 pub(crate) use self::bucket::*;
+
+#[repr(C, align(4096))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DirectIoPage([u8; BUCKET_BYTES]);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectIoBuffer {
+    pages: Vec<DirectIoPage>,
+    initialized_len: usize,
+}
+
+impl DirectIoBuffer {
+    pub(crate) fn zeroed(len: usize) -> Self {
+        assert!(len > 0 && len.is_multiple_of(BUCKET_BYTES));
+        Self {
+            pages: (0..len / BUCKET_BYTES)
+                .map(|_| DirectIoPage([0; BUCKET_BYTES]))
+                .collect(),
+            initialized_len: len,
+        }
+    }
+
+    pub(crate) fn for_read(len: usize) -> Self {
+        let mut buffer = Self::zeroed(len);
+        buffer.initialized_len = 0;
+        buffer
+    }
+
+    fn capacity(&self) -> usize {
+        self.pages.len() * BUCKET_BYTES
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.pages.as_ptr().cast()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.pages.as_mut_ptr().cast()
+    }
+}
+
+impl Deref for DirectIoBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: every DirectIoPage byte is initialized when allocated, and
+        // initialized_len never exceeds the allocation.
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.initialized_len) }
+    }
+}
+
+impl DerefMut for DirectIoBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: the allocation is exclusively borrowed and initialized_len
+        // never exceeds its capacity.
+        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), self.initialized_len) }
+    }
+}
+
+impl IoBuf for DirectIoBuffer {
+    fn as_init(&self) -> &[u8] {
+        self
+    }
+}
+
+impl IoBufMut for DirectIoBuffer {
+    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        let capacity = self.capacity();
+        // SAFETY: the contiguous page allocation contains capacity bytes.
+        // Treating initialized bytes as MaybeUninit is permitted.
+        unsafe {
+            std::slice::from_raw_parts_mut(self.as_mut_ptr().cast::<MaybeUninit<u8>>(), capacity)
+        }
+    }
+}
+
+impl SetLen for DirectIoBuffer {
+    unsafe fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= self.capacity());
+        self.initialized_len = len;
+    }
+}
+
+pub(crate) async fn open_direct_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_DIRECT)
+        .open(path)
+        .await
+}
+
+pub(crate) fn require_complete_direct_io(
+    operation: &str,
+    completed: usize,
+    expected: usize,
+) -> Result<()> {
+    if completed != expected {
+        return Err(KvError::Worker(format!(
+            "short direct {operation}: completed {completed} of {expected} bytes"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SetOutcome {
@@ -66,13 +176,7 @@ impl Kvkache {
         if let Some(parent) = config.data_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let data = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&config.data_path)
-            .await?;
+        let data = open_direct_file(&config.data_path).await?;
         data.set_len(config.data_bytes()).await?;
         let blob_segment = BlobSegment::open(&config).await?;
 
@@ -186,7 +290,7 @@ impl Kvkache {
         let blob_ref = self.blob_segment.append(&storage_key, value).await?;
         self.io
             .data_written
-            .set(self.io.data_written.get() + BLOB_STORAGE_KEY_BYTES + blob_ref.value_len);
+            .set(self.io.data_written.get() + blob_ref.extent_len);
 
         let table_location = TableLocation::blob();
         if let Some(previous) = &previous {
@@ -252,7 +356,7 @@ impl Kvkache {
                 let value = self.blob_segment.read(storage_key, blob_ref).await?;
                 self.io
                     .data_read
-                    .set(self.io.data_read.get() + BLOB_STORAGE_KEY_BYTES + blob_ref.value_len);
+                    .set(self.io.data_read.get() + blob_ref.extent_len);
                 return Ok(Some(LocatedItem {
                     table_location,
                     item: Item {
@@ -343,14 +447,15 @@ impl Kvkache {
             return Ok(());
         }
         let offset = active.sg_index as u64 * self.config.segment_size as u64;
-        let write = self.data.write_all_at(active.bytes, offset);
+        let expected = active.bytes.len();
+        let write = self.data.write_at(active.bytes, offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
             Duration::from_micros(self.config.write_max_time_us),
             write,
         )
         .await
         .map_err(|_| KvError::Timeout("Segment write"))?;
-        result?;
+        require_complete_direct_io("Segment write", result?, expected)?;
         self.io
             .data_written
             .set(self.io.data_written.get() + bytes.len() as u64);

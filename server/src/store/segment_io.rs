@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use compio::BufResult;
-use compio::io::AsyncReadAtExt;
+use compio::io::AsyncReadAt;
 
 use crate::*;
 
@@ -12,19 +12,19 @@ impl Kvkache {
         &self,
         sg_index: usize,
         bucket_index: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<DirectIoBuffer> {
         let offset = sg_index as u64 * self.config.segment_size as u64
             + bucket_index as u64 * BUCKET_BYTES as u64;
         let read = self
             .data
-            .read_exact_at(Vec::with_capacity(BUCKET_BYTES), offset);
+            .read_at(DirectIoBuffer::for_read(BUCKET_BYTES), offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
             Duration::from_micros(self.config.read_max_time_us),
             read,
         )
         .await
         .map_err(|_| KvError::Timeout("Bucket read"))?;
-        result?;
+        require_complete_direct_io("Bucket read", result?, BUCKET_BYTES)?;
         self.io
             .data_read
             .set(self.io.data_read.get() + bytes.len() as u64);
