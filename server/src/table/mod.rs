@@ -24,6 +24,7 @@ pub(crate) struct Table {
     fingerprint_bits: usize,
     fingerprint_hash_offset_bits: usize,
     sg_index_bits: usize,
+    bucket_choice_bits: usize,
     pub(crate) entry_count: usize,
 }
 
@@ -35,6 +36,7 @@ impl Table {
             false,
             config.unary_count,
             config.sg_index_bits,
+            config.bucket_choice_bits(),
         )?;
         let back_subtable_layout = SubtableLayout::new(
             config.fingerprint_bits,
@@ -42,6 +44,7 @@ impl Table {
             true,
             config.unary_count,
             config.sg_index_bits,
+            config.bucket_choice_bits(),
         )?;
         let entries_per_front = front_subtable_layout.entry_capacity as f64
             + back_subtable_layout.entry_capacity as f64 / config.front_back_ratio as f64;
@@ -69,6 +72,7 @@ impl Table {
             fingerprint_bits: config.fingerprint_bits,
             fingerprint_hash_offset_bits: config.fingerprint_hash_offset_bits,
             sg_index_bits: config.sg_index_bits,
+            bucket_choice_bits: config.bucket_choice_bits(),
             entry_count: 0,
         })
     }
@@ -109,7 +113,7 @@ impl Table {
         let mut seen = HashSet::new();
         encoded
             .into_iter()
-            .map(|value| TableLocation::decode(value, self.sg_index_bits))
+            .map(|value| TableLocation::decode(value, self.sg_index_bits, self.bucket_choice_bits))
             .filter(|location| seen.insert(*location))
             .collect()
     }
@@ -119,7 +123,7 @@ impl Table {
         storage_key: &StorageKey,
         table_location: TableLocation,
     ) -> Result<()> {
-        if !table_location.is_valid(self.sg_index_bits) {
+        if !table_location.is_valid(self.sg_index_bits, self.bucket_choice_bits) {
             return Err(KvError::InvalidConfig(
                 "Table Location does not fit configured Segment/Bucket-hash fields".into(),
             ));
@@ -128,7 +132,7 @@ impl Table {
         let entry = SubtableEntry {
             unary_index,
             fingerprint,
-            table_location: table_location.encode(self.sg_index_bits),
+            table_location: table_location.encode(self.sg_index_bits, self.bucket_choice_bits),
             crumb: 0,
         };
         let saved = self.front_table[front_subtable_index].clone();
@@ -160,11 +164,11 @@ impl Table {
         storage_key: &StorageKey,
         table_location: TableLocation,
     ) -> bool {
-        if !table_location.is_valid(self.sg_index_bits) {
+        if !table_location.is_valid(self.sg_index_bits, self.bucket_choice_bits) {
             return false;
         }
         let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
-        let encoded = table_location.encode(self.sg_index_bits);
+        let encoded = table_location.encode(self.sg_index_bits, self.bucket_choice_bits);
         let was_full = self.front_table[front_subtable_index]
             .entry_count(&self.front_subtable_layout)
             == self.front_subtable_layout.entry_capacity;
@@ -225,15 +229,14 @@ impl Table {
         previous: TableLocation,
         replacement: TableLocation,
     ) -> bool {
-        if !previous.is_valid(self.sg_index_bits) || !replacement.is_valid(self.sg_index_bits) {
+        if !previous.is_valid(self.sg_index_bits, self.bucket_choice_bits)
+            || !replacement.is_valid(self.sg_index_bits, self.bucket_choice_bits)
+        {
             return false;
         }
-        if previous == replacement {
-            return true;
-        }
         let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
-        let old = previous.encode(self.sg_index_bits);
-        let new = replacement.encode(self.sg_index_bits);
+        let old = previous.encode(self.sg_index_bits, self.bucket_choice_bits);
+        let new = replacement.encode(self.sg_index_bits, self.bucket_choice_bits);
         let front_entry_slots = self.front_table[front_subtable_index].matching_entry_slots(
             &self.front_subtable_layout,
             unary_index,

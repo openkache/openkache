@@ -1,8 +1,8 @@
 //! Core cache engine and its Segment lifecycle.
 //!
-//! Live Items and Tombstones form a circular append log. The active RAM
-//! Segment is newest; immutable SSD records are ordered by their circular
-//! distance behind the write cursor.
+//! A bounded pending map coalesces the latest writes before flush. Live Items
+//! and Tombstones form a circular SG log; each SG is reused with its paired
+//! dense Blob generation.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -143,12 +143,22 @@ pub enum SetOutcome {
 pub(crate) struct KvkacheIoStats {
     pub(crate) data_written: u64,
     pub(crate) data_read: u64,
+    pub(crate) blob_data_written: u64,
+    pub(crate) blob_data_read: u64,
 }
 
 #[derive(Default)]
 struct IoCounters {
     data_written: Cell<u64>,
     data_read: Cell<u64>,
+    blob_data_written: Cell<u64>,
+    blob_data_read: Cell<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum SegmentFlushReason {
+    Capacity,
+    Sync,
 }
 
 struct LocatedItem {
@@ -156,19 +166,42 @@ struct LocatedItem {
     item: Item,
 }
 
+#[derive(Debug)]
+pub(crate) struct PendingItem {
+    pub(crate) value: Option<Vec<u8>>,
+    pub(crate) previous: Option<TableLocation>,
+    pub(crate) previous_live: bool,
+}
+
+struct FlushRecord {
+    storage_key: StorageKey,
+    value: Option<Vec<u8>>,
+    previous: Option<TableLocation>,
+    previous_live: bool,
+    table_location: Option<TableLocation>,
+    blob_ref: Option<BlobRef>,
+}
+
 pub(crate) struct Kvkache {
     config: Config,
     data: File,
     pub(crate) table: Table,
     pub(crate) blob_segment: BlobSegment,
-    pub(crate) blob_refs: HashMap<StorageKey, BlobRef>,
-    pub(crate) active: Option<MutableSegment>,
-    pub(crate) active_blob: Option<MutableBlobSegment>,
+    pub(crate) pending: HashMap<StorageKey, PendingItem>,
+    pub(crate) pending_sg_bytes: usize,
+    pub(crate) pending_blob_bytes: usize,
     pub(crate) occupied_segments: Vec<bool>,
-    pub(crate) regular_segment_occupied: Vec<bool>,
-    pub(crate) blob_segment_used_bytes: Vec<usize>,
+    stable_live_keys: usize,
     next_segment_index: usize,
     pub(crate) segment_flushes: u64,
+    pub(crate) segment_capacity_flushes: u64,
+    pub(crate) segment_sync_flushes: u64,
+    pub(crate) segment_fill_used_bytes: u64,
+    pub(crate) segment_fill_capacity_bytes: u64,
+    pub(crate) segment_capacity_fill_used_bytes: u64,
+    pub(crate) segment_capacity_fill_capacity_bytes: u64,
+    pub(crate) segment_sync_fill_used_bytes: u64,
+    pub(crate) segment_sync_fill_capacity_bytes: u64,
     pub(crate) segment_reuses: u64,
     io: IoCounters,
 }
@@ -186,14 +219,21 @@ impl Kvkache {
         Ok(Self {
             table: Table::new(&config)?,
             blob_segment,
-            blob_refs: HashMap::new(),
-            active: None,
-            active_blob: None,
+            pending: HashMap::new(),
+            pending_sg_bytes: 0,
+            pending_blob_bytes: 0,
             occupied_segments: vec![false; config.segment_count],
-            regular_segment_occupied: vec![false; config.segment_count],
-            blob_segment_used_bytes: vec![0; config.segment_count],
+            stable_live_keys: 0,
             next_segment_index: 0,
             segment_flushes: 0,
+            segment_capacity_flushes: 0,
+            segment_sync_flushes: 0,
+            segment_fill_used_bytes: 0,
+            segment_fill_capacity_bytes: 0,
+            segment_capacity_fill_used_bytes: 0,
+            segment_capacity_fill_capacity_bytes: 0,
+            segment_sync_fill_used_bytes: 0,
+            segment_sync_fill_capacity_bytes: 0,
             segment_reuses: 0,
             io: IoCounters::default(),
             config,
@@ -202,10 +242,18 @@ impl Kvkache {
     }
 
     pub(crate) async fn get(&self, storage_key: &StorageKey) -> Result<Option<Vec<u8>>> {
-        Ok(self
-            .locate(storage_key)
-            .await?
-            .and_then(|located| (!located.item.is_tombstone).then_some(located.item.value)))
+        if let Some(pending) = self.pending.get(storage_key) {
+            return Ok(pending.value.clone());
+        }
+        let Some(located) = self.locate_stable_record(storage_key).await? else {
+            return Ok(None);
+        };
+        if located.item.is_tombstone {
+            return Ok(None);
+        }
+        self.read_stored_value(located.table_location, &located.item.value)
+            .await
+            .map(Some)
     }
 
     pub(crate) async fn get_many(
@@ -232,229 +280,87 @@ impl Kvkache {
         storage_key: StorageKey,
         value: &[u8],
     ) -> Result<SetOutcome> {
-        if is_blob_item(value) {
-            return self.set_blob(storage_key, value).await;
+        self.validate_value(value)?;
+        let (previous, previous_live, outcome) =
+            if let Some(pending) = self.take_pending(&storage_key) {
+                let outcome = if pending.value.is_some() {
+                    SetOutcome::Replaced
+                } else {
+                    SetOutcome::Created
+                };
+                (pending.previous, pending.previous_live, outcome)
+            } else {
+                let previous = self.locate_stable_record(&storage_key).await?;
+                let previous_live = previous
+                    .as_ref()
+                    .is_some_and(|located| !located.item.is_tombstone);
+                let location = previous.map(|located| located.table_location);
+                let outcome = if previous_live {
+                    SetOutcome::Replaced
+                } else {
+                    SetOutcome::Created
+                };
+                (location, previous_live, outcome)
+            };
+        self.insert_pending(
+            storage_key,
+            PendingItem {
+                value: Some(value.to_vec()),
+                previous,
+                previous_live,
+            },
+        );
+        if self.pending_should_flush() {
+            self.flush_pending(SegmentFlushReason::Capacity).await?;
         }
-        self.set_bucket_item(storage_key, value).await
-    }
-
-    async fn set_bucket_item(
-        &mut self,
-        storage_key: StorageKey,
-        value: &[u8],
-    ) -> Result<SetOutcome> {
-        let item_bytes = item_offsets_bytes(1) + ITEM_FIXED_BYTES + value.len();
-        let capacity = BUCKET_BYTES - 1;
-        if item_bytes > capacity {
-            return Err(KvError::ItemTooLarge {
-                bytes: item_bytes,
-                capacity,
-            });
-        }
-        let previous = self.locate(&storage_key).await?;
-        let was_live = previous
-            .as_ref()
-            .is_some_and(|located| !located.item.is_tombstone);
-        let item = Item::live(storage_key, value.to_vec());
-        let replacement = self
-            .active
-            .as_mut()
-            .map(|active| active.replace(&storage_key, item.clone(), true));
-        let table_location = match replacement {
-            Some(MutableItemReplace::Replaced(table_location)) => table_location,
-            Some(MutableItemReplace::NotFound | MutableItemReplace::NoSpace) | None => {
-                self.append_with_retry(item, true).await?
-            }
-        };
-        if let Some(previous) = &previous {
-            if !self
-                .table
-                .replace_location(&storage_key, previous.table_location, table_location)
-            {
-                // Opening the next active Segment can reuse the Segment that held
-                // `previous`, removing its Table entry before this append finishes.
-                if let Err(error) = self.table.insert(&storage_key, table_location) {
-                    if table_location != previous.table_location
-                        && let Some(active) = self.active.as_mut()
-                    {
-                        active.remove(&storage_key);
-                    }
-                    return Err(error);
-                }
-            }
-        } else {
-            self.table.insert(&storage_key, table_location)?;
-        }
-        if previous
-            .as_ref()
-            .is_some_and(|previous| previous.table_location.is_blob())
-            && let Some(blob_ref) = self.blob_refs.remove(&storage_key)
-        {
-            self.remove_active_blob(&storage_key, blob_ref);
-        }
-        Ok(if was_live {
-            SetOutcome::Replaced
-        } else {
-            SetOutcome::Created
-        })
-    }
-
-    async fn set_blob(&mut self, storage_key: StorageKey, value: &[u8]) -> Result<SetOutcome> {
-        let previous = self.locate(&storage_key).await?;
-        let was_live = previous
-            .as_ref()
-            .is_some_and(|located| !located.item.is_tombstone);
-        let previous_blob_ref = self.blob_refs.get(&storage_key).copied();
-        let replacement = previous_blob_ref.map_or(MutableBlobReplace::NotFound, |blob_ref| {
-            self.active_blob
-                .as_mut()
-                .map_or(MutableBlobReplace::NotFound, |active| {
-                    active.replace(&storage_key, blob_ref, value)
-                })
-        });
-        let blob_ref = match replacement {
-            MutableBlobReplace::Replaced => previous_blob_ref.expect("replacement has a BlobRef"),
-            MutableBlobReplace::NotFound | MutableBlobReplace::NoSpace => {
-                self.append_blob_with_retry(storage_key, value).await?
-            }
-        };
-        // A rotation while appending can convert the previous active reference
-        // to a stored reference. Read it again before publishing the replacement.
-        let superseded_blob_ref = self.blob_refs.get(&storage_key).copied();
-
-        let table_location = TableLocation::blob();
-        if let Some(previous) = &previous {
-            if !self
-                .table
-                .replace_location(&storage_key, previous.table_location, table_location)
-                && let Err(error) = self.table.insert(&storage_key, table_location)
-            {
-                if superseded_blob_ref != Some(blob_ref) {
-                    self.remove_active_blob(&storage_key, blob_ref);
-                }
-                return Err(error);
-            }
-        } else {
-            if let Err(error) = self.table.insert(&storage_key, table_location) {
-                self.remove_active_blob(&storage_key, blob_ref);
-                return Err(error);
-            }
-        }
-        if let Some(previous) = &previous
-            && !previous.table_location.is_blob()
-            && let Some(active) = self.active.as_mut()
-            && active.sg_index == previous.table_location.sg_index as usize
-        {
-            let removed = active.remove(&storage_key);
-            debug_assert!(removed);
-        }
-        if let Some(previous_blob_ref) = superseded_blob_ref
-            && previous_blob_ref != blob_ref
-        {
-            self.remove_active_blob(&storage_key, previous_blob_ref);
-        }
-        self.blob_refs.insert(storage_key, blob_ref);
-        Ok(if was_live {
-            SetOutcome::Replaced
-        } else {
-            SetOutcome::Created
-        })
+        Ok(outcome)
     }
 
     pub(crate) async fn delete(&mut self, storage_key: &StorageKey) -> Result<bool> {
-        let Some(previous) = self.locate(storage_key).await? else {
+        if let Some(mut pending) = self.take_pending(storage_key) {
+            if pending.value.is_none() {
+                self.insert_pending(*storage_key, pending);
+                return Ok(false);
+            }
+            if pending.previous.is_some() {
+                pending.value = None;
+                self.insert_pending(*storage_key, pending);
+            }
+            if self.pending_should_flush() {
+                self.flush_pending(SegmentFlushReason::Capacity).await?;
+            }
+            return Ok(true);
+        }
+        let Some(previous) = self.locate_stable_record(storage_key).await? else {
             return Ok(false);
         };
         if previous.item.is_tombstone {
             return Ok(false);
         }
-        let tombstone = Item::tombstone(*storage_key);
-        let replacement = self
-            .active
-            .as_mut()
-            .map(|active| active.replace(storage_key, tombstone.clone(), false));
-        let table_location = match replacement {
-            Some(MutableItemReplace::Replaced(table_location)) => table_location,
-            Some(MutableItemReplace::NotFound | MutableItemReplace::NoSpace) | None => {
-                self.append_with_retry(tombstone, false).await?
-            }
-        };
-        if !self
-            .table
-            .replace_location(storage_key, previous.table_location, table_location)
-        {
-            // The circular reuse needed to open this active Segment may have
-            // removed `previous`; in that case the Tombstone becomes a new entry.
-            if let Err(error) = self.table.insert(storage_key, table_location) {
-                if table_location != previous.table_location
-                    && let Some(active) = self.active.as_mut()
-                {
-                    active.remove(storage_key);
-                }
-                return Err(error);
-            }
-        }
-        if previous.table_location.is_blob()
-            && let Some(blob_ref) = self.blob_refs.remove(storage_key)
-        {
-            self.remove_active_blob(storage_key, blob_ref);
+        self.insert_pending(
+            *storage_key,
+            PendingItem {
+                value: None,
+                previous: Some(previous.table_location),
+                previous_live: true,
+            },
+        );
+        if self.pending_should_flush() {
+            self.flush_pending(SegmentFlushReason::Capacity).await?;
         }
         Ok(true)
     }
 
     pub(crate) async fn sync(&mut self) -> Result<()> {
-        self.flush_active_segment().await
+        self.flush_pending(SegmentFlushReason::Sync).await?;
+        self.blob_segment.sync().await?;
+        self.data.sync_data().await?;
+        Ok(())
     }
 
-    async fn locate(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
-        let candidates = self.table.candidate_locations(storage_key);
-        if let Some(active) = &self.active {
-            for table_location in candidates.iter().copied().filter(|location| {
-                !location.is_blob() && location.sg_index as usize == active.sg_index
-            }) {
-                if let Some(item) = active.find(storage_key, table_location.bucket_hash_index) {
-                    return Ok(Some(LocatedItem {
-                        table_location,
-                        item,
-                    }));
-                }
-            }
-        }
-        if candidates.iter().any(|location| location.is_blob())
-            && let Some(blob_ref) = self.blob_refs.get(storage_key).copied()
-        {
-            let value = match blob_ref {
-                BlobRef::Active { .. } => self
-                    .active_blob
-                    .as_ref()
-                    .ok_or_else(|| KvError::Worker("active Blob SG is missing".into()))?
-                    .read(storage_key, blob_ref)?,
-                BlobRef::Stored { sg_index, .. } => {
-                    let (value, bytes_read) = self
-                        .blob_segment
-                        .read(
-                            storage_key,
-                            blob_ref,
-                            self.blob_segment_used_bytes[sg_index as usize],
-                        )
-                        .await?;
-                    self.io.data_read.set(self.io.data_read.get() + bytes_read);
-                    value
-                }
-            };
-            return Ok(Some(LocatedItem {
-                table_location: TableLocation::blob(),
-                item: Item::live(*storage_key, value),
-            }));
-        }
+    async fn locate_stable_record(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
         let mut newest: Option<(usize, LocatedItem)> = None;
-        for table_location in candidates.into_iter().filter(|location| {
-            !location.is_blob()
-                && self
-                    .active
-                    .as_ref()
-                    .is_none_or(|active| location.sg_index as usize != active.sg_index)
-        }) {
+        for table_location in self.table.candidate_locations(storage_key) {
             let Some(item) = self.read_location(storage_key, table_location).await? else {
                 continue;
             };
@@ -475,6 +381,30 @@ impl Kvkache {
         Ok(newest.map(|(_, located)| located))
     }
 
+    async fn read_stored_value(
+        &self,
+        table_location: TableLocation,
+        encoded: &[u8],
+    ) -> Result<Vec<u8>> {
+        match decode_stored_value(encoded)? {
+            StoredValue::Inline(value) => Ok(value.to_vec()),
+            StoredValue::Blob(blob_ref) => {
+                let value = self
+                    .blob_segment
+                    .read(table_location.sg_index as usize, blob_ref)
+                    .await?;
+                let physical_bytes = self.blob_segment.physical_read_bytes(blob_ref);
+                self.io
+                    .data_read
+                    .set(self.io.data_read.get() + physical_bytes);
+                self.io
+                    .blob_data_read
+                    .set(self.io.blob_data_read.get() + physical_bytes);
+                Ok(value)
+            }
+        }
+    }
+
     fn ssd_segment_age(&self, sg_index: usize) -> usize {
         let count = self.config.segment_count;
         let newest_ssd = (self.next_segment_index + count - 1) % count;
@@ -486,10 +416,9 @@ impl Kvkache {
         storage_key: &StorageKey,
         table_location: TableLocation,
     ) -> Result<Option<Item>> {
-        debug_assert!(!table_location.is_blob());
         let sg_index = table_location.sg_index as usize;
         if !self
-            .regular_segment_occupied
+            .occupied_segments
             .get(sg_index)
             .copied()
             .unwrap_or(false)
@@ -505,136 +434,290 @@ impl Kvkache {
         Ok(find_item_in_bucket(&bytes, storage_key))
     }
 
-    async fn append_with_retry(
-        &mut self,
-        item: Item,
-        count_accepted: bool,
-    ) -> Result<TableLocation> {
-        loop {
-            self.ensure_active_segment().await?;
-            if let Some(table_location) = self
-                .active
-                .as_mut()
-                .unwrap()
-                .append(item.clone(), count_accepted)
-            {
-                return Ok(table_location);
-            }
-            self.flush_active_segment().await?;
-        }
-    }
-
-    async fn append_blob_with_retry(
-        &mut self,
-        storage_key: StorageKey,
-        value: &[u8],
-    ) -> Result<BlobRef> {
-        let required_bytes = BLOB_ITEM_FIXED_BYTES
-            .checked_add(value.len())
-            .ok_or_else(|| KvError::Usage("Blob Item length overflow".into()))?;
-        if required_bytes > self.config.segment_size {
-            return Err(KvError::BlobSegmentFull {
-                required_bytes: required_bytes as u64,
-                remaining_bytes: self.config.segment_size as u64,
-            });
-        }
-        loop {
-            self.ensure_active_segment().await?;
-            if let Some(blob_ref) = self
-                .active_blob
-                .as_mut()
-                .expect("active Blob SG accompanies active Bucket SG")
-                .append(storage_key, value)
-            {
-                return Ok(blob_ref);
-            }
-            self.flush_active_segment().await?;
-        }
-    }
-
-    async fn ensure_active_segment(&mut self) -> Result<()> {
-        if self.active.is_some() {
+    async fn flush_pending(&mut self, reason: SegmentFlushReason) -> Result<()> {
+        if self.pending.is_empty() {
             return Ok(());
         }
-        let sg_index = self.next_segment_index;
-        if self.occupied_segments[sg_index] {
-            self.prepare_segment_for_reuse(sg_index).await?;
-        }
-        self.active = Some(MutableSegment::new(&self.config, sg_index));
-        self.active_blob = Some(MutableBlobSegment::new(&self.config, sg_index));
-        Ok(())
-    }
+        let pending = std::mem::take(&mut self.pending);
+        self.pending_sg_bytes = 0;
+        self.pending_blob_bytes = 0;
+        let mut remaining = pending
+            .into_iter()
+            .filter_map(|(storage_key, pending)| {
+                (pending.value.is_some() || pending.previous.is_some()).then_some(FlushRecord {
+                    storage_key,
+                    value: pending.value,
+                    previous: pending.previous,
+                    previous_live: pending.previous_live,
+                    table_location: None,
+                    blob_ref: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        remaining.sort_unstable_by(|left, right| {
+            right
+                .value
+                .as_ref()
+                .map_or(0, Vec::len)
+                .cmp(&left.value.as_ref().map_or(0, Vec::len))
+                .then_with(|| left.storage_key.cmp(&right.storage_key))
+        });
 
-    async fn flush_active_segment(&mut self) -> Result<()> {
-        let Some(active) = self.active.take() else {
-            debug_assert!(self.active_blob.is_none());
-            return Ok(());
-        };
-        let active_blob = self
-            .active_blob
-            .take()
-            .expect("active Blob SG accompanies active Bucket SG");
-        debug_assert_eq!(active.sg_index, active_blob.sg_index);
-        if active.item_count == 0 && active_blob.is_empty() {
-            return Ok(());
-        }
-        let sg_index = active.sg_index;
-        let regular_occupied = active.item_count != 0;
-        if regular_occupied {
-            let offset = sg_index as u64 * self.config.segment_size as u64;
-            let expected = active.bytes.len();
-            let write = self.data.write_at(active.bytes, offset);
-            let BufResult(result, bytes) = compio::runtime::time::timeout(
-                Duration::from_micros(self.config.write_max_time_us),
-                write,
-            )
-            .await
-            .map_err(|_| KvError::Timeout("Segment write"))?;
-            require_complete_direct_io("Segment write", result?, expected)?;
-            self.io
-                .data_written
-                .set(self.io.data_written.get() + bytes.len() as u64);
-            self.data.sync_data().await?;
-        }
+        while !remaining.is_empty() {
+            let sg_index = self.next_segment_index;
+            let mut active = MutableSegment::new(&self.config, sg_index);
+            let mut planned = Vec::new();
+            let mut deferred = Vec::new();
+            let mut blob_used = 0usize;
 
-        let encoded_blob = active_blob.encode()?;
-        let blob_logical_len = encoded_blob
-            .as_ref()
-            .map_or(0, |encoded| encoded.logical_len);
-        if let Some(encoded_blob) = encoded_blob {
-            let bytes_written = self
-                .blob_segment
-                .write_segment(sg_index, encoded_blob.bytes)
-                .await?;
-            self.io
-                .data_written
-                .set(self.io.data_written.get() + bytes_written);
-            self.blob_segment.sync().await?;
-            for (storage_key, active_ref, stored_ref) in encoded_blob.refs {
-                if self.blob_refs.get(&storage_key) == Some(&active_ref) {
-                    self.blob_refs.insert(storage_key, stored_ref);
+            for mut record in remaining {
+                let (item, blob_ref) = match record.value.as_deref() {
+                    None => (Item::tombstone(record.storage_key), None),
+                    Some(value) if is_blob_item(value) => {
+                        let Some(blob_end) = blob_used.checked_add(value.len()) else {
+                            deferred.push(record);
+                            continue;
+                        };
+                        if blob_end > self.config.blob_segment_size {
+                            deferred.push(record);
+                            continue;
+                        }
+                        let blob_ref = BlobRef::new(blob_used, value.len())?;
+                        (
+                            Item::live(record.storage_key, encode_blob_ref(blob_ref)),
+                            Some(blob_ref),
+                        )
+                    }
+                    Some(value) => (
+                        Item::live(record.storage_key, encode_inline_value(value)),
+                        None,
+                    ),
+                };
+                if let Some(table_location) = active.append(item, false) {
+                    if blob_ref.is_some() {
+                        blob_used += record
+                            .value
+                            .as_ref()
+                            .expect("Blob record has a live value")
+                            .len();
+                    }
+                    if let Some(value) = &record.value {
+                        active.accepted_item_bytes +=
+                            (crate::types::STORAGE_KEY_BYTES + value.len()) as u64;
+                    }
+                    record.table_location = Some(table_location);
+                    record.blob_ref = blob_ref;
+                    planned.push(record);
+                } else {
+                    deferred.push(record);
                 }
             }
+
+            if planned.is_empty() {
+                self.restore_flush_records(deferred);
+                return Err(KvError::Worker(
+                    "pending Item cannot fit in an empty Segment generation".into(),
+                ));
+            }
+            if self.occupied_segments[sg_index] {
+                let evicted = match self.prepare_segment_for_reuse(sg_index).await {
+                    Ok(evicted) => evicted,
+                    Err(error) => {
+                        self.restore_flush_records(planned.into_iter().chain(deferred));
+                        return Err(error);
+                    }
+                };
+                if !evicted.is_empty() {
+                    for record in planned.iter_mut().chain(&mut deferred) {
+                        if evicted.contains(&record.storage_key) {
+                            record.previous = None;
+                            record.previous_live = false;
+                        }
+                    }
+                }
+            }
+
+            let blob_values = planned
+                .iter()
+                .filter(|record| record.blob_ref.is_some())
+                .map(|record| {
+                    record
+                        .value
+                        .as_deref()
+                        .expect("Blob record has a live value")
+                })
+                .collect::<Vec<_>>();
+            let blob_physical_bytes = match self
+                .blob_segment
+                .write_segment(sg_index, &blob_values)
+                .await
+            {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.restore_flush_records(planned.into_iter().chain(deferred));
+                    return Err(error);
+                }
+            };
+            self.io
+                .data_written
+                .set(self.io.data_written.get() + blob_physical_bytes);
+            self.io
+                .blob_data_written
+                .set(self.io.blob_data_written.get() + blob_physical_bytes);
+
+            if let Err(error) = self.write_segment(active, reason).await {
+                self.restore_flush_records(planned.into_iter().chain(deferred));
+                return Err(error);
+            }
+
+            let mut published = 0usize;
+            let mut publish_error = None;
+            for record in &planned {
+                let table_location = record.table_location.unwrap();
+                let new_live = record.value.is_some();
+                let replaced = record.previous.is_some_and(|previous| {
+                    self.table
+                        .replace_location(&record.storage_key, previous, table_location)
+                });
+                if replaced {
+                    match (record.previous_live, new_live) {
+                        (true, false) => {
+                            self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
+                        }
+                        (false, true) => self.stable_live_keys += 1,
+                        _ => {}
+                    }
+                } else if let Err(error) = self.table.insert(&record.storage_key, table_location) {
+                    publish_error = Some(error);
+                    break;
+                } else if new_live {
+                    self.stable_live_keys += 1;
+                }
+                published += 1;
+            }
+            if let Some(error) = publish_error {
+                self.restore_flush_records(planned.into_iter().skip(published).chain(deferred));
+                return Err(error);
+            }
+            remaining = deferred;
         }
-        self.regular_segment_occupied[sg_index] = regular_occupied;
-        self.blob_segment_used_bytes[sg_index] = blob_logical_len;
-        self.occupied_segments[sg_index] = true;
-        self.next_segment_index = (sg_index + 1) % self.config.segment_count;
-        self.segment_flushes += 1;
         Ok(())
     }
 
-    fn remove_active_blob(&mut self, storage_key: &StorageKey, blob_ref: BlobRef) {
-        if let Some(active_blob) = self.active_blob.as_mut() {
-            active_blob.remove(storage_key, blob_ref);
+    async fn write_segment(
+        &mut self,
+        active: MutableSegment,
+        reason: SegmentFlushReason,
+    ) -> Result<()> {
+        let fill_used_bytes = active.used_bytes() as u64;
+        let offset = active.sg_index as u64 * self.config.segment_size as u64;
+        let expected = active.bytes.len();
+        let write = self.data.write_at(active.bytes, offset);
+        let BufResult(result, bytes) = compio::runtime::time::timeout(
+            Duration::from_micros(self.config.write_max_time_us),
+            write,
+        )
+        .await
+        .map_err(|_| KvError::Timeout("Segment write"))?;
+        require_complete_direct_io("Segment write", result?, expected)?;
+        self.io
+            .data_written
+            .set(self.io.data_written.get() + bytes.len() as u64);
+        self.blob_segment.sync().await?;
+        self.data.sync_data().await?;
+        self.occupied_segments[active.sg_index] = true;
+        self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
+        self.segment_flushes += 1;
+        match reason {
+            SegmentFlushReason::Capacity => {
+                self.segment_capacity_flushes += 1;
+                self.segment_capacity_fill_used_bytes += fill_used_bytes;
+                self.segment_capacity_fill_capacity_bytes += self.config.segment_size as u64;
+            }
+            SegmentFlushReason::Sync => {
+                self.segment_sync_flushes += 1;
+                self.segment_sync_fill_used_bytes += fill_used_bytes;
+                self.segment_sync_fill_capacity_bytes += self.config.segment_size as u64;
+            }
+        }
+        self.segment_fill_used_bytes += fill_used_bytes;
+        self.segment_fill_capacity_bytes += self.config.segment_size as u64;
+        Ok(())
+    }
+
+    fn validate_value(&self, value: &[u8]) -> Result<()> {
+        if is_blob_item(value) {
+            if value.len() > self.config.blob_segment_size || value.len() > u32::MAX as usize {
+                return Err(KvError::BlobSegmentFull {
+                    required_bytes: value.len() as u64,
+                    remaining_bytes: self.config.blob_segment_size as u64,
+                });
+            }
+            return Ok(());
+        }
+        let item_bytes =
+            item_offsets_bytes(1) + ITEM_FIXED_BYTES + STORED_VALUE_TAG_BYTES + value.len();
+        let capacity = BUCKET_BYTES - 1;
+        if item_bytes > capacity {
+            return Err(KvError::ItemTooLarge {
+                bytes: item_bytes,
+                capacity,
+            });
+        }
+        Ok(())
+    }
+
+    fn insert_pending(&mut self, storage_key: StorageKey, pending: PendingItem) {
+        let (sg_bytes, blob_bytes) = pending_accounted_bytes(pending.value.as_deref());
+        self.pending_sg_bytes = self.pending_sg_bytes.saturating_add(sg_bytes);
+        self.pending_blob_bytes = self.pending_blob_bytes.saturating_add(blob_bytes);
+        let replaced = self.pending.insert(storage_key, pending);
+        debug_assert!(replaced.is_none());
+    }
+
+    fn take_pending(&mut self, storage_key: &StorageKey) -> Option<PendingItem> {
+        let pending = self.pending.remove(storage_key)?;
+        let (sg_bytes, blob_bytes) = pending_accounted_bytes(pending.value.as_deref());
+        self.pending_sg_bytes = self.pending_sg_bytes.saturating_sub(sg_bytes);
+        self.pending_blob_bytes = self.pending_blob_bytes.saturating_sub(blob_bytes);
+        Some(pending)
+    }
+
+    fn pending_should_flush(&self) -> bool {
+        self.pending_sg_bytes >= self.config.segment_size
+            || self.pending_blob_bytes >= self.config.blob_segment_size
+    }
+
+    fn restore_flush_records<I>(&mut self, records: I)
+    where
+        I: IntoIterator<Item = FlushRecord>,
+    {
+        for record in records {
+            self.insert_pending(
+                record.storage_key,
+                PendingItem {
+                    value: record.value,
+                    previous: record.previous,
+                    previous_live: record.previous_live,
+                },
+            );
         }
     }
 
     pub(crate) fn stats(&self) -> String {
         let io = self.io_stats();
+        let segment_fill_percent = self.segment_fill_used_bytes as f64 * 100.0
+            / self.segment_fill_capacity_bytes.max(1) as f64;
+        let segment_capacity_fill_percent = self.segment_capacity_fill_used_bytes as f64 * 100.0
+            / self.segment_capacity_fill_capacity_bytes.max(1) as f64;
+        let segment_sync_fill_percent = self.segment_sync_fill_used_bytes as f64 * 100.0
+            / self.segment_sync_fill_capacity_bytes.max(1) as f64;
         format!(
-            "keys={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} blob_refs={} blob_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} segment_reuses={} data_read={} data_written={}",
-            self.table.entry_count,
+            "keys={} stable_keys={} pending_items={} pending_value_bytes={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
+            self.logical_key_count(),
+            self.stable_live_keys,
+            self.pending.len(),
+            self.pending_value_bytes(),
             self.table.load_factor() * 100.0,
             self.table.memory_bytes() as f64 / (1024.0 * 1024.0),
             self.table.memory_bytes() as f64 / self.config.table_capacity as f64,
@@ -643,8 +726,10 @@ impl Kvkache {
             self.table.front_subtable_layout.entry_capacity,
             self.table.back_table.len(),
             self.table.back_subtable_layout.entry_capacity,
-            self.blob_refs.len(),
-            self.blob_used_bytes(),
+            self.config.bucket_choice_count,
+            self.config.bucket_selection_policy.as_str(),
+            self.blob_segment.used_bytes(),
+            self.blob_segment.logical_used_bytes(),
             self.blob_segment.capacity_bytes(),
             self.next_segment_index,
             self.occupied_segments
@@ -652,9 +737,22 @@ impl Kvkache {
                 .filter(|value| **value)
                 .count(),
             self.segment_flushes,
+            self.segment_capacity_flushes,
+            self.segment_sync_flushes,
             self.segment_reuses,
+            segment_fill_percent,
+            self.segment_fill_used_bytes,
+            self.segment_fill_capacity_bytes,
+            segment_capacity_fill_percent,
+            self.segment_capacity_fill_used_bytes,
+            self.segment_capacity_fill_capacity_bytes,
+            segment_sync_fill_percent,
+            self.segment_sync_fill_used_bytes,
+            self.segment_sync_fill_capacity_bytes,
             io.data_read,
             io.data_written,
+            io.blob_data_read,
+            io.blob_data_written,
         )
     }
 
@@ -662,35 +760,62 @@ impl Kvkache {
     pub(crate) fn reset_io_stats(&self) {
         self.io.data_written.set(0);
         self.io.data_read.set(0);
+        self.io.blob_data_written.set(0);
+        self.io.blob_data_read.set(0);
     }
 
     pub(super) fn io_stats(&self) -> KvkacheIoStats {
         KvkacheIoStats {
             data_written: self.io.data_written.get(),
             data_read: self.io.data_read.get(),
+            blob_data_written: self.io.blob_data_written.get(),
+            blob_data_read: self.io.blob_data_read.get(),
         }
     }
 
     pub(super) fn memory_bytes(&self) -> usize {
         self.table.memory_bytes()
-            + self.config.segment_size * 2
-            + self.blob_refs.capacity()
-                * (std::mem::size_of::<StorageKey>() + std::mem::size_of::<BlobRef>())
+            + self.pending.capacity()
+                * (std::mem::size_of::<StorageKey>() + std::mem::size_of::<PendingItem>())
+            + self.pending_value_bytes()
             + self.occupied_segments.capacity() * std::mem::size_of::<bool>()
-            + self.regular_segment_occupied.capacity() * std::mem::size_of::<bool>()
-            + self.blob_segment_used_bytes.capacity() * std::mem::size_of::<usize>()
+            + self.blob_segment.memory_bytes()
     }
 
-    fn blob_used_bytes(&self) -> u64 {
-        let stored = self
-            .blob_segment_used_bytes
-            .iter()
-            .copied()
-            .map(|len| len.next_multiple_of(BUCKET_BYTES) as u64)
-            .sum::<u64>();
-        let active = self.active_blob.as_ref().map_or(0, |active| {
-            active.logical_len().next_multiple_of(BUCKET_BYTES) as u64
-        });
-        stored + active
+    fn logical_key_count(&self) -> usize {
+        let mut count = self.stable_live_keys;
+        for pending in self.pending.values() {
+            match (pending.previous_live, pending.value.is_some()) {
+                (true, false) => count = count.saturating_sub(1),
+                (false, true) => count += 1,
+                _ => {}
+            }
+        }
+        count
     }
+
+    fn pending_value_bytes(&self) -> usize {
+        self.pending
+            .values()
+            .filter_map(|pending| pending.value.as_ref())
+            .map(Vec::capacity)
+            .sum()
+    }
+}
+
+fn stored_payload_len(value: &[u8]) -> usize {
+    if is_blob_item(value) {
+        STORED_BLOB_REF_BYTES
+    } else {
+        STORED_VALUE_TAG_BYTES + value.len()
+    }
+}
+
+fn pending_accounted_bytes(value: Option<&[u8]>) -> (usize, usize) {
+    let Some(value) = value else {
+        return (item_offsets_bytes(1) + ITEM_FIXED_BYTES, 0);
+    };
+    let sg_bytes = item_offsets_bytes(1) + ITEM_FIXED_BYTES + stored_payload_len(value);
+    let blob_bytes = if is_blob_item(value) { value.len() } else { 0 };
+    (sg_bytes, blob_bytes)
 }
