@@ -223,20 +223,17 @@ impl Client {
         .await;
         let response = match result {
             Ok(response) => {
-                self.connection.release_lane(stream);
+                if response.status.is_error() {
+                    return Err(Error::Server {
+                        status: response.status,
+                        message: String::from_utf8_lossy(&response.payload).into_owned(),
+                    });
+                }
+                stream.release();
                 response
             }
-            Err(error) => {
-                self.connection.discard_lane(stream);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        if response.status.is_error() {
-            return Err(Error::Server {
-                status: response.status,
-                message: String::from_utf8_lossy(&response.payload).into_owned(),
-            });
-        }
         Ok(response)
     }
 }

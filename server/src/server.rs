@@ -23,6 +23,94 @@ use crate::transport::{
 };
 use crate::{AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache};
 
+enum NetworkWorkerPhase {
+    Starting,
+    Running,
+    Finished,
+}
+
+pub(crate) struct NetworkWorkerReporter {
+    worker_id: usize,
+    phase: NetworkWorkerPhase,
+    started: Option<flume::Sender<std::result::Result<(), String>>>,
+    finished: Option<flume::Sender<(usize, std::result::Result<(), String>)>>,
+}
+
+impl NetworkWorkerReporter {
+    pub(crate) fn new(
+        worker_id: usize,
+        started: flume::Sender<std::result::Result<(), String>>,
+        finished: flume::Sender<(usize, std::result::Result<(), String>)>,
+    ) -> Self {
+        Self {
+            worker_id,
+            phase: NetworkWorkerPhase::Starting,
+            started: Some(started),
+            finished: Some(finished),
+        }
+    }
+
+    fn startup_failed(mut self, message: String) {
+        self.phase = NetworkWorkerPhase::Finished;
+        self.finished.take();
+        if let Some(started) = self.started.take() {
+            let _ = started.send(Err(message));
+        }
+    }
+
+    pub(crate) fn started(&mut self) -> bool {
+        let reported = self
+            .started
+            .take()
+            .is_some_and(|started| started.send(Ok(())).is_ok());
+        if reported {
+            self.phase = NetworkWorkerPhase::Running;
+        } else {
+            self.phase = NetworkWorkerPhase::Finished;
+            self.finished.take();
+        }
+        reported
+    }
+
+    fn finish(mut self, result: std::result::Result<(), String>) {
+        self.phase = NetworkWorkerPhase::Finished;
+        if let Some(finished) = self.finished.take() {
+            let _ = finished.send((self.worker_id, result));
+        }
+    }
+}
+
+impl Drop for NetworkWorkerReporter {
+    fn drop(&mut self) {
+        match self.phase {
+            NetworkWorkerPhase::Starting => {
+                if let Some(started) = self.started.take() {
+                    let failure = if std::thread::panicking() {
+                        format!("network worker {} panicked during startup", self.worker_id)
+                    } else {
+                        format!(
+                            "network worker {} exited without reporting startup",
+                            self.worker_id
+                        )
+                    };
+                    let _ = started.send(Err(failure));
+                }
+            }
+            NetworkWorkerPhase::Running => {
+                if let Some(finished) = self.finished.take() {
+                    let failure = if std::thread::panicking() {
+                        "panicked"
+                    } else {
+                        "exited without reporting completion"
+                    };
+                    let _ = finished.send((self.worker_id, Err(failure.into())));
+                }
+            }
+            NetworkWorkerPhase::Finished => {}
+        }
+    }
+}
+
 /// Bound reuse-port sockets and the sharded SSD-backed cache they serve.
 pub struct KacheServer {
     sockets: Vec<std::net::UdpSocket>,
@@ -158,6 +246,8 @@ impl KacheServer {
             let thread = match std::thread::Builder::new()
                 .name(format!("openkache-network-{worker_id}"))
                 .spawn(move || {
+                    let mut reporter =
+                        NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
                     let mut proactor = ProactorBuilder::new();
                     proactor.capacity(entries);
                     let mut builder = RuntimeBuilder::new();
@@ -168,7 +258,7 @@ impl KacheServer {
                     let runtime = match builder.build() {
                         Ok(runtime) => runtime,
                         Err(error) => {
-                            let _ = started_tx.send(Err(error.to_string()));
+                            reporter.startup_failed(error.to_string());
                             return;
                         }
                     };
@@ -184,18 +274,20 @@ impl KacheServer {
                         {
                             Ok(endpoint) => endpoint,
                             Err(error) => {
-                                let _ = started_tx.send(Err(error.to_string()));
+                                reporter.startup_failed(error.to_string());
                                 return;
                             }
                         };
                         let actual_cpu = unsafe { libc::sched_getcpu() };
                         if actual_cpu < 0 || actual_cpu as usize != cpu_id {
-                            let _ = started_tx.send(Err(format!(
+                            reporter.startup_failed(format!(
                                 "network worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
-                            )));
+                            ));
                             return;
                         }
-                        let _ = started_tx.send(Ok(()));
+                        if !reporter.started() {
+                            return;
+                        }
                         let result = run_selected_endpoint(
                             endpoint,
                             &worker_cache,
@@ -205,7 +297,7 @@ impl KacheServer {
                         )
                         .await
                         .map_err(|error| error.to_string());
-                        let _ = finished_tx.send((worker_id, result));
+                        reporter.finish(result);
                     });
                 }) {
                 Ok(thread) => thread,

@@ -26,9 +26,15 @@ pub(crate) struct Connection {
 }
 
 /// A Compio bidirectional QUIC stream.
-pub(crate) struct BidiStream {
+struct BidiStream {
     send: SendStream,
     receive: RecvStream,
+}
+
+/// A checked-out stream lane that removes itself from pool accounting if dropped.
+pub(crate) struct Lane<'a> {
+    connection: &'a Connection,
+    stream: Option<BidiStream>,
 }
 
 /// Open a QUIC connection to `addr`, authenticating as `server_name` with the
@@ -67,10 +73,10 @@ pub(crate) async fn connect(
 
 impl Connection {
     /// Acquires an idle lane, growing the connection-local pool when needed.
-    pub(crate) async fn acquire_lane(&self) -> Result<BidiStream> {
+    pub(crate) async fn acquire_lane(&self) -> Result<Lane<'_>> {
         loop {
             if let Ok(lane) = self.idle_lanes_rx.try_recv() {
-                return Ok(lane);
+                return Ok(Lane::new(self, lane));
             }
             if self.open_lanes.get() >= MAX_STREAM_LANES {
                 let idle = self.idle_lanes_rx.recv_async().fuse();
@@ -79,6 +85,7 @@ impl Connection {
                 select! {
                     lane = idle => {
                         return lane
+                            .map(|lane| Lane::new(self, lane))
                             .map_err(|_| Error::Connection("stream lane pool closed".into()));
                     }
                     _ = capacity => continue,
@@ -94,25 +101,24 @@ impl Connection {
                     let (send, receive) =
                         opened.map_err(|error| Error::Connection(error.to_string()))?;
                     reservation.commit();
-                    return Ok(BidiStream { send, receive });
+                    return Ok(Lane::new(self, BidiStream { send, receive }));
                 }
                 lane = idle => {
                     return lane
+                        .map(|lane| Lane::new(self, lane))
                         .map_err(|_| Error::Connection("stream lane pool closed".into()));
                 }
             }
         }
     }
 
-    /// Returns a healthy lane to the connection-local pool.
-    pub(crate) fn release_lane(&self, lane: BidiStream) {
+    fn release_lane(&self, lane: BidiStream) {
         if self.idle_lanes_tx.try_send(lane).is_err() {
             self.remove_lane();
         }
     }
 
-    /// Removes a failed lane so a later request can replace it.
-    pub(crate) fn discard_lane(&self, lane: BidiStream) {
+    fn discard_lane(&self, lane: BidiStream) {
         drop(lane);
         self.remove_lane();
     }
@@ -125,6 +131,50 @@ impl Connection {
                 .expect("a removed stream lane must be open"),
         );
         let _ = self.lane_capacity_tx.try_send(());
+    }
+}
+
+impl<'a> Lane<'a> {
+    fn new(connection: &'a Connection, stream: BidiStream) -> Self {
+        Self {
+            connection,
+            stream: Some(stream),
+        }
+    }
+
+    /// Writes one complete request without closing this reusable lane.
+    pub(crate) async fn write_request(&mut self, frame: Vec<u8>) -> Result<()> {
+        self.stream
+            .as_mut()
+            .expect("a checked-out lane must own its stream")
+            .write_request(frame)
+            .await
+    }
+
+    /// Reads exactly one length-delimited response up to `maximum` bytes.
+    pub(crate) async fn read_response(&mut self, maximum: usize) -> Result<Vec<u8>> {
+        self.stream
+            .as_mut()
+            .expect("a checked-out lane must own its stream")
+            .read_response(maximum)
+            .await
+    }
+
+    /// Returns this lane to the idle pool after a complete request/response exchange.
+    pub(crate) fn release(mut self) {
+        let stream = self
+            .stream
+            .take()
+            .expect("a released lane must own its stream");
+        self.connection.release_lane(stream);
+    }
+}
+
+impl Drop for Lane<'_> {
+    fn drop(&mut self) {
+        if let Some(stream) = self.stream.take() {
+            self.connection.discard_lane(stream);
+        }
     }
 }
 
