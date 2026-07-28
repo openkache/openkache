@@ -2,24 +2,24 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use compio::BufResult;
-use compio::io::{AsyncReadExt, AsyncWriteExt};
-use compio_quic::{Endpoint, VarInt};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
-    ALPN, MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status, ValueFlags,
+    MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status, ValueFlags,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::CertificateDer;
 
+use crate::transport::{
+    Connection as TransportConnection, Endpoint as TransportEndpoint,
+    Incoming as TransportIncoming, ReceiveStream, SendStream, ServerEndpoint, StreamReadError,
+};
 use crate::{AppConfig, KvError, SetOutcome, ThreadedKvkache};
 
 /// A bound QUIC endpoint and its sharded SSD-backed cache.
 pub struct KacheServer {
-    endpoint: Endpoint,
+    endpoint: ServerEndpoint,
     certificate_der: CertificateDer<'static>,
     cache: ThreadedKvkache,
     request_timeout: Duration,
@@ -63,25 +63,18 @@ impl KacheServer {
         config.validate()?;
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
         let max_inflight_streams_per_connection = config.io_uring.max_inflight_per_worker;
+        let quic_backend = config.quic.selected_backend()?;
         let generated = rcgen::generate_simple_self_signed(["localhost".to_string()])?;
         let certificate_der = generated.cert.der().clone();
-        let private_key_der = PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der());
-
-        let mut tls = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![certificate_der.clone()],
-                PrivateKeyDer::Pkcs8(private_key_der),
-            )?;
-        tls.alpn_protocols = vec![ALPN.to_vec()];
-        let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(tls)?;
-        let socket = compio::net::UdpSocket::bind(address).await?;
-        let endpoint = Endpoint::new(
-            socket,
-            compio_quic::EndpointConfig::default(),
-            Some(compio_quic::ServerConfig::with_crypto(Arc::new(crypto))),
-            None,
-        )?;
+        let private_key_der = generated.signing_key.serialize_der();
+        let endpoint = ServerEndpoint::bind(
+            quic_backend,
+            address,
+            certificate_der.as_ref(),
+            &private_key_der,
+            max_inflight_streams_per_connection,
+        )
+        .await?;
         let cache = ThreadedKvkache::start(config)?;
         Ok(Self {
             endpoint,
@@ -128,75 +121,120 @@ impl KacheServer {
     ///
     /// Returns an error when endpoint shutdown or cache worker shutdown fails.
     pub async fn serve(mut self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        let shutdown = shutdown.fuse();
-        pin_mut!(shutdown);
-        let mut connections = FuturesUnordered::new();
-
-        loop {
-            if connections.is_empty() {
-                let incoming = self.endpoint.wait_incoming().fuse();
-                pin_mut!(incoming);
-                select! {
-                    incoming = incoming => {
-                        let Some(incoming) = incoming else {
-                            break;
-                        };
-                        connections.push(serve_incoming(
-                            incoming,
-                            &self.cache,
-                            self.request_timeout,
-                            self.max_inflight_streams_per_connection,
-                        ));
-                    }
-                    () = &mut shutdown => break,
-                }
-            } else {
-                let incoming = self.endpoint.wait_incoming().fuse();
-                let completed = connections.next().fuse();
-                pin_mut!(incoming, completed);
-                select! {
-                    incoming = incoming => {
-                        let Some(incoming) = incoming else {
-                            break;
-                        };
-                        connections.push(serve_incoming(
-                            incoming,
-                            &self.cache,
-                            self.request_timeout,
-                            self.max_inflight_streams_per_connection,
-                        ));
-                    }
-                    _ = completed => {}
-                    () = &mut shutdown => break,
-                }
+        let endpoint = self.endpoint;
+        match endpoint {
+            #[cfg(feature = "quic-quinn")]
+            ServerEndpoint::Quinn(endpoint) => {
+                serve_endpoint(
+                    endpoint,
+                    &self.cache,
+                    self.request_timeout,
+                    self.max_inflight_streams_per_connection,
+                    shutdown,
+                )
+                .await?;
+            }
+            #[cfg(feature = "quic-noq")]
+            ServerEndpoint::Noq(endpoint) => {
+                serve_endpoint(
+                    endpoint,
+                    &self.cache,
+                    self.request_timeout,
+                    self.max_inflight_streams_per_connection,
+                    shutdown,
+                )
+                .await?;
+            }
+            #[cfg(feature = "quic-quiche")]
+            ServerEndpoint::Quiche(endpoint) => {
+                serve_endpoint(
+                    endpoint,
+                    &self.cache,
+                    self.request_timeout,
+                    self.max_inflight_streams_per_connection,
+                    shutdown,
+                )
+                .await?;
             }
         }
-
-        self.endpoint
-            .close(VarInt::from_u32(0), b"server shutting down");
-        self.endpoint.shutdown().await?;
-        while connections.next().await.is_some() {}
-        drop(connections);
         self.cache.shutdown()?;
         Ok(())
     }
 }
 
+/// Accepts connections from one concrete QUIC implementation until shutdown.
+async fn serve_endpoint<E: TransportEndpoint>(
+    endpoint: E,
+    cache: &ThreadedKvkache,
+    request_timeout: Duration,
+    max_inflight_streams_per_connection: usize,
+    shutdown: impl Future<Output = ()>,
+) -> Result<()> {
+    let shutdown = shutdown.fuse();
+    pin_mut!(shutdown);
+    let mut connections = FuturesUnordered::new();
+
+    loop {
+        if connections.is_empty() {
+            let incoming = endpoint.wait_incoming().fuse();
+            pin_mut!(incoming);
+            select! {
+                incoming = incoming => {
+                    let Some(incoming) = incoming else {
+                        break;
+                    };
+                    connections.push(serve_incoming(
+                        incoming,
+                        cache,
+                        request_timeout,
+                        max_inflight_streams_per_connection,
+                    ));
+                }
+                () = &mut shutdown => break,
+            }
+        } else {
+            let incoming = endpoint.wait_incoming().fuse();
+            let completed = connections.next().fuse();
+            pin_mut!(incoming, completed);
+            select! {
+                incoming = incoming => {
+                    let Some(incoming) = incoming else {
+                        break;
+                    };
+                    connections.push(serve_incoming(
+                        incoming,
+                        cache,
+                        request_timeout,
+                        max_inflight_streams_per_connection,
+                    ));
+                }
+                _ = completed => {}
+                () = &mut shutdown => break,
+            }
+        }
+    }
+
+    endpoint.close(b"server shutting down");
+    while connections.next().await.is_some() {}
+    endpoint.shutdown().await?;
+    Ok(())
+}
+
 /// Completes one QUIC handshake and serves the accepted connection.
-async fn serve_incoming(
-    incoming: compio_quic::Incoming,
+async fn serve_incoming<I: TransportIncoming>(
+    incoming: I,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
     max_inflight_streams: usize,
 ) {
-    if let Ok(connection) = incoming.await {
+    if let Ok(connection) = incoming.connect().await {
         serve_connection(connection, cache, request_timeout, max_inflight_streams).await;
     }
 }
 
 /// Multiplexes bounded concurrent request streams for one QUIC connection.
-async fn serve_connection(
-    connection: compio_quic::Connection,
+async fn serve_connection<C: TransportConnection>(
+    connection: C,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
     max_inflight_streams: usize,
@@ -233,40 +271,35 @@ async fn serve_connection(
 }
 
 /// Reads, executes, and responds to one request stream within the configured timeout.
-async fn serve_stream(
-    mut send: compio_quic::SendStream,
-    receive: compio_quic::RecvStream,
+async fn serve_stream<S: SendStream, R: ReceiveStream>(
+    send: S,
+    receive: R,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
 ) {
-    let mut receive = receive.take((MAX_REQUEST_FRAME_BYTES + 1) as u64);
-    let read =
-        compio::runtime::time::timeout(request_timeout, receive.read_to_end(Vec::new())).await;
-    let response = match read {
-        Err(_) => response(Status::Timeout, b"request read timed out".to_vec()),
-        Ok(BufResult(Ok(_), frame)) if frame.len() > MAX_REQUEST_FRAME_BYTES => response(
+    let response = match receive
+        .read_request(MAX_REQUEST_FRAME_BYTES + 1, request_timeout)
+        .await
+    {
+        Err(StreamReadError::Timeout) => {
+            response(Status::Timeout, b"request read timed out".to_vec())
+        }
+        Ok(frame) if frame.len() > MAX_REQUEST_FRAME_BYTES => response(
             Status::TooLarge,
             b"request exceeds the protocol limit".to_vec(),
         ),
-        Ok(BufResult(Ok(_), frame)) => match Request::decode(&frame) {
+        Ok(frame) => match Request::decode(&frame) {
             Ok(request) => execute_request(cache, request).await,
             Err(error) => protocol_error_response(error),
         },
-        Ok(BufResult(Err(error), _)) => {
+        Err(StreamReadError::Transport(error)) => {
             response(Status::InvalidRequest, error.to_string().into_bytes())
         }
     };
     let Ok(frame) = response.encode() else {
         return;
     };
-    let Ok(BufResult(write_result, _)) =
-        compio::runtime::time::timeout(request_timeout, send.write_all(frame)).await
-    else {
-        return;
-    };
-    if write_result.is_ok() {
-        let _ = send.finish();
-    }
+    let _ = send.write_response(frame, request_timeout).await;
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
@@ -374,8 +407,8 @@ pub enum ServerError {
     Certificate(#[from] rcgen::Error),
     #[error("TLS configuration failed: {0}")]
     Tls(#[from] rustls::Error),
-    #[error("QUIC TLS configuration failed: {0}")]
-    QuicTls(#[from] compio_quic::crypto::rustls::NoInitialCipherSuite),
+    #[error("QUIC transport failed: {0}")]
+    Transport(#[from] crate::transport::TransportError),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
 }

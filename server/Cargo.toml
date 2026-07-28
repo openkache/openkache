@@ -4,13 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["allocator-jemalloc"]
+default = ["allocator-jemalloc", "quic-noq"]
 # Forces the portable lookup paths for cross-architecture benchmarking.
 force-scalar = []
 allocator-system = []
 allocator-mimalloc = ["dep:mimalloc"]
 allocator-jemalloc = ["dep:tikv-jemallocator"]
 allocator-snmalloc = ["dep:snmalloc-rs"]
+quic-quinn = ["dep:compio-quic"]
+quic-noq = ["dep:comnoq"]
+quic-quiche = ["dep:boring", "dep:quiche"]
 
 [[bin]]
 name = "openkache-server"
@@ -18,14 +21,18 @@ path = "src/bin/openkache_server.rs"
 
 [dependencies]
 aes = "*"
+# Both crates must resolve to one BoringSSL binding version.
+boring = { version = "*", optional = true }
 clap = { version = "*", features = ["derive"] }
+comnoq = { version = "*", default-features = false, features = ["ring"], optional = true }
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "runtime", "signal", "time"] }
-compio-quic = { version = "*", features = ["ring"] }
+compio-quic = { version = "*", features = ["ring"], optional = true }
 flume = "*"
 futures-util = "*"
 libc = "*"
 mimalloc = { version = "*", optional = true }
 openkache-protocol = { path = "../protocol" }
+quiche = { version = "*", default-features = false, features = ["boringssl-boring-crate"], optional = true }
 rand = "*"
 rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }

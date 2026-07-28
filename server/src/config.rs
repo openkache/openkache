@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
+use clap::ValueEnum;
 use serde::Deserialize;
 
 use crate::BUCKET_BYTES;
@@ -19,6 +20,73 @@ pub enum BucketSelectionPolicy {
     #[default]
     LeastUsed,
     MostUsed,
+}
+
+/// QUIC protocol implementation used by the network server.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum QuicBackend {
+    /// Quinn protocol state machine driven by Compio packet I/O.
+    Quinn,
+    /// Compio packet I/O backed by `noq-proto`.
+    Noq,
+    /// Compio packet I/O backed by Cloudflare quiche.
+    Quiche,
+    /// Reserved selection for a future Mozilla neqo adapter.
+    Neqo,
+}
+
+impl QuicBackend {
+    /// Returns the stable configuration and diagnostics label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quinn => "quinn",
+            Self::Noq => "noq",
+            Self::Quiche => "quiche",
+            Self::Neqo => "neqo",
+        }
+    }
+}
+
+const COMPILED_QUIC_BACKENDS: &[QuicBackend] = &[
+    #[cfg(feature = "quic-quinn")]
+    QuicBackend::Quinn,
+    #[cfg(feature = "quic-noq")]
+    QuicBackend::Noq,
+    #[cfg(feature = "quic-quiche")]
+    QuicBackend::Quiche,
+];
+
+/// QUIC transport configuration shared by all protocol implementations.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuicConfig {
+    /// Protocol implementation selected when the server binds.
+    ///
+    /// Exactly one compiled backend is selected automatically. Builds containing
+    /// multiple backends must set this field explicitly.
+    pub backend: Option<QuicBackend>,
+}
+
+impl QuicConfig {
+    /// Resolves the configured backend or rejects an ambiguous multi-backend build.
+    pub fn selected_backend(&self) -> Result<QuicBackend> {
+        self.backend.ok_or_else(|| {
+            KvError::InvalidConfig(
+                "quic.backend must be specified when multiple QUIC backends are compiled".into(),
+            )
+        })
+    }
+}
+
+impl Default for QuicConfig {
+    fn default() -> Self {
+        let backend = match COMPILED_QUIC_BACKENDS {
+            [backend] => Some(*backend),
+            _ => None,
+        };
+        Self { backend }
+    }
 }
 
 impl BucketSelectionPolicy {
@@ -239,6 +307,7 @@ impl Config {
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
+    pub quic: QuicConfig,
     pub runtime: RuntimeConfig,
     pub io_uring: IoUringConfig,
     pub timeouts: TimeoutConfig,
@@ -250,6 +319,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             version: 1,
+            quic: QuicConfig::default(),
             runtime: RuntimeConfig::default(),
             io_uring: IoUringConfig::default(),
             timeouts: TimeoutConfig::default(),
@@ -384,6 +454,7 @@ impl AppConfig {
                 self.version
             )));
         }
+        self.quic.selected_backend()?;
         if self.runtime.thread_count == 0 {
             return Err(KvError::InvalidConfig(
                 "runtime.thread_count must be non-zero".into(),
@@ -500,6 +571,7 @@ impl AppConfig {
         let capacity_per_thread = total_table_capacity.div_ceil(thread_count);
         let config = Self {
             version: 1,
+            quic: QuicConfig::default(),
             runtime: RuntimeConfig {
                 thread_count,
                 cpu_ids,

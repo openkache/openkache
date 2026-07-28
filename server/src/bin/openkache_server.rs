@@ -1,11 +1,10 @@
 //! Command-line entry point for the SSD-backed OpenKache QUIC server.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
-use openkache::AppConfig;
 use openkache::server::KacheServer;
+use openkache::{AppConfig, QuicBackend};
 
 #[path = "openkache_server/allocator.rs"]
 mod allocator;
@@ -28,6 +27,10 @@ struct Arguments {
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
 
+    /// QUIC protocol implementation, overriding the configuration file.
+    #[arg(long, value_enum)]
+    quic_backend: Option<QuicBackend>,
+
     #[command(flatten)]
     sizing: sizing::SizingArguments,
 }
@@ -36,17 +39,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     let sizing_plan = arguments.sizing.build_plan()?;
     if arguments.sizing.plan_only() {
-        sizing::print_plan(
-            sizing_plan
-                .as_ref()
-                .expect("clap requires sizing arguments with --plan"),
-        );
+        sizing::print_plan(sizing_plan.as_ref().expect("clap requires a sizing plan"));
         return Ok(());
     }
-    let config = match &sizing_plan {
+    let mut config = match &sizing_plan {
         Some(plan) => plan.config.clone(),
         None => load_config(arguments.config.as_deref())?,
     };
+    if let Some(backend) = arguments.quic_backend {
+        config.quic.backend = Some(backend);
+    }
     if let Some(plan) = &sizing_plan {
         sizing::print_plan(plan);
     }
@@ -59,6 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let storage_directory = config.storage.directory.clone();
+    let quic_backend = config.quic.selected_backend()?;
     let server = KacheServer::bind_with_config(arguments.listen, config).await?;
     let address = server.local_addr()?;
     if let Some(parent) = arguments.certificate_out.parent() {
@@ -73,6 +76,7 @@ async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std:
     );
     println!("Storage: SSD-backed ({})", storage_directory.display());
     println!("Runtime: Compio (io_uring)");
+    println!("QUIC backend: {}", quic_backend.as_str());
     println!("Allocator: {}", allocator::NAME);
     println!("Press Ctrl-C to stop");
 
