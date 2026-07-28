@@ -25,21 +25,41 @@ bun run build:native
 ```typescript
 import { OpenKache_Client } from "@openkache/client"
 
-const client = OpenKache_Client.connect({
+const client = await OpenKache_Client.connect({
   address: "127.0.0.1:4433",
   certificate: await Bun.file("certificate.der").bytes(),
   encryption_key: crypto.getRandomValues(new Uint8Array(32)),
 })
 
-client.set("greeting", "hello")
-const value = client.get("greeting")
-client.close()
+await client.set("profile", {
+  name: "Kim",
+  visits: 42,
+  labels: ["subscriber", "beta"],
+})
+const profile = await client.get<{
+  name: string
+  visits: number
+  labels: string[]
+}>("profile")
+
+await client.setRaw("opaque", Uint8Array.of(1, 2, 3))
+const bytes = await client.getRaw("opaque")
+await client.close()
 ```
 
-The current methods are synchronous because Bun's C ABI interface is
-synchronous. Bun FFI is currently an experimental Bun interface, so this
-package is a preview. The native client keeps one Rust worker thread and one
-reusable QUIC connection. Call `close()` when finished.
+`set` and `get` use `@msgpack/msgpack` internally. Applications import only
+`@openkache/client`; they do not need to import or pass a codec. MessagePack
+preserves strings, numbers, booleans, arrays, plain objects, binary
+`Uint8Array` values, and 64-bit `bigint` values. The generic argument to `get`
+describes the expected TypeScript type but does not validate it at runtime.
+Use `setRaw` and `getRaw` when the application already owns an encoded byte
+representation or needs byte-for-byte round trips.
+
+All connection and cache methods return promises. A small Bun worker owns the
+synchronous FFI handle so native networking does not block the application's
+main JavaScript thread. Bun FFI is currently experimental, so this package is
+a preview. The native client reuses one QUIC connection. Call and await
+`close()` when finished.
 
 ## Configuration
 
