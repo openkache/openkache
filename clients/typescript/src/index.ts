@@ -1,103 +1,58 @@
 /**
- * Bun client backed by the shared Rust OpenKache implementation.
+ * Promise-based Bun client backed by the shared Rust OpenKache implementation.
  */
 
-import { dlopen, FFIType, type Library, type Pointer, suffix, toArrayBuffer } from "bun:ffi"
+import {
+  create,
+  fromBinary,
+  toBinary,
+  type DescMessage,
+  type MessageInitShape,
+  type MessageShape,
+} from "@bufbuild/protobuf"
 import { join } from "node:path"
+import { suffix } from "bun:ffi"
+import {
+  OPERATION_DELETE,
+  OPERATION_GET,
+  OPERATION_PING,
+  OPERATION_SET,
+  OPERATION_STATS,
+  OPERATION_SYNC,
+  RESULT_CONNECTED,
+  RESULT_CREATED,
+  RESULT_DELETED,
+  RESULT_NOT_DELETED,
+  RESULT_NOT_FOUND,
+  RESULT_OK,
+  RESULT_REPLACED,
+  RESULT_VALUE,
+  type Worker_Request_Body,
+  type Worker_Response,
+  type Worker_Success_Response,
+} from "./worker-protocol.ts"
 
-const ABI_VERSION = 1
 const EMPTY_BYTES = new Uint8Array()
+const MAX_VALUE_BYTES = 16 * 1024 * 1024
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
-const RESULT_ERROR = 0
-const RESULT_OK = 1
-const RESULT_VALUE = 2
-const RESULT_NOT_FOUND = 3
-const RESULT_CREATED = 4
-const RESULT_REPLACED = 5
-const RESULT_DELETED = 6
-const RESULT_NOT_DELETED = 7
-const RESULT_CONNECTED = 8
-
-const OPERATION_PING = 1
-const OPERATION_GET = 2
-const OPERATION_SET = 3
-const OPERATION_DELETE = 4
-const OPERATION_STATS = 5
-const OPERATION_SYNC = 6
-
-const NATIVE_SYMBOLS = {
-  openkache_client_abi_version: {
-    args: [],
-    returns: FFIType.u32,
-  },
-  openkache_client_connect: {
-    args: [
-      FFIType.ptr,
-      FFIType.u64_fast,
-      FFIType.ptr,
-      FFIType.u64_fast,
-      FFIType.ptr,
-      FFIType.u64_fast,
-      FFIType.ptr,
-      FFIType.u64_fast,
-      FFIType.u8,
-      FFIType.i32,
-      FFIType.u64_fast,
-      FFIType.u64_fast,
-    ],
-    returns: FFIType.ptr,
-  },
-  openkache_client_execute: {
-    args: [
-      FFIType.ptr,
-      FFIType.u32,
-      FFIType.ptr,
-      FFIType.u64_fast,
-      FFIType.ptr,
-      FFIType.u64_fast,
-    ],
-    returns: FFIType.ptr,
-  },
-  openkache_client_result_kind: {
-    args: [FFIType.ptr],
-    returns: FFIType.u32,
-  },
-  openkache_client_result_data: {
-    args: [FFIType.ptr],
-    returns: FFIType.ptr,
-  },
-  openkache_client_result_data_length: {
-    args: [FFIType.ptr],
-    returns: FFIType.u64_fast,
-  },
-  openkache_client_result_take_client: {
-    args: [FFIType.ptr],
-    returns: FFIType.ptr,
-  },
-  openkache_client_result_free: {
-    args: [FFIType.ptr],
-    returns: FFIType.void,
-  },
-  openkache_client_free: {
-    args: [FFIType.ptr],
-    returns: FFIType.void,
-  },
-} as const
-
-type Native_Library = Library<typeof NATIVE_SYMBOLS>
-type Native_Symbols = Native_Library["symbols"]
-type Native_Pointer = Pointer
-
-interface Finalizer_State {
-  readonly client: Native_Pointer
-  readonly symbols: Native_Symbols
+interface Pending_Request {
+  readonly resolve: (response: Worker_Success_Response) => void
+  readonly reject: (error: OpenKache_Error) => void
 }
 
-const LIBRARIES = new Map<string, Native_Library>()
-const CLIENT_FINALIZER = new FinalizationRegistry<Finalizer_State>(({ client, symbols }) => {
-  symbols.openkache_client_free(client)
+interface Worker_Channel {
+  readonly pending: Map<number, Pending_Request>
+  closed: boolean
+}
+
+const CLIENT_FINALIZER = new FinalizationRegistry<Worker>((worker): void => {
+  try {
+    worker.postMessage({ request_id: 0, kind: "close" })
+  } catch {
+    worker.terminate()
+  }
 })
 
 /**
@@ -138,247 +93,324 @@ export interface Client_Options {
 export type Set_Outcome = "created" | "replaced"
 
 /**
- * Error returned by the shared Rust client implementation.
+ * Error returned by the shared Rust client implementation or Protobuf layer.
  */
 export class OpenKache_Error extends Error {
   readonly kind = "openkache_error" as const
 }
 
 /**
- * Synchronous Bun client that delegates protocol, compression, encryption, and QUIC I/O to Rust.
+ * Promise-based Bun client that delegates blocking native work to a dedicated worker.
  */
 export class OpenKache_Client {
-  readonly #symbols: Native_Symbols
-  #native_client: Native_Pointer | undefined
+  readonly #worker: Worker
+  readonly #channel: Worker_Channel
+  #next_request_id = 1
+  #close_promise: Promise<void> | undefined
+  #closed = false
 
-  private constructor(symbols: Native_Symbols, native_client: Native_Pointer) {
-    this.#symbols = symbols
-    this.#native_client = native_client
-    CLIENT_FINALIZER.register(this, { client: native_client, symbols }, this)
+  private constructor(worker: Worker) {
+    this.#worker = worker
+    const channel: Worker_Channel = {
+      pending: new Map(),
+      closed: false,
+    }
+    this.#channel = channel
+    worker.onmessage = (event: MessageEvent<Worker_Response>): void => {
+      receive_worker_response(channel, event.data)
+    }
+    worker.onerror = (event: ErrorEvent): void => {
+      channel.closed = true
+      worker.terminate()
+      fail_pending_requests(
+        channel,
+        new OpenKache_Error(event.message || "OpenKache native worker failed"),
+      )
+    }
   }
 
   /**
-   * Connects to an OpenKache server through the shared Rust client.
+   * Connects without blocking the Bun main thread.
    *
    * @param options - Address, trust certificate, encryption key, and compression policy.
    * @returns A connected client that reuses one QUIC connection.
-   * @throws {OpenKache_Error} When configuration, TLS, runtime startup, or connection fails.
+   * @throws {OpenKache_Error} When configuration, worker startup, or connection fails.
    */
-  static connect(options: Client_Options): OpenKache_Client {
+  static async connect(options: Client_Options): Promise<OpenKache_Client> {
     validate_options(options)
-    const library_path = options.library_path ?? default_library_path()
-    const { symbols } = load_native_library(library_path)
-    const address = TEXT_ENCODER.encode(options.address)
-    const server_name = TEXT_ENCODER.encode(options.server_name ?? "localhost")
+    const worker = new Worker(new URL("./native-worker.ts", import.meta.url).href, {
+      name: "openkache-client",
+      smol: true,
+    })
+    const client = new OpenKache_Client(worker)
     const compression = options.compression ?? {}
-    const result = symbols.openkache_client_connect(
-      address,
-      address.byteLength,
-      server_name,
-      server_name.byteLength,
-      options.certificate,
-      options.certificate.byteLength,
-      options.encryption_key,
-      options.encryption_key.byteLength,
-      compression.enabled === false ? 0 : 1,
-      compression.level ?? 1,
-      compression.minimum_input_size ?? 1_024,
-      compression.minimum_savings ?? 64,
-    )
-    if (result === null) {
-      throw new OpenKache_Error("Rust client returned a null connection result")
-    }
+    const certificate = options.certificate.slice()
+    const encryption_key = options.encryption_key.slice()
     try {
-      const result_kind = symbols.openkache_client_result_kind(result)
-      if (result_kind !== RESULT_CONNECTED) {
-        throw result_error(symbols, result, result_kind)
+      const response = await client.#request(
+        {
+          kind: "connect",
+          options: {
+            address: options.address,
+            certificate,
+            encryption_key,
+            server_name: options.server_name ?? "localhost",
+            compression_enabled: compression.enabled !== false,
+            compression_level: compression.level ?? 1,
+            minimum_input_size: compression.minimum_input_size ?? 1_024,
+            minimum_savings: compression.minimum_savings ?? 64,
+            library_path: options.library_path ?? default_library_path(),
+          },
+        },
+        [certificate.buffer, encryption_key.buffer],
+      )
+      if (response.result_kind !== RESULT_CONNECTED) {
+        throw unexpected_result("connect", response.result_kind)
       }
-      const native_client = symbols.openkache_client_result_take_client(result)
-      if (native_client === null) {
-        throw new OpenKache_Error("Rust client returned a null client handle")
-      }
-      return new OpenKache_Client(symbols, native_client)
-    } finally {
-      symbols.openkache_client_result_free(result)
+      CLIENT_FINALIZER.register(client, worker, client)
+      return client
+    } catch (error) {
+      worker.terminate()
+      throw as_openkache_error(error)
     }
   }
 
   /**
    * Verifies that the server is reachable and speaks the expected protocol.
-   *
-   * @returns Nothing after a successful PING/PONG exchange.
-   * @throws {OpenKache_Error} When the operation fails.
    */
-  ping(): void {
-    this.#expect_kind(OPERATION_PING, EMPTY_BYTES, EMPTY_BYTES, RESULT_OK)
+  async ping(): Promise<void> {
+    await this.#expect_kind(OPERATION_PING, EMPTY_BYTES, RESULT_OK)
   }
 
   /**
-   * Retrieves and decrypts a value.
+   * Retrieves, decrypts, decompresses, and Protobuf-decodes a value.
    *
+   * @typeParam Schema - Generated Protobuf message schema type.
    * @param key - Exact string or binary cache key.
-   * @returns The application value, or `undefined` when the key does not exist.
-   * @throws {OpenKache_Error} When transport, authentication, or decompression fails.
+   * @param schema - Generated Protobuf schema used for runtime decoding.
+   * @returns The decoded value, or `undefined` when the key does not exist.
    */
-  get(key: string | Uint8Array): Uint8Array | undefined {
-    const result = this.#execute(OPERATION_GET, as_bytes(key), EMPTY_BYTES)
-    if (result.kind === RESULT_NOT_FOUND) return undefined
-    if (result.kind !== RESULT_VALUE) throw unexpected_result("GET", result.kind)
-    return result.payload
-  }
-
-  /**
-   * Compresses, encrypts, and stores a value.
-   *
-   * @param key - Exact string or binary cache key.
-   * @param value - Exact string or binary application value.
-   * @returns Whether the operation created or replaced the key.
-   * @throws {OpenKache_Error} When transformation, transport, or server execution fails.
-   */
-  set(key: string | Uint8Array, value: string | Uint8Array): Set_Outcome {
-    const result = this.#execute(OPERATION_SET, as_bytes(key), as_bytes(value))
-    const outcomes: Readonly<Record<number, Set_Outcome | undefined>> = {
-      [RESULT_CREATED]: "created",
-      [RESULT_REPLACED]: "replaced",
+  async get<Schema extends DescMessage>(
+    key: string | Uint8Array,
+    schema: Schema,
+  ): Promise<MessageShape<Schema> | undefined> {
+    const bytes = await this.getRaw(key)
+    if (bytes === undefined) return undefined
+    try {
+      return fromBinary(schema, bytes)
+    } catch (error) {
+      throw new OpenKache_Error(`Protobuf decoding failed: ${error_message(error)}`)
     }
-    const outcome = outcomes[result.kind]
-    if (outcome === undefined) throw unexpected_result("SET", result.kind)
-    return outcome
+  }
+
+  /**
+   * Protobuf-encodes, compresses, encrypts, and stores a value.
+   *
+   * @typeParam Schema - Generated Protobuf message schema type.
+   * @param key - Exact string or binary cache key.
+   * @param value - Message or initializer accepted by the generated schema.
+   * @param schema - Generated Protobuf schema used for runtime encoding.
+   * @returns Whether the operation created or replaced the key.
+   */
+  async set<Schema extends DescMessage>(
+    key: string | Uint8Array,
+    value: MessageInitShape<Schema>,
+    schema: Schema,
+  ): Promise<Set_Outcome> {
+    let bytes: Uint8Array
+    try {
+      bytes = toBinary(schema, create(schema, value))
+    } catch (error) {
+      throw new OpenKache_Error(`Protobuf encoding failed: ${error_message(error)}`)
+    }
+    validate_value_length(bytes)
+    return this.#set_owned_bytes(key, bytes)
+  }
+
+  /**
+   * Retrieves exact decrypted and decompressed bytes without Protobuf decoding.
+   */
+  async getRaw(key: string | Uint8Array): Promise<Uint8Array | undefined> {
+    const response = await this.#execute(OPERATION_GET, key, EMPTY_BYTES)
+    if (response.result_kind === RESULT_NOT_FOUND) return undefined
+    if (response.result_kind !== RESULT_VALUE) {
+      throw unexpected_result("GET", response.result_kind)
+    }
+    return response.payload
+  }
+
+  /**
+   * Stores exact bytes without Protobuf encoding.
+   */
+  async setRaw(
+    key: string | Uint8Array,
+    value: Uint8Array,
+  ): Promise<Set_Outcome> {
+    validate_value_length(value)
+    return this.#set_owned_bytes(key, value.slice())
   }
 
   /**
    * Deletes a key.
-   *
-   * @param key - Exact string or binary cache key.
-   * @returns Whether the key existed.
-   * @throws {OpenKache_Error} When the operation fails.
    */
-  delete(key: string | Uint8Array): boolean {
-    const result = this.#execute(OPERATION_DELETE, as_bytes(key), EMPTY_BYTES)
-    if (result.kind === RESULT_DELETED) return true
-    if (result.kind === RESULT_NOT_DELETED) return false
-    throw unexpected_result("DELETE", result.kind)
+  async delete(key: string | Uint8Array): Promise<boolean> {
+    const response = await this.#execute(OPERATION_DELETE, key, EMPTY_BYTES)
+    if (response.result_kind === RESULT_DELETED) return true
+    if (response.result_kind === RESULT_NOT_DELETED) return false
+    throw unexpected_result("DELETE", response.result_kind)
   }
 
   /**
-   * Retrieves server statistics.
-   *
-   * @returns The server JSON payload as text.
-   * @throws {OpenKache_Error} When the operation fails or returns invalid UTF-8.
+   * Retrieves server statistics as JSON text.
    */
-  stats(): string {
-    const result = this.#execute(OPERATION_STATS, EMPTY_BYTES, EMPTY_BYTES)
-    if (result.kind !== RESULT_VALUE) throw unexpected_result("STATS", result.kind)
-    return TEXT_DECODER.decode(result.payload)
+  async stats(): Promise<string> {
+    const response = await this.#execute(OPERATION_STATS, EMPTY_BYTES, EMPTY_BYTES)
+    if (response.result_kind !== RESULT_VALUE) {
+      throw unexpected_result("STATS", response.result_kind)
+    }
+    return TEXT_DECODER.decode(response.payload)
   }
 
   /**
    * Requests a server durability barrier.
-   *
-   * @returns Nothing after the server acknowledges the barrier.
-   * @throws {OpenKache_Error} When the operation fails.
    */
-  sync(): void {
-    this.#expect_kind(OPERATION_SYNC, EMPTY_BYTES, EMPTY_BYTES, RESULT_OK)
+  async sync(): Promise<void> {
+    await this.#expect_kind(OPERATION_SYNC, EMPTY_BYTES, RESULT_OK)
   }
 
   /**
-   * Closes the native connection and worker thread.
-   *
-   * @returns Nothing. Repeated calls are safe.
+   * Closes the native connection and worker. Repeated calls are safe.
    */
-  close(): void {
-    const native_client = this.#native_client
-    if (native_client === undefined) return
-    this.#native_client = undefined
-    CLIENT_FINALIZER.unregister(this)
-    this.#symbols.openkache_client_free(native_client)
+  close(): Promise<void> {
+    this.#close_promise ??= this.#close_once()
+    return this.#close_promise
   }
 
-  #expect_kind(
+  async #set_owned_bytes(
+    key: string | Uint8Array,
+    bytes: Uint8Array,
+  ): Promise<Set_Outcome> {
+    const response = await this.#execute(OPERATION_SET, key, bytes)
+    const outcomes: Readonly<Record<number, Set_Outcome | undefined>> = {
+      [RESULT_CREATED]: "created",
+      [RESULT_REPLACED]: "replaced",
+    }
+    const outcome = outcomes[response.result_kind]
+    if (outcome === undefined) throw unexpected_result("SET", response.result_kind)
+    return outcome
+  }
+
+  async #expect_kind(
     operation: number,
     key: Uint8Array,
-    value: Uint8Array,
     expected_kind: number,
-  ): void {
-    const result = this.#execute(operation, key, value)
-    if (result.kind !== expected_kind) throw unexpected_result("operation", result.kind)
+  ): Promise<void> {
+    const response = await this.#execute(operation, key, EMPTY_BYTES)
+    if (response.result_kind !== expected_kind) {
+      throw unexpected_result("operation", response.result_kind)
+    }
   }
 
   #execute(
     operation: number,
-    key: Uint8Array,
+    key: string | Uint8Array,
     value: Uint8Array,
-  ): { readonly kind: number; readonly payload: Uint8Array } {
-    const native_client = this.#native_client
-    if (native_client === undefined) {
-      throw new OpenKache_Error("client is closed")
+  ): Promise<Worker_Success_Response> {
+    const key_bytes = owned_key_bytes(key)
+    const owned_value = value.byteLength === 0 ? value : owned_bytes(value)
+    const transfer: Transferable[] = [key_bytes.buffer as ArrayBuffer]
+    if (owned_value.byteLength > 0) {
+      transfer.push(owned_value.buffer as ArrayBuffer)
     }
-    const result = this.#symbols.openkache_client_execute(
-      native_client,
-      operation,
-      key,
-      key.byteLength,
-      value,
-      value.byteLength,
+    return this.#request(
+      {
+        kind: "execute",
+        operation,
+        key: key_bytes,
+        value: owned_value,
+      },
+      transfer,
     )
-    if (result === null) {
-      throw new OpenKache_Error("Rust client returned a null operation result")
+  }
+
+  #request(
+    request: Worker_Request_Body,
+    transfer: Transferable[] = [],
+    allow_closing = false,
+  ): Promise<Worker_Success_Response> {
+    if (
+      this.#closed ||
+      this.#channel.closed ||
+      (!allow_closing && this.#close_promise !== undefined)
+    ) {
+      return Promise.reject(new OpenKache_Error("client is closed"))
     }
-    try {
-      const kind = this.#symbols.openkache_client_result_kind(result)
-      if (kind === RESULT_ERROR) {
-        throw result_error(this.#symbols, result, kind)
+    const request_id = this.#next_request_id
+    this.#next_request_id += 1
+    return new Promise<Worker_Success_Response>((resolve, reject): void => {
+      this.#channel.pending.set(request_id, { resolve, reject })
+      try {
+        this.#worker.postMessage({ ...request, request_id }, transfer)
+      } catch (error) {
+        this.#channel.pending.delete(request_id)
+        reject(as_openkache_error(error))
       }
-      return {
-        kind,
-        payload: copy_result_payload(this.#symbols, result),
+    })
+  }
+
+  async #close_once(): Promise<void> {
+    try {
+      const response = await this.#request({ kind: "close" }, [], true)
+      if (response.result_kind !== RESULT_OK) {
+        throw unexpected_result("close", response.result_kind)
       }
     } finally {
-      this.#symbols.openkache_client_result_free(result)
+      this.#closed = true
+      this.#channel.closed = true
+      CLIENT_FINALIZER.unregister(this)
+      this.#worker.terminate()
+      fail_pending_requests(this.#channel, new OpenKache_Error("client is closed"))
     }
   }
 }
 
-function load_native_library(path: string): Native_Library {
-  const cached = LIBRARIES.get(path)
-  if (cached !== undefined) return cached
-  const library = dlopen(path, NATIVE_SYMBOLS)
-  if (library.symbols.openkache_client_abi_version() !== ABI_VERSION) {
-    library.close()
-    throw new OpenKache_Error(`native library at ${path} has an incompatible ABI`)
+function receive_worker_response(
+  channel: Worker_Channel,
+  response: Worker_Response,
+): void {
+  const pending = channel.pending.get(response.request_id)
+  if (pending === undefined) return
+  channel.pending.delete(response.request_id)
+  if (response.ok) {
+    pending.resolve(response)
+  } else {
+    pending.reject(new OpenKache_Error(response.message))
   }
-  LIBRARIES.set(path, library)
-  return library
 }
 
-function copy_result_payload(symbols: Native_Symbols, result: Native_Pointer): Uint8Array {
-  const length = Number(symbols.openkache_client_result_data_length(result))
-  if (length === 0) return EMPTY_BYTES
-  const data = symbols.openkache_client_result_data(result)
-  if (data === null) {
-    throw new OpenKache_Error(`Rust client returned a null pointer for ${length} payload bytes`)
+function fail_pending_requests(
+  channel: Worker_Channel,
+  error: OpenKache_Error,
+): void {
+  for (const pending of channel.pending.values()) {
+    pending.reject(error)
   }
-  return new Uint8Array(toArrayBuffer(data, 0, length)).slice()
+  channel.pending.clear()
 }
 
-function result_error(
-  symbols: Native_Symbols,
-  result: Native_Pointer,
-  kind: number,
-): OpenKache_Error {
-  const payload = copy_result_payload(symbols, result)
-  const message = payload.byteLength === 0 ? `native operation failed with result ${kind}` : TEXT_DECODER.decode(payload)
-  return new OpenKache_Error(message)
+function owned_key_bytes(key: string | Uint8Array): Uint8Array {
+  return typeof key === "string" ? TEXT_ENCODER.encode(key) : key.slice()
 }
 
-function unexpected_result(operation: string, kind: number): OpenKache_Error {
-  return new OpenKache_Error(`${operation} returned unexpected native result ${kind}`)
-}
-
-function as_bytes(value: string | Uint8Array): Uint8Array {
-  if (typeof value === "string") return TEXT_ENCODER.encode(value)
-  return value
+function owned_bytes(bytes: Uint8Array): Uint8Array {
+  if (
+    bytes.byteOffset === 0 &&
+    bytes.buffer instanceof ArrayBuffer &&
+    bytes.byteLength === bytes.buffer.byteLength
+  ) {
+    return bytes
+  }
+  return bytes.slice()
 }
 
 function validate_options(options: Client_Options): void {
@@ -391,6 +423,28 @@ function validate_options(options: Client_Options): void {
       `encryption_key must contain 32 bytes, got ${options.encryption_key.byteLength}`,
     )
   }
+}
+
+function validate_value_length(value: Uint8Array): void {
+  if (value.byteLength > MAX_VALUE_BYTES) {
+    throw new OpenKache_Error(
+      `value contains ${value.byteLength} bytes, maximum is ${MAX_VALUE_BYTES}`,
+    )
+  }
+}
+
+function unexpected_result(operation: string, kind: number): OpenKache_Error {
+  return new OpenKache_Error(`${operation} returned unexpected native result ${kind}`)
+}
+
+function as_openkache_error(error: unknown): OpenKache_Error {
+  return error instanceof OpenKache_Error
+    ? error
+    : new OpenKache_Error(error_message(error))
+}
+
+function error_message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function default_library_path(): string {

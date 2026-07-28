@@ -24,22 +24,48 @@ bun run build:native
 
 ```typescript
 import { OpenKache_Client } from "@openkache/client"
+import { ProfileSchema } from "./gen/profile_pb.ts"
 
-const client = OpenKache_Client.connect({
+const client = await OpenKache_Client.connect({
   address: "127.0.0.1:4433",
   certificate: await Bun.file("certificate.der").bytes(),
   encryption_key: crypto.getRandomValues(new Uint8Array(32)),
 })
 
-client.set("greeting", "hello")
-const value = client.get("greeting")
-client.close()
+await client.set("profile", {
+  name: "Kim",
+  visits: 42,
+  labels: ["subscriber", "beta"],
+}, ProfileSchema)
+const profile = await client.get("profile", ProfileSchema)
+
+await client.setRaw("opaque", Uint8Array.of(1, 2, 3))
+const bytes = await client.getRaw("opaque")
+await client.close()
 ```
 
-The current methods are synchronous because Bun's C ABI interface is
-synchronous. Bun FFI is currently an experimental Bun interface, so this
-package is a preview. The native client keeps one Rust worker thread and one
-reusable QUIC connection. Call `close()` when finished.
+`set` and `get` use Protobuf-ES internally. Define values in a shared `.proto`
+file, generate TypeScript with `@bufbuild/protoc-gen-es`, and pass the generated
+message schema to both methods. The schema infers the TypeScript initializer and
+result types and also performs the actual runtime encoding and decoding.
+Applications import `OpenKache_Client` and their generated schema; they do not
+need to call `create`, `toBinary`, or `fromBinary`.
+
+Generate each language SDK from the same `.proto` definitions. A TypeScript
+client can therefore encode a value that Java, C++, Python, or Rust later
+decodes with its generated type, and the reverse direction works the same way.
+The Rust transport treats those Protobuf bytes as opaque values; it only
+compresses, encrypts, and sends them. The server does not parse Protobuf,
+decrypt, or decompress stored values.
+
+Use `setRaw` and `getRaw` when the application already owns Protobuf bytes from
+another runtime or needs an exact byte-for-byte round trip.
+
+All connection and cache methods return promises. A small Bun worker owns the
+synchronous FFI handle so native networking does not block the application's
+main JavaScript thread. Bun FFI is currently experimental, so this package is
+a preview. The native client reuses one QUIC connection. Call and await
+`close()` when finished.
 
 ## Configuration
 
