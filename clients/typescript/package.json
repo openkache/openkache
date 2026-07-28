@@ -8,5 +8,8 @@
   },
   "scripts": {
     "build:native": "cargo build --manifest-path ../rust/Cargo.toml --features ffi --release --target-dir target/native"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3"
   }
 }
