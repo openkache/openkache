@@ -1,0 +1,285 @@
+//! Resource-budget sizing for common cache value distributions.
+//!
+//! The planner deliberately favors predictable headroom over exhaustive hardware
+//! tuning. It selects power-of-two SG counts, limits the Table to half of the
+//! process RAM budget, and leaves five percent of the SSD budget unassigned.
+//! Budgets are advisory inputs: the planner does not inspect cgroup limits,
+//! filesystem free space, device performance, or whole-process peak RSS.
+
+use std::path::PathBuf;
+
+use crate::store::{
+    BLOB_ITEM_THRESHOLD_BYTES, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES, STORED_VALUE_TAG_BYTES,
+};
+use crate::table::Table;
+use crate::types::STORAGE_KEY_BYTES;
+use crate::{AppConfig, BUCKET_BYTES, KvError, Result, allowed_cpu_ids, bits_for_count};
+
+const MIB: u64 = 1024 * 1024;
+const STORAGE_USE_PERCENT: u64 = 95;
+const TABLE_RAM_PERCENT: u64 = 50;
+const LIVE_KEY_PERCENT: u64 = 75;
+
+/// A coarse value-size distribution used to choose the SG and Blob layout.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SizingProfile {
+    /// Predominantly 100-byte values stored inline in SG Buckets.
+    Light,
+    /// Predominantly 1 KiB values stored inline in SG Buckets.
+    #[default]
+    Balanced,
+    /// Predominantly 2 KiB values stored densely in Blob Segments.
+    Heavy,
+}
+
+impl SizingProfile {
+    /// Returns the stable CLI and diagnostic label.
+    ///
+    /// # Returns
+    ///
+    /// One of `light`, `balanced`, or `heavy`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Balanced => "balanced",
+            Self::Heavy => "heavy",
+        }
+    }
+
+    /// Returns the encoded value size modeled by this profile.
+    ///
+    /// # Returns
+    ///
+    /// The encoded value length in bytes.
+    pub const fn value_bytes(self) -> usize {
+        match self {
+            Self::Light => 100,
+            Self::Balanced => 1024,
+            Self::Heavy => 2048,
+        }
+    }
+
+    const fn segment_size_mib(self) -> usize {
+        match self {
+            Self::Light | Self::Balanced => 16,
+            Self::Heavy => 2,
+        }
+    }
+
+    const fn blob_segment_size_mib(self) -> usize {
+        match self {
+            Self::Light | Self::Balanced => 1,
+            Self::Heavy => 64,
+        }
+    }
+}
+
+/// Hardware limits and storage location used to derive one server configuration.
+#[derive(Clone, Debug)]
+pub struct SizingRequest {
+    /// Total CPUs available to the server process.
+    pub cpu_count: usize,
+    /// Maximum resident memory budget in bytes.
+    pub memory_bytes: u64,
+    /// Maximum SSD address-space budget in bytes.
+    pub storage_bytes: u64,
+    /// Directory that owns the generated worker shard files.
+    pub directory: PathBuf,
+    /// Coarse encoded-value distribution; defaults to 1 KiB values.
+    pub profile: SizingProfile,
+}
+
+impl SizingRequest {
+    /// Derives an [`AppConfig`] and its capacity estimates from the resource budgets.
+    ///
+    /// # Returns
+    ///
+    /// A plan using permitted CPU IDs and the largest power-of-two SG count that
+    /// stays within the SSD and Table-memory budgets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a budget is zero, fewer CPUs are available than
+    /// requested, arithmetic overflows, or even one SG per worker cannot fit.
+    ///
+    /// The returned plan does not reserve filesystem blocks or enforce the
+    /// process memory limit. Callers must compare the requested budgets with
+    /// deployment limits before starting the server.
+    pub fn plan(self) -> Result<SizingPlan> {
+        let mut cpu_ids = allowed_cpu_ids()?.into_iter().collect::<Vec<_>>();
+        cpu_ids.sort_unstable();
+        if self.cpu_count > cpu_ids.len() {
+            return Err(KvError::InvalidConfig(format!(
+                "sizing requested {} CPUs but the process affinity set permits {}",
+                self.cpu_count,
+                cpu_ids.len()
+            )));
+        }
+        cpu_ids.truncate(self.cpu_count);
+        let plan = self.plan_with_cpu_ids(cpu_ids)?;
+        plan.config.validate()?;
+        Ok(plan)
+    }
+
+    pub(crate) fn plan_with_cpu_ids(self, cpu_ids: Vec<usize>) -> Result<SizingPlan> {
+        if self.cpu_count == 0 {
+            return Err(KvError::InvalidConfig(
+                "sizing CPU count must be non-zero".into(),
+            ));
+        }
+        if self.memory_bytes == 0 || self.storage_bytes == 0 {
+            return Err(KvError::InvalidConfig(
+                "sizing memory and storage budgets must be non-zero".into(),
+            ));
+        }
+        if cpu_ids.len() != self.cpu_count {
+            return Err(KvError::InvalidConfig(
+                "sizing CPU ID count must equal the requested CPU count".into(),
+            ));
+        }
+
+        let storage_budget_bytes =
+            percent_of(self.storage_bytes, STORAGE_USE_PERCENT, "SSD sizing budget")?;
+        let table_memory_budget_bytes =
+            percent_of(self.memory_bytes, TABLE_RAM_PERCENT, "Table sizing budget")?;
+        let mut config = AppConfig::default();
+        config.runtime.thread_count = self.cpu_count;
+        config.runtime.cpu_ids = cpu_ids;
+        config.storage.directory = self.directory;
+        config.storage.segment_size_mib = self.profile.segment_size_mib();
+        config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
+
+        for exponent in (0..=16).rev() {
+            let segments_per_thread = 1usize << exponent;
+            config.storage.segments_per_thread = segments_per_thread;
+            let keys_per_segment = keys_per_segment(self.profile)?;
+            let raw_key_capacity = checked_product(
+                [
+                    self.cpu_count as u64,
+                    segments_per_thread as u64,
+                    keys_per_segment,
+                ],
+                "raw key capacity",
+            )?;
+            let planned_key_capacity =
+                percent_of(raw_key_capacity, LIVE_KEY_PERCENT, "planned key capacity")?;
+            let capacity_per_thread_u64 = planned_key_capacity.div_ceil(self.cpu_count as u64);
+            let Ok(capacity_per_thread) = usize::try_from(capacity_per_thread_u64) else {
+                continue;
+            };
+            config.table.capacity_per_thread = capacity_per_thread.max(1);
+
+            let storage_file_bytes = storage_file_bytes(&config)?;
+            if storage_file_bytes > storage_budget_bytes {
+                continue;
+            }
+            let worker_config = config.worker_config(0);
+            worker_config.validate()?;
+            let table_memory_bytes = (Table::modeled_memory_bytes(&worker_config)? as u64)
+                .checked_mul(self.cpu_count as u64)
+                .ok_or_else(|| {
+                    KvError::InvalidConfig("modeled Table memory size overflowed".into())
+                })?;
+            if table_memory_bytes > table_memory_budget_bytes {
+                continue;
+            }
+
+            return Ok(SizingPlan {
+                config,
+                profile: self.profile,
+                value_bytes: self.profile.value_bytes(),
+                sg_index_bits: bits_for_count(segments_per_thread),
+                raw_key_capacity,
+                planned_key_capacity,
+                table_memory_bytes,
+                table_memory_budget_bytes,
+                storage_file_bytes,
+                storage_budget_bytes,
+            });
+        }
+
+        Err(KvError::InvalidConfig(
+            "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD".into(),
+        ))
+    }
+}
+
+/// Effective configuration and capacity estimates produced by [`SizingRequest`].
+#[derive(Clone, Debug)]
+pub struct SizingPlan {
+    /// Server configuration ready for validation and startup.
+    pub config: AppConfig,
+    /// Selected workload profile.
+    pub profile: SizingProfile,
+    /// Encoded value size used by the storage model.
+    pub value_bytes: usize,
+    /// Packed bits used for one worker-local SG index.
+    pub sg_index_bits: usize,
+    /// Theoretical unique-key capacity at perfect SG packing.
+    pub raw_key_capacity: u64,
+    /// Recommended live-key capacity after the 25% SG churn reserve.
+    pub planned_key_capacity: u64,
+    /// Modeled host-wide Table allocation.
+    pub table_memory_bytes: u64,
+    /// Maximum Table allocation admitted by the planner.
+    pub table_memory_budget_bytes: u64,
+    /// Host-wide Segment, control-page, and Blob file address space.
+    pub storage_file_bytes: u64,
+    /// Maximum storage address space admitted by the planner.
+    pub storage_budget_bytes: u64,
+}
+
+fn percent_of(value: u64, percent: u64, name: &str) -> Result<u64> {
+    value
+        .checked_mul(percent)
+        .map(|scaled| scaled / 100)
+        .ok_or_else(|| KvError::InvalidConfig(format!("{name} overflowed")))
+}
+
+fn checked_product<const N: usize>(values: [u64; N], name: &str) -> Result<u64> {
+    values.into_iter().try_fold(1u64, |product, value| {
+        product
+            .checked_mul(value)
+            .ok_or_else(|| KvError::InvalidConfig(format!("{name} overflowed")))
+    })
+}
+
+fn storage_file_bytes(config: &AppConfig) -> Result<u64> {
+    let per_worker = config.worker_config(0);
+    per_worker
+        .segment_file_bytes()?
+        .checked_add(per_worker.blob_bytes())
+        .and_then(|bytes| bytes.checked_mul(config.runtime.thread_count as u64))
+        .ok_or_else(|| KvError::InvalidConfig("sized storage file length overflowed".into()))
+}
+
+fn keys_per_segment(profile: SizingProfile) -> Result<u64> {
+    let value_bytes = profile.value_bytes();
+    let segment_bytes = checked_product(
+        [profile.segment_size_mib() as u64, MIB],
+        "Segment byte size",
+    )?;
+    let bucket_count = segment_bytes / BUCKET_BYTES as u64;
+    if STORAGE_KEY_BYTES.saturating_add(value_bytes) <= BLOB_ITEM_THRESHOLD_BYTES {
+        let item_bytes = ITEM_FIXED_BYTES + STORED_VALUE_TAG_BYTES + value_bytes;
+        return bucket_count
+            .checked_mul(items_per_bucket(item_bytes) as u64)
+            .ok_or_else(|| KvError::InvalidConfig("inline SG key capacity overflowed".into()));
+    }
+
+    let reference_capacity = bucket_count
+        .checked_mul(items_per_bucket(ITEM_FIXED_BYTES + STORED_BLOB_REF_BYTES) as u64)
+        .ok_or_else(|| KvError::InvalidConfig("BlobRef SG capacity overflowed".into()))?;
+    let blob_bytes = checked_product(
+        [profile.blob_segment_size_mib() as u64, MIB],
+        "Blob Segment byte size",
+    )?;
+    Ok(reference_capacity.min(blob_bytes / value_bytes as u64))
+}
+
+fn items_per_bucket(item_bytes: usize) -> usize {
+    (1..=u8::MAX as usize)
+        .take_while(|count| 1 + (*count * 20).div_ceil(8) + *count * item_bytes <= BUCKET_BYTES)
+        .last()
+        .unwrap_or_default()
+}

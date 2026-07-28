@@ -9,6 +9,8 @@ use openkache::server::KacheServer;
 
 #[path = "openkache_server/allocator.rs"]
 mod allocator;
+#[path = "openkache_server/sizing.rs"]
+mod sizing;
 
 /// Command-line arguments controlling the network endpoint and cache configuration.
 #[derive(Parser)]
@@ -25,19 +27,37 @@ struct Arguments {
     /// Optional TOML cache configuration file.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    #[command(flatten)]
+    sizing: sizing::SizingArguments,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments = Arguments::parse();
+    let sizing_plan = arguments.sizing.build_plan()?;
+    if arguments.sizing.plan_only() {
+        sizing::print_plan(
+            sizing_plan
+                .as_ref()
+                .expect("clap requires sizing arguments with --plan"),
+        );
+        return Ok(());
+    }
+    let config = match &sizing_plan {
+        Some(plan) => plan.config.clone(),
+        None => load_config(arguments.config.as_deref())?,
+    };
+    if let Some(plan) = &sizing_plan {
+        sizing::print_plan(plan);
+    }
     let runtime = compio::runtime::Runtime::new()?;
     if !runtime.driver_type().is_iouring() {
         return Err(std::io::Error::other("openkache-server requires the io_uring driver").into());
     }
-    runtime.block_on(run())
+    runtime.block_on(run(arguments, config))
 }
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let arguments = Arguments::parse();
-    let config = load_config(arguments.config.as_deref())?;
+async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let storage_directory = config.storage.directory.clone();
     let server = KacheServer::bind_with_config(arguments.listen, config).await?;
     let address = server.local_addr()?;
