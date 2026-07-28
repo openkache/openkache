@@ -5,7 +5,7 @@
     "": {
       "name": "@openkache/client",
       "peerDependencies": {
-        "bun": ">=1.3.13",
+        "bun": "latest",
       },
     },
   },
