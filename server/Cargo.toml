@@ -3,6 +3,10 @@ name = "openkache"
 version = "0.1.0"
 edition = "2024"
 
+[profile.dev.package.tikv-jemalloc-sys]
+# Nix fortify rejects jemalloc's configure probes at the default -O0.
+opt-level = 1
+
 [features]
 default = ["allocator-jemalloc", "channel-crossfire", "quic-noq"]
 # Forces the portable lookup paths for cross-architecture benchmarking.

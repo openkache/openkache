@@ -6,6 +6,8 @@ use clap::Parser;
 use openkache::server::KacheServer;
 use openkache::{AppConfig, QuicBackend};
 
+const DEFAULT_PORT: u16 = 4433;
+
 #[path = "openkache_server/allocator.rs"]
 mod allocator;
 #[path = "openkache_server/sizing.rs"]
@@ -16,8 +18,12 @@ mod sizing;
 #[command(name = "openkache-server")]
 struct Arguments {
     /// UDP address on which the QUIC endpoint listens.
-    #[arg(long, default_value = "127.0.0.1:4433")]
-    listen: SocketAddr,
+    #[arg(long, value_name = "ADDRESS", conflicts_with = "port")]
+    listen: Option<SocketAddr>,
+
+    /// UDP port on localhost; defaults to 4433.
+    #[arg(long, value_name = "PORT", conflicts_with = "listen")]
+    port: Option<u16>,
 
     /// File receiving the generated self-signed server certificate.
     #[arg(long, default_value = "target/openkache-local/certificate.local.der")]
@@ -37,9 +43,13 @@ struct Arguments {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
-    let sizing_plan = arguments.sizing.build_plan()?;
+    let sizing_plan = arguments.sizing.build_plan(arguments.config.is_some())?;
     if arguments.sizing.plan_only() {
-        sizing::print_plan(sizing_plan.as_ref().expect("clap requires a sizing plan"));
+        sizing::print_plan(
+            sizing_plan
+                .as_ref()
+                .expect("clap requires sizing arguments with --plan"),
+        );
         return Ok(());
     }
     let mut config = match &sizing_plan {
@@ -62,7 +72,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
     let storage_directory = config.storage.directory.clone();
     let quic_backend = config.quic.selected_backend()?;
-    let server = KacheServer::bind_with_config(arguments.listen, config).await?;
+    let listen = arguments.listen.unwrap_or_else(|| {
+        SocketAddr::from(([127, 0, 0, 1], arguments.port.unwrap_or(DEFAULT_PORT)))
+    });
+    let server = KacheServer::bind_with_config(listen, config).await?;
     let address = server.local_addr()?;
     if let Some(parent) = arguments.certificate_out.parent() {
         std::fs::create_dir_all(parent)?;

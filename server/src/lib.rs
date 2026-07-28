@@ -50,7 +50,7 @@ pub use config::{
     bits_for_count, expand_thread_pattern,
 };
 
-mod sizing;
+pub(crate) mod sizing;
 pub use sizing::{SizingPlan, SizingProfile, SizingRequest};
 
 mod cli;

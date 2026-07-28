@@ -73,7 +73,40 @@ self-signed certificate to
 `target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
 `SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/2` QUIC
 protocol. `SYNC` flushes each SSD worker before acknowledging the request.
-Pass `--config <path>` to load an explicit TOML cache configuration.
+Pass `--port <port>` only when overriding the default port, or pass
+`--config <path>` to load an explicit TOML cache configuration.
+
+Without TOML, the server uses all CPUs permitted by process affinity, the
+smaller of available host RAM and common cgroup memory limits, and available
+space on the storage directory's filesystem. It then starts with the default
+`balanced` profile for 1 KiB values. `light` models 100-byte values and `heavy`
+models 2 KiB values.
+
+```bash
+cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
+  --port 6380 \
+  --cpus 4 \
+  --memory-gib 32 \
+  --storage-gb 2500 \
+  --directory ./openkache-data \
+  --plan
+```
+
+Every argument in this example is optional. `--plan` prints the automatically
+detected or overridden sizing result without starting. The planner reserves 5%
+of the SSD budget, limits the packed Table to 50% of RAM, and targets 75% of
+theoretical SG key capacity so updates and Tombstones have room.
+
+Sizing is a deterministic capacity estimate, not an adaptive benchmark. It
+detects the standard Linux cgroup memory files and filesystem availability but
+does not detect filesystem quotas, SSD type, or NVMe performance. The RAM
+estimate covers the packed Table rather than complete peak process RSS.
+`--cpus` selects worker threads but does not impose a process CPU quota; use
+deployment affinity or cgroups for that boundary. `light` and `balanced` use 1
+MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that limit
+to 64 MiB. Reopen existing storage with the same automatically detected layout
+or explicit sizing overrides because worker count and Segment layout changes
+require cache recreation.
 
 For a resource-sized configuration without TOML, provide the worker CPU count,
 RAM limit, SSD limit, and storage directory. The default `balanced` profile

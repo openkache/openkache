@@ -29,72 +29,54 @@ impl From<Profile> for SizingProfile {
 #[derive(Args)]
 pub(super) struct SizingArguments {
     /// CPUs assigned to cache workers.
-    #[arg(
-        long,
-        requires_all = ["memory_gib", "storage_gb"],
-        conflicts_with = "config"
-    )]
+    #[arg(long, conflicts_with = "config")]
     cpus: Option<usize>,
 
-    /// Maximum process memory in GiB.
-    #[arg(
-        long,
-        requires_all = ["cpus", "storage_gb"],
-        conflicts_with = "config"
-    )]
+    /// Override the detected process memory budget in GiB.
+    #[arg(long, conflicts_with = "config")]
     memory_gib: Option<u64>,
 
-    /// Maximum SSD space in decimal GB.
-    #[arg(
-        long,
-        requires_all = ["cpus", "memory_gib"],
-        conflicts_with = "config"
-    )]
+    /// Override the detected SSD space budget in decimal GB.
+    #[arg(long, conflicts_with = "config")]
     storage_gb: Option<u64>,
 
     /// Value-size model: light=100B, balanced=1KiB, heavy=2KiB.
-    #[arg(long, value_enum, requires = "cpus", conflicts_with = "config")]
+    #[arg(long, value_enum, conflicts_with = "config")]
     profile: Option<Profile>,
 
     /// Storage directory used by the generated configuration.
-    #[arg(long, requires = "cpus", conflicts_with = "config")]
+    #[arg(long, conflicts_with = "config")]
     directory: Option<PathBuf>,
 
     /// Print the sizing result without opening storage or binding the server.
-    #[arg(long, requires = "cpus", conflicts_with = "config")]
+    #[arg(long, conflicts_with = "config")]
     plan: bool,
 }
 
 impl SizingArguments {
-    pub(super) fn build_plan(&self) -> Result<Option<SizingPlan>, Box<dyn std::error::Error>> {
-        let Some(cpu_count) = self.cpus else {
+    pub(super) fn build_plan(
+        &self,
+        use_config_file: bool,
+    ) -> Result<Option<SizingPlan>, Box<dyn std::error::Error>> {
+        if use_config_file {
             return Ok(None);
-        };
-        let memory_bytes = checked_unit(
-            self.memory_gib
-                .expect("clap requires --memory-gib with --cpus"),
-            GIB,
-            "memory",
-        )?;
-        let storage_bytes = checked_unit(
-            self.storage_gb
-                .expect("clap requires --storage-gb with --cpus"),
-            GB,
-            "storage",
-        )?;
-        Ok(Some(
-            SizingRequest {
-                cpu_count,
-                memory_bytes,
-                storage_bytes,
-                directory: self
-                    .directory
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("target/kvkache-v1")),
-                profile: self.profile.map(Into::into).unwrap_or_default(),
-            }
-            .plan()?,
-        ))
+        }
+        let directory = self
+            .directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("target/kvkache-v1"));
+        let mut request =
+            SizingRequest::detect(directory, self.profile.map(Into::into).unwrap_or_default())?;
+        if let Some(cpu_count) = self.cpus {
+            request.cpu_count = cpu_count;
+        }
+        if let Some(memory_gib) = self.memory_gib {
+            request.memory_bytes = checked_unit(memory_gib, GIB, "memory")?;
+        }
+        if let Some(storage_gb) = self.storage_gb {
+            request.storage_bytes = checked_unit(storage_gb, GB, "storage")?;
+        }
+        Ok(Some(request.plan()?))
     }
 
     pub(super) const fn plan_only(&self) -> bool {
