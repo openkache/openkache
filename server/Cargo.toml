@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["allocator-jemalloc"]
 # Forces the portable lookup paths for cross-architecture benchmarking.
 force-scalar = []
-# The server uses the system allocator when no allocator feature is enabled.
 allocator-system = []
 allocator-mimalloc = ["dep:mimalloc"]
 allocator-jemalloc = ["dep:tikv-jemallocator"]
