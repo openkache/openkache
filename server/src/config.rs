@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
+use clap::ValueEnum;
 use serde::Deserialize;
 
 use crate::BUCKET_BYTES;
@@ -19,6 +20,41 @@ pub enum BucketSelectionPolicy {
     #[default]
     LeastUsed,
     MostUsed,
+}
+
+/// QUIC protocol implementation used by the network server.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum QuicBackend {
+    /// Compio packet I/O backed by `quinn-proto`.
+    #[default]
+    Compio,
+    /// Compio packet I/O backed by `noq-proto`.
+    Noq,
+    /// Compio packet I/O backed by Cloudflare quiche.
+    Quiche,
+    /// Reserved selection for a future Mozilla neqo adapter.
+    Neqo,
+}
+
+impl QuicBackend {
+    /// Returns the stable configuration and diagnostics label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compio => "compio",
+            Self::Noq => "noq",
+            Self::Quiche => "quiche",
+            Self::Neqo => "neqo",
+        }
+    }
+}
+
+/// QUIC transport configuration shared by all protocol implementations.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuicConfig {
+    /// Protocol implementation selected when the server binds.
+    pub backend: QuicBackend,
 }
 
 impl BucketSelectionPolicy {
@@ -239,6 +275,7 @@ impl Config {
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
+    pub quic: QuicConfig,
     pub runtime: RuntimeConfig,
     pub io_uring: IoUringConfig,
     pub timeouts: TimeoutConfig,
@@ -250,6 +287,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             version: 1,
+            quic: QuicConfig::default(),
             runtime: RuntimeConfig::default(),
             io_uring: IoUringConfig::default(),
             timeouts: TimeoutConfig::default(),
@@ -500,6 +538,7 @@ impl AppConfig {
         let capacity_per_thread = total_table_capacity.div_ceil(thread_count);
         let config = Self {
             version: 1,
+            quic: QuicConfig::default(),
             runtime: RuntimeConfig {
                 thread_count,
                 cpu_ids,

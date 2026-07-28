@@ -10,6 +10,7 @@
 pub mod allocators;
 pub mod breadcrumb_filter;
 pub mod server;
+mod transport;
 pub mod types;
 
 pub use types::{StorageKey, Value};
@@ -19,8 +20,9 @@ pub use error::{KvError, Result};
 
 mod config;
 pub use config::{
-    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, RuntimeConfig, StorageConfig,
-    TableConfig, TimeoutConfig, allowed_cpu_ids, bits_for_count, expand_thread_pattern,
+    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, QuicBackend, QuicConfig,
+    RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, allowed_cpu_ids, bits_for_count,
+    expand_thread_pattern,
 };
 
 mod cli;

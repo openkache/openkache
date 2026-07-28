@@ -4,8 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use openkache::AppConfig;
 use openkache::server::KacheServer;
+use openkache::{AppConfig, QuicBackend};
 
 #[path = "openkache_server/allocator.rs"]
 mod allocator;
@@ -25,6 +25,10 @@ struct Arguments {
     /// Optional TOML cache configuration file.
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
+
+    /// QUIC protocol implementation, overriding the configuration file.
+    #[arg(long, value_enum)]
+    quic_backend: Option<QuicBackend>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,8 +41,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
-    let config = load_config(arguments.config.as_deref())?;
+    let mut config = load_config(arguments.config.as_deref())?;
+    if let Some(backend) = arguments.quic_backend {
+        config.quic.backend = backend;
+    }
     let storage_directory = config.storage.directory.clone();
+    let quic_backend = config.quic.backend;
     let server = KacheServer::bind_with_config(arguments.listen, config).await?;
     let address = server.local_addr()?;
     if let Some(parent) = arguments.certificate_out.parent() {
@@ -53,6 +61,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Storage: SSD-backed ({})", storage_directory.display());
     println!("Runtime: Compio (io_uring)");
+    println!("QUIC backend: {}", quic_backend.as_str());
     println!("Allocator: {}", allocator::NAME);
     println!("Press Ctrl-C to stop");
 

@@ -11,6 +11,8 @@ allocator-system = []
 allocator-mimalloc = ["dep:mimalloc"]
 allocator-jemalloc = ["dep:tikv-jemallocator"]
 allocator-snmalloc = ["dep:snmalloc-rs"]
+quic-noq = ["dep:comnoq"]
+quic-quiche = ["dep:boring", "dep:quiche"]
 
 [[bin]]
 name = "openkache-server"
@@ -18,7 +20,10 @@ path = "src/bin/openkache_server.rs"
 
 [dependencies]
 aes = "*"
+# quiche 0.29 uses boring 4; both crates link one BoringSSL build.
+boring = { version = "4", optional = true }
 clap = { version = "*", features = ["derive"] }
+comnoq = { version = "*", default-features = false, features = ["ring"], optional = true }
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "runtime", "signal", "time"] }
 compio-quic = { version = "*", features = ["ring"] }
 flume = "*"
@@ -26,6 +31,7 @@ futures-util = "*"
 libc = "*"
 mimalloc = { version = "*", optional = true }
 openkache-protocol = { path = "../protocol" }
+quiche = { version = "*", optional = true }
 rand = "*"
 rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }

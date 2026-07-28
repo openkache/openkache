@@ -49,4 +49,9 @@ plaintext.
 
 ### Can I use my own QUIC implementation?
 
-Yes. OpenKache supports Quinn, Noq, and Quiche backends — switch with a feature flag.
+The server has a backend-independent connection and stream boundary. The
+default `compio` backend uses `quinn-proto`; optional `noq` and `quiche`
+backends use the same Compio UDP I/O and timers and are selected with
+`--quic-backend` or `[quic].backend`. Mozilla neqo is not currently available:
+its official transport is not published as a standalone crate and its server
+API requires NSS certificate-database integration.
