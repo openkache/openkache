@@ -300,12 +300,7 @@ impl Kvkache {
                 if !item.is_tombstone
                     && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?
                 {
-                    let value_end = blob_ref.value_offset as usize + blob_ref.value_len as usize;
-                    if value_end > commit.blob_logical_len {
-                        return Err(KvError::Worker(
-                            "recovered BlobRef exceeds the committed Blob length".into(),
-                        ));
-                    }
+                    validate_recovered_blob_ref(blob_ref, commit.blob_logical_len)?;
                 }
                 let new_live = !item.is_tombstone;
                 if let Some((previous, previous_live)) =
@@ -560,6 +555,13 @@ impl Kvkache {
         });
 
         while !remaining.is_empty() {
+            let next_generation = match next_sg_generation(self.next_generation) {
+                Ok(next_generation) => next_generation,
+                Err(error) => {
+                    self.restore_flush_records(remaining);
+                    return Err(error);
+                }
+            };
             let sg_index = self.next_segment_index;
             let mut active = MutableSegment::new(&self.config, sg_index);
             let mut planned = Vec::new();
@@ -672,7 +674,10 @@ impl Kvkache {
                 .blob_data_written
                 .set(self.io.blob_data_written.get() + blob_physical_bytes);
 
-            if let Err(error) = self.write_segment(active, reason, blob_used).await {
+            if let Err(error) = self
+                .write_segment(active, reason, blob_used, next_generation)
+                .await
+            {
                 self.restore_flush_records(planned.into_iter().chain(deferred));
                 return Err(error);
             }
@@ -716,6 +721,7 @@ impl Kvkache {
         active: MutableSegment,
         reason: SegmentFlushReason,
         blob_logical_len: usize,
+        next_generation: u64,
     ) -> Result<()> {
         let fill_used_bytes = active.used_bytes() as u64;
         let offset = self.config.segment_data_offset(active.sg_index);
@@ -749,10 +755,7 @@ impl Kvkache {
             .set(self.io.data_written.get() + control_bytes);
         self.occupied_segments[active.sg_index] = true;
         self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .ok_or_else(|| KvError::Worker("SG generation is exhausted".into()))?;
+        self.next_generation = next_generation;
         self.segment_flushes += 1;
         match reason {
             SegmentFlushReason::Capacity => {
@@ -927,6 +930,21 @@ impl Kvkache {
             .map(Vec::capacity)
             .sum()
     }
+}
+
+pub(crate) fn validate_recovered_blob_ref(
+    blob_ref: BlobRef,
+    blob_logical_len: usize,
+) -> Result<()> {
+    let value_end = (blob_ref.value_offset as usize)
+        .checked_add(blob_ref.value_len as usize)
+        .ok_or_else(|| KvError::Worker("recovered BlobRef range overflow".into()))?;
+    if blob_ref.value_len == 0 || value_end > blob_logical_len {
+        return Err(KvError::Worker(
+            "recovered BlobRef is invalid or exceeds the committed Blob length".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn stored_payload_len(value: &[u8]) -> usize {

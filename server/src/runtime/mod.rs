@@ -4,7 +4,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::fs;
-use std::io::Write;
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::Duration;
@@ -677,15 +677,32 @@ pub(crate) fn load_or_create_server_secret(
     existing_storage: bool,
 ) -> Result<ServerSecret> {
     let path = directory.join(SERVER_KEY_FILE);
-    if path.exists() {
-        let permissions = fs::metadata(&path)?.permissions().mode() & 0o777;
-        if permissions & 0o077 != 0 {
-            return Err(KvError::Worker(format!(
-                "server key file {} must not be accessible by group or other users",
-                path.display()
-            )));
+    match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            let metadata = file.metadata()?;
+            if !metadata.file_type().is_file() {
+                return Err(KvError::Worker(format!(
+                    "server key file {} must be a regular file",
+                    path.display()
+                )));
+            }
+            let permissions = metadata.permissions().mode() & 0o777;
+            if permissions & 0o077 != 0 {
+                return Err(KvError::Worker(format!(
+                    "server key file {} must not be accessible by group or other users",
+                    path.display()
+                )));
+            }
+            let mut bytes = Vec::with_capacity(SERVER_KEY_FILE_BYTES);
+            file.read_to_end(&mut bytes)?;
+            return decode_server_secret(&bytes);
         }
-        return decode_server_secret(&fs::read(&path)?);
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     if existing_storage {
         return Err(KvError::Worker(format!(

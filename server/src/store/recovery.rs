@@ -25,6 +25,12 @@ pub(crate) struct RecoveryState {
     pub(crate) next_generation: u64,
 }
 
+pub(crate) fn next_sg_generation(generation: u64) -> Result<u64> {
+    generation
+        .checked_add(1)
+        .ok_or_else(|| KvError::Worker("SG generation is exhausted".into()))
+}
+
 pub(crate) async fn initialize_segment_file(
     file: &mut File,
     config: &Config,
@@ -81,10 +87,7 @@ pub(crate) async fn recover_state(
     }
     let newest = commits.last().copied();
     let next_generation = match newest {
-        Some(commit) => commit
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| KvError::Worker("SG generation is exhausted".into()))?,
+        Some(commit) => next_sg_generation(commit.generation)?,
         None => 1,
     };
     Ok(RecoveryState {
