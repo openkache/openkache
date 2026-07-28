@@ -14,8 +14,8 @@ impl Kvkache {
         sg_index: usize,
         bucket_index: usize,
     ) -> Result<DirectIoBuffer> {
-        let offset = sg_index as u64 * self.config.segment_size as u64
-            + bucket_index as u64 * BUCKET_BYTES as u64;
+        let offset =
+            self.config.segment_data_offset(sg_index) + bucket_index as u64 * BUCKET_BYTES as u64;
         let read = self
             .data
             .read_at(DirectIoBuffer::for_read(BUCKET_BYTES), offset);
@@ -32,7 +32,10 @@ impl Kvkache {
         Ok(bytes)
     }
 
-    async fn read_segment_items(&self, sg_index: usize) -> Result<Vec<(Item, TableLocation)>> {
+    pub(super) async fn read_segment_items(
+        &self,
+        sg_index: usize,
+    ) -> Result<Vec<(Item, TableLocation)>> {
         let mut result = Vec::new();
         for bucket_index in 0..self.config.bucket_count() {
             let bytes = self.read_bucket(sg_index, bucket_index).await?;

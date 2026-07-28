@@ -1,8 +1,8 @@
 //! Application and per-worker configuration for the OpenKache server.
 //!
 //! Storage uses fixed 4 KiB Buckets inside Segments. Each worker owns paired
-//! Segment and Blob files plus one in-memory lookup Table; restart recovery is
-//! not part of this configuration.
+//! Segment and Blob files plus one in-memory lookup Table. The Segment file
+//! embeds recovery control pages used to rebuild committed state at startup.
 
 use std::collections::HashSet;
 use std::io;
@@ -132,6 +132,7 @@ impl Config {
                 "total Segment data size is too large".into(),
             ));
         }
+        self.segment_file_bytes()?;
         if self.blob_segment_size == 0
             || !self.blob_segment_size.is_multiple_of(BUCKET_BYTES)
             || self.blob_segment_size > u32::MAX as usize
@@ -207,6 +208,26 @@ impl Config {
 
     pub fn data_bytes(&self) -> u64 {
         (self.segment_size * self.segment_count) as u64
+    }
+
+    pub fn segment_file_bytes(&self) -> Result<u64> {
+        let stride = self
+            .segment_size
+            .checked_add(BUCKET_BYTES)
+            .ok_or_else(|| KvError::InvalidConfig("Segment file stride is too large".into()))?;
+        let bytes = stride
+            .checked_mul(self.segment_count)
+            .and_then(|bytes| bytes.checked_add(BUCKET_BYTES))
+            .ok_or_else(|| KvError::InvalidConfig("Segment file size is too large".into()))?;
+        Ok(bytes as u64)
+    }
+
+    pub(crate) fn segment_control_offset(&self, sg_index: usize) -> u64 {
+        (BUCKET_BYTES + sg_index * (BUCKET_BYTES + self.segment_size)) as u64
+    }
+
+    pub(crate) fn segment_data_offset(&self, sg_index: usize) -> u64 {
+        self.segment_control_offset(sg_index) + BUCKET_BYTES as u64
     }
 
     pub fn blob_bytes(&self) -> u64 {

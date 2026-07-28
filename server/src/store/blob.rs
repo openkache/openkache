@@ -224,6 +224,27 @@ impl BlobSegment {
         }
     }
 
+    pub(crate) fn recover_segment(&mut self, sg_index: usize, logical_bytes: usize) -> Result<()> {
+        self.validate_segment_index(sg_index)?;
+        if logical_bytes > self.segment_capacity_bytes as usize {
+            return Err(KvError::Worker(
+                "recovered Blob length exceeds its Segment capacity".into(),
+            ));
+        }
+        let chunk_capacity = BLOB_WRITE_BUFFER_BYTES.min(self.segment_capacity_bytes as usize);
+        let full_chunks = logical_bytes / chunk_capacity;
+        let remainder = logical_bytes % chunk_capacity;
+        let physical_bytes = full_chunks as u64 * chunk_capacity as u64
+            + if remainder == 0 {
+                0
+            } else {
+                remainder.next_multiple_of(BUCKET_BYTES) as u64
+            };
+        self.segment_logical_bytes[sg_index] = logical_bytes as u64;
+        self.segment_physical_bytes[sg_index] = physical_bytes;
+        Ok(())
+    }
+
     pub(crate) fn physical_read_bytes(&self, blob_ref: BlobRef) -> u64 {
         let start = blob_ref.value_offset as u64;
         let end = start + blob_ref.value_len as u64;

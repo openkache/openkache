@@ -22,10 +22,12 @@ use crate::*;
 
 mod blob;
 mod bucket;
+mod recovery;
 mod segment_io;
 
 pub(crate) use self::blob::*;
 pub(crate) use self::bucket::*;
+pub(crate) use self::recovery::*;
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -193,6 +195,8 @@ pub(crate) struct Kvkache {
     pub(crate) occupied_segments: Vec<bool>,
     stable_live_keys: usize,
     next_segment_index: usize,
+    next_generation: u64,
+    storage_key_id: [u8; 16],
     pub(crate) segment_flushes: u64,
     pub(crate) segment_capacity_flushes: u64,
     pub(crate) segment_sync_flushes: u64,
@@ -207,16 +211,57 @@ pub(crate) struct Kvkache {
 }
 
 impl Kvkache {
+    #[allow(dead_code)]
     pub(crate) async fn open(config: Config) -> Result<Self> {
+        Self::open_with_storage_key_id(config, [0; 16]).await
+    }
+
+    pub(crate) async fn open_with_storage_key_id(
+        config: Config,
+        storage_key_id: [u8; 16],
+    ) -> Result<Self> {
         config.validate()?;
         if let Some(parent) = config.data_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let data = open_direct_file(&config.data_path).await?;
-        data.set_len(config.data_bytes()).await?;
+        let data_exists = config.data_path.exists();
+        let blob_exists = config.blob_path().exists();
+        if !data_exists && blob_exists {
+            return Err(KvError::Worker(
+                "Blob storage exists but the Segment file is missing".into(),
+            ));
+        }
+        if data_exists {
+            let actual = fs::metadata(&config.data_path)?.len();
+            let expected = config.segment_file_bytes()?;
+            if actual != expected {
+                return Err(KvError::Worker(format!(
+                    "Segment file has length {actual}, expected {expected}; legacy files require repopulation"
+                )));
+            }
+        }
+        if blob_exists {
+            let actual = fs::metadata(config.blob_path())?.len();
+            let expected = config.blob_bytes();
+            if actual != expected {
+                return Err(KvError::Worker(format!(
+                    "Blob file has length {actual}, expected {expected}"
+                )));
+            }
+        }
+        let mut data = open_direct_file(&config.data_path).await?;
+        if !data_exists {
+            initialize_segment_file(&mut data, &config, storage_key_id).await?;
+        }
+        let recovery_state = recover_state(&data, &config, storage_key_id).await?;
+        if !blob_exists && !recovery_state.commits.is_empty() {
+            return Err(KvError::Worker(
+                "committed Segment state exists but the Blob file is missing".into(),
+            ));
+        }
         let blob_segment = BlobSegment::open(&config).await?;
 
-        Ok(Self {
+        let mut cache = Self {
             table: Table::new(&config)?,
             blob_segment,
             pending: HashMap::new(),
@@ -224,7 +269,9 @@ impl Kvkache {
             pending_blob_bytes: 0,
             occupied_segments: vec![false; config.segment_count],
             stable_live_keys: 0,
-            next_segment_index: 0,
+            next_segment_index: recovery_state.next_segment_index,
+            next_generation: recovery_state.next_generation,
+            storage_key_id,
             segment_flushes: 0,
             segment_capacity_flushes: 0,
             segment_sync_flushes: 0,
@@ -238,7 +285,51 @@ impl Kvkache {
             io: IoCounters::default(),
             config,
             data,
-        })
+        };
+        cache.recover(recovery_state.commits).await?;
+        Ok(cache)
+    }
+
+    async fn recover(&mut self, commits: Vec<SegmentCommit>) -> Result<()> {
+        let mut locations = HashMap::new();
+        for commit in commits {
+            self.occupied_segments[commit.sg_index] = true;
+            self.blob_segment
+                .recover_segment(commit.sg_index, commit.blob_logical_len)?;
+            for (item, table_location) in self.read_segment_items(commit.sg_index).await? {
+                if !item.is_tombstone
+                    && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?
+                {
+                    validate_recovered_blob_ref(blob_ref, commit.blob_logical_len)?;
+                }
+                let new_live = !item.is_tombstone;
+                if let Some((previous, previous_live)) =
+                    locations.insert(item.storage_key, (table_location, new_live))
+                {
+                    if !self
+                        .table
+                        .replace_location(&item.storage_key, previous, table_location)
+                    {
+                        return Err(KvError::Worker(
+                            "recovery could not replace a Table location".into(),
+                        ));
+                    }
+                    match (previous_live, new_live) {
+                        (true, false) => {
+                            self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
+                        }
+                        (false, true) => self.stable_live_keys += 1,
+                        _ => {}
+                    }
+                } else {
+                    self.table.insert(&item.storage_key, table_location)?;
+                    if new_live {
+                        self.stable_live_keys += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn get(&self, storage_key: &StorageKey) -> Result<Option<Vec<u8>>> {
@@ -464,6 +555,13 @@ impl Kvkache {
         });
 
         while !remaining.is_empty() {
+            let next_generation = match next_sg_generation(self.next_generation) {
+                Ok(next_generation) => next_generation,
+                Err(error) => {
+                    self.restore_flush_records(remaining);
+                    return Err(error);
+                }
+            };
             let sg_index = self.next_segment_index;
             let mut active = MutableSegment::new(&self.config, sg_index);
             let mut planned = Vec::new();
@@ -520,6 +618,17 @@ impl Kvkache {
                 ));
             }
             if self.occupied_segments[sg_index] {
+                let invalidated =
+                    match invalidate_segment(&mut self.data, &self.config, sg_index).await {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            self.restore_flush_records(planned.into_iter().chain(deferred));
+                            return Err(error);
+                        }
+                    };
+                self.io
+                    .data_written
+                    .set(self.io.data_written.get() + invalidated);
                 let evicted = match self.prepare_segment_for_reuse(sg_index).await {
                     Ok(evicted) => evicted,
                     Err(error) => {
@@ -565,7 +674,10 @@ impl Kvkache {
                 .blob_data_written
                 .set(self.io.blob_data_written.get() + blob_physical_bytes);
 
-            if let Err(error) = self.write_segment(active, reason).await {
+            if let Err(error) = self
+                .write_segment(active, reason, blob_used, next_generation)
+                .await
+            {
                 self.restore_flush_records(planned.into_iter().chain(deferred));
                 return Err(error);
             }
@@ -608,9 +720,11 @@ impl Kvkache {
         &mut self,
         active: MutableSegment,
         reason: SegmentFlushReason,
+        blob_logical_len: usize,
+        next_generation: u64,
     ) -> Result<()> {
         let fill_used_bytes = active.used_bytes() as u64;
-        let offset = active.sg_index as u64 * self.config.segment_size as u64;
+        let offset = self.config.segment_data_offset(active.sg_index);
         let expected = active.bytes.len();
         let write = self.data.write_at(active.bytes, offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
@@ -625,8 +739,23 @@ impl Kvkache {
             .set(self.io.data_written.get() + bytes.len() as u64);
         self.blob_segment.sync().await?;
         self.data.sync_data().await?;
+        let control_bytes = commit_segment(
+            &mut self.data,
+            &self.config,
+            self.storage_key_id,
+            SegmentCommit {
+                sg_index: active.sg_index,
+                generation: self.next_generation,
+                blob_logical_len,
+            },
+        )
+        .await?;
+        self.io
+            .data_written
+            .set(self.io.data_written.get() + control_bytes);
         self.occupied_segments[active.sg_index] = true;
         self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
+        self.next_generation = next_generation;
         self.segment_flushes += 1;
         match reason {
             SegmentFlushReason::Capacity => {
@@ -801,6 +930,21 @@ impl Kvkache {
             .map(Vec::capacity)
             .sum()
     }
+}
+
+pub(crate) fn validate_recovered_blob_ref(
+    blob_ref: BlobRef,
+    blob_logical_len: usize,
+) -> Result<()> {
+    let value_end = (blob_ref.value_offset as usize)
+        .checked_add(blob_ref.value_len as usize)
+        .ok_or_else(|| KvError::Worker("recovered BlobRef range overflow".into()))?;
+    if blob_ref.value_len == 0 || value_end > blob_logical_len {
+        return Err(KvError::Worker(
+            "recovered BlobRef is invalid or exceeds the committed Blob length".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn stored_payload_len(value: &[u8]) -> usize {
