@@ -299,7 +299,7 @@ impl Kvkache {
                 .recover_segment(commit.sg_index, commit.blob_logical_len)?;
             for (item, table_location) in self.read_segment_items(commit.sg_index).await? {
                 if !item.is_tombstone
-                    && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?
+                    && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?.value
                 {
                     validate_recovered_blob_ref(blob_ref, commit.blob_logical_len)?;
                 }
