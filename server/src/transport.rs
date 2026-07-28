@@ -1,6 +1,7 @@
 //! QUIC backend boundary used by the OpenKache protocol server.
 
 use std::future::Future;
+#[cfg(feature = "quic-quiche")]
 use std::net::SocketAddr;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use std::sync::Arc;
@@ -9,6 +10,7 @@ use std::time::Duration;
 use compio::BufResult;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use compio::io::{AsyncReadExt, AsyncWriteExt};
+use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
@@ -25,21 +27,62 @@ pub(super) enum ServerEndpoint {
 }
 
 impl ServerEndpoint {
+    /// Rejects backend selections that this binary cannot initialize.
+    pub(super) fn validate_backend(backend: QuicBackend) -> Result<(), TransportError> {
+        match backend {
+            QuicBackend::Quinn => {
+                #[cfg(feature = "quic-quinn")]
+                {
+                    Ok(())
+                }
+                #[cfg(not(feature = "quic-quinn"))]
+                {
+                    Err(TransportError::not_compiled(backend, "quic-quinn"))
+                }
+            }
+            QuicBackend::Noq => {
+                #[cfg(feature = "quic-noq")]
+                {
+                    Ok(())
+                }
+                #[cfg(not(feature = "quic-noq"))]
+                {
+                    Err(TransportError::not_compiled(backend, "quic-noq"))
+                }
+            }
+            QuicBackend::Quiche => {
+                #[cfg(feature = "quic-quiche")]
+                {
+                    Ok(())
+                }
+                #[cfg(not(feature = "quic-quiche"))]
+                {
+                    Err(TransportError::not_compiled(backend, "quic-quiche"))
+                }
+            }
+            QuicBackend::Neqo => Err(TransportError::unavailable(
+                backend,
+                "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
+            )),
+        }
+    }
+
     /// Binds the selected implementation to a Compio UDP socket.
     pub(super) async fn bind(
         backend: QuicBackend,
-        address: SocketAddr,
+        socket: std::net::UdpSocket,
         certificate_der: &[u8],
         private_key_der: &[u8],
         max_concurrent_streams: usize,
     ) -> Result<Self, TransportError> {
+        Self::validate_backend(backend)?;
         match backend {
             QuicBackend::Quinn => {
                 #[cfg(feature = "quic-quinn")]
                 {
                     Ok(Self::Quinn(
                         quinn_backend::Endpoint::bind(
-                            address,
+                            socket,
                             certificate_der,
                             private_key_der,
                             max_concurrent_streams,
@@ -57,7 +100,7 @@ impl ServerEndpoint {
                 {
                     Ok(Self::Noq(
                         noq_backend::Endpoint::bind(
-                            address,
+                            socket,
                             certificate_der,
                             private_key_der,
                             max_concurrent_streams,
@@ -75,7 +118,7 @@ impl ServerEndpoint {
                 {
                     Ok(Self::Quiche(
                         quiche_backend::Endpoint::bind(
-                            address,
+                            socket,
                             certificate_der,
                             private_key_der,
                             max_concurrent_streams,
@@ -92,18 +135,6 @@ impl ServerEndpoint {
                 backend,
                 "the official neqo transport is not published as a standalone crate and requires NSS certificate-database integration",
             )),
-        }
-    }
-
-    /// Returns the UDP address selected by the operating system.
-    pub(super) fn local_addr(&self) -> Result<SocketAddr, TransportError> {
-        match self {
-            #[cfg(feature = "quic-quinn")]
-            Self::Quinn(endpoint) => endpoint.local_addr(),
-            #[cfg(feature = "quic-noq")]
-            Self::Noq(endpoint) => endpoint.local_addr(),
-            #[cfg(feature = "quic-quiche")]
-            Self::Quiche(endpoint) => endpoint.local_addr(),
         }
     }
 }
@@ -139,7 +170,7 @@ pub(super) trait Connection {
 /// Receive half of one request stream.
 pub(super) trait ReceiveStream {
     fn read_request(
-        self,
+        &mut self,
         maximum: usize,
         timeout: Duration,
     ) -> impl Future<Output = Result<Vec<u8>, StreamReadError>>;
@@ -148,7 +179,7 @@ pub(super) trait ReceiveStream {
 /// Send half of one response stream.
 pub(super) trait SendStream {
     fn write_response(
-        self,
+        &mut self,
         frame: Vec<u8>,
         timeout: Duration,
     ) -> impl Future<Output = Result<(), TransportError>>;
@@ -159,6 +190,10 @@ pub(super) trait SendStream {
 pub(super) enum StreamReadError {
     #[error("request read timed out")]
     Timeout,
+    #[error("request exceeds the protocol limit")]
+    TooLarge,
+    #[error(transparent)]
+    Protocol(#[from] openkache_protocol::ProtocolError),
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
@@ -232,7 +267,7 @@ mod quinn_backend {
 
     impl Endpoint {
         pub(super) async fn bind(
-            address: SocketAddr,
+            socket: std::net::UdpSocket,
             certificate_der: &[u8],
             private_key_der: &[u8],
             max_concurrent_streams: usize,
@@ -241,9 +276,8 @@ mod quinn_backend {
                 .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
             let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(tls)
                 .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
-            let socket = compio::net::UdpSocket::bind(address)
-                .await
-                .map_err(|error| TransportError::backend(NAME, "bind", error))?;
+            let socket = compio::net::UdpSocket::from_std(socket)
+                .map_err(|error| TransportError::backend(NAME, "socket initialization", error))?;
             let max_concurrent_streams =
                 u32::try_from(max_concurrent_streams).map_err(|error| {
                     TransportError::backend(NAME, "stream limit configuration", error)
@@ -262,12 +296,6 @@ mod quinn_backend {
             )
             .map_err(|error| TransportError::backend(NAME, "endpoint initialization", error))?;
             Ok(Self(endpoint))
-        }
-
-        pub(super) fn local_addr(&self) -> Result<SocketAddr, TransportError> {
-            self.0
-                .local_addr()
-                .map_err(|error| TransportError::backend(NAME, "local address", error))
         }
     }
 
@@ -324,18 +352,38 @@ mod quinn_backend {
 
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
-            self,
+            &mut self,
             maximum: usize,
             timeout: Duration,
         ) -> Result<Vec<u8>, StreamReadError> {
-            let mut receive = self.0.take(maximum as u64);
-            match compio::runtime::time::timeout(timeout, receive.read_to_end(Vec::new())).await {
-                Err(_) => Err(StreamReadError::Timeout),
-                Ok(BufResult(Err(error), _)) => {
-                    Err(TransportError::backend(NAME, "stream read", error).into())
-                }
-                Ok(BufResult(Ok(_), frame)) => Ok(frame),
+            let BufResult(result, mut frame) = self.0.read_exact(Vec::with_capacity(1)).await;
+            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
+            let BufResult(result, header) = compio::runtime::time::timeout(
+                timeout,
+                self.0
+                    .read_exact(Vec::with_capacity(REQUEST_HEADER_BYTES - 1)),
+            )
+            .await
+            .map_err(|_| StreamReadError::Timeout)?;
+            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
+            frame.extend_from_slice(&header);
+            let frame_len = Request::frame_len_from_header(&frame)?;
+            if frame_len > maximum {
+                return Err(StreamReadError::TooLarge);
             }
+            let body_len = frame_len - REQUEST_HEADER_BYTES;
+            if body_len == 0 {
+                return Ok(frame);
+            }
+            let BufResult(result, body) = compio::runtime::time::timeout(
+                timeout,
+                self.0.read_exact(Vec::with_capacity(body_len)),
+            )
+            .await
+            .map_err(|_| StreamReadError::Timeout)?;
+            result.map_err(|error| TransportError::backend(NAME, "stream body read", error))?;
+            frame.extend_from_slice(&body);
+            Ok(frame)
         }
     }
 
@@ -343,7 +391,7 @@ mod quinn_backend {
 
     impl super::SendStream for SendStream {
         async fn write_response(
-            mut self,
+            &mut self,
             frame: Vec<u8>,
             timeout: Duration,
         ) -> Result<(), TransportError> {
@@ -354,9 +402,7 @@ mod quinn_backend {
                         TransportError::backend(NAME, "stream write timeout", error)
                     })?;
             result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
-            self.0
-                .finish()
-                .map_err(|error| TransportError::backend(NAME, "stream finish", error))
+            Ok(())
         }
     }
 }
@@ -371,7 +417,7 @@ mod noq_backend {
 
     impl Endpoint {
         pub(super) async fn bind(
-            address: SocketAddr,
+            socket: std::net::UdpSocket,
             certificate_der: &[u8],
             private_key_der: &[u8],
             max_concurrent_streams: usize,
@@ -380,9 +426,8 @@ mod noq_backend {
                 .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
             let crypto = comnoq::crypto::rustls::QuicServerConfig::try_from(tls)
                 .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
-            let socket = compio::net::UdpSocket::bind(address)
-                .await
-                .map_err(|error| TransportError::backend(NAME, "bind", error))?;
+            let socket = compio::net::UdpSocket::from_std(socket)
+                .map_err(|error| TransportError::backend(NAME, "socket initialization", error))?;
             let max_concurrent_streams =
                 u32::try_from(max_concurrent_streams).map_err(|error| {
                     TransportError::backend(NAME, "stream limit configuration", error)
@@ -401,12 +446,6 @@ mod noq_backend {
             )
             .map_err(|error| TransportError::backend(NAME, "endpoint initialization", error))?;
             Ok(Self(endpoint))
-        }
-
-        pub(super) fn local_addr(&self) -> Result<SocketAddr, TransportError> {
-            self.0
-                .local_addr()
-                .map_err(|error| TransportError::backend(NAME, "local address", error))
         }
     }
 
@@ -463,18 +502,38 @@ mod noq_backend {
 
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
-            self,
+            &mut self,
             maximum: usize,
             timeout: Duration,
         ) -> Result<Vec<u8>, StreamReadError> {
-            let mut receive = self.0.take(maximum as u64);
-            match compio::runtime::time::timeout(timeout, receive.read_to_end(Vec::new())).await {
-                Err(_) => Err(StreamReadError::Timeout),
-                Ok(BufResult(Err(error), _)) => {
-                    Err(TransportError::backend(NAME, "stream read", error).into())
-                }
-                Ok(BufResult(Ok(_), frame)) => Ok(frame),
+            let BufResult(result, mut frame) = self.0.read_exact(Vec::with_capacity(1)).await;
+            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
+            let BufResult(result, header) = compio::runtime::time::timeout(
+                timeout,
+                self.0
+                    .read_exact(Vec::with_capacity(REQUEST_HEADER_BYTES - 1)),
+            )
+            .await
+            .map_err(|_| StreamReadError::Timeout)?;
+            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
+            frame.extend_from_slice(&header);
+            let frame_len = Request::frame_len_from_header(&frame)?;
+            if frame_len > maximum {
+                return Err(StreamReadError::TooLarge);
             }
+            let body_len = frame_len - REQUEST_HEADER_BYTES;
+            if body_len == 0 {
+                return Ok(frame);
+            }
+            let BufResult(result, body) = compio::runtime::time::timeout(
+                timeout,
+                self.0.read_exact(Vec::with_capacity(body_len)),
+            )
+            .await
+            .map_err(|_| StreamReadError::Timeout)?;
+            result.map_err(|error| TransportError::backend(NAME, "stream body read", error))?;
+            frame.extend_from_slice(&body);
+            Ok(frame)
         }
     }
 
@@ -482,7 +541,7 @@ mod noq_backend {
 
     impl super::SendStream for SendStream {
         async fn write_response(
-            mut self,
+            &mut self,
             frame: Vec<u8>,
             timeout: Duration,
         ) -> Result<(), TransportError> {
@@ -493,9 +552,7 @@ mod noq_backend {
                         TransportError::backend(NAME, "stream write timeout", error)
                     })?;
             result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
-            self.0
-                .finish()
-                .map_err(|error| TransportError::backend(NAME, "stream finish", error))
+            Ok(())
         }
     }
 }
@@ -511,35 +568,36 @@ mod quiche_backend {
     use futures_util::{FutureExt, StreamExt, pin_mut, select};
 
     use super::*;
+    use crate::channel::{self, AsyncReceiver, Sender, TrySendError};
 
     const NAME: &str = "quiche";
     const MAX_DATAGRAM_BYTES: usize = 65_535;
     const MAX_BUFFERED_REQUEST_BYTES: usize = openkache_protocol::MAX_REQUEST_FRAME_BYTES + 1;
     const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
+    const STREAM_CHUNK_BYTES: usize = 16 * 1024;
+    const STREAM_CHUNK_BACKLOG: usize = 1;
 
     pub(crate) struct Endpoint {
-        local_address: SocketAddr,
-        incoming: flume::Receiver<Incoming>,
-        commands: flume::Sender<Command>,
+        incoming: AsyncReceiver<Incoming>,
+        commands: Sender<Command>,
         driver: JoinHandle<Result<(), TransportError>>,
     }
 
     impl Endpoint {
         pub(super) async fn bind(
-            address: SocketAddr,
+            socket: std::net::UdpSocket,
             certificate_der: &[u8],
             private_key_der: &[u8],
             max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
-            let socket = compio::net::UdpSocket::bind(address)
-                .await
-                .map_err(|error| TransportError::backend(NAME, "bind", error))?;
+            let socket = compio::net::UdpSocket::from_std(socket)
+                .map_err(|error| TransportError::backend(NAME, "socket initialization", error))?;
             let local_address = socket
                 .local_addr()
                 .map_err(|error| TransportError::backend(NAME, "local address", error))?;
             let config = config(certificate_der, private_key_der, max_concurrent_streams)?;
-            let (incoming_sender, incoming) = flume::unbounded();
-            let (commands, command_receiver) = flume::unbounded();
+            let (incoming_sender, incoming) = channel::unbounded_async();
+            let (commands, command_receiver) = channel::unbounded_async();
             let driver_commands = commands.clone();
             let driver = compio::runtime::spawn(async move {
                 Driver {
@@ -548,7 +606,7 @@ mod quiche_backend {
                     config,
                     incoming: incoming_sender,
                     command_sender: driver_commands,
-                    commands: command_receiver,
+                    commands: Some(command_receiver),
                     routes: HashMap::new(),
                     clients: HashMap::new(),
                 }
@@ -556,15 +614,10 @@ mod quiche_backend {
                 .await
             });
             Ok(Self {
-                local_address,
                 incoming,
                 commands,
                 driver,
             })
-        }
-
-        pub(super) fn local_addr(&self) -> Result<SocketAddr, TransportError> {
-            Ok(self.local_address)
         }
     }
 
@@ -604,8 +657,8 @@ mod quiche_backend {
 
     pub(crate) struct Connection {
         connection_id: Vec<u8>,
-        streams: flume::Receiver<Stream>,
-        commands: flume::Sender<Command>,
+        streams: AsyncReceiver<Stream>,
+        commands: Sender<Command>,
     }
 
     impl super::Connection for Connection {
@@ -630,8 +683,8 @@ mod quiche_backend {
                     connection_id: self.connection_id.clone(),
                     stream_id: stream.stream_id,
                     commands: self.commands.clone(),
-                    request: stream.request,
-                    completed: false,
+                    chunks: stream.chunks,
+                    buffered: Vec::new(),
                 },
             ))
         }
@@ -639,39 +692,72 @@ mod quiche_backend {
 
     struct Stream {
         stream_id: u64,
-        request: flume::Receiver<Vec<u8>>,
+        chunks: AsyncReceiver<Vec<u8>>,
     }
 
     pub(crate) struct ReceiveStream {
         connection_id: Vec<u8>,
         stream_id: u64,
-        commands: flume::Sender<Command>,
-        request: flume::Receiver<Vec<u8>>,
-        completed: bool,
+        commands: Sender<Command>,
+        chunks: AsyncReceiver<Vec<u8>>,
+        buffered: Vec<u8>,
+    }
+
+    impl ReceiveStream {
+        async fn next_chunk(&self, operation: &'static str) -> Result<Vec<u8>, TransportError> {
+            let chunk = self
+                .chunks
+                .recv_async()
+                .await
+                .map_err(|error| TransportError::backend(NAME, operation, error))?;
+            let _ = self.commands.try_send(Command::ResumeRequest {
+                connection_id: self.connection_id.clone(),
+                stream_id: self.stream_id,
+            });
+            Ok(chunk)
+        }
     }
 
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
-            mut self,
+            &mut self,
             maximum: usize,
             timeout: Duration,
         ) -> Result<Vec<u8>, StreamReadError> {
-            let receive = self.request.recv_async();
-            let mut frame = compio::runtime::time::timeout(timeout, receive)
-                .await
-                .map_err(|_| StreamReadError::Timeout)?
-                .map_err(|error| TransportError::backend(NAME, "stream read", error))?;
-            self.completed = true;
-            frame.truncate(maximum);
-            Ok(frame)
+            while self.buffered.is_empty() {
+                let chunk = self.next_chunk("stream header read").await?;
+                self.buffered.extend_from_slice(&chunk);
+            }
+            compio::runtime::time::timeout(timeout, async {
+                while self.buffered.len() < REQUEST_HEADER_BYTES {
+                    let chunk = self.next_chunk("stream header read").await?;
+                    self.buffered.extend_from_slice(&chunk);
+                }
+                Ok::<(), TransportError>(())
+            })
+            .await
+            .map_err(|_| StreamReadError::Timeout)?
+            .map_err(StreamReadError::Transport)?;
+            let frame_len = Request::frame_len_from_header(&self.buffered[..REQUEST_HEADER_BYTES])?;
+            if frame_len > maximum {
+                return Err(StreamReadError::TooLarge);
+            }
+            compio::runtime::time::timeout(timeout, async {
+                while self.buffered.len() < frame_len {
+                    let chunk = self.next_chunk("stream body read").await?;
+                    self.buffered.extend_from_slice(&chunk);
+                }
+                Ok::<(), TransportError>(())
+            })
+            .await
+            .map_err(|_| StreamReadError::Timeout)?
+            .map_err(StreamReadError::Transport)?;
+            Ok(self.buffered.drain(..frame_len).collect())
         }
     }
 
     impl Drop for ReceiveStream {
         fn drop(&mut self) {
-            if self.completed {
-                return;
-            }
             let _ = self.commands.try_send(Command::CancelRequest {
                 connection_id: self.connection_id.clone(),
                 stream_id: self.stream_id,
@@ -682,19 +768,19 @@ mod quiche_backend {
     pub(crate) struct SendStream {
         connection_id: Vec<u8>,
         stream_id: u64,
-        commands: flume::Sender<Command>,
+        commands: Sender<Command>,
     }
 
     impl super::SendStream for SendStream {
         async fn write_response(
-            self,
+            &mut self,
             frame: Vec<u8>,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            let (reply, response) = flume::bounded(1);
+            let (reply, response) = channel::bounded_sync_async(1);
             self.commands
                 .send_async(Command::SendResponse {
-                    connection_id: self.connection_id,
+                    connection_id: self.connection_id.clone(),
                     stream_id: self.stream_id,
                     frame,
                     reply,
@@ -715,11 +801,15 @@ mod quiche_backend {
             connection_id: Vec<u8>,
             stream_id: u64,
         },
+        ResumeRequest {
+            connection_id: Vec<u8>,
+            stream_id: u64,
+        },
         SendResponse {
             connection_id: Vec<u8>,
             stream_id: u64,
             frame: Vec<u8>,
-            reply: flume::Sender<Result<(), String>>,
+            reply: Sender<Result<(), String>>,
         },
         Shutdown,
     }
@@ -727,19 +817,20 @@ mod quiche_backend {
     struct PendingResponse {
         frame: Vec<u8>,
         written: usize,
-        reply: flume::Sender<Result<(), String>>,
+        reply: Sender<Result<(), String>>,
     }
 
-    struct Request {
-        frame: Vec<u8>,
-        completed: flume::Sender<Vec<u8>>,
+    struct RequestChunks {
+        chunks: Sender<Vec<u8>>,
+        pending: Option<Vec<u8>>,
+        finished: bool,
     }
 
     struct Client {
         connection: quiche::Connection,
         announced: bool,
-        streams: Option<flume::Sender<Stream>>,
-        requests: HashMap<u64, Request>,
+        streams: Option<Sender<Stream>>,
+        requests: HashMap<u64, RequestChunks>,
         responses: HashMap<u64, PendingResponse>,
     }
 
@@ -747,9 +838,9 @@ mod quiche_backend {
         socket: compio::net::UdpSocket,
         local_address: SocketAddr,
         config: quiche::Config,
-        incoming: flume::Sender<Incoming>,
-        command_sender: flume::Sender<Command>,
-        commands: flume::Receiver<Command>,
+        incoming: Sender<Incoming>,
+        command_sender: Sender<Command>,
+        commands: Option<AsyncReceiver<Command>>,
         routes: HashMap<Vec<u8>, Vec<u8>>,
         clients: HashMap<Vec<u8>, Client>,
     }
@@ -758,7 +849,10 @@ mod quiche_backend {
         async fn run(mut self) -> Result<(), TransportError> {
             let receive_socket = self.socket.clone();
             let mut packets = Box::pin(receive_socket.recv_from_multi());
-            let commands = self.commands.clone();
+            let commands = self
+                .commands
+                .take()
+                .expect("QUIC driver command receiver is present");
             loop {
                 let packet = packets.next().fuse();
                 let command = commands.recv_async().fuse();
@@ -898,6 +992,15 @@ mod quiche_backend {
                     }
                     false
                 }
+                Command::ResumeRequest {
+                    connection_id,
+                    stream_id,
+                } => {
+                    if let Some(client) = self.clients.get_mut(&connection_id) {
+                        receive_stream(client, stream_id);
+                    }
+                    false
+                }
                 Command::SendResponse {
                     connection_id,
                     stream_id,
@@ -935,7 +1038,7 @@ mod quiche_backend {
                     continue;
                 };
                 if !client.announced && client.connection.is_established() {
-                    let (streams, stream_receiver) = flume::unbounded();
+                    let (streams, stream_receiver) = channel::unbounded_async();
                     client.streams = Some(streams);
                     client.announced = true;
                     let _ = self.incoming.try_send(Incoming(Connection {
@@ -999,25 +1102,55 @@ mod quiche_backend {
             return;
         };
         let request = client.requests.entry(stream_id).or_insert_with(|| {
-            let (completed, request) = flume::bounded(1);
-            let _ = stream_sender.try_send(Stream { stream_id, request });
-            Request {
-                frame: Vec::new(),
-                completed,
+            let (chunks, chunk_receiver) = channel::bounded_sync_async(STREAM_CHUNK_BACKLOG);
+            let _ = stream_sender.try_send(Stream {
+                stream_id,
+                chunks: chunk_receiver,
+            });
+            RequestChunks {
+                chunks,
+                pending: None,
+                finished: false,
             }
         });
-        let mut buffer = [0_u8; 16_384];
+        if let Some(chunk) = request.pending.take() {
+            match request.chunks.try_send(chunk) {
+                Ok(()) if request.finished => {
+                    client.requests.remove(&stream_id);
+                    return;
+                }
+                Ok(()) => {}
+                Err(TrySendError::Full(chunk)) => {
+                    request.pending = Some(chunk);
+                    return;
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    client.requests.remove(&stream_id);
+                    return;
+                }
+            }
+        }
+        let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
         loop {
+            if request.chunks.is_full() {
+                break;
+            }
             match client.connection.stream_recv(stream_id, &mut buffer) {
                 Ok((read, finished)) => {
-                    let remaining = MAX_BUFFERED_REQUEST_BYTES.saturating_sub(request.frame.len());
-                    request
-                        .frame
-                        .extend_from_slice(&buffer[..read.min(remaining)]);
-                    if finished {
-                        if let Some(request) = client.requests.remove(&stream_id) {
-                            let _ = request.completed.try_send(request.frame);
+                    request.finished = finished;
+                    match request.chunks.try_send(buffer[..read].to_vec()) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(chunk)) => {
+                            request.pending = Some(chunk);
+                            break;
                         }
+                        Err(TrySendError::Disconnected(_)) => {
+                            client.requests.remove(&stream_id);
+                            break;
+                        }
+                    }
+                    if finished {
+                        client.requests.remove(&stream_id);
                         break;
                     }
                 }
@@ -1035,7 +1168,7 @@ mod quiche_backend {
             return;
         };
         let remaining = &response.frame[response.written..];
-        match client.connection.stream_send(stream_id, remaining, true) {
+        match client.connection.stream_send(stream_id, remaining, false) {
             Ok(written) => {
                 response.written += written;
                 if response.written == response.frame.len() {

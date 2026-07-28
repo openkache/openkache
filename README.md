@@ -71,7 +71,7 @@ The server listens on `127.0.0.1:4433`, stores shard files under
 `target/kvkache-v1`, and writes an ephemeral
 self-signed certificate to
 `target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
-`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/1` QUIC
+`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/2` QUIC
 protocol. `SYNC` flushes each SSD worker before acknowledging the request.
 Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
@@ -196,11 +196,24 @@ feature:
 cargo build --release --manifest-path server/Cargo.toml \
   --bin openkache-server \
   --no-default-features \
-  --features allocator-mimalloc
+  --features allocator-mimalloc,channel-crossfire,quic-noq
 ```
 
 The allocator features are mutually exclusive. The server reports the selected
 allocator during startup.
+
+### Server channel
+
+The server uses Crossfire by default for worker, request/reply, and transport
+channels. Select exactly one of `channel-crossfire`, `channel-flume`, or
+`channel-kanal` at compile time:
+
+```bash
+cargo build --release --manifest-path server/Cargo.toml \
+  --bin openkache-server \
+  --no-default-features \
+  --features allocator-system,channel-flume,quic-noq
+```
 
 ### Static musl (x86_64 / aarch64)
 
@@ -235,7 +248,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
-| QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v1, secure value codec |
+| QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v2, secure value codec |
 | QUIC client (TypeScript) | 🚧 Preview | Bun wrapper over the Rust client ABI |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | .NET client | ✅ Stable | TCP-based, NuGet published |

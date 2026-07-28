@@ -17,6 +17,7 @@ use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
 use openkache_protocol::ClientKeyDigest;
 
+use crate::channel::{self, Sender};
 use crate::types::EncodedValue;
 use crate::*;
 
@@ -35,7 +36,7 @@ pub(crate) struct ServerSecret {
 }
 
 struct WorkerHandle {
-    sender: flume::Sender<WorkerRequest>,
+    sender: Sender<WorkerRequest>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -114,7 +115,7 @@ impl ThreadedKvkache {
         fs::create_dir_all(&config.storage.directory)?;
         let server_cipher = Aes256::new(&server_secret.key.into());
         let (started_tx, started_rx) =
-            flume::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
+            channel::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
         let queue_capacity = config
             .io_uring
             .batch_size
@@ -123,7 +124,7 @@ impl ThreadedKvkache {
         let mut workers = Vec::with_capacity(config.runtime.thread_count);
 
         for thread_id in 0..config.runtime.thread_count {
-            let (sender, receiver) = flume::bounded(queue_capacity);
+            let (sender, receiver) = channel::bounded_async(queue_capacity);
             let started_tx = started_tx.clone();
             let shard_config = config.worker_config(thread_id);
             let io_config = config.io_uring.clone();
@@ -189,7 +190,7 @@ impl ThreadedKvkache {
                 Ok(()) => {}
                 Err(message) => {
                     for worker in &workers {
-                        let (response, _) = flume::bounded(1);
+                        let (response, _) = channel::bounded(1);
                         let _ = worker.sender.send(WorkerRequest::Shutdown { response });
                     }
                     for worker in &mut workers {
@@ -221,9 +222,9 @@ impl ThreadedKvkache {
     fn request(
         &self,
         worker: usize,
-        build: impl FnOnce(flume::Sender<Result<WorkerResponse>>) -> WorkerRequest,
+        build: impl FnOnce(Sender<Result<WorkerResponse>>) -> WorkerRequest,
     ) -> Result<WorkerResponse> {
-        let (response_tx, response_rx) = flume::bounded(1);
+        let (response_tx, response_rx) = channel::bounded(1);
         let request_started = std::time::Instant::now();
         self.workers[worker]
             .sender
@@ -245,9 +246,9 @@ impl ThreadedKvkache {
     async fn request_async(
         &self,
         worker: usize,
-        build: impl FnOnce(flume::Sender<Result<WorkerResponse>>) -> WorkerRequest,
+        build: impl FnOnce(Sender<Result<WorkerResponse>>) -> WorkerRequest,
     ) -> Result<WorkerResponse> {
-        let (response_tx, response_rx) = flume::bounded(1);
+        let (response_tx, response_rx) = channel::bounded_sync_async(1);
         let request_started = std::time::Instant::now();
         compio::runtime::time::timeout(
             Duration::from_micros(self.config.timeouts.input_max_time_us),
@@ -495,7 +496,7 @@ impl ThreadedKvkache {
             }
             let storage_key = self.storage_key(operation.client_key_digest());
             let worker = self.owner(&storage_key);
-            let (response_tx, response_rx) = flume::bounded(1);
+            let (response_tx, response_rx) = channel::bounded(1);
             let (request, kind) = match operation {
                 BenchmarkOperation::Get(_) => (
                     WorkerRequest::Get {

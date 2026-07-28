@@ -12,11 +12,31 @@ compile_error!(
     "enable at least one QUIC backend feature: `quic-quinn`, `quic-noq`, or `quic-quiche`"
 );
 
+#[cfg(not(any(
+    feature = "channel-crossfire",
+    feature = "channel-flume",
+    feature = "channel-kanal"
+)))]
+compile_error!(
+    "enable exactly one channel backend feature: `channel-crossfire`, `channel-flume`, or `channel-kanal`"
+);
+
+#[cfg(any(
+    all(feature = "channel-crossfire", feature = "channel-flume"),
+    all(feature = "channel-crossfire", feature = "channel-kanal"),
+    all(feature = "channel-flume", feature = "channel-kanal")
+))]
+compile_error!(
+    "enable exactly one channel backend feature: `channel-crossfire`, `channel-flume`, or `channel-kanal`"
+);
+
 pub mod allocators;
 pub mod breadcrumb_filter;
 pub mod server;
 mod transport;
 pub mod types;
+
+pub(crate) mod channel;
 
 pub use types::{StorageKey, Value};
 
@@ -25,9 +45,9 @@ pub use error::{KvError, Result};
 
 mod config;
 pub use config::{
-    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, QuicBackend, QuicConfig,
-    RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, allowed_cpu_ids, bits_for_count,
-    expand_thread_pattern,
+    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, NetworkConfig, QuicBackend,
+    QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, allowed_cpu_ids,
+    bits_for_count, expand_thread_pattern,
 };
 
 pub(crate) mod sizing;

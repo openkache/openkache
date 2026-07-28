@@ -2,8 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-/// QUIC application protocol identifier for the first OpenKache wire format.
-pub const ALPN: &[u8] = b"openkache/1";
+/// QUIC application protocol identifier for persistent request lanes.
+pub const ALPN: &[u8] = b"openkache/2";
 /// Bytes in an encoded request header.
 pub const REQUEST_HEADER_BYTES: usize = 9;
 /// Bytes in an encoded response header.
@@ -22,7 +22,7 @@ const VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
 const VALUE_COMPRESSED_BIT: u32 = 1 << 31;
 const VALUE_ENCRYPTED_BIT: u32 = 1 << 30;
 
-/// Operations supported by protocol v1.
+/// Operations supported by protocol v2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Opcode {
@@ -192,6 +192,26 @@ pub struct Request {
 }
 
 impl Request {
+    /// Returns the complete frame length encoded by a fixed-size request header.
+    pub fn frame_len_from_header(header: &[u8]) -> Result<usize> {
+        if header.len() < REQUEST_HEADER_BYTES {
+            return Err(ProtocolError::FrameTooShort {
+                expected: REQUEST_HEADER_BYTES,
+                actual: header.len(),
+            });
+        }
+        let opcode = Opcode::try_from(header[0])?;
+        let key_len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+        let encoded_value_len = u32::from_be_bytes(header[5..9].try_into().unwrap());
+        let value_len = (encoded_value_len & VALUE_LENGTH_MASK) as usize;
+        validate_lengths(value_len)?;
+        validate_wire_key_length(opcode, key_len)?;
+        REQUEST_HEADER_BYTES
+            .checked_add(key_len)
+            .and_then(|size| size.checked_add(value_len))
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    }
+
     /// Creates and validates a request.
     pub fn new(
         opcode: Opcode,
@@ -291,10 +311,7 @@ impl Request {
         let value_len = (encoded_value_len & VALUE_LENGTH_MASK) as usize;
         validate_lengths(value_len)?;
         validate_wire_key_length(opcode, key_len)?;
-        let expected = REQUEST_HEADER_BYTES
-            .checked_add(key_len)
-            .and_then(|size| size.checked_add(value_len))
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let expected = Self::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,
@@ -330,6 +347,23 @@ pub struct Response {
 }
 
 impl Response {
+    /// Returns the complete frame length encoded by a fixed-size response header.
+    pub fn frame_len_from_header(header: &[u8]) -> Result<usize> {
+        if header.len() < RESPONSE_HEADER_BYTES {
+            return Err(ProtocolError::FrameTooShort {
+                expected: RESPONSE_HEADER_BYTES,
+                actual: header.len(),
+            });
+        }
+        Status::try_from(header[0])?;
+        let encoded_payload_len = u32::from_be_bytes(header[1..5].try_into().unwrap());
+        let payload_len = (encoded_payload_len & VALUE_LENGTH_MASK) as usize;
+        validate_lengths(payload_len)?;
+        RESPONSE_HEADER_BYTES
+            .checked_add(payload_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    }
+
     /// Creates a response after checking the payload limit.
     pub fn new(status: Status, payload: Vec<u8>) -> Result<Self> {
         Self::new_with_value_flags(status, ValueFlags::NONE, payload)
@@ -391,9 +425,7 @@ impl Response {
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        let expected = RESPONSE_HEADER_BYTES
-            .checked_add(payload_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let expected = Self::frame_len_from_header(&frame[..RESPONSE_HEADER_BYTES])?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,
@@ -426,9 +458,7 @@ impl Response {
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        let expected = RESPONSE_HEADER_BYTES
-            .checked_add(payload_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let expected = Self::frame_len_from_header(&frame[..RESPONSE_HEADER_BYTES])?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,

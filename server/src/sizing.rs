@@ -174,8 +174,17 @@ impl SizingRequest {
         let table_memory_budget_bytes =
             percent_of(self.memory_bytes, TABLE_RAM_PERCENT, "Table sizing budget")?;
         let mut config = AppConfig::default();
-        config.runtime.thread_count = self.cpu_count;
-        config.runtime.cpu_ids = cpu_ids;
+        let network_worker_count = cpu_ids.len().min(2);
+        let storage_cpu_ids = if cpu_ids.len() > network_worker_count {
+            cpu_ids[network_worker_count..].to_vec()
+        } else {
+            cpu_ids.clone()
+        };
+        let storage_worker_count = storage_cpu_ids.len();
+        config.network.worker_count = network_worker_count;
+        config.network.cpu_ids = cpu_ids[..network_worker_count].to_vec();
+        config.runtime.thread_count = storage_worker_count;
+        config.runtime.cpu_ids = storage_cpu_ids;
         config.storage.directory = self.directory;
         config.storage.segment_size_mib = self.profile.segment_size_mib();
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
@@ -186,7 +195,7 @@ impl SizingRequest {
             let keys_per_segment = keys_per_segment(self.profile)?;
             let raw_key_capacity = checked_product(
                 [
-                    self.cpu_count as u64,
+                    storage_worker_count as u64,
                     segments_per_thread as u64,
                     keys_per_segment,
                 ],
@@ -194,7 +203,8 @@ impl SizingRequest {
             )?;
             let planned_key_capacity =
                 percent_of(raw_key_capacity, LIVE_KEY_PERCENT, "planned key capacity")?;
-            let capacity_per_thread_u64 = planned_key_capacity.div_ceil(self.cpu_count as u64);
+            let capacity_per_thread_u64 =
+                planned_key_capacity.div_ceil(storage_worker_count as u64);
             let Ok(capacity_per_thread) = usize::try_from(capacity_per_thread_u64) else {
                 continue;
             };
@@ -207,7 +217,7 @@ impl SizingRequest {
             let worker_config = config.worker_config(0);
             worker_config.validate()?;
             let table_memory_bytes = (Table::modeled_memory_bytes(&worker_config)? as u64)
-                .checked_mul(self.cpu_count as u64)
+                .checked_mul(storage_worker_count as u64)
                 .ok_or_else(|| {
                     KvError::InvalidConfig("modeled Table memory size overflowed".into())
                 })?;

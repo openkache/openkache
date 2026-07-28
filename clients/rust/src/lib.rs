@@ -109,7 +109,7 @@ impl Client {
         })
     }
 
-    /// Verifies that the server is reachable and speaks protocol v1.
+    /// Verifies that the server is reachable and speaks protocol v2.
     pub async fn ping(&self) -> Result<()> {
         let response = self
             .request(Request::new(Opcode::Ping, None, Vec::new())?)
@@ -214,16 +214,26 @@ impl Client {
     }
 
     async fn request(&self, request: Request) -> Result<Response> {
-        let mut stream = self.connection.open_bi().await?;
-        stream.write_request(request.into_encoded()?).await?;
-        let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
-        let response = Response::decode_owned(frame)?;
-        if response.status.is_error() {
-            return Err(Error::Server {
-                status: response.status,
-                message: String::from_utf8_lossy(&response.payload).into_owned(),
-            });
+        let mut stream = self.connection.acquire_lane().await?;
+        let result = async {
+            stream.write_request(request.into_encoded()?).await?;
+            let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
+            Response::decode_owned(frame).map_err(Error::from)
         }
+        .await;
+        let response = match result {
+            Ok(response) => {
+                if response.status.is_error() {
+                    return Err(Error::Server {
+                        status: response.status,
+                        message: String::from_utf8_lossy(&response.payload).into_owned(),
+                    });
+                }
+                stream.release();
+                response
+            }
+            Err(error) => return Err(error),
+        };
         Ok(response)
     }
 }
