@@ -21,7 +21,9 @@ cargo fmt --check
 ## Wire format
 
 Protocol v1 uses the QUIC ALPN identifier `openkache/1`. Each bidirectional
-stream carries one request and one response.
+stream is a reusable sequential lane carrying any number of request/response
+pairs. A lane has at most one in-flight request, so responses need no request
+identifier.
 
 ```text
 request  = opcode:u8 | key_len:u32be | value_len:u32be | client_key_digest | value
@@ -37,6 +39,8 @@ are limited to 16 MiB.
 
 - `Opcode` and `Status` define stable wire identifiers.
 - `Request` and `Response` validate and encode complete stream frames.
+- Fixed request and response headers report the next complete frame length for
+  persistent-lane readers.
 - `ProtocolError` reports malformed, unsupported, and oversized frames.
 
 ## Configuration

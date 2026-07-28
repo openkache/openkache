@@ -214,10 +214,23 @@ impl Client {
     }
 
     async fn request(&self, request: Request) -> Result<Response> {
-        let mut stream = self.connection.open_bi().await?;
-        stream.write_request(request.into_encoded()?).await?;
-        let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
-        let response = Response::decode_owned(frame)?;
+        let mut stream = self.connection.acquire_lane().await?;
+        let result = async {
+            stream.write_request(request.into_encoded()?).await?;
+            let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
+            Response::decode_owned(frame).map_err(Error::from)
+        }
+        .await;
+        let response = match result {
+            Ok(response) => {
+                self.connection.release_lane(stream);
+                response
+            }
+            Err(error) => {
+                self.connection.discard_lane(stream);
+                return Err(error);
+            }
+        };
         if response.status.is_error() {
             return Err(Error::Server {
                 status: response.status,

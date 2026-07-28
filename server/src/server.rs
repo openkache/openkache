@@ -1,29 +1,38 @@
 //! QUIC server backed by the sharded SSD-first cache runtime.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use compio::driver::ProactorBuilder;
+use compio::runtime::RuntimeBuilder;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
     MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status, ValueFlags,
 };
 use rustls::pki_types::CertificateDer;
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, SendStream, ServerEndpoint, StreamReadError,
+    TransportError,
 };
-use crate::{AppConfig, KvError, SetOutcome, ThreadedKvkache};
+use crate::{AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache};
 
-/// A bound QUIC endpoint and its sharded SSD-backed cache.
+/// Bound reuse-port sockets and the sharded SSD-backed cache they serve.
 pub struct KacheServer {
-    endpoint: ServerEndpoint,
+    sockets: Vec<std::net::UdpSocket>,
+    local_addr: SocketAddr,
+    quic_backend: QuicBackend,
     certificate_der: CertificateDer<'static>,
-    cache: ThreadedKvkache,
+    private_key_der: Vec<u8>,
+    cache: Arc<ThreadedKvkache>,
+    network: NetworkConfig,
     request_timeout: Duration,
-    max_inflight_streams_per_connection: usize,
 }
 
 impl KacheServer {
@@ -35,11 +44,11 @@ impl KacheServer {
     ///
     /// # Returns
     ///
-    /// A ready server containing its bound endpoint, generated certificate, and cache workers.
+    /// A ready server containing bound sockets, a generated certificate, and cache workers.
     ///
     /// # Errors
     ///
-    /// Returns an error when certificate generation, QUIC binding, or cache startup fails.
+    /// Returns an error when certificate generation, socket binding, or cache startup fails.
     pub async fn bind(address: SocketAddr) -> Result<Self> {
         Self::bind_with_config(address, AppConfig::default()).await
     }
@@ -49,39 +58,37 @@ impl KacheServer {
     /// # Arguments
     ///
     /// * `address` - UDP address on which the QUIC endpoint listens.
-    /// * `config` - Worker, storage, table, and timeout configuration for the cache.
+    /// * `config` - Network, storage, table, and timeout configuration.
     ///
     /// # Returns
     ///
-    /// A ready server containing its bound endpoint, generated certificate, and cache workers.
+    /// A ready server containing bound sockets, a generated certificate, and cache workers.
     ///
     /// # Errors
     ///
-    /// Returns an error when configuration validation, certificate generation, QUIC binding, or
+    /// Returns an error when configuration validation, certificate generation, socket binding, or
     /// cache startup fails.
     pub async fn bind_with_config(address: SocketAddr, config: AppConfig) -> Result<Self> {
         config.validate()?;
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
-        let max_inflight_streams_per_connection = config.io_uring.max_inflight_per_worker;
+        let network = config.network.clone();
         let quic_backend = config.quic.selected_backend()?;
+        ServerEndpoint::validate_backend(quic_backend)?;
         let generated = rcgen::generate_simple_self_signed(["localhost".to_string()])?;
         let certificate_der = generated.cert.der().clone();
         let private_key_der = generated.signing_key.serialize_der();
-        let endpoint = ServerEndpoint::bind(
-            quic_backend,
-            address,
-            certificate_der.as_ref(),
-            &private_key_der,
-            max_inflight_streams_per_connection,
-        )
-        .await?;
-        let cache = ThreadedKvkache::start(config)?;
+        let sockets = bind_reuse_port_sockets(address, network.worker_count)?;
+        let local_addr = sockets[0].local_addr()?;
+        let cache = Arc::new(ThreadedKvkache::start(config)?);
         Ok(Self {
-            endpoint,
+            sockets,
+            local_addr,
+            quic_backend,
             certificate_der,
+            private_key_der,
             cache,
+            network,
             request_timeout,
-            max_inflight_streams_per_connection,
         })
     }
 
@@ -89,13 +96,13 @@ impl KacheServer {
     ///
     /// # Returns
     ///
-    /// The bound local address for this server endpoint.
+    /// The bound local address shared by all reuse-port sockets.
     ///
     /// # Errors
     ///
-    /// Returns an error when the endpoint cannot report its local address.
+    /// Returns an error when the stored socket address cannot be reported.
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        Ok(self.endpoint.local_addr()?)
+        Ok(self.local_addr)
     }
 
     /// Returns the self-signed certificate clients must trust for this run.
@@ -119,105 +126,220 @@ impl KacheServer {
     ///
     /// # Errors
     ///
-    /// Returns an error when endpoint shutdown or cache worker shutdown fails.
-    pub async fn serve(mut self, shutdown: impl Future<Output = ()>) -> Result<()> {
-        let endpoint = self.endpoint;
-        match endpoint {
-            #[cfg(feature = "quic-quinn")]
-            ServerEndpoint::Quinn(endpoint) => {
-                serve_endpoint(
-                    endpoint,
-                    &self.cache,
-                    self.request_timeout,
-                    self.max_inflight_streams_per_connection,
-                    shutdown,
-                )
-                .await?;
-            }
-            #[cfg(feature = "quic-noq")]
-            ServerEndpoint::Noq(endpoint) => {
-                serve_endpoint(
-                    endpoint,
-                    &self.cache,
-                    self.request_timeout,
-                    self.max_inflight_streams_per_connection,
-                    shutdown,
-                )
-                .await?;
-            }
-            #[cfg(feature = "quic-quiche")]
-            ServerEndpoint::Quiche(endpoint) => {
-                serve_endpoint(
-                    endpoint,
-                    &self.cache,
-                    self.request_timeout,
-                    self.max_inflight_streams_per_connection,
-                    shutdown,
-                )
-                .await?;
+    /// Returns an error when a network worker cannot start or cache shutdown fails.
+    pub async fn serve(self, shutdown: impl Future<Output = ()>) -> Result<()> {
+        let Self {
+            sockets,
+            quic_backend,
+            certificate_der,
+            private_key_der,
+            cache,
+            network,
+            request_timeout,
+            ..
+        } = self;
+        let (started_tx, started_rx) =
+            flume::bounded::<std::result::Result<(), String>>(network.worker_count);
+        let mut workers = Vec::with_capacity(network.worker_count);
+
+        for (worker_id, socket) in sockets.into_iter().enumerate() {
+            let (stop_tx, stop_rx) = flume::bounded(1);
+            let started_tx = started_tx.clone();
+            let certificate_der = certificate_der.clone();
+            let private_key_der = private_key_der.clone();
+            let cache = Arc::clone(&cache);
+            let cpu_id = network.cpu_ids[worker_id];
+            let entries = network.io_uring_entries_per_worker;
+            let event_interval = network.event_interval;
+            let max_stream_lanes = network.max_stream_lanes_per_connection;
+            let thread = std::thread::Builder::new()
+                .name(format!("openkache-network-{worker_id}"))
+                .spawn(move || {
+                    let mut proactor = ProactorBuilder::new();
+                    proactor.capacity(entries);
+                    let mut builder = RuntimeBuilder::new();
+                    builder
+                        .with_proactor(proactor)
+                        .thread_affinity(HashSet::from([cpu_id]))
+                        .event_interval(event_interval);
+                    let runtime = match builder.build() {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            let _ = started_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
+                    runtime.block_on(async move {
+                        let endpoint = match ServerEndpoint::bind(
+                            quic_backend,
+                            socket,
+                            certificate_der.as_ref(),
+                            &private_key_der,
+                            max_stream_lanes,
+                        )
+                        .await
+                        {
+                            Ok(endpoint) => endpoint,
+                            Err(error) => {
+                                let _ = started_tx.send(Err(error.to_string()));
+                                return;
+                            }
+                        };
+                        let actual_cpu = unsafe { libc::sched_getcpu() };
+                        if actual_cpu < 0 || actual_cpu as usize != cpu_id {
+                            let _ = started_tx.send(Err(format!(
+                                "network worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
+                            )));
+                            return;
+                        }
+                        let _ = started_tx.send(Ok(()));
+                        if let Err(error) = run_selected_endpoint(
+                            endpoint,
+                            &cache,
+                            request_timeout,
+                            max_stream_lanes,
+                            stop_rx,
+                        )
+                        .await
+                        {
+                            eprintln!("network worker {worker_id} stopped: {error}");
+                        }
+                    });
+                })?;
+            workers.push((stop_tx, thread));
+        }
+        drop(started_tx);
+
+        for _ in 0..network.worker_count {
+            match started_rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(message)) => {
+                    stop_network_workers(workers);
+                    shutdown_cache(cache)?;
+                    return Err(ServerError::NetworkWorker(message));
+                }
+                Err(_) => {
+                    stop_network_workers(workers);
+                    shutdown_cache(cache)?;
+                    return Err(ServerError::NetworkWorker(
+                        "network worker startup channel closed".into(),
+                    ));
+                }
             }
         }
-        self.cache.shutdown()?;
+
+        shutdown.await;
+        stop_network_workers(workers);
+        shutdown_cache(cache)?;
         Ok(())
     }
 }
 
-/// Accepts connections from one concrete QUIC implementation until shutdown.
-async fn serve_endpoint<E: TransportEndpoint>(
+fn bind_reuse_port_sockets(
+    address: SocketAddr,
+    worker_count: usize,
+) -> std::io::Result<Vec<std::net::UdpSocket>> {
+    let mut sockets = Vec::with_capacity(worker_count);
+    let mut bind_address = address;
+    for worker_id in 0..worker_count {
+        let socket = Socket::new(
+            Domain::for_address(bind_address),
+            Type::DGRAM,
+            Some(Protocol::UDP),
+        )?;
+        socket.set_reuse_address(true)?;
+        socket.set_reuse_port(true)?;
+        socket.bind(&SockAddr::from(bind_address))?;
+        let socket = std::net::UdpSocket::from(socket);
+        if worker_id == 0 {
+            bind_address = socket.local_addr()?;
+        }
+        sockets.push(socket);
+    }
+    Ok(sockets)
+}
+
+fn stop_network_workers(workers: Vec<(flume::Sender<()>, std::thread::JoinHandle<()>)>) {
+    for (stop, _) in &workers {
+        let _ = stop.send(());
+    }
+    for (_, thread) in workers {
+        let _ = thread.join();
+    }
+}
+
+fn shutdown_cache(cache: Arc<ThreadedKvkache>) -> Result<()> {
+    let mut cache = Arc::try_unwrap(cache)
+        .map_err(|_| ServerError::NetworkWorker("network cache handle leaked".into()))?;
+    cache.shutdown()?;
+    Ok(())
+}
+
+async fn run_selected_endpoint(
+    endpoint: ServerEndpoint,
+    cache: &ThreadedKvkache,
+    request_timeout: Duration,
+    max_stream_lanes: usize,
+    stop: flume::Receiver<()>,
+) -> std::result::Result<(), TransportError> {
+    match endpoint {
+        #[cfg(feature = "quic-quinn")]
+        ServerEndpoint::Quinn(endpoint) => {
+            run_network_worker(endpoint, cache, request_timeout, max_stream_lanes, stop).await
+        }
+        #[cfg(feature = "quic-noq")]
+        ServerEndpoint::Noq(endpoint) => {
+            run_network_worker(endpoint, cache, request_timeout, max_stream_lanes, stop).await
+        }
+        #[cfg(feature = "quic-quiche")]
+        ServerEndpoint::Quiche(endpoint) => {
+            run_network_worker(endpoint, cache, request_timeout, max_stream_lanes, stop).await
+        }
+    }
+}
+
+async fn run_network_worker<E: TransportEndpoint>(
     endpoint: E,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
-    max_inflight_streams_per_connection: usize,
-    shutdown: impl Future<Output = ()>,
-) -> Result<()> {
-    let shutdown = shutdown.fuse();
-    pin_mut!(shutdown);
+    max_stream_lanes: usize,
+    stop: flume::Receiver<()>,
+) -> std::result::Result<(), TransportError> {
     let mut connections = FuturesUnordered::new();
-
     loop {
         if connections.is_empty() {
             let incoming = endpoint.wait_incoming().fuse();
-            pin_mut!(incoming);
+            let stopping = stop.recv_async().fuse();
+            pin_mut!(incoming, stopping);
             select! {
                 incoming = incoming => {
-                    let Some(incoming) = incoming else {
-                        break;
-                    };
+                    let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming,
-                        cache,
-                        request_timeout,
-                        max_inflight_streams_per_connection,
+                        incoming, cache, request_timeout, max_stream_lanes,
                     ));
                 }
-                () = &mut shutdown => break,
+                _ = stopping => break,
             }
         } else {
             let incoming = endpoint.wait_incoming().fuse();
             let completed = connections.next().fuse();
-            pin_mut!(incoming, completed);
+            let stopping = stop.recv_async().fuse();
+            pin_mut!(incoming, completed, stopping);
             select! {
                 incoming = incoming => {
-                    let Some(incoming) = incoming else {
-                        break;
-                    };
+                    let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming,
-                        cache,
-                        request_timeout,
-                        max_inflight_streams_per_connection,
+                        incoming, cache, request_timeout, max_stream_lanes,
                     ));
                 }
                 _ = completed => {}
-                () = &mut shutdown => break,
+                _ = stopping => break,
             }
         }
     }
-
     endpoint.close(b"server shutting down");
     while connections.next().await.is_some() {}
-    endpoint.shutdown().await?;
-    Ok(())
+    endpoint.shutdown().await
 }
 
 /// Completes one QUIC handshake and serves the accepted connection.
@@ -225,23 +347,23 @@ async fn serve_incoming<I: TransportIncoming>(
     incoming: I,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
-    max_inflight_streams: usize,
+    max_stream_lanes: usize,
 ) {
     if let Ok(connection) = incoming.connect().await {
-        serve_connection(connection, cache, request_timeout, max_inflight_streams).await;
+        serve_connection(connection, cache, request_timeout, max_stream_lanes).await;
     }
 }
 
-/// Multiplexes bounded concurrent request streams for one QUIC connection.
+/// Multiplexes bounded reusable request lanes for one QUIC connection.
 async fn serve_connection<C: TransportConnection>(
     connection: C,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
-    max_inflight_streams: usize,
+    max_stream_lanes: usize,
 ) {
     let mut streams = FuturesUnordered::new();
     loop {
-        if streams.len() >= max_inflight_streams {
+        if streams.len() >= max_stream_lanes {
             let _ = streams.next().await;
             continue;
         }
@@ -270,36 +392,76 @@ async fn serve_connection<C: TransportConnection>(
     while streams.next().await.is_some() {}
 }
 
-/// Reads, executes, and responds to one request stream within the configured timeout.
+/// Reuses one QUIC stream as a sequential request lane until either peer closes it.
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
-    send: S,
-    receive: R,
+    mut send: S,
+    mut receive: R,
     cache: &ThreadedKvkache,
     request_timeout: Duration,
 ) {
-    let response = match receive
-        .read_request(MAX_REQUEST_FRAME_BYTES + 1, request_timeout)
-        .await
-    {
-        Err(StreamReadError::Timeout) => {
-            response(Status::Timeout, b"request read timed out".to_vec())
-        }
-        Ok(frame) if frame.len() > MAX_REQUEST_FRAME_BYTES => response(
-            Status::TooLarge,
-            b"request exceeds the protocol limit".to_vec(),
-        ),
-        Ok(frame) => match Request::decode(&frame) {
-            Ok(request) => execute_request(cache, request).await,
+    loop {
+        let frame = match receive
+            .read_request(MAX_REQUEST_FRAME_BYTES, request_timeout)
+            .await
+        {
+            Ok(frame) => frame,
+            Err(StreamReadError::Timeout) => {
+                let _ = write_response(
+                    &mut send,
+                    response(Status::Timeout, b"request read timed out".to_vec()),
+                    request_timeout,
+                )
+                .await;
+                break;
+            }
+            Err(StreamReadError::TooLarge) => {
+                let _ = write_response(
+                    &mut send,
+                    response(
+                        Status::TooLarge,
+                        b"request exceeds the protocol limit".to_vec(),
+                    ),
+                    request_timeout,
+                )
+                .await;
+                break;
+            }
+            Err(StreamReadError::Protocol(error)) => {
+                let _ = write_response(&mut send, protocol_error_response(error), request_timeout)
+                    .await;
+                break;
+            }
+            Err(StreamReadError::Transport(_)) => break,
+        };
+        let response = match Request::decode(&frame) {
+            Ok(request) => {
+                match compio::runtime::time::timeout(
+                    request_timeout,
+                    execute_request(cache, request),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(_) => response(Status::Timeout, b"request execution timed out".to_vec()),
+                }
+            }
             Err(error) => protocol_error_response(error),
-        },
-        Err(StreamReadError::Transport(error)) => {
-            response(Status::InvalidRequest, error.to_string().into_bytes())
+        };
+        if !write_response(&mut send, response, request_timeout).await {
+            break;
         }
-    };
+    }
+}
+
+async fn write_response<S: SendStream>(
+    send: &mut S,
+    response: Response,
+    request_timeout: Duration,
+) -> bool {
     let Ok(frame) = response.encode() else {
-        return;
+        return false;
     };
-    let _ = send.write_response(frame, request_timeout).await;
+    send.write_response(frame, request_timeout).await.is_ok()
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
@@ -408,9 +570,11 @@ pub enum ServerError {
     #[error("TLS configuration failed: {0}")]
     Tls(#[from] rustls::Error),
     #[error("QUIC transport failed: {0}")]
-    Transport(#[from] crate::transport::TransportError),
+    Transport(#[from] TransportError),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("network worker failed: {0}")]
+    NetworkWorker(String),
 }
 
 /// Convenience result type for server lifecycle operations.

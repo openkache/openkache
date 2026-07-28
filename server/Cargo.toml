@@ -38,6 +38,7 @@ rcgen = "*"
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 serde = { version = "*", features = ["derive"] }
 snmalloc-rs = { version = "*", optional = true, default-features = false, features = ["build_cc", "usewait-on-address"] }
+socket2 = { version = "*", features = ["all"] }
 thiserror = "*"
 tikv-jemallocator = { version = "*", optional = true }
 toml = "*"
