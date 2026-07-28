@@ -19,8 +19,8 @@ pub use error::{KvError, Result};
 
 mod config;
 pub use config::{
-    AppConfig, Config, IoUringConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig,
-    allowed_cpu_ids, bits_for_count, expand_thread_pattern,
+    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, RuntimeConfig, StorageConfig,
+    TableConfig, TimeoutConfig, allowed_cpu_ids, bits_for_count, expand_thread_pattern,
 };
 
 mod cli;

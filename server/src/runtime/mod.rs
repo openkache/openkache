@@ -65,9 +65,16 @@ pub struct ThreadedKvkache {
 
 impl ThreadedKvkache {
     pub fn start(config: crate::config::AppConfig) -> Result<Self> {
+        Self::start_with_server_key(config, rand::random())
+    }
+
+    fn start_with_server_key(
+        config: crate::config::AppConfig,
+        server_key: [u8; 32],
+    ) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
-        let server_cipher = Aes256::new(&rand::random::<[u8; 32]>().into());
+        let server_cipher = Aes256::new(&server_key.into());
         let (started_tx, started_rx) =
             flume::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
         let queue_capacity = config
@@ -326,6 +333,77 @@ impl ThreadedKvkache {
         total_segment_count: usize,
         total_table_capacity: usize,
     ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_choices(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            2,
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with a configurable Bucket-choice count.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - Fresh storage directory owned by this benchmark instance.
+    /// * `cpu_ids` - One pinned CPU identifier per worker.
+    /// * `total_segment_count` - Segment count divided evenly across workers.
+    /// * `total_table_capacity` - Planned key capacity divided across workers.
+    /// * `bucket_choice_count` - Power-of-two candidate count from 1 through 32.
+    ///
+    /// # Returns
+    ///
+    /// A running worker set whose storage-key secret is fixed for reproducible placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when benchmark sizing or worker configuration is invalid, or when
+    /// worker startup fails.
+    pub fn for_trace_benchmark_with_bucket_choices(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+    ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_policy(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            crate::config::BucketSelectionPolicy::LeastUsed,
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with configurable Bucket placement.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - Fresh storage directory owned by this benchmark instance.
+    /// * `cpu_ids` - One pinned CPU identifier per worker.
+    /// * `total_segment_count` - Segment count divided evenly across workers.
+    /// * `total_table_capacity` - Planned key capacity divided across workers.
+    /// * `bucket_choice_count` - Power-of-two candidate count from 1 through 32.
+    /// * `bucket_selection_policy` - Whether fitting Items spread or pack across candidates.
+    ///
+    /// # Returns
+    ///
+    /// A running worker set whose storage-key secret is fixed for reproducible placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when benchmark sizing or worker configuration is invalid, or when
+    /// worker startup fails.
+    pub fn for_trace_benchmark_with_bucket_policy(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_selection_policy: crate::config::BucketSelectionPolicy,
+    ) -> Result<Self> {
         let thread_count = cpu_ids.len();
         if thread_count == 0 {
             return Err(KvError::InvalidConfig(
@@ -337,12 +415,15 @@ impl ThreadedKvkache {
                 "benchmark window is too large".into(),
             ));
         }
-        Self::start(crate::config::AppConfig::for_trace_benchmark(
+        let mut config = crate::config::AppConfig::for_trace_benchmark(
             directory,
             cpu_ids,
             total_segment_count,
             total_table_capacity,
-        )?)
+        )?;
+        config.table.bucket_choice_count = bucket_choice_count;
+        config.table.bucket_selection_policy = bucket_selection_policy;
+        Self::start_with_server_key(config, [0; 32])
     }
 
     pub fn run_benchmark_batch(

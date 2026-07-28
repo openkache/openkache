@@ -8,56 +8,34 @@ use crate::error::{KvError, Result};
 
 /// Candidate storage location encoded in a Table Entry.
 ///
-/// A regular location selects a Segment and one of a key's Bucket hash
-/// functions. A Blob location uses one extra bit and resolves its exact Item
-/// through the in-memory BlobRef map.
+/// The location selects a Segment and one of a key's Bucket hash functions.
+/// The Bucket Item itself determines whether the value is inline or stored in
+/// the paired Blob Segment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct TableLocation {
-    pub(crate) is_blob: bool,
     pub(crate) sg_index: u16,
     pub(crate) bucket_hash_index: u8,
 }
 
 impl TableLocation {
-    pub(crate) const fn blob() -> Self {
-        Self {
-            is_blob: true,
-            sg_index: 0,
-            bucket_hash_index: 0,
-        }
-    }
-
-    pub(crate) const fn is_blob(self) -> bool {
-        self.is_blob
-    }
-
     /// Returns whether all fields fit their configured packed ranges.
-    pub(crate) fn is_valid(self, sg_index_bits: usize) -> bool {
-        if self.is_blob() {
-            self.sg_index == 0 && self.bucket_hash_index == 0
-        } else {
-            self.bucket_hash_index <= 1 && (self.sg_index as usize) < (1usize << sg_index_bits)
-        }
+    pub(crate) fn is_valid(self, sg_index_bits: usize, bucket_choice_bits: usize) -> bool {
+        (self.bucket_hash_index as usize) < (1usize << bucket_choice_bits)
+            && (self.sg_index as usize) < (1usize << sg_index_bits)
     }
 
-    /// Packs the Blob bit, Segment index, and Bucket hash index.
-    pub(crate) fn encode(self, sg_index_bits: usize) -> u32 {
-        debug_assert!(self.is_valid(sg_index_bits));
-        if self.is_blob() {
-            return 1u32 << (sg_index_bits + 1);
-        }
-        ((self.sg_index as u32) << 1) | self.bucket_hash_index as u32
+    /// Packs the Segment index and Bucket hash index.
+    pub(crate) fn encode(self, sg_index_bits: usize, bucket_choice_bits: usize) -> u32 {
+        debug_assert!(self.is_valid(sg_index_bits, bucket_choice_bits));
+        ((self.sg_index as u32) << bucket_choice_bits) | self.bucket_hash_index as u32
     }
 
     /// Decodes a packed Table location.
-    pub(crate) fn decode(value: u32, sg_index_bits: usize) -> Self {
-        if value & (1u32 << (sg_index_bits + 1)) != 0 {
-            return Self::blob();
-        }
+    pub(crate) fn decode(value: u32, _sg_index_bits: usize, bucket_choice_bits: usize) -> Self {
+        let bucket_choice_mask = (1u32 << bucket_choice_bits) - 1;
         Self {
-            is_blob: false,
-            sg_index: (value >> 1) as u16,
-            bucket_hash_index: (value & 1) as u8,
+            sg_index: (value >> bucket_choice_bits) as u16,
+            bucket_hash_index: (value & bucket_choice_mask) as u8,
         }
     }
 }
@@ -90,8 +68,9 @@ impl SubtableLayout {
         is_back_table: bool,
         unary_count: usize,
         sg_index_bits: usize,
+        bucket_choice_bits: usize,
     ) -> Result<Self> {
-        let table_location_bits = sg_index_bits + 2;
+        let table_location_bits = sg_index_bits + bucket_choice_bits;
         let crumb_bits = if is_back_table {
             front_back_ratio.ilog2() as usize + 1
         } else {
