@@ -58,3 +58,11 @@ backend selects it automatically. A build with multiple backends requires an
 explicit selection. Mozilla neqo is not currently available: its official
 transport is not published as a standalone crate and its server API requires
 NSS certificate-database integration.
+
+### Can I select a different in-process channel implementation?
+
+Yes. The server uses one compile-time channel backend for its worker,
+request/reply, and transport channels. `channel-crossfire` is enabled by
+default; replace it with exactly one of `channel-flume` or `channel-kanal` in a
+`--no-default-features` build. This is a build choice and does not add a runtime
+configuration field.

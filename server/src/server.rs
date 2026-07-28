@@ -16,6 +16,7 @@ use openkache_protocol::{
 use rustls::pki_types::CertificateDer;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
+use crate::channel::{self, AsyncReceiver, Sender};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, SendStream, ServerEndpoint, StreamReadError,
@@ -32,15 +33,15 @@ enum NetworkWorkerPhase {
 pub(crate) struct NetworkWorkerReporter {
     worker_id: usize,
     phase: NetworkWorkerPhase,
-    started: Option<flume::Sender<std::result::Result<(), String>>>,
-    finished: Option<flume::Sender<(usize, std::result::Result<(), String>)>>,
+    started: Option<Sender<std::result::Result<(), String>>>,
+    finished: Option<Sender<(usize, std::result::Result<(), String>)>>,
 }
 
 impl NetworkWorkerReporter {
     pub(crate) fn new(
         worker_id: usize,
-        started: flume::Sender<std::result::Result<(), String>>,
-        finished: flume::Sender<(usize, std::result::Result<(), String>)>,
+        started: Sender<std::result::Result<(), String>>,
+        finished: Sender<(usize, std::result::Result<(), String>)>,
     ) -> Self {
         Self {
             worker_id,
@@ -227,13 +228,15 @@ impl KacheServer {
             ..
         } = self;
         let (started_tx, started_rx) =
-            flume::bounded::<std::result::Result<(), String>>(network.worker_count);
-        let (finished_tx, finished_rx) =
-            flume::bounded::<(usize, std::result::Result<(), String>)>(network.worker_count);
+            channel::bounded::<std::result::Result<(), String>>(network.worker_count);
+        let (finished_tx, finished_rx) = channel::bounded_sync_async::<(
+            usize,
+            std::result::Result<(), String>,
+        )>(network.worker_count);
         let mut workers = Vec::with_capacity(network.worker_count);
 
         for (worker_id, socket) in sockets.into_iter().enumerate() {
-            let (stop_tx, stop_rx) = flume::bounded(1);
+            let (stop_tx, stop_rx) = channel::bounded_sync_async(1);
             let started_tx = started_tx.clone();
             let finished_tx = finished_tx.clone();
             let certificate_der = certificate_der.clone();
@@ -375,7 +378,7 @@ fn bind_reuse_port_sockets(
 }
 
 fn shutdown_workers_and_cache(
-    workers: Vec<(flume::Sender<()>, std::thread::JoinHandle<()>)>,
+    workers: Vec<(Sender<()>, std::thread::JoinHandle<()>)>,
     cache: Arc<ThreadedKvkache>,
 ) -> Result<()> {
     let network_result = stop_network_workers(workers);
@@ -385,7 +388,7 @@ fn shutdown_workers_and_cache(
 }
 
 pub(crate) fn stop_network_workers(
-    workers: Vec<(flume::Sender<()>, std::thread::JoinHandle<()>)>,
+    workers: Vec<(Sender<()>, std::thread::JoinHandle<()>)>,
 ) -> Result<()> {
     for (stop, _) in &workers {
         let _ = stop.send(());
@@ -419,7 +422,7 @@ async fn run_selected_endpoint(
     cache: &ThreadedKvkache,
     request_timeout: Duration,
     max_stream_lanes: usize,
-    stop: flume::Receiver<()>,
+    stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
     match endpoint {
         #[cfg(feature = "quic-quinn")]
@@ -442,7 +445,7 @@ async fn run_network_worker<E: TransportEndpoint>(
     cache: &ThreadedKvkache,
     request_timeout: Duration,
     max_stream_lanes: usize,
-    stop: flume::Receiver<()>,
+    stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
     let mut connections = FuturesUnordered::new();
     loop {

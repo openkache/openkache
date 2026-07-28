@@ -15,6 +15,8 @@ use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use crate::QuicBackend;
+#[cfg(feature = "quic-quiche")]
+use crate::channel::{self, AsyncReceiver, Sender, TrySendError};
 
 /// Backend-independent endpoint selected when the server binds.
 pub(super) enum ServerEndpoint {
@@ -577,8 +579,8 @@ mod quiche_backend {
     const STREAM_CHUNK_BACKLOG: usize = 1;
 
     pub(crate) struct Endpoint {
-        incoming: flume::Receiver<Incoming>,
-        commands: flume::Sender<Command>,
+        incoming: AsyncReceiver<Incoming>,
+        commands: Sender<Command>,
         driver: JoinHandle<Result<(), TransportError>>,
     }
 
@@ -595,8 +597,8 @@ mod quiche_backend {
                 .local_addr()
                 .map_err(|error| TransportError::backend(NAME, "local address", error))?;
             let config = config(certificate_der, private_key_der, max_concurrent_streams)?;
-            let (incoming_sender, incoming) = flume::unbounded();
-            let (commands, command_receiver) = flume::unbounded();
+            let (incoming_sender, incoming) = channel::unbounded_async();
+            let (commands, command_receiver) = channel::unbounded_async();
             let driver_commands = commands.clone();
             let driver = compio::runtime::spawn(async move {
                 Driver {
@@ -605,7 +607,7 @@ mod quiche_backend {
                     config,
                     incoming: incoming_sender,
                     command_sender: driver_commands,
-                    commands: command_receiver,
+                    commands: Some(command_receiver),
                     routes: HashMap::new(),
                     clients: HashMap::new(),
                 }
@@ -656,8 +658,8 @@ mod quiche_backend {
 
     pub(crate) struct Connection {
         connection_id: Vec<u8>,
-        streams: flume::Receiver<Stream>,
-        commands: flume::Sender<Command>,
+        streams: AsyncReceiver<Stream>,
+        commands: Sender<Command>,
     }
 
     impl super::Connection for Connection {
@@ -691,14 +693,14 @@ mod quiche_backend {
 
     struct Stream {
         stream_id: u64,
-        chunks: flume::Receiver<Vec<u8>>,
+        chunks: AsyncReceiver<Vec<u8>>,
     }
 
     pub(crate) struct ReceiveStream {
         connection_id: Vec<u8>,
         stream_id: u64,
-        commands: flume::Sender<Command>,
-        chunks: flume::Receiver<Vec<u8>>,
+        commands: Sender<Command>,
+        chunks: AsyncReceiver<Vec<u8>>,
         buffered: Vec<u8>,
     }
 
@@ -767,7 +769,7 @@ mod quiche_backend {
     pub(crate) struct SendStream {
         connection_id: Vec<u8>,
         stream_id: u64,
-        commands: flume::Sender<Command>,
+        commands: Sender<Command>,
     }
 
     impl super::SendStream for SendStream {
@@ -776,7 +778,7 @@ mod quiche_backend {
             frame: Vec<u8>,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            let (reply, response) = flume::bounded(1);
+            let (reply, response) = channel::bounded_sync_async(1);
             self.commands
                 .send_async(Command::SendResponse {
                     connection_id: self.connection_id.clone(),
@@ -808,7 +810,7 @@ mod quiche_backend {
             connection_id: Vec<u8>,
             stream_id: u64,
             frame: Vec<u8>,
-            reply: flume::Sender<Result<(), String>>,
+            reply: Sender<Result<(), String>>,
         },
         Shutdown,
     }
@@ -816,11 +818,11 @@ mod quiche_backend {
     struct PendingResponse {
         frame: Vec<u8>,
         written: usize,
-        reply: flume::Sender<Result<(), String>>,
+        reply: Sender<Result<(), String>>,
     }
 
     struct RequestChunks {
-        chunks: flume::Sender<Vec<u8>>,
+        chunks: Sender<Vec<u8>>,
         pending: Option<Vec<u8>>,
         finished: bool,
     }
@@ -828,7 +830,7 @@ mod quiche_backend {
     struct Client {
         connection: quiche::Connection,
         announced: bool,
-        streams: Option<flume::Sender<Stream>>,
+        streams: Option<Sender<Stream>>,
         requests: HashMap<u64, RequestChunks>,
         responses: HashMap<u64, PendingResponse>,
     }
@@ -837,9 +839,9 @@ mod quiche_backend {
         socket: compio::net::UdpSocket,
         local_address: SocketAddr,
         config: quiche::Config,
-        incoming: flume::Sender<Incoming>,
-        command_sender: flume::Sender<Command>,
-        commands: flume::Receiver<Command>,
+        incoming: Sender<Incoming>,
+        command_sender: Sender<Command>,
+        commands: Option<AsyncReceiver<Command>>,
         routes: HashMap<Vec<u8>, Vec<u8>>,
         clients: HashMap<Vec<u8>, Client>,
     }
@@ -848,7 +850,10 @@ mod quiche_backend {
         async fn run(mut self) -> Result<(), TransportError> {
             let receive_socket = self.socket.clone();
             let mut packets = Box::pin(receive_socket.recv_from_multi());
-            let commands = self.commands.clone();
+            let commands = self
+                .commands
+                .take()
+                .expect("QUIC driver command receiver is present");
             loop {
                 let packet = packets.next().fuse();
                 let command = commands.recv_async().fuse();
@@ -1034,7 +1039,7 @@ mod quiche_backend {
                     continue;
                 };
                 if !client.announced && client.connection.is_established() {
-                    let (streams, stream_receiver) = flume::unbounded();
+                    let (streams, stream_receiver) = channel::unbounded_async();
                     client.streams = Some(streams);
                     client.announced = true;
                     let _ = self.incoming.try_send(Incoming(Connection {
@@ -1098,7 +1103,7 @@ mod quiche_backend {
             return;
         };
         let request = client.requests.entry(stream_id).or_insert_with(|| {
-            let (chunks, chunk_receiver) = flume::bounded(STREAM_CHUNK_BACKLOG);
+            let (chunks, chunk_receiver) = channel::bounded_sync_async(STREAM_CHUNK_BACKLOG);
             let _ = stream_sender.try_send(Stream {
                 stream_id,
                 chunks: chunk_receiver,
@@ -1116,11 +1121,11 @@ mod quiche_backend {
                     return;
                 }
                 Ok(()) => {}
-                Err(flume::TrySendError::Full(chunk)) => {
+                Err(TrySendError::Full(chunk)) => {
                     request.pending = Some(chunk);
                     return;
                 }
-                Err(flume::TrySendError::Disconnected(_)) => {
+                Err(TrySendError::Disconnected(_)) => {
                     client.requests.remove(&stream_id);
                     return;
                 }
@@ -1136,11 +1141,11 @@ mod quiche_backend {
                     request.finished = finished;
                     match request.chunks.try_send(buffer[..read].to_vec()) {
                         Ok(()) => {}
-                        Err(flume::TrySendError::Full(chunk)) => {
+                        Err(TrySendError::Full(chunk)) => {
                             request.pending = Some(chunk);
                             break;
                         }
-                        Err(flume::TrySendError::Disconnected(_)) => {
+                        Err(TrySendError::Disconnected(_)) => {
                             client.requests.remove(&stream_id);
                             break;
                         }
