@@ -13,7 +13,7 @@ allocator-jemalloc = ["dep:tikv-jemallocator"]
 allocator-snmalloc = ["dep:snmalloc-rs"]
 channel-crossfire = ["dep:crossfire"]
 channel-flume = ["dep:flume"]
-channel-kanal = ["dep:kanal"]
+channel-kanal = ["dep:event-listener", "dep:kanal"]
 quic-quinn = ["dep:compio-quic"]
 quic-noq = ["dep:comnoq"]
 quic-quiche = ["dep:boring", "dep:quiche"]
@@ -31,6 +31,7 @@ comnoq = { version = "*", default-features = false, features = ["ring"], optiona
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "runtime", "signal", "time"] }
 compio-quic = { version = "*", features = ["ring"], optional = true }
 crossfire = { version = "*", optional = true }
+event-listener = { version = "*", optional = true }
 flume = { version = "*", optional = true }
 futures-util = "*"
 kanal = { version = "*", optional = true }

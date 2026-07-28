@@ -1,91 +1,52 @@
 //! Compile-time-selected channel backend used by the server runtime.
 
-use std::fmt;
 use std::time::Duration;
 
-#[derive(Debug)]
-pub(crate) struct SendError;
-
-impl fmt::Display for SendError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("sending on a disconnected channel")
-    }
+fn assert_bounded_capacity(capacity: usize) {
+    assert!(capacity > 0, "bounded channel capacity must be positive");
 }
 
-impl std::error::Error for SendError {}
+#[derive(Debug, thiserror::Error)]
+#[error("sending on a disconnected channel")]
+pub(crate) struct SendError;
 
 #[cfg(feature = "quic-quiche")]
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum TrySendError<T> {
+    #[error("sending on a full channel")]
     Full(T),
+    #[error("sending on a disconnected channel")]
     Disconnected(T),
 }
 
-#[cfg(feature = "quic-quiche")]
-impl<T> fmt::Display for TrySendError<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Full(_) => formatter.write_str("sending on a full channel"),
-            Self::Disconnected(_) => formatter.write_str("sending on a disconnected channel"),
-        }
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("sending on a full or disconnected channel")]
 pub(crate) struct SendTimeoutError;
 
-impl fmt::Display for SendTimeoutError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("sending on a full or disconnected channel")
-    }
-}
-
-impl std::error::Error for SendTimeoutError {}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("receiving on an empty and disconnected channel")]
 pub(crate) struct RecvError;
 
-impl fmt::Display for RecvError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("receiving on an empty and disconnected channel")
-    }
-}
-
-impl std::error::Error for RecvError {}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
 pub(crate) enum TryRecvError {
+    #[error("receiving on an empty channel")]
     Empty,
+    #[error("receiving on an empty and disconnected channel")]
     Disconnected,
 }
 
-impl fmt::Display for TryRecvError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => formatter.write_str("receiving on an empty channel"),
-            Self::Disconnected => {
-                formatter.write_str("receiving on an empty and disconnected channel")
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+#[error("receiving on an empty or disconnected channel")]
 pub(crate) struct RecvTimeoutError;
-
-impl fmt::Display for RecvTimeoutError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("receiving on an empty or disconnected channel")
-    }
-}
-
-impl std::error::Error for RecvTimeoutError {}
 
 #[cfg(feature = "channel-crossfire")]
 mod backend {
     #[cfg(feature = "quic-quiche")]
     use super::TrySendError;
-    use super::{Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError};
+    use super::{
+        Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
+        assert_bounded_capacity,
+    };
     use crossfire::{AsyncRx, MAsyncTx, MTx, Rx, mpsc};
 
     enum SenderInner<T: 'static> {
@@ -138,6 +99,7 @@ mod backend {
     where
         T: Send + Unpin + 'static,
     {
+        assert_bounded_capacity(capacity);
         let (sender, receiver) = mpsc::bounded_blocking(capacity);
         (
             Sender {
@@ -151,6 +113,7 @@ mod backend {
     where
         T: Send + Unpin + 'static,
     {
+        assert_bounded_capacity(capacity);
         let (asynchronous, receiver) = mpsc::bounded_async(capacity);
         let blocking = asynchronous.clone().into_blocking();
         (
@@ -170,6 +133,7 @@ mod backend {
     where
         T: Send + Unpin + 'static,
     {
+        assert_bounded_capacity(capacity);
         let (sender, receiver) = mpsc::bounded_blocking_async(capacity);
         (
             Sender {
@@ -317,7 +281,10 @@ mod backend {
 mod backend {
     #[cfg(feature = "quic-quiche")]
     use super::TrySendError;
-    use super::{Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError};
+    use super::{
+        Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
+        assert_bounded_capacity,
+    };
 
     pub(crate) struct Sender<T> {
         inner: flume::Sender<T>,
@@ -340,11 +307,13 @@ mod backend {
     }
 
     pub(crate) fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
+        assert_bounded_capacity(capacity);
         let (sender, receiver) = flume::bounded(capacity);
         (Sender { inner: sender }, Receiver { inner: receiver })
     }
 
     pub(crate) fn bounded_async<T>(capacity: usize) -> (Sender<T>, AsyncReceiver<T>) {
+        assert_bounded_capacity(capacity);
         let (sender, receiver) = flume::bounded(capacity);
         (Sender { inner: sender }, AsyncReceiver { inner: receiver })
     }
@@ -422,16 +391,31 @@ mod backend {
 mod backend {
     #[cfg(feature = "quic-quiche")]
     use super::TrySendError;
-    use super::{Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError};
+    use super::{
+        Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
+        assert_bounded_capacity,
+    };
+    use event_listener::Event;
+    use std::sync::Arc;
 
     pub(crate) struct Sender<T> {
         inner: kanal::Sender<T>,
+        receive_event: Option<Arc<Event>>,
     }
 
     impl<T> Clone for Sender<T> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
+                receive_event: self.receive_event.clone(),
+            }
+        }
+    }
+
+    impl<T> Drop for Sender<T> {
+        fn drop(&mut self) {
+            if let Some(event) = &self.receive_event {
+                event.notify(usize::MAX);
             }
         }
     }
@@ -440,18 +424,39 @@ mod backend {
         inner: kanal::Receiver<T>,
     }
 
+    // Kanal receive futures can lose a delivered message when select or timeout
+    // cancels them. Event-driven try_recv keeps cancellation atomic.
     pub(crate) struct AsyncReceiver<T> {
         inner: kanal::Receiver<T>,
+        receive_event: Arc<Event>,
     }
 
     pub(crate) fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
+        assert_bounded_capacity(capacity);
         let (sender, receiver) = kanal::bounded(capacity);
-        (Sender { inner: sender }, Receiver { inner: receiver })
+        (
+            Sender {
+                inner: sender,
+                receive_event: None,
+            },
+            Receiver { inner: receiver },
+        )
     }
 
     pub(crate) fn bounded_async<T>(capacity: usize) -> (Sender<T>, AsyncReceiver<T>) {
+        assert_bounded_capacity(capacity);
         let (sender, receiver) = kanal::bounded(capacity);
-        (Sender { inner: sender }, AsyncReceiver { inner: receiver })
+        let receive_event = Arc::new(Event::new());
+        (
+            Sender {
+                inner: sender,
+                receive_event: Some(receive_event.clone()),
+            },
+            AsyncReceiver {
+                inner: receiver,
+                receive_event,
+            },
+        )
     }
 
     pub(crate) fn bounded_sync_async<T>(capacity: usize) -> (Sender<T>, AsyncReceiver<T>) {
@@ -461,12 +466,30 @@ mod backend {
     #[cfg(feature = "quic-quiche")]
     pub(crate) fn unbounded_async<T>() -> (Sender<T>, AsyncReceiver<T>) {
         let (sender, receiver) = kanal::unbounded();
-        (Sender { inner: sender }, AsyncReceiver { inner: receiver })
+        let receive_event = Arc::new(Event::new());
+        (
+            Sender {
+                inner: sender,
+                receive_event: Some(receive_event.clone()),
+            },
+            AsyncReceiver {
+                inner: receiver,
+                receive_event,
+            },
+        )
     }
 
     impl<T> Sender<T> {
+        fn notify_receiver(&self) {
+            if let Some(event) = &self.receive_event {
+                event.notify(1);
+            }
+        }
+
         pub(crate) fn send(&self, value: T) -> Result<(), SendError> {
-            self.inner.send(value).map_err(|_| SendError)
+            self.inner.send(value).map_err(|_| SendError)?;
+            self.notify_receiver();
+            Ok(())
         }
 
         pub(crate) async fn send_async(&self, value: T) -> Result<(), SendError> {
@@ -474,7 +497,9 @@ mod backend {
                 .as_async()
                 .send(value)
                 .await
-                .map_err(|_| SendError)
+                .map_err(|_| SendError)?;
+            self.notify_receiver();
+            Ok(())
         }
 
         pub(crate) fn send_timeout(
@@ -484,17 +509,23 @@ mod backend {
         ) -> Result<(), SendTimeoutError> {
             self.inner
                 .send_timeout(value, timeout)
-                .map_err(|_| SendTimeoutError)
+                .map_err(|_| SendTimeoutError)?;
+            self.notify_receiver();
+            Ok(())
         }
 
         #[cfg(feature = "quic-quiche")]
         pub(crate) fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
             let mut value = Some(value);
-            match self.inner.try_send_option(&mut value) {
+            let result = match self.inner.try_send_option(&mut value) {
                 Ok(true) => Ok(()),
                 Ok(false) => Err(TrySendError::Full(value.unwrap())),
                 Err(_) => Err(TrySendError::Disconnected(value.unwrap())),
+            };
+            if result.is_ok() {
+                self.notify_receiver();
             }
+            result
         }
 
         #[cfg(feature = "quic-quiche")]
@@ -517,7 +548,14 @@ mod backend {
 
     impl<T> AsyncReceiver<T> {
         pub(crate) async fn recv_async(&self) -> Result<T, RecvError> {
-            self.inner.as_async().recv().await.map_err(|_| RecvError)
+            loop {
+                let listener = self.receive_event.listen();
+                match self.try_recv() {
+                    Ok(value) => return Ok(value),
+                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                    Err(TryRecvError::Empty) => listener.await,
+                }
+            }
         }
 
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {

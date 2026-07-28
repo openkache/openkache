@@ -1515,6 +1515,7 @@ dependencies = [
  "compio",
  "compio-quic",
  "crossfire",
+ "event-listener",
  "flume",
  "futures-util",
  "kanal",
