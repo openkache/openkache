@@ -18,6 +18,10 @@ pub const MAX_REQUEST_FRAME_BYTES: usize =
 /// Maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_VALUE_BYTES;
 
+const VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
+const VALUE_COMPRESSED_BIT: u32 = 1 << 31;
+const VALUE_ENCRYPTED_BIT: u32 = 1 << 30;
+
 /// Operations supported by protocol v1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -124,11 +128,66 @@ impl AsRef<[u8]> for ClientKeyDigest {
     }
 }
 
+/// Transformation metadata packed into unused high bits of the wire value length.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ValueFlags {
+    compressed: bool,
+    encrypted: bool,
+}
+
+impl ValueFlags {
+    /// No client-side value transformation.
+    pub const NONE: Self = Self::new(false, false);
+
+    /// Creates flags for one encoded value.
+    pub const fn new(compressed: bool, encrypted: bool) -> Self {
+        Self {
+            compressed,
+            encrypted,
+        }
+    }
+
+    /// Returns whether the value body is a Zstandard frame before encryption.
+    pub const fn is_compressed(self) -> bool {
+        self.compressed
+    }
+
+    /// Returns whether the value body is authenticated ciphertext.
+    pub const fn is_encrypted(self) -> bool {
+        self.encrypted
+    }
+
+    /// Returns a stable byte representation suitable for authenticated metadata.
+    pub const fn authentication_byte(self) -> u8 {
+        self.compressed as u8 | ((self.encrypted as u8) << 1)
+    }
+
+    const fn wire_bits(self) -> u32 {
+        (if self.compressed {
+            VALUE_COMPRESSED_BIT
+        } else {
+            0
+        }) | (if self.encrypted {
+            VALUE_ENCRYPTED_BIT
+        } else {
+            0
+        })
+    }
+
+    const fn from_wire_length(encoded_length: u32) -> Self {
+        Self::new(
+            encoded_length & VALUE_COMPRESSED_BIT != 0,
+            encoded_length & VALUE_ENCRYPTED_BIT != 0,
+        )
+    }
+}
+
 /// A decoded OpenKache request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub opcode: Opcode,
     pub client_key_digest: Option<ClientKeyDigest>,
+    pub value_flags: ValueFlags,
     pub value: Vec<u8>,
 }
 
@@ -139,11 +198,27 @@ impl Request {
         client_key_digest: Option<ClientKeyDigest>,
         value: Vec<u8>,
     ) -> Result<Self> {
+        Self::new_with_value_flags(opcode, client_key_digest, ValueFlags::NONE, value)
+    }
+
+    /// Creates and validates a request with explicit value transformation flags.
+    pub fn new_with_value_flags(
+        opcode: Opcode,
+        client_key_digest: Option<ClientKeyDigest>,
+        value_flags: ValueFlags,
+        value: Vec<u8>,
+    ) -> Result<Self> {
         validate_lengths(value.len())?;
-        validate_request_shape(opcode, client_key_digest.is_some(), value.len())?;
+        validate_request_shape(
+            opcode,
+            client_key_digest.is_some(),
+            value_flags,
+            value.len(),
+        )?;
         Ok(Self {
             opcode,
             client_key_digest,
+            value_flags,
             value,
         })
     }
@@ -154,6 +229,7 @@ impl Request {
         validate_request_shape(
             self.opcode,
             self.client_key_digest.is_some(),
+            self.value_flags,
             self.value.len(),
         )?;
         let key_len = self
@@ -162,12 +238,42 @@ impl Request {
         let mut frame = Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + self.value.len());
         frame.push(self.opcode as u8);
         frame.extend_from_slice(&(key_len as u32).to_be_bytes());
-        frame.extend_from_slice(&(self.value.len() as u32).to_be_bytes());
+        frame.extend_from_slice(
+            &encode_value_length(self.value.len(), self.value_flags).to_be_bytes(),
+        );
         if let Some(client_key_digest) = self.client_key_digest {
             frame.extend_from_slice(client_key_digest.as_bytes());
         }
         frame.extend_from_slice(&self.value);
         Ok(frame)
+    }
+
+    /// Encodes this request while reusing its value allocation when practical.
+    pub fn into_encoded(mut self) -> Result<Vec<u8>> {
+        validate_lengths(self.value.len())?;
+        validate_request_shape(
+            self.opcode,
+            self.client_key_digest.is_some(),
+            self.value_flags,
+            self.value.len(),
+        )?;
+        let key_len = self
+            .client_key_digest
+            .map_or(0, |_| CLIENT_KEY_DIGEST_BYTES);
+        let prefix_len = REQUEST_HEADER_BYTES + key_len;
+        let value_len = self.value.len();
+        self.value.reserve(prefix_len);
+        self.value.resize(prefix_len + value_len, 0);
+        self.value.copy_within(0..value_len, prefix_len);
+        self.value[0] = self.opcode as u8;
+        self.value[1..5].copy_from_slice(&(key_len as u32).to_be_bytes());
+        self.value[5..9]
+            .copy_from_slice(&encode_value_length(value_len, self.value_flags).to_be_bytes());
+        if let Some(client_key_digest) = self.client_key_digest {
+            self.value[REQUEST_HEADER_BYTES..prefix_len]
+                .copy_from_slice(client_key_digest.as_bytes());
+        }
+        Ok(self.value)
     }
 
     /// Decodes and validates one complete request frame.
@@ -180,7 +286,9 @@ impl Request {
         }
         let opcode = Opcode::try_from(frame[0])?;
         let key_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
-        let value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap()) as usize;
+        let encoded_value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap());
+        let value_flags = ValueFlags::from_wire_length(encoded_value_len);
+        let value_len = (encoded_value_len & VALUE_LENGTH_MASK) as usize;
         validate_lengths(value_len)?;
         validate_wire_key_length(opcode, key_len)?;
         let expected = REQUEST_HEADER_BYTES
@@ -193,7 +301,7 @@ impl Request {
                 actual: frame.len(),
             });
         }
-        validate_request_shape(opcode, key_len != 0, value_len)?;
+        validate_request_shape(opcode, key_len != 0, value_flags, value_len)?;
         let key_end = REQUEST_HEADER_BYTES + key_len;
         let client_key_digest = if key_len == 0 {
             None
@@ -207,6 +315,7 @@ impl Request {
         Ok(Self {
             opcode,
             client_key_digest,
+            value_flags,
             value: frame[key_end..].to_vec(),
         })
     }
@@ -216,19 +325,34 @@ impl Request {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Response {
     pub status: Status,
+    pub value_flags: ValueFlags,
     pub payload: Vec<u8>,
 }
 
 impl Response {
     /// Creates a response after checking the payload limit.
     pub fn new(status: Status, payload: Vec<u8>) -> Result<Self> {
+        Self::new_with_value_flags(status, ValueFlags::NONE, payload)
+    }
+
+    /// Creates a response with explicit value transformation flags.
+    pub fn new_with_value_flags(
+        status: Status,
+        value_flags: ValueFlags,
+        payload: Vec<u8>,
+    ) -> Result<Self> {
         if payload.len() > MAX_VALUE_BYTES {
             return Err(ProtocolError::ValueTooLarge {
                 size: payload.len(),
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        Ok(Self { status, payload })
+        validate_response_flags(status, value_flags, payload.len())?;
+        Ok(Self {
+            status,
+            value_flags,
+            payload,
+        })
     }
 
     /// Encodes this response into one complete stream frame.
@@ -241,7 +365,10 @@ impl Response {
         }
         let mut frame = Vec::with_capacity(RESPONSE_HEADER_BYTES + self.payload.len());
         frame.push(self.status as u8);
-        frame.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+        validate_response_flags(self.status, self.value_flags, self.payload.len())?;
+        frame.extend_from_slice(
+            &encode_value_length(self.payload.len(), self.value_flags).to_be_bytes(),
+        );
         frame.extend_from_slice(&self.payload);
         Ok(frame)
     }
@@ -255,7 +382,9 @@ impl Response {
             });
         }
         let status = Status::try_from(frame[0])?;
-        let payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
+        let encoded_payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap());
+        let value_flags = ValueFlags::from_wire_length(encoded_payload_len);
+        let payload_len = (encoded_payload_len & VALUE_LENGTH_MASK) as usize;
         if payload_len > MAX_VALUE_BYTES {
             return Err(ProtocolError::ValueTooLarge {
                 size: payload_len,
@@ -271,9 +400,48 @@ impl Response {
                 actual: frame.len(),
             });
         }
+        validate_response_flags(status, value_flags, payload_len)?;
         Ok(Self {
             status,
+            value_flags,
             payload: frame[RESPONSE_HEADER_BYTES..].to_vec(),
+        })
+    }
+
+    /// Decodes a response while reusing the frame allocation for its payload.
+    pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
+        if frame.len() < RESPONSE_HEADER_BYTES {
+            return Err(ProtocolError::FrameTooShort {
+                expected: RESPONSE_HEADER_BYTES,
+                actual: frame.len(),
+            });
+        }
+        let status = Status::try_from(frame[0])?;
+        let encoded_payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap());
+        let value_flags = ValueFlags::from_wire_length(encoded_payload_len);
+        let payload_len = (encoded_payload_len & VALUE_LENGTH_MASK) as usize;
+        if payload_len > MAX_VALUE_BYTES {
+            return Err(ProtocolError::ValueTooLarge {
+                size: payload_len,
+                maximum: MAX_VALUE_BYTES,
+            });
+        }
+        let expected = RESPONSE_HEADER_BYTES
+            .checked_add(payload_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        if frame.len() != expected {
+            return Err(ProtocolError::FrameLength {
+                expected,
+                actual: frame.len(),
+            });
+        }
+        validate_response_flags(status, value_flags, payload_len)?;
+        frame.copy_within(RESPONSE_HEADER_BYTES.., 0);
+        frame.truncate(payload_len);
+        Ok(Self {
+            status,
+            value_flags,
+            payload: frame,
         })
     }
 }
@@ -305,6 +473,8 @@ pub enum ProtocolError {
         expected_key: &'static str,
         expected_value: &'static str,
     },
+    #[error("value transformation flags are not valid for {context}")]
+    InvalidValueFlags { context: &'static str },
 }
 
 /// Convenience result type for protocol operations.
@@ -318,6 +488,10 @@ fn validate_lengths(value_len: usize) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn encode_value_length(value_len: usize, value_flags: ValueFlags) -> u32 {
+    value_len as u32 | value_flags.wire_bits()
 }
 
 fn validate_wire_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
@@ -336,10 +510,19 @@ fn validate_wire_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
     }
 }
 
-fn validate_request_shape(opcode: Opcode, has_client_key: bool, value_len: usize) -> Result<()> {
+fn validate_request_shape(
+    opcode: Opcode,
+    has_client_key: bool,
+    value_flags: ValueFlags,
+    value_len: usize,
+) -> Result<()> {
     let valid = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_client_key && value_len == 0,
-        Opcode::Get | Opcode::Delete => has_client_key && value_len == 0,
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => {
+            !has_client_key && value_len == 0 && value_flags == ValueFlags::NONE
+        }
+        Opcode::Get | Opcode::Delete => {
+            has_client_key && value_len == 0 && value_flags == ValueFlags::NONE
+        }
         Opcode::Set => has_client_key,
     };
     if valid {
@@ -355,4 +538,18 @@ fn validate_request_shape(opcode: Opcode, has_client_key: bool, value_len: usize
         expected_key,
         expected_value,
     })
+}
+
+fn validate_response_flags(
+    status: Status,
+    value_flags: ValueFlags,
+    payload_len: usize,
+) -> Result<()> {
+    if value_flags == ValueFlags::NONE || (status == Status::Ok && payload_len > 0) {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidValueFlags {
+            context: "response status or empty payload",
+        })
+    }
 }

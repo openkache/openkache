@@ -17,6 +17,7 @@ use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
 use openkache_protocol::ClientKeyDigest;
 
+use crate::types::EncodedValue;
 use crate::*;
 
 mod worker;
@@ -272,7 +273,7 @@ impl ThreadedKvkache {
             storage_key,
             response,
         })? {
-            WorkerResponse::Value(value) => Ok(value),
+            WorkerResponse::Value(value) => Ok(value.map(|value| value.bytes)),
             response => Err(KvError::Worker(format!(
                 "unexpected get response: {response:?}"
             ))),
@@ -283,7 +284,7 @@ impl ThreadedKvkache {
     pub(crate) async fn get_async(
         &self,
         client_key_digest: ClientKeyDigest,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<Option<EncodedValue>> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
         match self
@@ -305,7 +306,7 @@ impl ThreadedKvkache {
         let worker = self.owner(&storage_key);
         match self.request(worker, |response| WorkerRequest::Set {
             storage_key,
-            value,
+            value: EncodedValue::plain(value),
             response,
         })? {
             WorkerResponse::Set(outcome) => Ok(outcome),
@@ -319,7 +320,7 @@ impl ThreadedKvkache {
     pub(crate) async fn set_async(
         &self,
         client_key_digest: ClientKeyDigest,
-        value: Vec<u8>,
+        value: EncodedValue,
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
@@ -506,7 +507,7 @@ impl ThreadedKvkache {
                 BenchmarkOperation::Set(_, value) => (
                     WorkerRequest::Set {
                         storage_key,
-                        value,
+                        value: EncodedValue::plain(value),
                         response: response_tx,
                     },
                     BenchmarkResponseKind::Set,

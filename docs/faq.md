@@ -37,11 +37,15 @@ See [Getting Started](getting-started.md). Build from source with `cargo build -
 
 ### What client languages are available?
 
-Rust and .NET SDKs are available. More languages planned.
+Rust, TypeScript on Bun, and .NET SDKs are available.
 
 ### Is end-to-end encryption mandatory?
 
-E2E encryption is on by default but configurable. Keys are sent as Blake3 hashes, values as AES ciphertext. The server never sees plaintext.
+The TypeScript client requires a 32-byte XChaCha20-Poly1305 key. Rust callers
+can select the same secure codec or use the backwards-compatible plaintext
+mode. Cache keys are sent as SHA-256 digests. With the secure codec, the server
+sees deterministic key digests and encrypted value sizes, but not value
+plaintext.
 
 ### Can I use my own QUIC implementation?
 

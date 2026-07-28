@@ -1,0 +1,12 @@
+{
+  "name": "@openkache/client",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "peerDependencies": {
+    "bun": "^1.3.14"
+  },
+  "scripts": {
+    "build:native": "cargo build --manifest-path ../rust/Cargo.toml --features ffi --release --target-dir target/native"
+  }
+}
