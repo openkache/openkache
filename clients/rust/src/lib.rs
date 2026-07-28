@@ -1,6 +1,9 @@
 //! QUIC client for the OpenKache binary protocol.
 
+#[cfg(feature = "ffi")]
+pub mod ffi;
 mod transport;
+pub mod value;
 
 use std::net::SocketAddr;
 
@@ -33,6 +36,8 @@ pub enum Error {
     Utf8(#[from] std::string::FromUtf8Error),
     #[error("I/O failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("value transformation failed: {0}")]
+    Value(#[from] value::Error),
 }
 
 /// Convenience alias for client results.
@@ -45,9 +50,17 @@ pub enum SetOutcome {
     Replaced,
 }
 
+/// Optional client behaviors layered over the OpenKache wire protocol.
+#[derive(Default)]
+pub struct ClientOptions {
+    /// Compression and end-to-end encryption applied to stored values.
+    pub value_codec: value::ValueCodec,
+}
+
 /// A reusable QUIC connection to an OpenKache server.
 pub struct Client {
     connection: transport::Connection,
+    value_codec: value::ValueCodec,
 }
 
 impl Client {
@@ -57,9 +70,43 @@ impl Client {
         server_name: &str,
         trusted_certificate_der: &[u8],
     ) -> Result<Self> {
+        Self::connect_with_options(
+            address,
+            server_name,
+            trusted_certificate_der,
+            ClientOptions::default(),
+        )
+        .await
+    }
+
+    /// Connects to a server with explicit value compression and encryption options.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - Server UDP socket address.
+    /// * `server_name` - TLS certificate name expected from the server.
+    /// * `trusted_certificate_der` - DER certificate trusted for this connection.
+    /// * `options` - Client-side value transformation settings.
+    ///
+    /// # Returns
+    ///
+    /// A reusable, connected client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when TLS configuration or the QUIC handshake fails.
+    pub async fn connect_with_options(
+        address: SocketAddr,
+        server_name: &str,
+        trusted_certificate_der: &[u8],
+        options: ClientOptions,
+    ) -> Result<Self> {
         let tls = make_tls_config(trusted_certificate_der)?;
         let connection = transport::connect(address, server_name, tls).await?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            value_codec: options.value_codec,
+        })
     }
 
     /// Verifies that the server is reachable and speaks protocol v1.
@@ -85,7 +132,11 @@ impl Client {
             )?)
             .await?;
         match response.status {
-            Status::Ok => Ok(Some(response.payload)),
+            Status::Ok => Ok(Some(self.value_codec.open(
+                client_key_digest,
+                response.value_flags,
+                response.payload,
+            )?)),
             Status::NotFound => Ok(None),
             status => Err(unexpected("GET", status)),
         }
@@ -93,12 +144,32 @@ impl Client {
 
     /// Stores a value and reports whether it created or replaced the key.
     pub async fn set(&self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
+        self.set_owned(key, value.to_vec()).await
+    }
+
+    /// Stores an owned value while reusing its allocation when practical.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact application key bytes.
+    /// * `value` - Owned application value.
+    ///
+    /// # Returns
+    ///
+    /// Whether the operation created or replaced the key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when value transformation, transport, protocol, or server execution fails.
+    pub async fn set_owned(&self, key: &[u8], value: Vec<u8>) -> Result<SetOutcome> {
         let client_key_digest = ClientKeyDigest::from_user_key(key);
+        let sealed = self.value_codec.seal_owned(client_key_digest, value)?;
         let response = self
-            .request(Request::new(
+            .request(Request::new_with_value_flags(
                 Opcode::Set,
                 Some(client_key_digest),
-                value.to_vec(),
+                sealed.flags,
+                sealed.bytes,
             )?)
             .await?;
         match response.status {
@@ -144,9 +215,9 @@ impl Client {
 
     async fn request(&self, request: Request) -> Result<Response> {
         let mut stream = self.connection.open_bi().await?;
-        stream.write_request(request.encode()?).await?;
+        stream.write_request(request.into_encoded()?).await?;
         let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
-        let response = Response::decode(&frame)?;
+        let response = Response::decode_owned(frame)?;
         if response.status.is_error() {
             return Err(Error::Server {
                 status: response.status,

@@ -1,5 +1,7 @@
 //! Shared byte-oriented types used across the KV cache.
 
+use openkache_protocol::ValueFlags;
+
 /// Number of bytes in every server-derived storage key.
 pub const STORAGE_KEY_BYTES: usize = 32;
 
@@ -53,6 +55,31 @@ impl From<&[u8]> for Value {
     /// Copies a borrowed byte slice into an owned value.
     fn from(bytes: &[u8]) -> Self {
         Self::new(bytes.to_vec())
+    }
+}
+
+/// Opaque client value plus transformation bits propagated without server-side decoding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EncodedValue {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) flags: ValueFlags,
+}
+
+impl EncodedValue {
+    pub(crate) fn new(bytes: Vec<u8>, flags: ValueFlags) -> Self {
+        Self { bytes, flags }
+    }
+
+    pub(crate) fn plain(bytes: Vec<u8>) -> Self {
+        Self::new(bytes, ValueFlags::NONE)
+    }
+}
+
+impl std::ops::Deref for EncodedValue {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes
     }
 }
 

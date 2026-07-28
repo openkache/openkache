@@ -39,7 +39,10 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 
 ### 🔒 End-to-end encryption
 
-The server has zero visibility into client data. Keys are sent as Blake3 keyed hashes, values as AES ciphertext. No plaintext leaves the client — zero trust by default. Algorithm is configurable.
+Secure clients compress values and encrypt them with XChaCha20-Poly1305 before
+transmission. The compact authenticated value is bound to the SHA-256 wire-key
+digest, so moving ciphertext to another cache key fails authentication. The
+server observes key digests and encoded sizes, but not value plaintext.
 
 ### 📦 Transparent compression
 
@@ -47,7 +50,9 @@ Large values are automatically compressed with zstd before storage and decompres
 
 ### 📚 Multi-language SDKs
 
-First-class client libraries for Rust and .NET, with more on the way. Idiomatic, typed APIs — no C bindings, no FFI overhead.
+First-class client libraries are available for Rust, TypeScript on Bun, and
+.NET. TypeScript calls the production Rust client through a thin native ABI so
+transport, compression, and encryption behavior stay identical.
 
 ### 📦 Single binary distribution
 
@@ -78,7 +83,7 @@ Pass `--config <path>` to load an explicit TOML cache configuration.
 ┌──────────────┐         QUIC (UDP, TLS 1.3)         ┌──────────────────────┐
 │  openkache-  │ ──────────────────────────────────▶ │     OpenKache        │
 │  client      │   Multiplexed streams, 0-RTT        │  (single binary)     │
-│  (Rust/.NET) │                                     │                      │
+│ (Rust/TS/.NET)│                                    │                      │
 └──────────────┘                                     │  ┌────────────────┐  │
                                                      │  │ BCF53 Filter   │  │
 ┌──────────────┐                                     │  │ (SIMD, AVX2)   │  │
@@ -116,6 +121,7 @@ Pass `--config <path>` to load an explicit TOML cache configuration.
 cargo build --manifest-path server/Cargo.toml
 cargo build --manifest-path clients/rust/Cargo.toml
 cargo build --manifest-path protocol/Cargo.toml
+bun run --cwd clients/typescript build:native
 ```
 
 ### Static musl (x86_64 / aarch64)
@@ -145,13 +151,14 @@ cargo check --manifest-path protocol/Cargo.toml
 
 ## 📊 Project status
 
-OpenKache is in **active development**. Core components are stable, the server protocol layer is being built out, and client SDKs are available for Rust and .NET.
+OpenKache is in **active development**. Core components are stable, the server protocol layer is being built out, and client SDKs are available for Rust, TypeScript, and .NET.
 
 | Component | Status | Notes |
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
-| QUIC client (Rust) | 🚧 Preview | Quinn + Noq backends, binary protocol v1 |
+| QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v1, secure value codec |
+| QUIC client (TypeScript) | 🚧 Preview | Bun wrapper over the Rust client ABI |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | .NET client | ✅ Stable | TCP-based, NuGet published |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
@@ -165,7 +172,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
-| E2E encryption | ⏳ Planned | Client-side encryption, zero-trust server architecture |
+| E2E encryption | ✅ Done | Zstandard then compact XChaCha20-Poly1305 values |
 | Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
 | General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
 
@@ -184,6 +191,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `protocol/` | Shared binary request, response, opcode, and status definitions |
 | `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/rust/` | Rust client SDK over QUIC |
+| `clients/typescript/` | Bun client backed by the Rust client ABI |
 | `clients/dotnet/` | .NET / C# client SDK |
 
 

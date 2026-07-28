@@ -38,15 +38,31 @@ cargo run --package openkache --bin breadcrumb --release
 ### Use the SDK (Rust)
 
 ```rust
-use openkache::prelude::*;
+use openkache_client::value::{Compression, ValueCodec, ZstandardOptions};
+use openkache_client::{Client, ClientOptions};
 
-let client = OpenKacheClient::new("localhost:9000").await?;
-client.set("mykey", b"myvalue").await?;
-let value = client.get("mykey").await?;
+let certificate = std::fs::read(
+    "target/openkache-local/certificate.local.der",
+)?;
+let client = Client::connect_with_options(
+    "127.0.0.1:4433".parse()?,
+    "localhost",
+    &certificate,
+    ClientOptions {
+        value_codec: ValueCodec::encrypted(
+            encryption_key,
+            Compression::Zstandard(ZstandardOptions::default()),
+        )?,
+    },
+)
+.await?;
+client.set(b"mykey", b"myvalue").await?;
+let value = client.get(b"mykey").await?;
 ```
 
 ## Next steps
 
 - See [Architecture](../README.md#-architecture) for how OpenKache works
 - See the Rust client SDK under `clients/rust/`
+- See the TypeScript client SDK under `clients/typescript/`
 - See the .NET client SDK under `clients/dotnet/`

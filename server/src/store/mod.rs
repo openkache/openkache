@@ -18,6 +18,7 @@ use compio::fs::{File, OpenOptions};
 use compio::io::AsyncWriteAt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 
+use crate::types::EncodedValue;
 use crate::*;
 
 mod blob;
@@ -168,14 +169,14 @@ struct LocatedItem {
 
 #[derive(Debug)]
 pub(crate) struct PendingItem {
-    pub(crate) value: Option<Vec<u8>>,
+    pub(crate) value: Option<EncodedValue>,
     pub(crate) previous: Option<TableLocation>,
     pub(crate) previous_live: bool,
 }
 
 struct FlushRecord {
     storage_key: StorageKey,
-    value: Option<Vec<u8>>,
+    value: Option<EncodedValue>,
     previous: Option<TableLocation>,
     previous_live: bool,
     table_location: Option<TableLocation>,
@@ -241,7 +242,18 @@ impl Kvkache {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn get(&self, storage_key: &StorageKey) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .get_encoded(storage_key)
+            .await?
+            .map(|value| value.bytes))
+    }
+
+    pub(crate) async fn get_encoded(
+        &self,
+        storage_key: &StorageKey,
+    ) -> Result<Option<EncodedValue>> {
         if let Some(pending) = self.pending.get(storage_key) {
             return Ok(pending.value.clone());
         }
@@ -256,14 +268,14 @@ impl Kvkache {
             .map(Some)
     }
 
-    pub(crate) async fn get_many(
+    pub(crate) async fn get_many_encoded(
         &self,
         storage_keys: Vec<StorageKey>,
-    ) -> Vec<Result<Option<Vec<u8>>>> {
+    ) -> Vec<Result<Option<EncodedValue>>> {
         let count = storage_keys.len();
         let mut pending = FuturesUnordered::new();
         for (index, storage_key) in storage_keys.into_iter().enumerate() {
-            pending.push(async move { (index, self.get(&storage_key).await) });
+            pending.push(async move { (index, self.get_encoded(&storage_key).await) });
         }
         let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
         while let Some((index, result)) = pending.next().await {
@@ -275,12 +287,22 @@ impl Kvkache {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn set(
         &mut self,
         storage_key: StorageKey,
         value: &[u8],
     ) -> Result<SetOutcome> {
-        self.validate_value(value)?;
+        self.set_encoded(storage_key, EncodedValue::plain(value.to_vec()))
+            .await
+    }
+
+    pub(crate) async fn set_encoded(
+        &mut self,
+        storage_key: StorageKey,
+        value: EncodedValue,
+    ) -> Result<SetOutcome> {
+        self.validate_value(&value.bytes)?;
         let (previous, previous_live, outcome) =
             if let Some(pending) = self.take_pending(&storage_key) {
                 let outcome = if pending.value.is_some() {
@@ -305,7 +327,7 @@ impl Kvkache {
         self.insert_pending(
             storage_key,
             PendingItem {
-                value: Some(value.to_vec()),
+                value: Some(value),
                 previous,
                 previous_live,
             },
@@ -385,9 +407,10 @@ impl Kvkache {
         &self,
         table_location: TableLocation,
         encoded: &[u8],
-    ) -> Result<Vec<u8>> {
-        match decode_stored_value(encoded)? {
-            StoredValue::Inline(value) => Ok(value.to_vec()),
+    ) -> Result<EncodedValue> {
+        let decoded = decode_stored_value(encoded)?;
+        let bytes = match decoded.value {
+            StoredValue::Inline(value) => value.to_vec(),
             StoredValue::Blob(blob_ref) => {
                 let value = self
                     .blob_segment
@@ -400,9 +423,10 @@ impl Kvkache {
                 self.io
                     .blob_data_read
                     .set(self.io.blob_data_read.get() + physical_bytes);
-                Ok(value)
+                value
             }
-        }
+        };
+        Ok(EncodedValue::new(bytes, decoded.flags))
     }
 
     fn ssd_segment_age(&self, sg_index: usize) -> usize {
@@ -458,8 +482,8 @@ impl Kvkache {
             right
                 .value
                 .as_ref()
-                .map_or(0, Vec::len)
-                .cmp(&left.value.as_ref().map_or(0, Vec::len))
+                .map_or(0, |value| value.bytes.len())
+                .cmp(&left.value.as_ref().map_or(0, |value| value.bytes.len()))
                 .then_with(|| left.storage_key.cmp(&right.storage_key))
         });
 
@@ -471,10 +495,10 @@ impl Kvkache {
             let mut blob_used = 0usize;
 
             for mut record in remaining {
-                let (item, blob_ref) = match record.value.as_deref() {
+                let (item, blob_ref) = match record.value.as_ref() {
                     None => (Item::tombstone(record.storage_key), None),
-                    Some(value) if is_blob_item(value) => {
-                        let Some(blob_end) = blob_used.checked_add(value.len()) else {
+                    Some(value) if is_blob_item(&value.bytes) => {
+                        let Some(blob_end) = blob_used.checked_add(value.bytes.len()) else {
                             deferred.push(record);
                             continue;
                         };
@@ -482,14 +506,17 @@ impl Kvkache {
                             deferred.push(record);
                             continue;
                         }
-                        let blob_ref = BlobRef::new(blob_used, value.len())?;
+                        let blob_ref = BlobRef::new(blob_used, value.bytes.len())?;
                         (
-                            Item::live(record.storage_key, encode_blob_ref(blob_ref)),
+                            Item::live(record.storage_key, encode_blob_ref(blob_ref, value.flags)),
                             Some(blob_ref),
                         )
                     }
                     Some(value) => (
-                        Item::live(record.storage_key, encode_inline_value(value)),
+                        Item::live(
+                            record.storage_key,
+                            encode_inline_value(&value.bytes, value.flags),
+                        ),
                         None,
                     ),
                 };
@@ -499,11 +526,12 @@ impl Kvkache {
                             .value
                             .as_ref()
                             .expect("Blob record has a live value")
+                            .bytes
                             .len();
                     }
                     if let Some(value) = &record.value {
                         active.accepted_item_bytes +=
-                            (crate::types::STORAGE_KEY_BYTES + value.len()) as u64;
+                            (crate::types::STORAGE_KEY_BYTES + value.bytes.len()) as u64;
                     }
                     record.table_location = Some(table_location);
                     record.blob_ref = blob_ref;
@@ -543,8 +571,10 @@ impl Kvkache {
                 .map(|record| {
                     record
                         .value
-                        .as_deref()
+                        .as_ref()
                         .expect("Blob record has a live value")
+                        .bytes
+                        .as_slice()
                 })
                 .collect::<Vec<_>>();
             let blob_physical_bytes = match self
@@ -668,7 +698,8 @@ impl Kvkache {
     }
 
     fn insert_pending(&mut self, storage_key: StorageKey, pending: PendingItem) {
-        let (sg_bytes, blob_bytes) = pending_accounted_bytes(pending.value.as_deref());
+        let (sg_bytes, blob_bytes) =
+            pending_accounted_bytes(pending.value.as_ref().map(|value| value.bytes.as_slice()));
         self.pending_sg_bytes = self.pending_sg_bytes.saturating_add(sg_bytes);
         self.pending_blob_bytes = self.pending_blob_bytes.saturating_add(blob_bytes);
         let replaced = self.pending.insert(storage_key, pending);
@@ -677,7 +708,8 @@ impl Kvkache {
 
     fn take_pending(&mut self, storage_key: &StorageKey) -> Option<PendingItem> {
         let pending = self.pending.remove(storage_key)?;
-        let (sg_bytes, blob_bytes) = pending_accounted_bytes(pending.value.as_deref());
+        let (sg_bytes, blob_bytes) =
+            pending_accounted_bytes(pending.value.as_ref().map(|value| value.bytes.as_slice()));
         self.pending_sg_bytes = self.pending_sg_bytes.saturating_sub(sg_bytes);
         self.pending_blob_bytes = self.pending_blob_bytes.saturating_sub(blob_bytes);
         Some(pending)
@@ -798,7 +830,7 @@ impl Kvkache {
         self.pending
             .values()
             .filter_map(|pending| pending.value.as_ref())
-            .map(Vec::capacity)
+            .map(|value| value.bytes.capacity())
             .sum()
     }
 }

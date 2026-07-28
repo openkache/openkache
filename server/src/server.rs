@@ -11,7 +11,7 @@ use compio_quic::{Endpoint, VarInt};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
-    ALPN, MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status,
+    ALPN, MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status, ValueFlags,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
@@ -274,6 +274,7 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
     let Request {
         opcode,
         client_key_digest,
+        value_flags,
         value,
     } = request;
     let result = match opcode {
@@ -282,13 +283,13 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
             .get_async(client_key_digest.expect("GET requests have a validated key digest"))
             .await
             .map(|value| match value {
-                Some(value) => response(Status::Ok, value),
+                Some(value) => response_with_value_flags(Status::Ok, value.flags, value.bytes),
                 None => response(Status::NotFound, Vec::new()),
             }),
         Opcode::Set => cache
             .set_async(
                 client_key_digest.expect("SET requests have a validated key digest"),
-                value,
+                crate::types::EncodedValue::new(value, value_flags),
             )
             .await
             .map(|outcome| match outcome {
@@ -353,6 +354,15 @@ fn protocol_error_response(error: ProtocolError) -> Response {
 /// Constructs a protocol response whose payload is known to fit protocol limits.
 fn response(status: Status, payload: Vec<u8>) -> Response {
     Response::new(status, payload).expect("server responses stay within protocol limits")
+}
+
+fn response_with_value_flags(
+    status: Status,
+    value_flags: ValueFlags,
+    payload: Vec<u8>,
+) -> Response {
+    Response::new_with_value_flags(status, value_flags, payload)
+        .expect("server responses stay within protocol limits")
 }
 
 /// Errors produced while configuring or running the QUIC server.

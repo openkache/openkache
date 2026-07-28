@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use openkache_protocol::ClientKeyDigest;
 
+use crate::types::EncodedValue;
 use crate::*;
 
 pub(super) enum WorkerRequest {
@@ -16,7 +17,7 @@ pub(super) enum WorkerRequest {
     },
     Set {
         storage_key: StorageKey,
-        value: Vec<u8>,
+        value: EncodedValue,
         response: flume::Sender<Result<WorkerResponse>>,
     },
     Delete {
@@ -36,7 +37,7 @@ pub(super) enum WorkerRequest {
 
 #[derive(Debug)]
 pub(super) enum WorkerResponse {
-    Value(Option<Vec<u8>>),
+    Value(Option<EncodedValue>),
     Set(SetOutcome),
     Deleted(bool),
     Stats(String),
@@ -167,7 +168,7 @@ async fn process_worker_batch(
                     storage_keys.push(storage_key);
                     responses.push(response);
                 }
-                let results = cache.get_many(storage_keys).await;
+                let results = cache.get_many_encoded(storage_keys).await;
                 for (response, result) in responses.into_iter().zip(results) {
                     let _ = response.send(result.map(WorkerResponse::Value));
                 }
@@ -176,7 +177,7 @@ async fn process_worker_batch(
                 storage_key,
                 value,
                 response,
-            } => match cache.set(storage_key, &value).await {
+            } => match cache.set_encoded(storage_key, value).await {
                 Ok(outcome) => {
                     let _ = response.send(Ok(WorkerResponse::Set(outcome)));
                 }
