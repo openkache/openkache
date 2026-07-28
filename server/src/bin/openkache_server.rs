@@ -43,10 +43,10 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     let mut config = load_config(arguments.config.as_deref())?;
     if let Some(backend) = arguments.quic_backend {
-        config.quic.backend = backend;
+        config.quic.backend = Some(backend);
     }
     let storage_directory = config.storage.directory.clone();
-    let quic_backend = config.quic.backend;
+    let quic_backend = config.quic.selected_backend()?;
     let server = KacheServer::bind_with_config(arguments.listen, config).await?;
     let address = server.local_addr()?;
     if let Some(parent) = arguments.certificate_out.parent() {

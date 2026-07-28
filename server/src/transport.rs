@@ -31,14 +31,20 @@ impl ServerEndpoint {
         address: SocketAddr,
         certificate_der: &[u8],
         private_key_der: &[u8],
+        max_concurrent_streams: usize,
     ) -> Result<Self, TransportError> {
         match backend {
             QuicBackend::Quinn => {
                 #[cfg(feature = "quic-quinn")]
                 {
                     Ok(Self::Quinn(
-                        quinn_backend::Endpoint::bind(address, certificate_der, private_key_der)
-                            .await?,
+                        quinn_backend::Endpoint::bind(
+                            address,
+                            certificate_der,
+                            private_key_der,
+                            max_concurrent_streams,
+                        )
+                        .await?,
                     ))
                 }
                 #[cfg(not(feature = "quic-quinn"))]
@@ -50,8 +56,13 @@ impl ServerEndpoint {
                 #[cfg(feature = "quic-noq")]
                 {
                     Ok(Self::Noq(
-                        noq_backend::Endpoint::bind(address, certificate_der, private_key_der)
-                            .await?,
+                        noq_backend::Endpoint::bind(
+                            address,
+                            certificate_der,
+                            private_key_der,
+                            max_concurrent_streams,
+                        )
+                        .await?,
                     ))
                 }
                 #[cfg(not(feature = "quic-noq"))]
@@ -63,8 +74,13 @@ impl ServerEndpoint {
                 #[cfg(feature = "quic-quiche")]
                 {
                     Ok(Self::Quiche(
-                        quiche_backend::Endpoint::bind(address, certificate_der, private_key_der)
-                            .await?,
+                        quiche_backend::Endpoint::bind(
+                            address,
+                            certificate_der,
+                            private_key_der,
+                            max_concurrent_streams,
+                        )
+                        .await?,
                     ))
                 }
                 #[cfg(not(feature = "quic-quiche"))]
@@ -169,6 +185,11 @@ impl TransportError {
         }
     }
 
+    #[cfg(any(
+        not(feature = "quic-quinn"),
+        not(feature = "quic-noq"),
+        not(feature = "quic-quiche")
+    ))]
     fn not_compiled(backend: QuicBackend, feature: &'static str) -> Self {
         Self {
             backend: backend.as_str(),
@@ -214,6 +235,7 @@ mod quinn_backend {
             address: SocketAddr,
             certificate_der: &[u8],
             private_key_der: &[u8],
+            max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
             let tls = tls_config(certificate_der, private_key_der)
                 .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
@@ -222,10 +244,20 @@ mod quinn_backend {
             let socket = compio::net::UdpSocket::bind(address)
                 .await
                 .map_err(|error| TransportError::backend(NAME, "bind", error))?;
+            let max_concurrent_streams =
+                u32::try_from(max_concurrent_streams).map_err(|error| {
+                    TransportError::backend(NAME, "stream limit configuration", error)
+                })?;
+            let mut transport = compio_quic::TransportConfig::default();
+            transport
+                .max_concurrent_bidi_streams(compio_quic::VarInt::from_u32(max_concurrent_streams))
+                .max_concurrent_uni_streams(compio_quic::VarInt::from_u32(0));
+            let mut server_config = compio_quic::ServerConfig::with_crypto(Arc::new(crypto));
+            server_config.transport_config(Arc::new(transport));
             let endpoint = compio_quic::Endpoint::new(
                 socket,
                 compio_quic::EndpointConfig::default(),
-                Some(compio_quic::ServerConfig::with_crypto(Arc::new(crypto))),
+                Some(server_config),
                 None,
             )
             .map_err(|error| TransportError::backend(NAME, "endpoint initialization", error))?;
@@ -342,6 +374,7 @@ mod noq_backend {
             address: SocketAddr,
             certificate_der: &[u8],
             private_key_der: &[u8],
+            max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
             let tls = tls_config(certificate_der, private_key_der)
                 .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
@@ -350,10 +383,20 @@ mod noq_backend {
             let socket = compio::net::UdpSocket::bind(address)
                 .await
                 .map_err(|error| TransportError::backend(NAME, "bind", error))?;
+            let max_concurrent_streams =
+                u32::try_from(max_concurrent_streams).map_err(|error| {
+                    TransportError::backend(NAME, "stream limit configuration", error)
+                })?;
+            let mut transport = comnoq::TransportConfig::default();
+            transport
+                .max_concurrent_bidi_streams(comnoq::VarInt::from_u32(max_concurrent_streams))
+                .max_concurrent_uni_streams(comnoq::VarInt::from_u32(0));
+            let mut server_config = comnoq::ServerConfig::with_crypto(Arc::new(crypto));
+            server_config.transport_config(Arc::new(transport));
             let endpoint = comnoq::Endpoint::new(
                 socket,
                 comnoq::EndpointConfig::default(),
-                Some(comnoq::ServerConfig::with_crypto(Arc::new(crypto))),
+                Some(server_config),
                 None,
             )
             .map_err(|error| TransportError::backend(NAME, "endpoint initialization", error))?;
@@ -472,6 +515,7 @@ mod quiche_backend {
     const NAME: &str = "quiche";
     const MAX_DATAGRAM_BYTES: usize = 65_535;
     const MAX_BUFFERED_REQUEST_BYTES: usize = openkache_protocol::MAX_REQUEST_FRAME_BYTES + 1;
+    const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
 
     pub(crate) struct Endpoint {
         local_address: SocketAddr,
@@ -485,6 +529,7 @@ mod quiche_backend {
             address: SocketAddr,
             certificate_der: &[u8],
             private_key_der: &[u8],
+            max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
             let socket = compio::net::UdpSocket::bind(address)
                 .await
@@ -492,7 +537,7 @@ mod quiche_backend {
             let local_address = socket
                 .local_addr()
                 .map_err(|error| TransportError::backend(NAME, "local address", error))?;
-            let config = config(certificate_der, private_key_der)?;
+            let config = config(certificate_der, private_key_der, max_concurrent_streams)?;
             let (incoming_sender, incoming) = flume::unbounded();
             let (commands, command_receiver) = flume::unbounded();
             let driver_commands = commands.clone();
@@ -581,7 +626,13 @@ mod quiche_backend {
                     stream_id: stream.stream_id,
                     commands: self.commands.clone(),
                 },
-                ReceiveStream(stream.request),
+                ReceiveStream {
+                    connection_id: self.connection_id.clone(),
+                    stream_id: stream.stream_id,
+                    commands: self.commands.clone(),
+                    request: stream.request,
+                    completed: false,
+                },
             ))
         }
     }
@@ -591,21 +642,40 @@ mod quiche_backend {
         request: flume::Receiver<Vec<u8>>,
     }
 
-    pub(crate) struct ReceiveStream(flume::Receiver<Vec<u8>>);
+    pub(crate) struct ReceiveStream {
+        connection_id: Vec<u8>,
+        stream_id: u64,
+        commands: flume::Sender<Command>,
+        request: flume::Receiver<Vec<u8>>,
+        completed: bool,
+    }
 
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
-            self,
+            mut self,
             maximum: usize,
             timeout: Duration,
         ) -> Result<Vec<u8>, StreamReadError> {
-            let receive = self.0.recv_async();
+            let receive = self.request.recv_async();
             let mut frame = compio::runtime::time::timeout(timeout, receive)
                 .await
                 .map_err(|_| StreamReadError::Timeout)?
                 .map_err(|error| TransportError::backend(NAME, "stream read", error))?;
+            self.completed = true;
             frame.truncate(maximum);
             Ok(frame)
+        }
+    }
+
+    impl Drop for ReceiveStream {
+        fn drop(&mut self) {
+            if self.completed {
+                return;
+            }
+            let _ = self.commands.try_send(Command::CancelRequest {
+                connection_id: self.connection_id.clone(),
+                stream_id: self.stream_id,
+            });
         }
     }
 
@@ -641,6 +711,10 @@ mod quiche_backend {
 
     enum Command {
         Close(Vec<u8>),
+        CancelRequest {
+            connection_id: Vec<u8>,
+            stream_id: u64,
+        },
         SendResponse {
             connection_id: Vec<u8>,
             stream_id: u64,
@@ -810,6 +884,20 @@ mod quiche_backend {
                     }
                     false
                 }
+                Command::CancelRequest {
+                    connection_id,
+                    stream_id,
+                } => {
+                    if let Some(client) = self.clients.get_mut(&connection_id) {
+                        client.requests.remove(&stream_id);
+                        let _ = client.connection.stream_shutdown(
+                            stream_id,
+                            quiche::Shutdown::Read,
+                            REQUEST_CANCELLED_ERROR_CODE,
+                        );
+                    }
+                    false
+                }
                 Command::SendResponse {
                     connection_id,
                     stream_id,
@@ -968,6 +1056,7 @@ mod quiche_backend {
     fn config(
         certificate_der: &[u8],
         private_key_der: &[u8],
+        max_concurrent_streams: usize,
     ) -> Result<quiche::Config, TransportError> {
         let certificate = X509::from_der(certificate_der)
             .map_err(|error| TransportError::backend(NAME, "certificate parsing", error))?;
@@ -990,7 +1079,8 @@ mod quiche_backend {
         config.set_initial_max_data(64 * 1024 * 1024);
         config.set_initial_max_stream_data_bidi_remote(MAX_BUFFERED_REQUEST_BYTES as u64);
         config.set_initial_max_stream_data_bidi_local(64 * 1024);
-        config.set_initial_max_streams_bidi(1_024);
+        config.set_initial_max_streams_bidi(max_concurrent_streams as u64);
+        config.set_initial_max_streams_uni(0);
         config.set_disable_active_migration(true);
         Ok(config)
     }

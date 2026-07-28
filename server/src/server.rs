@@ -63,14 +63,16 @@ impl KacheServer {
         config.validate()?;
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
         let max_inflight_streams_per_connection = config.io_uring.max_inflight_per_worker;
+        let quic_backend = config.quic.selected_backend()?;
         let generated = rcgen::generate_simple_self_signed(["localhost".to_string()])?;
         let certificate_der = generated.cert.der().clone();
         let private_key_der = generated.signing_key.serialize_der();
         let endpoint = ServerEndpoint::bind(
-            config.quic.backend,
+            quic_backend,
             address,
             certificate_der.as_ref(),
             &private_key_der,
+            max_inflight_streams_per_connection,
         )
         .await?;
         let cache = ThreadedKvkache::start(config)?;

@@ -48,37 +48,45 @@ impl QuicBackend {
     }
 }
 
-impl Default for QuicBackend {
-    fn default() -> Self {
-        default_quic_backend()
-    }
-}
-
-#[cfg(feature = "quic-noq")]
-const fn default_quic_backend() -> QuicBackend {
-    QuicBackend::Noq
-}
-
-#[cfg(all(not(feature = "quic-noq"), feature = "quic-quinn"))]
-const fn default_quic_backend() -> QuicBackend {
-    QuicBackend::Quinn
-}
-
-#[cfg(all(
-    not(feature = "quic-noq"),
-    not(feature = "quic-quinn"),
-    feature = "quic-quiche"
-))]
-const fn default_quic_backend() -> QuicBackend {
-    QuicBackend::Quiche
-}
+const COMPILED_QUIC_BACKENDS: &[QuicBackend] = &[
+    #[cfg(feature = "quic-quinn")]
+    QuicBackend::Quinn,
+    #[cfg(feature = "quic-noq")]
+    QuicBackend::Noq,
+    #[cfg(feature = "quic-quiche")]
+    QuicBackend::Quiche,
+];
 
 /// QUIC transport configuration shared by all protocol implementations.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuicConfig {
     /// Protocol implementation selected when the server binds.
-    pub backend: QuicBackend,
+    ///
+    /// Exactly one compiled backend is selected automatically. Builds containing
+    /// multiple backends must set this field explicitly.
+    pub backend: Option<QuicBackend>,
+}
+
+impl QuicConfig {
+    /// Resolves the configured backend or rejects an ambiguous multi-backend build.
+    pub fn selected_backend(&self) -> Result<QuicBackend> {
+        self.backend.ok_or_else(|| {
+            KvError::InvalidConfig(
+                "quic.backend must be specified when multiple QUIC backends are compiled".into(),
+            )
+        })
+    }
+}
+
+impl Default for QuicConfig {
+    fn default() -> Self {
+        let backend = match COMPILED_QUIC_BACKENDS {
+            [backend] => Some(*backend),
+            _ => None,
+        };
+        Self { backend }
+    }
 }
 
 impl BucketSelectionPolicy {
@@ -446,6 +454,7 @@ impl AppConfig {
                 self.version
             )));
         }
+        self.quic.selected_backend()?;
         if self.runtime.thread_count == 0 {
             return Err(KvError::InvalidConfig(
                 "runtime.thread_count must be non-zero".into(),
