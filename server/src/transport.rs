@@ -956,7 +956,7 @@ mod quiche_backend {
             .map_err(|error| TransportError::backend(NAME, "certificate parsing", error))?;
         let private_key = PKey::private_key_from_der(private_key_der)
             .map_err(|error| TransportError::backend(NAME, "private key parsing", error))?;
-        let mut tls = SslContextBuilder::new(SslMethod::tls_server())
+        let mut tls = SslContextBuilder::new(SslMethod::tls())
             .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
         tls.set_certificate(&certificate)
             .map_err(|error| TransportError::backend(NAME, "TLS certificate", error))?;
