@@ -12,11 +12,31 @@ compile_error!(
     "enable at least one QUIC backend feature: `quic-quinn`, `quic-noq`, or `quic-quiche`"
 );
 
+#[cfg(not(any(
+    feature = "channel-crossfire",
+    feature = "channel-flume",
+    feature = "channel-kanal"
+)))]
+compile_error!(
+    "enable exactly one channel backend feature: `channel-crossfire`, `channel-flume`, or `channel-kanal`"
+);
+
+#[cfg(any(
+    all(feature = "channel-crossfire", feature = "channel-flume"),
+    all(feature = "channel-crossfire", feature = "channel-kanal"),
+    all(feature = "channel-flume", feature = "channel-kanal")
+))]
+compile_error!(
+    "enable exactly one channel backend feature: `channel-crossfire`, `channel-flume`, or `channel-kanal`"
+);
+
 pub mod allocators;
 pub mod breadcrumb_filter;
 pub mod server;
 mod transport;
 pub mod types;
+
+pub(crate) mod channel;
 
 pub use types::{StorageKey, Value};
 

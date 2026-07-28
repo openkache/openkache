@@ -7,31 +7,32 @@ use std::time::Duration;
 
 use openkache_protocol::ClientKeyDigest;
 
+use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
 use crate::types::EncodedValue;
 use crate::*;
 
 pub(super) enum WorkerRequest {
     Get {
         storage_key: StorageKey,
-        response: flume::Sender<Result<WorkerResponse>>,
+        response: Sender<Result<WorkerResponse>>,
     },
     Set {
         storage_key: StorageKey,
         value: EncodedValue,
-        response: flume::Sender<Result<WorkerResponse>>,
+        response: Sender<Result<WorkerResponse>>,
     },
     Delete {
         storage_key: StorageKey,
-        response: flume::Sender<Result<WorkerResponse>>,
+        response: Sender<Result<WorkerResponse>>,
     },
     Stats {
-        response: flume::Sender<Result<WorkerResponse>>,
+        response: Sender<Result<WorkerResponse>>,
     },
     Sync {
-        response: flume::Sender<Result<WorkerResponse>>,
+        response: Sender<Result<WorkerResponse>>,
     },
     Shutdown {
-        response: flume::Sender<Result<WorkerResponse>>,
+        response: Sender<Result<WorkerResponse>>,
     },
 }
 
@@ -97,14 +98,14 @@ pub(super) enum BenchmarkResponseKind {
 }
 
 pub(super) struct PendingBenchmarkRequest {
-    pub(super) response: flume::Receiver<Result<WorkerResponse>>,
+    pub(super) response: Receiver<Result<WorkerResponse>>,
     pub(super) kind: BenchmarkResponseKind,
     pub(super) started: std::time::Instant,
 }
 
 pub(super) async fn worker_loop(
     mut cache: Kvkache,
-    receiver: flume::Receiver<WorkerRequest>,
+    receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
 ) -> Result<()> {
     loop {
@@ -129,7 +130,7 @@ pub(super) async fn worker_loop(
         while batch.len() < io_config.batch_size {
             match receiver.try_recv() {
                 Ok(request) => batch.push_back(request),
-                Err(flume::TryRecvError::Empty | flume::TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
 
