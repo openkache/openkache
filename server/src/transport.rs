@@ -15,8 +15,6 @@ use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use crate::QuicBackend;
-#[cfg(feature = "quic-quiche")]
-use crate::channel::{self, AsyncReceiver, Sender, TrySendError};
 
 /// Backend-independent endpoint selected when the server binds.
 pub(super) enum ServerEndpoint {
@@ -570,6 +568,7 @@ mod quiche_backend {
     use futures_util::{FutureExt, StreamExt, pin_mut, select};
 
     use super::*;
+    use crate::channel::{self, AsyncReceiver, Sender, TrySendError};
 
     const NAME: &str = "quiche";
     const MAX_DATAGRAM_BYTES: usize = 65_535;

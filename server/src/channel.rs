@@ -1,4 +1,9 @@
 //! Compile-time-selected channel backend used by the server runtime.
+//
+// Transport implementations consume different subsets of this internal API.
+// Keep the channel contract transport-agnostic and let unused operations be
+// removed with the unselected transport code.
+#![allow(dead_code)]
 
 use std::time::Duration;
 
@@ -10,7 +15,6 @@ fn assert_bounded_capacity(capacity: usize) {
 #[error("sending on a disconnected channel")]
 pub(crate) struct SendError;
 
-#[cfg(feature = "quic-quiche")]
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TrySendError<T> {
     #[error("sending on a full channel")]
@@ -41,7 +45,6 @@ pub(crate) struct RecvTimeoutError;
 
 #[cfg(feature = "channel-crossfire")]
 mod backend {
-    #[cfg(feature = "quic-quiche")]
     use super::TrySendError;
     use super::{
         Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
@@ -55,7 +58,6 @@ mod backend {
             blocking: MTx<mpsc::Array<T>>,
             asynchronous: MAsyncTx<mpsc::Array<T>>,
         },
-        #[cfg(feature = "quic-quiche")]
         Unbounded(MTx<mpsc::List<T>>),
     }
 
@@ -74,7 +76,6 @@ mod backend {
                     blocking: blocking.clone(),
                     asynchronous: asynchronous.clone(),
                 },
-                #[cfg(feature = "quic-quiche")]
                 SenderInner::Unbounded(sender) => SenderInner::Unbounded(sender.clone()),
             };
             Self { inner }
@@ -87,7 +88,6 @@ mod backend {
 
     enum AsyncReceiverInner<T: 'static> {
         Bounded(AsyncRx<mpsc::Array<T>>),
-        #[cfg(feature = "quic-quiche")]
         Unbounded(AsyncRx<mpsc::List<T>>),
     }
 
@@ -145,7 +145,6 @@ mod backend {
         )
     }
 
-    #[cfg(feature = "quic-quiche")]
     pub(crate) fn unbounded_async<T>() -> (Sender<T>, AsyncReceiver<T>)
     where
         T: Send + Unpin + 'static,
@@ -169,7 +168,6 @@ mod backend {
             let result = match &self.inner {
                 SenderInner::BoundedSync(sender) => sender.send(value),
                 SenderInner::BoundedAsync { blocking, .. } => blocking.send(value),
-                #[cfg(feature = "quic-quiche")]
                 SenderInner::Unbounded(sender) => sender.send(value),
             };
             result.map_err(|_| SendError)
@@ -186,7 +184,6 @@ mod backend {
                 SenderInner::BoundedAsync { asynchronous, .. } => {
                     asynchronous.send(value).await.map_err(|_| SendError)
                 }
-                #[cfg(feature = "quic-quiche")]
                 SenderInner::Unbounded(sender) => sender.send(value).map_err(|_| SendError),
             }
         }
@@ -199,7 +196,6 @@ mod backend {
             let result = match &self.inner {
                 SenderInner::BoundedSync(sender) => sender.send_timeout(value, timeout),
                 SenderInner::BoundedAsync { blocking, .. } => blocking.send_timeout(value, timeout),
-                #[cfg(feature = "quic-quiche")]
                 SenderInner::Unbounded(sender) => {
                     return sender.send(value).map_err(|_| SendTimeoutError);
                 }
@@ -207,12 +203,10 @@ mod backend {
             result.map_err(|_| SendTimeoutError)
         }
 
-        #[cfg(feature = "quic-quiche")]
         pub(crate) fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
             let result = match &self.inner {
                 SenderInner::BoundedSync(sender) => sender.try_send(value),
                 SenderInner::BoundedAsync { asynchronous, .. } => asynchronous.try_send(value),
-                #[cfg(feature = "quic-quiche")]
                 SenderInner::Unbounded(sender) => sender.try_send(value),
             };
             result.map_err(|error| match error {
@@ -221,12 +215,10 @@ mod backend {
             })
         }
 
-        #[cfg(feature = "quic-quiche")]
         pub(crate) fn is_full(&self) -> bool {
             match &self.inner {
                 SenderInner::BoundedSync(sender) => sender.is_full(),
                 SenderInner::BoundedAsync { asynchronous, .. } => asynchronous.is_full(),
-                #[cfg(feature = "quic-quiche")]
                 SenderInner::Unbounded(sender) => sender.is_full(),
             }
         }
@@ -256,7 +248,6 @@ mod backend {
                 AsyncReceiverInner::Bounded(receiver) => {
                     receiver.recv().await.map_err(|_| RecvError)
                 }
-                #[cfg(feature = "quic-quiche")]
                 AsyncReceiverInner::Unbounded(receiver) => {
                     receiver.recv().await.map_err(|_| RecvError)
                 }
@@ -266,7 +257,6 @@ mod backend {
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
             let result = match &self.inner {
                 AsyncReceiverInner::Bounded(receiver) => receiver.try_recv(),
-                #[cfg(feature = "quic-quiche")]
                 AsyncReceiverInner::Unbounded(receiver) => receiver.try_recv(),
             };
             result.map_err(|error| match error {
@@ -279,7 +269,6 @@ mod backend {
 
 #[cfg(feature = "channel-flume")]
 mod backend {
-    #[cfg(feature = "quic-quiche")]
     use super::TrySendError;
     use super::{
         Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
@@ -322,7 +311,6 @@ mod backend {
         bounded_async(capacity)
     }
 
-    #[cfg(feature = "quic-quiche")]
     pub(crate) fn unbounded_async<T>() -> (Sender<T>, AsyncReceiver<T>) {
         let (sender, receiver) = flume::unbounded();
         (Sender { inner: sender }, AsyncReceiver { inner: receiver })
@@ -347,7 +335,6 @@ mod backend {
                 .map_err(|_| SendTimeoutError)
         }
 
-        #[cfg(feature = "quic-quiche")]
         pub(crate) fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
             self.inner.try_send(value).map_err(|error| match error {
                 flume::TrySendError::Full(value) => TrySendError::Full(value),
@@ -355,7 +342,6 @@ mod backend {
             })
         }
 
-        #[cfg(feature = "quic-quiche")]
         pub(crate) fn is_full(&self) -> bool {
             self.inner.is_full()
         }
@@ -389,7 +375,6 @@ mod backend {
 
 #[cfg(feature = "channel-kanal")]
 mod backend {
-    #[cfg(feature = "quic-quiche")]
     use super::TrySendError;
     use super::{
         Duration, RecvError, RecvTimeoutError, SendError, SendTimeoutError, TryRecvError,
@@ -463,7 +448,6 @@ mod backend {
         bounded_async(capacity)
     }
 
-    #[cfg(feature = "quic-quiche")]
     pub(crate) fn unbounded_async<T>() -> (Sender<T>, AsyncReceiver<T>) {
         let (sender, receiver) = kanal::unbounded();
         let receive_event = Arc::new(Event::new());
@@ -514,7 +498,6 @@ mod backend {
             Ok(())
         }
 
-        #[cfg(feature = "quic-quiche")]
         pub(crate) fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
             let mut value = Some(value);
             let result = match self.inner.try_send_option(&mut value) {
@@ -528,7 +511,6 @@ mod backend {
             result
         }
 
-        #[cfg(feature = "quic-quiche")]
         pub(crate) fn is_full(&self) -> bool {
             self.inner.is_full()
         }
@@ -567,8 +549,13 @@ mod backend {
     }
 }
 
-#[cfg(feature = "quic-quiche")]
-pub(crate) use backend::unbounded_async;
 pub(crate) use backend::{
     AsyncReceiver, Receiver, Sender, bounded, bounded_async, bounded_sync_async,
 };
+
+pub(crate) fn unbounded_async<T>() -> (Sender<T>, AsyncReceiver<T>)
+where
+    T: Send + Unpin + 'static,
+{
+    backend::unbounded_async()
+}
