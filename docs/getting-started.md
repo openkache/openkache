@@ -26,10 +26,12 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server
 
 The server listens on `127.0.0.1:4433`, stores shard files under
 `target/kvkache-v1`, and writes its generated certificate to
-`target/openkache-local/certificate.local.der`. Use `--config <path>` to load
-an explicit TOML cache configuration.
+`target/openkache-local/certificate.local.der`. It automatically sizes itself
+from process CPU affinity, available or cgroup-limited RAM, and available
+filesystem space. Use `--port <port>` only to override the default port, or
+`--config <path>` to load an explicit TOML cache configuration.
 
-To calculate a configuration from resource budgets instead, run:
+To inspect the automatic result and optionally override individual inputs, run:
 
 ```bash
 cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
@@ -42,17 +44,17 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
 ```
 
 `balanced` is the default and models 1 KiB encoded values. `light` models
-100-byte inline values, while `heavy` models 2 KiB Blob values. Remove
-`--plan` to open the storage files and start serving with the calculated
-configuration.
+100-byte inline values, while `heavy` models 2 KiB Blob values. Every sizing
+argument is optional. Remove `--plan` to open the storage files and start
+serving with the calculated configuration.
 
-The calculated limits are advisory. The planner does not inspect cgroup
-limits, filesystem free space, or device throughput, and its memory estimate
-covers the packed Table rather than whole-process peak RSS. `--cpus` selects
-worker threads but does not impose a process CPU quota. `light` and `balanced`
-accept individual values up to their 1 MiB Blob Segment size; `heavy` accepts
-up to 64 MiB. Existing storage must be reopened with the same worker count and
-Segment layout.
+The calculated limits are advisory. The planner detects standard Linux cgroup
+memory limits and filesystem availability but not filesystem quotas, SSD type,
+or device throughput. Its memory estimate covers the packed Table rather than
+whole-process peak RSS. `--cpus` selects worker threads but does not impose a
+process CPU quota. `light` and `balanced` accept individual values up to their
+1 MiB Blob Segment size; `heavy` accepts up to 64 MiB. Existing storage must be
+reopened with the same worker count and Segment layout.
 
 ### Run the BCF53 benchmark
 

@@ -3,10 +3,15 @@
 //! The planner deliberately favors predictable headroom over exhaustive hardware
 //! tuning. It selects power-of-two SG counts, limits the Table to half of the
 //! process RAM budget, and leaves five percent of the SSD budget unassigned.
-//! Budgets are advisory inputs: the planner does not inspect cgroup limits,
-//! filesystem free space, device performance, or whole-process peak RSS.
+//! Budgets are advisory inputs. Automatic discovery recognizes common Linux
+//! cgroup memory limits and filesystem availability, but not device performance,
+//! filesystem quotas, or whole-process peak RSS.
 
-use std::path::PathBuf;
+use std::ffi::CString;
+use std::fs;
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use crate::store::{
     BLOB_ITEM_THRESHOLD_BYTES, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES, STORED_VALUE_TAG_BYTES,
@@ -90,6 +95,32 @@ pub struct SizingRequest {
 }
 
 impl SizingRequest {
+    /// Detects the process CPU affinity, available RAM, and filesystem space.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - Storage directory, or a path whose nearest existing
+    ///   ancestor identifies the target filesystem.
+    /// * `profile` - Encoded-value distribution used for capacity modeling.
+    ///
+    /// # Returns
+    ///
+    /// Resource budgets ready for optional caller overrides and planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when CPU affinity, `/proc/meminfo`, or target filesystem
+    /// capacity cannot be inspected.
+    pub fn detect(directory: PathBuf, profile: SizingProfile) -> Result<Self> {
+        Ok(Self {
+            cpu_count: allowed_cpu_ids()?.len(),
+            memory_bytes: detected_memory_bytes()?,
+            storage_bytes: filesystem_available_bytes(&directory)?,
+            directory,
+            profile,
+        })
+    }
+
     /// Derives an [`AppConfig`] and its capacity estimates from the resource budgets.
     ///
     /// # Returns
@@ -202,6 +233,79 @@ impl SizingRequest {
             "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD".into(),
         ))
     }
+}
+
+fn detected_memory_bytes() -> Result<u64> {
+    let meminfo = fs::read_to_string("/proc/meminfo")?;
+    let cgroup_v2 = fs::read_to_string("/sys/fs/cgroup/memory.max").ok();
+    let cgroup_v1 = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok();
+    memory_budget_from_sources(cgroup_v2.as_deref(), cgroup_v1.as_deref(), &meminfo)
+}
+
+pub(crate) fn memory_budget_from_sources(
+    cgroup_v2: Option<&str>,
+    cgroup_v1: Option<&str>,
+    meminfo: &str,
+) -> Result<u64> {
+    let mut budget = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemAvailable:"))
+        .and_then(|value| value.split_whitespace().next())
+        .ok_or_else(|| KvError::InvalidConfig("MemAvailable is absent from /proc/meminfo".into()))?
+        .parse::<u64>()
+        .map_err(|_| KvError::InvalidConfig("MemAvailable is not an integer".into()))?
+        .checked_mul(1024)
+        .ok_or_else(|| KvError::InvalidConfig("MemAvailable byte size overflowed".into()))?;
+
+    for limit in [cgroup_v2, cgroup_v1].into_iter().flatten() {
+        let limit = limit.trim();
+        if limit == "max" {
+            continue;
+        }
+        let limit = limit
+            .parse::<u64>()
+            .map_err(|_| KvError::InvalidConfig("cgroup memory limit is not an integer".into()))?;
+        if limit == 0 {
+            return Err(KvError::InvalidConfig(
+                "cgroup memory limit must be non-zero".into(),
+            ));
+        }
+        budget = budget.min(limit);
+    }
+    Ok(budget)
+}
+
+pub(crate) fn filesystem_available_bytes(path: &Path) -> Result<u64> {
+    let mut probe = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    while !probe.exists() {
+        if !probe.pop() {
+            return Err(KvError::InvalidConfig(format!(
+                "no existing filesystem ancestor for {}",
+                path.display()
+            )));
+        }
+    }
+
+    let path = CString::new(probe.as_os_str().as_bytes())
+        .map_err(|_| KvError::InvalidConfig("storage path contains a NUL byte".into()))?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stats = unsafe { stats.assume_init() };
+    let fragment_bytes = if stats.f_frsize == 0 {
+        stats.f_bsize
+    } else {
+        stats.f_frsize
+    };
+    stats
+        .f_bavail
+        .checked_mul(fragment_bytes)
+        .ok_or_else(|| KvError::InvalidConfig("available filesystem size overflowed".into()))
 }
 
 /// Effective configuration and capacity estimates produced by [`SizingRequest`].
