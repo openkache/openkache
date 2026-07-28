@@ -121,7 +121,8 @@ impl KacheServer {
     pub async fn serve(mut self, shutdown: impl Future<Output = ()>) -> Result<()> {
         let endpoint = self.endpoint;
         match endpoint {
-            ServerEndpoint::Compio(endpoint) => {
+            #[cfg(feature = "quic-quinn")]
+            ServerEndpoint::Quinn(endpoint) => {
                 serve_endpoint(
                     endpoint,
                     &self.cache,
@@ -212,8 +213,8 @@ async fn serve_endpoint<E: TransportEndpoint>(
     }
 
     endpoint.close(b"server shutting down");
-    endpoint.shutdown().await?;
     while connections.next().await.is_some() {}
+    endpoint.shutdown().await?;
     Ok(())
 }
 

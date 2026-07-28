@@ -2,18 +2,22 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use std::sync::Arc;
 use std::time::Duration;
 
 use compio::BufResult;
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use compio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use crate::QuicBackend;
 
 /// Backend-independent endpoint selected when the server binds.
 pub(super) enum ServerEndpoint {
-    Compio(compio_backend::Endpoint),
+    #[cfg(feature = "quic-quinn")]
+    Quinn(quinn_backend::Endpoint),
     #[cfg(feature = "quic-noq")]
     Noq(noq_backend::Endpoint),
     #[cfg(feature = "quic-quiche")]
@@ -29,9 +33,19 @@ impl ServerEndpoint {
         private_key_der: &[u8],
     ) -> Result<Self, TransportError> {
         match backend {
-            QuicBackend::Compio => Ok(Self::Compio(
-                compio_backend::Endpoint::bind(address, certificate_der, private_key_der).await?,
-            )),
+            QuicBackend::Quinn => {
+                #[cfg(feature = "quic-quinn")]
+                {
+                    Ok(Self::Quinn(
+                        quinn_backend::Endpoint::bind(address, certificate_der, private_key_der)
+                            .await?,
+                    ))
+                }
+                #[cfg(not(feature = "quic-quinn"))]
+                {
+                    Err(TransportError::not_compiled(backend, "quic-quinn"))
+                }
+            }
             QuicBackend::Noq => {
                 #[cfg(feature = "quic-noq")]
                 {
@@ -68,7 +82,8 @@ impl ServerEndpoint {
     /// Returns the UDP address selected by the operating system.
     pub(super) fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         match self {
-            Self::Compio(endpoint) => endpoint.local_addr(),
+            #[cfg(feature = "quic-quinn")]
+            Self::Quinn(endpoint) => endpoint.local_addr(),
             #[cfg(feature = "quic-noq")]
             Self::Noq(endpoint) => endpoint.local_addr(),
             #[cfg(feature = "quic-quiche")]
@@ -171,6 +186,7 @@ impl TransportError {
     }
 }
 
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 fn tls_config(
     certificate_der: &[u8],
     private_key_der: &[u8],
@@ -185,10 +201,11 @@ fn tls_config(
     Ok(tls)
 }
 
-mod compio_backend {
+#[cfg(feature = "quic-quinn")]
+mod quinn_backend {
     use super::*;
 
-    const NAME: &str = "compio";
+    const NAME: &str = "quinn";
 
     pub(crate) struct Endpoint(compio_quic::Endpoint);
 

@@ -7,6 +7,11 @@
     feature(stdarch_aarch64_sve)
 )]
 
+#[cfg(not(any(feature = "quic-quinn", feature = "quic-noq", feature = "quic-quiche")))]
+compile_error!(
+    "enable at least one QUIC backend feature: `quic-quinn`, `quic-noq`, or `quic-quiche`"
+);
+
 pub mod allocators;
 pub mod breadcrumb_filter;
 pub mod server;

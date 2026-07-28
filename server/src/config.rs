@@ -23,12 +23,11 @@ pub enum BucketSelectionPolicy {
 }
 
 /// QUIC protocol implementation used by the network server.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum QuicBackend {
-    /// Compio packet I/O backed by `quinn-proto`.
-    #[default]
-    Compio,
+    /// Quinn protocol state machine driven by Compio packet I/O.
+    Quinn,
     /// Compio packet I/O backed by `noq-proto`.
     Noq,
     /// Compio packet I/O backed by Cloudflare quiche.
@@ -41,12 +40,37 @@ impl QuicBackend {
     /// Returns the stable configuration and diagnostics label.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Compio => "compio",
+            Self::Quinn => "quinn",
             Self::Noq => "noq",
             Self::Quiche => "quiche",
             Self::Neqo => "neqo",
         }
     }
+}
+
+impl Default for QuicBackend {
+    fn default() -> Self {
+        default_quic_backend()
+    }
+}
+
+#[cfg(feature = "quic-noq")]
+const fn default_quic_backend() -> QuicBackend {
+    QuicBackend::Noq
+}
+
+#[cfg(all(not(feature = "quic-noq"), feature = "quic-quinn"))]
+const fn default_quic_backend() -> QuicBackend {
+    QuicBackend::Quinn
+}
+
+#[cfg(all(
+    not(feature = "quic-noq"),
+    not(feature = "quic-quinn"),
+    feature = "quic-quiche"
+))]
+const fn default_quic_backend() -> QuicBackend {
+    QuicBackend::Quiche
 }
 
 /// QUIC transport configuration shared by all protocol implementations.
