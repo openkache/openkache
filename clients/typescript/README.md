@@ -24,6 +24,7 @@ bun run build:native
 
 ```typescript
 import { OpenKache_Client } from "@openkache/client"
+import { ProfileSchema } from "./gen/profile_pb.ts"
 
 const client = await OpenKache_Client.connect({
   address: "127.0.0.1:4433",
@@ -35,25 +36,30 @@ await client.set("profile", {
   name: "Kim",
   visits: 42,
   labels: ["subscriber", "beta"],
-})
-const profile = await client.get<{
-  name: string
-  visits: number
-  labels: string[]
-}>("profile")
+}, ProfileSchema)
+const profile = await client.get("profile", ProfileSchema)
 
 await client.setRaw("opaque", Uint8Array.of(1, 2, 3))
 const bytes = await client.getRaw("opaque")
 await client.close()
 ```
 
-`set` and `get` use `@msgpack/msgpack` internally. Applications import only
-`@openkache/client`; they do not need to import or pass a codec. MessagePack
-preserves strings, numbers, booleans, arrays, plain objects, binary
-`Uint8Array` values, and 64-bit `bigint` values. The generic argument to `get`
-describes the expected TypeScript type but does not validate it at runtime.
-Use `setRaw` and `getRaw` when the application already owns an encoded byte
-representation or needs byte-for-byte round trips.
+`set` and `get` use Protobuf-ES internally. Define values in a shared `.proto`
+file, generate TypeScript with `@bufbuild/protoc-gen-es`, and pass the generated
+message schema to both methods. The schema infers the TypeScript initializer and
+result types and also performs the actual runtime encoding and decoding.
+Applications import `OpenKache_Client` and their generated schema; they do not
+need to call `create`, `toBinary`, or `fromBinary`.
+
+Generate each language SDK from the same `.proto` definitions. A TypeScript
+client can therefore encode a value that Java, C++, Python, or Rust later
+decodes with its generated type, and the reverse direction works the same way.
+The Rust transport treats those Protobuf bytes as opaque values; it only
+compresses, encrypts, and sends them. The server does not parse Protobuf,
+decrypt, or decompress stored values.
+
+Use `setRaw` and `getRaw` when the application already owns Protobuf bytes from
+another runtime or needs an exact byte-for-byte round trip.
 
 All connection and cache methods return promises. A small Bun worker owns the
 synchronous FFI handle so native networking does not block the application's

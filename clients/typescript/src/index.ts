@@ -2,7 +2,14 @@
  * Promise-based Bun client backed by the shared Rust OpenKache implementation.
  */
 
-import { decode, encode } from "@msgpack/msgpack"
+import {
+  create,
+  fromBinary,
+  toBinary,
+  type DescMessage,
+  type MessageInitShape,
+  type MessageShape,
+} from "@bufbuild/protobuf"
 import { join } from "node:path"
 import { suffix } from "bun:ffi"
 import {
@@ -26,7 +33,6 @@ import {
 } from "./worker-protocol.ts"
 
 const EMPTY_BYTES = new Uint8Array()
-const MAX_COLLECTION_ITEMS = 256 * 1024
 const MAX_VALUE_BYTES = 16 * 1024 * 1024
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
@@ -87,7 +93,7 @@ export interface Client_Options {
 export type Set_Outcome = "created" | "replaced"
 
 /**
- * Error returned by the shared Rust client implementation or MessagePack layer.
+ * Error returned by the shared Rust client implementation or Protobuf layer.
  */
 export class OpenKache_Error extends Error {
   readonly kind = "openkache_error" as const
@@ -177,57 +183,52 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves, decrypts, decompresses, and MessagePack-decodes a value.
+   * Retrieves, decrypts, decompresses, and Protobuf-decodes a value.
    *
-   * @typeParam T - Expected TypeScript result type; this does not perform schema validation.
+   * @typeParam Schema - Generated Protobuf message schema type.
    * @param key - Exact string or binary cache key.
+   * @param schema - Generated Protobuf schema used for runtime decoding.
    * @returns The decoded value, or `undefined` when the key does not exist.
    */
-  async get<T = unknown>(key: string | Uint8Array): Promise<T | undefined> {
+  async get<Schema extends DescMessage>(
+    key: string | Uint8Array,
+    schema: Schema,
+  ): Promise<MessageShape<Schema> | undefined> {
     const bytes = await this.getRaw(key)
     if (bytes === undefined) return undefined
     try {
-      return decode(bytes, {
-        useBigInt64: true,
-        maxStrLength: MAX_VALUE_BYTES,
-        maxBinLength: MAX_VALUE_BYTES,
-        maxArrayLength: MAX_COLLECTION_ITEMS,
-        maxMapLength: MAX_COLLECTION_ITEMS,
-        maxExtLength: MAX_VALUE_BYTES,
-      }) as T
+      return fromBinary(schema, bytes)
     } catch (error) {
-      throw new OpenKache_Error(`MessagePack decoding failed: ${error_message(error)}`)
+      throw new OpenKache_Error(`Protobuf decoding failed: ${error_message(error)}`)
     }
   }
 
   /**
-   * MessagePack-encodes, compresses, encrypts, and stores a value.
+   * Protobuf-encodes, compresses, encrypts, and stores a value.
    *
-   * @typeParam T - TypeScript value type inferred from `value`.
+   * @typeParam Schema - Generated Protobuf message schema type.
    * @param key - Exact string or binary cache key.
-   * @param value - MessagePack-compatible value.
+   * @param value - Message or initializer accepted by the generated schema.
+   * @param schema - Generated Protobuf schema used for runtime encoding.
    * @returns Whether the operation created or replaced the key.
    */
-  async set<T>(key: string | Uint8Array, value: T): Promise<Set_Outcome> {
-    if (value === undefined) {
-      throw new OpenKache_Error("top-level undefined values are not supported")
-    }
+  async set<Schema extends DescMessage>(
+    key: string | Uint8Array,
+    value: MessageInitShape<Schema>,
+    schema: Schema,
+  ): Promise<Set_Outcome> {
     let bytes: Uint8Array
     try {
-      bytes = encode(value, {
-        useBigInt64: true,
-        maxDepth: 100,
-        initialBufferSize: Math.min(2_048, MAX_VALUE_BYTES),
-      })
+      bytes = toBinary(schema, create(schema, value))
     } catch (error) {
-      throw new OpenKache_Error(`MessagePack encoding failed: ${error_message(error)}`)
+      throw new OpenKache_Error(`Protobuf encoding failed: ${error_message(error)}`)
     }
     validate_value_length(bytes)
     return this.#set_owned_bytes(key, bytes)
   }
 
   /**
-   * Retrieves exact decrypted and decompressed bytes without MessagePack decoding.
+   * Retrieves exact decrypted and decompressed bytes without Protobuf decoding.
    */
   async getRaw(key: string | Uint8Array): Promise<Uint8Array | undefined> {
     const response = await this.#execute(OPERATION_GET, key, EMPTY_BYTES)
@@ -239,7 +240,7 @@ export class OpenKache_Client {
   }
 
   /**
-   * Stores exact bytes without MessagePack encoding.
+   * Stores exact bytes without Protobuf encoding.
    */
   async setRaw(
     key: string | Uint8Array,
