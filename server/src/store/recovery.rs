@@ -11,13 +11,11 @@ use crate::*;
 const FILE_MAGIC: &[u8; 8] = b"OKSGFILE";
 const CONTROL_MAGIC: &[u8; 8] = b"OKSGCTL\0";
 const FORMAT_VERSION: u32 = 1;
-const REGULAR_OCCUPIED: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SegmentCommit {
     pub(crate) sg_index: usize,
     pub(crate) generation: u64,
-    pub(crate) regular_occupied: bool,
     pub(crate) blob_logical_len: usize,
 }
 
@@ -139,6 +137,7 @@ fn encode_file_header(config: &Config, storage_key_id: [u8; 16]) -> DirectIoBuff
     bytes[28..36].copy_from_slice(&(config.segment_size as u64).to_le_bytes());
     bytes[36..40].copy_from_slice(&(config.segment_count as u32).to_le_bytes());
     bytes[40..44].copy_from_slice(&(BUCKET_BYTES as u32).to_le_bytes());
+    bytes[44..52].copy_from_slice(&(config.blob_segment_size as u64).to_le_bytes());
     let checksum = checksum(&bytes[..BUCKET_BYTES - 4]);
     bytes[BUCKET_BYTES - 4..].copy_from_slice(&checksum.to_le_bytes());
     bytes
@@ -162,7 +161,11 @@ fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16])
     }
     let segment_size = u64::from_le_bytes(bytes[28..36].try_into().unwrap());
     let segment_count = u32::from_le_bytes(bytes[36..40].try_into().unwrap()) as usize;
-    if segment_size != config.segment_size as u64 || segment_count != config.segment_count {
+    let blob_segment_size = u64::from_le_bytes(bytes[44..52].try_into().unwrap());
+    if segment_size != config.segment_size as u64
+        || segment_count != config.segment_count
+        || blob_segment_size != config.blob_segment_size as u64
+    {
         return Err(KvError::Worker(
             "Segment file does not match the configured Segment geometry".into(),
         ));
@@ -186,14 +189,9 @@ fn encode_control_page(
     bytes[28..32].copy_from_slice(&sg_index.to_le_bytes());
     bytes[32..40].copy_from_slice(&commit.generation.to_le_bytes());
     bytes[40..48].copy_from_slice(&blob_logical_len.to_le_bytes());
-    let flags = if commit.regular_occupied {
-        REGULAR_OCCUPIED
-    } else {
-        0
-    };
-    bytes[48..52].copy_from_slice(&flags.to_le_bytes());
     bytes[52..60].copy_from_slice(&(config.segment_size as u64).to_le_bytes());
     bytes[60..64].copy_from_slice(&(config.segment_count as u32).to_le_bytes());
+    bytes[64..72].copy_from_slice(&(config.blob_segment_size as u64).to_le_bytes());
     let checksum = checksum(&bytes[..BUCKET_BYTES - 4]);
     bytes[BUCKET_BYTES - 4..].copy_from_slice(&checksum.to_le_bytes());
     Ok(bytes)
@@ -210,18 +208,18 @@ fn decode_control_page(
     let blob_logical_len =
         usize::try_from(u64::from_le_bytes(bytes[40..48].try_into().unwrap()))
             .map_err(|_| KvError::Worker("stored Blob length is too large".into()))?;
-    let flags = u32::from_le_bytes(bytes[48..52].try_into().unwrap());
     let segment_size = u64::from_le_bytes(bytes[52..60].try_into().unwrap());
     let segment_count = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
+    let blob_segment_size = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
     if &bytes[..8] != CONTROL_MAGIC
         || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != FORMAT_VERSION
         || bytes[12..28] != storage_key_id
         || stored_sg_index != sg_index
         || generation == 0
-        || flags & !REGULAR_OCCUPIED != 0
-        || blob_logical_len > config.segment_size
+        || blob_logical_len > config.blob_segment_size
         || segment_size != config.segment_size as u64
         || segment_count != config.segment_count
+        || blob_segment_size != config.blob_segment_size as u64
         || checksum(&bytes[..BUCKET_BYTES - 4])
             != u32::from_le_bytes(bytes[BUCKET_BYTES - 4..].try_into().unwrap())
     {
@@ -232,7 +230,6 @@ fn decode_control_page(
     Ok(SegmentCommit {
         sg_index,
         generation,
-        regular_occupied: flags & REGULAR_OCCUPIED != 0,
         blob_logical_len,
     })
 }
