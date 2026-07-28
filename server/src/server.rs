@@ -126,7 +126,7 @@ impl KacheServer {
     ///
     /// # Errors
     ///
-    /// Returns an error when a network worker cannot start or cache shutdown fails.
+    /// Returns an error when a network worker fails or cache shutdown fails.
     pub async fn serve(self, shutdown: impl Future<Output = ()>) -> Result<()> {
         let Self {
             sockets,
@@ -140,19 +140,22 @@ impl KacheServer {
         } = self;
         let (started_tx, started_rx) =
             flume::bounded::<std::result::Result<(), String>>(network.worker_count);
+        let (finished_tx, finished_rx) =
+            flume::bounded::<(usize, std::result::Result<(), String>)>(network.worker_count);
         let mut workers = Vec::with_capacity(network.worker_count);
 
         for (worker_id, socket) in sockets.into_iter().enumerate() {
             let (stop_tx, stop_rx) = flume::bounded(1);
             let started_tx = started_tx.clone();
+            let finished_tx = finished_tx.clone();
             let certificate_der = certificate_der.clone();
             let private_key_der = private_key_der.clone();
-            let cache = Arc::clone(&cache);
+            let worker_cache = Arc::clone(&cache);
             let cpu_id = network.cpu_ids[worker_id];
             let entries = network.io_uring_entries_per_worker;
             let event_interval = network.event_interval;
             let max_stream_lanes = network.max_stream_lanes_per_connection;
-            let thread = std::thread::Builder::new()
+            let thread = match std::thread::Builder::new()
                 .name(format!("openkache-network-{worker_id}"))
                 .spawn(move || {
                     let mut proactor = ProactorBuilder::new();
@@ -193,34 +196,38 @@ impl KacheServer {
                             return;
                         }
                         let _ = started_tx.send(Ok(()));
-                        if let Err(error) = run_selected_endpoint(
+                        let result = run_selected_endpoint(
                             endpoint,
-                            &cache,
+                            &worker_cache,
                             request_timeout,
                             max_stream_lanes,
                             stop_rx,
                         )
                         .await
-                        {
-                            eprintln!("network worker {worker_id} stopped: {error}");
-                        }
+                        .map_err(|error| error.to_string());
+                        let _ = finished_tx.send((worker_id, result));
                     });
-                })?;
+                }) {
+                Ok(thread) => thread,
+                Err(error) => {
+                    shutdown_workers_and_cache(workers, cache)?;
+                    return Err(error.into());
+                }
+            };
             workers.push((stop_tx, thread));
         }
         drop(started_tx);
+        drop(finished_tx);
 
         for _ in 0..network.worker_count {
             match started_rx.recv() {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => {
-                    stop_network_workers(workers);
-                    shutdown_cache(cache)?;
+                    shutdown_workers_and_cache(workers, cache)?;
                     return Err(ServerError::NetworkWorker(message));
                 }
                 Err(_) => {
-                    stop_network_workers(workers);
-                    shutdown_cache(cache)?;
+                    shutdown_workers_and_cache(workers, cache)?;
                     return Err(ServerError::NetworkWorker(
                         "network worker startup channel closed".into(),
                     ));
@@ -228,10 +235,26 @@ impl KacheServer {
             }
         }
 
-        shutdown.await;
-        stop_network_workers(workers);
-        shutdown_cache(cache)?;
-        Ok(())
+        let shutdown = shutdown.fuse();
+        let worker_finished = finished_rx.recv_async().fuse();
+        pin_mut!(shutdown, worker_finished);
+        let worker_failure = select! {
+            () = shutdown => None,
+            result = worker_finished => Some(match result {
+                Ok((worker_id, Ok(()))) => {
+                    format!("network worker {worker_id} exited unexpectedly")
+                }
+                Ok((worker_id, Err(message))) => {
+                    format!("network worker {worker_id} failed: {message}")
+                }
+                Err(_) => "network worker completion channel closed".into(),
+            }),
+        };
+        shutdown_workers_and_cache(workers, cache)?;
+        match worker_failure {
+            Some(message) => Err(ServerError::NetworkWorker(message)),
+            None => Ok(()),
+        }
     }
 }
 
@@ -259,13 +282,37 @@ fn bind_reuse_port_sockets(
     Ok(sockets)
 }
 
-fn stop_network_workers(workers: Vec<(flume::Sender<()>, std::thread::JoinHandle<()>)>) {
+fn shutdown_workers_and_cache(
+    workers: Vec<(flume::Sender<()>, std::thread::JoinHandle<()>)>,
+    cache: Arc<ThreadedKvkache>,
+) -> Result<()> {
+    let network_result = stop_network_workers(workers);
+    let cache_result = shutdown_cache(cache);
+    network_result?;
+    cache_result
+}
+
+pub(crate) fn stop_network_workers(
+    workers: Vec<(flume::Sender<()>, std::thread::JoinHandle<()>)>,
+) -> Result<()> {
     for (stop, _) in &workers {
         let _ = stop.send(());
     }
+    let mut panicked_worker = None;
     for (_, thread) in workers {
-        let _ = thread.join();
+        let name = thread
+            .thread()
+            .name()
+            .unwrap_or("network worker")
+            .to_owned();
+        if thread.join().is_err() && panicked_worker.is_none() {
+            panicked_worker = Some(name);
+        }
     }
+    if let Some(name) = panicked_worker {
+        return Err(ServerError::NetworkWorker(format!("{name} panicked")));
+    }
+    Ok(())
 }
 
 fn shutdown_cache(cache: Arc<ThreadedKvkache>) -> Result<()> {

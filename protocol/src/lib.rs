@@ -2,8 +2,8 @@
 
 use sha2::{Digest, Sha256};
 
-/// QUIC application protocol identifier for the first OpenKache wire format.
-pub const ALPN: &[u8] = b"openkache/1";
+/// QUIC application protocol identifier for persistent request lanes.
+pub const ALPN: &[u8] = b"openkache/2";
 /// Bytes in an encoded request header.
 pub const REQUEST_HEADER_BYTES: usize = 9;
 /// Bytes in an encoded response header.
@@ -22,7 +22,7 @@ const VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
 const VALUE_COMPRESSED_BIT: u32 = 1 << 31;
 const VALUE_ENCRYPTED_BIT: u32 = 1 << 30;
 
-/// Operations supported by protocol v1.
+/// Operations supported by protocol v2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Opcode {

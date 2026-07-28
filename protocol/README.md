@@ -20,7 +20,7 @@ cargo fmt --check
 
 ## Wire format
 
-Protocol v1 uses the QUIC ALPN identifier `openkache/1`. Each bidirectional
+Protocol v2 uses the QUIC ALPN identifier `openkache/2`. Each bidirectional
 stream is a reusable sequential lane carrying any number of request/response
 pairs. A lane has at most one in-flight request, so responses need no request
 identifier.
@@ -45,5 +45,5 @@ are limited to 16 MiB.
 
 ## Configuration
 
-The v1 limits and ALPN identifier are compile-time constants. There are no
+The v2 limits and ALPN identifier are compile-time constants. There are no
 environment variables or runtime configuration files.

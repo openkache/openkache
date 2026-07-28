@@ -573,6 +573,8 @@ mod quiche_backend {
     const MAX_DATAGRAM_BYTES: usize = 65_535;
     const MAX_BUFFERED_REQUEST_BYTES: usize = openkache_protocol::MAX_REQUEST_FRAME_BYTES + 1;
     const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
+    const STREAM_CHUNK_BYTES: usize = 16 * 1024;
+    const STREAM_CHUNK_BACKLOG: usize = 1;
 
     pub(crate) struct Endpoint {
         incoming: flume::Receiver<Incoming>,
@@ -700,6 +702,21 @@ mod quiche_backend {
         buffered: Vec<u8>,
     }
 
+    impl ReceiveStream {
+        async fn next_chunk(&self, operation: &'static str) -> Result<Vec<u8>, TransportError> {
+            let chunk = self
+                .chunks
+                .recv_async()
+                .await
+                .map_err(|error| TransportError::backend(NAME, operation, error))?;
+            let _ = self.commands.try_send(Command::ResumeRequest {
+                connection_id: self.connection_id.clone(),
+                stream_id: self.stream_id,
+            });
+            Ok(chunk)
+        }
+    }
+
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
             &mut self,
@@ -707,17 +724,12 @@ mod quiche_backend {
             timeout: Duration,
         ) -> Result<Vec<u8>, StreamReadError> {
             while self.buffered.is_empty() {
-                let chunk =
-                    self.chunks.recv_async().await.map_err(|error| {
-                        TransportError::backend(NAME, "stream header read", error)
-                    })?;
+                let chunk = self.next_chunk("stream header read").await?;
                 self.buffered.extend_from_slice(&chunk);
             }
             compio::runtime::time::timeout(timeout, async {
                 while self.buffered.len() < REQUEST_HEADER_BYTES {
-                    let chunk = self.chunks.recv_async().await.map_err(|error| {
-                        TransportError::backend(NAME, "stream header read", error)
-                    })?;
+                    let chunk = self.next_chunk("stream header read").await?;
                     self.buffered.extend_from_slice(&chunk);
                 }
                 Ok::<(), TransportError>(())
@@ -731,9 +743,7 @@ mod quiche_backend {
             }
             compio::runtime::time::timeout(timeout, async {
                 while self.buffered.len() < frame_len {
-                    let chunk = self.chunks.recv_async().await.map_err(|error| {
-                        TransportError::backend(NAME, "stream body read", error)
-                    })?;
+                    let chunk = self.next_chunk("stream body read").await?;
                     self.buffered.extend_from_slice(&chunk);
                 }
                 Ok::<(), TransportError>(())
@@ -790,6 +800,10 @@ mod quiche_backend {
             connection_id: Vec<u8>,
             stream_id: u64,
         },
+        ResumeRequest {
+            connection_id: Vec<u8>,
+            stream_id: u64,
+        },
         SendResponse {
             connection_id: Vec<u8>,
             stream_id: u64,
@@ -807,6 +821,8 @@ mod quiche_backend {
 
     struct RequestChunks {
         chunks: flume::Sender<Vec<u8>>,
+        pending: Option<Vec<u8>>,
+        finished: bool,
     }
 
     struct Client {
@@ -972,6 +988,15 @@ mod quiche_backend {
                     }
                     false
                 }
+                Command::ResumeRequest {
+                    connection_id,
+                    stream_id,
+                } => {
+                    if let Some(client) = self.clients.get_mut(&connection_id) {
+                        receive_stream(client, stream_id);
+                    }
+                    false
+                }
                 Command::SendResponse {
                     connection_id,
                     stream_id,
@@ -1073,18 +1098,53 @@ mod quiche_backend {
             return;
         };
         let request = client.requests.entry(stream_id).or_insert_with(|| {
-            let (chunks, chunk_receiver) = flume::unbounded();
+            let (chunks, chunk_receiver) = flume::bounded(STREAM_CHUNK_BACKLOG);
             let _ = stream_sender.try_send(Stream {
                 stream_id,
                 chunks: chunk_receiver,
             });
-            RequestChunks { chunks }
+            RequestChunks {
+                chunks,
+                pending: None,
+                finished: false,
+            }
         });
-        let mut buffer = [0_u8; 16_384];
+        if let Some(chunk) = request.pending.take() {
+            match request.chunks.try_send(chunk) {
+                Ok(()) if request.finished => {
+                    client.requests.remove(&stream_id);
+                    return;
+                }
+                Ok(()) => {}
+                Err(flume::TrySendError::Full(chunk)) => {
+                    request.pending = Some(chunk);
+                    return;
+                }
+                Err(flume::TrySendError::Disconnected(_)) => {
+                    client.requests.remove(&stream_id);
+                    return;
+                }
+            }
+        }
+        let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
         loop {
+            if request.chunks.is_full() {
+                break;
+            }
             match client.connection.stream_recv(stream_id, &mut buffer) {
                 Ok((read, finished)) => {
-                    let _ = request.chunks.try_send(buffer[..read].to_vec());
+                    request.finished = finished;
+                    match request.chunks.try_send(buffer[..read].to_vec()) {
+                        Ok(()) => {}
+                        Err(flume::TrySendError::Full(chunk)) => {
+                            request.pending = Some(chunk);
+                            break;
+                        }
+                        Err(flume::TrySendError::Disconnected(_)) => {
+                            client.requests.remove(&stream_id);
+                            break;
+                        }
+                    }
                     if finished {
                         client.requests.remove(&stream_id);
                         break;

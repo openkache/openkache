@@ -665,6 +665,7 @@ dependencies = [
  "compio",
  "compio-quic",
  "flume",
+ "futures-util",
  "getrandom 0.4.3",
  "openkache-protocol",
  "rustls",

@@ -109,7 +109,7 @@ impl Client {
         })
     }
 
-    /// Verifies that the server is reachable and speaks protocol v1.
+    /// Verifies that the server is reachable and speaks protocol v2.
     pub async fn ping(&self) -> Result<()> {
         let response = self
             .request(Request::new(Opcode::Ping, None, Vec::new())?)

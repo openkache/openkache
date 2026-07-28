@@ -7,6 +7,7 @@ use std::sync::Arc;
 use compio::BufResult;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 use compio_quic::{Endpoint, RecvStream, SendStream};
+use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{RESPONSE_HEADER_BYTES, Response};
 
 use crate::{Error, Result};
@@ -19,6 +20,8 @@ pub(crate) struct Connection {
     inner: compio_quic::Connection,
     idle_lanes_tx: flume::Sender<BidiStream>,
     idle_lanes_rx: flume::Receiver<BidiStream>,
+    lane_capacity_tx: flume::Sender<()>,
+    lane_capacity_rx: flume::Receiver<()>,
     open_lanes: Cell<usize>,
 }
 
@@ -50,11 +53,14 @@ pub(crate) async fn connect(
         .await
         .map_err(|error| Error::Connection(error.to_string()))?;
     let (idle_lanes_tx, idle_lanes_rx) = flume::bounded(MAX_STREAM_LANES);
+    let (lane_capacity_tx, lane_capacity_rx) = flume::bounded(MAX_STREAM_LANES);
     Ok(Connection {
         _endpoint: endpoint,
         inner,
         idle_lanes_tx,
         idle_lanes_rx,
+        lane_capacity_tx,
+        lane_capacity_rx,
         open_lanes: Cell::new(0),
     })
 }
@@ -62,36 +68,90 @@ pub(crate) async fn connect(
 impl Connection {
     /// Acquires an idle lane, growing the connection-local pool when needed.
     pub(crate) async fn acquire_lane(&self) -> Result<BidiStream> {
-        if let Ok(lane) = self.idle_lanes_rx.try_recv() {
-            return Ok(lane);
-        }
-        if self.open_lanes.get() >= MAX_STREAM_LANES {
-            return self
-                .idle_lanes_rx
-                .recv_async()
-                .await
-                .map_err(|_| Error::Connection("stream lane pool closed".into()));
-        }
+        loop {
+            if let Ok(lane) = self.idle_lanes_rx.try_recv() {
+                return Ok(lane);
+            }
+            if self.open_lanes.get() >= MAX_STREAM_LANES {
+                let idle = self.idle_lanes_rx.recv_async().fuse();
+                let capacity = self.lane_capacity_rx.recv_async().fuse();
+                pin_mut!(idle, capacity);
+                select! {
+                    lane = idle => {
+                        return lane
+                            .map_err(|_| Error::Connection("stream lane pool closed".into()));
+                    }
+                    _ = capacity => continue,
+                }
+            }
 
-        self.open_lanes.set(self.open_lanes.get() + 1);
-        let (send, receive) = self.inner.open_bi_wait().await.map_err(|error| {
-            self.open_lanes.set(self.open_lanes.get() - 1);
-            Error::Connection(error.to_string())
-        })?;
-        Ok(BidiStream { send, receive })
+            let reservation = LaneReservation::new(self);
+            let opening = self.inner.open_bi_wait().fuse();
+            let idle = self.idle_lanes_rx.recv_async().fuse();
+            pin_mut!(opening, idle);
+            select! {
+                opened = opening => {
+                    let (send, receive) =
+                        opened.map_err(|error| Error::Connection(error.to_string()))?;
+                    reservation.commit();
+                    return Ok(BidiStream { send, receive });
+                }
+                lane = idle => {
+                    return lane
+                        .map_err(|_| Error::Connection("stream lane pool closed".into()));
+                }
+            }
+        }
     }
 
     /// Returns a healthy lane to the connection-local pool.
     pub(crate) fn release_lane(&self, lane: BidiStream) {
         if self.idle_lanes_tx.try_send(lane).is_err() {
-            self.open_lanes.set(self.open_lanes.get() - 1);
+            self.remove_lane();
         }
     }
 
     /// Removes a failed lane so a later request can replace it.
     pub(crate) fn discard_lane(&self, lane: BidiStream) {
         drop(lane);
-        self.open_lanes.set(self.open_lanes.get() - 1);
+        self.remove_lane();
+    }
+
+    fn remove_lane(&self) {
+        self.open_lanes.set(
+            self.open_lanes
+                .get()
+                .checked_sub(1)
+                .expect("a removed stream lane must be open"),
+        );
+        let _ = self.lane_capacity_tx.try_send(());
+    }
+}
+
+struct LaneReservation<'a> {
+    connection: &'a Connection,
+    active: bool,
+}
+
+impl<'a> LaneReservation<'a> {
+    fn new(connection: &'a Connection) -> Self {
+        connection.open_lanes.set(connection.open_lanes.get() + 1);
+        Self {
+            connection,
+            active: true,
+        }
+    }
+
+    fn commit(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for LaneReservation<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.connection.remove_lane();
+        }
     }
 }
 
