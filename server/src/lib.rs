@@ -30,6 +30,9 @@ pub use config::{
     expand_thread_pattern,
 };
 
+mod sizing;
+pub use sizing::{SizingPlan, SizingProfile, SizingRequest};
+
 mod cli;
 pub use cli::Command;
 

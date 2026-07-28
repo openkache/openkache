@@ -28,8 +28,16 @@ pub(crate) struct Table {
     pub(crate) entry_count: usize,
 }
 
-impl Table {
-    pub(crate) fn new(config: &Config) -> Result<Self> {
+struct TableAllocation {
+    front_subtable_layout: SubtableLayout,
+    back_subtable_layout: SubtableLayout,
+    front_subtable_count: usize,
+    back_subtable_count: usize,
+    back_subtable_group_count: usize,
+}
+
+impl TableAllocation {
+    fn new(config: &Config) -> Result<Self> {
         let front_subtable_layout = SubtableLayout::new(
             config.fingerprint_bits,
             config.front_back_ratio,
@@ -59,15 +67,35 @@ impl Table {
             .div_ceil(config.front_back_ratio)
             .max(config.front_back_ratio * back_subtable_group_count);
         Ok(Self {
-            front_table: (0..front_subtable_count)
-                .map(|_| Subtable::new(&front_subtable_layout))
-                .collect(),
-            back_table: (0..back_subtable_count)
-                .map(|_| Subtable::new(&back_subtable_layout))
-                .collect(),
             front_subtable_layout,
             back_subtable_layout,
+            front_subtable_count,
+            back_subtable_count,
             back_subtable_group_count,
+        })
+    }
+
+    fn memory_bytes(&self) -> Result<usize> {
+        self.front_subtable_count
+            .checked_add(self.back_subtable_count)
+            .and_then(|count| count.checked_mul(SUBTABLE_BYTES))
+            .ok_or_else(|| KvError::InvalidConfig("Table allocation size is too large".into()))
+    }
+}
+
+impl Table {
+    pub(crate) fn new(config: &Config) -> Result<Self> {
+        let allocation = TableAllocation::new(config)?;
+        Ok(Self {
+            front_table: (0..allocation.front_subtable_count)
+                .map(|_| Subtable::new(&allocation.front_subtable_layout))
+                .collect(),
+            back_table: (0..allocation.back_subtable_count)
+                .map(|_| Subtable::new(&allocation.back_subtable_layout))
+                .collect(),
+            front_subtable_layout: allocation.front_subtable_layout,
+            back_subtable_layout: allocation.back_subtable_layout,
+            back_subtable_group_count: allocation.back_subtable_group_count,
             front_back_ratio: config.front_back_ratio,
             fingerprint_bits: config.fingerprint_bits,
             fingerprint_hash_offset_bits: config.fingerprint_hash_offset_bits,
@@ -75,6 +103,10 @@ impl Table {
             bucket_choice_bits: config.bucket_choice_bits(),
             entry_count: 0,
         })
+    }
+
+    pub(crate) fn modeled_memory_bytes(config: &Config) -> Result<usize> {
+        TableAllocation::new(config)?.memory_bytes()
     }
 
     pub(crate) fn candidate_locations(&self, storage_key: &StorageKey) -> Vec<TableLocation> {
