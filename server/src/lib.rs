@@ -7,9 +7,15 @@
     feature(stdarch_aarch64_sve)
 )]
 
+#[cfg(not(any(feature = "quic-quinn", feature = "quic-noq", feature = "quic-quiche")))]
+compile_error!(
+    "enable at least one QUIC backend feature: `quic-quinn`, `quic-noq`, or `quic-quiche`"
+);
+
 pub mod allocators;
 pub mod breadcrumb_filter;
 pub mod server;
+mod transport;
 pub mod types;
 
 pub use types::{StorageKey, Value};
@@ -19,8 +25,9 @@ pub use error::{KvError, Result};
 
 mod config;
 pub use config::{
-    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, RuntimeConfig, StorageConfig,
-    TableConfig, TimeoutConfig, allowed_cpu_ids, bits_for_count, expand_thread_pattern,
+    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, QuicBackend, QuicConfig,
+    RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, allowed_cpu_ids, bits_for_count,
+    expand_thread_pattern,
 };
 
 pub(crate) mod sizing;

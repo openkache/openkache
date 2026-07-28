@@ -56,6 +56,31 @@ process CPU quota. `light` and `balanced` accept individual values up to their
 1 MiB Blob Segment size; `heavy` accepts up to 64 MiB. Existing storage must be
 reopened with the same worker count and Segment layout.
 
+To calculate a configuration from resource budgets instead, run:
+
+```bash
+cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
+  --cpus 4 \
+  --memory-gib 32 \
+  --storage-gb 2500 \
+  --profile balanced \
+  --directory ./openkache-data \
+  --plan
+```
+
+`balanced` is the default and models 1 KiB encoded values. `light` models
+100-byte inline values, while `heavy` models 2 KiB Blob values. Remove
+`--plan` to open the storage files and start serving with the calculated
+configuration.
+
+The calculated limits are advisory. The planner does not inspect cgroup
+limits, filesystem free space, or device throughput, and its memory estimate
+covers the packed Table rather than whole-process peak RSS. `--cpus` selects
+worker threads but does not impose a process CPU quota. `light` and `balanced`
+accept individual values up to their 1 MiB Blob Segment size; `heavy` accepts
+up to 64 MiB. Existing storage must be reopened with the same worker count and
+Segment layout.
+
 ### Run the BCF53 benchmark
 
 ```bash
