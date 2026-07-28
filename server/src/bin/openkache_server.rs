@@ -7,6 +7,9 @@ use clap::Parser;
 use openkache::AppConfig;
 use openkache::server::KacheServer;
 
+#[path = "openkache_server/allocator.rs"]
+mod allocator;
+
 /// Command-line arguments controlling the network endpoint and cache configuration.
 #[derive(Parser)]
 #[command(name = "openkache-server")]
@@ -50,6 +53,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("Storage: SSD-backed ({})", storage_directory.display());
     println!("Runtime: Compio (io_uring)");
+    println!("Allocator: {}", allocator::NAME);
     println!("Press Ctrl-C to stop");
 
     server

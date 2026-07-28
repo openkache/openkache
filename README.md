@@ -118,6 +118,22 @@ cargo build --manifest-path clients/rust/Cargo.toml
 cargo build --manifest-path protocol/Cargo.toml
 ```
 
+### Server allocator
+
+The server uses jemalloc by default. Select the system allocator, mimalloc, or
+snmalloc by disabling default features and enabling exactly one allocator
+feature:
+
+```bash
+cargo build --release --manifest-path server/Cargo.toml \
+  --bin openkache-server \
+  --no-default-features \
+  --features allocator-mimalloc
+```
+
+The allocator features are mutually exclusive. The server reports the selected
+allocator during startup.
+
 ### Static musl (x86_64 / aarch64)
 
 ```bash
