@@ -308,6 +308,7 @@ impl Config {
 pub struct AppConfig {
     pub version: u32,
     pub quic: QuicConfig,
+    pub network: NetworkConfig,
     pub runtime: RuntimeConfig,
     pub io_uring: IoUringConfig,
     pub timeouts: TimeoutConfig,
@@ -317,14 +318,67 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
+        let mut cpu_ids = sorted_allowed_cpu_ids();
+        let network_worker_count = cpu_ids.len().min(2);
+        let storage_cpu_ids = if cpu_ids.len() > network_worker_count {
+            cpu_ids.split_off(network_worker_count)
+        } else {
+            cpu_ids.clone()
+        };
         Self {
             version: 1,
             quic: QuicConfig::default(),
-            runtime: RuntimeConfig::default(),
+            network: NetworkConfig {
+                worker_count: network_worker_count,
+                cpu_ids,
+                ..NetworkConfig::default()
+            },
+            runtime: RuntimeConfig {
+                thread_count: storage_cpu_ids.len(),
+                cpu_ids: storage_cpu_ids,
+                ..RuntimeConfig::default()
+            },
             io_uring: IoUringConfig::default(),
             timeouts: TimeoutConfig::default(),
             storage: StorageConfig::default(),
             table: TableConfig::default(),
+        }
+    }
+}
+
+fn sorted_allowed_cpu_ids() -> Vec<usize> {
+    let mut cpu_ids = allowed_cpu_ids()
+        .map(|allowed| allowed.into_iter().collect::<Vec<_>>())
+        .unwrap_or_else(|_| vec![0]);
+    cpu_ids.sort_unstable();
+    cpu_ids
+}
+
+/// QUIC network workers, each owning one socket, endpoint, and connection set.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NetworkConfig {
+    pub worker_count: usize,
+    pub cpu_ids: Vec<usize>,
+    pub event_interval: usize,
+    pub io_uring_entries_per_worker: u32,
+    pub max_stream_lanes_per_connection: usize,
+    pub sqpoll: bool,
+    pub napi_busy_poll: bool,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        let cpu_ids = sorted_allowed_cpu_ids();
+        let worker_count = cpu_ids.len().min(2);
+        Self {
+            worker_count,
+            cpu_ids: cpu_ids.into_iter().take(worker_count).collect(),
+            event_interval: 31,
+            io_uring_entries_per_worker: 1_024,
+            max_stream_lanes_per_connection: 256,
+            sqpoll: false,
+            napi_busy_poll: false,
         }
     }
 }
@@ -339,10 +393,7 @@ pub struct RuntimeConfig {
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        let mut cpu_ids = allowed_cpu_ids()
-            .map(|allowed| allowed.into_iter().collect::<Vec<_>>())
-            .unwrap_or_else(|_| vec![0]);
-        cpu_ids.sort_unstable();
+        let cpu_ids = sorted_allowed_cpu_ids();
         let thread_count = cpu_ids.len();
         Self {
             thread_count,
@@ -356,6 +407,7 @@ impl Default for RuntimeConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IoUringConfig {
     pub sqpoll: bool,
+    pub iopoll: bool,
     pub entries_per_worker: u32,
     pub max_inflight_per_worker: usize,
     pub batch_size: usize,
@@ -366,6 +418,7 @@ impl Default for IoUringConfig {
     fn default() -> Self {
         Self {
             sqpoll: false,
+            iopoll: false,
             entries_per_worker: 256,
             max_inflight_per_worker: 8,
             batch_size: 16,
@@ -455,6 +508,37 @@ impl AppConfig {
             )));
         }
         self.quic.selected_backend()?;
+        if self.network.worker_count == 0 {
+            return Err(KvError::InvalidConfig(
+                "network.worker_count must be non-zero".into(),
+            ));
+        }
+        if self.network.cpu_ids.len() != self.network.worker_count {
+            return Err(KvError::InvalidConfig(
+                "network.cpu_ids length must equal network.worker_count".into(),
+            ));
+        }
+        let unique = self.network.cpu_ids.iter().copied().collect::<HashSet<_>>();
+        if unique.len() != self.network.cpu_ids.len() {
+            return Err(KvError::InvalidConfig(
+                "network.cpu_ids must not contain duplicates".into(),
+            ));
+        }
+        if self.network.event_interval == 0
+            || self.network.io_uring_entries_per_worker == 0
+            || self.network.max_stream_lanes_per_connection == 0
+            || self.network.max_stream_lanes_per_connection > u32::MAX as usize
+        {
+            return Err(KvError::InvalidConfig(
+                "network event interval, io_uring entries, and stream lane limit must be non-zero"
+                    .into(),
+            ));
+        }
+        if self.network.sqpoll || self.network.napi_busy_poll {
+            return Err(KvError::InvalidConfig(
+                "network SQPOLL and NAPI busy poll must remain false".into(),
+            ));
+        }
         if self.runtime.thread_count == 0 {
             return Err(KvError::InvalidConfig(
                 "runtime.thread_count must be non-zero".into(),
@@ -473,6 +557,16 @@ impl AppConfig {
         }
         let allowed = allowed_cpu_ids()?;
         if let Some(cpu) = self
+            .network
+            .cpu_ids
+            .iter()
+            .find(|cpu| !allowed.contains(cpu))
+        {
+            return Err(KvError::InvalidConfig(format!(
+                "network CPU {cpu} is not in the process affinity set {allowed:?}"
+            )));
+        }
+        if let Some(cpu) = self
             .runtime
             .cpu_ids
             .iter()
@@ -487,9 +581,9 @@ impl AppConfig {
                 "runtime.event_interval must be non-zero".into(),
             ));
         }
-        if self.io_uring.sqpoll {
+        if self.io_uring.sqpoll || self.io_uring.iopoll {
             return Err(KvError::InvalidConfig(
-                "io_uring.sqpoll must remain false".into(),
+                "io_uring SQPOLL and IOPOLL must remain false".into(),
             ));
         }
         if self.io_uring.entries_per_worker == 0
@@ -572,6 +666,7 @@ impl AppConfig {
         let config = Self {
             version: 1,
             quic: QuicConfig::default(),
+            network: NetworkConfig::default(),
             runtime: RuntimeConfig {
                 thread_count,
                 cpu_ids,

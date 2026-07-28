@@ -1502,6 +1502,7 @@ dependencies = [
  "rustls",
  "serde",
  "snmalloc-rs",
+ "socket2",
  "thiserror",
  "tikv-jemallocator",
  "toml",

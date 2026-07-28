@@ -55,6 +55,10 @@ let value = client.get(b"greeting").await?;
 `connect_with_options` with an application-managed 32-byte encryption key when
 the server must not observe value plaintext.
 
+One client owns one QUIC connection. Operations reuse a lazily grown pool of
+bidirectional stream lanes, with one request in flight per lane and at most 256
+lanes per connection.
+
 ## Configuration
 
 `ZstandardOptions` defaults to level 1, skips values below 1 KiB, and requires
