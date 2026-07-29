@@ -6,8 +6,11 @@
 //! contain the remaining 31 storage-key bytes followed by the encoded stored
 //! value, with a separate one-byte live/Tombstone marker.
 
-use crate::types::STORAGE_KEY_BYTES;
-use crate::*;
+use crate::BUCKET_BYTES;
+use crate::buffer::DirectIoBuffer;
+use crate::config::{BucketSelectionPolicy, Config};
+use crate::table::TableLocation;
+use crate::types::{STORAGE_KEY_BYTES, StorageKey};
 
 pub(crate) const ITEM_OFFSET_BITS: usize = 20;
 pub(crate) const ITEM_KEY_PREFIX_BITS: usize = 8;

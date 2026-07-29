@@ -37,6 +37,7 @@ pub mod server;
 mod transport;
 pub mod types;
 
+pub(crate) mod buffer;
 pub(crate) mod channel;
 
 pub use types::{StorageKey, Value};
@@ -58,13 +59,12 @@ mod cli;
 pub use cli::Command;
 
 pub(crate) mod store;
-pub(crate) use store::*;
+pub use store::SetOutcome;
 
 pub mod runtime;
-pub use runtime::*;
+pub use runtime::{BenchmarkBatchStats, BenchmarkOperation, ThreadedKvkache};
 
 pub(crate) mod table;
-pub(crate) use table::*;
 
 pub(crate) const BUCKET_BYTES: usize = 4 * 1024;
 pub(crate) const SUBTABLE_BYTES: usize = 64;
