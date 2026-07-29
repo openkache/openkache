@@ -13,4 +13,7 @@ public enum SetOutcome
 
     /// <summary>The key previously existed and was replaced.</summary>
     Replaced,
+
+    /// <summary>The value was not stored because its existence condition failed.</summary>
+    NotStored,
 }
