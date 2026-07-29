@@ -10,7 +10,7 @@ use crate::*;
 
 const FILE_MAGIC: &[u8; 8] = b"OKSGFILE";
 const CONTROL_MAGIC: &[u8; 8] = b"OKSGCTL\0";
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SegmentCommit {

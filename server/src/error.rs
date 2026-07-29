@@ -14,6 +14,8 @@ pub enum KvError {
     Io(#[from] io::Error),
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     #[error("lookup Table is full")]
     TableFull,
     #[error("Item requires {bytes} bytes but one empty Bucket has {capacity} bytes")]

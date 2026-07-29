@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 
 use crate::value::{Compression, ENCRYPTION_KEY_BYTES, ValueCodec, ZstandardOptions};
-use crate::{Client, ClientOptions, SetOutcome};
+use crate::{Client, ClientOptions, SetCondition, SetOptions, SetOutcome};
 
 const RESULT_ERROR: u32 = 0;
 const RESULT_OK: u32 = 1;
@@ -19,6 +19,7 @@ const RESULT_REPLACED: u32 = 5;
 const RESULT_DELETED: u32 = 6;
 const RESULT_NOT_DELETED: u32 = 7;
 const RESULT_CONNECTED: u32 = 8;
+const RESULT_NOT_STORED: u32 = 9;
 
 const OPERATION_PING: u32 = 1;
 const OPERATION_GET: u32 = 2;
@@ -47,6 +48,7 @@ enum Command {
         operation: u32,
         key: Vec<u8>,
         value: Vec<u8>,
+        set_options: SetOptions,
         response: SyncSender<FfiResult>,
     },
     Shutdown,
@@ -119,12 +121,19 @@ impl FfiClient {
         }
     }
 
-    fn execute(&self, operation: u32, key: Vec<u8>, value: Vec<u8>) -> FfiResult {
+    fn execute(
+        &self,
+        operation: u32,
+        key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+    ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         if let Err(error) = self.commands.send(Command::Execute {
             operation,
             key,
             value,
+            set_options,
             response,
         }) {
             return FfiResult::error(format!("client worker is unavailable: {error}"));
@@ -189,9 +198,10 @@ fn run_worker(
                 operation,
                 key,
                 value,
+                set_options,
                 response,
             } => {
-                let result = runtime.block_on(execute(&client, operation, key, value));
+                let result = runtime.block_on(execute(&client, operation, key, value, set_options));
                 let _ = response.send(result);
             }
             Command::Shutdown => break,
@@ -199,7 +209,13 @@ fn run_worker(
     }
 }
 
-async fn execute(client: &Client, operation: u32, key: Vec<u8>, value: Vec<u8>) -> FfiResult {
+async fn execute(
+    client: &Client,
+    operation: u32,
+    key: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> FfiResult {
     let result = match operation {
         OPERATION_PING => client
             .ping()
@@ -210,11 +226,12 @@ async fn execute(client: &Client, operation: u32, key: Vec<u8>, value: Vec<u8>) 
             None => FfiResult::success(RESULT_NOT_FOUND, Vec::new()),
         }),
         OPERATION_SET => client
-            .set_owned(&key, value)
+            .set_owned_with_options(&key, value, set_options)
             .await
             .map(|outcome| match outcome {
                 SetOutcome::Created => FfiResult::success(RESULT_CREATED, Vec::new()),
                 SetOutcome::Replaced => FfiResult::success(RESULT_REPLACED, Vec::new()),
+                SetOutcome::NotStored => FfiResult::success(RESULT_NOT_STORED, Vec::new()),
             }),
         OPERATION_DELETE => client.delete(&key).await.map(|deleted| {
             FfiResult::success(
@@ -242,7 +259,7 @@ async fn execute(client: &Client, operation: u32, key: Vec<u8>, value: Vec<u8>) 
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    1
+    2
 }
 
 /// Connects a native client and returns an opaque result.
@@ -320,6 +337,8 @@ pub unsafe extern "C" fn openkache_client_execute(
     key_length: usize,
     value: *const u8,
     value_length: usize,
+    set_condition: u32,
+    ttl_ms: u64,
 ) -> *mut FfiResult {
     boxed_result(catch_result(|| {
         let client = unsafe {
@@ -329,6 +348,13 @@ pub unsafe extern "C" fn openkache_client_execute(
         };
         let key = copy_bytes(key, key_length, "key")?;
         let value = copy_bytes(value, value_length, "value")?;
+        let condition = match set_condition {
+            0 => SetCondition::None,
+            1 => SetCondition::Nx,
+            2 => SetCondition::Xx,
+            _ => return Err(format!("unsupported SET condition {set_condition}")),
+        };
+        let set_options = SetOptions::new(condition, (ttl_ms != 0).then_some(ttl_ms));
         match operation {
             OPERATION_GET | OPERATION_SET | OPERATION_DELETE if key.is_empty() => {
                 Err("key must not be empty".to_string())
@@ -343,7 +369,14 @@ pub unsafe extern "C" fn openkache_client_execute(
             {
                 Err("operation does not accept a value".to_string())
             }
-            _ => Ok(client.execute(operation, key, value)),
+            operation
+                if operation != OPERATION_SET
+                    && (set_options.condition != SetCondition::None
+                        || set_options.ttl_ms.is_some()) =>
+            {
+                Err("SET options require a SET operation".to_string())
+            }
+            _ => Ok(client.execute(operation, key, value, set_options)),
         }
     }))
 }

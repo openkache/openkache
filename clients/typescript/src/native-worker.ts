@@ -15,7 +15,7 @@ import {
 
 declare const self: Worker & { close(): void }
 
-const ABI_VERSION = 1
+const ABI_VERSION = 2
 const EMPTY_BYTES = new Uint8Array()
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
@@ -49,6 +49,8 @@ const NATIVE_SYMBOLS = {
       FFIType.ptr,
       FFIType.u64_fast,
       FFIType.ptr,
+      FFIType.u64_fast,
+      FFIType.u32,
       FFIType.u64_fast,
     ],
     returns: FFIType.ptr,
@@ -188,6 +190,8 @@ function execute(
     request.key.byteLength,
     request.value,
     request.value.byteLength,
+    request.set_condition,
+    request.ttl_ms,
   )
   if (result === null) {
     throw new Error("Rust client returned a null operation result")
