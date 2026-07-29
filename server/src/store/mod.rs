@@ -1179,11 +1179,11 @@ impl Kvkache {
                 self.io
                     .data_written
                     .set(self.io.data_written.get() + invalidated);
-                self.segment_commits[sg_index] = None;
                 if let Err(error) = self.prepare_segment_for_reuse(reclaimed_commit).await {
                     self.restore_flush_records(planned.into_iter().chain(deferred));
                     return Err(error);
                 }
+                self.segment_commits[sg_index] = None;
                 for record in planned.iter_mut().chain(&mut deferred) {
                     if record
                         .previous
@@ -1295,6 +1295,8 @@ impl Kvkache {
         let data_bytes = (self.config.segment_size as u64)
             .checked_add(BUCKET_BYTES as u64)
             .ok_or_else(|| KvError::InvalidConfig("Segment reservation size overflowed".into()))?;
+        // Reserve both sparse extents before an occupied control page is
+        // invalidated, so allocation failure cannot discard the old generation.
         reserve_file_range(&self.data, data_offset, data_bytes)
             .await
             .map_err(|error| storage_io_error(&self.resource_guard, error))?;

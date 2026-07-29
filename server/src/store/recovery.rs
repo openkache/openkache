@@ -803,16 +803,21 @@ fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16])
             "Segment file does not match the configured Segment geometry".into(),
         ));
     }
-    validate_stored_bucket_choice_count(bucket_choice_count, config, "Segment file")?;
+    validate_bucket_choice_count(bucket_choice_count, "Segment file")?;
     Ok(())
 }
 
-fn validate_stored_bucket_choice_count(stored: usize, config: &Config, source: &str) -> Result<()> {
+fn validate_bucket_choice_count(stored: usize, source: &str) -> Result<()> {
     if !(1..=32).contains(&stored) || !stored.is_power_of_two() {
         return Err(KvError::Worker(format!(
             "{source} contains an invalid Bucket choice count"
         )));
     }
+    Ok(())
+}
+
+fn validate_stored_bucket_choice_count(stored: usize, config: &Config, source: &str) -> Result<()> {
+    validate_bucket_choice_count(stored, source)?;
     if stored > config.bucket_choice_count {
         return Err(KvError::Worker(format!(
             "{source} uses {stored} Bucket choices, but the configured {} cannot safely locate its records",
