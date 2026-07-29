@@ -13,6 +13,8 @@ mod allocator;
 mod pki;
 #[path = "openkache_server/security.rs"]
 mod security;
+#[path = "openkache_server/serve.rs"]
+mod serve;
 #[path = "openkache_server/sizing.rs"]
 mod sizing;
 
@@ -30,6 +32,10 @@ struct Arguments {
     /// UDP port on localhost; defaults to 4433.
     #[arg(long, value_name = "PORT", conflicts_with = "listen")]
     port: Option<u16>,
+
+    /// Client protocol accepted by this server process.
+    #[arg(long, value_enum, default_value_t = serve::Protocol::Quic)]
+    protocol: serve::Protocol,
 
     #[command(flatten)]
     security: security::SecurityArguments,
@@ -75,38 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !runtime.driver_type().is_iouring() {
         return Err(std::io::Error::other("openkache-server requires the io_uring driver").into());
     }
-    runtime.block_on(run(arguments, config))
-}
-
-async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let storage_directory = config.storage.directory.clone();
-    let quic_backend = config.quic.selected_backend()?;
-    let listen = arguments.listen.unwrap_or_else(|| {
-        SocketAddr::from(([127, 0, 0, 1], arguments.port.unwrap_or(DEFAULT_PORT)))
-    });
-    let (server, security_mode) = arguments.security.bind(listen, config).await?;
-    let address = server.local_addr()?;
-    arguments
-        .security
-        .write_development_certificate(&server, security_mode)?;
-
-    println!("OpenKache listening on {address}");
-    arguments.security.report(security_mode);
-    println!("Storage: SSD-backed ({})", storage_directory.display());
-    println!("Runtime: Compio (io_uring)");
-    println!("QUIC backend: {}", quic_backend.as_str());
-    println!("Allocator: {}", allocator::NAME);
-    println!("Press Ctrl-C or send SIGTERM to stop");
-
-    server
-        .serve(async {
-            let interrupt = compio::signal::ctrl_c();
-            let terminate = compio::signal::unix::signal(libc::SIGTERM);
-            futures_util::pin_mut!(interrupt, terminate);
-            let _ = futures_util::future::select(interrupt, terminate).await;
-        })
-        .await?;
-    Ok(())
+    runtime.block_on(serve::run(arguments, config))
 }
 
 /// Loads the cache configuration from TOML or returns the default configuration.

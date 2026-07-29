@@ -32,6 +32,7 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+pub mod resp;
 pub mod server;
 mod transport;
 pub mod types;
