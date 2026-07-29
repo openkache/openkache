@@ -152,7 +152,7 @@ impl ResourceGuard {
         Self::new(&config.storage.directory, &workers)
     }
 
-    fn for_worker_config(config: &Config) -> Result<Self> {
+    pub(crate) fn for_worker_config(config: &Config) -> Result<Self> {
         let directory = config
             .data_path
             .parent()
@@ -450,6 +450,7 @@ pub(crate) struct Kvkache {
     pub(crate) pending_sg_bytes: usize,
     pub(crate) pending_blob_bytes: usize,
     pub(crate) occupied_segments: Vec<bool>,
+    segment_commits: Vec<Option<SegmentCommit>>,
     stable_live_keys: usize,
     next_segment_index: usize,
     next_generation: u64,
@@ -473,7 +474,7 @@ impl Kvkache {
     #[allow(dead_code)]
     pub(crate) async fn open(config: Config) -> Result<Self> {
         let resource_guard = Arc::new(ResourceGuard::for_worker_config(&config)?);
-        Self::open_with_resource_guard(config, [0; 16], resource_guard).await
+        Self::open_with_resource_guard(config, [0; 16], resource_guard, false).await
     }
 
     #[allow(dead_code)]
@@ -482,13 +483,14 @@ impl Kvkache {
         storage_key_id: [u8; 16],
     ) -> Result<Self> {
         let resource_guard = Arc::new(ResourceGuard::for_worker_config(&config)?);
-        Self::open_with_resource_guard(config, storage_key_id, resource_guard).await
+        Self::open_with_resource_guard(config, storage_key_id, resource_guard, false).await
     }
 
     pub(crate) async fn open_with_resource_guard(
         config: Config,
         storage_key_id: [u8; 16],
         resource_guard: Arc<ResourceGuard>,
+        allow_checkpoint: bool,
     ) -> Result<Self> {
         config.validate()?;
         if let Some(parent) = config.data_path.parent() {
@@ -523,24 +525,48 @@ impl Kvkache {
         if !data_exists {
             initialize_segment_file(&mut data, &config, storage_key_id).await?;
         }
-        let recovery_state = recover_state(&data, &config, storage_key_id).await?;
+        let checkpoint = if allow_checkpoint && data_exists {
+            load_table_checkpoint(&config, storage_key_id).await?
+        } else {
+            None
+        };
+        let (table, recovery_state, stable_live_keys, recovered_from_checkpoint) =
+            if let Some(checkpoint) = checkpoint {
+                validate_segment_file(&data, &config, storage_key_id).await?;
+                (
+                    checkpoint.table,
+                    checkpoint.recovery_state,
+                    checkpoint.stable_live_keys,
+                    true,
+                )
+            } else {
+                (
+                    Table::new(&config)?,
+                    recover_state(&data, &config, storage_key_id).await?,
+                    0,
+                    false,
+                )
+            };
         if !blob_exists && !recovery_state.commits.is_empty() {
             return Err(KvError::Worker(
                 "committed Segment state exists but the Blob file is missing".into(),
             ));
         }
         let blob_segment = BlobSegment::open(&config).await?;
+        let next_segment_index = recovery_state.next_segment_index;
+        let next_generation = recovery_state.next_generation;
 
         let mut cache = Self {
-            table: Table::new(&config)?,
+            table,
             blob_segment,
             pending: HashMap::new(),
             pending_sg_bytes: 0,
             pending_blob_bytes: 0,
             occupied_segments: vec![false; config.segment_count],
-            stable_live_keys: 0,
-            next_segment_index: recovery_state.next_segment_index,
-            next_generation: recovery_state.next_generation,
+            segment_commits: vec![None; config.segment_count],
+            stable_live_keys,
+            next_segment_index,
+            next_generation,
             storage_key_id,
             segment_flushes: 0,
             segment_capacity_flushes: 0,
@@ -558,50 +584,74 @@ impl Kvkache {
             config,
             data,
         };
-        cache.recover(recovery_state.commits).await?;
+        if recovered_from_checkpoint {
+            cache.restore_commit_state(&recovery_state.commits)?;
+        } else {
+            cache.recover(recovery_state.commits).await?;
+        }
         Ok(cache)
     }
 
     async fn recover(&mut self, commits: Vec<SegmentCommit>) -> Result<()> {
-        let mut locations = HashMap::new();
-        for commit in commits {
-            self.occupied_segments[commit.sg_index] = true;
-            self.blob_segment
-                .recover_segment(commit.sg_index, commit.blob_logical_len)?;
+        self.restore_commit_state(&commits)?;
+        for commit in commits.into_iter().rev() {
             for (item, table_location) in self.read_segment_items(commit.sg_index).await? {
                 if !item.is_tombstone
                     && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?.value
                 {
                     validate_recovered_blob_ref(blob_ref, commit.blob_logical_len)?;
                 }
-                let new_live = !item.is_tombstone;
-                if let Some((previous, previous_live)) =
-                    locations.insert(item.storage_key, (table_location, new_live))
-                {
-                    if !self
-                        .table
-                        .replace_location(&item.storage_key, previous, table_location)
-                    {
-                        return Err(KvError::Worker(
-                            "recovery could not replace a Table location".into(),
-                        ));
-                    }
-                    match (previous_live, new_live) {
-                        (true, false) => {
-                            self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
-                        }
-                        (false, true) => self.stable_live_keys += 1,
-                        _ => {}
-                    }
-                } else {
-                    self.table.insert(&item.storage_key, table_location)?;
-                    if new_live {
-                        self.stable_live_keys += 1;
-                    }
+                if self.recovered_key_exists(&item.storage_key).await? {
+                    continue;
+                }
+                self.table.insert(&item.storage_key, table_location)?;
+                if !item.is_tombstone {
+                    self.stable_live_keys += 1;
                 }
             }
         }
         Ok(())
+    }
+
+    fn restore_commit_state(&mut self, commits: &[SegmentCommit]) -> Result<()> {
+        for commit in commits {
+            self.occupied_segments[commit.sg_index] = true;
+            self.segment_commits[commit.sg_index] = Some(*commit);
+            self.blob_segment
+                .recover_segment(commit.sg_index, commit.blob_logical_len)?;
+        }
+        Ok(())
+    }
+
+    async fn recovered_key_exists(&self, storage_key: &StorageKey) -> Result<bool> {
+        for table_location in self.table.candidate_locations(storage_key) {
+            if self
+                .read_location(storage_key, table_location)
+                .await?
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub(crate) async fn checkpoint(&self) -> Result<()> {
+        if !self.pending.is_empty() {
+            return Err(KvError::Worker(
+                "Table checkpoint requires an empty pending map".into(),
+            ));
+        }
+        write_table_checkpoint(
+            &self.config,
+            self.storage_key_id,
+            &self.table,
+            self.stable_live_keys,
+            &self.segment_commits,
+            self.next_segment_index,
+            self.next_generation,
+        )
+        .await
     }
 
     #[allow(dead_code)]
@@ -1016,6 +1066,7 @@ impl Kvkache {
                 self.io
                     .data_written
                     .set(self.io.data_written.get() + invalidated);
+                self.segment_commits[sg_index] = None;
                 let evicted = match self.prepare_segment_for_reuse(sg_index).await {
                     Ok(evicted) => evicted,
                     Err(error) => {
@@ -1146,21 +1197,18 @@ impl Kvkache {
             .set(self.io.data_written.get() + bytes.len() as u64);
         self.blob_segment.sync().await?;
         self.data.sync_data().await?;
-        let control_bytes = commit_segment(
-            &mut self.data,
-            &self.config,
-            self.storage_key_id,
-            SegmentCommit {
-                sg_index: active.sg_index,
-                generation: self.next_generation,
-                blob_logical_len,
-            },
-        )
-        .await?;
+        let commit = SegmentCommit {
+            sg_index: active.sg_index,
+            generation: self.next_generation,
+            blob_logical_len,
+        };
+        let control_bytes =
+            commit_segment(&mut self.data, &self.config, self.storage_key_id, commit).await?;
         self.io
             .data_written
             .set(self.io.data_written.get() + control_bytes);
         self.occupied_segments[active.sg_index] = true;
+        self.segment_commits[active.sg_index] = Some(commit);
         self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
         self.next_generation = next_generation;
         self.segment_flushes += 1;

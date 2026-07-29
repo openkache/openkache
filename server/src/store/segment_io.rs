@@ -8,6 +8,8 @@ use compio::io::AsyncReadAt;
 
 use crate::*;
 
+const SEGMENT_READ_EXTENT_BYTES: usize = 1024 * 1024;
+
 impl Kvkache {
     pub(super) async fn read_bucket(
         &self,
@@ -37,23 +39,45 @@ impl Kvkache {
         sg_index: usize,
     ) -> Result<Vec<(Item, TableLocation)>> {
         let mut result = Vec::new();
-        for bucket_index in 0..self.config.bucket_count() {
-            let bytes = self.read_bucket(sg_index, bucket_index).await?;
-            result.extend(items(&bytes).into_iter().filter_map(|item| {
-                let bucket_hash_index = bucket_hash_index_for_bucket(
-                    &item.storage_key,
-                    bucket_index,
-                    self.config.bucket_count(),
-                    self.config.bucket_choice_count,
-                )?;
-                Some((
-                    item,
-                    TableLocation {
-                        sg_index: sg_index as u16,
-                        bucket_hash_index,
-                    },
-                ))
-            }));
+        let mut extent_offset = 0usize;
+        while extent_offset < self.config.segment_size {
+            let extent_bytes =
+                SEGMENT_READ_EXTENT_BYTES.min(self.config.segment_size - extent_offset);
+            let offset = self.config.segment_data_offset(sg_index) + extent_offset as u64;
+            let read = self
+                .data
+                .read_at(DirectIoBuffer::for_read(extent_bytes), offset);
+            let BufResult(read_result, bytes) = compio::runtime::time::timeout(
+                Duration::from_micros(self.config.read_max_time_us),
+                read,
+            )
+            .await
+            .map_err(|_| KvError::Timeout("Segment extent read"))?;
+            require_complete_direct_io("Segment extent read", read_result?, extent_bytes)?;
+            self.io
+                .data_read
+                .set(self.io.data_read.get() + bytes.len() as u64);
+
+            for bucket_offset in (0..extent_bytes).step_by(BUCKET_BYTES) {
+                let bucket_index = (extent_offset + bucket_offset) / BUCKET_BYTES;
+                let bucket = &bytes[bucket_offset..bucket_offset + BUCKET_BYTES];
+                result.extend(items(bucket).into_iter().filter_map(|item| {
+                    let bucket_hash_index = bucket_hash_index_for_bucket(
+                        &item.storage_key,
+                        bucket_index,
+                        self.config.bucket_count(),
+                        self.config.bucket_choice_count,
+                    )?;
+                    Some((
+                        item,
+                        TableLocation {
+                            sg_index: sg_index as u16,
+                            bucket_hash_index,
+                        },
+                    ))
+                }));
+            }
+            extent_offset += extent_bytes;
         }
         Ok(result)
     }
