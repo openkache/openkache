@@ -204,47 +204,31 @@ pub(crate) struct ItemOffset {
 
 pub(crate) fn item_offset(bucket: &[u8], item_slot: usize) -> Option<ItemOffset> {
     let bit = 8 + item_slot * ITEM_OFFSET_BITS;
-    let key_prefix = get_packed_bits(bucket, bit, ITEM_KEY_PREFIX_BITS)? as u8;
-    let item_byte_offset =
-        get_packed_bits(bucket, bit + ITEM_KEY_PREFIX_BITS, ITEM_BYTE_OFFSET_BITS)? as usize;
+    let byte = bit / 8;
+    let shift = bit % 8;
+    let packed = u32::from_le_bytes([
+        *bucket.get(byte)?,
+        *bucket.get(byte + 1)?,
+        *bucket.get(byte + 2)?,
+        0,
+    ]) >> shift;
     Some(ItemOffset {
-        key_prefix,
-        item_byte_offset,
+        key_prefix: packed as u8,
+        item_byte_offset: ((packed >> ITEM_KEY_PREFIX_BITS) & ((1 << ITEM_BYTE_OFFSET_BITS) - 1))
+            as usize,
     })
 }
 
 fn write_item_offset(bucket: &mut [u8], item_slot: usize, entry: ItemOffset) {
     let bit = 8 + item_slot * ITEM_OFFSET_BITS;
-    set_packed_bits(bucket, bit, ITEM_KEY_PREFIX_BITS, entry.key_prefix as u16);
-    set_packed_bits(
-        bucket,
-        bit + ITEM_KEY_PREFIX_BITS,
-        ITEM_BYTE_OFFSET_BITS,
-        entry.item_byte_offset as u16,
-    );
-}
-
-fn get_packed_bits(bytes: &[u8], bit: usize, width: usize) -> Option<u16> {
-    if bit + width > bytes.len() * 8 {
-        return None;
-    }
-    let mut value = 0u16;
-    for offset in 0..width {
-        value |= (((bytes[(bit + offset) / 8] >> ((bit + offset) % 8)) & 1) as u16) << offset;
-    }
-    Some(value)
-}
-
-fn set_packed_bits(bytes: &mut [u8], bit: usize, width: usize, value: u16) {
-    for offset in 0..width {
-        let target = bit + offset;
-        let mask = 1u8 << (target % 8);
-        if value & (1u16 << offset) == 0 {
-            bytes[target / 8] &= !mask;
-        } else {
-            bytes[target / 8] |= mask;
-        }
-    }
+    let byte = bit / 8;
+    let shift = bit % 8;
+    let packed =
+        u32::from(entry.key_prefix) | ((entry.item_byte_offset as u32) << ITEM_KEY_PREFIX_BITS);
+    let current = u32::from_le_bytes([bucket[byte], bucket[byte + 1], bucket[byte + 2], 0]);
+    let mask = ((1u32 << ITEM_OFFSET_BITS) - 1) << shift;
+    let updated = (current & !mask) | ((packed << shift) & mask);
+    bucket[byte..byte + 3].copy_from_slice(&updated.to_le_bytes()[..3]);
 }
 
 #[derive(Clone, Copy)]

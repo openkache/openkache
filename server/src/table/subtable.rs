@@ -6,6 +6,11 @@
 use crate::SUBTABLE_BYTES;
 use crate::error::{KvError, Result};
 
+#[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
+use std::arch::x86_64::*;
+#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+use std::arch::{aarch64::*, is_aarch64_feature_detected};
+
 /// Candidate storage location encoded in a Table Entry.
 ///
 /// The location selects a Segment and one of a key's Bucket hash functions.
@@ -126,11 +131,53 @@ pub(crate) struct Subtable {
     pub(crate) bytes: [u8; SUBTABLE_BYTES],
 }
 
-fn select_one(mut bits: u128, rank: usize) -> usize {
+fn select_one(bits: u128, rank: usize) -> usize {
+    #[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
+    if is_x86_feature_detected!("bmi2") {
+        return unsafe { select_one_bmi2(bits, rank) };
+    }
+
+    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    if is_aarch64_feature_detected!("sve2-bitperm") {
+        return unsafe { select_one_sve2_bitperm(bits, rank) };
+    }
+
+    select_one_scalar(bits, rank)
+}
+
+fn select_one_scalar(mut bits: u128, rank: usize) -> usize {
     for _ in 0..rank {
         bits &= bits - 1;
     }
     bits.trailing_zeros() as usize
+}
+
+#[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
+#[target_feature(enable = "bmi2")]
+unsafe fn select_one_bmi2(bits: u128, rank: usize) -> usize {
+    let low = bits as u64;
+    let low_count = low.count_ones() as usize;
+    if rank < low_count {
+        _pdep_u64(1u64 << rank, low).trailing_zeros() as usize
+    } else {
+        let high = (bits >> 64) as u64;
+        64 + _pdep_u64(1u64 << (rank - low_count), high).trailing_zeros() as usize
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[target_feature(enable = "sve,sve2,sve2-bitperm")]
+unsafe fn select_one_sve2_bitperm(bits: u128, rank: usize) -> usize {
+    let low = bits as u64;
+    let low_count = low.count_ones() as usize;
+    let (word, word_rank, offset) = if rank < low_count {
+        (low, rank, 0)
+    } else {
+        ((bits >> 64) as u64, rank - low_count, 64)
+    };
+    let source = svdup_n_u64(1u64 << word_rank);
+    let selected = svbdep_n_u64(source, word);
+    offset + svlastb_u64(svptrue_b64(), selected).trailing_zeros() as usize
 }
 
 fn low_mask(bits: usize) -> u128 {
@@ -174,25 +221,37 @@ impl Subtable {
     pub(crate) fn entry(&self, layout: &SubtableLayout, entry_slot: usize) -> SubtableEntry {
         SubtableEntry {
             unary_index: self.unary_index_at(layout, entry_slot),
-            fingerprint: get_bits(
+            fingerprint: self.fingerprint(layout, entry_slot),
+            table_location: self.table_location(layout, entry_slot),
+            crumb: self.crumb(layout, entry_slot),
+        }
+    }
+
+    fn fingerprint(&self, layout: &SubtableLayout, entry_slot: usize) -> u16 {
+        get_bits(
+            &self.bytes,
+            layout.fingerprint_bit + entry_slot * layout.fingerprint_bits,
+            layout.fingerprint_bits,
+        ) as u16
+    }
+
+    pub(crate) fn table_location(&self, layout: &SubtableLayout, entry_slot: usize) -> u32 {
+        get_bits(
+            &self.bytes,
+            layout.table_location_bit + entry_slot * layout.table_location_bits,
+            layout.table_location_bits,
+        ) as u32
+    }
+
+    fn crumb(&self, layout: &SubtableLayout, entry_slot: usize) -> u8 {
+        if layout.crumb_bits == 0 {
+            0
+        } else {
+            get_bits(
                 &self.bytes,
-                layout.fingerprint_bit + entry_slot * layout.fingerprint_bits,
-                layout.fingerprint_bits,
-            ) as u16,
-            table_location: get_bits(
-                &self.bytes,
-                layout.table_location_bit + entry_slot * layout.table_location_bits,
-                layout.table_location_bits,
-            ) as u32,
-            crumb: if layout.crumb_bits == 0 {
-                0
-            } else {
-                get_bits(
-                    &self.bytes,
-                    layout.crumb_bit + entry_slot * layout.crumb_bits,
-                    layout.crumb_bits,
-                ) as u8
-            },
+                layout.crumb_bit + entry_slot * layout.crumb_bits,
+                layout.crumb_bits,
+            ) as u8
         }
     }
 
@@ -295,9 +354,8 @@ impl Subtable {
         let (start, end) = self.bounds(layout, unary_index);
         (start..end)
             .filter(|entry_slot| {
-                let entry = self.entry(layout, *entry_slot);
-                entry.fingerprint == fingerprint
-                    && crumb.is_none_or(|candidate| entry.crumb == candidate)
+                self.fingerprint(layout, *entry_slot) == fingerprint
+                    && crumb.is_none_or(|candidate| self.crumb(layout, *entry_slot) == candidate)
             })
             .collect()
     }
