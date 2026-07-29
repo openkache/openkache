@@ -43,6 +43,7 @@ let client = Client::connect_with_options(
             encryption_key,
             Compression::Zstandard(ZstandardOptions::default()),
         )?,
+        ..ClientOptions::default()
     },
 )
 .await?;
@@ -54,6 +55,11 @@ let value = client.get(b"greeting").await?;
 `Client::connect` remains available for unwrapped plaintext values. Prefer
 `connect_with_options` with an application-managed 32-byte encryption key when
 the server must not observe value plaintext.
+
+Production servers also require `ClientOptions.identity` containing a
+`ClientIdentity` certificate chain and private key. Every CA-authenticated
+identity can use data operations, while `STATS` and `SYNC` additionally require
+the exact leaf certificate to appear in the server administrator allowlist.
 
 One client owns one QUIC connection. Operations reuse a lazily grown pool of
 bidirectional stream lanes, with one request in flight per lane and at most 256

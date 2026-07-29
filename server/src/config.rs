@@ -326,6 +326,7 @@ impl Config {
 pub struct AppConfig {
     pub version: u32,
     pub quic: QuicConfig,
+    pub tls: TlsConfig,
     pub network: NetworkConfig,
     pub runtime: RuntimeConfig,
     pub io_uring: IoUringConfig,
@@ -346,6 +347,7 @@ impl Default for AppConfig {
         Self {
             version: 1,
             quic: QuicConfig::default(),
+            tls: TlsConfig::default(),
             network: NetworkConfig {
                 worker_count: network_worker_count,
                 cpu_ids,
@@ -361,6 +363,54 @@ impl Default for AppConfig {
             storage: StorageConfig::default(),
             table: TableConfig::default(),
         }
+    }
+}
+
+/// Server identity, client authentication, and administrative authorization paths.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsConfig {
+    /// PEM or DER server certificate chain, with the leaf certificate first.
+    pub certificate_chain: Option<PathBuf>,
+    /// Unencrypted PEM or DER server private key.
+    pub private_key: Option<PathBuf>,
+    /// PEM or DER CA certificates trusted to authenticate clients.
+    pub client_ca: Option<PathBuf>,
+    /// Leaf certificates whose authenticated clients may execute administrative commands.
+    pub admin_client_certificates: Vec<PathBuf>,
+}
+
+impl TlsConfig {
+    /// Returns whether any production TLS setting is present.
+    pub fn is_configured(&self) -> bool {
+        self.certificate_chain.is_some()
+            || self.private_key.is_some()
+            || self.client_ca.is_some()
+            || !self.admin_client_certificates.is_empty()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.is_configured() {
+            return Ok(());
+        }
+        for (name, path) in [
+            ("tls.certificate_chain", &self.certificate_chain),
+            ("tls.private_key", &self.private_key),
+            ("tls.client_ca", &self.client_ca),
+        ] {
+            if path.is_none() {
+                return Err(KvError::InvalidConfig(format!(
+                    "{name} is required when production TLS is configured"
+                )));
+            }
+        }
+        if self.admin_client_certificates.is_empty() {
+            return Err(KvError::InvalidConfig(
+                "tls.admin_client_certificates must contain at least one administrator certificate"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -526,6 +576,7 @@ impl AppConfig {
             )));
         }
         self.quic.selected_backend()?;
+        self.tls.validate()?;
         if self.network.worker_count == 0 {
             return Err(KvError::InvalidConfig(
                 "network.worker_count must be non-zero".into(),
@@ -684,6 +735,7 @@ impl AppConfig {
         let config = Self {
             version: 1,
             quic: QuicConfig::default(),
+            tls: TlsConfig::default(),
             network: NetworkConfig::default(),
             runtime: RuntimeConfig {
                 thread_count,

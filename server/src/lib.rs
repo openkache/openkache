@@ -46,8 +46,8 @@ pub use error::{KvError, Result};
 mod config;
 pub use config::{
     AppConfig, BucketSelectionPolicy, Config, IoUringConfig, NetworkConfig, QuicBackend,
-    QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, allowed_cpu_ids,
-    bits_for_count, expand_thread_pattern,
+    QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, TlsConfig,
+    allowed_cpu_ids, bits_for_count, expand_thread_pattern,
 };
 
 pub(crate) mod sizing;

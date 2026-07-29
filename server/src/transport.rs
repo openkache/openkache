@@ -3,7 +3,6 @@
 use std::future::Future;
 #[cfg(feature = "quic-quiche")]
 use std::net::SocketAddr;
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,10 +10,16 @@ use compio::BufResult;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
+
+/// Parsed TLS material shared by every reuse-port endpoint.
+pub(super) struct ServerTlsConfig {
+    pub(super) certificate_chain: Vec<CertificateDer<'static>>,
+    pub(super) private_key: PrivateKeyDer<'static>,
+    pub(super) client_ca: Vec<CertificateDer<'static>>,
+}
 
 /// Backend-independent endpoint selected when the server binds.
 pub(super) enum ServerEndpoint {
@@ -71,8 +76,7 @@ impl ServerEndpoint {
     pub(super) async fn bind(
         backend: QuicBackend,
         socket: std::net::UdpSocket,
-        certificate_der: &[u8],
-        private_key_der: &[u8],
+        tls: Arc<ServerTlsConfig>,
         max_concurrent_streams: usize,
     ) -> Result<Self, TransportError> {
         Self::validate_backend(backend)?;
@@ -81,13 +85,7 @@ impl ServerEndpoint {
                 #[cfg(feature = "quic-quinn")]
                 {
                     Ok(Self::Quinn(
-                        quinn_backend::Endpoint::bind(
-                            socket,
-                            certificate_der,
-                            private_key_der,
-                            max_concurrent_streams,
-                        )
-                        .await?,
+                        quinn_backend::Endpoint::bind(socket, tls, max_concurrent_streams).await?,
                     ))
                 }
                 #[cfg(not(feature = "quic-quinn"))]
@@ -99,13 +97,7 @@ impl ServerEndpoint {
                 #[cfg(feature = "quic-noq")]
                 {
                     Ok(Self::Noq(
-                        noq_backend::Endpoint::bind(
-                            socket,
-                            certificate_der,
-                            private_key_der,
-                            max_concurrent_streams,
-                        )
-                        .await?,
+                        noq_backend::Endpoint::bind(socket, tls, max_concurrent_streams).await?,
                     ))
                 }
                 #[cfg(not(feature = "quic-noq"))]
@@ -117,13 +109,7 @@ impl ServerEndpoint {
                 #[cfg(feature = "quic-quiche")]
                 {
                     Ok(Self::Quiche(
-                        quiche_backend::Endpoint::bind(
-                            socket,
-                            certificate_der,
-                            private_key_der,
-                            max_concurrent_streams,
-                        )
-                        .await?,
+                        quiche_backend::Endpoint::bind(socket, tls, max_concurrent_streams).await?,
                     ))
                 }
                 #[cfg(not(feature = "quic-quiche"))]
@@ -161,6 +147,9 @@ pub(super) trait Incoming {
 pub(super) trait Connection {
     type SendStream: SendStream;
     type ReceiveStream: ReceiveStream;
+
+    /// Returns the authenticated peer's leaf certificate, when client authentication is enabled.
+    fn peer_certificate(&self) -> Option<CertificateDer<'static>>;
 
     fn accept_bi(
         &self,
@@ -243,16 +232,24 @@ impl TransportError {
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-fn tls_config(
-    certificate_der: &[u8],
-    private_key_der: &[u8],
-) -> Result<rustls::ServerConfig, rustls::Error> {
-    let mut tls = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![CertificateDer::from(certificate_der.to_vec())],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key_der.to_vec())),
-        )?;
+fn tls_config(material: &ServerTlsConfig) -> Result<rustls::ServerConfig, rustls::Error> {
+    let builder = rustls::ServerConfig::builder();
+    let mut tls = if material.client_ca.is_empty() {
+        builder.with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        for certificate in &material.client_ca {
+            roots.add(certificate.clone())?;
+        }
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|error| rustls::Error::General(error.to_string()))?;
+        builder.with_client_cert_verifier(verifier)
+    }
+    .with_single_cert(
+        material.certificate_chain.clone(),
+        material.private_key.clone_key(),
+    )?;
     tls.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
     Ok(tls)
 }
@@ -268,11 +265,10 @@ mod quinn_backend {
     impl Endpoint {
         pub(super) async fn bind(
             socket: std::net::UdpSocket,
-            certificate_der: &[u8],
-            private_key_der: &[u8],
+            material: Arc<ServerTlsConfig>,
             max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
-            let tls = tls_config(certificate_der, private_key_der)
+            let tls = tls_config(&material)
                 .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
             let crypto = compio_quic::crypto::rustls::QuicServerConfig::try_from(tls)
                 .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
@@ -336,6 +332,12 @@ mod quinn_backend {
     impl super::Connection for Connection {
         type SendStream = SendStream;
         type ReceiveStream = ReceiveStream;
+
+        fn peer_certificate(&self) -> Option<CertificateDer<'static>> {
+            self.0
+                .peer_identity()
+                .and_then(|certificates| certificates.first().cloned())
+        }
 
         async fn accept_bi(
             &self,
@@ -418,11 +420,10 @@ mod noq_backend {
     impl Endpoint {
         pub(super) async fn bind(
             socket: std::net::UdpSocket,
-            certificate_der: &[u8],
-            private_key_der: &[u8],
+            material: Arc<ServerTlsConfig>,
             max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
-            let tls = tls_config(certificate_der, private_key_der)
+            let tls = tls_config(&material)
                 .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
             let crypto = comnoq::crypto::rustls::QuicServerConfig::try_from(tls)
                 .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
@@ -486,6 +487,12 @@ mod noq_backend {
     impl super::Connection for Connection {
         type SendStream = SendStream;
         type ReceiveStream = ReceiveStream;
+
+        fn peer_certificate(&self) -> Option<CertificateDer<'static>> {
+            self.0
+                .peer_identity()
+                .and_then(|certificates| certificates.first().cloned())
+        }
 
         async fn accept_bi(
             &self,
@@ -562,8 +569,9 @@ mod quiche_backend {
     use std::collections::HashMap;
 
     use boring::pkey::PKey;
-    use boring::ssl::{SslContextBuilder, SslMethod};
+    use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode};
     use boring::x509::X509;
+    use boring::x509::store::X509StoreBuilder;
     use compio::runtime::JoinHandle;
     use futures_util::{FutureExt, StreamExt, pin_mut, select};
 
@@ -586,8 +594,7 @@ mod quiche_backend {
     impl Endpoint {
         pub(super) async fn bind(
             socket: std::net::UdpSocket,
-            certificate_der: &[u8],
-            private_key_der: &[u8],
+            material: Arc<ServerTlsConfig>,
             max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
             let socket = compio::net::UdpSocket::from_std(socket)
@@ -595,7 +602,7 @@ mod quiche_backend {
             let local_address = socket
                 .local_addr()
                 .map_err(|error| TransportError::backend(NAME, "local address", error))?;
-            let config = config(certificate_der, private_key_der, max_concurrent_streams)?;
+            let config = config(&material, max_concurrent_streams)?;
             let (incoming_sender, incoming) = channel::unbounded_async();
             let (commands, command_receiver) = channel::unbounded_async();
             let driver_commands = commands.clone();
@@ -657,6 +664,7 @@ mod quiche_backend {
 
     pub(crate) struct Connection {
         connection_id: Vec<u8>,
+        peer_certificate: Option<CertificateDer<'static>>,
         streams: AsyncReceiver<Stream>,
         commands: Sender<Command>,
     }
@@ -664,6 +672,10 @@ mod quiche_backend {
     impl super::Connection for Connection {
         type SendStream = SendStream;
         type ReceiveStream = ReceiveStream;
+
+        fn peer_certificate(&self) -> Option<CertificateDer<'static>> {
+            self.peer_certificate.clone()
+        }
 
         async fn accept_bi(
             &self,
@@ -1043,6 +1055,10 @@ mod quiche_backend {
                     client.announced = true;
                     let _ = self.incoming.try_send(Incoming(Connection {
                         connection_id: connection_id.clone(),
+                        peer_certificate: client
+                            .connection
+                            .peer_cert()
+                            .map(|certificate| CertificateDer::from(certificate.to_vec())),
                         streams: stream_receiver,
                         commands: self.command_sender.clone(),
                     }));
@@ -1187,20 +1203,49 @@ mod quiche_backend {
     }
 
     fn config(
-        certificate_der: &[u8],
-        private_key_der: &[u8],
+        material: &ServerTlsConfig,
         max_concurrent_streams: usize,
     ) -> Result<quiche::Config, TransportError> {
-        let certificate = X509::from_der(certificate_der)
-            .map_err(|error| TransportError::backend(NAME, "certificate parsing", error))?;
-        let private_key = PKey::private_key_from_der(private_key_der)
+        let certificate = X509::from_der(
+            material
+                .certificate_chain
+                .first()
+                .expect("validated TLS certificate chain"),
+        )
+        .map_err(|error| TransportError::backend(NAME, "certificate parsing", error))?;
+        let private_key = PKey::private_key_from_der(material.private_key.secret_der())
             .map_err(|error| TransportError::backend(NAME, "private key parsing", error))?;
         let mut tls = SslContextBuilder::new(SslMethod::tls())
             .map_err(|error| TransportError::backend(NAME, "TLS configuration", error))?;
         tls.set_certificate(&certificate)
             .map_err(|error| TransportError::backend(NAME, "TLS certificate", error))?;
+        for certificate in material.certificate_chain.iter().skip(1) {
+            let certificate = X509::from_der(certificate)
+                .map_err(|error| TransportError::backend(NAME, "certificate parsing", error))?;
+            tls.add_extra_chain_cert(certificate)
+                .map_err(|error| TransportError::backend(NAME, "TLS certificate chain", error))?;
+        }
         tls.set_private_key(&private_key)
             .map_err(|error| TransportError::backend(NAME, "TLS private key", error))?;
+        if !material.client_ca.is_empty() {
+            let mut roots = X509StoreBuilder::new()
+                .map_err(|error| TransportError::backend(NAME, "client CA store", error))?;
+            for certificate in &material.client_ca {
+                let certificate = X509::from_der(certificate).map_err(|error| {
+                    TransportError::backend(NAME, "client CA certificate parsing", error)
+                })?;
+                tls.add_client_ca(&certificate)
+                    .map_err(|error| TransportError::backend(NAME, "client CA names", error))?;
+                roots
+                    .add_cert(certificate)
+                    .map_err(|error| TransportError::backend(NAME, "client CA store", error))?;
+            }
+            tls.set_verify_cert_store(roots.build())
+                .map_err(|error| TransportError::backend(NAME, "client CA store", error))?;
+            tls.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+            tls.set_session_id_context(b"openkache-mtls")
+                .map_err(|error| TransportError::backend(NAME, "TLS session identity", error))?;
+        }
         let mut config = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, tls)
             .map_err(|error| TransportError::backend(NAME, "configuration", error))?;
         config

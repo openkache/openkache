@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,16 +14,19 @@ use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
     MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status, ValueFlags,
 };
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
-    Incoming as TransportIncoming, ReceiveStream, SendStream, ServerEndpoint, StreamReadError,
-    TransportError,
+    Incoming as TransportIncoming, ReceiveStream, SendStream, ServerEndpoint, ServerTlsConfig,
+    StreamReadError, TransportError,
 };
-use crate::{AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache};
+use crate::{
+    AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache, TlsConfig,
+};
 
 enum NetworkWorkerPhase {
     Starting,
@@ -112,36 +116,121 @@ impl Drop for NetworkWorkerReporter {
     }
 }
 
+enum AccessPolicy {
+    InsecureDevelopment,
+    MutualTls {
+        admin_client_certificates: Vec<CertificateDer<'static>>,
+    },
+}
+
+impl AccessPolicy {
+    fn permits_administration(&self, peer_certificate: Option<&CertificateDer<'_>>) -> bool {
+        match self {
+            Self::InsecureDevelopment => true,
+            Self::MutualTls {
+                admin_client_certificates,
+            } => peer_certificate.is_some_and(|peer| {
+                admin_client_certificates
+                    .iter()
+                    .any(|administrator| administrator.as_ref() == peer.as_ref())
+            }),
+        }
+    }
+}
+
+fn load_production_tls(config: &TlsConfig) -> Result<(ServerTlsConfig, AccessPolicy)> {
+    let certificate_chain = load_certificates(
+        config
+            .certificate_chain
+            .as_deref()
+            .expect("validated production TLS certificate path"),
+    )?;
+    let private_key = load_private_key(
+        config
+            .private_key
+            .as_deref()
+            .expect("validated production TLS private key path"),
+    )?;
+    let client_ca = load_certificates(
+        config
+            .client_ca
+            .as_deref()
+            .expect("validated production TLS client CA path"),
+    )?;
+    let mut admin_client_certificates = Vec::with_capacity(config.admin_client_certificates.len());
+    for path in &config.admin_client_certificates {
+        let mut certificates = load_certificates(path)?;
+        admin_client_certificates.push(certificates.remove(0));
+    }
+    Ok((
+        ServerTlsConfig {
+            certificate_chain,
+            private_key,
+            client_ca,
+        },
+        AccessPolicy::MutualTls {
+            admin_client_certificates,
+        },
+    ))
+}
+
+fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let bytes = std::fs::read(path).map_err(|error| ServerError::TlsIdentity {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let certificates = if bytes.starts_with(b"-----BEGIN") {
+        CertificateDer::pem_slice_iter(&bytes)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| ServerError::TlsIdentity {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?
+    } else {
+        vec![CertificateDer::from(bytes)]
+    };
+    if certificates.is_empty() {
+        return Err(ServerError::TlsIdentity {
+            path: path.to_path_buf(),
+            message: "no certificates found".into(),
+        });
+    }
+    Ok(certificates)
+}
+
+fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    let bytes = std::fs::read(path).map_err(|error| ServerError::TlsIdentity {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    if bytes.starts_with(b"-----BEGIN") {
+        PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| ServerError::TlsIdentity {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })
+    } else {
+        PrivateKeyDer::try_from(bytes.as_slice())
+            .map(|key| key.clone_key())
+            .map_err(|message| ServerError::TlsIdentity {
+                path: path.to_path_buf(),
+                message: message.into(),
+            })
+    }
+}
+
 /// Bound reuse-port sockets and the sharded SSD-backed cache they serve.
 pub struct KacheServer {
     sockets: Vec<std::net::UdpSocket>,
     local_addr: SocketAddr,
     quic_backend: QuicBackend,
-    certificate_der: CertificateDer<'static>,
-    private_key_der: Vec<u8>,
+    tls: Arc<ServerTlsConfig>,
+    access_policy: Arc<AccessPolicy>,
     cache: Arc<ThreadedKvkache>,
     network: NetworkConfig,
     request_timeout: Duration,
 }
 
 impl KacheServer {
-    /// Binds a server with the default SSD cache configuration.
-    ///
-    /// # Arguments
-    ///
-    /// * `address` - UDP address on which the QUIC endpoint listens.
-    ///
-    /// # Returns
-    ///
-    /// A ready server containing bound sockets, a generated certificate, and cache workers.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when certificate generation, socket binding, or cache startup fails.
-    pub async fn bind(address: SocketAddr) -> Result<Self> {
-        Self::bind_with_config(address, AppConfig::default()).await
-    }
-
     /// Binds a server with an explicit SSD cache configuration.
     ///
     /// # Arguments
@@ -151,21 +240,72 @@ impl KacheServer {
     ///
     /// # Returns
     ///
-    /// A ready server containing bound sockets, a generated certificate, and cache workers.
+    /// A ready server containing bound sockets, configured TLS identity, and cache workers.
     ///
     /// # Errors
     ///
-    /// Returns an error when configuration validation, certificate generation, socket binding, or
-    /// cache startup fails.
+    /// Returns an error when production TLS is missing or invalid, configuration validation or
+    /// socket binding fails, or cache startup fails.
     pub async fn bind_with_config(address: SocketAddr, config: AppConfig) -> Result<Self> {
+        config.validate()?;
+        if !config.tls.is_configured() {
+            return Err(ServerError::ProductionTlsRequired(address));
+        }
+        let (tls, access_policy) = load_production_tls(&config.tls)?;
+        Self::bind_with_security(address, config, tls, access_policy).await
+    }
+
+    /// Binds with a generated certificate and no peer authentication for development only.
+    ///
+    /// This mode grants every connected peer administrative access and must not be used for
+    /// production deployments.
+    ///
+    /// # Arguments
+    ///
+    /// * `address` - UDP address on which the QUIC endpoint listens.
+    /// * `config` - Network, storage, table, and timeout configuration.
+    ///
+    /// # Returns
+    ///
+    /// A ready server containing bound sockets, an ephemeral certificate, and cache workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when production TLS is also configured, configuration validation,
+    /// certificate generation, socket binding, or cache startup fails.
+    pub async fn bind_insecure_for_development(
+        address: SocketAddr,
+        config: AppConfig,
+    ) -> Result<Self> {
+        if config.tls.is_configured() {
+            return Err(ServerError::ConflictingSecurityModes);
+        }
+        let mut subject_alt_names = vec!["localhost".to_string()];
+        if !address.ip().is_unspecified() {
+            subject_alt_names.push(address.ip().to_string());
+        }
+        let generated = rcgen::generate_simple_self_signed(subject_alt_names)?;
+        let tls = ServerTlsConfig {
+            certificate_chain: vec![generated.cert.der().clone()],
+            private_key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                generated.signing_key.serialize_der(),
+            )),
+            client_ca: Vec::new(),
+        };
+        Self::bind_with_security(address, config, tls, AccessPolicy::InsecureDevelopment).await
+    }
+
+    async fn bind_with_security(
+        address: SocketAddr,
+        config: AppConfig,
+        tls: ServerTlsConfig,
+        access_policy: AccessPolicy,
+    ) -> Result<Self> {
         config.validate()?;
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
         let network = config.network.clone();
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
-        let generated = rcgen::generate_simple_self_signed(["localhost".to_string()])?;
-        let certificate_der = generated.cert.der().clone();
-        let private_key_der = generated.signing_key.serialize_der();
         let mut cache = ThreadedKvkache::start(config)?;
         let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
             Ok(sockets) => sockets,
@@ -180,8 +320,8 @@ impl KacheServer {
             sockets,
             local_addr,
             quic_backend,
-            certificate_der,
-            private_key_der,
+            tls: Arc::new(tls),
+            access_policy: Arc::new(access_policy),
             cache,
             network,
             request_timeout,
@@ -201,13 +341,17 @@ impl KacheServer {
         Ok(self.local_addr)
     }
 
-    /// Returns the self-signed certificate clients must trust for this run.
+    /// Returns the leaf certificate clients must trust directly or through its issuing CA.
     ///
     /// # Returns
     ///
-    /// The generated certificate encoded as DER bytes.
+    /// The configured or generated leaf certificate encoded as DER bytes.
     pub fn certificate_der(&self) -> &[u8] {
-        self.certificate_der.as_ref()
+        self.tls
+            .certificate_chain
+            .first()
+            .expect("validated TLS certificate chain")
+            .as_ref()
     }
 
     /// Accepts connections until `shutdown` resolves, then flushes all cache workers.
@@ -227,8 +371,8 @@ impl KacheServer {
         let Self {
             sockets,
             quic_backend,
-            certificate_der,
-            private_key_der,
+            tls,
+            access_policy,
             cache,
             network,
             request_timeout,
@@ -246,8 +390,8 @@ impl KacheServer {
             let (stop_tx, stop_rx) = channel::bounded_sync_async(1);
             let started_tx = started_tx.clone();
             let finished_tx = finished_tx.clone();
-            let certificate_der = certificate_der.clone();
-            let private_key_der = private_key_der.clone();
+            let worker_tls = Arc::clone(&tls);
+            let worker_access_policy = Arc::clone(&access_policy);
             let worker_cache = Arc::clone(&cache);
             let cpu_id = network.cpu_ids[worker_id];
             let entries = network.io_uring_entries_per_worker;
@@ -276,8 +420,7 @@ impl KacheServer {
                         let endpoint = match ServerEndpoint::bind(
                             quic_backend,
                             socket,
-                            certificate_der.as_ref(),
-                            &private_key_der,
+                            worker_tls,
                             max_stream_lanes,
                         )
                         .await
@@ -301,6 +444,7 @@ impl KacheServer {
                         let result = run_selected_endpoint(
                             endpoint,
                             &worker_cache,
+                            &worker_access_policy,
                             request_timeout,
                             max_stream_lanes,
                             stop_rx,
@@ -427,6 +571,7 @@ fn shutdown_cache(cache: Arc<ThreadedKvkache>) -> Result<()> {
 async fn run_selected_endpoint(
     endpoint: ServerEndpoint,
     cache: &ThreadedKvkache,
+    access_policy: &AccessPolicy,
     request_timeout: Duration,
     max_stream_lanes: usize,
     stop: AsyncReceiver<()>,
@@ -434,15 +579,39 @@ async fn run_selected_endpoint(
     match endpoint {
         #[cfg(feature = "quic-quinn")]
         ServerEndpoint::Quinn(endpoint) => {
-            run_network_worker(endpoint, cache, request_timeout, max_stream_lanes, stop).await
+            run_network_worker(
+                endpoint,
+                cache,
+                access_policy,
+                request_timeout,
+                max_stream_lanes,
+                stop,
+            )
+            .await
         }
         #[cfg(feature = "quic-noq")]
         ServerEndpoint::Noq(endpoint) => {
-            run_network_worker(endpoint, cache, request_timeout, max_stream_lanes, stop).await
+            run_network_worker(
+                endpoint,
+                cache,
+                access_policy,
+                request_timeout,
+                max_stream_lanes,
+                stop,
+            )
+            .await
         }
         #[cfg(feature = "quic-quiche")]
         ServerEndpoint::Quiche(endpoint) => {
-            run_network_worker(endpoint, cache, request_timeout, max_stream_lanes, stop).await
+            run_network_worker(
+                endpoint,
+                cache,
+                access_policy,
+                request_timeout,
+                max_stream_lanes,
+                stop,
+            )
+            .await
         }
     }
 }
@@ -450,6 +619,7 @@ async fn run_selected_endpoint(
 async fn run_network_worker<E: TransportEndpoint>(
     endpoint: E,
     cache: &ThreadedKvkache,
+    access_policy: &AccessPolicy,
     request_timeout: Duration,
     max_stream_lanes: usize,
     stop: AsyncReceiver<()>,
@@ -464,7 +634,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                 incoming = incoming => {
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming, cache, request_timeout, max_stream_lanes,
+                        incoming, cache, access_policy, request_timeout, max_stream_lanes,
                     ));
                 }
                 _ = stopping => break,
@@ -478,7 +648,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                 incoming = incoming => {
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming, cache, request_timeout, max_stream_lanes,
+                        incoming, cache, access_policy, request_timeout, max_stream_lanes,
                     ));
                 }
                 _ = completed => {}
@@ -495,11 +665,21 @@ async fn run_network_worker<E: TransportEndpoint>(
 async fn serve_incoming<I: TransportIncoming>(
     incoming: I,
     cache: &ThreadedKvkache,
+    access_policy: &AccessPolicy,
     request_timeout: Duration,
     max_stream_lanes: usize,
 ) {
     if let Ok(connection) = incoming.connect().await {
-        serve_connection(connection, cache, request_timeout, max_stream_lanes).await;
+        let administrator =
+            access_policy.permits_administration(connection.peer_certificate().as_ref());
+        serve_connection(
+            connection,
+            cache,
+            administrator,
+            request_timeout,
+            max_stream_lanes,
+        )
+        .await;
     }
 }
 
@@ -507,6 +687,7 @@ async fn serve_incoming<I: TransportIncoming>(
 async fn serve_connection<C: TransportConnection>(
     connection: C,
     cache: &ThreadedKvkache,
+    administrator: bool,
     request_timeout: Duration,
     max_stream_lanes: usize,
 ) {
@@ -519,7 +700,13 @@ async fn serve_connection<C: TransportConnection>(
         if streams.is_empty() {
             match connection.accept_bi().await {
                 Ok((send, receive)) => {
-                    streams.push(serve_stream(send, receive, cache, request_timeout));
+                    streams.push(serve_stream(
+                        send,
+                        receive,
+                        cache,
+                        administrator,
+                        request_timeout,
+                    ));
                 }
                 Err(_) => break,
             }
@@ -530,7 +717,13 @@ async fn serve_connection<C: TransportConnection>(
             select! {
                 incoming = incoming => match incoming {
                     Ok((send, receive)) => {
-                        streams.push(serve_stream(send, receive, cache, request_timeout));
+                        streams.push(serve_stream(
+                            send,
+                            receive,
+                            cache,
+                            administrator,
+                            request_timeout,
+                        ));
                     }
                     Err(_) => break,
                 },
@@ -546,6 +739,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
     cache: &ThreadedKvkache,
+    administrator: bool,
     request_timeout: Duration,
 ) {
     loop {
@@ -586,7 +780,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Ok(request) => {
                 match compio::runtime::time::timeout(
                     request_timeout,
-                    execute_request(cache, request),
+                    execute_request(cache, request, administrator),
                 )
                 .await
                 {
@@ -614,7 +808,11 @@ async fn write_response<S: SendStream>(
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
-async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response {
+async fn execute_request(
+    cache: &ThreadedKvkache,
+    request: Request,
+    administrator: bool,
+) -> Response {
     let Request {
         opcode,
         client_key_digest,
@@ -656,6 +854,12 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
                     Vec::new(),
                 )
             }),
+        Opcode::Stats if !administrator => {
+            return response(
+                Status::Forbidden,
+                b"STATS requires administrator authorization".to_vec(),
+            );
+        }
         Opcode::Stats => cache.stats_async().await.map(|workers| {
             let workers = workers
                 .into_iter()
@@ -667,6 +871,12 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
                 format!(r#"{{"storage":"ssd","workers":[{workers}]}}"#).into_bytes(),
             )
         }),
+        Opcode::Sync if !administrator => {
+            return response(
+                Status::Forbidden,
+                b"SYNC requires administrator authorization".to_vec(),
+            );
+        }
         Opcode::Sync => cache
             .sync_async()
             .await
@@ -718,8 +928,19 @@ fn response_with_value_flags(
 pub enum ServerError {
     #[error("cache failed: {0}")]
     Cache(#[from] KvError),
+    #[error(
+        "production TLS and client authentication are required to bind {0}; configure [tls] or explicitly select insecure development mode"
+    )]
+    ProductionTlsRequired(SocketAddr),
+    #[error("production TLS cannot be combined with insecure development mode")]
+    ConflictingSecurityModes,
     #[error("certificate generation failed: {0}")]
     Certificate(#[from] rcgen::Error),
+    #[error("TLS identity file {path} is invalid: {message}")]
+    TlsIdentity {
+        path: std::path::PathBuf,
+        message: String,
+    },
     #[error("TLS configuration failed: {0}")]
     Tls(#[from] rustls::Error),
     #[error("QUIC transport failed: {0}")]
