@@ -484,14 +484,14 @@ impl ThreadedKvkache {
             }
             let storage_key = self.storage_key(operation.client_key_digest());
             let worker = self.owner(&storage_key);
-            let started = std::time::Instant::now();
-            let response = match operation {
+            let (response, started) = match operation {
                 BenchmarkOperation::Get(_) => {
                     let (response_tx, response_rx) = channel::bounded(1);
                     let request = WorkerRequest::Get {
                         storage_key,
                         response: response_tx,
                     };
+                    let started = std::time::Instant::now();
                     self.workers[worker]
                         .sender
                         .send_timeout(
@@ -499,7 +499,7 @@ impl ThreadedKvkache {
                             Duration::from_micros(self.config.timeouts.input_max_time_us),
                         )
                         .map_err(|_| KvError::Timeout("benchmark request input"))?;
-                    BenchmarkResponse::Get(response_rx)
+                    (BenchmarkResponse::Get(response_rx), started)
                 }
                 BenchmarkOperation::Set(_, value) => {
                     let (response_tx, response_rx) = channel::bounded(1);
@@ -509,6 +509,7 @@ impl ThreadedKvkache {
                         options: SetOptions::NONE,
                         response: response_tx,
                     };
+                    let started = std::time::Instant::now();
                     self.workers[worker]
                         .sender
                         .send_timeout(
@@ -516,7 +517,7 @@ impl ThreadedKvkache {
                             Duration::from_micros(self.config.timeouts.input_max_time_us),
                         )
                         .map_err(|_| KvError::Timeout("benchmark request input"))?;
-                    BenchmarkResponse::Set(response_rx)
+                    (BenchmarkResponse::Set(response_rx), started)
                 }
                 BenchmarkOperation::Delete(_) => {
                     let (response_tx, response_rx) = channel::bounded(1);
@@ -524,6 +525,7 @@ impl ThreadedKvkache {
                         storage_key,
                         response: response_tx,
                     };
+                    let started = std::time::Instant::now();
                     self.workers[worker]
                         .sender
                         .send_timeout(
@@ -531,7 +533,7 @@ impl ThreadedKvkache {
                             Duration::from_micros(self.config.timeouts.input_max_time_us),
                         )
                         .map_err(|_| KvError::Timeout("benchmark request input"))?;
-                    BenchmarkResponse::Delete(response_rx)
+                    (BenchmarkResponse::Delete(response_rx), started)
                 }
             };
             pending.push_back(PendingBenchmarkRequest { response, started });

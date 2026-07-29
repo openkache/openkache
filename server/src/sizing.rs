@@ -261,7 +261,8 @@ impl SizingRequest {
         }
 
         Err(KvError::InvalidConfig(
-            "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD".into(),
+            "resource budgets cannot fit one SG within the modeled memory and storage limits; increase RAM or SSD"
+                .into(),
         ))
     }
 }
