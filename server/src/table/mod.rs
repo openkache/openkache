@@ -374,6 +374,32 @@ impl Table {
         (self.front_table.len() + self.back_table.len()) * SUBTABLE_BYTES
     }
 
+    pub(crate) fn checkpoint_bytes(&self) -> [&[u8]; 2] {
+        [
+            subtable_bytes(&self.front_table),
+            subtable_bytes(&self.back_table),
+        ]
+    }
+
+    pub(crate) fn checkpoint_bytes_mut(&mut self) -> [&mut [u8]; 2] {
+        [
+            subtable_bytes_mut(&mut self.front_table),
+            subtable_bytes_mut(&mut self.back_table),
+        ]
+    }
+
+    pub(crate) fn restored_entry_count(&self) -> usize {
+        self.front_table
+            .iter()
+            .map(|subtable| subtable.entry_count(&self.front_subtable_layout))
+            .chain(
+                self.back_table
+                    .iter()
+                    .map(|subtable| subtable.entry_count(&self.back_subtable_layout)),
+            )
+            .sum()
+    }
+
     fn table_coordinates(&self, storage_key: &StorageKey) -> (usize, usize, u16) {
         let storage_key = storage_key.as_bytes();
         let prefix = u128::from_le_bytes(storage_key[..16].try_into().unwrap())
@@ -412,5 +438,27 @@ impl Table {
             second.0
         );
         [first, second]
+    }
+}
+
+fn subtable_bytes(subtables: &[Subtable]) -> &[u8] {
+    // SAFETY: Subtable is a contiguous, repr(C) wrapper around exactly
+    // SUBTABLE_BYTES initialized bytes.
+    unsafe {
+        std::slice::from_raw_parts(
+            subtables.as_ptr().cast::<u8>(),
+            subtables.len() * SUBTABLE_BYTES,
+        )
+    }
+}
+
+fn subtable_bytes_mut(subtables: &mut [Subtable]) -> &mut [u8] {
+    // SAFETY: the mutable slice exclusively borrows contiguous Subtables, each
+    // containing exactly SUBTABLE_BYTES initialized bytes.
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            subtables.as_mut_ptr().cast::<u8>(),
+            subtables.len() * SUBTABLE_BYTES,
+        )
     }
 }

@@ -166,9 +166,16 @@ impl KacheServer {
         let generated = rcgen::generate_simple_self_signed(["localhost".to_string()])?;
         let certificate_der = generated.cert.der().clone();
         let private_key_der = generated.signing_key.serialize_der();
-        let sockets = bind_reuse_port_sockets(address, network.worker_count)?;
+        let mut cache = ThreadedKvkache::start(config)?;
+        let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
+            Ok(sockets) => sockets,
+            Err(error) => {
+                cache.shutdown()?;
+                return Err(error.into());
+            }
+        };
         let local_addr = sockets[0].local_addr()?;
-        let cache = Arc::new(ThreadedKvkache::start(config)?);
+        let cache = Arc::new(cache);
         Ok(Self {
             sockets,
             local_addr,

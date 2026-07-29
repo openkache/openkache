@@ -26,9 +26,11 @@ mod worker;
 pub use worker::*;
 
 pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
+pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
 const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
 const SERVER_KEY_VERSION: u32 = 1;
 const SERVER_KEY_FILE_BYTES: usize = 64;
+const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -90,13 +92,17 @@ impl ThreadedKvkache {
         });
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
-        Self::start_with_server_secret(config, server_secret)
+        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
+        Self::start_with_server_secret(config, server_secret, allow_checkpoint)
     }
 
     fn start_with_server_key(
         config: crate::config::AppConfig,
         server_key: [u8; 32],
     ) -> Result<Self> {
+        config.validate()?;
+        fs::create_dir_all(&config.storage.directory)?;
+        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
         let mut id = [0; 16];
         id.copy_from_slice(&server_key[..16]);
         Self::start_with_server_secret(
@@ -105,12 +111,14 @@ impl ThreadedKvkache {
                 id,
                 key: server_key,
             },
+            allow_checkpoint,
         )
     }
 
     fn start_with_server_secret(
         config: crate::config::AppConfig,
         server_secret: ServerSecret,
+        allow_checkpoint: bool,
     ) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
@@ -164,6 +172,7 @@ impl ThreadedKvkache {
                             shard_config,
                             storage_key_id,
                             resource_guard,
+                            allow_checkpoint,
                         )
                         .await
                         {
@@ -661,25 +670,90 @@ impl ThreadedKvkache {
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
-        for thread_id in 0..self.workers.len() {
-            match self.request(thread_id, |response| WorkerRequest::Shutdown { response })? {
-                WorkerResponse::Shutdown => {}
-                response => {
-                    return Err(KvError::Worker(format!(
+        let mut responses = Vec::with_capacity(self.workers.len());
+        let mut shutdown_error = None;
+        for worker in &self.workers {
+            let (response_tx, response_rx) = channel::bounded(1);
+            if worker
+                .sender
+                .send(WorkerRequest::Shutdown {
+                    response: response_tx,
+                })
+                .is_err()
+                && shutdown_error.is_none()
+            {
+                shutdown_error = Some(KvError::Worker(
+                    "worker request queue disconnected during shutdown".into(),
+                ));
+            } else {
+                responses.push(response_rx);
+            }
+        }
+        for response in responses {
+            match response.recv() {
+                Ok(Ok(WorkerResponse::Shutdown)) => {}
+                Ok(Ok(response)) if shutdown_error.is_none() => {
+                    shutdown_error = Some(KvError::Worker(format!(
                         "unexpected shutdown response: {response:?}"
                     )));
                 }
+                Ok(Err(error)) if shutdown_error.is_none() => {
+                    shutdown_error = Some(error);
+                }
+                Err(_) if shutdown_error.is_none() => {
+                    shutdown_error = Some(KvError::Worker(
+                        "worker response queue disconnected during shutdown".into(),
+                    ));
+                }
+                _ => {}
             }
         }
         for worker in &mut self.workers {
-            if let Some(thread) = worker.thread.take() {
-                thread
-                    .join()
-                    .map_err(|_| KvError::Worker("worker thread panicked".into()))?;
+            if let Some(thread) = worker.thread.take()
+                && thread.join().is_err()
+                && shutdown_error.is_none()
+            {
+                shutdown_error = Some(KvError::Worker("worker thread panicked".into()));
             }
         }
+        if let Some(error) = shutdown_error {
+            return Err(error);
+        }
+        finish_storage_run(&self.config.storage.directory)?;
         Ok(())
     }
+}
+
+pub(crate) fn begin_storage_run(directory: &Path) -> Result<bool> {
+    let path = directory.join(RUNNING_MARKER_FILE);
+    let allow_checkpoint = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => false,
+        Ok(_) => {
+            return Err(KvError::Worker(format!(
+                "running marker {} must be a regular file",
+                path.display()
+            )));
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)?;
+    file.write_all(RUNNING_MARKER_MAGIC)?;
+    file.sync_all()?;
+    fs::File::open(directory)?.sync_all()?;
+    Ok(allow_checkpoint)
+}
+
+pub(crate) fn finish_storage_run(directory: &Path) -> Result<()> {
+    fs::remove_file(directory.join(RUNNING_MARKER_FILE))?;
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
 }
 
 pub(crate) fn load_or_create_server_secret(
