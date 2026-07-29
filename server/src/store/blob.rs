@@ -7,8 +7,12 @@
 
 use compio::fs::File;
 
+use super::{ResourceGuard, open_direct_file, read_exact_direct, write_all_direct};
+use crate::BUCKET_BYTES;
+use crate::buffer::DirectIoBuffer;
+use crate::config::Config;
+use crate::error::{KvError, Result};
 use crate::types::STORAGE_KEY_BYTES;
-use crate::*;
 
 pub(crate) const BLOB_ITEM_THRESHOLD_BYTES: usize = 2 * 1024;
 pub(crate) const BLOB_REF_BYTES: usize = 8;

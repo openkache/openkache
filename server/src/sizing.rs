@@ -219,6 +219,26 @@ impl SizingRequest {
             if table_memory_bytes > table_memory_budget_bytes {
                 continue;
             }
+            let storage_metadata_bytes = modeled_storage_metadata_bytes(&config)?;
+            let storage_request_queue_bytes = modeled_storage_request_queue_bytes(&config)?;
+            let storage_read_buffer_bytes = modeled_storage_read_buffer_bytes(&config)?;
+            let network_value_budget_bytes = modeled_network_value_budget_bytes(&config)?;
+            let modeled_resident_bytes = [
+                table_memory_bytes,
+                storage_metadata_bytes,
+                storage_request_queue_bytes,
+                storage_read_buffer_bytes,
+                network_value_budget_bytes,
+            ]
+            .into_iter()
+            .try_fold(0u64, |total, bytes| {
+                total.checked_add(bytes).ok_or_else(|| {
+                    KvError::InvalidConfig("modeled resident memory size overflowed".into())
+                })
+            })?;
+            if modeled_resident_bytes > self.memory_bytes {
+                continue;
+            }
 
             return Ok(SizingPlan {
                 config,
@@ -230,13 +250,19 @@ impl SizingRequest {
                 planned_key_capacity,
                 table_memory_bytes,
                 table_memory_budget_bytes,
+                storage_metadata_bytes,
+                storage_request_queue_bytes,
+                storage_read_buffer_bytes,
+                network_value_budget_bytes,
+                modeled_resident_bytes,
                 storage_file_bytes,
                 storage_budget_bytes,
             });
         }
 
         Err(KvError::InvalidConfig(
-            "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD".into(),
+            "resource budgets cannot fit one SG within the modeled memory and storage limits; increase RAM or SSD"
+                .into(),
         ))
     }
 }
@@ -444,10 +470,71 @@ pub struct SizingPlan {
     pub table_memory_bytes: u64,
     /// Maximum Table allocation admitted by the planner.
     pub table_memory_budget_bytes: u64,
+    /// Host-wide resident SG commit, occupancy, and Blob-usage metadata.
+    pub storage_metadata_bytes: u64,
+    /// Host-wide payload capacity of bounded storage-worker request queues.
+    pub storage_request_queue_bytes: u64,
+    /// Host-wide storage read buffers at the configured maximum concurrency.
+    pub storage_read_buffer_bytes: u64,
+    /// Host-wide request and GET-response byte budget across network workers.
+    pub network_value_budget_bytes: u64,
+    /// Sum of modeled Table, storage metadata, queue slots, read buffers, and network budgets.
+    pub modeled_resident_bytes: u64,
     /// Host-wide Segment, control-page, and Blob file address space.
     pub storage_file_bytes: u64,
     /// Maximum storage address space admitted by the planner.
     pub storage_budget_bytes: u64,
+}
+
+fn modeled_storage_metadata_bytes(config: &AppConfig) -> Result<u64> {
+    checked_product(
+        [
+            config.runtime.thread_count as u64,
+            config.storage.segments_per_thread as u64,
+            (std::mem::size_of::<Option<crate::store::SegmentCommit>>()
+                + std::mem::size_of::<bool>()
+                + 2 * std::mem::size_of::<u64>()) as u64,
+        ],
+        "storage metadata memory",
+    )
+}
+
+fn modeled_storage_request_queue_bytes(config: &AppConfig) -> Result<u64> {
+    let slots_per_worker = config
+        .io_uring
+        .batch_size
+        .saturating_mul(config.io_uring.max_inflight_per_worker)
+        .max(64);
+    checked_product(
+        [
+            config.runtime.thread_count as u64,
+            slots_per_worker as u64,
+            crate::runtime::worker_request_slot_bytes() as u64,
+        ],
+        "storage request queue memory",
+    )
+}
+
+fn modeled_storage_read_buffer_bytes(config: &AppConfig) -> Result<u64> {
+    checked_product(
+        [
+            config.runtime.thread_count as u64,
+            config.io_uring.max_inflight_per_worker as u64,
+            BUCKET_BYTES as u64,
+        ],
+        "storage read buffer memory",
+    )
+}
+
+fn modeled_network_value_budget_bytes(config: &AppConfig) -> Result<u64> {
+    checked_product(
+        [
+            config.network.worker_count as u64,
+            config.network.max_inflight_value_mib_per_worker as u64,
+            MIB,
+        ],
+        "network value budget memory",
+    )
 }
 
 fn percent_of(value: u64, percent: u64, name: &str) -> Result<u64> {

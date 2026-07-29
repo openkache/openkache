@@ -8,44 +8,37 @@ use std::time::Duration;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::{ClientKeyDigest, SetOptions};
 
+use crate::StorageKey;
 use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
+use crate::config::IoUringConfig;
+use crate::error::{KvError, Result};
+use crate::store::{Kvkache, SetOutcome};
 use crate::types::EncodedValue;
-use crate::*;
 
 pub(super) enum WorkerRequest {
     Get {
         storage_key: StorageKey,
-        response: Sender<Result<WorkerResponse>>,
+        response: Sender<Result<Option<EncodedValue>>>,
     },
     Set {
         storage_key: StorageKey,
         value: EncodedValue,
         options: SetOptions,
-        response: Sender<Result<WorkerResponse>>,
+        response: Sender<Result<SetOutcome>>,
     },
     Delete {
         storage_key: StorageKey,
-        response: Sender<Result<WorkerResponse>>,
+        response: Sender<Result<bool>>,
     },
     Stats {
-        response: Sender<Result<WorkerResponse>>,
+        response: Sender<Result<String>>,
     },
     Sync {
-        response: Sender<Result<WorkerResponse>>,
+        response: Sender<Result<()>>,
     },
     Shutdown {
-        response: Sender<Result<WorkerResponse>>,
+        response: Sender<Result<()>>,
     },
-}
-
-#[derive(Debug)]
-pub(super) enum WorkerResponse {
-    Value(Option<EncodedValue>),
-    Set(SetOutcome),
-    Deleted(bool),
-    Stats(String),
-    Synced,
-    Shutdown,
 }
 
 #[derive(Debug)]
@@ -92,16 +85,14 @@ impl BenchmarkBatchStats {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum BenchmarkResponseKind {
-    Get,
-    Set,
-    Delete,
+pub(super) enum BenchmarkResponse {
+    Get(Receiver<Result<Option<EncodedValue>>>),
+    Set(Receiver<Result<SetOutcome>>),
+    Delete(Receiver<Result<bool>>),
 }
 
 pub(super) struct PendingBenchmarkRequest {
-    pub(super) response: Receiver<Result<WorkerResponse>>,
-    pub(super) kind: BenchmarkResponseKind,
+    pub(super) response: BenchmarkResponse,
     pub(super) started: std::time::Instant,
 }
 
@@ -175,7 +166,7 @@ async fn process_worker_batch(
                     pending.push(get(storage_key, response));
                 }
                 while let Some((response, result)) = pending.next().await {
-                    let _ = response.send(result.map(WorkerResponse::Value));
+                    let _ = response.send(result);
                 }
             }
             WorkerRequest::Set {
@@ -188,7 +179,7 @@ async fn process_worker_batch(
                 .await
             {
                 Ok(outcome) => {
-                    let _ = response.send(Ok(WorkerResponse::Set(outcome)));
+                    let _ = response.send(Ok(outcome));
                 }
                 Err(error) => {
                     let _ = response.send(Err(error));
@@ -199,7 +190,7 @@ async fn process_worker_batch(
                 response,
             } => match cache.delete(&storage_key).await {
                 Ok(deleted) => {
-                    let _ = response.send(Ok(WorkerResponse::Deleted(deleted)));
+                    let _ = response.send(Ok(deleted));
                 }
                 Err(error) => {
                     let _ = response.send(Err(error));
@@ -207,14 +198,10 @@ async fn process_worker_batch(
             },
             WorkerRequest::Stats { response } => {
                 let cpu = unsafe { libc::sched_getcpu() };
-                let _ = response.send(Ok(WorkerResponse::Stats(format!(
-                    "cpu_id={cpu} {}",
-                    cache.stats()
-                ))));
+                let _ = response.send(Ok(format!("cpu_id={cpu} {}", cache.stats())));
             }
             WorkerRequest::Sync { response } => {
-                let result = cache.sync().await.map(|()| WorkerResponse::Synced);
-                let _ = response.send(result);
+                let _ = response.send(cache.sync().await);
             }
             WorkerRequest::Shutdown { response } => {
                 shutdown_response = Some(response);
@@ -241,7 +228,7 @@ async fn process_worker_batch(
     }
 
     if let Some(response) = shutdown_response {
-        let _ = response.send(Ok(WorkerResponse::Shutdown));
+        let _ = response.send(Ok(()));
         return Ok(true);
     }
     Ok(false)
