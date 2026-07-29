@@ -1,4 +1,4 @@
-//! Node-API adapter for the runtime-independent OpenKache Rust client.
+//! Node-API adapter for the OpenKache client on Node.js, Bun, and Deno.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -58,7 +58,7 @@ pub struct NativeValueEnvelope {
     pub payload: Uint8Array,
 }
 
-/// Closable Node-API handle around one reusable Rust client.
+/// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
     client: RwLock<Option<Arc<Client>>>,
@@ -135,7 +135,7 @@ impl NativeClient {
     /// * `encoding` - Portable codec identifier.
     /// * `type_name` - Codec-defined logical type name.
     /// * `payload` - Exact codec-specific bytes.
-    /// * `condition` - Optional `nx` or `xx` existence condition.
+    /// * `condition` - Optional `if_absent` or `if_present` existence condition.
     /// * `ttl_ms` - Optional positive relative lifetime in milliseconds.
     ///
     /// # Returns
@@ -226,7 +226,7 @@ impl NativeClient {
     }
 }
 
-/// Connects a Node-API client using the shared Rust implementation.
+/// Connects Node.js, Bun, or Deno using the shared Rust implementation.
 ///
 /// # Errors
 ///
@@ -342,10 +342,10 @@ fn parse_private_key(bytes: &[u8]) -> Result<PrivateKeyDer<'static>> {
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     match condition {
         None => Ok(SetCondition::None),
-        Some("nx") => Ok(SetCondition::Nx),
-        Some("xx") => Ok(SetCondition::Xx),
+        Some("if_absent") => Ok(SetCondition::IfAbsent),
+        Some("if_present") => Ok(SetCondition::IfPresent),
         Some(value) => Err(invalid_argument(format!(
-            "condition must be nx or xx, got {value}"
+            "condition must be if_absent or if_present, got {value}"
         ))),
     }
 }

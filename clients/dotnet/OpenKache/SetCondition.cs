@@ -12,8 +12,8 @@ public enum SetCondition
     None,
 
     /// <summary>Store the value only when the key does not exist.</summary>
-    Nx,
+    IfAbsent,
 
     /// <summary>Store the value only when the key already exists.</summary>
-    Xx,
+    IfPresent,
 }

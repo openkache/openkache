@@ -79,6 +79,10 @@ envelope records the encoding and logical type so `get` can select the decoder.
 Its optional generic parameter documents the expected application shape.
 Properties whose value is `undefined` are omitted by the JSON codec.
 
+Use `{ condition: "if_absent" }` to create without overwriting an existing key,
+or `{ condition: "if_present" }` to update without creating a missing key.
+Unsatisfied conditions return `"not_stored"`.
+
 Big integers should use decimal strings. Binary fields should use an
 application-selected base64 string representation. Use `set_raw` and `get_raw`
 when the entire value is binary or uses another shared serialization format.

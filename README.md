@@ -49,9 +49,9 @@ Large values are automatically compressed with zstd before storage and decompres
 
 ### 📚 Multi-language SDKs
 
-Implemented client libraries are available for Rust, TypeScript on Node.js, and
-.NET. TypeScript and JavaScript applications share the TypeScript package,
-which calls the production Rust client through Node-API so transport,
+Implemented client libraries are available for Rust, TypeScript and JavaScript
+on Node.js, Bun, and Deno, and .NET. JavaScript runtimes share the TypeScript
+package, which calls the production Rust client through Node-API so transport,
 compression, and encryption behavior stay identical. Package scaffolds for
 Python, Go, Java, Kotlin, C, C++, Swift, and Dart are available under
 [`clients/`](./clients/README.md) for future Rust-backed bindings.
@@ -74,11 +74,11 @@ The server listens on `127.0.0.1:4433`, stores shard files under
 self-signed certificate to
 `target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
 `SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/2` QUIC
-protocol. `SET` accepts an optional millisecond TTL and atomic `NX` or `XX`
-existence condition. Expired values are treated as absent immediately, while
-their SSD space is reclaimed when the containing Segment Group is reused.
-`SYNC` flushes each SSD worker before acknowledging the request. Pass
-`--port <port>` only when overriding the default port, or pass
+protocol. `SET` accepts an optional millisecond TTL and atomic `if_absent` or
+`if_present` existence condition. Expired values are treated as absent
+immediately, while their SSD space is reclaimed when the containing Segment
+Group is reused. `SYNC` flushes each SSD worker before acknowledging the
+request. Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
 
 The default loopback endpoint accepts unauthenticated clients and grants them
@@ -349,7 +349,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/rust/` | Rust client SDK over QUIC |
-| `clients/typescript/` | TypeScript client backed by Rust through Node-API |
+| `clients/typescript/` | Node.js, Bun, and Deno client backed by Rust through Node-API |
 | `clients/dotnet/` | Managed .NET client over QUIC |
 
 

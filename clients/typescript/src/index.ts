@@ -61,7 +61,7 @@ export interface Client_Timeouts {
 }
 
 /**
- * Connection settings for the Rust-backed Node.js client.
+ * Connection settings for the Rust-backed Node.js, Bun, and Deno client.
  */
 export interface Client_Options {
   /** Server UDP socket address, such as `127.0.0.1:4433`. */
@@ -93,8 +93,8 @@ export type Set_Outcome = "created" | "replaced" | "not_stored"
  * Optional TTL and atomic existence condition for `set`.
  */
 export interface Set_Options {
-  /** Store only when the key is absent (`nx`) or present (`xx`). */
-  readonly condition?: "nx" | "xx"
+  /** Store only when the key is absent (`if_absent`) or present (`if_present`). */
+  readonly condition?: "if_absent" | "if_present"
   /** Positive relative lifetime in milliseconds. */
   readonly ttl_ms?: number
 }
@@ -128,7 +128,7 @@ export class OpenKache_Error extends Error {
 }
 
 /**
- * Promise-based client backed by the shared Rust transport through Node-API.
+ * Promise-based Node.js, Bun, and Deno client backed by Rust through Node-API.
  */
 export class OpenKache_Client {
   readonly #native_client: Native_Client
@@ -145,7 +145,7 @@ export class OpenKache_Client {
   }
 
   /**
-   * Connects through the packaged Node-API adapter without blocking the JavaScript event loop.
+   * Connects Node.js, Bun, or Deno through the packaged asynchronous Node-API adapter.
    *
    * @param options - Address, trust, mTLS identity, encryption, and compression settings.
    * @returns A connected client that reuses one QUIC connection.
@@ -235,7 +235,7 @@ export class OpenKache_Client {
    * @typeParam Value - Object shape to store.
    * @param key - Exact non-empty string or binary cache key.
    * @param value - Plain object accepted by a registered codec or built-in JSON.
-   * @param options - Optional TTL and `nx` or `xx` existence condition.
+   * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
    * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
    */
@@ -289,7 +289,7 @@ export class OpenKache_Client {
    *
    * @param key - Exact non-empty string or binary cache key.
    * @param value - Bytes to compress, encrypt, and store; empty values are supported.
-   * @param options - Optional TTL and `nx` or `xx` existence condition.
+   * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
    * @throws {OpenKache_Error} When validation, transport, or storage fails.
    */
@@ -500,10 +500,12 @@ function validate_value_length(value: Uint8Array): void {
 function validate_set_options(options: Set_Options): void {
   if (
     options.condition !== undefined &&
-    options.condition !== "nx" &&
-    options.condition !== "xx"
+    options.condition !== "if_absent" &&
+    options.condition !== "if_present"
   ) {
-    throw new OpenKache_Error("condition must be nx or xx")
+    throw new OpenKache_Error(
+      "condition must be if_absent or if_present",
+    )
   }
   if (
     options.ttl_ms !== undefined &&

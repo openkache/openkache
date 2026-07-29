@@ -1470,8 +1470,8 @@ impl PendingItem {
 fn set_condition_allows(condition: SetCondition, current_live: bool) -> bool {
     match condition {
         SetCondition::None => true,
-        SetCondition::Nx => !current_live,
-        SetCondition::Xx => current_live,
+        SetCondition::IfAbsent => !current_live,
+        SetCondition::IfPresent => current_live,
     }
 }
 

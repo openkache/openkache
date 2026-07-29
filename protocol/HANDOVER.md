@@ -3,9 +3,9 @@
 ## Current status
 
 Protocol v2 defines binary frames for `PING`, `GET`, `SET`, `DELETE`, `STATS`,
-and `SYNC`. `SET` supports an optional millisecond TTL and the atomic `NX` and
-`XX` existence conditions. The Rust client and server share these types
-directly.
+and `SYNC`. `SET` supports an optional millisecond TTL and the atomic
+`if_absent` and `if_present` existence conditions. The Rust client and server
+share these types directly.
 
 ## Architecture
 
@@ -16,8 +16,8 @@ status codes keep cache misses separate from protocol or server errors.
 `SET` encodes its options in the high bits of the request value-length word.
 When the TTL bit is present, an unsigned 8-byte relative TTL in milliseconds
 appears after the key digest and before the value. A zero TTL is invalid.
-`NX` stores only when the key is absent, while `XX` stores only when the key is
-present. An expired key is absent for both conditions.
+`if_absent` stores only when the key is absent, while `if_present` stores only
+when the key is present. An expired key is absent for both conditions.
 
 The SSD item format is version 2. Persistent items keep their existing layout;
 expiring items use a distinct kind and store an 8-byte absolute Unix

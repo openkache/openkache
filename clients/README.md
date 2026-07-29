@@ -9,7 +9,7 @@ transport instead of implementing the wire or security protocols again.
 | Language | Path | Status |
 |---|---|---|
 | Rust | `rust/` | Implemented core client |
-| TypeScript / JavaScript | `typescript/` | Implemented Node-API SDK |
+| TypeScript / JavaScript | `typescript/` | Node.js, Bun, and Deno Node-API SDK |
 | C# / .NET | `dotnet/` | Implemented managed client |
 | Python | `python/` | Package scaffold |
 | Go | `go/` | Package scaffold |
@@ -47,5 +47,5 @@ implemented.
 ## Configuration
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters
-under `target/native/`. Other scaffolded clients choose their runtime integration
-when implemented.
+for Node.js, Bun, and Deno under `target/native/`. Other scaffolded clients
+choose their runtime integration when implemented.

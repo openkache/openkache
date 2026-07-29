@@ -35,8 +35,8 @@ Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
 Clients encode KV keys as the 32-byte SHA-256 digest of the exact user-key
 bytes. The server rejects every other key length. Values and response payloads
 are limited to 64 MiB. Servers may enforce a smaller operational item limit.
-`SET` uses request length flag bits for an optional
-positive millisecond TTL and the mutually exclusive `NX` and `XX` conditions.
+`SET` uses request length flag bits for an optional positive millisecond TTL
+and the mutually exclusive `if_absent` and `if_present` conditions.
 `STATS` and `SYNC` return `Forbidden` when the authenticated client lacks
 administrator authorization.
 The 8-byte relative TTL appears immediately before the value when present.

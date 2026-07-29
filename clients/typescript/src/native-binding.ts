@@ -1,5 +1,5 @@
 /**
- * Runtime loading and typed contract for the packaged Node-API adapter.
+ * Node.js, Bun, and Deno loading contract for the packaged Node-API adapter.
  */
 
 import { createRequire } from "node:module"
@@ -37,7 +37,7 @@ export interface Native_Client {
   set(
     key: Uint8Array,
     value: Uint8Array,
-    condition?: "nx" | "xx",
+    condition?: "if_absent" | "if_present",
     ttl_ms?: number,
   ): Promise<string>
   set_value(
@@ -45,7 +45,7 @@ export interface Native_Client {
     encoding: string,
     type_name: string,
     payload: Uint8Array,
-    condition?: "nx" | "xx",
+    condition?: "if_absent" | "if_present",
     ttl_ms?: number,
   ): Promise<string>
   delete(key: Uint8Array): Promise<boolean>
@@ -61,7 +61,7 @@ interface Native_Module {
 const REQUIRE = createRequire(import.meta.url)
 
 /**
- * Loads a Node-API adapter by path or selects the packaged platform artifact.
+ * Loads the Node.js, Bun, or Deno Node-API adapter for the current platform.
  *
  * @param native_path - Optional custom `.node` adapter path.
  * @returns The semantic native client module.

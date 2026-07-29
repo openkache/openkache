@@ -47,7 +47,7 @@ var outcome = await client.SetAsync(
     Encoding.UTF8.GetBytes("hello"),
     new SetOptions
     {
-        Condition = SetCondition.Nx,
+        Condition = SetCondition.IfAbsent,
         TimeToLive = TimeSpan.FromMinutes(5),
     });
 var value = await client.GetAsync("greeting");
@@ -56,11 +56,12 @@ await client.SyncAsync();
 var deleted = await client.DeleteAsync("greeting");
 ```
 
-`SetAsync` reports `Created`, `Replaced`, or `NotStored` when an `Nx` or `Xx`
-condition fails. A positive `TimeToLive` is rounded up to the next millisecond.
-Expired keys are treated as missing. `GetAsync` returns `null` for a missing
-key, and `DeleteAsync` returns whether the key existed. String keys are encoded
-as UTF-8; binary overloads preserve exact key bytes.
+`SetAsync` reports `NotStored` when an `IfAbsent` or `IfPresent` condition
+fails; otherwise it reports `Created` or `Replaced`. A positive `TimeToLive` is
+rounded up to the next millisecond. Expired keys are treated as missing.
+`GetAsync` returns `null` for a missing key, and `DeleteAsync` returns whether
+the key existed. String keys are encoded as UTF-8; binary overloads preserve
+exact key bytes.
 
 ## Protocol and configuration
 
