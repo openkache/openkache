@@ -1,10 +1,7 @@
 /**
- * Runtime-neutral envelope and codec registry for cross-language values.
+ * Runtime-neutral codec registry for cross-language values.
  */
 
-const ENVELOPE_MAGIC = Uint8Array.of(0x4f, 0x4b, 0x56, 0x01)
-const ENVELOPE_HEADER_BYTES = 8
-const MAX_METADATA_BYTES = 0xffff
 const ENCODING_PATTERN = /^[a-z][a-z0-9.-]{0,63}$/
 const JSON_ENCODING = "json"
 const TEXT_ENCODER = new TextEncoder()
@@ -17,6 +14,18 @@ export interface Encoded_Value {
   /** Cross-language type identifier, such as `acme.profile.v1`. */
   readonly type_name: string
   /** Codec-specific bytes stored inside the OpenKache value envelope. */
+  readonly payload: Uint8Array
+}
+
+/**
+ * Codec metadata and payload passed to the Rust value-envelope implementation.
+ */
+export interface Value_Envelope {
+  /** Stable codec identifier, such as `json`, `protobuf`, or `flatbuffers`. */
+  readonly encoding: string
+  /** Codec-defined logical type stored with the payload. */
+  readonly type_name: string
+  /** Exact codec-specific payload bytes. */
   readonly payload: Uint8Array
 }
 
@@ -92,10 +101,10 @@ export class Value_Codec_Registry {
    * Encodes a regular object using one custom codec or JSON fallback.
    *
    * @param value - Regular JavaScript object supplied to `set`.
-   * @returns Versioned, self-describing OpenKache value bytes.
+   * @returns Codec metadata and payload for the Rust value-envelope encoder.
    * @throws {Error} When codec selection is ambiguous or encoding fails.
    */
-  encode(value: object): Uint8Array {
+  encode(value: object): Value_Envelope {
     if (!is_regular_object(value)) {
       throw new Error("value must be a regular JavaScript object")
     }
@@ -109,7 +118,11 @@ export class Value_Codec_Registry {
     }
     const codec = matching_codecs[0]
     if (codec === undefined) {
-      return encode_envelope(JSON_ENCODING, "", encode_json_object(value))
+      return {
+        encoding: JSON_ENCODING,
+        type_name: "",
+        payload: encode_json_object(value),
+      }
     }
     const encoded = codec.encode(value)
     if (!is_regular_object(encoded)) {
@@ -121,18 +134,22 @@ export class Value_Codec_Registry {
     if (!(encoded.payload instanceof Uint8Array)) {
       throw new Error(`codec ${codec.encoding} returned a non-binary payload`)
     }
-    return encode_envelope(codec.encoding, encoded.type_name, encoded.payload)
+    return {
+      encoding: codec.encoding,
+      type_name: encoded.type_name,
+      payload: encoded.payload.slice(),
+    }
   }
 
   /**
-   * Decodes an OpenKache value envelope through its registered codec.
+   * Decodes value-envelope components through the registered codec.
    *
-   * @param bytes - Decrypted and decompressed value bytes.
+   * @param envelope - Metadata and payload decoded by the Rust value-envelope implementation.
    * @returns A regular JavaScript object.
-   * @throws {Error} When the envelope or selected codec is invalid.
+   * @throws {Error} When the metadata, selected codec, or payload is invalid.
    */
-  decode(bytes: Uint8Array): object {
-    const envelope = decode_envelope(bytes)
+  decode(envelope: Value_Envelope): object {
+    validate_envelope(envelope)
     if (envelope.encoding === JSON_ENCODING) {
       if (envelope.type_name.length !== 0) {
         throw new Error("JSON value envelope must not contain a type name")
@@ -151,76 +168,19 @@ export class Value_Codec_Registry {
   }
 }
 
-interface Value_Envelope {
-  readonly encoding: string
-  readonly type_name: string
-  readonly payload: Uint8Array
-}
-
-function encode_envelope(
-  encoding: string,
-  type_name: string,
-  payload: Uint8Array,
-): Uint8Array {
-  validate_encoding(encoding)
-  const encoding_bytes = TEXT_ENCODER.encode(encoding)
-  const type_name_bytes = TEXT_ENCODER.encode(type_name)
-  if (encoding_bytes.byteLength > MAX_METADATA_BYTES) {
-    throw new Error(`value encoding contains too many bytes: ${encoding_bytes.byteLength}`)
+function validate_envelope(envelope: Value_Envelope): void {
+  if (!is_regular_object(envelope)) {
+    throw new Error("decoded value envelope is not an object")
   }
-  if (type_name_bytes.byteLength > MAX_METADATA_BYTES) {
-    throw new Error(`value type name contains too many bytes: ${type_name_bytes.byteLength}`)
+  if (typeof envelope.encoding !== "string") {
+    throw new Error("decoded value envelope has a non-string encoding")
   }
-  const bytes = new Uint8Array(
-    ENVELOPE_HEADER_BYTES +
-      encoding_bytes.byteLength +
-      type_name_bytes.byteLength +
-      payload.byteLength,
-  )
-  bytes.set(ENVELOPE_MAGIC)
-  const view = new DataView(bytes.buffer)
-  view.setUint16(4, encoding_bytes.byteLength)
-  view.setUint16(6, type_name_bytes.byteLength)
-  let offset = ENVELOPE_HEADER_BYTES
-  bytes.set(encoding_bytes, offset)
-  offset += encoding_bytes.byteLength
-  bytes.set(type_name_bytes, offset)
-  offset += type_name_bytes.byteLength
-  bytes.set(payload, offset)
-  return bytes
-}
-
-function decode_envelope(bytes: Uint8Array): Value_Envelope {
-  if (bytes.byteLength < ENVELOPE_HEADER_BYTES) {
-    throw new Error("value does not contain an OpenKache envelope")
+  validate_encoding(envelope.encoding)
+  if (typeof envelope.type_name !== "string") {
+    throw new Error("decoded value envelope has a non-string type name")
   }
-  for (let index = 0; index < ENVELOPE_MAGIC.byteLength; index += 1) {
-    if (bytes[index] !== ENVELOPE_MAGIC[index]) {
-      throw new Error("value contains an unsupported OpenKache envelope")
-    }
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-  const encoding_length = view.getUint16(4)
-  const type_name_length = view.getUint16(6)
-  const payload_offset =
-    ENVELOPE_HEADER_BYTES + encoding_length + type_name_length
-  if (payload_offset > bytes.byteLength) {
-    throw new Error("value contains truncated OpenKache metadata")
-  }
-  const encoding = TEXT_DECODER.decode(
-    bytes.subarray(ENVELOPE_HEADER_BYTES, ENVELOPE_HEADER_BYTES + encoding_length),
-  )
-  validate_encoding(encoding)
-  const type_name = TEXT_DECODER.decode(
-    bytes.subarray(
-      ENVELOPE_HEADER_BYTES + encoding_length,
-      payload_offset,
-    ),
-  )
-  return {
-    encoding,
-    type_name,
-    payload: bytes.slice(payload_offset),
+  if (!(envelope.payload instanceof Uint8Array)) {
+    throw new Error("decoded value envelope has a non-binary payload")
   }
 }
 

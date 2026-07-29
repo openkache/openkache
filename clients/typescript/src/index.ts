@@ -6,11 +6,13 @@ import {
 import {
   Value_Codec_Registry,
   type Value_Codec,
+  type Value_Envelope,
 } from "./value-codec.js"
 
 export type {
   Encoded_Value,
   Value_Codec,
+  Value_Envelope,
 } from "./value-codec.js"
 
 const MAX_VALUE_BYTES = 64 * 1024 * 1024
@@ -212,10 +214,16 @@ export class OpenKache_Client {
   async get<Value extends object = Record<string, unknown>>(
     key: string | Uint8Array,
   ): Promise<Value | undefined> {
-    const bytes = await this.get_raw(key)
-    if (bytes === undefined) return undefined
+    this.#assert_open()
+    let envelope: Value_Envelope | null
     try {
-      return this.#value_codecs.decode(bytes) as Value
+      envelope = await this.#native_client.get_value(owned_key_bytes(key))
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+    if (envelope === null) return undefined
+    try {
+      return this.#value_codecs.decode(envelope) as Value
     } catch (error) {
       throw new OpenKache_Error(`value decoding failed: ${error_message(error)}`, error)
     }
@@ -237,14 +245,26 @@ export class OpenKache_Client {
     options: Set_Options = {},
   ): Promise<Set_Outcome> {
     validate_set_options(options)
-    let bytes: Uint8Array
+    let envelope: Value_Envelope
     try {
-      bytes = this.#value_codecs.encode(value)
+      envelope = this.#value_codecs.encode(value)
     } catch (error) {
       throw new OpenKache_Error(`value encoding failed: ${error_message(error)}`, error)
     }
-    validate_value_length(bytes)
-    return this.#set_owned_bytes(key, bytes, options)
+    this.#assert_open()
+    try {
+      const outcome = await this.#native_client.set_value(
+        owned_key_bytes(key),
+        envelope.encoding,
+        envelope.type_name,
+        envelope.payload,
+        options.condition,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
   }
 
   /**

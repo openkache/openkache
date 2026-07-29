@@ -10,6 +10,7 @@ use napi_derive::napi;
 use openkache_client::value::{Compression, ENCRYPTION_KEY_BYTES, ValueCodec, ZstandardOptions};
 use openkache_client::{
     Client, ClientIdentity, ClientOptions, ClientTimeouts, SetCondition, SetOptions, SetOutcome,
+    value_envelope,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 
@@ -48,6 +49,15 @@ pub struct NativeClientOptions {
     pub request_timeout_ms: f64,
 }
 
+/// Decoded components of a canonical OpenKache value envelope.
+#[napi(object)]
+pub struct NativeValueEnvelope {
+    pub encoding: String,
+    #[napi(js_name = "type_name")]
+    pub type_name: String,
+    pub payload: Uint8Array,
+}
+
 /// Closable Node-API handle around one reusable Rust client.
 #[napi]
 pub struct NativeClient {
@@ -72,6 +82,38 @@ impl NativeClient {
             .map_err(native_error)
     }
 
+    /// Retrieves and decodes a canonical value envelope.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact application key bytes.
+    ///
+    /// # Returns
+    ///
+    /// Decoded codec metadata and payload, or `None` when the key is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client is closed, transport or value transformation fails, or
+    /// the stored bytes are not a supported value envelope.
+    #[napi(js_name = "get_value")]
+    pub async fn get_value(&self, key: Uint8Array) -> Result<Option<NativeValueEnvelope>> {
+        let Some(bytes) = self
+            .active_client()?
+            .get(key.as_ref())
+            .await
+            .map_err(native_error)?
+        else {
+            return Ok(None);
+        };
+        let envelope = value_envelope::decode(&bytes).map_err(native_error)?;
+        Ok(Some(NativeValueEnvelope {
+            encoding: envelope.encoding.to_owned(),
+            type_name: envelope.type_name.to_owned(),
+            payload: Uint8Array::new(envelope.payload.to_vec()),
+        }))
+    }
+
     /// Stores exact bytes with an optional existence condition and TTL.
     #[napi]
     pub async fn set(
@@ -81,23 +123,42 @@ impl NativeClient {
         condition: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        let condition = parse_condition(condition.as_deref())?;
-        let ttl_ms = ttl_ms
-            .map(|value| parse_u64(value, "ttl_ms", false))
-            .transpose()?;
-        self.active_client()?
-            .set_owned_with_options(
-                key.as_ref(),
-                value.as_ref().to_vec(),
-                SetOptions::new(condition, ttl_ms),
-            )
+        self.store(key.as_ref(), value.as_ref().to_vec(), condition, ttl_ms)
             .await
-            .map(|outcome| match outcome {
-                SetOutcome::Created => "created".to_string(),
-                SetOutcome::Replaced => "replaced".to_string(),
-                SetOutcome::NotStored => "not_stored".to_string(),
-            })
-            .map_err(native_error)
+    }
+
+    /// Encodes and stores a canonical value envelope.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact application key bytes.
+    /// * `encoding` - Portable codec identifier.
+    /// * `type_name` - Codec-defined logical type name.
+    /// * `payload` - Exact codec-specific bytes.
+    /// * `condition` - Optional `nx` or `xx` existence condition.
+    /// * `ttl_ms` - Optional positive relative lifetime in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// The server's created, replaced, or not-stored outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when envelope metadata or options are invalid, the value is too large,
+    /// the client is closed, or the operation fails.
+    #[napi(js_name = "set_value")]
+    pub async fn set_value(
+        &self,
+        key: Uint8Array,
+        encoding: String,
+        type_name: String,
+        payload: Uint8Array,
+        condition: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let value = value_envelope::encode(&encoding, &type_name, payload.as_ref())
+            .map_err(native_error)?;
+        self.store(key.as_ref(), value, condition, ttl_ms).await
     }
 
     /// Deletes a key and reports whether it existed.
@@ -133,6 +194,28 @@ impl NativeClient {
 }
 
 impl NativeClient {
+    async fn store(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+        condition: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let condition = parse_condition(condition.as_deref())?;
+        let ttl_ms = ttl_ms
+            .map(|value| parse_u64(value, "ttl_ms", false))
+            .transpose()?;
+        self.active_client()?
+            .set_owned_with_options(key, value, SetOptions::new(condition, ttl_ms))
+            .await
+            .map(|outcome| match outcome {
+                SetOutcome::Created => "created".to_string(),
+                SetOutcome::Replaced => "replaced".to_string(),
+                SetOutcome::NotStored => "not_stored".to_string(),
+            })
+            .map_err(native_error)
+    }
+
     fn active_client(&self) -> Result<Arc<Client>> {
         self.client
             .read()

@@ -7,11 +7,12 @@ do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
 
 ## Purpose
 
-Applications use regular JavaScript objects while OpenKache keeps transport and
-security behavior in one Rust implementation. The SDK wraps encoded objects in
-the shared [OpenKache value envelope](../VALUE_FORMAT.md), compresses beneficial
-values, and encrypts every value before it leaves the client. The server stores
-opaque bytes without parsing, decrypting, or decompressing them.
+Applications use regular JavaScript objects while OpenKache keeps envelope
+framing, transport, and security behavior in one Rust implementation. JavaScript
+codecs produce metadata and payload bytes; Rust wraps them in the shared
+[OpenKache value envelope](../VALUE_FORMAT.md), compresses beneficial values,
+and encrypts every value before it leaves the client. The server stores opaque
+bytes without parsing, decrypting, or decompressing them.
 
 ## Commands
 
@@ -87,10 +88,11 @@ application format. A codec owns its schema registry, while each stored envelope
 carries its encoding and type name. Schemas are therefore registered once
 instead of being passed to every `get` and `set`.
 
-The envelope, codec registry, and JSON fallback use only web-standard APIs and
-contain no Node.js imports. A separate browser configuration typechecks this
-subpath against DOM and ES declarations without loading Node declarations.
-Empty raw values are valid.
+The codec registry and JSON fallback use only web-standard APIs and contain no
+Node.js imports. Binary envelope framing stays in the Rust core instead of
+duplicating its constants in TypeScript. A separate browser configuration
+typechecks this subpath against DOM and ES declarations without loading Node
+declarations. Empty raw values are valid.
 
 The runtime-neutral layer is available from
 `@openkache/client/value-codec`. The package can be installed on any platform;

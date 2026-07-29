@@ -24,12 +24,27 @@ export interface Native_Client_Options {
   readonly request_timeout_ms: number
 }
 
+interface Native_Value_Envelope {
+  readonly encoding: string
+  readonly type_name: string
+  readonly payload: Uint8Array
+}
+
 export interface Native_Client {
   ping(): Promise<void>
   get(key: Uint8Array): Promise<Uint8Array | null>
+  get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
   set(
     key: Uint8Array,
     value: Uint8Array,
+    condition?: "nx" | "xx",
+    ttl_ms?: number,
+  ): Promise<string>
+  set_value(
+    key: Uint8Array,
+    encoding: string,
+    type_name: string,
+    payload: Uint8Array,
     condition?: "nx" | "xx",
     ttl_ms?: number,
   ): Promise<string>
