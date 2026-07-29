@@ -1,6 +1,8 @@
 # OpenKache TypeScript Client
 
-The TypeScript client is a thin Bun wrapper over the production Rust client.
+The TypeScript package is the canonical SDK for TypeScript and JavaScript
+applications. It is currently a thin Bun wrapper over the production Rust
+client.
 It uses the same QUIC transport, wire protocol, Zstandard codec, and
 XChaCha20-Poly1305 value encryption as Rust instead of maintaining a second
 protocol implementation.

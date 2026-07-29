@@ -115,6 +115,7 @@ let value = client.get(b"mykey").await?;
 ## Next steps
 
 - See [Architecture](../README.md#-architecture) for how OpenKache works
+- See the client status and binding architecture in `clients/README.md`
 - See the Rust client SDK under `clients/rust/`
 - See the TypeScript client SDK under `clients/typescript/`
 - See the .NET client SDK under `clients/dotnet/`

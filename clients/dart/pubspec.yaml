@@ -1,0 +1,13 @@
+name: openkache
+description: Thin Dart binding for the OpenKache Rust client.
+version: 0.1.0
+repository: https://github.com/openkache/openkache
+issue_tracker: https://github.com/openkache/openkache/issues
+
+environment:
+  sdk: ^3.8.0
+
+topics:
+  - cache
+  - ffi
+  - openkache
