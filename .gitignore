@@ -6,5 +6,9 @@
 # Rust output
 target/
 
+# Managed client output
+clients/dotnet/**/bin/
+clients/dotnet/**/obj/
+
 # Local research papers
 papers/

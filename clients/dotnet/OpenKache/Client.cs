@@ -1,143 +1,351 @@
-// Copyright (C) 2026 OpenStd Inc.
+// SPDX-FileCopyrightText: 2026 OpenStd Inc.
+// SPDX-License-Identifier: Apache-2.0
 
-#nullable enable
-using System;
+using System.Net.Quic;
 using System.Net.Sockets;
 using System.Text;
 
 namespace OpenKache;
 
-public class Client : IDisposable
+/// <summary>
+/// An asynchronous, thread-safe client for the OpenKache QUIC protocol.
+/// </summary>
+public sealed class Client : IAsyncDisposable
 {
-    private TcpClient? _tcp;
-    private NetworkStream? _stream;
-    private readonly string _host;
-    private readonly int _port;
-    private readonly int _timeoutMs;
-    private byte[] _readBuf = new byte[4096];
-    private int _readLen = 0;
+    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
-    public Client(string host = "127.0.0.1", int port = 7123, int timeoutMs = 5000)
+    private readonly QuicTransport _transport;
+    private readonly TimeSpan _operationTimeout;
+    private int _disposed;
+
+    private Client(QuicTransport transport, TimeSpan operationTimeout)
     {
-        _host = host;
-        _port = port;
-        _timeoutMs = timeoutMs;
+        _transport = transport;
+        _operationTimeout = operationTimeout;
     }
 
-    public void Connect()
+    /// <summary>
+    /// Connects to an OpenKache server and authenticates its TLS certificate.
+    /// </summary>
+    /// <param name="host">Server host or IP address.</param>
+    /// <param name="port">Server UDP port.</param>
+    /// <param name="serverName">DNS name required by the server certificate.</param>
+    /// <param name="trustedCertificateDer">Exact DER certificate trusted for this connection.</param>
+    /// <param name="options">Optional stream-pool and timeout settings.</param>
+    /// <param name="cancellationToken">Cancels connection establishment.</param>
+    /// <returns>A connected client that owns one reusable QUIC connection.</returns>
+    /// <exception cref="OpenKacheException">
+    /// Thrown when QUIC is unavailable, configuration is invalid, certificate validation fails,
+    /// or the connection cannot be established.
+    /// </exception>
+    public static async ValueTask<Client> ConnectAsync(
+        string host,
+        int port,
+        string serverName,
+        ReadOnlyMemory<byte> trustedCertificateDer,
+        ClientOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
-        if (_tcp?.Connected == true) return;
-        _tcp = new TcpClient();
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
+        ArgumentException.ThrowIfNullOrWhiteSpace(serverName);
+        ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(port, 65_535);
+        if (trustedCertificateDer.IsEmpty)
+        {
+            throw new ArgumentException(
+                "A trusted DER certificate is required.",
+                nameof(trustedCertificateDer));
+        }
+
+        options ??= new ClientOptions();
+        options.Validate();
+
+        using var timeout = CreateTimeout(
+            cancellationToken,
+            options.OperationTimeout);
         try
         {
-            var task = _tcp.ConnectAsync(_host, _port);
-            if (!task.Wait(_timeoutMs))
-            {
-                _tcp.Dispose();
-                _tcp = null;
-                throw new OpenKacheException("TIMEOUT", "Connection timeout");
-            }
+            var transport = await QuicTransport.ConnectAsync(
+                host,
+                port,
+                serverName,
+                trustedCertificateDer.ToArray(),
+                options.MaximumStreamLanes,
+                timeout.Token).ConfigureAwait(false);
+            return new Client(transport, options.OperationTimeout);
         }
-        catch (AggregateException ae)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            _tcp.Dispose();
-            _tcp = null;
-            var inner = ae.InnerException;
-            throw new OpenKacheException("CONNECTION_REFUSED", inner?.Message ?? ae.Message);
+            throw new OpenKacheException(
+                "TIMEOUT",
+                $"Connection exceeded {options.OperationTimeout}.");
         }
-        _stream = _tcp.GetStream();
-        _stream.ReadTimeout = _timeoutMs;
-        _stream.WriteTimeout = _timeoutMs;
-    }
-
-    private string Send(string cmd)
-    {
-        if (_stream == null || _tcp?.Connected != true)
-            throw new OpenKacheException("CONNECTION_REFUSED", "Not connected");
-
-        var data = Encoding.UTF8.GetBytes(cmd + "\n");
-        _stream.Write(data, 0, data.Length);
-
-        while (true)
+        catch (PlatformNotSupportedException error)
         {
-            for (int i = 0; i < _readLen; i++)
-            {
-                if (_readBuf[i] == '\n')
-                {
-                    var line = Encoding.UTF8.GetString(_readBuf, 0, i).Trim();
-                    _readLen -= i + 1;
-                    Array.Copy(_readBuf, i + 1, _readBuf, 0, _readLen);
-                    return line;
-                }
-            }
-            int n = _stream.Read(_readBuf, _readLen, _readBuf.Length - _readLen);
-            if (n <= 0)
-                throw new OpenKacheException("CONNECTION_REFUSED", "Connection closed");
-            _readLen += n;
+            throw new OpenKacheException("QUIC_UNAVAILABLE", error.Message, error);
+        }
+        catch (Exception error) when (
+            error is QuicException
+                or SocketException
+                or System.Security.Authentication.AuthenticationException)
+        {
+            throw new OpenKacheException("CONNECTION_FAILED", error.Message, error);
         }
     }
 
-    public string? Get(string key)
+    /// <summary>
+    /// Verifies that the peer speaks the expected OpenKache protocol.
+    /// </summary>
+    public async ValueTask PingAsync(CancellationToken cancellationToken = default)
     {
-        var resp = Send($"GET {key}");
-        if (resp == "NOT_FOUND") return null;
-        if (resp.StartsWith("OK ")) return resp[3..];
-        throw new OpenKacheException("PROTOCOL_ERROR", $"Unexpected response: {resp}");
-    }
-
-    public void Set(string key, string value)
-    {
-        var resp = Send($"SET {key} {value}");
-        if (resp != "OK")
-            throw new OpenKacheException("PROTOCOL_ERROR", $"Unexpected response: {resp}");
-    }
-
-    public bool Delete(string key)
-    {
-        var resp = Send($"DEL {key}");
-        return resp switch
+        var response = await RequestAsync(
+            Protocol.Opcode.Ping,
+            ReadOnlyMemory<byte>.Empty,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken).ConfigureAwait(false);
+        ExpectStatus("PING", response.Status, Protocol.Status.Ok);
+        if (!response.Payload.AsSpan().SequenceEqual("PONG"u8))
         {
-            "OK" => true,
-            "NOT_FOUND" => false,
-            _ => throw new OpenKacheException("PROTOCOL_ERROR", $"Unexpected response: {resp}")
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "PING returned an unexpected payload.");
+        }
+    }
+
+    /// <summary>
+    /// Retrieves the bytes stored for an exact binary key.
+    /// </summary>
+    /// <returns>The stored bytes, or <see langword="null"/> when the key is absent.</returns>
+    public async ValueTask<byte[]?> GetAsync(
+        ReadOnlyMemory<byte> key,
+        CancellationToken cancellationToken = default)
+    {
+        var response = await RequestAsync(
+            Protocol.Opcode.Get,
+            key,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken).ConfigureAwait(false);
+        return response.Status switch
+        {
+            Protocol.Status.Ok => DecodePlaintextValue(response),
+            Protocol.Status.NotFound => null,
+            _ => throw UnexpectedStatus("GET", response.Status),
         };
     }
 
-    public bool Ping()
+    /// <summary>
+    /// Retrieves the bytes stored for a UTF-8 key.
+    /// </summary>
+    /// <returns>The stored bytes, or <see langword="null"/> when the key is absent.</returns>
+    public ValueTask<byte[]?> GetAsync(
+        string key,
+        CancellationToken cancellationToken = default)
     {
-        var resp = Send("PING");
-        if (resp == "PONG") return true;
-        throw new OpenKacheException("PROTOCOL_ERROR", $"Unexpected response: {resp}");
+        ArgumentNullException.ThrowIfNull(key);
+        return GetAsync(Encoding.UTF8.GetBytes(key), cancellationToken);
     }
 
-    public void Flush()
+    /// <summary>
+    /// Stores exact bytes under an exact binary key.
+    /// </summary>
+    /// <returns>Whether the operation created or replaced the key.</returns>
+    public async ValueTask<SetOutcome> SetAsync(
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> value,
+        CancellationToken cancellationToken = default)
     {
-        var resp = Send("FLUSH");
-        if (resp != "OK")
-            throw new OpenKacheException("PROTOCOL_ERROR", $"Unexpected response: {resp}");
+        var response = await RequestAsync(
+            Protocol.Opcode.Set,
+            key,
+            value,
+            cancellationToken).ConfigureAwait(false);
+        return response.Status switch
+        {
+            Protocol.Status.Created => SetOutcome.Created,
+            Protocol.Status.Replaced => SetOutcome.Replaced,
+            _ => throw UnexpectedStatus("SET", response.Status),
+        };
     }
 
-    public void Close()
+    /// <summary>
+    /// Stores exact bytes under a UTF-8 key.
+    /// </summary>
+    /// <returns>Whether the operation created or replaced the key.</returns>
+    public ValueTask<SetOutcome> SetAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        CancellationToken cancellationToken = default)
     {
-        _stream?.Close();
-        _tcp?.Close();
-        _stream = null;
-        _tcp = null;
+        ArgumentNullException.ThrowIfNull(key);
+        return SetAsync(Encoding.UTF8.GetBytes(key), value, cancellationToken);
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Deletes an exact binary key.
+    /// </summary>
+    /// <returns><see langword="true"/> when the key existed.</returns>
+    public async ValueTask<bool> DeleteAsync(
+        ReadOnlyMemory<byte> key,
+        CancellationToken cancellationToken = default)
     {
-        Close();
+        var response = await RequestAsync(
+            Protocol.Opcode.Delete,
+            key,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken).ConfigureAwait(false);
+        return response.Status switch
+        {
+            Protocol.Status.Deleted => true,
+            Protocol.Status.NotFound => false,
+            _ => throw UnexpectedStatus("DELETE", response.Status),
+        };
+    }
+
+    /// <summary>
+    /// Deletes a UTF-8 key.
+    /// </summary>
+    /// <returns><see langword="true"/> when the key existed.</returns>
+    public ValueTask<bool> DeleteAsync(
+        string key,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return DeleteAsync(Encoding.UTF8.GetBytes(key), cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns the server statistics payload as UTF-8 JSON.
+    /// </summary>
+    public async ValueTask<string> StatsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var response = await RequestAsync(
+            Protocol.Opcode.Stats,
+            ReadOnlyMemory<byte>.Empty,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken).ConfigureAwait(false);
+        ExpectStatus("STATS", response.Status, Protocol.Status.Ok);
+        try
+        {
+            return StrictUtf8.GetString(response.Payload);
+        }
+        catch (DecoderFallbackException error)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "STATS returned invalid UTF-8.",
+                error);
+        }
+    }
+
+    /// <summary>
+    /// Requests a durability barrier from the server.
+    /// </summary>
+    public async ValueTask SyncAsync(CancellationToken cancellationToken = default)
+    {
+        var response = await RequestAsync(
+            Protocol.Opcode.Sync,
+            ReadOnlyMemory<byte>.Empty,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken).ConfigureAwait(false);
+        ExpectStatus("SYNC", response.Status, Protocol.Status.Ok);
+    }
+
+    /// <summary>
+    /// Closes the QUIC connection and releases every idle stream lane.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        await _transport.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private static CancellationTokenSource CreateTimeout(
+        CancellationToken cancellationToken,
+        TimeSpan timeout)
+    {
+        var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        source.CancelAfter(timeout);
+        return source;
+    }
+
+    private async ValueTask<Protocol.Response> RequestAsync(
+        Protocol.Opcode opcode,
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> value,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(
+            Volatile.Read(ref _disposed) != 0,
+            this);
+        var frame = Protocol.EncodeRequest(opcode, key.Span, value.Span);
+        using var timeout = CreateTimeout(cancellationToken, _operationTimeout);
+        try
+        {
+            var response = await _transport.RequestAsync(
+                frame,
+                timeout.Token).ConfigureAwait(false);
+            if (Protocol.IsError(response.Status))
+            {
+                throw new OpenKacheException(
+                    Protocol.ErrorCode(response.Status),
+                    Encoding.UTF8.GetString(response.Payload));
+            }
+
+            return response;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException(
+                "TIMEOUT",
+                $"{opcode.ToString().ToUpperInvariant()} exceeded {_operationTimeout}.");
+        }
+        catch (OpenKacheException)
+        {
+            throw;
+        }
+        catch (Exception error) when (
+            error is QuicException
+                or IOException
+                or ObjectDisposedException)
+        {
+            throw new OpenKacheException("CONNECTION_FAILED", error.Message, error);
+        }
+    }
+
+    private static byte[] DecodePlaintextValue(Protocol.Response response)
+    {
+        if (response.ValueFlags != Protocol.ValueFlags.None)
+        {
+            throw new OpenKacheException(
+                "UNSUPPORTED_VALUE_ENCODING",
+                "The value is compressed or encrypted. This .NET client currently accepts plaintext values only.");
+        }
+
+        return response.Payload;
+    }
+
+    private static void ExpectStatus(
+        string operation,
+        Protocol.Status actual,
+        Protocol.Status expected)
+    {
+        if (actual != expected)
+        {
+            throw UnexpectedStatus(operation, actual);
+        }
+    }
+
+    private static OpenKacheException UnexpectedStatus(
+        string operation,
+        Protocol.Status status)
+    {
+        return new OpenKacheException(
+            "PROTOCOL_ERROR",
+            $"{operation} returned unexpected status {status}.");
     }
 }
-
-public class OpenKacheException : Exception
-{
-    public string Code { get; }
-
-    public OpenKacheException(string code, string message) : base($"[{code}] {message}")
-    {
-        Code = code;
-    }
-}
-
