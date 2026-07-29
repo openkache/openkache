@@ -427,6 +427,20 @@ async fn execute_command(
                 integer(response, deleted);
             }
         }
+        Some(name) if name.eq_ignore_ascii_case(b"INFO") => match command {
+            [_] => match cache.stats_async().await {
+                Ok(worker_stats) => {
+                    let mut info = Vec::new();
+                    for (worker_id, stats) in worker_stats.into_iter().enumerate() {
+                        writeln!(info, "worker_id={worker_id} {stats}")
+                            .expect("writing to a Vec cannot fail");
+                    }
+                    bulk(response, Some(&info));
+                }
+                Err(cache_error) => resp_cache_error(response, cache_error),
+            },
+            _ => error(response, "wrong number of arguments for INFO"),
+        },
         Some(name)
             if name.eq_ignore_ascii_case(b"SELECT") || name.eq_ignore_ascii_case(b"CLIENT") =>
         {
