@@ -26,8 +26,7 @@ bun run pack:check
 
 `build` generates the JavaScript and declaration files under the ignored
 `dist/` directory. `pack:check` also cross-compiles the static Rust helper and
-previews the complete npm package. Public CI builds these artifacts from source;
-generated output is not committed.
+previews the complete npm package. Generated output is not committed.
 
 The repository uses Bun only for development and release tooling. Published
 applications run the client on Node.js 20 or newer without Bun or runtime npm
