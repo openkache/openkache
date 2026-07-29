@@ -49,9 +49,11 @@ Large values are automatically compressed with zstd before storage and decompres
 
 ### 📚 Multi-language SDKs
 
-First-class client libraries are available for Rust, TypeScript on Bun, and
+Implemented client libraries are available for Rust, TypeScript on Bun, and
 .NET. TypeScript calls the production Rust client through a thin native ABI so
-transport, compression, and encryption behavior stay identical.
+transport, compression, and encryption behavior stay identical. Package
+scaffolds for Python, JavaScript, Go, Java, Kotlin, C, C++, Swift, and Dart are
+available under [`clients/`](./clients/README.md) for future Rust-backed bindings.
 
 ### 📦 Single binary distribution
 
@@ -291,6 +293,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 |---|---|
 | `protocol/` | Shared binary request, response, opcode, and status definitions |
 | `server/` | SSD cache engine plus the runnable QUIC server |
+| `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/typescript/` | Bun client backed by the Rust client ABI |
 | `clients/dotnet/` | Managed .NET client over QUIC |

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openkache"
+version = "0.1.0"
+description = "Thin Python binding for the OpenKache Rust client"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "OpenKache Team" }]
+keywords = ["cache", "openkache", "ssd"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Typing :: Typed",
+]
+
+[tool.setuptools.package-data]
+openkache = ["py.typed"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
