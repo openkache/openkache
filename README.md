@@ -50,10 +50,11 @@ Large values are automatically compressed with zstd before storage and decompres
 ### 📚 Multi-language SDKs
 
 Implemented client libraries are available for Rust, TypeScript on Bun, and
-.NET. TypeScript calls the production Rust client through a thin native ABI so
-transport, compression, and encryption behavior stay identical. Package
-scaffolds for Python, JavaScript, Go, Java, Kotlin, C, C++, Swift, and Dart are
-available under [`clients/`](./clients/README.md) for future Rust-backed bindings.
+.NET. TypeScript and JavaScript applications share the TypeScript package,
+which calls the production Rust client through a thin native ABI so transport,
+compression, and encryption behavior stay identical. Package scaffolds for
+Python, Go, Java, Kotlin, C, C++, Swift, and Dart are available under
+[`clients/`](./clients/README.md) for future Rust-backed bindings.
 
 ### 📦 Single binary distribution
 

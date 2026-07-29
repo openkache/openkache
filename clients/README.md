@@ -9,10 +9,9 @@ ABI unless a platform cannot load the native library.
 | Language | Path | Status |
 |---|---|---|
 | Rust | `rust/` | Implemented core client |
-| TypeScript | `typescript/` | Implemented Bun binding |
+| TypeScript / JavaScript | `typescript/` | Implemented binding; currently uses Bun |
 | C# / .NET | `dotnet/` | Implemented managed client |
 | Python | `python/` | Package scaffold |
-| JavaScript | `javascript/` | Package scaffold |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
