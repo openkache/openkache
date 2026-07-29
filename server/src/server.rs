@@ -55,7 +55,7 @@ impl NetworkWorkerReporter {
         }
     }
 
-    fn startup_failed(mut self, message: String) {
+    pub(crate) fn startup_failed(mut self, message: String) {
         self.phase = NetworkWorkerPhase::Finished;
         self.finished.take();
         if let Some(started) = self.started.take() {
@@ -77,7 +77,7 @@ impl NetworkWorkerReporter {
         reported
     }
 
-    fn finish(mut self, result: std::result::Result<(), String>) {
+    pub(crate) fn finish(mut self, result: std::result::Result<(), String>) {
         self.phase = NetworkWorkerPhase::Finished;
         if let Some(finished) = self.finished.take() {
             let _ = finished.send((self.worker_id, result));
@@ -528,7 +528,7 @@ fn bind_reuse_port_sockets(
     Ok(sockets)
 }
 
-fn shutdown_workers_and_cache(
+pub(crate) fn shutdown_workers_and_cache(
     workers: Vec<(Sender<()>, std::thread::JoinHandle<()>)>,
     cache: Arc<ThreadedKvkache>,
 ) -> Result<()> {
@@ -934,6 +934,8 @@ pub enum ServerError {
     ProductionTlsRequired(SocketAddr),
     #[error("production TLS cannot be combined with insecure development mode")]
     ConflictingSecurityModes,
+    #[error("plaintext RESP is restricted to a loopback address, not {0}")]
+    PlaintextRespRequiresLoopback(SocketAddr),
     #[error("certificate generation failed: {0}")]
     Certificate(#[from] rcgen::Error),
     #[error("TLS identity file {path} is invalid: {message}")]

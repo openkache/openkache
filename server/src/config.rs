@@ -338,7 +338,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         let mut cpu_ids = sorted_allowed_cpu_ids();
-        let network_worker_count = cpu_ids.len().min(2);
+        let network_worker_count = default_network_worker_count(cpu_ids.len());
         let storage_cpu_ids = if cpu_ids.len() > network_worker_count {
             cpu_ids.split_off(network_worker_count)
         } else {
@@ -422,7 +422,18 @@ fn sorted_allowed_cpu_ids() -> Vec<usize> {
     cpu_ids
 }
 
-/// QUIC network workers, each owning one socket, endpoint, and connection set.
+/// Preserves the four-CPU 2/2 baseline and reserves four front-end CPUs only
+/// when at least eight storage CPUs remain.
+pub(crate) const fn default_network_worker_count(cpu_count: usize) -> usize {
+    match cpu_count {
+        0 => 0,
+        1 => 1,
+        2..=11 => 2,
+        _ => 4,
+    }
+}
+
+/// Front-end network workers, each owning one socket and protocol connection set.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
@@ -438,12 +449,12 @@ pub struct NetworkConfig {
 impl Default for NetworkConfig {
     fn default() -> Self {
         let cpu_ids = sorted_allowed_cpu_ids();
-        let worker_count = cpu_ids.len().min(2);
+        let worker_count = default_network_worker_count(cpu_ids.len());
         Self {
             worker_count,
             cpu_ids: cpu_ids.into_iter().take(worker_count).collect(),
             event_interval: 31,
-            io_uring_entries_per_worker: 1_024,
+            io_uring_entries_per_worker: 4_096,
             max_stream_lanes_per_connection: 256,
             sqpoll: false,
             napi_busy_poll: false,
