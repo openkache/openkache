@@ -119,6 +119,37 @@ limit to 64 MiB. Reopen existing storage with the same automatically detected
 layout or explicit sizing overrides because worker count and Segment layout
 changes require cache recreation.
 
+For a resource-sized configuration without TOML, provide the worker CPU count,
+RAM limit, SSD limit, and storage directory. The default `balanced` profile
+models 1 KiB values; `light` models 100-byte values and `heavy` models 2 KiB
+values.
+
+```bash
+cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
+  --cpus 4 \
+  --memory-gib 32 \
+  --storage-gb 2500 \
+  --directory ./openkache-data \
+  --plan
+```
+
+Remove `--plan` to start the server with the displayed sizing result. The
+planner reserves 5% of available SSD space, keeps at least 20% of currently
+available RAM outside the process budget, limits the packed Table to half of
+that budget, and targets 75% of theoretical SG key capacity so updates and
+Tombstones have room.
+
+Sizing is a deterministic capacity estimate, not an adaptive benchmark. It
+inspects cgroup memory headroom and filesystem free space, but does not detect
+filesystem quotas or NVMe performance. Runtime Segment reservation and
+stop-writes thresholds protect the remaining headroom from concurrent resource
+use. `--cpus` selects worker threads but does not impose a process CPU quota;
+use deployment affinity or cgroups for that boundary. `light` and `balanced`
+use 1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that
+limit to 64 MiB. Reuse the same sizing arguments when reopening existing
+storage because worker count and Segment layout changes require cache
+recreation.
+
 ---
 
 ## 🏗️ Architecture
