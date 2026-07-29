@@ -25,6 +25,8 @@ export interface Worker_Connection_Options {
   readonly compression_level: number
   readonly minimum_input_size: number
   readonly minimum_savings: number
+  readonly connect_timeout_ms: number
+  readonly request_timeout_ms: number
   readonly library_path: string
 }
 

@@ -3,12 +3,18 @@
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::value::{Compression, ENCRYPTION_KEY_BYTES, ValueCodec, ZstandardOptions};
-use crate::{Client, ClientOptions, SetCondition, SetOptions, SetOutcome};
+use crate::{
+    Client, ClientOptions, ClientTimeouts, QuicBackend, QuicOptions, SetCondition, SetOptions,
+    SetOutcome,
+};
 
 const RESULT_ERROR: u32 = 0;
 const RESULT_OK: u32 = 1;
@@ -39,7 +45,9 @@ pub struct FfiResult {
 
 /// Opaque TypeScript-owned handle to a dedicated Rust client worker.
 pub struct FfiClient {
-    commands: SyncSender<Command>,
+    commands: flume::Sender<Command>,
+    request_timeout: Duration,
+    shutdown: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -52,6 +60,14 @@ enum Command {
         response: SyncSender<FfiResult>,
     },
     Shutdown,
+}
+
+struct WorkerOptions {
+    address: SocketAddr,
+    server_name: String,
+    certificate: Vec<u8>,
+    value_codec: ValueCodec,
+    timeouts: ClientTimeouts,
 }
 
 impl FfiResult {
@@ -86,26 +102,31 @@ impl FfiClient {
         server_name: String,
         certificate: Vec<u8>,
         value_codec: ValueCodec,
+        timeouts: ClientTimeouts,
     ) -> std::result::Result<Self, String> {
-        let (commands, receiver) = sync_channel(COMMAND_QUEUE_CAPACITY);
+        let (commands, receiver) = flume::bounded(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let options = WorkerOptions {
+            address,
+            server_name,
+            certificate,
+            value_codec,
+            timeouts,
+        };
         let worker = thread::Builder::new()
             .name("openkache-client".to_string())
             .spawn(move || {
-                run_worker(
-                    receiver,
-                    ready_sender,
-                    address,
-                    server_name,
-                    certificate,
-                    value_codec,
-                );
+                run_worker(receiver, ready_sender, options, worker_shutdown);
             })
             .map_err(|error| format!("failed to start client worker: {error}"))?;
 
         match ready_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 commands,
+                request_timeout: timeouts.request,
+                shutdown,
                 worker: Mutex::new(Some(worker)),
             }),
             Ok(Err(error)) => {
@@ -129,24 +150,32 @@ impl FfiClient {
         set_options: SetOptions,
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
-        if let Err(error) = self.commands.send(Command::Execute {
-            operation,
-            key,
-            value,
-            set_options,
-            response,
-        }) {
-            return FfiResult::error(format!("client worker is unavailable: {error}"));
+        let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
+            return FfiResult::error("client request timeout exceeds the platform clock range");
+        };
+        if let Err(error) = self.commands.send_deadline(
+            Command::Execute {
+                operation,
+                key,
+                value,
+                set_options,
+                response,
+            },
+            deadline,
+        ) {
+            return FfiResult::error(format!("client worker queue deadline exceeded: {error}"));
         }
-        receiver.recv().unwrap_or_else(|error| {
-            FfiResult::error(format!("client worker returned no result: {error}"))
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            FfiResult::error(format!("client operation timed out: {error}"))
         })
     }
 }
 
 impl Drop for FfiClient {
     fn drop(&mut self) {
-        let _ = self.commands.send(Command::Shutdown);
+        self.shutdown.store(true, Ordering::Release);
+        let _ = self.commands.try_send(Command::Shutdown);
         if let Ok(worker) = self.worker.get_mut()
             && let Some(worker) = worker.take()
         {
@@ -156,13 +185,18 @@ impl Drop for FfiClient {
 }
 
 fn run_worker(
-    commands: Receiver<Command>,
+    commands: flume::Receiver<Command>,
     ready: SyncSender<std::result::Result<(), String>>,
-    address: SocketAddr,
-    server_name: String,
-    certificate: Vec<u8>,
-    value_codec: ValueCodec,
+    options: WorkerOptions,
+    shutdown: Arc<AtomicBool>,
 ) {
+    let WorkerOptions {
+        address,
+        server_name,
+        certificate,
+        value_codec,
+        timeouts,
+    } = options;
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -183,6 +217,11 @@ fn run_worker(
         ClientOptions {
             value_codec,
             identity: None,
+            quic: QuicOptions {
+                backend: Some(QuicBackend::Compio),
+            },
+            timeouts,
+            ..ClientOptions::default()
         },
     )) {
         Ok(client) => client,
@@ -195,7 +234,10 @@ fn run_worker(
         return;
     }
 
-    while let Ok(command) = commands.recv() {
+    while !shutdown.load(Ordering::Acquire) {
+        let Ok(command) = commands.recv() else {
+            break;
+        };
         match command {
             Command::Execute {
                 operation,
@@ -262,7 +304,7 @@ async fn execute(
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    2
+    3
 }
 
 /// Connects a native client and returns an opaque result.
@@ -285,6 +327,8 @@ pub unsafe extern "C" fn openkache_client_connect(
     compression_level: i32,
     minimum_input_size: usize,
     minimum_savings: usize,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
 ) -> *mut FfiResult {
     boxed_result(catch_result(|| {
         let address = copy_utf8(address, address_length, "address")?;
@@ -321,7 +365,15 @@ pub unsafe extern "C" fn openkache_client_connect(
             }
         }
         .map_err(|error| error.to_string())?;
-        FfiClient::connect(address, server_name, certificate, value_codec).map(FfiResult::connected)
+        if connect_timeout_ms == 0 || request_timeout_ms == 0 {
+            return Err("client timeouts must be greater than zero milliseconds".to_string());
+        }
+        let timeouts = ClientTimeouts {
+            connect: Duration::from_millis(connect_timeout_ms),
+            request: Duration::from_millis(request_timeout_ms),
+        };
+        FfiClient::connect(address, server_name, certificate, value_codec, timeouts)
+            .map(FfiResult::connected)
     }))
 }
 

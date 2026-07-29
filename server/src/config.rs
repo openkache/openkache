@@ -14,6 +14,8 @@ use serde::Deserialize;
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
 
+const DEFAULT_MAX_ITEM_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum BucketSelectionPolicy {
@@ -131,6 +133,7 @@ pub struct Config {
     pub data_path: PathBuf,
     pub segment_size: usize,
     pub blob_segment_size: usize,
+    pub max_item_bytes: usize,
     pub segment_count: usize,
     pub table_capacity: usize,
     pub table_target_load_percent: usize,
@@ -151,6 +154,7 @@ impl Default for Config {
             data_path: PathBuf::from("target/kvkache-v1/kvkache.data"),
             segment_size: 16 * 1024 * 1024,
             blob_segment_size: 64 * 1024 * 1024,
+            max_item_bytes: DEFAULT_MAX_ITEM_BYTES,
             segment_count: 64,
             table_capacity: 10_000_000,
             table_target_load_percent: 88,
@@ -226,6 +230,16 @@ impl Config {
             return Err(KvError::InvalidConfig(
                 "Blob Segment size must be a 4096-byte multiple no larger than u32::MAX".into(),
             ));
+        }
+        if self.max_item_bytes == 0
+            || self.max_item_bytes > self.blob_segment_size
+            || self.max_item_bytes > openkache_protocol::MAX_VALUE_BYTES
+        {
+            return Err(KvError::InvalidConfig(format!(
+                "maximum item size must be between 1 byte and {} bytes",
+                self.blob_segment_size
+                    .min(openkache_protocol::MAX_VALUE_BYTES)
+            )));
         }
         if self
             .blob_segment_size
@@ -431,6 +445,8 @@ pub struct NetworkConfig {
     pub event_interval: usize,
     pub io_uring_entries_per_worker: u32,
     pub max_stream_lanes_per_connection: usize,
+    /// Aggregate request/GET-response bytes admitted concurrently by each network worker.
+    pub max_inflight_value_mib_per_worker: usize,
     pub sqpoll: bool,
     pub napi_busy_poll: bool,
 }
@@ -445,6 +461,7 @@ impl Default for NetworkConfig {
             event_interval: 31,
             io_uring_entries_per_worker: 1_024,
             max_stream_lanes_per_connection: 256,
+            max_inflight_value_mib_per_worker: 256,
             sqpoll: false,
             napi_busy_poll: false,
         }
@@ -525,6 +542,8 @@ pub struct StorageConfig {
     pub segments_per_thread: usize,
     pub segment_size_mib: usize,
     pub blob_segment_size_mib: usize,
+    /// Maximum encoded cache-item size accepted by the server.
+    pub max_item_size_mib: usize,
 }
 
 impl Default for StorageConfig {
@@ -535,6 +554,7 @@ impl Default for StorageConfig {
             segments_per_thread: 4,
             segment_size_mib: 16,
             blob_segment_size_mib: 64,
+            max_item_size_mib: DEFAULT_MAX_ITEM_BYTES / (1024 * 1024),
         }
     }
 }
@@ -597,9 +617,15 @@ impl AppConfig {
             || self.network.io_uring_entries_per_worker == 0
             || self.network.max_stream_lanes_per_connection == 0
             || self.network.max_stream_lanes_per_connection > u32::MAX as usize
+            || self.network.max_inflight_value_mib_per_worker == 0
+            || self
+                .network
+                .max_inflight_value_mib_per_worker
+                .checked_mul(1024 * 1024)
+                .is_none()
         {
             return Err(KvError::InvalidConfig(
-                "network event interval, io_uring entries, and stream lane limit must be non-zero"
+                "network event interval, io_uring entries, stream lane limit, and in-flight value budget must be non-zero"
                     .into(),
             ));
         }
@@ -707,6 +733,27 @@ impl AppConfig {
                 "storage.blob_segment_size_mib is invalid".into(),
             ));
         }
+        if self.storage.max_item_size_mib == 0
+            || self.storage.max_item_size_mib > self.storage.blob_segment_size_mib
+            || self
+                .storage
+                .max_item_size_mib
+                .checked_mul(1024 * 1024)
+                .is_none_or(|bytes| bytes > openkache_protocol::MAX_VALUE_BYTES)
+        {
+            return Err(KvError::InvalidConfig(format!(
+                "storage.max_item_size_mib must be between 1 and {}",
+                self.storage
+                    .blob_segment_size_mib
+                    .min(openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
+            )));
+        }
+        if self.network.max_inflight_value_mib_per_worker < self.storage.max_item_size_mib {
+            return Err(KvError::InvalidConfig(
+                "network.max_inflight_value_mib_per_worker must be at least storage.max_item_size_mib"
+                    .into(),
+            ));
+        }
         let data_names = (0..self.runtime.thread_count)
             .map(|thread_id| expand_thread_pattern(&self.storage.data_file_pattern, thread_id))
             .collect::<HashSet<_>>();
@@ -761,6 +808,7 @@ impl AppConfig {
                 segments_per_thread,
                 segment_size_mib: 16,
                 blob_segment_size_mib: 64,
+                max_item_size_mib: 16,
             },
             table: TableConfig {
                 capacity_per_thread,
@@ -777,6 +825,7 @@ impl AppConfig {
             data_path: self.storage.directory.join(data_name),
             segment_size: self.storage.segment_size_mib * 1024 * 1024,
             blob_segment_size: self.storage.blob_segment_size_mib * 1024 * 1024,
+            max_item_bytes: self.storage.max_item_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,
             table_capacity: self.table.capacity_per_thread,
             table_target_load_percent: self.table.target_load_percent,

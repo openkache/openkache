@@ -15,7 +15,7 @@ import {
 
 declare const self: Worker & { close(): void }
 
-const ABI_VERSION = 2
+const ABI_VERSION = 3
 const EMPTY_BYTES = new Uint8Array()
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
@@ -37,6 +37,8 @@ const NATIVE_SYMBOLS = {
       FFIType.u64_fast,
       FFIType.u8,
       FFIType.i32,
+      FFIType.u64_fast,
+      FFIType.u64_fast,
       FFIType.u64_fast,
       FFIType.u64_fast,
     ],
@@ -151,6 +153,8 @@ function connect(options: Worker_Connection_Options): void {
     options.compression_level,
     options.minimum_input_size,
     options.minimum_savings,
+    options.connect_timeout_ms,
+    options.request_timeout_ms,
   )
   if (result === null) {
     library.close()
