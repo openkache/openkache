@@ -1,36 +1,8 @@
-/**
- * Promise-based Node.js client backed by the shared Rust OpenKache transport.
- */
-
 import {
-  spawn,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process"
-import { fileURLToPath } from "node:url"
-import {
-  decode_helper_error,
-  encode_close_request,
-  encode_connect_request,
-  encode_execute_request,
-  Helper_Response_Decoder,
-  OPERATION_DELETE,
-  OPERATION_GET,
-  OPERATION_PING,
-  OPERATION_SET,
-  OPERATION_STATS,
-  OPERATION_SYNC,
-  RESULT_CONNECTED,
-  RESULT_CREATED,
-  RESULT_DELETED,
-  RESULT_NOT_DELETED,
-  RESULT_NOT_FOUND,
-  RESULT_NOT_STORED,
-  RESULT_OK,
-  RESULT_REPLACED,
-  RESULT_VALUE,
-  type Helper_Connection_Options,
-  type Helper_Response,
-} from "./helper-protocol.js"
+  load_native_module,
+  type Native_Client,
+  type Native_Client_Options,
+} from "./native-binding.js"
 import {
   Value_Codec_Registry,
   type Value_Codec,
@@ -41,29 +13,14 @@ export type {
   Value_Codec,
 } from "./value-codec.js"
 
-const EMPTY_BYTES = new Uint8Array()
 const MAX_VALUE_BYTES = 64 * 1024 * 1024
 const ENCRYPTION_OVERHEAD_BYTES = 40
 const MAX_PLAINTEXT_BYTES = MAX_VALUE_BYTES - ENCRYPTION_OVERHEAD_BYTES
-const MAX_STDERR_BYTES = 64 * 1024
 const TEXT_ENCODER = new TextEncoder()
-const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
-interface Pending_Request {
-  readonly resolve: (response: Helper_Response) => void
-  readonly reject: (error: OpenKache_Error) => void
-}
-
-interface Helper_Channel {
-  readonly decoder: Helper_Response_Decoder
-  readonly pending: Map<number, Pending_Request>
-  closed: boolean
-  stderr: string
-}
-
-const CLIENT_FINALIZER = new FinalizationRegistry<ChildProcessWithoutNullStreams>(
-  (helper): void => {
-    helper.kill()
+const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
+  (native_client): void => {
+    native_client.close()
   },
 )
 
@@ -121,8 +78,8 @@ export interface Client_Options {
   readonly timeouts?: Client_Timeouts
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
-  /** Explicit Rust helper executable path, primarily for custom packaging. */
-  readonly helper_path?: string
+  /** Explicit Node-API adapter path, primarily for custom packaging. */
+  readonly native_path?: string
 }
 
 /**
@@ -151,7 +108,7 @@ export interface Server_Stats {
 }
 
 /**
- * Error returned by client validation, value codecs, helper, transport, or server failures.
+ * Error returned by client validation, value codecs, native transport, or server failures.
  */
 export class OpenKache_Error extends Error {
   readonly kind = "openkache_error" as const
@@ -169,66 +126,28 @@ export class OpenKache_Error extends Error {
 }
 
 /**
- * Promise-based Node.js client that delegates native QUIC work to a Rust helper process.
+ * Promise-based client backed by the shared Rust transport through Node-API.
  */
 export class OpenKache_Client {
-  readonly #helper: ChildProcessWithoutNullStreams
-  readonly #channel: Helper_Channel
+  readonly #native_client: Native_Client
   readonly #value_codecs: Value_Codec_Registry
-  #next_request_id = 1
-  #operation_tail: Promise<void> = Promise.resolve()
   #close_promise: Promise<void> | undefined
   #closed = false
 
   private constructor(
-    helper: ChildProcessWithoutNullStreams,
+    native_client: Native_Client,
     value_codecs: Value_Codec_Registry,
   ) {
-    this.#helper = helper
+    this.#native_client = native_client
     this.#value_codecs = value_codecs
-    const channel: Helper_Channel = {
-      decoder: new Helper_Response_Decoder(),
-      pending: new Map(),
-      closed: false,
-      stderr: "",
-    }
-    this.#channel = channel
-    helper.stdout.on("data", (chunk: Uint8Array): void => {
-      receive_helper_bytes(channel, helper, chunk)
-    })
-    helper.stderr.on("data", (chunk: Uint8Array): void => {
-      channel.stderr = append_stderr(channel.stderr, chunk)
-    })
-    helper.on("error", (error: Error): void => {
-      close_failed_helper(channel, helper, as_openkache_error(error))
-    })
-    helper.on("exit", (code, signal): void => {
-      if (channel.closed) return
-      let truncated_error = ""
-      try {
-        channel.decoder.finish()
-      } catch (error) {
-        truncated_error = `: ${error_message(error)}`
-      }
-      const status = signal === null ? `status ${code ?? "unknown"}` : `signal ${signal}`
-      const stderr =
-        channel.stderr.length === 0 ? "" : `: ${channel.stderr.trim()}`
-      close_failed_helper(
-        channel,
-        helper,
-        new OpenKache_Error(
-          `OpenKache native helper exited with ${status}${stderr}${truncated_error}`,
-        ),
-      )
-    })
   }
 
   /**
-   * Connects through the packaged Rust helper without blocking the Node.js event loop.
+   * Connects through the packaged Node-API adapter without blocking the JavaScript event loop.
    *
    * @param options - Address, trust, mTLS identity, encryption, and compression settings.
    * @returns A connected client that reuses one QUIC connection.
-   * @throws {OpenKache_Error} When configuration, helper startup, TLS, or QUIC fails.
+   * @throws {OpenKache_Error} When configuration, native loading, TLS, or QUIC fails.
    */
   static async connect(options: Client_Options): Promise<OpenKache_Client> {
     validate_options(options)
@@ -241,20 +160,14 @@ export class OpenKache_Client {
         error,
       )
     }
-    const helper_path = options.helper_path ?? default_helper_path()
-    const helper = spawn(helper_path, [], {
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    })
-    const client = new OpenKache_Client(helper, value_codecs)
     const compression = options.compression ?? {}
     const timeouts = options.timeouts ?? {}
-    const helper_options: Helper_Connection_Options = {
+    const native_options: Native_Client_Options = {
       address: options.address,
       server_name: options.server_name ?? "localhost",
-      certificate: options.certificate,
-      identity: options.identity,
-      encryption_key: options.encryption_key,
+      certificate: options.certificate.slice(),
+      identity: owned_identity(options.identity),
+      encryption_key: options.encryption_key.slice(),
       compression_enabled: compression.enabled !== false,
       compression_level: compression.level ?? 1,
       minimum_input_size: compression.minimum_input_size ?? 1_024,
@@ -263,16 +176,12 @@ export class OpenKache_Client {
       request_timeout_ms: timeouts.request_ms ?? 2_000,
     }
     try {
-      const response = await client.#request((request_id): Uint8Array =>
-        encode_connect_request(request_id, helper_options),
-      )
-      if (response.result_kind !== RESULT_CONNECTED) {
-        throw unexpected_result("connect", response.result_kind)
-      }
-      CLIENT_FINALIZER.register(client, helper, client)
+      const native_module = load_native_module(options.native_path)
+      const native_client = await native_module.connect(native_options)
+      const client = new OpenKache_Client(native_client, value_codecs)
+      CLIENT_FINALIZER.register(client, native_client, client)
       return client
     } catch (error) {
-      helper.kill()
       throw as_openkache_error(error)
     }
   }
@@ -284,7 +193,12 @@ export class OpenKache_Client {
    * @throws {OpenKache_Error} When the client is closed or the operation fails.
    */
   async ping(): Promise<void> {
-    await this.#expect_kind(OPERATION_PING, EMPTY_BYTES, RESULT_OK)
+    this.#assert_open()
+    try {
+      await this.#native_client.ping()
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
   }
 
   /**
@@ -341,12 +255,13 @@ export class OpenKache_Client {
    * @throws {OpenKache_Error} When the client is closed or the operation fails.
    */
   async get_raw(key: string | Uint8Array): Promise<Uint8Array | undefined> {
-    const response = await this.#execute(OPERATION_GET, key, EMPTY_BYTES)
-    if (response.result_kind === RESULT_NOT_FOUND) return undefined
-    if (response.result_kind !== RESULT_VALUE) {
-      throw unexpected_result("GET", response.result_kind)
+    this.#assert_open()
+    try {
+      const value = await this.#native_client.get(owned_key_bytes(key))
+      return value === null ? undefined : value
+    } catch (error) {
+      throw as_openkache_error(error)
     }
-    return response.payload
   }
 
   /**
@@ -376,10 +291,12 @@ export class OpenKache_Client {
    * @throws {OpenKache_Error} When the client is closed or the operation fails.
    */
   async delete(key: string | Uint8Array): Promise<boolean> {
-    const response = await this.#execute(OPERATION_DELETE, key, EMPTY_BYTES)
-    if (response.result_kind === RESULT_DELETED) return true
-    if (response.result_kind === RESULT_NOT_DELETED) return false
-    throw unexpected_result("DELETE", response.result_kind)
+    this.#assert_open()
+    try {
+      return await this.#native_client.delete(owned_key_bytes(key))
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
   }
 
   /**
@@ -389,12 +306,15 @@ export class OpenKache_Client {
    * @throws {OpenKache_Error} When authorization, transport, or response validation fails.
    */
   async stats(): Promise<Server_Stats> {
-    const response = await this.#execute(OPERATION_STATS, EMPTY_BYTES, EMPTY_BYTES)
-    if (response.result_kind !== RESULT_VALUE) {
-      throw unexpected_result("STATS", response.result_kind)
+    this.#assert_open()
+    let text: string
+    try {
+      text = await this.#native_client.stats()
+    } catch (error) {
+      throw as_openkache_error(error)
     }
     try {
-      return parse_stats(TEXT_DECODER.decode(response.payload))
+      return parse_stats(text)
     } catch (error) {
       throw new OpenKache_Error(`STATS decoding failed: ${error_message(error)}`, error)
     }
@@ -407,14 +327,18 @@ export class OpenKache_Client {
    * @throws {OpenKache_Error} When authorization, transport, or synchronization fails.
    */
   async sync(): Promise<void> {
-    await this.#expect_kind(OPERATION_SYNC, EMPTY_BYTES, RESULT_OK)
+    this.#assert_open()
+    try {
+      await this.#native_client.sync()
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
   }
 
   /**
-   * Closes the native connection and helper process. Repeated calls are safe.
+   * Closes the native connection. Repeated calls are safe.
    *
-   * @returns A shared promise for helper shutdown.
-   * @throws {OpenKache_Error} When the helper cannot acknowledge shutdown.
+   * @returns A shared promise for native resource release.
    */
   close(): Promise<void> {
     this.#close_promise ??= this.#close_once()
@@ -426,184 +350,54 @@ export class OpenKache_Client {
     bytes: Uint8Array,
     options: Set_Options,
   ): Promise<Set_Outcome> {
-    const response = await this.#execute(OPERATION_SET, key, bytes, options)
-    const outcomes: Readonly<Record<number, Set_Outcome | undefined>> = {
-      [RESULT_CREATED]: "created",
-      [RESULT_REPLACED]: "replaced",
-      [RESULT_NOT_STORED]: "not_stored",
-    }
-    const outcome = outcomes[response.result_kind]
-    if (outcome === undefined) throw unexpected_result("SET", response.result_kind)
-    return outcome
-  }
-
-  async #expect_kind(
-    operation: number,
-    key: Uint8Array,
-    expected_kind: number,
-  ): Promise<void> {
-    const response = await this.#execute(operation, key, EMPTY_BYTES)
-    if (response.result_kind !== expected_kind) {
-      throw unexpected_result("operation", response.result_kind)
-    }
-  }
-
-  #execute(
-    operation: number,
-    key: string | Uint8Array,
-    value: Uint8Array,
-    set_options: Set_Options = {},
-  ): Promise<Helper_Response> {
-    const key_bytes = owned_key_bytes(
-      key,
-      operation === OPERATION_GET ||
-        operation === OPERATION_SET ||
-        operation === OPERATION_DELETE,
-    )
-    const condition: 0 | 1 | 2 =
-      set_options.condition === undefined
-        ? 0
-        : SET_CONDITIONS[set_options.condition]
-    const operation_request = this.#operation_tail.then(
-      (): Promise<Helper_Response> =>
-        this.#request((request_id): Uint8Array =>
-          encode_execute_request(request_id, {
-            operation,
-            condition,
-            ttl_ms: set_options.ttl_ms ?? 0,
-            key: key_bytes,
-            value,
-          }),
-        ),
-    )
-    this.#operation_tail = operation_request.then(
-      (): void => {},
-      (): void => {},
-    )
-    return operation_request
-  }
-
-  #request(
-    encode_request: (request_id: number) => Uint8Array,
-    allow_closing = false,
-  ): Promise<Helper_Response> {
-    if (
-      this.#closed ||
-      this.#channel.closed ||
-      (!allow_closing && this.#close_promise !== undefined)
-    ) {
-      return Promise.reject(new OpenKache_Error("client is closed"))
-    }
-    const request_id = this.#next_request_id
-    this.#next_request_id += 1
-    let frame: Uint8Array
+    this.#assert_open()
     try {
-      frame = encode_request(request_id)
+      const outcome = await this.#native_client.set(
+        owned_key_bytes(key),
+        bytes,
+        options.condition,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
     } catch (error) {
-      return Promise.reject(as_openkache_error(error))
+      throw as_openkache_error(error)
     }
-    return new Promise<Helper_Response>((resolve, reject): void => {
-      this.#channel.pending.set(request_id, { resolve, reject })
-      this.#helper.stdin.write(frame, (error): void => {
-        if (error === null || error === undefined) return
-        const pending = this.#channel.pending.get(request_id)
-        if (pending === undefined) return
-        this.#channel.pending.delete(request_id)
-        pending.reject(as_openkache_error(error))
-      })
-    })
+  }
+
+  #assert_open(): void {
+    if (this.#closed || this.#close_promise !== undefined) {
+      throw new OpenKache_Error("client is closed")
+    }
   }
 
   async #close_once(): Promise<void> {
     try {
-      const response = await this.#request(
-        (request_id): Uint8Array => encode_close_request(request_id),
-        true,
-      )
-      if (response.result_kind !== RESULT_OK) {
-        throw unexpected_result("close", response.result_kind)
-      }
+      this.#native_client.close()
+    } catch (error) {
+      throw as_openkache_error(error)
     } finally {
       this.#closed = true
-      this.#channel.closed = true
       CLIENT_FINALIZER.unregister(this)
-      this.#helper.kill()
-      fail_pending_requests(this.#channel, new OpenKache_Error("client is closed"))
     }
   }
 }
 
-const SET_CONDITIONS: Readonly<Record<NonNullable<Set_Options["condition"]>, 1 | 2>> = {
-  nx: 1,
-  xx: 2,
-}
-
-function receive_helper_bytes(
-  channel: Helper_Channel,
-  helper: ChildProcessWithoutNullStreams,
-  chunk: Uint8Array,
-): void {
-  try {
-    for (const response of channel.decoder.push(chunk)) {
-      receive_helper_response(channel, response)
-    }
-  } catch (error) {
-    close_failed_helper(channel, helper, as_openkache_error(error))
-  }
-}
-
-function receive_helper_response(
-  channel: Helper_Channel,
-  response: Helper_Response,
-): void {
-  const pending = channel.pending.get(response.request_id)
-  if (pending === undefined) return
-  channel.pending.delete(response.request_id)
-  if (response.ok) {
-    pending.resolve(response)
-  } else {
-    try {
-      pending.reject(new OpenKache_Error(decode_helper_error(response.payload)))
-    } catch (error) {
-      pending.reject(as_openkache_error(error))
-    }
-  }
-}
-
-function close_failed_helper(
-  channel: Helper_Channel,
-  helper: ChildProcessWithoutNullStreams,
-  error: OpenKache_Error,
-): void {
-  if (channel.closed) return
-  channel.closed = true
-  helper.kill()
-  fail_pending_requests(channel, error)
-}
-
-function fail_pending_requests(channel: Helper_Channel, error: OpenKache_Error): void {
-  for (const pending of channel.pending.values()) {
-    pending.reject(error)
-  }
-  channel.pending.clear()
-}
-
-function append_stderr(existing: string, chunk: Uint8Array): string {
-  const combined = existing + new TextDecoder().decode(chunk)
-  return combined.length <= MAX_STDERR_BYTES
-    ? combined
-    : combined.slice(combined.length - MAX_STDERR_BYTES)
-}
-
-function owned_key_bytes(
-  key: string | Uint8Array,
-  required: boolean,
-): Uint8Array {
+function owned_key_bytes(key: string | Uint8Array): Uint8Array {
   const bytes = typeof key === "string" ? TEXT_ENCODER.encode(key) : key.slice()
-  if (required && bytes.byteLength === 0) {
+  if (bytes.byteLength === 0) {
     throw new OpenKache_Error("key must not be empty")
   }
   return bytes
+}
+
+function owned_identity(identity: Client_Identity | undefined): Client_Identity | undefined {
+  if (identity === undefined) return undefined
+  return {
+    certificate_chain: identity.certificate_chain.map(
+      (certificate): Uint8Array => certificate.slice(),
+    ),
+    private_key: identity.private_key.slice(),
+  }
 }
 
 function validate_options(options: Client_Options): void {
@@ -619,8 +413,8 @@ function validate_options(options: Client_Options): void {
   if (options.server_name !== undefined && options.server_name.length === 0) {
     throw new OpenKache_Error("server_name must not be empty")
   }
-  if (options.helper_path !== undefined && options.helper_path.length === 0) {
-    throw new OpenKache_Error("helper_path must not be empty")
+  if (options.native_path !== undefined && options.native_path.length === 0) {
+    throw new OpenKache_Error("native_path must not be empty")
   }
   validate_identity(options.identity)
   validate_compression(options.compression)
@@ -727,8 +521,15 @@ function parse_stats(text: string): Server_Stats {
   }
 }
 
-function unexpected_result(operation: string, kind: number): OpenKache_Error {
-  return new OpenKache_Error(`${operation} returned unexpected native result ${kind}`)
+function parse_set_outcome(value: string): Set_Outcome {
+  switch (value) {
+    case "created":
+    case "replaced":
+    case "not_stored":
+      return value
+    default:
+      throw new OpenKache_Error(`SET returned unexpected native outcome ${value}`)
+  }
 }
 
 function as_openkache_error(error: unknown): OpenKache_Error {
@@ -739,19 +540,4 @@ function as_openkache_error(error: unknown): OpenKache_Error {
 
 function error_message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function default_helper_path(): string {
-  if (process.platform !== "linux" || process.arch !== "x64") {
-    throw new OpenKache_Error(
-      `packaged helper supports Linux x64, got ${process.platform} ${process.arch}; ` +
-        "provide helper_path for a custom build",
-    )
-  }
-  return fileURLToPath(
-    new URL(
-      "../target/native/x86_64-unknown-linux-musl/release/openkache-client-helper",
-      import.meta.url,
-    ),
-  )
 }

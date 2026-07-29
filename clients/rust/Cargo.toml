@@ -8,11 +8,6 @@ license = "Apache-2.0"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "openkache-client-helper"
-path = "src/bin/openkache_client_helper.rs"
-required-features = ["quic-quinn"]
-
 [features]
 default = ["quic-quinn"]
 ffi = ["quic-compio"]

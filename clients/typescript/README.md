@@ -1,9 +1,9 @@
 # OpenKache TypeScript Client
 
-`@openkache/client` is the Node.js SDK for TypeScript and JavaScript
-applications. It delegates QUIC, mutual TLS, compression, and value encryption
-to the production Rust client through a packaged helper process. The JavaScript
-runtime does not need Bun or an experimental FFI API.
+`@openkache/client` is the TypeScript and JavaScript SDK for Node.js, Bun, and
+Deno applications. It delegates QUIC, mutual TLS, compression, and value encryption
+to the production Rust client through a packaged Node-API adapter. Applications
+do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
 
 ## Purpose
 
@@ -25,13 +25,13 @@ bun run pack:check
 ```
 
 `build` generates the JavaScript and declaration files under the ignored
-`dist/` directory. `pack:check` also cross-compiles the static Rust helper and
+`dist/` directory. `pack:check` also cross-compiles the Rust Node-API adapter and
 previews the complete npm package. Generated output is not committed.
 
 The repository uses Bun only for development and release tooling. Published
-applications run the client on Node.js 20 or newer without Bun or runtime npm
-dependencies. Release packages currently support Linux x64 and contain a
-statically linked helper under `target/native/`.
+applications can use Node.js 20 or newer, Bun's Node-API support, or Deno's Node
+compatibility layer with `--allow-ffi`. Release packages contain Linux x64 and
+ARM64 adapters under `target/native/` and require glibc 2.17 or newer.
 
 ## Usage
 
@@ -94,19 +94,19 @@ Empty raw values are valid.
 
 The runtime-neutral layer is available from
 `@openkache/client/value-codec`. The package can be installed on any platform;
-the current Node.js transport supports Linux x64. `helper_path` can select
-another compatible helper implementation when one becomes available.
+the current native transport supports Linux x64 and ARM64. `native_path` can
+select another compatible Node-API build.
 
-The browser cannot open the UDP-based QUIC transport or spawn the native helper.
-A future browser client can instead use the browser `WebTransport` API against
-a WebTransport/HTTP3 server endpoint. Rust compiled to WebAssembly can reuse the
+The browser cannot open the UDP-based QUIC transport or load a native adapter.
+A future browser client can instead use the browser `WebTransport` API against a
+WebTransport/HTTP3 server endpoint. Rust compiled to WebAssembly can reuse the
 canonical framing, codecs, compression, and encryption, while JavaScript owns
-the WebTransport streams. The runtime-neutral value-codec subpath preserves
-that boundary without adding a WebAssembly or browser transport dependency now.
+the WebTransport streams. The runtime-neutral value-codec subpath preserves that
+boundary without adding a WebAssembly or browser transport dependency now.
 
-Every connection and cache method returns a promise. The helper process owns one
-reusable QUIC connection and keeps native networking off the Node.js event loop.
-Call and await `close()` when finished.
+Every connection and cache method returns a promise. The adapter owns one
+reusable QUIC connection and runs native networking outside the JavaScript event
+loop. Call and await `close()` when finished.
 
 ## Configuration
 
@@ -124,7 +124,7 @@ Call and await `close()` when finished.
 - `timeouts.request_ms` bounds each complete request/response operation;
   the default is 2000 ms.
 - `value_codecs` registers optional Protobuf, FlatBuffers, or application codecs.
-- `helper_path` overrides helper discovery for custom packaging.
+- `native_path` overrides Node-API adapter discovery for custom packaging.
 
 `stats()` validates the server response and returns
 `{ storage: string, workers: readonly string[] }`.

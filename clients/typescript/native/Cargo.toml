@@ -1,0 +1,18 @@
+[package]
+name = "openkache-client-napi"
+version = "0.1.0"
+edition = "2024"
+description = "Node-API adapter for the OpenKache Rust client"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "*", default-features = false, features = ["async", "napi8"] }
+napi-derive = "*"
+openkache-client = { path = "../../rust", default-features = false, features = ["quic-quinn"] }
+rustls = { version = "*", default-features = false, features = ["ring", "std"] }
+
+[build-dependencies]
+napi-build = "*"

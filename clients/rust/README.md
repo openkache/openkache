@@ -22,12 +22,6 @@ cargo check
 cargo fmt --check
 ```
 
-Build the helper process used by TypeScript with:
-
-```bash
-cargo build --bin openkache-client-helper --release
-```
-
 ## Usage
 
 ```rust
@@ -92,6 +86,10 @@ require an active Compio runtime. A single-backend build selects that backend
 automatically. When both backends are compiled, the client selects the active
 Compio or Tokio runtime, or callers can set `QuicOptions.backend` explicitly.
 Missing runtime support is returned as `Error::Runtime`.
+
+The TypeScript package links this crate through an isolated Node-API adapter.
+Keeping that adapter outside this crate preserves the core's native Rust, C ABI,
+and future WebAssembly portability.
 
 Connection setup has a 5-second deadline and complete request exchanges have a
 2-second deadline by default. Configure both with `ClientTimeouts`. `PING`,

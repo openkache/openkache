@@ -99,7 +99,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `server/` | Core cache server (BCF53, allocators, types) |
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/rust/` | Rust client SDK over QUIC |
-| `clients/typescript/` | Node.js client backed by the Rust transport helper |
+| `clients/typescript/` | TypeScript client backed by Rust through Node-API |
 | `clients/dotnet/` | .NET / C# client SDK |
 
 ## License
