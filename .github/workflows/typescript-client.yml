@@ -31,6 +31,9 @@ jobs:
         with:
           version: 0.16.0
 
+      - name: Install Rust target
+        run: rustup target add x86_64-unknown-linux-musl
+
       - uses: taiki-e/install-action@18b1216eba7f8039b0f8d131d5473787f0edce68 # v2
         with:
           tool: cargo-zigbuild@0.23.0
