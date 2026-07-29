@@ -10,7 +10,6 @@ Open-source · Rust · QUIC · SIMD-accelerated · SSD-first
 
 <!-- TODO: add more badges — GitHub Stars, crates.io version/downloads, Docker pulls, real CI status, OpenSSF scorecard, code coverage, PRs welcome --> 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org/)
 [![SIMD](https://img.shields.io/badge/simd-AVX2%20|%20AVX--512%20|%20NEON%20|%20SVE2-blueviolet)](#index-simd-accelerated-bcf53-breadcrumb-filter)
 
@@ -290,10 +289,11 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 
 ## ⚖️ License
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![OSI Approved](https://img.shields.io/badge/OSI-Approved-brightgreen.svg)](https://opensource.org/licenses/AGPL-3.0)
-
-Licensed under the [GNU Affero General Public License v3.0](./LICENSE).
+Except where otherwise noted, OpenKache is licensed under the
+[GNU Affero General Public License v3.0 or later](./LICENSE). Client SDKs
+under [`clients/`](./clients/) and the shared protocol under
+[`protocol/`](./protocol/) are licensed under the Apache License 2.0; see
+the `LICENSE` file in each directory.
 
 
 ---
