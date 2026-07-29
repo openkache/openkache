@@ -261,7 +261,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v2, secure value codec |
 | QUIC client (TypeScript) | 🚧 Preview | Bun wrapper over the Rust client ABI |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
-| .NET client | ✅ Stable | TCP-based, NuGet published |
+| QUIC client (.NET) | 🚧 Preview | Managed `System.Net.Quic`, binary protocol v2 |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
 
 ---
@@ -270,7 +270,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 | Milestone | Target | Focus |
 |---|---|---|
-| Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
+| Core engine | ✅ Done | Allocators, BCF53 filter, types, and client foundations |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
 | E2E encryption | ✅ Done | Zstandard then compact XChaCha20-Poly1305 values |
@@ -293,7 +293,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/typescript/` | Bun client backed by the Rust client ABI |
-| `clients/dotnet/` | .NET / C# client SDK |
+| `clients/dotnet/` | Managed .NET client over QUIC |
 
 
 ---

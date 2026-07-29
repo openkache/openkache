@@ -1,0 +1,189 @@
+// SPDX-FileCopyrightText: 2026 OpenStd Inc.
+// SPDX-License-Identifier: Apache-2.0
+
+using System.Buffers.Binary;
+using System.Security.Cryptography;
+
+namespace OpenKache;
+
+internal static class Protocol
+{
+    internal const string ApplicationProtocol = "openkache/2";
+    internal const int ResponseHeaderBytes = 5;
+    internal const int MaximumValueBytes = 16 * 1024 * 1024;
+
+    private const int RequestHeaderBytes = 9;
+    private const int ClientKeyDigestBytes = 32;
+    private const uint ValueLengthMask = (1u << 30) - 1;
+    private const uint ValueCompressedBit = 1u << 31;
+    private const uint ValueEncryptedBit = 1u << 30;
+
+    internal enum Opcode : byte
+    {
+        Ping = 0x01,
+        Get = 0x02,
+        Set = 0x03,
+        Delete = 0x04,
+        Stats = 0x05,
+        Sync = 0x06,
+    }
+
+    internal enum Status : byte
+    {
+        Ok = 0x00,
+        NotFound = 0x01,
+        Created = 0x02,
+        Replaced = 0x03,
+        Deleted = 0x04,
+        InvalidRequest = 0x40,
+        UnsupportedOpcode = 0x41,
+        TooLarge = 0x42,
+        Overloaded = 0x43,
+        Timeout = 0x44,
+        InternalError = 0x7f,
+    }
+
+    [Flags]
+    internal enum ValueFlags : byte
+    {
+        None = 0,
+        Compressed = 1,
+        Encrypted = 2,
+    }
+
+    internal readonly record struct Response(
+        Status Status,
+        ValueFlags ValueFlags,
+        byte[] Payload);
+
+    internal readonly record struct ResponseHeader(
+        Status Status,
+        ValueFlags ValueFlags,
+        int PayloadLength);
+
+    internal static byte[] EncodeRequest(
+        Opcode opcode,
+        ReadOnlySpan<byte> userKey,
+        ReadOnlySpan<byte> value)
+    {
+        if (value.Length > MaximumValueBytes)
+        {
+            throw new OpenKacheException(
+                "VALUE_TOO_LARGE",
+                $"Value size {value.Length} exceeds {MaximumValueBytes} bytes.");
+        }
+
+        var usesKey = opcode is Opcode.Get or Opcode.Set or Opcode.Delete;
+        var acceptsValue = opcode is Opcode.Set;
+        if (!acceptsValue && !value.IsEmpty)
+        {
+            throw ProtocolError($"{opcode} does not accept a value.");
+        }
+
+        if (!usesKey && !userKey.IsEmpty)
+        {
+            throw ProtocolError($"{opcode} does not accept a key.");
+        }
+
+        var keyLength = usesKey ? ClientKeyDigestBytes : 0;
+        var frame = GC.AllocateUninitializedArray<byte>(
+            checked(RequestHeaderBytes + keyLength + value.Length));
+        frame[0] = (byte)opcode;
+        BinaryPrimitives.WriteUInt32BigEndian(
+            frame.AsSpan(1, sizeof(uint)),
+            (uint)keyLength);
+        BinaryPrimitives.WriteUInt32BigEndian(
+            frame.AsSpan(5, sizeof(uint)),
+            (uint)value.Length);
+        if (usesKey)
+        {
+            SHA256.HashData(
+                userKey,
+                frame.AsSpan(RequestHeaderBytes, ClientKeyDigestBytes));
+        }
+
+        value.CopyTo(frame.AsSpan(RequestHeaderBytes + keyLength));
+        return frame;
+    }
+
+    internal static ResponseHeader DecodeResponseHeader(ReadOnlySpan<byte> header)
+    {
+        if (header.Length != ResponseHeaderBytes)
+        {
+            throw ProtocolError(
+                $"Response header must contain {ResponseHeaderBytes} bytes.");
+        }
+
+        var status = DecodeStatus(header[0]);
+        var encodedLength = BinaryPrimitives.ReadUInt32BigEndian(header[1..]);
+        var payloadLength = checked((int)(encodedLength & ValueLengthMask));
+        if (payloadLength > MaximumValueBytes)
+        {
+            throw ProtocolError(
+                $"Response payload exceeds {MaximumValueBytes} bytes.");
+        }
+
+        var flags = ValueFlags.None;
+        if ((encodedLength & ValueCompressedBit) != 0)
+        {
+            flags |= ValueFlags.Compressed;
+        }
+
+        if ((encodedLength & ValueEncryptedBit) != 0)
+        {
+            flags |= ValueFlags.Encrypted;
+        }
+
+        if (flags != ValueFlags.None
+            && (status != Status.Ok || payloadLength == 0))
+        {
+            throw ProtocolError(
+                "Value transformation flags require a non-empty OK response.");
+        }
+
+        return new ResponseHeader(status, flags, payloadLength);
+    }
+
+    internal static bool IsError(Status status)
+    {
+        return (byte)status >= (byte)Status.InvalidRequest;
+    }
+
+    internal static string ErrorCode(Status status)
+    {
+        return status switch
+        {
+            Status.InvalidRequest => "INVALID_REQUEST",
+            Status.UnsupportedOpcode => "UNSUPPORTED_OPCODE",
+            Status.TooLarge => "TOO_LARGE",
+            Status.Overloaded => "OVERLOADED",
+            Status.Timeout => "TIMEOUT",
+            Status.InternalError => "INTERNAL_ERROR",
+            _ => throw ProtocolError($"{status} is not an error status."),
+        };
+    }
+
+    private static Status DecodeStatus(byte value)
+    {
+        return value switch
+        {
+            0x00 => Status.Ok,
+            0x01 => Status.NotFound,
+            0x02 => Status.Created,
+            0x03 => Status.Replaced,
+            0x04 => Status.Deleted,
+            0x40 => Status.InvalidRequest,
+            0x41 => Status.UnsupportedOpcode,
+            0x42 => Status.TooLarge,
+            0x43 => Status.Overloaded,
+            0x44 => Status.Timeout,
+            0x7f => Status.InternalError,
+            _ => throw ProtocolError($"Unknown response status 0x{value:x2}."),
+        };
+    }
+
+    private static OpenKacheException ProtocolError(string message)
+    {
+        return new OpenKacheException("PROTOCOL_ERROR", message);
+    }
+}

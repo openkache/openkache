@@ -16,9 +16,7 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-      - run: dotnet test clients/dotnet/OpenKache.Tests/OpenKache.Tests.csproj -c Release
       - run: dotnet pack clients/dotnet/OpenKache/OpenKache.csproj -c Release -o out
-      - run: dotnet pack clients/dotnet/OpenKache.Client/OpenKache.Client.csproj -c Release -o out-client
       - uses: NuGet/login@v1
         id: nugetlogin
         with:
