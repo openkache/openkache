@@ -72,7 +72,7 @@ export class Value_Codec_Registry {
    * @param codecs - Optional Protobuf, FlatBuffers, or application codecs.
    * @throws {Error} When encoding identifiers are invalid or duplicated.
    */
-  constructor(codecs: readonly Value_Codec[]) {
+  constructor(codecs: readonly Value_Codec[] = []) {
     const codecs_by_encoding = new Map<string, Value_Codec>()
     for (const codec of codecs) {
       validate_encoding(codec.encoding)

@@ -56,7 +56,7 @@ export declare class Value_Codec_Registry {
      * @param codecs - Optional Protobuf, FlatBuffers, or application codecs.
      * @throws {Error} When encoding identifiers are invalid or duplicated.
      */
-    constructor(codecs: readonly Value_Codec[]);
+    constructor(codecs?: readonly Value_Codec[]);
     /**
      * Encodes a regular object using one custom codec or JSON fallback.
      *
