@@ -1,6 +1,7 @@
 //! QUIC server backed by the sharded SSD-first cache runtime.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -159,8 +160,11 @@ fn load_production_tls(config: &TlsConfig) -> Result<(ServerTlsConfig, AccessPol
     )?;
     let mut admin_client_certificates = Vec::with_capacity(config.admin_client_certificates.len());
     for path in &config.admin_client_certificates {
-        let mut certificates = load_certificates(path)?;
-        admin_client_certificates.push(certificates.remove(0));
+        let certificate = load_certificates(path)?
+            .into_iter()
+            .next()
+            .expect("certificate loader rejects empty files");
+        admin_client_certificates.push(certificate);
     }
     Ok((
         ServerTlsConfig {
@@ -209,12 +213,10 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
             message: error.to_string(),
         })
     } else {
-        PrivateKeyDer::try_from(bytes.as_slice())
-            .map(|key| key.clone_key())
-            .map_err(|message| ServerError::TlsIdentity {
-                path: path.to_path_buf(),
-                message: message.into(),
-            })
+        PrivateKeyDer::try_from(bytes).map_err(|message| ServerError::TlsIdentity {
+            path: path.to_path_buf(),
+            message: message.into(),
+        })
     }
 }
 
@@ -281,15 +283,17 @@ impl KacheServer {
         if config.tls.is_configured() {
             return Err(ServerError::ConflictingSecurityModes);
         }
+        config.validate()?;
         let mut subject_alt_names = vec!["localhost".to_string()];
         if !address.ip().is_unspecified() {
             subject_alt_names.push(address.ip().to_string());
         }
-        let generated = rcgen::generate_simple_self_signed(subject_alt_names)?;
+        let rcgen::CertifiedKey { cert, signing_key } =
+            rcgen::generate_simple_self_signed(subject_alt_names)?;
         let tls = ServerTlsConfig {
-            certificate_chain: vec![generated.cert.der().clone()],
+            certificate_chain: vec![cert.into()],
             private_key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-                generated.signing_key.serialize_der(),
+                signing_key.serialize_der(),
             )),
             client_ca: Vec::new(),
         };
@@ -302,13 +306,12 @@ impl KacheServer {
         tls: ServerTlsConfig,
         access_policy: AccessPolicy,
     ) -> Result<Self> {
-        config.validate()?;
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
         let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
-        let mut cache = ThreadedKvkache::start(config)?;
+        let mut cache = ThreadedKvkache::start_validated(config)?;
         let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
             Ok(sockets) => sockets,
             Err(error) => {
@@ -554,13 +557,9 @@ pub(crate) fn stop_network_workers(
     }
     let mut panicked_worker = None;
     for (_, thread) in workers {
-        let name = thread
-            .thread()
-            .name()
-            .unwrap_or("network worker")
-            .to_owned();
+        let worker = thread.thread().clone();
         if thread.join().is_err() && panicked_worker.is_none() {
-            panicked_worker = Some(name);
+            panicked_worker = Some(worker.name().unwrap_or("network worker").to_owned());
         }
     }
     if let Some(name) = panicked_worker {
@@ -670,9 +669,9 @@ async fn serve_incoming<I: TransportIncoming>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
 ) {
-    if let Ok(connection) = incoming.connect().await {
+    if let Ok(mut connection) = incoming.connect().await {
         let administrator =
-            access_policy.permits_administration(connection.peer_certificate().as_ref());
+            access_policy.permits_administration(connection.take_peer_certificate().as_ref());
         serve_connection(
             connection,
             cache,
@@ -762,7 +761,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Timeout) => {
                 let _ = write_response(
                     &mut send,
-                    response(Status::Timeout, b"request read timed out".to_vec()),
+                    response_bytes(Status::Timeout, b"request read timed out"),
                     request_timeout,
                 )
                 .await;
@@ -771,10 +770,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::TooLarge) => {
                 let _ = write_response(
                     &mut send,
-                    response(
-                        Status::TooLarge,
-                        b"request exceeds the protocol limit".to_vec(),
-                    ),
+                    response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
                     request_timeout,
                 )
                 .await;
@@ -797,9 +793,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     {
                         Ok(permit) => Some(permit),
                         Err(StreamReadError::Timeout) => {
-                            let response = response(
+                            let response = response_bytes(
                                 Status::Timeout,
-                                b"response memory budget timed out".to_vec(),
+                                b"response memory budget timed out",
                             );
                             if !write_response(&mut send, response, request_timeout).await {
                                 break;
@@ -807,9 +803,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             continue;
                         }
                         Err(_) => {
-                            let response = response(
+                            let response = response_bytes(
                                 Status::Overloaded,
-                                b"response exceeds the network worker memory budget".to_vec(),
+                                b"response exceeds the network worker memory budget",
                             );
                             if !write_response(&mut send, response, request_timeout).await {
                                 break;
@@ -828,7 +824,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 {
                     Ok(response) => (response, response_permit),
                     Err(_) => (
-                        response(Status::Timeout, b"request execution timed out".to_vec()),
+                        response_bytes(Status::Timeout, b"request execution timed out"),
                         response_permit,
                     ),
                 }
@@ -846,7 +842,7 @@ async fn write_response<S: SendStream>(
     response: Response,
     request_timeout: Duration,
 ) -> bool {
-    let Ok(frame) = response.encode() else {
+    let Ok(frame) = response.into_encoded() else {
         return false;
     };
     send.write_response(frame, request_timeout).await.is_ok()
@@ -866,7 +862,7 @@ async fn execute_request(
         value,
     } = request;
     let result = match opcode {
-        Opcode::Ping => return response(Status::Ok, b"PONG".to_vec()),
+        Opcode::Ping => return response_bytes(Status::Ok, b"PONG"),
         Opcode::Get => cache
             .get_async(client_key_digest.expect("GET requests have a validated key digest"))
             .await
@@ -900,26 +896,28 @@ async fn execute_request(
                 )
             }),
         Opcode::Stats if !administrator => {
-            return response(
+            return response_bytes(
                 Status::Forbidden,
-                b"STATS requires administrator authorization".to_vec(),
+                b"STATS requires administrator authorization",
             );
         }
         Opcode::Stats => cache.stats_async().await.map(|workers| {
-            let workers = workers
-                .into_iter()
-                .map(|worker| format!("{worker:?}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            response(
-                Status::Ok,
-                format!(r#"{{"storage":"ssd","workers":[{workers}]}}"#).into_bytes(),
-            )
+            let worker_bytes = workers.iter().map(String::len).sum::<usize>();
+            let mut payload = String::with_capacity(32 + worker_bytes);
+            payload.push_str(r#"{"storage":"ssd","workers":["#);
+            for (index, worker) in workers.into_iter().enumerate() {
+                if index > 0 {
+                    payload.push(',');
+                }
+                write!(payload, "{worker:?}").expect("writing to a String cannot fail");
+            }
+            payload.push_str("]}");
+            response(Status::Ok, payload.into_bytes())
         }),
         Opcode::Sync if !administrator => {
-            return response(
+            return response_bytes(
                 Status::Forbidden,
-                b"SYNC requires administrator authorization".to_vec(),
+                b"SYNC requires administrator authorization",
             );
         }
         Opcode::Sync => cache
@@ -941,7 +939,7 @@ fn cache_error_response(error: KvError) -> Response {
             Status::InternalError
         }
     };
-    response(status, error.to_string().into_bytes())
+    response_display(status, error)
 }
 
 /// Maps framing and validation failures to stable protocol statuses.
@@ -951,12 +949,24 @@ fn protocol_error_response(error: ProtocolError) -> Response {
         ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
         _ => Status::InvalidRequest,
     };
-    response(status, error.to_string().into_bytes())
+    response_display(status, error)
+}
+
+fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
+    let mut payload = String::with_capacity(openkache_protocol::RESPONSE_HEADER_BYTES + 64);
+    write!(payload, "{value}").expect("writing to a String cannot fail");
+    response(status, payload.into_bytes())
 }
 
 /// Constructs a protocol response whose payload is known to fit protocol limits.
 fn response(status: Status, payload: Vec<u8>) -> Response {
     Response::new(status, payload).expect("server responses stay within protocol limits")
+}
+
+fn response_bytes(status: Status, payload: &[u8]) -> Response {
+    let mut owned = Vec::with_capacity(openkache_protocol::RESPONSE_HEADER_BYTES + payload.len());
+    owned.extend_from_slice(payload);
+    response(status, owned)
 }
 
 fn response_with_value_flags(

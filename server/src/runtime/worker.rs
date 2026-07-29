@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
@@ -109,13 +110,13 @@ pub(super) async fn worker_loop(
     receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
 ) -> Result<()> {
+    let mut batch = VecDeque::with_capacity(io_config.batch_size);
     loop {
         let first = receiver
             .recv_async()
             .await
             .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
         let wait_us = io_config.batch_max_wait_us;
-        let mut batch = VecDeque::with_capacity(io_config.batch_size);
         batch.push_back(first);
 
         if batch.len() < io_config.batch_size
@@ -135,7 +136,7 @@ pub(super) async fn worker_loop(
             }
         }
 
-        if process_worker_batch(&mut cache, batch, io_config.max_inflight_per_worker).await? {
+        if process_worker_batch(&mut cache, &mut batch, io_config.max_inflight_per_worker).await? {
             return Ok(());
         }
     }
@@ -143,7 +144,7 @@ pub(super) async fn worker_loop(
 
 async fn process_worker_batch(
     cache: &mut Kvkache,
-    mut batch: VecDeque<WorkerRequest>,
+    batch: &mut VecDeque<WorkerRequest>,
     max_inflight: usize,
 ) -> Result<bool> {
     let mut shutdown_response = None;
@@ -154,9 +155,13 @@ async fn process_worker_batch(
                 storage_key,
                 response,
             } => {
-                let mut storage_keys = vec![storage_key];
-                let mut responses = vec![response];
-                while storage_keys.len() < max_inflight {
+                let mut pending = FuturesUnordered::new();
+                let cache_ref = &*cache;
+                let get = |storage_key, response| async move {
+                    (response, cache_ref.get_encoded(&storage_key).await)
+                };
+                pending.push(get(storage_key, response));
+                while pending.len() < max_inflight {
                     let Some(WorkerRequest::Get { .. }) = batch.front() else {
                         break;
                     };
@@ -167,11 +172,9 @@ async fn process_worker_batch(
                     else {
                         unreachable!()
                     };
-                    storage_keys.push(storage_key);
-                    responses.push(response);
+                    pending.push(get(storage_key, response));
                 }
-                let results = cache.get_many_encoded(storage_keys).await;
-                for (response, result) in responses.into_iter().zip(results) {
+                while let Some((response, result)) = pending.next().await {
                     let _ = response.send(result.map(WorkerResponse::Value));
                 }
             }

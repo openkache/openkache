@@ -119,9 +119,15 @@ pub fn allowed_cpu_ids() -> Result<HashSet<usize>> {
 }
 
 pub fn expand_thread_pattern(pattern: &str, thread_id: usize) -> String {
-    pattern
-        .replace("{thread_id:02}", &format!("{thread_id:02}"))
-        .replace("{thread_id}", &thread_id.to_string())
+    let mut expanded = if pattern.contains("{thread_id:02}") {
+        pattern.replace("{thread_id:02}", &format!("{thread_id:02}"))
+    } else {
+        pattern.to_owned()
+    };
+    if expanded.contains("{thread_id}") {
+        expanded = expanded.replace("{thread_id}", &thread_id.to_string());
+    }
+    expanded
 }
 
 pub fn bits_for_count(count: usize) -> usize {
@@ -351,7 +357,12 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let mut cpu_ids = sorted_allowed_cpu_ids();
+        Self::with_cpu_ids(sorted_allowed_cpu_ids())
+    }
+}
+
+impl AppConfig {
+    pub(crate) fn with_cpu_ids(mut cpu_ids: Vec<usize>) -> Self {
         let network_worker_count = default_network_worker_count(cpu_ids.len());
         let storage_cpu_ids = if cpu_ids.len() > network_worker_count {
             cpu_ids.split_off(network_worker_count)
@@ -362,16 +373,8 @@ impl Default for AppConfig {
             version: 1,
             quic: QuicConfig::default(),
             tls: TlsConfig::default(),
-            network: NetworkConfig {
-                worker_count: network_worker_count,
-                cpu_ids,
-                ..NetworkConfig::default()
-            },
-            runtime: RuntimeConfig {
-                thread_count: storage_cpu_ids.len(),
-                cpu_ids: storage_cpu_ids,
-                ..RuntimeConfig::default()
-            },
+            network: NetworkConfig::with_cpu_ids(cpu_ids),
+            runtime: RuntimeConfig::with_cpu_ids(storage_cpu_ids),
             io_uring: IoUringConfig::default(),
             timeouts: TimeoutConfig::default(),
             storage: StorageConfig::default(),
@@ -464,11 +467,18 @@ pub struct NetworkConfig {
 
 impl Default for NetworkConfig {
     fn default() -> Self {
-        let cpu_ids = sorted_allowed_cpu_ids();
-        let worker_count = default_network_worker_count(cpu_ids.len());
+        let mut cpu_ids = sorted_allowed_cpu_ids();
+        cpu_ids.truncate(default_network_worker_count(cpu_ids.len()));
+        Self::with_cpu_ids(cpu_ids)
+    }
+}
+
+impl NetworkConfig {
+    fn with_cpu_ids(cpu_ids: Vec<usize>) -> Self {
+        let worker_count = cpu_ids.len();
         Self {
             worker_count,
-            cpu_ids: cpu_ids.into_iter().take(worker_count).collect(),
+            cpu_ids,
             event_interval: 31,
             io_uring_entries_per_worker: 4_096,
             max_stream_lanes_per_connection: 256,
@@ -489,7 +499,12 @@ pub struct RuntimeConfig {
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
-        let cpu_ids = sorted_allowed_cpu_ids();
+        Self::with_cpu_ids(sorted_allowed_cpu_ids())
+    }
+}
+
+impl RuntimeConfig {
+    fn with_cpu_ids(cpu_ids: Vec<usize>) -> Self {
         let thread_count = cpu_ids.len();
         Self {
             thread_count,

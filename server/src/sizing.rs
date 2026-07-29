@@ -14,7 +14,6 @@ use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::config::default_network_worker_count;
 use crate::store::{
     BLOB_ITEM_THRESHOLD_BYTES, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES, STORED_VALUE_TAG_BYTES,
 };
@@ -178,18 +177,8 @@ impl SizingRequest {
             percent_of(self.storage_bytes, STORAGE_USE_PERCENT, "SSD sizing budget")?;
         let table_memory_budget_bytes =
             percent_of(self.memory_bytes, TABLE_RAM_PERCENT, "Table sizing budget")?;
-        let mut config = AppConfig::default();
-        let network_worker_count = default_network_worker_count(cpu_ids.len());
-        let storage_cpu_ids = if cpu_ids.len() > network_worker_count {
-            cpu_ids[network_worker_count..].to_vec()
-        } else {
-            cpu_ids.clone()
-        };
-        let storage_worker_count = storage_cpu_ids.len();
-        config.network.worker_count = network_worker_count;
-        config.network.cpu_ids = cpu_ids[..network_worker_count].to_vec();
-        config.runtime.thread_count = storage_worker_count;
-        config.runtime.cpu_ids = storage_cpu_ids;
+        let mut config = AppConfig::with_cpu_ids(cpu_ids);
+        let storage_worker_count = config.runtime.thread_count;
         config.storage.directory = self.directory;
         config.storage.segment_size_mib = self.profile.segment_size_mib();
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();

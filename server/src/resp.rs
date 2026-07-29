@@ -2,11 +2,13 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf};
 use compio::driver::ProactorBuilder;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
@@ -14,6 +16,7 @@ use compio::runtime::RuntimeBuilder;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{ClientKeyDigest, SetOptions, ValueFlags};
+use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver};
@@ -25,6 +28,7 @@ const MAX_ARRAY_ITEMS: usize = 64;
 const MAX_BULK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
+type Command<'a> = SmallVec<[&'a [u8]; 4]>;
 
 /// Plaintext RESP2 endpoint that dispatches directly to OpenKache storage workers.
 pub struct RespServer {
@@ -61,7 +65,7 @@ impl RespServer {
         config.validate()?;
         let network = config.network.clone();
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
-        let mut cache = ThreadedKvkache::start(config)?;
+        let mut cache = ThreadedKvkache::start_validated(config)?;
         let sockets = match bind_reuse_port_tcp_listeners(address, network.worker_count) {
             Ok(sockets) => sockets,
             Err(error) => {
@@ -291,10 +295,13 @@ async fn serve_resp_connection(
     request_timeout: Duration,
 ) -> std::io::Result<()> {
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
+    let mut responses = Vec::new();
     loop {
+        let read_start = pending.len();
+        pending.reserve(READ_BUFFER_BYTES);
         let read = compio::runtime::time::timeout(
             request_timeout,
-            stream.read(Vec::with_capacity(READ_BUFFER_BYTES)),
+            stream.read(pending.slice(read_start..read_start + READ_BUFFER_BYTES)),
         )
         .await;
         let BufResult(result, input) = match read {
@@ -302,22 +309,19 @@ async fn serve_resp_connection(
             Err(_) => return Ok(()),
         };
         let bytes_read = result?;
+        pending = input.into_inner();
         if bytes_read == 0 {
             return Ok(());
         }
-        pending.extend_from_slice(&input[..bytes_read]);
         if pending.len() > MAX_BUFFER_BYTES {
-            write_with_timeout(
-                &mut stream,
-                error("request buffer exceeds RESP limit"),
-                request_timeout,
-            )
-            .await?;
+            responses.clear();
+            error(&mut responses, "request buffer exceeds RESP limit");
+            write_with_timeout(&mut stream, responses, request_timeout).await?;
             return Ok(());
         }
 
         let mut consumed = 0;
-        let mut responses = Vec::new();
+        responses.clear();
         let mut close = false;
         while consumed < pending.len() {
             match parse_command(&pending[consumed..]) {
@@ -326,16 +330,14 @@ async fn serve_resp_connection(
                     consumed: command_bytes,
                 } => {
                     consumed += command_bytes;
-                    let outcome = execute_command(cache, &command).await;
-                    responses.extend_from_slice(&outcome.response);
-                    close = outcome.close;
+                    close = execute_command(cache, &command, &mut responses).await;
                     if close {
                         break;
                     }
                 }
                 ParseResult::Incomplete => break,
                 ParseResult::Invalid(message) => {
-                    responses.extend_from_slice(&error(&message));
+                    error(&mut responses, &message);
                     close = true;
                     consumed = pending.len();
                     break;
@@ -346,7 +348,7 @@ async fn serve_resp_connection(
             pending.drain(..consumed);
         }
         if !responses.is_empty() {
-            write_with_timeout(&mut stream, responses, request_timeout).await?;
+            responses = write_with_timeout(&mut stream, responses, request_timeout).await?;
         }
         if close {
             return Ok(());
@@ -358,9 +360,12 @@ async fn write_with_timeout(
     stream: &mut TcpStream,
     response: Vec<u8>,
     timeout: Duration,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<u8>> {
     match compio::runtime::time::timeout(timeout, stream.write_all(response)).await {
-        Ok(BufResult(result, _)) => result,
+        Ok(BufResult(result, response)) => {
+            result?;
+            Ok(response)
+        }
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "RESP response write timed out",
@@ -368,22 +373,23 @@ async fn write_with_timeout(
     }
 }
 
-struct CommandOutcome {
-    response: Vec<u8>,
-    close: bool,
-}
-
-async fn execute_command(cache: &ThreadedKvkache, command: &[&[u8]]) -> CommandOutcome {
-    let response = match command.first() {
-        Some(name) if name.eq_ignore_ascii_case(b"PING") => simple("PONG"),
+async fn execute_command(
+    cache: &ThreadedKvkache,
+    command: &[&[u8]],
+    response: &mut Vec<u8>,
+) -> bool {
+    match command.first() {
+        Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
             [_, key] => match cache.get_async(ClientKeyDigest::from_user_key(key)).await {
-                Ok(Some(value)) if value.flags == ValueFlags::NONE => bulk(Some(&value.bytes)),
-                Ok(Some(_)) => error("RESP cannot decode transformed client values"),
-                Ok(None) => bulk(None),
-                Err(error) => resp_cache_error(error),
+                Ok(Some(value)) if value.flags == ValueFlags::NONE => {
+                    bulk(response, Some(&value.bytes));
+                }
+                Ok(Some(_)) => error(response, "RESP cannot decode transformed client values"),
+                Ok(None) => bulk(response, None),
+                Err(cache_error) => resp_cache_error(response, cache_error),
             },
-            _ => error("wrong number of arguments for GET"),
+            _ => error(response, "wrong number of arguments for GET"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
             [_, key, value] => match cache
@@ -394,15 +400,15 @@ async fn execute_command(cache: &ThreadedKvkache, command: &[&[u8]]) -> CommandO
                 )
                 .await
             {
-                Ok(SetOutcome::Created | SetOutcome::Replaced) => simple("OK"),
-                Ok(SetOutcome::NotStored) => bulk(None),
-                Err(error) => resp_cache_error(error),
+                Ok(SetOutcome::Created | SetOutcome::Replaced) => simple(response, "OK"),
+                Ok(SetOutcome::NotStored) => bulk(response, None),
+                Err(cache_error) => resp_cache_error(response, cache_error),
             },
-            _ => error("SET options are not supported"),
+            _ => error(response, "SET options are not supported"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"DEL") => {
             if command.len() < 2 {
-                error("wrong number of arguments for DEL")
+                error(response, "wrong number of arguments for DEL");
             } else {
                 let mut deleted = 0;
                 for key in &command[1..] {
@@ -412,74 +418,85 @@ async fn execute_command(cache: &ThreadedKvkache, command: &[&[u8]]) -> CommandO
                     {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
-                        Err(error) => return outcome(resp_cache_error(error)),
+                        Err(cache_error) => {
+                            resp_cache_error(response, cache_error);
+                            return false;
+                        }
                     }
                 }
-                integer(deleted)
+                integer(response, deleted);
             }
         }
         Some(name)
             if name.eq_ignore_ascii_case(b"SELECT") || name.eq_ignore_ascii_case(b"CLIENT") =>
         {
-            simple("OK")
+            simple(response, "OK");
         }
         Some(name) if name.eq_ignore_ascii_case(b"QUIT") => {
-            return CommandOutcome {
-                response: simple("OK"),
-                close: true,
-            };
+            simple(response, "OK");
+            return true;
         }
-        Some(_) => error("unsupported command"),
-        None => error("empty command"),
-    };
-    outcome(response)
-}
-
-fn outcome(response: Vec<u8>) -> CommandOutcome {
-    CommandOutcome {
-        response,
-        close: false,
+        Some(_) => error(response, "unsupported command"),
+        None => error(response, "empty command"),
     }
+    false
 }
 
-fn simple(message: &str) -> Vec<u8> {
-    format!("+{message}\r\n").into_bytes()
+fn simple(response: &mut Vec<u8>, message: &str) {
+    response.push(b'+');
+    response.extend_from_slice(message.as_bytes());
+    response.extend_from_slice(b"\r\n");
 }
 
-fn error(message: &str) -> Vec<u8> {
-    format!("-ERR {}\r\n", message.replace(['\r', '\n'], " ")).into_bytes()
+fn error(response: &mut Vec<u8>, message: &str) {
+    response.extend_from_slice(b"-ERR ");
+    response.extend(message.bytes().map(|byte| {
+        if matches!(byte, b'\r' | b'\n') {
+            b' '
+        } else {
+            byte
+        }
+    }));
+    response.extend_from_slice(b"\r\n");
 }
 
-fn integer(value: u64) -> Vec<u8> {
-    format!(":{value}\r\n").into_bytes()
+fn integer(response: &mut Vec<u8>, value: u64) {
+    write!(response, ":{value}\r\n").expect("writing to a Vec cannot fail");
 }
 
-fn bulk(value: Option<&[u8]>) -> Vec<u8> {
+fn bulk(response: &mut Vec<u8>, value: Option<&[u8]>) {
     match value {
         Some(value) => {
-            let mut response = format!("${}\r\n", value.len()).into_bytes();
+            write!(response, "${}\r\n", value.len()).expect("writing to a Vec cannot fail");
             response.extend_from_slice(value);
             response.extend_from_slice(b"\r\n");
-            response
         }
-        None => b"$-1\r\n".to_vec(),
+        None => response.extend_from_slice(b"$-1\r\n"),
     }
 }
 
-fn resp_cache_error(cache_error: crate::KvError) -> Vec<u8> {
-    error(&cache_error.to_string())
+fn resp_cache_error(response: &mut Vec<u8>, cache_error: crate::KvError) {
+    response.extend_from_slice(b"-ERR ");
+    let message_start = response.len();
+    write!(response, "{cache_error}").expect("writing to a Vec cannot fail");
+    for byte in &mut response[message_start..] {
+        if matches!(*byte, b'\r' | b'\n') {
+            *byte = b' ';
+        }
+    }
+    response.extend_from_slice(b"\r\n");
 }
 
 pub(crate) enum ParseResult<'a> {
     Complete {
-        command: Vec<&'a [u8]>,
+        command: Command<'a>,
         consumed: usize,
     },
     Incomplete,
     Invalid(String),
 }
 
-pub(crate) fn parse_command(input: &[u8]) -> ParseResult<'_> {
+pub(crate) fn parse_command<'a>(input: &'a [u8]) -> ParseResult<'a> {
     if input.is_empty() {
         return ParseResult::Incomplete;
     }
@@ -500,7 +517,7 @@ pub(crate) fn parse_command(input: &[u8]) -> ParseResult<'_> {
         Err(message) => return ParseResult::Invalid(message),
     };
 
-    let mut items = Vec::with_capacity(item_count);
+    let mut items = Command::with_capacity(item_count);
     for _ in 0..item_count {
         let Some((bulk_line, next_offset)) = line_at(input, offset) else {
             return ParseResult::Incomplete;
@@ -539,14 +556,14 @@ pub(crate) fn parse_command(input: &[u8]) -> ParseResult<'_> {
     }
 }
 
-fn parse_inline_command(input: &[u8]) -> ParseResult<'_> {
+fn parse_inline_command<'a>(input: &'a [u8]) -> ParseResult<'a> {
     let Some((line, consumed)) = line_at(input, 0) else {
         return ParseResult::Incomplete;
     };
-    let items = line
+    let items: Command<'a> = line
         .split(|byte| byte.is_ascii_whitespace())
-        .filter(|item| !item.is_empty())
-        .collect::<Vec<_>>();
+        .filter(|item| !<[u8]>::is_empty(item))
+        .collect();
     if items.is_empty() {
         return ParseResult::Invalid("empty inline command".into());
     }

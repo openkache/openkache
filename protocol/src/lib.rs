@@ -590,6 +590,43 @@ impl Response {
         Ok(frame)
     }
 
+    /// Consumes and encodes this response, reusing its payload allocation when practical.
+    ///
+    /// # Returns
+    ///
+    /// The complete encoded response frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload exceeds the protocol limit or its value flags are
+    /// invalid for the response status.
+    pub fn into_encoded(mut self) -> Result<Vec<u8>> {
+        if self.payload.len() > MAX_VALUE_BYTES {
+            return Err(ProtocolError::ValueTooLarge {
+                size: self.payload.len(),
+                maximum: MAX_VALUE_BYTES,
+            });
+        }
+        let payload_len = self.payload.len();
+        validate_response_flags(self.status, self.value_flags, payload_len)?;
+        if self.payload.capacity() - payload_len < RESPONSE_HEADER_BYTES {
+            let mut frame = Vec::with_capacity(RESPONSE_HEADER_BYTES + payload_len);
+            frame.push(self.status as u8);
+            frame.extend_from_slice(
+                &encode_value_length(payload_len, self.value_flags).to_be_bytes(),
+            );
+            frame.extend_from_slice(&self.payload);
+            return Ok(frame);
+        }
+        self.payload.resize(RESPONSE_HEADER_BYTES + payload_len, 0);
+        self.payload
+            .copy_within(0..payload_len, RESPONSE_HEADER_BYTES);
+        self.payload[0] = self.status as u8;
+        self.payload[1..RESPONSE_HEADER_BYTES]
+            .copy_from_slice(&encode_value_length(payload_len, self.value_flags).to_be_bytes());
+        Ok(self.payload)
+    }
+
     /// Decodes and validates one complete response frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
         if frame.len() < RESPONSE_HEADER_BYTES {

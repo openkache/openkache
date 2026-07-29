@@ -4,7 +4,8 @@
 //! fingerprint and candidate Segment/Bucket-hash location; storage verifies the
 //! complete storage key.
 
-use std::collections::HashSet;
+use smallvec::SmallVec;
+use std::num::NonZeroU64;
 
 use crate::SUBTABLE_BYTES;
 use crate::StorageKey;
@@ -22,7 +23,9 @@ pub(crate) struct Table {
     pub(crate) back_subtable_group_count: usize,
     front_back_ratio: usize,
     fingerprint_bits: usize,
+    fingerprint_mask: u64,
     fingerprint_hash_offset_bits: usize,
+    coordinate_modulus: Option<NonZeroU64>,
     sg_index_bits: usize,
     bucket_choice_bits: usize,
     pub(crate) entry_count: usize,
@@ -86,6 +89,13 @@ impl TableAllocation {
 impl Table {
     pub(crate) fn new(config: &Config) -> Result<Self> {
         let allocation = TableAllocation::new(config)?;
+        let fingerprint_space = 1u64 << config.fingerprint_bits;
+        let coordinate_space = allocation.front_subtable_count as u128
+            * config.unary_count as u128
+            * fingerprint_space as u128;
+        let coordinate_modulus = u64::try_from(coordinate_space)
+            .ok()
+            .and_then(NonZeroU64::new);
         let mut front_table = Vec::new();
         front_table
             .try_reserve_exact(allocation.front_subtable_count)
@@ -112,7 +122,9 @@ impl Table {
             back_subtable_group_count: allocation.back_subtable_group_count,
             front_back_ratio: config.front_back_ratio,
             fingerprint_bits: config.fingerprint_bits,
+            fingerprint_mask: fingerprint_space - 1,
             fingerprint_hash_offset_bits: config.fingerprint_hash_offset_bits,
+            coordinate_modulus,
             sg_index_bits: config.sg_index_bits,
             bucket_choice_bits: config.bucket_choice_bits(),
             entry_count: 0,
@@ -123,41 +135,50 @@ impl Table {
         TableAllocation::new(config)?.memory_bytes()
     }
 
-    pub(crate) fn candidate_locations(&self, storage_key: &StorageKey) -> Vec<TableLocation> {
+    pub(crate) fn candidate_locations(
+        &self,
+        storage_key: &StorageKey,
+    ) -> SmallVec<[TableLocation; 4]> {
         let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
         let front_subtable = &self.front_table[front_subtable_index];
-        let mut encoded = front_subtable
-            .matching_entry_slots(&self.front_subtable_layout, unary_index, fingerprint, None)
-            .into_iter()
-            .map(|entry_slot| {
-                front_subtable.table_location(&self.front_subtable_layout, entry_slot)
-            })
-            .collect::<Vec<_>>();
-        let (_, end) = front_subtable.bounds(&self.front_subtable_layout, unary_index);
+        let (start, end) = front_subtable.bounds(&self.front_subtable_layout, unary_index);
+        let mut locations = SmallVec::new();
+        for entry_slot in front_subtable.matching_entry_slots_in_range(
+            &self.front_subtable_layout,
+            start..end,
+            fingerprint,
+            None,
+        ) {
+            let location = TableLocation::decode(
+                front_subtable.table_location(&self.front_subtable_layout, entry_slot),
+                self.sg_index_bits,
+                self.bucket_choice_bits,
+            );
+            if !locations.contains(&location) {
+                locations.push(location);
+            }
+        }
         if end == self.front_subtable_layout.entry_capacity {
             for route in self.back_subtable_routes(front_subtable_index) {
                 let back_subtable = &self.back_table[route.0];
-                encoded.extend(
-                    back_subtable
-                        .matching_entry_slots(
-                            &self.back_subtable_layout,
-                            unary_index,
-                            fingerprint,
-                            Some(route.1),
-                        )
-                        .into_iter()
-                        .map(|entry_slot| {
-                            back_subtable.table_location(&self.back_subtable_layout, entry_slot)
-                        }),
-                );
+                for entry_slot in back_subtable.matching_entry_slots(
+                    &self.back_subtable_layout,
+                    unary_index,
+                    fingerprint,
+                    Some(route.1),
+                ) {
+                    let location = TableLocation::decode(
+                        back_subtable.table_location(&self.back_subtable_layout, entry_slot),
+                        self.sg_index_bits,
+                        self.bucket_choice_bits,
+                    );
+                    if !locations.contains(&location) {
+                        locations.push(location);
+                    }
+                }
             }
         }
-        let mut seen = HashSet::new();
-        encoded
-            .into_iter()
-            .map(|value| TableLocation::decode(value, self.sg_index_bits, self.bucket_choice_bits))
-            .filter(|location| seen.insert(*location))
-            .collect()
+        locations
     }
 
     pub(crate) fn insert(
@@ -214,18 +235,14 @@ impl Table {
         let was_full = self.front_table[front_subtable_index]
             .entry_count(&self.front_subtable_layout)
             == self.front_subtable_layout.entry_capacity;
-        let front_entry_slots = self.front_table[front_subtable_index].matching_entry_slots(
-            &self.front_subtable_layout,
-            unary_index,
-            fingerprint,
-            None,
-        );
-        if let Some(entry_slot) = front_entry_slots.into_iter().find(|entry_slot| {
-            self.front_table[front_subtable_index]
-                .entry(&self.front_subtable_layout, *entry_slot)
-                .table_location
-                == encoded
-        }) {
+        let front_entry_slot = self.front_table[front_subtable_index]
+            .matching_entry_slots(&self.front_subtable_layout, unary_index, fingerprint, None)
+            .find(|entry_slot| {
+                self.front_table[front_subtable_index]
+                    .table_location(&self.front_subtable_layout, *entry_slot)
+                    == encoded
+            });
+        if let Some(entry_slot) = front_entry_slot {
             self.front_table[front_subtable_index].remove_at(
                 &self.front_subtable_layout,
                 unary_index,
@@ -241,18 +258,18 @@ impl Table {
             return false;
         }
         for route in self.back_subtable_routes(front_subtable_index) {
-            let entry_slots = self.back_table[route.0].matching_entry_slots(
-                &self.back_subtable_layout,
-                unary_index,
-                fingerprint,
-                Some(route.1),
-            );
-            if let Some(entry_slot) = entry_slots.into_iter().find(|entry_slot| {
-                self.back_table[route.0]
-                    .entry(&self.back_subtable_layout, *entry_slot)
-                    .table_location
-                    == encoded
-            }) {
+            let entry_slot = self.back_table[route.0]
+                .matching_entry_slots(
+                    &self.back_subtable_layout,
+                    unary_index,
+                    fingerprint,
+                    Some(route.1),
+                )
+                .find(|entry_slot| {
+                    self.back_table[route.0].table_location(&self.back_subtable_layout, *entry_slot)
+                        == encoded
+                });
+            if let Some(entry_slot) = entry_slot {
                 self.back_table[route.0].remove_at(
                     &self.back_subtable_layout,
                     unary_index,
@@ -279,18 +296,14 @@ impl Table {
         let (front_subtable_index, unary_index, fingerprint) = self.table_coordinates(storage_key);
         let old = previous.encode(self.sg_index_bits, self.bucket_choice_bits);
         let new = replacement.encode(self.sg_index_bits, self.bucket_choice_bits);
-        let front_entry_slots = self.front_table[front_subtable_index].matching_entry_slots(
-            &self.front_subtable_layout,
-            unary_index,
-            fingerprint,
-            None,
-        );
-        if let Some(entry_slot) = front_entry_slots.into_iter().find(|entry_slot| {
-            self.front_table[front_subtable_index]
-                .entry(&self.front_subtable_layout, *entry_slot)
-                .table_location
-                == old
-        }) {
+        let front_entry_slot = self.front_table[front_subtable_index]
+            .matching_entry_slots(&self.front_subtable_layout, unary_index, fingerprint, None)
+            .find(|entry_slot| {
+                self.front_table[front_subtable_index]
+                    .table_location(&self.front_subtable_layout, *entry_slot)
+                    == old
+            });
+        if let Some(entry_slot) = front_entry_slot {
             let mut entry = self.front_table[front_subtable_index]
                 .entry(&self.front_subtable_layout, entry_slot);
             entry.table_location = new;
@@ -307,18 +320,18 @@ impl Table {
             return false;
         }
         for route in self.back_subtable_routes(front_subtable_index) {
-            let entry_slots = self.back_table[route.0].matching_entry_slots(
-                &self.back_subtable_layout,
-                unary_index,
-                fingerprint,
-                Some(route.1),
-            );
-            if let Some(entry_slot) = entry_slots.into_iter().find(|entry_slot| {
-                self.back_table[route.0]
-                    .entry(&self.back_subtable_layout, *entry_slot)
-                    .table_location
-                    == old
-            }) {
+            let entry_slot = self.back_table[route.0]
+                .matching_entry_slots(
+                    &self.back_subtable_layout,
+                    unary_index,
+                    fingerprint,
+                    Some(route.1),
+                )
+                .find(|entry_slot| {
+                    self.back_table[route.0].table_location(&self.back_subtable_layout, *entry_slot)
+                        == old
+                });
+            if let Some(entry_slot) = entry_slot {
                 let mut entry =
                     self.back_table[route.0].entry(&self.back_subtable_layout, entry_slot);
                 entry.table_location = new;
@@ -401,17 +414,16 @@ impl Table {
         let prefix = u128::from_le_bytes(storage_key[..16].try_into().unwrap())
             >> self.fingerprint_hash_offset_bits;
         let prefix = prefix as u64;
-        let quotient_count = self.front_table.len() * self.front_subtable_layout.unary_count;
-        let fingerprint_space = 1u64 << self.fingerprint_bits;
-        let space = quotient_count as u128 * fingerprint_space as u128;
-        let quotient_and_fingerprint = (prefix as u128 % space) as u64;
-        let quotient = (quotient_and_fingerprint / fingerprint_space) as usize;
+        let quotient_and_fingerprint = self
+            .coordinate_modulus
+            .map_or(prefix, |modulus| prefix % modulus.get());
+        let quotient = (quotient_and_fingerprint >> self.fingerprint_bits) as usize;
         let front_subtable_index = quotient / self.front_subtable_layout.unary_count;
         let unary_index = quotient % self.front_subtable_layout.unary_count;
         (
             front_subtable_index,
             unary_index,
-            (quotient_and_fingerprint & (fingerprint_space - 1)) as u16,
+            (quotient_and_fingerprint & self.fingerprint_mask) as u16,
         )
     }
 

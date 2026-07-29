@@ -56,6 +56,7 @@ rand = "*"
 rcgen = { version = "*", features = ["x509-parser"] }
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 serde = { version = "*", features = ["derive"] }
+smallvec = "*"
 snmalloc-rs = { version = "*", optional = true, default-features = false, features = ["build_cc", "usewait-on-address"] }
 socket2 = { version = "*", features = ["all"] }
 thiserror = "*"

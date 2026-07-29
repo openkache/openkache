@@ -1537,6 +1537,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde",
+ "smallvec",
  "snmalloc-rs",
  "socket2",
  "thiserror",

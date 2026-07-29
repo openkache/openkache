@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf};
 use compio::io::AsyncReadAt;
 
 use crate::*;
@@ -40,13 +41,13 @@ impl Kvkache {
     ) -> Result<Vec<(Item, TableLocation)>> {
         let mut result = Vec::new();
         let mut extent_offset = 0usize;
+        let mut buffer =
+            DirectIoBuffer::for_read(SEGMENT_READ_EXTENT_BYTES.min(self.config.segment_size));
         while extent_offset < self.config.segment_size {
             let extent_bytes =
                 SEGMENT_READ_EXTENT_BYTES.min(self.config.segment_size - extent_offset);
             let offset = self.config.segment_data_offset(sg_index) + extent_offset as u64;
-            let read = self
-                .data
-                .read_at(DirectIoBuffer::for_read(extent_bytes), offset);
+            let read = self.data.read_at(buffer.slice(..extent_bytes), offset);
             let BufResult(read_result, bytes) = compio::runtime::time::timeout(
                 Duration::from_micros(self.config.read_max_time_us),
                 read,
@@ -61,7 +62,7 @@ impl Kvkache {
             for bucket_offset in (0..extent_bytes).step_by(BUCKET_BYTES) {
                 let bucket_index = (extent_offset + bucket_offset) / BUCKET_BYTES;
                 let bucket = &bytes[bucket_offset..bucket_offset + BUCKET_BYTES];
-                result.extend(items(bucket).into_iter().filter_map(|item| {
+                result.extend(items(bucket).filter_map(|item| {
                     let bucket_hash_index = bucket_hash_index_for_bucket(
                         &item.storage_key,
                         bucket_index,
@@ -77,6 +78,7 @@ impl Kvkache {
                     ))
                 }));
             }
+            buffer = bytes.into_inner();
             extent_offset += extent_bytes;
         }
         Ok(result)
@@ -86,16 +88,20 @@ impl Kvkache {
         &mut self,
         sg_index: usize,
     ) -> Result<HashSet<StorageKey>> {
-        let mut latest = Vec::new();
-        for (item, table_location) in self.read_segment_items(sg_index).await? {
+        let mut latest = self.read_segment_items(sg_index).await?;
+        let mut index = 0;
+        while index < latest.len() {
+            let (item, table_location) = &latest[index];
             let is_latest = self
                 .locate_stable_record(&item.storage_key)
                 .await?
                 .is_some_and(|located| {
-                    located.table_location == table_location && located.item == item
+                    located.table_location == *table_location && located.item == *item
                 });
             if is_latest {
-                latest.push((item, table_location));
+                index += 1;
+            } else {
+                latest.swap_remove(index);
             }
         }
 
@@ -121,6 +127,6 @@ fn bucket_hash_index_for_bucket(
     bucket_count: usize,
     bucket_choice_count: usize,
 ) -> Option<u8> {
-    (0..bucket_choice_count as u8)
-        .find(|&index| bucket_hash(storage_key, index, bucket_count) == bucket_index)
+    let hashes = BucketHashSequence::new(storage_key, bucket_count);
+    (0..bucket_choice_count as u8).find(|&index| hashes.get(index) == bucket_index)
 }

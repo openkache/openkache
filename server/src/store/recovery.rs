@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf};
 use compio::fs::{File, OpenOptions};
 use compio::io::{AsyncReadAt, AsyncWriteAt};
 
@@ -62,7 +63,7 @@ pub(crate) async fn initialize_segment_file(
     storage_key_id: [u8; 16],
 ) -> Result<()> {
     file.set_len(config.segment_file_bytes()?).await?;
-    write_page(
+    let _ = write_page(
         file,
         encode_file_header(config, storage_key_id),
         0,
@@ -79,13 +80,14 @@ pub(crate) async fn recover_state(
     config: &Config,
     storage_key_id: [u8; 16],
 ) -> Result<RecoveryState> {
-    let header = read_page(file, 0, config.read_max_time_us, "Segment file header read").await?;
-    validate_file_header(&header, config, storage_key_id)?;
+    let mut bytes = read_page(file, 0, config.read_max_time_us, "Segment file header read").await?;
+    validate_file_header(&bytes, config, storage_key_id)?;
 
     let mut commits = Vec::new();
     for sg_index in 0..config.segment_count {
-        let bytes = read_page(
+        bytes = read_page_into(
             file,
+            bytes,
             config.segment_control_offset(sg_index),
             config.read_max_time_us,
             "SG control page read",
@@ -202,9 +204,10 @@ pub(crate) async fn write_table_checkpoint(
 
     let table_slices = table.checkpoint_bytes();
     let mut payload_offset = 0usize;
+    let mut payload_buffer = DirectIoBuffer::zeroed(CHECKPOINT_IO_BYTES.min(payload_bytes));
     while payload_offset < payload_bytes {
         let extent_bytes = CHECKPOINT_IO_BYTES.min(payload_bytes - payload_offset);
-        let mut bytes = DirectIoBuffer::zeroed(extent_bytes);
+        let mut bytes = payload_buffer.slice(..extent_bytes);
         copy_checkpoint_payload(
             &commit_bytes,
             table_slices,
@@ -213,13 +216,13 @@ pub(crate) async fn write_table_checkpoint(
             logical_payload_bytes,
         );
         checkpoint_checksum.update(&bytes);
-        write_checkpoint_extent(
-            &mut file,
-            bytes,
-            (BUCKET_BYTES + payload_offset) as u64,
-            config.write_max_time_us,
-        )
-        .await?;
+        let write = file.write_at(bytes, (BUCKET_BYTES + payload_offset) as u64);
+        let BufResult(result, returned) =
+            compio::runtime::time::timeout(Duration::from_micros(config.write_max_time_us), write)
+                .await
+                .map_err(|_| KvError::Timeout("Table checkpoint write"))?;
+        require_complete_direct_io("Table checkpoint write", result?, extent_bytes)?;
+        payload_buffer = returned.into_inner();
         payload_offset += extent_bytes;
     }
 
@@ -282,16 +285,19 @@ pub(crate) async fn load_table_checkpoint(
     let mut checkpoint_checksum = crc32fast::Hasher::new();
     checkpoint_checksum.update(&header_bytes);
     let mut payload_offset = 0usize;
+    let mut payload_buffer =
+        DirectIoBuffer::for_read(CHECKPOINT_IO_BYTES.min(header.payload_bytes));
     while payload_offset < header.payload_bytes {
         let extent_bytes = CHECKPOINT_IO_BYTES.min(header.payload_bytes - payload_offset);
-        let bytes = read_checkpoint_extent(
-            &file,
-            extent_bytes,
+        let read = file.read_at(
+            payload_buffer.slice(..extent_bytes),
             (BUCKET_BYTES + payload_offset) as u64,
-            config.read_max_time_us,
-            "Table checkpoint payload read",
-        )
-        .await?;
+        );
+        let BufResult(result, bytes) =
+            compio::runtime::time::timeout(Duration::from_micros(config.read_max_time_us), read)
+                .await
+                .map_err(|_| KvError::Timeout("Table checkpoint payload read"))?;
+        require_complete_direct_io("Table checkpoint payload read", result?, extent_bytes)?;
         checkpoint_checksum.update(&bytes);
         restore_checkpoint_payload(
             &mut commit_bytes,
@@ -300,6 +306,7 @@ pub(crate) async fn load_table_checkpoint(
             &bytes,
             logical_payload_bytes,
         );
+        payload_buffer = bytes.into_inner();
         payload_offset += extent_bytes;
     }
 
@@ -487,13 +494,13 @@ fn encode_checkpoint_commits(commits: &[Option<SegmentCommit>]) -> Result<Vec<u8
 }
 
 fn decode_checkpoint_commits(bytes: &[u8], config: &Config) -> Result<Vec<SegmentCommit>> {
-    let mut commits = Vec::new();
     let (encoded_commits, remainder) = bytes.as_chunks::<CHECKPOINT_COMMIT_BYTES>();
     if !remainder.is_empty() {
         return Err(KvError::Worker(
             "Table checkpoint commit metadata is misaligned".into(),
         ));
     }
+    let mut commits = Vec::new();
     for (sg_index, encoded) in encoded_commits.iter().enumerate() {
         let generation = u64::from_le_bytes(encoded[..8].try_into().unwrap());
         let blob_logical_len =
@@ -583,7 +590,7 @@ fn copy_segmented_bytes(slices: [&[u8]; 2], mut offset: usize, mut destination: 
         destination[..copied].copy_from_slice(&bytes[offset..offset + copied]);
         destination = &mut destination[copied..];
         offset = 0;
-        if destination.is_empty() {
+        if <[u8]>::is_empty(destination) {
             return;
         }
     }
@@ -599,7 +606,7 @@ fn copy_into_segmented_bytes(slices: [&mut [u8]; 2], mut offset: usize, mut sour
         bytes[offset..offset + copied].copy_from_slice(&source[..copied]);
         source = &source[copied..];
         offset = 0;
-        if source.is_empty() {
+        if <[u8]>::is_empty(source) {
             return;
         }
     }
@@ -682,34 +689,40 @@ pub(crate) async fn commit_segment(
     config: &Config,
     storage_key_id: [u8; 16],
     commit: SegmentCommit,
-) -> Result<u64> {
-    write_page(
+    buffer: Option<DirectIoBuffer>,
+) -> Result<(u64, DirectIoBuffer)> {
+    let buffer = encode_control_page(config, storage_key_id, commit, buffer)?;
+    let buffer = write_page(
         file,
-        encode_control_page(config, storage_key_id, commit)?,
+        buffer,
         config.segment_control_offset(commit.sg_index),
         config.write_max_time_us,
         "SG control page write",
     )
     .await?;
     file.sync_data().await?;
-    Ok(BUCKET_BYTES as u64)
+    Ok((BUCKET_BYTES as u64, buffer))
 }
 
 pub(crate) async fn invalidate_segment(
     file: &mut File,
     config: &Config,
     sg_index: usize,
-) -> Result<u64> {
-    write_page(
+    buffer: Option<DirectIoBuffer>,
+) -> Result<(u64, DirectIoBuffer)> {
+    let mut buffer = buffer.unwrap_or_else(|| DirectIoBuffer::zeroed(BUCKET_BYTES));
+    debug_assert_eq!(buffer.len(), BUCKET_BYTES);
+    buffer.fill(0);
+    let buffer = write_page(
         file,
-        DirectIoBuffer::zeroed(BUCKET_BYTES),
+        buffer,
         config.segment_control_offset(sg_index),
         config.write_max_time_us,
         "SG control page invalidation",
     )
     .await?;
     file.sync_data().await?;
-    Ok(BUCKET_BYTES as u64)
+    Ok((BUCKET_BYTES as u64, buffer))
 }
 
 fn encode_file_header(config: &Config, storage_key_id: [u8; 16]) -> DirectIoBuffer {
@@ -760,12 +773,15 @@ fn encode_control_page(
     config: &Config,
     storage_key_id: [u8; 16],
     commit: SegmentCommit,
+    buffer: Option<DirectIoBuffer>,
 ) -> Result<DirectIoBuffer> {
     let sg_index = u32::try_from(commit.sg_index)
         .map_err(|_| KvError::Worker("SG index does not fit the control page".into()))?;
     let blob_logical_len = u64::try_from(commit.blob_logical_len)
         .map_err(|_| KvError::Worker("Blob length does not fit the control page".into()))?;
-    let mut bytes = DirectIoBuffer::zeroed(BUCKET_BYTES);
+    let mut bytes = buffer.unwrap_or_else(|| DirectIoBuffer::zeroed(BUCKET_BYTES));
+    debug_assert_eq!(bytes.len(), BUCKET_BYTES);
+    bytes.fill(0);
     bytes[..8].copy_from_slice(CONTROL_MAGIC);
     bytes[8..12].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
     bytes[12..28].copy_from_slice(&storage_key_id);
@@ -823,7 +839,24 @@ async fn read_page(
     timeout_us: u64,
     operation: &'static str,
 ) -> Result<DirectIoBuffer> {
-    let read = file.read_at(DirectIoBuffer::for_read(BUCKET_BYTES), offset);
+    read_page_into(
+        file,
+        DirectIoBuffer::for_read(BUCKET_BYTES),
+        offset,
+        timeout_us,
+        operation,
+    )
+    .await
+}
+
+async fn read_page_into(
+    file: &File,
+    bytes: DirectIoBuffer,
+    offset: u64,
+    timeout_us: u64,
+    operation: &'static str,
+) -> Result<DirectIoBuffer> {
+    let read = file.read_at(bytes, offset);
     let BufResult(result, bytes) =
         compio::runtime::time::timeout(Duration::from_micros(timeout_us), read)
             .await
@@ -838,7 +871,7 @@ async fn write_page(
     offset: u64,
     timeout_us: u64,
     operation: &'static str,
-) -> Result<()> {
+) -> Result<DirectIoBuffer> {
     let write = file.write_at(bytes, offset);
     let BufResult(result, bytes) =
         compio::runtime::time::timeout(Duration::from_micros(timeout_us), write)
@@ -846,16 +879,9 @@ async fn write_page(
             .map_err(|_| KvError::Timeout(operation))?;
     require_complete_direct_io(operation, result?, BUCKET_BYTES)?;
     debug_assert_eq!(bytes.len(), BUCKET_BYTES);
-    Ok(())
+    Ok(bytes)
 }
 
 fn checksum(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
+    crc32fast::hash(bytes)
 }
