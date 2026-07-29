@@ -86,13 +86,27 @@ impl TableAllocation {
 impl Table {
     pub(crate) fn new(config: &Config) -> Result<Self> {
         let allocation = TableAllocation::new(config)?;
+        let mut front_table = Vec::new();
+        front_table
+            .try_reserve_exact(allocation.front_subtable_count)
+            .map_err(|error| {
+                KvError::InvalidConfig(format!("front Table allocation failed: {error}"))
+            })?;
+        front_table.resize_with(allocation.front_subtable_count, || {
+            Subtable::new(&allocation.front_subtable_layout)
+        });
+        let mut back_table = Vec::new();
+        back_table
+            .try_reserve_exact(allocation.back_subtable_count)
+            .map_err(|error| {
+                KvError::InvalidConfig(format!("back Table allocation failed: {error}"))
+            })?;
+        back_table.resize_with(allocation.back_subtable_count, || {
+            Subtable::new(&allocation.back_subtable_layout)
+        });
         Ok(Self {
-            front_table: (0..allocation.front_subtable_count)
-                .map(|_| Subtable::new(&allocation.front_subtable_layout))
-                .collect(),
-            back_table: (0..allocation.back_subtable_count)
-                .map(|_| Subtable::new(&allocation.back_subtable_layout))
-                .collect(),
+            front_table,
+            back_table,
             front_subtable_layout: allocation.front_subtable_layout,
             back_subtable_layout: allocation.back_subtable_layout,
             back_subtable_group_count: allocation.back_subtable_group_count,
