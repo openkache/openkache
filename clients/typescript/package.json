@@ -27,6 +27,15 @@
     "access": "public"
   },
   "scripts": {
-    "build:native": "cargo zigbuild --locked --manifest-path ../rust/Cargo.toml --bin openkache-client-helper --release --target x86_64-unknown-linux-musl --target-dir target/native"
+    "build": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json",
+    "build:native": "cargo zigbuild --locked --manifest-path ../rust/Cargo.toml --bin openkache-client-helper --release --target x86_64-unknown-linux-musl --target-dir target/native",
+    "build:package": "bun run build && bun run build:native",
+    "pack:check": "bun run build:package && bun pm pack --dry-run",
+    "prepublishOnly": "bun run build:package",
+    "typecheck": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.13",
+    "typescript": "^7.0.2"
   }
 }

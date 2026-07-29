@@ -19,12 +19,20 @@ From `clients/typescript`:
 
 ```bash
 bun install --frozen-lockfile
-bun run build:native
+bun run build
+bun run typecheck
+bun run pack:check
 ```
 
-The repository uses Bun only as its package manager. Published applications run
-the client on Node.js 20 or newer. Release packages currently support Linux x64
-and contain a statically linked helper under `target/native/`.
+`build` generates the JavaScript and declaration files under the ignored
+`dist/` directory. `pack:check` also cross-compiles the static Rust helper and
+previews the complete npm package. The public CI and publication workflows build
+these artifacts from source; generated output is not committed.
+
+The repository uses Bun only for development and release tooling. Published
+applications run the client on Node.js 20 or newer without Bun or runtime npm
+dependencies. Release packages currently support Linux x64 and contain a
+statically linked helper under `target/native/`.
 
 ## Usage
 
