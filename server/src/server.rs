@@ -21,8 +21,8 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use crate::channel::{self, AsyncReceiver, Sender};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
-    Incoming as TransportIncoming, ReceiveStream, SendStream, ServerEndpoint, ServerTlsConfig,
-    StreamReadError, TransportError,
+    Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
+    ServerTlsConfig, StreamReadError, TransportError,
 };
 use crate::{
     AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache, TlsConfig,
@@ -55,7 +55,7 @@ impl NetworkWorkerReporter {
         }
     }
 
-    fn startup_failed(mut self, message: String) {
+    pub(crate) fn startup_failed(mut self, message: String) {
         self.phase = NetworkWorkerPhase::Finished;
         self.finished.take();
         if let Some(started) = self.started.take() {
@@ -77,7 +77,7 @@ impl NetworkWorkerReporter {
         reported
     }
 
-    fn finish(mut self, result: std::result::Result<(), String>) {
+    pub(crate) fn finish(mut self, result: std::result::Result<(), String>) {
         self.phase = NetworkWorkerPhase::Finished;
         if let Some(finished) = self.finished.take() {
             let _ = finished.send((self.worker_id, result));
@@ -228,6 +228,7 @@ pub struct KacheServer {
     cache: Arc<ThreadedKvkache>,
     network: NetworkConfig,
     request_timeout: Duration,
+    max_item_bytes: usize,
 }
 
 impl KacheServer {
@@ -303,6 +304,7 @@ impl KacheServer {
     ) -> Result<Self> {
         config.validate()?;
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
+        let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
@@ -325,6 +327,7 @@ impl KacheServer {
             cache,
             network,
             request_timeout,
+            max_item_bytes,
         })
     }
 
@@ -376,6 +379,7 @@ impl KacheServer {
             cache,
             network,
             request_timeout,
+            max_item_bytes,
             ..
         } = self;
         let (started_tx, started_rx) =
@@ -396,7 +400,12 @@ impl KacheServer {
             let cpu_id = network.cpu_ids[worker_id];
             let entries = network.io_uring_entries_per_worker;
             let event_interval = network.event_interval;
-            let max_stream_lanes = network.max_stream_lanes_per_connection;
+            let limits = NetworkWorkerLimits {
+                request_timeout,
+                max_stream_lanes: network.max_stream_lanes_per_connection,
+                request_budget_bytes: network.max_inflight_value_mib_per_worker * 1024 * 1024,
+                max_item_bytes,
+            };
             let thread = match std::thread::Builder::new()
                 .name(format!("openkache-network-{worker_id}"))
                 .spawn(move || {
@@ -421,7 +430,7 @@ impl KacheServer {
                             quic_backend,
                             socket,
                             worker_tls,
-                            max_stream_lanes,
+                            limits.max_stream_lanes,
                         )
                         .await
                         {
@@ -445,8 +454,7 @@ impl KacheServer {
                             endpoint,
                             &worker_cache,
                             &worker_access_policy,
-                            request_timeout,
-                            max_stream_lanes,
+                            limits,
                             stop_rx,
                         )
                         .await
@@ -528,7 +536,7 @@ fn bind_reuse_port_sockets(
     Ok(sockets)
 }
 
-fn shutdown_workers_and_cache(
+pub(crate) fn shutdown_workers_and_cache(
     workers: Vec<(Sender<()>, std::thread::JoinHandle<()>)>,
     cache: Arc<ThreadedKvkache>,
 ) -> Result<()> {
@@ -568,50 +576,33 @@ fn shutdown_cache(cache: Arc<ThreadedKvkache>) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct NetworkWorkerLimits {
+    request_timeout: Duration,
+    max_stream_lanes: usize,
+    request_budget_bytes: usize,
+    max_item_bytes: usize,
+}
+
 async fn run_selected_endpoint(
     endpoint: ServerEndpoint,
     cache: &ThreadedKvkache,
     access_policy: &AccessPolicy,
-    request_timeout: Duration,
-    max_stream_lanes: usize,
+    limits: NetworkWorkerLimits,
     stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
     match endpoint {
         #[cfg(feature = "quic-quinn")]
         ServerEndpoint::Quinn(endpoint) => {
-            run_network_worker(
-                endpoint,
-                cache,
-                access_policy,
-                request_timeout,
-                max_stream_lanes,
-                stop,
-            )
-            .await
+            run_network_worker(endpoint, cache, access_policy, limits, stop).await
         }
         #[cfg(feature = "quic-noq")]
         ServerEndpoint::Noq(endpoint) => {
-            run_network_worker(
-                endpoint,
-                cache,
-                access_policy,
-                request_timeout,
-                max_stream_lanes,
-                stop,
-            )
-            .await
+            run_network_worker(endpoint, cache, access_policy, limits, stop).await
         }
         #[cfg(feature = "quic-quiche")]
         ServerEndpoint::Quiche(endpoint) => {
-            run_network_worker(
-                endpoint,
-                cache,
-                access_policy,
-                request_timeout,
-                max_stream_lanes,
-                stop,
-            )
-            .await
+            run_network_worker(endpoint, cache, access_policy, limits, stop).await
         }
     }
 }
@@ -620,10 +611,16 @@ async fn run_network_worker<E: TransportEndpoint>(
     endpoint: E,
     cache: &ThreadedKvkache,
     access_policy: &AccessPolicy,
-    request_timeout: Duration,
-    max_stream_lanes: usize,
+    limits: NetworkWorkerLimits,
     stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
+    let NetworkWorkerLimits {
+        request_timeout,
+        max_stream_lanes,
+        request_budget_bytes,
+        max_item_bytes,
+    } = limits;
+    let request_budget = RequestBudget::new(request_budget_bytes);
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {
@@ -635,6 +632,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, cache, access_policy, request_timeout, max_stream_lanes,
+                        request_budget.clone(), max_item_bytes,
                     ));
                 }
                 _ = stopping => break,
@@ -649,6 +647,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, cache, access_policy, request_timeout, max_stream_lanes,
+                        request_budget.clone(), max_item_bytes,
                     ));
                 }
                 _ = completed => {}
@@ -668,6 +667,8 @@ async fn serve_incoming<I: TransportIncoming>(
     access_policy: &AccessPolicy,
     request_timeout: Duration,
     max_stream_lanes: usize,
+    request_budget: RequestBudget,
+    max_item_bytes: usize,
 ) {
     if let Ok(connection) = incoming.connect().await {
         let administrator =
@@ -678,6 +679,8 @@ async fn serve_incoming<I: TransportIncoming>(
             administrator,
             request_timeout,
             max_stream_lanes,
+            request_budget,
+            max_item_bytes,
         )
         .await;
     }
@@ -690,6 +693,8 @@ async fn serve_connection<C: TransportConnection>(
     administrator: bool,
     request_timeout: Duration,
     max_stream_lanes: usize,
+    request_budget: RequestBudget,
+    max_item_bytes: usize,
 ) {
     let mut streams = FuturesUnordered::new();
     loop {
@@ -706,6 +711,8 @@ async fn serve_connection<C: TransportConnection>(
                         cache,
                         administrator,
                         request_timeout,
+                        request_budget.clone(),
+                        max_item_bytes,
                     ));
                 }
                 Err(_) => break,
@@ -723,6 +730,8 @@ async fn serve_connection<C: TransportConnection>(
                             cache,
                             administrator,
                             request_timeout,
+                            request_budget.clone(),
+                            max_item_bytes,
                         ));
                     }
                     Err(_) => break,
@@ -741,10 +750,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     cache: &ThreadedKvkache,
     administrator: bool,
     request_timeout: Duration,
+    request_budget: RequestBudget,
+    max_item_bytes: usize,
 ) {
     loop {
-        let frame = match receive
-            .read_request(MAX_REQUEST_FRAME_BYTES, request_timeout)
+        let mut frame = match receive
+            .read_request(MAX_REQUEST_FRAME_BYTES, request_timeout, &request_budget)
             .await
         {
             Ok(frame) => frame,
@@ -776,19 +787,53 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::Transport(_)) => break,
         };
-        let response = match Request::decode(&frame) {
+        let request_bytes = std::mem::take(&mut frame.bytes);
+        let (response, _response_permit) = match Request::decode_owned(request_bytes) {
             Ok(request) => {
+                let response_permit = if request.opcode == Opcode::Get {
+                    match request_budget
+                        .acquire(max_item_bytes, request_timeout)
+                        .await
+                    {
+                        Ok(permit) => Some(permit),
+                        Err(StreamReadError::Timeout) => {
+                            let response = response(
+                                Status::Timeout,
+                                b"response memory budget timed out".to_vec(),
+                            );
+                            if !write_response(&mut send, response, request_timeout).await {
+                                break;
+                            }
+                            continue;
+                        }
+                        Err(_) => {
+                            let response = response(
+                                Status::Overloaded,
+                                b"response exceeds the network worker memory budget".to_vec(),
+                            );
+                            if !write_response(&mut send, response, request_timeout).await {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
                 match compio::runtime::time::timeout(
                     request_timeout,
                     execute_request(cache, request, administrator),
                 )
                 .await
                 {
-                    Ok(response) => response,
-                    Err(_) => response(Status::Timeout, b"request execution timed out".to_vec()),
+                    Ok(response) => (response, response_permit),
+                    Err(_) => (
+                        response(Status::Timeout, b"request execution timed out".to_vec()),
+                        response_permit,
+                    ),
                 }
             }
-            Err(error) => protocol_error_response(error),
+            Err(error) => (protocol_error_response(error), None),
         };
         if !write_response(&mut send, response, request_timeout).await {
             break;
@@ -934,6 +979,8 @@ pub enum ServerError {
     ProductionTlsRequired(SocketAddr),
     #[error("production TLS cannot be combined with insecure development mode")]
     ConflictingSecurityModes,
+    #[error("plaintext RESP is restricted to a loopback address, not {0}")]
+    PlaintextRespRequiresLoopback(SocketAddr),
     #[error("certificate generation failed: {0}")]
     Certificate(#[from] rcgen::Error),
     #[error("TLS identity file {path} is invalid: {message}")]

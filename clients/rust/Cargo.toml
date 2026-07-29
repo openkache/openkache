@@ -12,15 +12,22 @@ crate-type = ["rlib"]
 name = "openkache-client-helper"
 path = "src/bin/openkache_client_helper.rs"
 
+[features]
+default = ["quic-quinn"]
+quic-compio = ["dep:compio", "dep:compio-quic"]
+quic-quinn = ["dep:quinn", "dep:tokio"]
+
 [dependencies]
 chacha20poly1305 = { version = "*", features = ["zeroize"] }
-compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime"] }
-compio-quic = { version = "*", features = ["ring"] }
+compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
+compio-quic = { version = "*", features = ["ring"], optional = true }
 flume = "*"
 futures-util = "*"
 getrandom = "*"
 openkache-protocol = { path = "../../protocol" }
+quinn = { version = "*", default-features = false, features = ["ring", "runtime-tokio", "rustls-ring"], optional = true }
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 thiserror = "*"
+tokio = { version = "*", features = ["io-util", "rt", "time"], optional = true }
 zeroize = "*"
 zstd-pure-rs = "*"

@@ -106,6 +106,12 @@ pub(crate) fn decode_stored_value(encoded: &[u8]) -> Result<DecodedStoredValue<'
     Ok(DecodedStoredValue { value, flags })
 }
 
+pub(crate) fn remove_stored_value_tag(encoded: &mut Vec<u8>) {
+    debug_assert!(encoded.len() >= STORED_VALUE_TAG_BYTES);
+    encoded.copy_within(STORED_VALUE_TAG_BYTES.., 0);
+    encoded.truncate(encoded.len() - STORED_VALUE_TAG_BYTES);
+}
+
 fn encode_stored_value_tag(kind: u8, flags: openkache_protocol::ValueFlags) -> u8 {
     kind | if flags.is_compressed() {
         COMPRESSED_VALUE_TAG

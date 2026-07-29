@@ -2,14 +2,15 @@
 
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use openkache_client::value::{Compression, ENCRYPTION_KEY_BYTES, ValueCodec, ZstandardOptions};
 use openkache_client::{
-    Client, ClientIdentity, ClientOptions, SetCondition, SetOptions, SetOutcome,
+    Client, ClientIdentity, ClientOptions, ClientTimeouts, SetCondition, SetOptions, SetOutcome,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 
-const MAX_HELPER_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const MAX_HELPER_FRAME_BYTES: usize = 128 * 1024 * 1024;
 
 const COMMAND_CONNECT: u8 = 1;
 const COMMAND_EXECUTE: u8 = 2;
@@ -41,12 +42,9 @@ fn main() {
 }
 
 fn run() -> Result<(), HelperError> {
-    let runtime = compio::runtime::Runtime::new()?;
-    if !runtime.driver_type().is_iouring() {
-        return Err(HelperError::Protocol(
-            "OpenKache client requires the Compio io_uring driver".to_string(),
-        ));
-    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -70,7 +68,7 @@ fn run() -> Result<(), HelperError> {
 }
 
 fn handle_request(
-    runtime: &compio::runtime::Runtime,
+    runtime: &tokio::runtime::Runtime,
     client: &mut Option<Client>,
     command: Command,
 ) -> Result<Response, HelperError> {
@@ -98,7 +96,7 @@ fn handle_request(
 }
 
 fn connect(
-    runtime: &compio::runtime::Runtime,
+    runtime: &tokio::runtime::Runtime,
     options: ConnectionOptions,
 ) -> Result<Client, HelperError> {
     let address: SocketAddr = options
@@ -140,6 +138,11 @@ fn connect(
             ClientOptions {
                 value_codec,
                 identity,
+                timeouts: ClientTimeouts {
+                    connect: Duration::from_millis(options.connect_timeout_ms),
+                    request: Duration::from_millis(options.request_timeout_ms),
+                },
+                ..ClientOptions::default()
             },
         ))
         .map_err(HelperError::from)
@@ -198,7 +201,7 @@ fn parse_private_key(bytes: Vec<u8>) -> Result<PrivateKeyDer<'static>, HelperErr
 }
 
 fn execute(
-    runtime: &compio::runtime::Runtime,
+    runtime: &tokio::runtime::Runtime,
     client: &Client,
     request: ExecuteRequest,
 ) -> Result<Response, HelperError> {
@@ -259,6 +262,8 @@ fn read_request(reader: &mut impl Read) -> Result<Option<Request>, HelperError> 
             compression_level: decoder.i32()?,
             minimum_input_size: decoder.usize()?,
             minimum_savings: decoder.usize()?,
+            connect_timeout_ms: decoder.u64()?,
+            request_timeout_ms: decoder.u64()?,
         }),
         COMMAND_EXECUTE => Command::Execute(ExecuteRequest {
             operation: decoder.u8()?,
@@ -370,6 +375,8 @@ struct ConnectionOptions {
     compression_level: i32,
     minimum_input_size: usize,
     minimum_savings: usize,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
 }
 
 struct Identity {

@@ -14,6 +14,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
+use crate::config::default_network_worker_count;
 use crate::store::{
     BLOB_ITEM_THRESHOLD_BYTES, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES, STORED_VALUE_TAG_BYTES,
 };
@@ -178,7 +179,7 @@ impl SizingRequest {
         let table_memory_budget_bytes =
             percent_of(self.memory_bytes, TABLE_RAM_PERCENT, "Table sizing budget")?;
         let mut config = AppConfig::default();
-        let network_worker_count = cpu_ids.len().min(2);
+        let network_worker_count = default_network_worker_count(cpu_ids.len());
         let storage_cpu_ids = if cpu_ids.len() > network_worker_count {
             cpu_ids[network_worker_count..].to_vec()
         } else {
@@ -192,6 +193,7 @@ impl SizingRequest {
         config.storage.directory = self.directory;
         config.storage.segment_size_mib = self.profile.segment_size_mib();
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
+        config.storage.max_item_size_mib = config.storage.blob_segment_size_mib.min(16);
 
         for exponent in (0..=16).rev() {
             let segments_per_thread = 1usize << exponent;

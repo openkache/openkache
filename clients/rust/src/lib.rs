@@ -4,6 +4,8 @@ mod transport;
 pub mod value;
 
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use openkache_protocol::{
     ClientKeyDigest, MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status,
@@ -11,11 +13,29 @@ use openkache_protocol::{
 pub use openkache_protocol::{SetCondition, SetOptions};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
+#[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
+compile_error!("enable at least one client QUIC backend feature");
+
 /// All client-level errors.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid client configuration: {0}")]
+    Configuration(String),
     #[error("connection failed: {0}")]
     Connection(String),
+    #[error("operation timed out during {operation}")]
+    Timeout { operation: &'static str },
+    #[error("{backend} QUIC requires {message}")]
+    Runtime {
+        backend: &'static str,
+        message: String,
+    },
+    #[error("{backend} QUIC {operation} failed: {message}")]
+    Transport {
+        backend: &'static str,
+        operation: &'static str,
+        message: String,
+    },
     #[error("server returned {status:?}: {message}")]
     Server { status: Status, message: String },
     #[error("unexpected {operation} response status: {status:?}")]
@@ -50,6 +70,94 @@ pub enum SetOutcome {
     NotStored,
 }
 
+/// QUIC implementation used by the client connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuicBackend {
+    /// Quinn with Tokio packet I/O.
+    Quinn,
+    /// Quinn protocol state managed through Compio packet I/O.
+    Compio,
+}
+
+impl QuicBackend {
+    /// Returns the stable configuration and diagnostics label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Quinn => "quinn",
+            Self::Compio => "compio",
+        }
+    }
+}
+
+const COMPILED_QUIC_BACKENDS: &[QuicBackend] = &[
+    #[cfg(feature = "quic-quinn")]
+    QuicBackend::Quinn,
+    #[cfg(feature = "quic-compio")]
+    QuicBackend::Compio,
+];
+
+/// QUIC backend selection for one client connection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QuicOptions {
+    /// Explicit backend selection. Single-backend builds select it automatically.
+    pub backend: Option<QuicBackend>,
+}
+
+impl QuicOptions {
+    fn selected_backend(self) -> Result<QuicBackend> {
+        if let Some(backend) = self.backend {
+            return Ok(backend);
+        }
+        if let [backend] = COMPILED_QUIC_BACKENDS {
+            return Ok(*backend);
+        }
+        #[cfg(all(feature = "quic-compio", feature = "quic-quinn"))]
+        {
+            if compio::runtime::Runtime::try_current().is_some() {
+                return Ok(QuicBackend::Compio);
+            }
+            if tokio::runtime::Handle::try_current().is_ok() {
+                return Ok(QuicBackend::Quinn);
+            }
+        }
+        Err(Error::Configuration(
+            "quic.backend must be specified when multiple QUIC backends are compiled and no supported runtime is active"
+                .into(),
+        ))
+    }
+}
+
+/// Deadlines applied to connection setup and complete request/response exchanges.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientTimeouts {
+    /// Maximum duration for endpoint initialization and the QUIC/TLS handshake.
+    pub connect: Duration,
+    /// Maximum duration for lane acquisition, request transmission, and response receipt.
+    pub request: Duration,
+}
+
+impl Default for ClientTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(5),
+            request: Duration::from_secs(2),
+        }
+    }
+}
+
+/// Whole-operation retry policy for response-safe cache operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetryPolicy {
+    /// Maximum total attempts, including the initial request.
+    pub max_attempts: usize,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self { max_attempts: 2 }
+    }
+}
+
 /// Optional client behaviors layered over the OpenKache wire protocol.
 #[derive(Default)]
 pub struct ClientOptions {
@@ -57,6 +165,12 @@ pub struct ClientOptions {
     pub value_codec: value::ValueCodec,
     /// Optional certificate identity presented to an mTLS server.
     pub identity: Option<ClientIdentity>,
+    /// QUIC implementation selected for the connection.
+    pub quic: QuicOptions,
+    /// Bounded connection and request durations.
+    pub timeouts: ClientTimeouts,
+    /// Retry attempts for response-safe operations after connection failures.
+    pub retry: RetryPolicy,
 }
 
 /// Certificate chain and private key presented during mutual TLS authentication.
@@ -89,8 +203,16 @@ impl ClientIdentity {
 
 /// A reusable QUIC connection to an OpenKache server.
 pub struct Client {
-    connection: transport::Connection,
+    connection: RwLock<Arc<transport::Connection>>,
+    reconnect: futures_util::lock::Mutex<()>,
+    address: SocketAddr,
+    server_name: String,
+    tls: rustls::ClientConfig,
+    backend: QuicBackend,
+    connect_timeout: Duration,
     value_codec: value::ValueCodec,
+    request_timeout: Duration,
+    retry: RetryPolicy,
 }
 
 impl Client {
@@ -125,6 +247,9 @@ impl Client {
     /// # Errors
     ///
     /// Returns an error when TLS configuration or the QUIC handshake fails.
+    // Compio connections are thread-affine; Arc provides task-local shared ownership here and
+    // preserves Send + Sync for Quinn-only builds.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub async fn connect_with_options(
         address: SocketAddr,
         server_name: &str,
@@ -134,12 +259,43 @@ impl Client {
         let ClientOptions {
             value_codec,
             identity,
+            quic,
+            timeouts,
+            retry,
         } = options;
+        if timeouts.connect.is_zero() || timeouts.request.is_zero() {
+            return Err(Error::Configuration(
+                "client timeouts must be greater than zero".into(),
+            ));
+        }
+        if Instant::now().checked_add(timeouts.connect).is_none()
+            || Instant::now().checked_add(timeouts.request).is_none()
+        {
+            return Err(Error::Configuration(
+                "client timeouts exceed the platform clock range".into(),
+            ));
+        }
+        if retry.max_attempts == 0 {
+            return Err(Error::Configuration(
+                "retry.max_attempts must be greater than zero".into(),
+            ));
+        }
+        let backend = quic.selected_backend()?;
         let tls = make_tls_config(trusted_certificate_der, identity)?;
-        let connection = transport::connect(address, server_name, tls).await?;
+        let connection =
+            transport::connect(backend, address, server_name, tls.clone(), timeouts.connect)
+                .await?;
         Ok(Self {
-            connection,
+            connection: RwLock::new(Arc::new(connection)),
+            reconnect: futures_util::lock::Mutex::new(()),
+            address,
+            server_name: server_name.to_string(),
+            tls,
+            backend,
+            connect_timeout: timeouts.connect,
             value_codec,
+            request_timeout: timeouts.request,
+            retry,
         })
     }
 
@@ -287,10 +443,42 @@ impl Client {
     }
 
     async fn request(&self, request: Request) -> Result<Response> {
-        let mut stream = self.connection.acquire_lane().await?;
+        let deadline = transport::Deadline::after(self.request_timeout)?;
+        let max_attempts = if matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats) {
+            self.retry.max_attempts
+        } else {
+            1
+        };
+        for attempt in 1..=max_attempts {
+            let connection = self.current_connection()?;
+            match self
+                .request_once(&connection, request.clone(), deadline)
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(error) if attempt < max_attempts && error.is_connection_failure() => {
+                    self.reconnect(&connection, deadline).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("every configured request has at least one attempt")
+    }
+
+    async fn request_once(
+        &self,
+        connection: &transport::Connection,
+        request: Request,
+        deadline: transport::Deadline,
+    ) -> Result<Response> {
+        let mut stream = connection.acquire_lane(deadline).await?;
         let result = async {
-            stream.write_request(request.into_encoded()?).await?;
-            let frame = stream.read_response(MAX_RESPONSE_FRAME_BYTES).await?;
+            stream
+                .write_request(request.into_encoded()?, deadline)
+                .await?;
+            let frame = stream
+                .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
+                .await?;
             Response::decode_owned(frame).map_err(Error::from)
         }
         .await;
@@ -308,6 +496,61 @@ impl Client {
             Err(error) => return Err(error),
         };
         Ok(response)
+    }
+
+    fn current_connection(&self) -> Result<Arc<transport::Connection>> {
+        self.connection
+            .read()
+            .map(|connection| Arc::clone(&connection))
+            .map_err(|_| Error::Connection("connection state lock is poisoned".into()))
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn reconnect(
+        &self,
+        failed: &Arc<transport::Connection>,
+        deadline: transport::Deadline,
+    ) -> Result<()> {
+        let remaining = deadline.remaining("connection retry")?;
+        let Some(_guard) =
+            transport::timeout(self.backend, remaining, self.reconnect.lock()).await?
+        else {
+            return Err(Error::Timeout {
+                operation: "connection retry",
+            });
+        };
+        let current = self.current_connection()?;
+        if !Arc::ptr_eq(&current, failed) {
+            return Ok(());
+        }
+        let timeout = deadline
+            .remaining("connection retry")?
+            .min(self.connect_timeout);
+        let replacement = transport::connect(
+            self.backend,
+            self.address,
+            &self.server_name,
+            self.tls.clone(),
+            timeout,
+        )
+        .await?;
+        let mut connection = self
+            .connection
+            .write()
+            .map_err(|_| Error::Connection("connection state lock is poisoned".into()))?;
+        if Arc::ptr_eq(&connection, failed) {
+            *connection = Arc::new(replacement);
+        }
+        Ok(())
+    }
+}
+
+impl Error {
+    fn is_connection_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(_) | Self::Timeout { .. } | Self::Transport { .. } | Self::Io(_)
+        )
     }
 }
 

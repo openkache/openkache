@@ -678,7 +678,7 @@ impl Kvkache {
         if !located.item.is_live_at(unix_time_ms()) {
             return Ok(None);
         }
-        self.read_stored_value(located.table_location, &located.item.value)
+        self.read_stored_value(located.table_location, located.item.value)
             .await
             .map(Some)
     }
@@ -891,12 +891,27 @@ impl Kvkache {
     async fn read_stored_value(
         &self,
         table_location: TableLocation,
-        encoded: &[u8],
+        mut encoded: Vec<u8>,
     ) -> Result<EncodedValue> {
-        let decoded = decode_stored_value(encoded)?;
-        let bytes = match decoded.value {
-            StoredValue::Inline(value) => value.to_vec(),
-            StoredValue::Blob(blob_ref) => {
+        let decoded = decode_stored_value(&encoded)?;
+        let flags = decoded.flags;
+        let blob_ref = match decoded.value {
+            StoredValue::Inline(value) => {
+                debug_assert_eq!(
+                    value.len() + STORED_VALUE_TAG_BYTES,
+                    encoded.len(),
+                    "decoded inline value excludes only its tag"
+                );
+                None
+            }
+            StoredValue::Blob(blob_ref) => Some(blob_ref),
+        };
+        let bytes = match blob_ref {
+            None => {
+                remove_stored_value_tag(&mut encoded);
+                encoded
+            }
+            Some(blob_ref) => {
                 let value = self
                     .blob_segment
                     .read(table_location.sg_index as usize, blob_ref)
@@ -911,7 +926,7 @@ impl Kvkache {
                 value
             }
         };
-        Ok(EncodedValue::new(bytes, decoded.flags))
+        Ok(EncodedValue::new(bytes, flags))
     }
 
     fn ssd_segment_age(&self, sg_index: usize) -> usize {
@@ -1230,6 +1245,12 @@ impl Kvkache {
     }
 
     fn validate_value(&self, value: &[u8], expiring: bool) -> Result<()> {
+        if value.len() > self.config.max_item_bytes {
+            return Err(KvError::ItemTooLarge {
+                bytes: value.len(),
+                capacity: self.config.max_item_bytes,
+            });
+        }
         if is_blob_item(value) {
             if value.len() > self.config.blob_segment_size || value.len() > u32::MAX as usize {
                 return Err(KvError::BlobSegmentFull {

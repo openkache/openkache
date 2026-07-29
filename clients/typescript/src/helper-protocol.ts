@@ -22,7 +22,7 @@ export const RESULT_NOT_STORED = 9
 const COMMAND_CONNECT = 1
 const COMMAND_EXECUTE = 2
 const COMMAND_CLOSE = 3
-const MAX_HELPER_FRAME_BYTES = 32 * 1024 * 1024
+const MAX_HELPER_FRAME_BYTES = 128 * 1024 * 1024
 const INITIAL_HELPER_BUFFER_BYTES = 4 * 1024
 const MAX_RETAINED_HELPER_BUFFER_BYTES = 64 * 1024
 const TEXT_ENCODER = new TextEncoder()
@@ -43,6 +43,8 @@ export interface Helper_Connection_Options {
   readonly compression_level: number
   readonly minimum_input_size: number
   readonly minimum_savings: number
+  readonly connect_timeout_ms: number
+  readonly request_timeout_ms: number
 }
 
 export interface Helper_Execute_Request {
@@ -84,6 +86,8 @@ export function encode_connect_request(
   encoder.i32(options.compression_level)
   encoder.u64(options.minimum_input_size)
   encoder.u64(options.minimum_savings)
+  encoder.u64(options.connect_timeout_ms)
+  encoder.u64(options.request_timeout_ms)
   return encoder.finish()
 }
 

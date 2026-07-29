@@ -104,11 +104,20 @@ Call and await `close()` when finished.
   values must use the same key. OpenKache never sends it to the server.
 - `compression` controls Zstandard level, minimum input size, and required
   savings. Defaults are level 1, 1 KiB, and 64 bytes.
+- `timeouts.connect_ms` bounds endpoint setup and the QUIC/TLS handshake;
+  the default is 5000 ms.
+- `timeouts.request_ms` bounds each complete request/response operation;
+  the default is 2000 ms.
 - `value_codecs` registers optional Protobuf, FlatBuffers, or application codecs.
 - `helper_path` overrides helper discovery for custom packaging.
 
 `stats()` validates the server response and returns
 `{ storage: string, workers: readonly string[] }`.
+
+`PING`, `GET`, and `STATS` may reconnect and retry once after a transport
+failure. Mutating operations are not retried automatically. Encoded values are
+limited to the 64 MiB wire ceiling; servers may enforce a smaller operational
+limit.
 
 Stored encrypted values contain a 24-byte nonce, ciphertext, and a 16-byte
 authentication tag. Existing request, response, and on-disk metadata fields

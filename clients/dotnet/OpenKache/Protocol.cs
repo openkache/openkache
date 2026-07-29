@@ -10,7 +10,7 @@ internal static class Protocol
 {
     internal const string ApplicationProtocol = "openkache/2";
     internal const int ResponseHeaderBytes = 5;
-    internal const int MaximumValueBytes = 16 * 1024 * 1024;
+    internal const int MaximumValueBytes = 64 * 1024 * 1024;
 
     private const int RequestHeaderBytes = 9;
     private const int ClientKeyDigestBytes = 32;

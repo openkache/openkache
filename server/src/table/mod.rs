@@ -130,9 +130,7 @@ impl Table {
             .matching_entry_slots(&self.front_subtable_layout, unary_index, fingerprint, None)
             .into_iter()
             .map(|entry_slot| {
-                front_subtable
-                    .entry(&self.front_subtable_layout, entry_slot)
-                    .table_location
+                front_subtable.table_location(&self.front_subtable_layout, entry_slot)
             })
             .collect::<Vec<_>>();
         let (_, end) = front_subtable.bounds(&self.front_subtable_layout, unary_index);
@@ -149,9 +147,7 @@ impl Table {
                         )
                         .into_iter()
                         .map(|entry_slot| {
-                            back_subtable
-                                .entry(&self.back_subtable_layout, entry_slot)
-                                .table_location
+                            back_subtable.table_location(&self.back_subtable_layout, entry_slot)
                         }),
                 );
             }

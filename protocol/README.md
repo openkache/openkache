@@ -34,7 +34,8 @@ response = status:u8 | payload_len:u32be | payload
 Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
 Clients encode KV keys as the 32-byte SHA-256 digest of the exact user-key
 bytes. The server rejects every other key length. Values and response payloads
-are limited to 16 MiB. `SET` uses request length flag bits for an optional
+are limited to 64 MiB. Servers may enforce a smaller operational item limit.
+`SET` uses request length flag bits for an optional
 positive millisecond TTL and the mutually exclusive `NX` and `XX` conditions.
 `STATS` and `SYNC` return `Forbidden` when the authenticated client lacks
 administrator authorization.

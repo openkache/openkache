@@ -234,6 +234,12 @@ impl ValueCodec {
         value_flags: ValueFlags,
         mut encoded: Vec<u8>,
     ) -> Result<Vec<u8>> {
+        if encoded.len() > MAX_VALUE_BYTES {
+            return Err(Error::EncodedValueTooLarge {
+                size: encoded.len(),
+                maximum: MAX_VALUE_BYTES,
+            });
+        }
         if self.cipher.is_some() != value_flags.is_encrypted() {
             return Err(if value_flags.is_encrypted() {
                 Error::EncryptionKeyRequired
@@ -338,7 +344,9 @@ fn compress_if_beneficial(plaintext: Vec<u8>, compression: Compression) -> Resul
     let mut compressed = vec![0_u8; ZSTD_compressBound(plaintext.len())];
     let compressed_length = ZSTD_compress(&mut compressed, &plaintext, options.level);
     check_zstandard("compression", compressed_length)?;
-    if compressed_length.saturating_add(options.minimum_savings) >= plaintext.len() {
+    if compressed_length >= plaintext.len()
+        || plaintext.len() - compressed_length < options.minimum_savings
+    {
         return Ok((plaintext, false));
     }
     compressed.truncate(compressed_length);

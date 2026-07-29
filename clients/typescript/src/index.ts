@@ -42,7 +42,7 @@ export type {
 } from "./value-codec.js"
 
 const EMPTY_BYTES = new Uint8Array()
-const MAX_VALUE_BYTES = 16 * 1024 * 1024
+const MAX_VALUE_BYTES = 64 * 1024 * 1024
 const ENCRYPTION_OVERHEAD_BYTES = 40
 const MAX_PLAINTEXT_BYTES = MAX_VALUE_BYTES - ENCRYPTION_OVERHEAD_BYTES
 const MAX_STDERR_BYTES = 64 * 1024
@@ -92,6 +92,16 @@ export interface Client_Identity {
 }
 
 /**
+ * Native connection and complete request/response deadlines.
+ */
+export interface Client_Timeouts {
+  /** Maximum duration for connection setup and the QUIC/TLS handshake. */
+  readonly connect_ms?: number
+  /** Maximum duration for one complete cache operation. */
+  readonly request_ms?: number
+}
+
+/**
  * Connection settings for the Rust-backed Node.js client.
  */
 export interface Client_Options {
@@ -107,6 +117,8 @@ export interface Client_Options {
   readonly identity?: Client_Identity
   /** Client-side compression settings. */
   readonly compression?: Zstandard_Options
+  /** Bounded connection and operation durations. */
+  readonly timeouts?: Client_Timeouts
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Rust helper executable path, primarily for custom packaging. */
@@ -235,6 +247,7 @@ export class OpenKache_Client {
     })
     const client = new OpenKache_Client(helper, value_codecs)
     const compression = options.compression ?? {}
+    const timeouts = options.timeouts ?? {}
     const helper_options: Helper_Connection_Options = {
       address: options.address,
       server_name: options.server_name ?? "localhost",
@@ -245,6 +258,8 @@ export class OpenKache_Client {
       compression_level: compression.level ?? 1,
       minimum_input_size: compression.minimum_input_size ?? 1_024,
       minimum_savings: compression.minimum_savings ?? 64,
+      connect_timeout_ms: timeouts.connect_ms ?? 5_000,
+      request_timeout_ms: timeouts.request_ms ?? 2_000,
     }
     try {
       const response = await client.#request((request_id): Uint8Array =>
@@ -600,6 +615,8 @@ function validate_options(options: Client_Options): void {
   }
   validate_identity(options.identity)
   validate_compression(options.compression)
+  validate_timeout(options.timeouts?.connect_ms, "timeouts.connect_ms")
+  validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms")
 }
 
 function validate_identity(identity: Client_Identity | undefined): void {
@@ -637,6 +654,15 @@ function validate_compression(compression: Zstandard_Options | undefined): void 
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
       throw new OpenKache_Error(`compression.${name} must be a non-negative safe integer`)
     }
+  }
+}
+
+function validate_timeout(timeout_ms: number | undefined, name: string): void {
+  if (
+    timeout_ms !== undefined &&
+    (!Number.isSafeInteger(timeout_ms) || timeout_ms <= 0)
+  ) {
+    throw new OpenKache_Error(`${name} must be a positive safe integer`)
   }
 }
 
