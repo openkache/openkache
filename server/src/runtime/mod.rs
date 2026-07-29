@@ -5,6 +5,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use crate::*;
 mod worker;
 pub use worker::*;
 
+pub(crate) const STORAGE_LOCK_FILE: &str = ".openkache-lock";
 pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
 pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
 const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
@@ -41,6 +43,10 @@ pub(crate) struct ServerSecret {
 struct WorkerHandle {
     sender: Sender<WorkerRequest>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+pub(crate) struct StorageDirectoryLock {
+    _file: fs::File,
 }
 
 pub(crate) fn derive_storage_key(
@@ -80,12 +86,14 @@ pub struct ThreadedKvkache {
     config: crate::config::AppConfig,
     workers: Vec<WorkerHandle>,
     server_cipher: Aes256,
+    _storage_lock: Arc<StorageDirectoryLock>,
 }
 
 impl ThreadedKvkache {
     pub fn start(config: crate::config::AppConfig) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
+        let storage_lock = Arc::new(lock_storage_directory(&config.storage.directory)?);
         let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
             let worker = config.worker_config(thread_id);
             worker.data_path.exists() || worker.blob_path().exists()
@@ -93,7 +101,7 @@ impl ThreadedKvkache {
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
         let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
-        Self::start_with_server_secret(config, server_secret, allow_checkpoint)
+        Self::start_with_server_secret(config, server_secret, allow_checkpoint, storage_lock)
     }
 
     fn start_with_server_key(
@@ -102,6 +110,7 @@ impl ThreadedKvkache {
     ) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
+        let storage_lock = Arc::new(lock_storage_directory(&config.storage.directory)?);
         let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
         let mut id = [0; 16];
         id.copy_from_slice(&server_key[..16]);
@@ -112,6 +121,7 @@ impl ThreadedKvkache {
                 key: server_key,
             },
             allow_checkpoint,
+            storage_lock,
         )
     }
 
@@ -119,6 +129,7 @@ impl ThreadedKvkache {
         config: crate::config::AppConfig,
         server_secret: ServerSecret,
         allow_checkpoint: bool,
+        storage_lock: Arc<StorageDirectoryLock>,
     ) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
@@ -142,9 +153,11 @@ impl ThreadedKvkache {
             let event_interval = config.runtime.event_interval;
             let storage_key_id = server_secret.id;
             let resource_guard = resource_guard.clone();
+            let storage_lock = storage_lock.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("kvkache-worker-{thread_id}"))
                 .spawn(move || {
+                    let _storage_lock = storage_lock;
                     let mut proactor = ProactorBuilder::new();
                     proactor.capacity(io_config.entries_per_worker);
                     let cpus = HashSet::from([cpu_id]);
@@ -220,6 +233,7 @@ impl ThreadedKvkache {
             config,
             workers,
             server_cipher,
+            _storage_lock: storage_lock,
         })
     }
 
@@ -722,6 +736,35 @@ impl ThreadedKvkache {
         finish_storage_run(&self.config.storage.directory)?;
         Ok(())
     }
+}
+
+pub(crate) fn lock_storage_directory(directory: &Path) -> Result<StorageDirectoryLock> {
+    let path = directory.join(STORAGE_LOCK_FILE);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(KvError::Worker(format!(
+            "storage lock {} must be a regular file",
+            path.display()
+        )));
+    }
+    // SAFETY: file owns a valid descriptor for the duration of the call and the returned guard.
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == ErrorKind::WouldBlock {
+            return Err(KvError::Worker(format!(
+                "storage directory {} is already in use by another OpenKache process",
+                directory.display()
+            )));
+        }
+        return Err(error.into());
+    }
+    Ok(StorageDirectoryLock { _file: file })
 }
 
 pub(crate) fn begin_storage_run(directory: &Path) -> Result<bool> {
