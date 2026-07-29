@@ -9,14 +9,14 @@ use std::io;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
 
 const DEFAULT_MAX_ITEM_BYTES: usize = 16 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BucketSelectionPolicy {
     #[default]
@@ -25,7 +25,7 @@ pub enum BucketSelectionPolicy {
 }
 
 /// QUIC protocol implementation used by the network server.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum QuicBackend {
     /// Quinn protocol state machine driven by Compio packet I/O.
@@ -60,7 +60,7 @@ const COMPILED_QUIC_BACKENDS: &[QuicBackend] = &[
 ];
 
 /// QUIC transport configuration shared by all protocol implementations.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct QuicConfig {
     /// Protocol implementation selected when the server binds.
@@ -335,7 +335,7 @@ impl Config {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
@@ -381,7 +381,7 @@ impl Default for AppConfig {
 }
 
 /// Server identity, client authentication, and administrative authorization paths.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM or DER server certificate chain, with the leaf certificate first.
@@ -448,7 +448,7 @@ pub(crate) const fn default_network_worker_count(cpu_count: usize) -> usize {
 }
 
 /// Front-end network workers, each owning one socket and protocol connection set.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
     pub worker_count: usize,
@@ -479,7 +479,7 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub thread_count: usize,
@@ -499,7 +499,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IoUringConfig {
     pub sqpoll: bool,
@@ -523,7 +523,7 @@ impl Default for IoUringConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TimeoutConfig {
     pub input_max_time_us: u64,
@@ -545,7 +545,7 @@ impl Default for TimeoutConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
     pub directory: PathBuf,
@@ -570,7 +570,7 @@ impl Default for StorageConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TableConfig {
     pub capacity_per_thread: usize,
