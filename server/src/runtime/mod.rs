@@ -85,6 +85,10 @@ pub struct ThreadedKvkache {
 impl ThreadedKvkache {
     pub fn start(config: crate::config::AppConfig) -> Result<Self> {
         config.validate()?;
+        Self::start_validated(config)
+    }
+
+    pub(crate) fn start_validated(config: crate::config::AppConfig) -> Result<Self> {
         fs::create_dir_all(&config.storage.directory)?;
         let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
             let worker = config.worker_config(thread_id);
@@ -120,8 +124,6 @@ impl ThreadedKvkache {
         server_secret: ServerSecret,
         allow_checkpoint: bool,
     ) -> Result<Self> {
-        config.validate()?;
-        fs::create_dir_all(&config.storage.directory)?;
         let server_cipher = Aes256::new(&server_secret.key.into());
         let (started_tx, started_rx) =
             channel::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
@@ -168,7 +170,7 @@ impl ThreadedKvkache {
                             )));
                             return;
                         }
-                        let cache = match Kvkache::open_with_resource_guard(
+                        let cache = match Kvkache::open_with_validated_config(
                             shard_config,
                             storage_key_id,
                             resource_guard,
@@ -841,12 +843,5 @@ fn decode_server_secret(bytes: &[u8]) -> Result<ServerSecret> {
 }
 
 fn server_key_checksum(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
+    crc32fast::hash(bytes)
 }

@@ -13,7 +13,9 @@ use std::time::Duration;
 
 use compio::BufResult;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use compio::io::{AsyncReadExt, AsyncWriteExt};
+use compio::buf::{IntoInner, IoBuf};
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+use compio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -153,8 +155,8 @@ pub(super) trait Connection {
     type SendStream: SendStream;
     type ReceiveStream: ReceiveStream;
 
-    /// Returns the authenticated peer's leaf certificate, when client authentication is enabled.
-    fn peer_certificate(&self) -> Option<CertificateDer<'static>>;
+    /// Takes the authenticated peer's leaf certificate, when client authentication is enabled.
+    fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>>;
 
     fn accept_bi(
         &self,
@@ -323,7 +325,7 @@ impl Drop for RequestBudgetPermit {
         if self.bytes == 0 {
             return;
         }
-        let waiters = {
+        let mut waiters = {
             let mut state = self.inner.borrow_mut();
             state.used = state
                 .used
@@ -331,10 +333,58 @@ impl Drop for RequestBudgetPermit {
                 .expect("released request bytes must be reserved");
             std::mem::take(&mut state.waiters)
         };
-        for waiter in waiters.into_values() {
+        for (_, waiter) in waiters.drain() {
             waiter.wake();
         }
+        let mut state = self.inner.borrow_mut();
+        if state.waiters.is_empty() {
+            state.waiters = waiters;
+        }
     }
+}
+
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+async fn read_buffered_request(
+    stream: &mut impl AsyncRead,
+    backend: &'static str,
+    maximum: usize,
+    timeout: Duration,
+    budget: &RequestBudget,
+) -> Result<RequestFrame, StreamReadError> {
+    let header = Vec::with_capacity(REQUEST_HEADER_BYTES).slice(..1);
+    let BufResult(result, header) = stream.read_exact(header).await;
+    result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
+
+    let frame = header.into_inner();
+    let BufResult(result, header) = compio::runtime::time::timeout(
+        timeout,
+        stream.read_exact(frame.slice(1..REQUEST_HEADER_BYTES)),
+    )
+    .await
+    .map_err(|_| StreamReadError::Timeout)?;
+    result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
+
+    let mut frame = header.into_inner();
+    let frame_len = Request::frame_len_from_header(&frame)?;
+    let value_len = Request::value_len_from_header(&frame)?;
+    if frame_len > maximum {
+        return Err(StreamReadError::TooLarge);
+    }
+    let body_len = frame_len - REQUEST_HEADER_BYTES;
+    let permit = budget.acquire(value_len, timeout).await?;
+    if body_len == 0 {
+        return Ok(RequestFrame::new(frame, permit));
+    }
+
+    frame.reserve(body_len);
+    let BufResult(result, body) = compio::runtime::time::timeout(
+        timeout,
+        stream.read_exact(frame.slice(REQUEST_HEADER_BYTES..frame_len)),
+    )
+    .await
+    .map_err(|_| StreamReadError::Timeout)?;
+    result.map_err(|error| TransportError::backend(backend, "stream body read", error))?;
+    Ok(RequestFrame::new(body.into_inner(), permit))
 }
 
 /// Stable transport failure with backend and operation context.
@@ -483,10 +533,10 @@ mod quinn_backend {
         type SendStream = SendStream;
         type ReceiveStream = ReceiveStream;
 
-        fn peer_certificate(&self) -> Option<CertificateDer<'static>> {
+        fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>> {
             self.0
                 .peer_identity()
-                .and_then(|certificates| certificates.first().cloned())
+                .and_then(|certificates| (*certificates).into_iter().next())
         }
 
         async fn accept_bi(
@@ -509,36 +559,7 @@ mod quinn_backend {
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            let BufResult(result, mut frame) = self.0.read_exact(Vec::with_capacity(1)).await;
-            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
-            let BufResult(result, header) = compio::runtime::time::timeout(
-                timeout,
-                self.0
-                    .read_exact(Vec::with_capacity(REQUEST_HEADER_BYTES - 1)),
-            )
-            .await
-            .map_err(|_| StreamReadError::Timeout)?;
-            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
-            frame.extend_from_slice(&header);
-            let frame_len = Request::frame_len_from_header(&frame)?;
-            let value_len = Request::value_len_from_header(&frame)?;
-            if frame_len > maximum {
-                return Err(StreamReadError::TooLarge);
-            }
-            let body_len = frame_len - REQUEST_HEADER_BYTES;
-            let permit = budget.acquire(value_len, timeout).await?;
-            if body_len == 0 {
-                return Ok(RequestFrame::new(frame, permit));
-            }
-            let BufResult(result, body) = compio::runtime::time::timeout(
-                timeout,
-                self.0.read_exact(Vec::with_capacity(body_len)),
-            )
-            .await
-            .map_err(|_| StreamReadError::Timeout)?;
-            result.map_err(|error| TransportError::backend(NAME, "stream body read", error))?;
-            frame.extend_from_slice(&body);
-            Ok(RequestFrame::new(frame, permit))
+            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
         }
     }
 
@@ -641,10 +662,10 @@ mod noq_backend {
         type SendStream = SendStream;
         type ReceiveStream = ReceiveStream;
 
-        fn peer_certificate(&self) -> Option<CertificateDer<'static>> {
+        fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>> {
             self.0
                 .peer_identity()
-                .and_then(|certificates| certificates.first().cloned())
+                .and_then(|certificates| (*certificates).into_iter().next())
         }
 
         async fn accept_bi(
@@ -667,36 +688,7 @@ mod noq_backend {
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            let BufResult(result, mut frame) = self.0.read_exact(Vec::with_capacity(1)).await;
-            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
-            let BufResult(result, header) = compio::runtime::time::timeout(
-                timeout,
-                self.0
-                    .read_exact(Vec::with_capacity(REQUEST_HEADER_BYTES - 1)),
-            )
-            .await
-            .map_err(|_| StreamReadError::Timeout)?;
-            result.map_err(|error| TransportError::backend(NAME, "stream header read", error))?;
-            frame.extend_from_slice(&header);
-            let frame_len = Request::frame_len_from_header(&frame)?;
-            let value_len = Request::value_len_from_header(&frame)?;
-            if frame_len > maximum {
-                return Err(StreamReadError::TooLarge);
-            }
-            let body_len = frame_len - REQUEST_HEADER_BYTES;
-            let permit = budget.acquire(value_len, timeout).await?;
-            if body_len == 0 {
-                return Ok(RequestFrame::new(frame, permit));
-            }
-            let BufResult(result, body) = compio::runtime::time::timeout(
-                timeout,
-                self.0.read_exact(Vec::with_capacity(body_len)),
-            )
-            .await
-            .map_err(|_| StreamReadError::Timeout)?;
-            result.map_err(|error| TransportError::backend(NAME, "stream body read", error))?;
-            frame.extend_from_slice(&body);
-            Ok(RequestFrame::new(frame, permit))
+            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
         }
     }
 
@@ -728,8 +720,10 @@ mod quiche_backend {
     use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode};
     use boring::x509::X509;
     use boring::x509::store::X509StoreBuilder;
+    use compio::buf::{IntoInner, IoBuf};
     use compio::runtime::JoinHandle;
     use futures_util::{FutureExt, StreamExt, pin_mut, select};
+    use smallvec::SmallVec;
 
     use super::*;
     use crate::channel::{self, AsyncReceiver, Sender, TrySendError};
@@ -740,6 +734,8 @@ mod quiche_backend {
     const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
     const STREAM_CHUNK_BYTES: usize = 16 * 1024;
     const STREAM_CHUNK_BACKLOG: usize = 1;
+
+    type ConnectionId = Arc<[u8]>;
 
     pub(crate) struct Endpoint {
         incoming: AsyncReceiver<Incoming>,
@@ -772,6 +768,7 @@ mod quiche_backend {
                     commands: Some(command_receiver),
                     routes: HashMap::new(),
                     clients: HashMap::new(),
+                    output_buffer: vec![0_u8; MAX_DATAGRAM_BYTES],
                 }
                 .run()
                 .await
@@ -819,7 +816,7 @@ mod quiche_backend {
     }
 
     pub(crate) struct Connection {
-        connection_id: Vec<u8>,
+        connection_id: ConnectionId,
         peer_certificate: Option<CertificateDer<'static>>,
         streams: AsyncReceiver<Stream>,
         commands: Sender<Command>,
@@ -829,8 +826,8 @@ mod quiche_backend {
         type SendStream = SendStream;
         type ReceiveStream = ReceiveStream;
 
-        fn peer_certificate(&self) -> Option<CertificateDer<'static>> {
-            self.peer_certificate.clone()
+        fn take_peer_certificate(&mut self) -> Option<CertificateDer<'static>> {
+            self.peer_certificate.take()
         }
 
         async fn accept_bi(
@@ -864,7 +861,7 @@ mod quiche_backend {
     }
 
     pub(crate) struct ReceiveStream {
-        connection_id: Vec<u8>,
+        connection_id: ConnectionId,
         stream_id: u64,
         commands: Sender<Command>,
         chunks: AsyncReceiver<Vec<u8>>,
@@ -894,8 +891,7 @@ mod quiche_backend {
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
             while self.buffered.is_empty() {
-                let chunk = self.next_chunk("stream header read").await?;
-                self.buffered.extend_from_slice(&chunk);
+                self.buffered = self.next_chunk("stream header read").await?;
             }
             compio::runtime::time::timeout(timeout, async {
                 while self.buffered.len() < REQUEST_HEADER_BYTES {
@@ -923,10 +919,12 @@ mod quiche_backend {
             .await
             .map_err(|_| StreamReadError::Timeout)?
             .map_err(StreamReadError::Transport)?;
-            Ok(RequestFrame::new(
-                self.buffered.drain(..frame_len).collect(),
-                permit,
-            ))
+            let frame = if self.buffered.len() == frame_len {
+                std::mem::take(&mut self.buffered)
+            } else {
+                self.buffered.drain(..frame_len).collect()
+            };
+            Ok(RequestFrame::new(frame, permit))
         }
     }
 
@@ -940,7 +938,7 @@ mod quiche_backend {
     }
 
     pub(crate) struct SendStream {
-        connection_id: Vec<u8>,
+        connection_id: ConnectionId,
         stream_id: u64,
         commands: Sender<Command>,
     }
@@ -972,15 +970,15 @@ mod quiche_backend {
     enum Command {
         Close(Vec<u8>),
         CancelRequest {
-            connection_id: Vec<u8>,
+            connection_id: ConnectionId,
             stream_id: u64,
         },
         ResumeRequest {
-            connection_id: Vec<u8>,
+            connection_id: ConnectionId,
             stream_id: u64,
         },
         SendResponse {
-            connection_id: Vec<u8>,
+            connection_id: ConnectionId,
             stream_id: u64,
             frame: Vec<u8>,
             reply: Sender<Result<(), String>>,
@@ -1015,8 +1013,9 @@ mod quiche_backend {
         incoming: Sender<Incoming>,
         command_sender: Sender<Command>,
         commands: Option<AsyncReceiver<Command>>,
-        routes: HashMap<Vec<u8>, Vec<u8>>,
-        clients: HashMap<Vec<u8>, Client>,
+        routes: HashMap<Vec<u8>, ConnectionId>,
+        clients: HashMap<ConnectionId, Client>,
+        output_buffer: Vec<u8>,
     }
 
     impl Driver {
@@ -1087,8 +1086,7 @@ mod quiche_backend {
                 Ok(header) => header,
                 Err(_) => return Ok(()),
             };
-            let destination_id = header.dcid.as_ref().to_vec();
-            let connection_id = match self.routes.get(&destination_id) {
+            let connection_id = match self.routes.get(header.dcid.as_ref()) {
                 Some(connection_id) => connection_id.clone(),
                 None => {
                     if header.ty != quiche::Type::Initial
@@ -1096,7 +1094,7 @@ mod quiche_backend {
                     {
                         return Ok(());
                     }
-                    self.accept_connection(destination_id, peer_address)?
+                    self.accept_connection(header.dcid.as_ref().to_vec(), peer_address)?
                 }
             };
             let Some(client) = self.clients.get_mut(&connection_id) else {
@@ -1116,8 +1114,8 @@ mod quiche_backend {
             &mut self,
             original_destination_id: Vec<u8>,
             peer_address: SocketAddr,
-        ) -> Result<Vec<u8>, TransportError> {
-            let connection_id = rand::random::<[u8; quiche::MAX_CONN_ID_LEN]>().to_vec();
+        ) -> Result<ConnectionId, TransportError> {
+            let connection_id = ConnectionId::from(rand::random::<[u8; quiche::MAX_CONN_ID_LEN]>());
             let source_id = quiche::ConnectionId::from_ref(&connection_id);
             let connection = quiche::accept(
                 &source_id,
@@ -1130,7 +1128,7 @@ mod quiche_backend {
             self.routes
                 .insert(original_destination_id, connection_id.clone());
             self.routes
-                .insert(connection_id.clone(), connection_id.clone());
+                .insert(connection_id.as_ref().to_vec(), connection_id.clone());
             self.clients.insert(
                 connection_id.clone(),
                 Client {
@@ -1206,32 +1204,30 @@ mod quiche_backend {
         }
 
         fn process_connections(&mut self) {
-            let connection_ids: Vec<_> = self.clients.keys().cloned().collect();
-            for connection_id in connection_ids {
-                let Some(client) = self.clients.get_mut(&connection_id) else {
-                    continue;
-                };
+            let incoming = &self.incoming;
+            let command_sender = &self.command_sender;
+            for (connection_id, client) in &mut self.clients {
                 if !client.announced && client.connection.is_established() {
                     let (streams, stream_receiver) = channel::unbounded_async();
                     client.streams = Some(streams);
                     client.announced = true;
-                    let _ = self.incoming.try_send(Incoming(Connection {
+                    let _ = incoming.try_send(Incoming(Connection {
                         connection_id: connection_id.clone(),
                         peer_certificate: client
                             .connection
                             .peer_cert()
                             .map(|certificate| CertificateDer::from(certificate.to_vec())),
                         streams: stream_receiver,
-                        commands: self.command_sender.clone(),
+                        commands: command_sender.clone(),
                     }));
                 }
 
-                let writable: Vec<_> = client.connection.writable().collect();
+                let writable: SmallVec<[_; 8]> = client.connection.writable().collect();
                 for stream_id in writable {
                     progress_response(client, stream_id);
                 }
 
-                let readable: Vec<_> = client.connection.readable().collect();
+                let readable: SmallVec<[_; 8]> = client.connection.readable().collect();
                 for stream_id in readable {
                     if stream_id & 0x3 != 0 {
                         continue;
@@ -1242,13 +1238,19 @@ mod quiche_backend {
         }
 
         async fn flush_packets(&mut self) -> Result<(), TransportError> {
-            let mut datagrams = Vec::new();
-            let mut output = vec![0_u8; MAX_DATAGRAM_BYTES];
+            let mut output = std::mem::take(&mut self.output_buffer);
             for client in self.clients.values_mut() {
                 loop {
                     match client.connection.send(&mut output) {
                         Ok((written, information)) => {
-                            datagrams.push((output[..written].to_vec(), information.to));
+                            let BufResult(result, returned) = self
+                                .socket
+                                .send_to(output.slice(..written), information.to)
+                                .await;
+                            output = returned.into_inner();
+                            result.map_err(|error| {
+                                TransportError::backend(NAME, "packet send", error)
+                            })?;
                         }
                         Err(quiche::Error::Done) => break,
                         Err(_) => {
@@ -1260,10 +1262,7 @@ mod quiche_backend {
                     }
                 }
             }
-            for (datagram, address) in datagrams {
-                let BufResult(result, _) = self.socket.send_to(datagram, address).await;
-                result.map_err(|error| TransportError::backend(NAME, "packet send", error))?;
-            }
+            self.output_buffer = output;
             Ok(())
         }
 
@@ -1271,7 +1270,7 @@ mod quiche_backend {
             self.clients
                 .retain(|_, client| !client.connection.is_closed());
             self.routes
-                .retain(|_, connection_id| self.clients.contains_key(connection_id));
+                .retain(|_, connection_id| self.clients.contains_key(connection_id.as_ref()));
         }
     }
 

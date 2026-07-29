@@ -257,13 +257,10 @@ impl Subtable {
 
     fn unary_index_at(&self, layout: &SubtableLayout, entry_slot: usize) -> usize {
         let bits = self.unary(layout);
-        for unary_index in 0..layout.unary_count {
-            let (_, end) = unary_bounds(bits, unary_index);
-            if entry_slot < end {
-                return unary_index;
-            }
-        }
-        layout.unary_count - 1
+        debug_assert!(entry_slot < self.entry_count(layout));
+        let active_mask = low_mask(layout.unary_count + layout.entry_capacity);
+        let entry_bit = select_one(!bits & active_mask, entry_slot);
+        entry_bit - entry_slot
     }
 
     pub(crate) fn write_entry(
@@ -344,20 +341,28 @@ impl Subtable {
         true
     }
 
-    pub(crate) fn matching_entry_slots(
-        &self,
-        layout: &SubtableLayout,
+    pub(crate) fn matching_entry_slots<'a>(
+        &'a self,
+        layout: &'a SubtableLayout,
         unary_index: usize,
         fingerprint: u16,
         crumb: Option<u8>,
-    ) -> Vec<usize> {
+    ) -> impl Iterator<Item = usize> + 'a {
         let (start, end) = self.bounds(layout, unary_index);
-        (start..end)
-            .filter(|entry_slot| {
-                self.fingerprint(layout, *entry_slot) == fingerprint
-                    && crumb.is_none_or(|candidate| self.crumb(layout, *entry_slot) == candidate)
-            })
-            .collect()
+        self.matching_entry_slots_in_range(layout, start..end, fingerprint, crumb)
+    }
+
+    pub(crate) fn matching_entry_slots_in_range<'a>(
+        &'a self,
+        layout: &'a SubtableLayout,
+        range: std::ops::Range<usize>,
+        fingerprint: u16,
+        crumb: Option<u8>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        range.filter(move |entry_slot| {
+            self.fingerprint(layout, *entry_slot) == fingerprint
+                && crumb.is_none_or(|candidate| self.crumb(layout, *entry_slot) == candidate)
+        })
     }
 
     pub(crate) fn first_with_crumb(
@@ -365,10 +370,9 @@ impl Subtable {
         layout: &SubtableLayout,
         crumb: u8,
     ) -> Option<(usize, SubtableEntry)> {
-        (0..self.entry_count(layout)).find_map(|entry_slot| {
-            let entry = self.entry(layout, entry_slot);
-            (entry.crumb == crumb).then_some((entry_slot, entry))
-        })
+        let entry_slot = (0..self.entry_count(layout))
+            .find(|entry_slot| self.crumb(layout, *entry_slot) == crumb)?;
+        Some((entry_slot, self.entry(layout, entry_slot)))
     }
 
     pub(crate) fn remove_at(
@@ -425,21 +429,39 @@ fn unary_bounds(bits: u128, unary_index: usize) -> (usize, usize) {
 }
 
 fn get_bits(bytes: &[u8], bit: usize, width: usize) -> u64 {
-    let mut value = 0u64;
-    for offset in 0..width {
-        let source = bit + offset;
-        value |= (((bytes[source / 8] >> (source % 8)) & 1) as u64) << offset;
+    if width == 0 {
+        return 0;
     }
-    value
+    let byte = bit / 8;
+    let shift = bit % 8;
+    debug_assert!(shift + width <= u64::BITS as usize);
+    let byte_len = (shift + width).div_ceil(8);
+    let mut word = [0; 8];
+    word[..byte_len].copy_from_slice(&bytes[byte..byte + byte_len]);
+    let mask = if width == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    (u64::from_le_bytes(word) >> shift) & mask
 }
 
 fn set_bits(bytes: &mut [u8], bit: usize, width: usize, value: u64) {
-    for offset in 0..width {
-        let target = bit + offset;
-        if value & (1u64 << offset) == 0 {
-            bytes[target / 8] &= !(1u8 << (target % 8));
-        } else {
-            bytes[target / 8] |= 1u8 << (target % 8);
-        }
+    if width == 0 {
+        return;
     }
+    let byte = bit / 8;
+    let shift = bit % 8;
+    debug_assert!(shift + width <= u64::BITS as usize);
+    let byte_len = (shift + width).div_ceil(8);
+    let mut word = [0; 8];
+    word[..byte_len].copy_from_slice(&bytes[byte..byte + byte_len]);
+    let field_mask = if width == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    let shifted_mask = field_mask << shift;
+    let updated = (u64::from_le_bytes(word) & !shifted_mask) | ((value << shift) & shifted_mask);
+    bytes[byte..byte + byte_len].copy_from_slice(&updated.to_le_bytes()[..byte_len]);
 }

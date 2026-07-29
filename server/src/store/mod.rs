@@ -22,7 +22,6 @@ use compio::buf::{IoBuf, IoBufMut, SetLen};
 use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
 use compio::io::AsyncWriteAt;
-use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::{SetCondition, SetOptions};
 
 use crate::types::EncodedValue;
@@ -342,9 +341,12 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
     let len = i64::try_from(len).map_err(|_| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "length is too large")
     })?;
-    let file = file.clone();
+    // Blocking tasks continue after their join handle is dropped, so retain an
+    // independently owned descriptor in case the awaiting operation is cancelled.
+    let file_descriptor =
+        unsafe { std::os::fd::BorrowedFd::borrow_raw(file.as_raw_fd()) }.try_clone_to_owned()?;
     compio::runtime::spawn_blocking(move || {
-        let result = unsafe { libc::posix_fallocate(file.as_raw_fd(), offset, len) };
+        let result = unsafe { libc::posix_fallocate(file_descriptor.as_raw_fd(), offset, len) };
         if result == 0 {
             Ok(())
         } else {
@@ -423,6 +425,11 @@ struct LocatedItem {
     item: Item,
 }
 
+struct LocatedItemState {
+    table_location: TableLocation,
+    state: ItemState,
+}
+
 #[derive(Debug)]
 pub(crate) struct PendingItem {
     pub(crate) value: Option<EncodedValue>,
@@ -493,6 +500,16 @@ impl Kvkache {
         allow_checkpoint: bool,
     ) -> Result<Self> {
         config.validate()?;
+        Self::open_with_validated_config(config, storage_key_id, resource_guard, allow_checkpoint)
+            .await
+    }
+
+    pub(crate) async fn open_with_validated_config(
+        config: Config,
+        storage_key_id: [u8; 16],
+        resource_guard: Arc<ResourceGuard>,
+        allow_checkpoint: bool,
+    ) -> Result<Self> {
         if let Some(parent) = config.data_path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -624,16 +641,7 @@ impl Kvkache {
     }
 
     async fn recovered_key_exists(&self, storage_key: &StorageKey) -> Result<bool> {
-        for table_location in self.table.candidate_locations(storage_key) {
-            if self
-                .read_location(storage_key, table_location)
-                .await?
-                .is_some()
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(self.locate_stable_state(storage_key).await?.is_some())
     }
 
     pub(crate) async fn checkpoint(&self) -> Result<()> {
@@ -681,25 +689,6 @@ impl Kvkache {
         self.read_stored_value(located.table_location, located.item.value)
             .await
             .map(Some)
-    }
-
-    pub(crate) async fn get_many_encoded(
-        &self,
-        storage_keys: Vec<StorageKey>,
-    ) -> Vec<Result<Option<EncodedValue>>> {
-        let count = storage_keys.len();
-        let mut pending = FuturesUnordered::new();
-        for (index, storage_key) in storage_keys.into_iter().enumerate() {
-            pending.push(async move { (index, self.get_encoded(&storage_key).await) });
-        }
-        let mut results = (0..count).map(|_| None).collect::<Vec<_>>();
-        while let Some((index, result)) = pending.next().await {
-            results[index] = Some(result);
-        }
-        results
-            .into_iter()
-            .map(|result| result.expect("every get future completes"))
-            .collect()
     }
 
     #[allow(dead_code)]
@@ -765,13 +754,13 @@ impl Kvkache {
                     },
                 )
             } else {
-                let previous = self.locate_stable_record(&storage_key).await?;
+                let previous = self.locate_stable_state(&storage_key).await?;
                 let current_live = previous
                     .as_ref()
-                    .is_some_and(|located| located.item.is_live_at(now_ms));
+                    .is_some_and(|located| located.state.is_live_at(now_ms));
                 let previous_stable_live = previous
                     .as_ref()
-                    .is_some_and(|located| !located.item.is_tombstone);
+                    .is_some_and(|located| !located.state.is_tombstone());
                 if !set_condition_allows(options.condition, current_live) {
                     return Ok(SetOutcome::NotStored);
                 }
@@ -831,10 +820,10 @@ impl Kvkache {
             }
             return Ok(true);
         }
-        let Some(previous) = self.locate_stable_record(storage_key).await? else {
+        let Some(previous) = self.locate_stable_state(storage_key).await? else {
             return Ok(false);
         };
-        if !previous.item.is_live_at(now_ms) {
+        if !previous.state.is_live_at(now_ms) {
             return Ok(false);
         }
         self.insert_pending(
@@ -881,6 +870,35 @@ impl Kvkache {
                     LocatedItem {
                         table_location,
                         item,
+                    },
+                ));
+            }
+        }
+        Ok(newest.map(|(_, located)| located))
+    }
+
+    async fn locate_stable_state(
+        &self,
+        storage_key: &StorageKey,
+    ) -> Result<Option<LocatedItemState>> {
+        let mut newest: Option<(usize, LocatedItemState)> = None;
+        for table_location in self.table.candidate_locations(storage_key) {
+            let Some(state) = self
+                .read_location_state(storage_key, table_location)
+                .await?
+            else {
+                continue;
+            };
+            let age = self.ssd_segment_age(table_location.sg_index as usize);
+            if newest
+                .as_ref()
+                .is_none_or(|(newest_age, _)| age < *newest_age)
+            {
+                newest = Some((
+                    age,
+                    LocatedItemState {
+                        table_location,
+                        state,
                     },
                 ));
             }
@@ -958,32 +976,56 @@ impl Kvkache {
         Ok(find_item_in_bucket(&bytes, storage_key))
     }
 
+    async fn read_location_state(
+        &self,
+        storage_key: &StorageKey,
+        table_location: TableLocation,
+    ) -> Result<Option<ItemState>> {
+        let sg_index = table_location.sg_index as usize;
+        if !self
+            .occupied_segments
+            .get(sg_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        let bucket_index = bucket_hash(
+            storage_key,
+            table_location.bucket_hash_index,
+            self.config.bucket_count(),
+        );
+        let bytes = self.read_bucket(sg_index, bucket_index).await?;
+        Ok(find_item_state_in_bucket(&bytes, storage_key))
+    }
+
     async fn flush_pending(&mut self, reason: SegmentFlushReason) -> Result<()> {
         if self.pending.is_empty() {
             return Ok(());
         }
         let now_ms = unix_time_ms();
-        let pending = std::mem::take(&mut self.pending);
         self.pending_sg_bytes = 0;
         self.pending_blob_bytes = 0;
-        let mut remaining = pending
-            .into_iter()
-            .filter_map(|(storage_key, mut pending)| {
-                if !pending.is_live_at(now_ms) {
-                    pending.value = None;
-                    pending.expires_at_ms = 0;
-                }
-                (pending.value.is_some() || pending.previous.is_some()).then_some(FlushRecord {
-                    storage_key,
-                    value: pending.value,
-                    expires_at_ms: pending.expires_at_ms,
-                    previous: pending.previous,
-                    previous_live: pending.previous_live,
-                    table_location: None,
-                    blob_ref: None,
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut remaining = Vec::with_capacity(self.pending.len());
+        remaining.extend(
+            self.pending
+                .drain()
+                .filter_map(|(storage_key, mut pending)| {
+                    if !pending.is_live_at(now_ms) {
+                        pending.value = None;
+                        pending.expires_at_ms = 0;
+                    }
+                    (pending.value.is_some() || pending.previous.is_some()).then_some(FlushRecord {
+                        storage_key,
+                        value: pending.value,
+                        expires_at_ms: pending.expires_at_ms,
+                        previous: pending.previous,
+                        previous_live: pending.previous_live,
+                        table_location: None,
+                        blob_ref: None,
+                    })
+                }),
+        );
         remaining.sort_unstable_by(|left, right| {
             right
                 .value
@@ -993,6 +1035,11 @@ impl Kvkache {
                 .then_with(|| left.storage_key.cmp(&right.storage_key))
         });
 
+        let mut segment_buffer = None;
+        let mut blob_buffer = None;
+        let mut control_buffer = None;
+        let mut planned_buffer = Vec::new();
+        let mut deferred_buffer = Vec::new();
         while !remaining.is_empty() {
             let next_generation = match next_sg_generation(self.next_generation) {
                 Ok(next_generation) => next_generation,
@@ -1002,12 +1049,16 @@ impl Kvkache {
                 }
             };
             let sg_index = self.next_segment_index;
-            let mut active = MutableSegment::new(&self.config, sg_index);
-            let mut planned = Vec::new();
-            let mut deferred = Vec::new();
+            let mut active = match segment_buffer.take() {
+                Some(bytes) => MutableSegment::reuse(&self.config, sg_index, bytes),
+                None => MutableSegment::new(&self.config, sg_index),
+            };
+            let mut planned = std::mem::take(&mut planned_buffer);
+            planned.reserve(remaining.len());
+            let mut deferred = std::mem::take(&mut deferred_buffer);
             let mut blob_used = 0usize;
 
-            for mut record in remaining {
+            for mut record in remaining.drain(..) {
                 let (item, blob_ref) = match record.value.as_ref() {
                     None => (Item::tombstone(record.storage_key), None),
                     Some(value) if is_blob_item(&value.bytes) => {
@@ -1070,14 +1121,23 @@ impl Kvkache {
                 return Err(error);
             }
             if self.occupied_segments[sg_index] {
-                let invalidated =
-                    match invalidate_segment(&mut self.data, &self.config, sg_index).await {
-                        Ok(bytes) => bytes,
-                        Err(error) => {
-                            self.restore_flush_records(planned.into_iter().chain(deferred));
-                            return Err(storage_operation_error(&self.resource_guard, error));
-                        }
-                    };
+                let invalidated = match invalidate_segment(
+                    &mut self.data,
+                    &self.config,
+                    sg_index,
+                    control_buffer.take(),
+                )
+                .await
+                {
+                    Ok((bytes, buffer)) => {
+                        control_buffer = Some(buffer);
+                        bytes
+                    }
+                    Err(error) => {
+                        self.restore_flush_records(planned.into_iter().chain(deferred));
+                        return Err(storage_operation_error(&self.resource_guard, error));
+                    }
+                };
                 self.io
                     .data_written
                     .set(self.io.data_written.get() + invalidated);
@@ -1109,14 +1169,16 @@ impl Kvkache {
                         .expect("Blob record has a live value")
                         .bytes
                         .as_slice()
-                })
-                .collect::<Vec<_>>();
+                });
             let blob_physical_bytes = match self
                 .blob_segment
-                .write_segment(sg_index, &blob_values)
+                .write_segment(sg_index, blob_values, blob_buffer.take())
                 .await
             {
-                Ok(bytes) => bytes,
+                Ok((bytes, buffer)) => {
+                    blob_buffer = buffer;
+                    bytes
+                }
                 Err(error) => {
                     self.restore_flush_records(planned.into_iter().chain(deferred));
                     return Err(storage_operation_error(&self.resource_guard, error));
@@ -1129,13 +1191,24 @@ impl Kvkache {
                 .blob_data_written
                 .set(self.io.blob_data_written.get() + blob_physical_bytes);
 
-            if let Err(error) = self
-                .write_segment(active, reason, blob_used, next_generation)
+            let (returned_segment_buffer, returned_control_buffer) = match self
+                .write_segment(
+                    active,
+                    reason,
+                    blob_used,
+                    next_generation,
+                    control_buffer.take(),
+                )
                 .await
             {
-                self.restore_flush_records(planned.into_iter().chain(deferred));
-                return Err(storage_operation_error(&self.resource_guard, error));
-            }
+                Ok(buffers) => buffers,
+                Err(error) => {
+                    self.restore_flush_records(planned.into_iter().chain(deferred));
+                    return Err(storage_operation_error(&self.resource_guard, error));
+                }
+            };
+            segment_buffer = Some(returned_segment_buffer);
+            control_buffer = Some(returned_control_buffer);
 
             let mut published = 0usize;
             let mut publish_error = None;
@@ -1166,7 +1239,10 @@ impl Kvkache {
                 self.restore_flush_records(planned.into_iter().skip(published).chain(deferred));
                 return Err(error);
             }
-            remaining = deferred;
+            planned.clear();
+            planned_buffer = planned;
+            std::mem::swap(&mut remaining, &mut deferred);
+            deferred_buffer = deferred;
         }
         Ok(())
     }
@@ -1195,9 +1271,11 @@ impl Kvkache {
         reason: SegmentFlushReason,
         blob_logical_len: usize,
         next_generation: u64,
-    ) -> Result<()> {
+        control_buffer: Option<DirectIoBuffer>,
+    ) -> Result<(DirectIoBuffer, DirectIoBuffer)> {
         let fill_used_bytes = active.used_bytes() as u64;
-        let offset = self.config.segment_data_offset(active.sg_index);
+        let sg_index = active.sg_index;
+        let offset = self.config.segment_data_offset(sg_index);
         let expected = active.bytes.len();
         let write = self.data.write_at(active.bytes, offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
@@ -1213,18 +1291,24 @@ impl Kvkache {
         self.blob_segment.sync().await?;
         self.data.sync_data().await?;
         let commit = SegmentCommit {
-            sg_index: active.sg_index,
+            sg_index,
             generation: self.next_generation,
             blob_logical_len,
         };
-        let control_bytes =
-            commit_segment(&mut self.data, &self.config, self.storage_key_id, commit).await?;
+        let (control_bytes, control_buffer) = commit_segment(
+            &mut self.data,
+            &self.config,
+            self.storage_key_id,
+            commit,
+            control_buffer,
+        )
+        .await?;
         self.io
             .data_written
             .set(self.io.data_written.get() + control_bytes);
-        self.occupied_segments[active.sg_index] = true;
-        self.segment_commits[active.sg_index] = Some(commit);
-        self.next_segment_index = (active.sg_index + 1) % self.config.segment_count;
+        self.occupied_segments[sg_index] = true;
+        self.segment_commits[sg_index] = Some(commit);
+        self.next_segment_index = (sg_index + 1) % self.config.segment_count;
         self.next_generation = next_generation;
         self.segment_flushes += 1;
         match reason {
@@ -1241,7 +1325,7 @@ impl Kvkache {
         }
         self.segment_fill_used_bytes += fill_used_bytes;
         self.segment_fill_capacity_bytes += self.config.segment_size as u64;
-        Ok(())
+        Ok((bytes, control_buffer))
     }
 
     fn validate_value(&self, value: &[u8], expiring: bool) -> Result<()> {

@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
 use compio::io::{AsyncReadAt, AsyncWriteAt};
 
@@ -173,10 +174,16 @@ impl BlobSegment {
     }
 
     /// Writes the logical concatenation of `values` into one paired Blob
-    /// Segment and returns the physical bytes submitted through `O_DIRECT`.
-    pub(crate) async fn write_segment(&mut self, sg_index: usize, values: &[&[u8]]) -> Result<u64> {
+    /// Segment and returns the physical byte count with the reusable staging
+    /// buffer, when one was needed.
+    pub(crate) async fn write_segment<'a>(
+        &mut self,
+        sg_index: usize,
+        values: impl Clone + Iterator<Item = &'a [u8]>,
+        buffer: Option<DirectIoBuffer>,
+    ) -> Result<(u64, Option<DirectIoBuffer>)> {
         self.validate_segment_index(sg_index)?;
-        let logical_bytes = values.iter().try_fold(0usize, |total, value| {
+        let logical_bytes = values.clone().try_fold(0usize, |total, value| {
             total
                 .checked_add(value.len())
                 .ok_or_else(|| KvError::Usage("Blob Segment length overflow".into()))
@@ -190,7 +197,7 @@ impl BlobSegment {
         if logical_bytes == 0 {
             self.segment_logical_bytes[sg_index] = 0;
             self.segment_physical_bytes[sg_index] = 0;
-            return Ok(0);
+            return Ok((0, buffer));
         }
 
         let chunk_capacity = BLOB_WRITE_BUFFER_BYTES.min(self.segment_capacity_bytes as usize);
@@ -198,8 +205,11 @@ impl BlobSegment {
         let segment_base = sg_index as u64 * self.segment_capacity_bytes;
         let mut logical_written = 0usize;
         let mut physical_written = 0u64;
-        let mut value_index = 0usize;
+        let mut values = values;
+        let mut value = values.next();
         let mut value_offset = 0usize;
+        let mut buffer = buffer.unwrap_or_else(|| DirectIoBuffer::zeroed(chunk_capacity));
+        debug_assert_eq!(buffer.len(), chunk_capacity);
 
         while logical_written < logical_bytes {
             let chunk_logical_bytes = chunk_capacity.min(logical_bytes - logical_written);
@@ -207,40 +217,43 @@ impl BlobSegment {
                 chunk_logical_bytes
                     .checked_next_multiple_of(BUCKET_BYTES)
                     .ok_or_else(|| KvError::Usage("Blob write extent overflow".into()))?;
-            let mut buffer = DirectIoBuffer::zeroed(chunk_physical_bytes);
             let mut destination_offset = 0usize;
             while destination_offset < chunk_logical_bytes {
-                while value_index < values.len() && value_offset == values[value_index].len() {
-                    value_index += 1;
+                while value.is_some_and(|value| value_offset == value.len()) {
+                    value = values.next();
                     value_offset = 0;
                 }
-                let value = values.get(value_index).ok_or_else(|| {
+                let source = value.ok_or_else(|| {
                     KvError::Worker("Blob write sources ended before their logical length".into())
                 })?;
                 let copy_bytes =
-                    (value.len() - value_offset).min(chunk_logical_bytes - destination_offset);
+                    (source.len() - value_offset).min(chunk_logical_bytes - destination_offset);
                 buffer[destination_offset..destination_offset + copy_bytes]
-                    .copy_from_slice(&value[value_offset..value_offset + copy_bytes]);
+                    .copy_from_slice(&source[value_offset..value_offset + copy_bytes]);
                 destination_offset += copy_bytes;
                 value_offset += copy_bytes;
             }
+            buffer[chunk_logical_bytes..chunk_physical_bytes].fill(0);
 
             let write_offset = segment_base + logical_written as u64;
-            let write = self.file.write_at(buffer, write_offset);
-            let BufResult(result, _) = compio::runtime::time::timeout(
+            let write = self
+                .file
+                .write_at(buffer.slice(..chunk_physical_bytes), write_offset);
+            let BufResult(result, returned) = compio::runtime::time::timeout(
                 Duration::from_micros(self.write_max_time_us),
                 write,
             )
             .await
             .map_err(|_| KvError::Timeout("Blob Segment write"))?;
             require_complete_direct_io("Blob Segment write", result?, chunk_physical_bytes)?;
+            buffer = returned.into_inner();
             logical_written += chunk_logical_bytes;
             physical_written += chunk_physical_bytes as u64;
         }
 
         self.segment_logical_bytes[sg_index] = logical_bytes as u64;
         self.segment_physical_bytes[sg_index] = physical_written;
-        Ok(physical_written)
+        Ok((physical_written, Some(buffer)))
     }
 
     pub(crate) async fn read(&self, sg_index: usize, blob_ref: BlobRef) -> Result<Vec<u8>> {
