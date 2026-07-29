@@ -45,6 +45,7 @@ internal static class Protocol
         TooLarge = 0x42,
         Overloaded = 0x43,
         Timeout = 0x44,
+        Forbidden = 0x45,
         InternalError = 0x7f,
     }
 
@@ -198,6 +199,7 @@ internal static class Protocol
             Status.TooLarge => "TOO_LARGE",
             Status.Overloaded => "OVERLOADED",
             Status.Timeout => "TIMEOUT",
+            Status.Forbidden => "FORBIDDEN",
             Status.InternalError => "INTERNAL_ERROR",
             _ => throw ProtocolError($"{status} is not an error status."),
         };
@@ -218,6 +220,7 @@ internal static class Protocol
             0x42 => Status.TooLarge,
             0x43 => Status.Overloaded,
             0x44 => Status.Timeout,
+            0x45 => Status.Forbidden,
             0x7f => Status.InternalError,
             _ => throw ProtocolError($"Unknown response status 0x{value:x2}."),
         };

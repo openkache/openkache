@@ -81,6 +81,56 @@ their SSD space is reclaimed when the containing Segment Group is reused.
 `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
 
+The default loopback endpoint accepts unauthenticated clients and grants them
+administrative commands for local development. `--insecure-development` is
+required to extend that behavior to an explicitly selected non-loopback
+address. Production non-loopback startup requires a stable server certificate
+and private key, a client CA for mTLS, and an administrator certificate
+allowlist. See the [production TLS guide](#production-tls).
+
+### Production TLS
+
+Create a small internal PKI without OpenSSL:
+
+```bash
+openkache-server pki init
+openkache-server pki issue-server --dns cache.example.com --ip 10.0.0.10
+openkache-server pki issue-client application-01
+openkache-server pki issue-admin operator-01
+openkache-server pki list
+```
+
+The default workspace is `_local/openkache-pki`. Keep
+`authority/ca.key` offline, deploy only the generated `server/` directory, and
+start with `--pki-directory /etc/openkache/pki`. Client and administrator
+directories are portable bundles containing the trusted CA, leaf certificate,
+and private key.
+
+Configure PEM or DER paths in the server TOML:
+
+```toml
+[tls]
+certificate_chain = "/etc/openkache/tls/server-chain.pem"
+private_key = "/etc/openkache/tls/server-key.pem"
+client_ca = "/etc/openkache/tls/client-ca-bundle.pem"
+admin_client_certificates = [
+  "/etc/openkache/tls/operators/admin-2026.pem",
+]
+```
+
+The server certificate must contain every client-facing DNS name and IP
+address in its SANs. `client_ca` authenticates all clients. Only authenticated
+clients whose exact leaf certificate appears in
+`admin_client_certificates` may run `STATS` or `SYNC`.
+
+TLS files are loaded at startup. For server identity rotation, deploy client
+trust for both issuers first, place the replacement chain and key at new paths,
+and roll servers one at a time. For client-CA rotation, temporarily put both
+CAs in `client_ca` before reissuing clients. For administrator rotation, list
+both old and new leaf certificates until the new identity has been verified,
+then remove the old entry and roll again. Keep private keys readable only by
+the service account.
+
 Without TOML, the server uses all CPUs permitted by process affinity, the
 smaller of available host RAM and remaining common cgroup headroom, and
 available space on the storage directory's filesystem. The automatic process

@@ -71,6 +71,7 @@ pub enum Status {
     TooLarge = 0x42,
     Overloaded = 0x43,
     Timeout = 0x44,
+    Forbidden = 0x45,
     InternalError = 0x7f,
 }
 
@@ -97,6 +98,7 @@ impl TryFrom<u8> for Status {
             0x42 => Ok(Self::TooLarge),
             0x43 => Ok(Self::Overloaded),
             0x44 => Ok(Self::Timeout),
+            0x45 => Ok(Self::Forbidden),
             0x7f => Ok(Self::InternalError),
             _ => Err(ProtocolError::UnknownStatus(value)),
         }

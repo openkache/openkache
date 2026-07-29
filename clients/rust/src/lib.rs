@@ -11,7 +11,7 @@ use openkache_protocol::{
     ClientKeyDigest, MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status,
 };
 pub use openkache_protocol::{SetCondition, SetOptions};
-use rustls::pki_types::CertificateDer;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 /// All client-level errors.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +57,36 @@ pub enum SetOutcome {
 pub struct ClientOptions {
     /// Compression and end-to-end encryption applied to stored values.
     pub value_codec: value::ValueCodec,
+    /// Optional certificate identity presented to an mTLS server.
+    pub identity: Option<ClientIdentity>,
+}
+
+/// Certificate chain and private key presented during mutual TLS authentication.
+pub struct ClientIdentity {
+    certificate_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+}
+
+impl ClientIdentity {
+    /// Creates a client identity from DER-encoded certificate and private-key material.
+    ///
+    /// # Arguments
+    ///
+    /// * `certificate_chain` - Leaf certificate followed by any intermediate certificates.
+    /// * `private_key` - Private key corresponding to the leaf certificate.
+    ///
+    /// # Returns
+    ///
+    /// An identity that can be placed in [`ClientOptions`].
+    pub fn new(
+        certificate_chain: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+    ) -> Self {
+        Self {
+            certificate_chain,
+            private_key,
+        }
+    }
 }
 
 /// A reusable QUIC connection to an OpenKache server.
@@ -103,11 +133,15 @@ impl Client {
         trusted_certificate_der: &[u8],
         options: ClientOptions,
     ) -> Result<Self> {
-        let tls = make_tls_config(trusted_certificate_der)?;
+        let ClientOptions {
+            value_codec,
+            identity,
+        } = options;
+        let tls = make_tls_config(trusted_certificate_der, identity)?;
         let connection = transport::connect(address, server_name, tls).await?;
         Ok(Self {
             connection,
-            value_codec: options.value_codec,
+            value_codec,
         })
     }
 
@@ -279,14 +313,22 @@ impl Client {
     }
 }
 
-fn make_tls_config(trusted_certificate_der: &[u8]) -> Result<rustls::ClientConfig> {
+fn make_tls_config(
+    trusted_certificate_der: &[u8],
+    identity: Option<ClientIdentity>,
+) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(CertificateDer::from(trusted_certificate_der.to_vec()))?;
     let provider = rustls::crypto::ring::default_provider();
-    let mut config = rustls::ClientConfig::builder_with_provider(provider.into())
+    let builder = rustls::ClientConfig::builder_with_provider(provider.into())
         .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_root_certificates(roots);
+    let mut config = match identity {
+        Some(identity) => {
+            builder.with_client_auth_cert(identity.certificate_chain, identity.private_key)?
+        }
+        None => builder.with_no_client_auth(),
+    };
     config.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
     Ok(config)
 }

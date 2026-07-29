@@ -3,13 +3,16 @@
 use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
-use openkache::server::KacheServer;
 use openkache::{AppConfig, QuicBackend};
 
 const DEFAULT_PORT: u16 = 4433;
 
 #[path = "openkache_server/allocator.rs"]
 mod allocator;
+#[path = "openkache_server/pki.rs"]
+mod pki;
+#[path = "openkache_server/security.rs"]
+mod security;
 #[path = "openkache_server/sizing.rs"]
 mod sizing;
 
@@ -17,6 +20,9 @@ mod sizing;
 #[derive(Parser)]
 #[command(name = "openkache-server")]
 struct Arguments {
+    #[command(subcommand)]
+    command: Option<pki::Command>,
+
     /// UDP address on which the QUIC endpoint listens.
     #[arg(long, value_name = "ADDRESS", conflicts_with = "port")]
     listen: Option<SocketAddr>,
@@ -25,9 +31,8 @@ struct Arguments {
     #[arg(long, value_name = "PORT", conflicts_with = "listen")]
     port: Option<u16>,
 
-    /// File receiving the generated self-signed server certificate.
-    #[arg(long, default_value = "target/openkache-local/certificate.local.der")]
-    certificate_out: PathBuf,
+    #[command(flatten)]
+    security: security::SecurityArguments,
 
     /// Optional TOML cache configuration file.
     #[arg(long, value_name = "PATH")]
@@ -43,6 +48,10 @@ struct Arguments {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
+    if let Some(command) = &arguments.command {
+        command.run()?;
+        return Ok(());
+    }
     let sizing_plan = arguments.sizing.build_plan(arguments.config.is_some())?;
     if arguments.sizing.plan_only() {
         sizing::print_plan(
@@ -59,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(backend) = arguments.quic_backend {
         config.quic.backend = Some(backend);
     }
+    arguments.security.apply(&mut config)?;
     if let Some(plan) = &sizing_plan {
         sizing::print_plan(plan);
     }
@@ -75,18 +85,14 @@ async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std:
     let listen = arguments.listen.unwrap_or_else(|| {
         SocketAddr::from(([127, 0, 0, 1], arguments.port.unwrap_or(DEFAULT_PORT)))
     });
-    let server = KacheServer::bind_with_config(listen, config).await?;
+    let (server, security_mode) = arguments.security.bind(listen, config).await?;
     let address = server.local_addr()?;
-    if let Some(parent) = arguments.certificate_out.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&arguments.certificate_out, server.certificate_der())?;
+    arguments
+        .security
+        .write_development_certificate(&server, security_mode)?;
 
     println!("OpenKache listening on {address}");
-    println!(
-        "Client certificate: {}",
-        arguments.certificate_out.display()
-    );
+    arguments.security.report(security_mode);
     println!("Storage: SSD-backed ({})", storage_directory.display());
     println!("Runtime: Compio (io_uring)");
     println!("QUIC backend: {}", quic_backend.as_str());

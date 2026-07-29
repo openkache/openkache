@@ -180,7 +180,10 @@ fn run_worker(
         address,
         &server_name,
         &certificate,
-        ClientOptions { value_codec },
+        ClientOptions {
+            value_codec,
+            identity: None,
+        },
     )) {
         Ok(client) => client,
         Err(error) => {
