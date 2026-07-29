@@ -77,7 +77,18 @@ a preview. The native client reuses one QUIC connection. Call and await
   values must use the same key. OpenKache never sends it to the server.
 - `compression` controls Zstandard level, minimum input size, and required
   savings. Defaults favor low memory use with level 1.
+- `timeouts.connect_ms` bounds endpoint setup and the QUIC/TLS handshake;
+  the default is 5000 ms.
+- `timeouts.request_ms` bounds each complete request/response operation;
+  the default is 2000 ms.
 - `library_path` overrides the native library location for packaged builds.
+
+`PING`, `GET`, and `STATS` may reconnect and retry once after a transport
+failure. Mutating operations are not retried automatically. Encoded values are
+limited to the 64 MiB wire ceiling; servers may enforce a smaller operational
+limit. Operations are serialized through the native worker; `close()` rejects
+operations that have not started and waits for at most the current bounded
+operation.
 
 Stored encrypted values contain only a 24-byte nonce, ciphertext, and a 16-byte
 authentication tag. Existing request, response, and on-disk metadata fields

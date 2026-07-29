@@ -193,6 +193,7 @@ impl SizingRequest {
         config.storage.directory = self.directory;
         config.storage.segment_size_mib = self.profile.segment_size_mib();
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
+        config.storage.max_item_size_mib = config.storage.blob_segment_size_mib.min(16);
 
         for exponent in (0..=16).rev() {
             let segments_per_thread = 1usize << exponent;

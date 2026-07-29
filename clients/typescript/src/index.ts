@@ -34,7 +34,7 @@ import {
 } from "./worker-protocol.ts"
 
 const EMPTY_BYTES = new Uint8Array()
-const MAX_VALUE_BYTES = 16 * 1024 * 1024
+const MAX_VALUE_BYTES = 64 * 1024 * 1024
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
@@ -71,6 +71,16 @@ export interface Zstandard_Options {
 }
 
 /**
+ * Native connection and complete request/response deadlines.
+ */
+export interface Client_Timeouts {
+  /** Maximum duration for connection setup and the QUIC/TLS handshake. */
+  readonly connect_ms?: number
+  /** Maximum duration for one complete cache operation. */
+  readonly request_ms?: number
+}
+
+/**
  * Connection settings for the Rust-backed TypeScript client.
  */
 export interface Client_Options {
@@ -84,6 +94,8 @@ export interface Client_Options {
   readonly server_name?: string
   /** Client-side compression settings. */
   readonly compression?: Zstandard_Options
+  /** Bounded connection and operation durations. */
+  readonly timeouts?: Client_Timeouts
   /** Explicit native library path, primarily for packaging. */
   readonly library_path?: string
 }
@@ -117,6 +129,7 @@ export class OpenKache_Client {
   readonly #worker: Worker
   readonly #channel: Worker_Channel
   #next_request_id = 1
+  #operation_tail: Promise<void> = Promise.resolve()
   #close_promise: Promise<void> | undefined
   #closed = false
 
@@ -155,6 +168,7 @@ export class OpenKache_Client {
     })
     const client = new OpenKache_Client(worker)
     const compression = options.compression ?? {}
+    const timeouts = options.timeouts ?? {}
     const certificate = options.certificate.slice()
     const encryption_key = options.encryption_key.slice()
     try {
@@ -170,6 +184,8 @@ export class OpenKache_Client {
             compression_level: compression.level ?? 1,
             minimum_input_size: compression.minimum_input_size ?? 1_024,
             minimum_savings: compression.minimum_savings ?? 64,
+            connect_timeout_ms: timeouts.connect_ms ?? 5_000,
+            request_timeout_ms: timeouts.request_ms ?? 2_000,
             library_path: options.library_path ?? default_library_path(),
           },
         },
@@ -342,18 +358,26 @@ export class OpenKache_Client {
     if (owned_value.byteLength > 0) {
       transfer.push(owned_value.buffer as ArrayBuffer)
     }
-    return this.#request(
-      {
-        kind: "execute",
-        operation,
-        key: key_bytes,
-        value: owned_value,
-        set_condition:
-          set_options.condition === "nx" ? 1 : set_options.condition === "xx" ? 2 : 0,
-        ttl_ms: set_options.ttl_ms ?? 0,
-      },
-      transfer,
+    const operation_request = this.#operation_tail.then(
+      (): Promise<Worker_Success_Response> =>
+        this.#request(
+          {
+            kind: "execute",
+            operation,
+            key: key_bytes,
+            value: owned_value,
+            set_condition:
+              set_options.condition === "nx" ? 1 : set_options.condition === "xx" ? 2 : 0,
+            ttl_ms: set_options.ttl_ms ?? 0,
+          },
+          transfer,
+        ),
     )
+    this.#operation_tail = operation_request.then(
+      (): void => {},
+      (): void => {},
+    )
+    return operation_request
   }
 
   #request(
@@ -445,6 +469,17 @@ function validate_options(options: Client_Options): void {
     throw new OpenKache_Error(
       `encryption_key must contain 32 bytes, got ${options.encryption_key.byteLength}`,
     )
+  }
+  validate_timeout(options.timeouts?.connect_ms, "timeouts.connect_ms")
+  validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms")
+}
+
+function validate_timeout(timeout_ms: number | undefined, name: string): void {
+  if (
+    timeout_ms !== undefined &&
+    (!Number.isSafeInteger(timeout_ms) || timeout_ms <= 0)
+  ) {
+    throw new OpenKache_Error(`${name} must be a positive safe integer`)
   }
 }
 

@@ -10,8 +10,8 @@ pub const REQUEST_HEADER_BYTES: usize = 9;
 pub const RESPONSE_HEADER_BYTES: usize = 5;
 /// Bytes in every client-computed SHA-256 key digest.
 pub const CLIENT_KEY_DIGEST_BYTES: usize = 32;
-/// Maximum value or response payload size accepted by the smoke server.
-pub const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
+/// Absolute value or response payload ceiling representable by protocol v2.
+pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
     REQUEST_HEADER_BYTES + CLIENT_KEY_DIGEST_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
@@ -267,6 +267,18 @@ pub struct Request {
 }
 
 impl Request {
+    /// Returns the value payload length encoded by a fixed-size request header.
+    pub fn value_len_from_header(header: &[u8]) -> Result<usize> {
+        if header.len() < REQUEST_HEADER_BYTES {
+            return Err(ProtocolError::FrameTooShort {
+                expected: REQUEST_HEADER_BYTES,
+                actual: header.len(),
+            });
+        }
+        let encoded_value_len = u32::from_be_bytes(header[5..9].try_into().unwrap());
+        Ok((encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize)
+    }
+
     /// Returns the complete frame length encoded by a fixed-size request header.
     pub fn frame_len_from_header(header: &[u8]) -> Result<usize> {
         if header.len() < REQUEST_HEADER_BYTES {
@@ -415,63 +427,98 @@ impl Request {
 
     /// Decodes and validates one complete request frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
-        if frame.len() < REQUEST_HEADER_BYTES {
-            return Err(ProtocolError::FrameTooShort {
-                expected: REQUEST_HEADER_BYTES,
-                actual: frame.len(),
-            });
-        }
-        let opcode = Opcode::try_from(frame[0])?;
-        let key_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
-        let encoded_value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap());
-        validate_set_option_bits(opcode, encoded_value_len)?;
-        let value_flags = ValueFlags::from_wire_length(encoded_value_len);
-        let mut set_options = SetOptions::from_wire_bits(encoded_value_len)?;
-        let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
-        validate_lengths(value_len)?;
-        validate_wire_key_length(opcode, key_len)?;
-        let expected = Self::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
-        if frame.len() != expected {
-            return Err(ProtocolError::FrameLength {
-                expected,
-                actual: frame.len(),
-            });
-        }
-        let has_ttl = encoded_value_len & SET_TTL_BIT != 0;
-        let key_end = REQUEST_HEADER_BYTES + key_len;
-        let client_key_digest = if key_len == 0 {
-            None
-        } else {
-            Some(ClientKeyDigest::new(
-                frame[REQUEST_HEADER_BYTES..key_end]
-                    .try_into()
-                    .expect("validated client key digest length"),
-            ))
-        };
-        let value_start = if has_ttl {
-            let ttl_end = key_end + SET_TTL_BYTES;
-            let ttl_ms = u64::from_be_bytes(
-                frame[key_end..ttl_end]
-                    .try_into()
-                    .expect("validated SET TTL length"),
-            );
-            if ttl_ms == 0 {
-                return Err(ProtocolError::InvalidSetTtl);
-            }
-            set_options.ttl_ms = Some(ttl_ms);
-            ttl_end
-        } else {
-            key_end
-        };
-        validate_request_shape(opcode, key_len != 0, value_flags, set_options, value_len)?;
+        let decoded = decode_request_frame(frame)?;
         Ok(Self {
-            opcode,
-            client_key_digest,
-            value_flags,
-            set_options,
-            value: frame[value_start..].to_vec(),
+            opcode: decoded.opcode,
+            client_key_digest: decoded.client_key_digest,
+            value_flags: decoded.value_flags,
+            set_options: decoded.set_options,
+            value: frame[decoded.value_start..].to_vec(),
         })
     }
+
+    /// Decodes a request while reusing the frame allocation for its value.
+    pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
+        let decoded = decode_request_frame(&frame)?;
+        frame.copy_within(decoded.value_start.., 0);
+        frame.truncate(decoded.value_len);
+        Ok(Self {
+            opcode: decoded.opcode,
+            client_key_digest: decoded.client_key_digest,
+            value_flags: decoded.value_flags,
+            set_options: decoded.set_options,
+            value: frame,
+        })
+    }
+}
+
+struct DecodedRequestFrame {
+    opcode: Opcode,
+    client_key_digest: Option<ClientKeyDigest>,
+    value_flags: ValueFlags,
+    set_options: SetOptions,
+    value_start: usize,
+    value_len: usize,
+}
+
+fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
+    if frame.len() < REQUEST_HEADER_BYTES {
+        return Err(ProtocolError::FrameTooShort {
+            expected: REQUEST_HEADER_BYTES,
+            actual: frame.len(),
+        });
+    }
+    let opcode = Opcode::try_from(frame[0])?;
+    let key_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
+    let encoded_value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap());
+    validate_set_option_bits(opcode, encoded_value_len)?;
+    let value_flags = ValueFlags::from_wire_length(encoded_value_len);
+    let mut set_options = SetOptions::from_wire_bits(encoded_value_len)?;
+    let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
+    validate_lengths(value_len)?;
+    validate_wire_key_length(opcode, key_len)?;
+    let expected = Request::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
+    if frame.len() != expected {
+        return Err(ProtocolError::FrameLength {
+            expected,
+            actual: frame.len(),
+        });
+    }
+    let has_ttl = encoded_value_len & SET_TTL_BIT != 0;
+    let key_end = REQUEST_HEADER_BYTES + key_len;
+    let client_key_digest = if key_len == 0 {
+        None
+    } else {
+        Some(ClientKeyDigest::new(
+            frame[REQUEST_HEADER_BYTES..key_end]
+                .try_into()
+                .expect("validated client key digest length"),
+        ))
+    };
+    let value_start = if has_ttl {
+        let ttl_end = key_end + SET_TTL_BYTES;
+        let ttl_ms = u64::from_be_bytes(
+            frame[key_end..ttl_end]
+                .try_into()
+                .expect("validated SET TTL length"),
+        );
+        if ttl_ms == 0 {
+            return Err(ProtocolError::InvalidSetTtl);
+        }
+        set_options.ttl_ms = Some(ttl_ms);
+        ttl_end
+    } else {
+        key_end
+    };
+    validate_request_shape(opcode, key_len != 0, value_flags, set_options, value_len)?;
+    Ok(DecodedRequestFrame {
+        opcode,
+        client_key_digest,
+        value_flags,
+        set_options,
+        value_start,
+        value_len,
+    })
 }
 
 /// A decoded OpenKache response.

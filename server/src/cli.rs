@@ -27,6 +27,9 @@ pub struct Cli {
     #[arg(long, value_name = "N")]
     pub max_inflight: Option<usize>,
 
+    #[arg(long, value_name = "MIB")]
+    pub max_inflight_value_mib_per_worker: Option<usize>,
+
     #[arg(long, value_name = "N")]
     pub batch_size: Option<usize>,
 
@@ -44,6 +47,9 @@ pub struct Cli {
 
     #[arg(long, value_name = "N")]
     pub blob_segment_mib: Option<usize>,
+
+    #[arg(long, value_name = "MIB")]
+    pub max_item_mib: Option<usize>,
 
     #[arg(long, value_name = "N")]
     pub table_capacity_per_thread: Option<usize>,
@@ -140,6 +146,9 @@ impl AppConfig {
         if let Some(v) = cli.max_inflight {
             config.io_uring.max_inflight_per_worker = v;
         }
+        if let Some(v) = cli.max_inflight_value_mib_per_worker {
+            config.network.max_inflight_value_mib_per_worker = v;
+        }
         if let Some(v) = cli.batch_size {
             config.io_uring.batch_size = v;
         }
@@ -172,6 +181,9 @@ impl AppConfig {
         }
         if let Some(v) = cli.blob_segment_mib {
             config.storage.blob_segment_size_mib = v;
+        }
+        if let Some(v) = cli.max_item_mib {
+            config.storage.max_item_size_mib = v;
         }
         if let Some(v) = cli.table_capacity_per_thread {
             config.table.capacity_per_thread = v;

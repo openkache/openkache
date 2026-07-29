@@ -1245,6 +1245,12 @@ impl Kvkache {
     }
 
     fn validate_value(&self, value: &[u8], expiring: bool) -> Result<()> {
+        if value.len() > self.config.max_item_bytes {
+            return Err(KvError::ItemTooLarge {
+                bytes: value.len(),
+                capacity: self.config.max_item_bytes,
+            });
+        }
         if is_blob_item(value) {
             if value.len() > self.config.blob_segment_size || value.len() > u32::MAX as usize {
                 return Err(KvError::BlobSegmentFull {
