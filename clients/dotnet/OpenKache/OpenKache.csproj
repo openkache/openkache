@@ -5,7 +5,7 @@
     <Version>0.0.2</Version>
     <Authors>OpenKache Team</Authors>
     <Description>OpenKache client — 10x cheaper and faster than Redis</Description>
-    <PackageLicenseExpression>AGPL-3.0-only</PackageLicenseExpression>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://openkache.com</PackageProjectUrl>
     <RepositoryUrl>https://github.com/openkache/openkache</RepositoryUrl>
     <PackageTags>cache;openkache;ssd;redis;kv;client</PackageTags>
