@@ -37,7 +37,7 @@ See [Getting Started](getting-started.md). Build from source with `cargo build -
 
 ### What client languages are available?
 
-Rust, TypeScript on Bun, and .NET SDKs are available.
+Rust, TypeScript on Node.js, and .NET SDKs are available.
 
 ### Is end-to-end encryption mandatory?
 

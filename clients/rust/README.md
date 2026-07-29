@@ -22,10 +22,10 @@ cargo check
 cargo fmt --check
 ```
 
-Build the shared library used by TypeScript with:
+Build the helper process used by TypeScript with:
 
 ```bash
-cargo build --features ffi --release
+cargo build --bin openkache-client-helper --release
 ```
 
 ## Usage

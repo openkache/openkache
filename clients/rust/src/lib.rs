@@ -1,7 +1,5 @@
 //! QUIC client for the OpenKache binary protocol.
 
-#[cfg(feature = "ffi")]
-pub mod ffi;
 mod transport;
 pub mod value;
 

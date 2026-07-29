@@ -49,9 +49,9 @@ Large values are automatically compressed with zstd before storage and decompres
 
 ### 📚 Multi-language SDKs
 
-Implemented client libraries are available for Rust, TypeScript on Bun, and
+Implemented client libraries are available for Rust, TypeScript on Node.js, and
 .NET. TypeScript and JavaScript applications share the TypeScript package,
-which calls the production Rust client through a thin native ABI so transport,
+which calls the production Rust client through a helper process so transport,
 compression, and encryption behavior stay identical. Package scaffolds for
 Python, Go, Java, Kotlin, C, C++, Swift, and Dart are available under
 [`clients/`](./clients/README.md) for future Rust-backed bindings.
@@ -315,7 +315,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
 | QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v2, secure value codec |
-| QUIC client (TypeScript) | 🚧 Preview | Bun wrapper over the Rust client ABI |
+| QUIC client (TypeScript) | 🚧 Preview | Node.js SDK backed by the Rust helper |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | QUIC client (.NET) | 🚧 Preview | Managed `System.Net.Quic`, binary protocol v2 |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
@@ -349,7 +349,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/rust/` | Rust client SDK over QUIC |
-| `clients/typescript/` | Bun client backed by the Rust client ABI |
+| `clients/typescript/` | Node.js client backed by the Rust transport helper |
 | `clients/dotnet/` | Managed .NET client over QUIC |
 
 

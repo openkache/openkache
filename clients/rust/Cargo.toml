@@ -6,10 +6,11 @@ description = "Rust client for the OpenKache cache server"
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
-[features]
-ffi = []
+[[bin]]
+name = "openkache-client-helper"
+path = "src/bin/openkache_client_helper.rs"
 
 [dependencies]
 chacha20poly1305 = { version = "*", features = ["zeroize"] }
