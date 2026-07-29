@@ -3,6 +3,7 @@ name = "openkache-client"
 version = "0.1.0"
 edition = "2024"
 description = "Rust client for the OpenKache cache server"
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

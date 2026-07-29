@@ -27,6 +27,8 @@ pub enum KvError {
         required_bytes: u64,
         remaining_bytes: u64,
     },
+    #[error("{resource} capacity is exhausted; writes are temporarily stopped")]
+    CapacityExhausted { resource: &'static str },
     #[error("{0} timed out")]
     Timeout(&'static str),
     #[error("worker error: {0}")]

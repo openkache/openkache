@@ -3,10 +3,16 @@
 //! The planner deliberately favors predictable headroom over exhaustive hardware
 //! tuning. It selects power-of-two SG counts, limits the Table to half of the
 //! process RAM budget, and leaves five percent of the SSD budget unassigned.
-//! Budgets are advisory inputs: the planner does not inspect cgroup limits,
-//! filesystem free space, device performance, or whole-process peak RSS.
+//! Automatic RAM discovery also leaves at least twenty percent of currently
+//! available memory outside the process budget. Budgets are advisory inputs.
+//! Discovery recognizes common Linux cgroup memory limits and usage plus
+//! filesystem availability, but not device performance or filesystem quotas.
 
-use std::path::PathBuf;
+use std::ffi::CString;
+use std::fs;
+use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
 
 use crate::store::{
     BLOB_ITEM_THRESHOLD_BYTES, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES, STORED_VALUE_TAG_BYTES,
@@ -16,6 +22,9 @@ use crate::types::STORAGE_KEY_BYTES;
 use crate::{AppConfig, BUCKET_BYTES, KvError, Result, allowed_cpu_ids, bits_for_count};
 
 const MIB: u64 = 1024 * 1024;
+const GIB: u64 = 1024 * 1024 * 1024;
+const MEMORY_USE_PERCENT: u64 = 80;
+const MEMORY_RESERVE_TOTAL_PERCENT: u64 = 5;
 const STORAGE_USE_PERCENT: u64 = 95;
 const TABLE_RAM_PERCENT: u64 = 50;
 const LIVE_KEY_PERCENT: u64 = 75;
@@ -90,6 +99,32 @@ pub struct SizingRequest {
 }
 
 impl SizingRequest {
+    /// Detects the process CPU affinity, available RAM, and filesystem space.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - Storage directory, or a path whose nearest existing
+    ///   ancestor identifies the target filesystem.
+    /// * `profile` - Encoded-value distribution used for capacity modeling.
+    ///
+    /// # Returns
+    ///
+    /// Resource budgets ready for optional caller overrides and planning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when CPU affinity, `/proc/meminfo`, or target filesystem
+    /// capacity cannot be inspected.
+    pub fn detect(directory: PathBuf, profile: SizingProfile) -> Result<Self> {
+        Ok(Self {
+            cpu_count: allowed_cpu_ids()?.len(),
+            memory_bytes: detected_memory_capacity()?.budget_bytes,
+            storage_bytes: filesystem_available_bytes(&directory)?,
+            directory,
+            profile,
+        })
+    }
+
     /// Derives an [`AppConfig`] and its capacity estimates from the resource budgets.
     ///
     /// # Returns
@@ -198,6 +233,7 @@ impl SizingRequest {
                 config,
                 profile: self.profile,
                 value_bytes: self.profile.value_bytes(),
+                process_memory_budget_bytes: self.memory_bytes,
                 sg_index_bits: bits_for_count(segments_per_thread),
                 raw_key_capacity,
                 planned_key_capacity,
@@ -214,6 +250,188 @@ impl SizingRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MemorySnapshot {
+    pub(crate) total_bytes: u64,
+    pub(crate) available_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MemoryCapacity {
+    pub(crate) available_bytes: u64,
+    pub(crate) reserve_bytes: u64,
+    pub(crate) budget_bytes: u64,
+}
+
+pub(crate) fn detected_memory_snapshot() -> Result<MemorySnapshot> {
+    let meminfo = fs::read_to_string("/proc/meminfo")?;
+    let cgroup_v2_max = fs::read_to_string("/sys/fs/cgroup/memory.max").ok();
+    let cgroup_v2_high = fs::read_to_string("/sys/fs/cgroup/memory.high").ok();
+    let cgroup_v2_current = fs::read_to_string("/sys/fs/cgroup/memory.current").ok();
+    let cgroup_v1_limit = fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes").ok();
+    let cgroup_v1_usage = fs::read_to_string("/sys/fs/cgroup/memory/memory.usage_in_bytes").ok();
+    memory_snapshot_from_sources(
+        cgroup_v2_max.as_deref(),
+        cgroup_v2_high.as_deref(),
+        cgroup_v2_current.as_deref(),
+        cgroup_v1_limit.as_deref(),
+        cgroup_v1_usage.as_deref(),
+        &meminfo,
+    )
+}
+
+fn detected_memory_capacity() -> Result<MemoryCapacity> {
+    automatic_memory_capacity(detected_memory_snapshot()?)
+}
+
+pub(crate) fn memory_snapshot_from_sources(
+    cgroup_v2_max: Option<&str>,
+    cgroup_v2_high: Option<&str>,
+    cgroup_v2_current: Option<&str>,
+    cgroup_v1_limit: Option<&str>,
+    cgroup_v1_usage: Option<&str>,
+    meminfo: &str,
+) -> Result<MemorySnapshot> {
+    let total_bytes = meminfo_bytes(meminfo, "MemTotal:")?;
+    let host_available_bytes = meminfo_bytes(meminfo, "MemAvailable:")?;
+    let mut effective_total_bytes = total_bytes;
+    let mut available_bytes = host_available_bytes;
+
+    if cgroup_v2_max.is_some() || cgroup_v2_high.is_some() || cgroup_v2_current.is_some() {
+        let mut limit = None;
+        for value in [cgroup_v2_max, cgroup_v2_high].into_iter().flatten() {
+            if let Some(value) = parse_memory_limit(value)? {
+                limit = Some(limit.map_or(value, |smallest: u64| smallest.min(value)));
+            }
+        }
+        if let Some(limit) = limit {
+            let current = parse_required_memory_value(cgroup_v2_current, "memory.current")?;
+            effective_total_bytes = effective_total_bytes.min(limit);
+            available_bytes = available_bytes.min(limit.saturating_sub(current));
+        }
+    } else if (cgroup_v1_limit.is_some() || cgroup_v1_usage.is_some())
+        && let Some(limit) = cgroup_v1_limit
+            .map(parse_memory_limit)
+            .transpose()?
+            .flatten()
+    {
+        let current = parse_required_memory_value(cgroup_v1_usage, "memory.usage_in_bytes")?;
+        effective_total_bytes = effective_total_bytes.min(limit);
+        available_bytes = available_bytes.min(limit.saturating_sub(current));
+    }
+
+    if effective_total_bytes == 0 {
+        return Err(KvError::InvalidConfig(
+            "effective memory limit must be non-zero".into(),
+        ));
+    }
+    Ok(MemorySnapshot {
+        total_bytes: effective_total_bytes,
+        available_bytes,
+    })
+}
+
+pub(crate) fn automatic_memory_capacity(snapshot: MemorySnapshot) -> Result<MemoryCapacity> {
+    if snapshot.available_bytes == 0 {
+        return Err(KvError::InvalidConfig(
+            "no memory is available within the host and cgroup limits".into(),
+        ));
+    }
+    let proportional_reserve = percent_of(
+        snapshot.available_bytes,
+        100 - MEMORY_USE_PERCENT,
+        "available memory reserve",
+    )?;
+    let total_reserve = percent_of(
+        snapshot.total_bytes,
+        MEMORY_RESERVE_TOTAL_PERCENT,
+        "total memory reserve",
+    )?
+    .min(GIB)
+    .min(snapshot.available_bytes / 2);
+    let reserve_bytes = proportional_reserve.max(total_reserve);
+    let budget_bytes = snapshot.available_bytes.saturating_sub(reserve_bytes);
+    if budget_bytes == 0 {
+        return Err(KvError::InvalidConfig(
+            "automatic memory reserve leaves no process budget".into(),
+        ));
+    }
+    Ok(MemoryCapacity {
+        available_bytes: snapshot.available_bytes,
+        reserve_bytes,
+        budget_bytes,
+    })
+}
+
+fn meminfo_bytes(meminfo: &str, field: &'static str) -> Result<u64> {
+    meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .and_then(|value| value.split_whitespace().next())
+        .ok_or_else(|| KvError::InvalidConfig(format!("{field} is absent from /proc/meminfo")))?
+        .parse::<u64>()
+        .map_err(|_| KvError::InvalidConfig(format!("{field} is not an integer")))?
+        .checked_mul(1024)
+        .ok_or_else(|| KvError::InvalidConfig(format!("{field} byte size overflowed")))
+}
+
+fn parse_memory_limit(value: &str) -> Result<Option<u64>> {
+    let value = value.trim();
+    if value == "max" {
+        return Ok(None);
+    }
+    let limit = value
+        .parse::<u64>()
+        .map_err(|_| KvError::InvalidConfig("cgroup memory limit is not an integer".into()))?;
+    if limit == 0 {
+        return Err(KvError::InvalidConfig(
+            "cgroup memory limit must be non-zero".into(),
+        ));
+    }
+    Ok(Some(limit))
+}
+
+fn parse_required_memory_value(value: Option<&str>, name: &'static str) -> Result<u64> {
+    value
+        .ok_or_else(|| KvError::InvalidConfig(format!("{name} is unavailable")))?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| KvError::InvalidConfig(format!("{name} is not an integer")))
+}
+
+pub(crate) fn filesystem_available_bytes(path: &Path) -> Result<u64> {
+    let mut probe = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    while !probe.exists() {
+        if !probe.pop() {
+            return Err(KvError::InvalidConfig(format!(
+                "no existing filesystem ancestor for {}",
+                path.display()
+            )));
+        }
+    }
+
+    let path = CString::new(probe.as_os_str().as_bytes())
+        .map_err(|_| KvError::InvalidConfig("storage path contains a NUL byte".into()))?;
+    let mut stats = MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let stats = unsafe { stats.assume_init() };
+    let fragment_bytes = if stats.f_frsize == 0 {
+        stats.f_bsize
+    } else {
+        stats.f_frsize
+    };
+    stats
+        .f_bavail
+        .checked_mul(fragment_bytes)
+        .ok_or_else(|| KvError::InvalidConfig("available filesystem size overflowed".into()))
+}
+
 /// Effective configuration and capacity estimates produced by [`SizingRequest`].
 #[derive(Clone, Debug)]
 pub struct SizingPlan {
@@ -223,6 +441,8 @@ pub struct SizingPlan {
     pub profile: SizingProfile,
     /// Encoded value size used by the storage model.
     pub value_bytes: usize,
+    /// Maximum whole-process memory budget supplied to the planner.
+    pub process_memory_budget_bytes: u64,
     /// Packed bits used for one worker-local SG index.
     pub sg_index_bits: usize,
     /// Theoretical unique-key capacity at perfect SG packing.

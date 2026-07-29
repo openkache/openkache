@@ -10,7 +10,6 @@ Open-source · Rust · QUIC · SIMD-accelerated · SSD-first
 
 <!-- TODO: add more badges — GitHub Stars, crates.io version/downloads, Docker pulls, real CI status, OpenSSF scorecard, code coverage, PRs welcome --> 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org/)
 [![SIMD](https://img.shields.io/badge/simd-AVX2%20|%20AVX--512%20|%20NEON%20|%20SVE2-blueviolet)](#index-simd-accelerated-bcf53-breadcrumb-filter)
 
@@ -76,15 +75,20 @@ protocol. `SET` accepts an optional millisecond TTL and atomic `NX` or `XX`
 existence condition. Expired values are treated as absent immediately, while
 their SSD space is reclaimed when the containing Segment Group is reused.
 `SYNC` flushes each SSD worker before acknowledging the request. Pass
+`--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
 
-For a resource-sized configuration without TOML, provide the worker CPU count,
-RAM limit, SSD limit, and storage directory. The default `balanced` profile
-models 1 KiB values; `light` models 100-byte values and `heavy` models 2 KiB
-values.
+Without TOML, the server uses all CPUs permitted by process affinity, the
+smaller of available host RAM and remaining common cgroup headroom, and
+available space on the storage directory's filesystem. The automatic process
+budget preserves at least 20% of currently available RAM, then limits the
+packed Table to half of that budget. It starts with the default `balanced`
+profile for 1 KiB values. `light` models 100-byte values and `heavy` models
+2 KiB values.
 
 ```bash
 cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
+  --port 6380 \
   --cpus 4 \
   --memory-gib 32 \
   --storage-gb 2500 \
@@ -92,20 +96,28 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
   --plan
 ```
 
-Remove `--plan` to start the server with the displayed sizing result. The
-planner reserves 5% of the SSD budget, limits the packed Table to 50% of RAM,
-and targets 75% of theoretical SG key capacity so updates and Tombstones have
-room.
+Every argument in this example is optional. `--plan` prints the automatically
+detected or overridden sizing result without starting. The planner reserves 5%
+of available SSD space, limits the packed Table to 50% of the safe process RAM
+budget, and targets 75% of theoretical SG key capacity so updates and
+Tombstones have room.
 
 Sizing is a deterministic capacity estimate, not an adaptive benchmark. It
-does not inspect cgroup memory limits, filesystem free space, or NVMe
-performance, and the RAM estimate covers the packed Table rather than complete
-peak process RSS. `--cpus` selects worker threads but does not impose a process
-CPU quota; use deployment affinity or cgroups for that boundary. `light` and
-`balanced` use 1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy`
-raises that limit to 64 MiB. Reuse the same sizing arguments when reopening
-existing storage because worker count and Segment layout changes require cache
-recreation.
+detects the standard Linux cgroup limits and current usage plus filesystem
+availability, but does not detect filesystem quotas, SSD type, or NVMe
+performance. At runtime, workers reserve each Segment generation immediately
+before writing it instead of preallocating the whole sparse file. Memory or
+storage pressure temporarily rejects `SET` with an overloaded response while
+reads, deletes, and recovery remain available. `STATS` reports
+the memory and storage stop/resume thresholds, `memory_stop_writes`,
+`storage_stop_writes`, and `rejected_writes`.
+
+`--cpus` selects worker threads but does not impose a process CPU quota; use
+deployment affinity or cgroups for that boundary. `light` and `balanced` use
+1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that
+limit to 64 MiB. Reopen existing storage with the same automatically detected
+layout or explicit sizing overrides because worker count and Segment layout
+changes require cache recreation.
 
 ---
 
@@ -221,7 +233,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v2, secure value codec |
 | QUIC client (TypeScript) | 🚧 Preview | Bun wrapper over the Rust client ABI |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
-| .NET client | ✅ Stable | TCP-based, NuGet published |
+| QUIC client (.NET) | 🚧 Preview | Managed `System.Net.Quic`, binary protocol v2 |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
 
 ---
@@ -230,7 +242,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 | Milestone | Target | Focus |
 |---|---|---|
-| Core engine | ✅ Done | Allocators, BCF53 filter, types, Rust client, .NET client |
+| Core engine | ✅ Done | Allocators, BCF53 filter, types, and client foundations |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
 | E2E encryption | ✅ Done | Zstandard then compact XChaCha20-Poly1305 values |
@@ -253,17 +265,18 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/rust/` | Rust client SDK over QUIC |
 | `clients/typescript/` | Bun client backed by the Rust client ABI |
-| `clients/dotnet/` | .NET / C# client SDK |
+| `clients/dotnet/` | Managed .NET client over QUIC |
 
 
 ---
 
 ## ⚖️ License
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![OSI Approved](https://img.shields.io/badge/OSI-Approved-brightgreen.svg)](https://opensource.org/licenses/AGPL-3.0)
-
-Licensed under the [GNU Affero General Public License v3.0](./LICENSE).
+Except where otherwise noted, OpenKache is licensed under the
+[GNU Affero General Public License v3.0 or later](./LICENSE). Client SDKs
+under [`clients/`](./clients/) and the shared protocol under
+[`protocol/`](./protocol/) are licensed under the Apache License 2.0; see
+the `LICENSE` file in each directory.
 
 
 ---

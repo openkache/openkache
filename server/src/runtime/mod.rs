@@ -7,6 +7,7 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use aes::{
@@ -122,6 +123,7 @@ impl ThreadedKvkache {
             .saturating_mul(config.io_uring.max_inflight_per_worker)
             .max(64);
         let mut workers = Vec::with_capacity(config.runtime.thread_count);
+        let resource_guard = Arc::new(ResourceGuard::for_app_config(&config)?);
 
         for thread_id in 0..config.runtime.thread_count {
             let (sender, receiver) = channel::bounded_async(queue_capacity);
@@ -131,6 +133,7 @@ impl ThreadedKvkache {
             let cpu_id = config.runtime.cpu_ids[thread_id];
             let event_interval = config.runtime.event_interval;
             let storage_key_id = server_secret.id;
+            let resource_guard = resource_guard.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("kvkache-worker-{thread_id}"))
                 .spawn(move || {
@@ -157,9 +160,10 @@ impl ThreadedKvkache {
                             )));
                             return;
                         }
-                        let cache = match Kvkache::open_with_storage_key_id(
+                        let cache = match Kvkache::open_with_resource_guard(
                             shard_config,
                             storage_key_id,
+                            resource_guard,
                         )
                         .await
                         {
