@@ -1,15 +1,15 @@
 # OpenKache client SDKs
 
 OpenKache keeps transport, protocol framing, compression, and encryption in the
-Rust client. Language packages should remain thin adapters over its stable C
-ABI unless a platform cannot load the native library.
+Rust client. Language packages should remain thin adapters over the Rust
+transport instead of implementing the wire or security protocols again.
 
 ## Status
 
 | Language | Path | Status |
 |---|---|---|
 | Rust | `rust/` | Implemented core client |
-| TypeScript / JavaScript | `typescript/` | Implemented binding; currently uses Bun |
+| TypeScript / JavaScript | `typescript/` | Node.js, Bun, and Deno Node-API SDK |
 | C# / .NET | `dotnet/` | Implemented managed client |
 | Python | `python/` | Package scaffold |
 | Go | `go/` | Package scaffold |
@@ -27,23 +27,18 @@ layout only. It does not connect to OpenKache or expose cache operations yet.
 
 Future bindings should own only language-native concerns:
 
-- native library discovery and loading;
-- conversion between language values and ABI byte buffers;
+- native adapter discovery and lifecycle;
+- conversion between language values and Rust byte buffers;
 - asynchronous execution appropriate to the runtime;
-- deterministic client and result cleanup;
+- deterministic client cleanup;
 - idiomatic errors and package-level API names.
 
 Do not duplicate QUIC, wire framing, hashing, compression, encryption, or
-certificate behavior outside `rust/`. Extend the Rust ABI first when a binding
-needs new core behavior.
+certificate behavior outside `rust/`. Extend the Rust core and add only the
+smallest runtime-specific adapter when a binding needs new behavior.
 
-## Commands
-
-Build the Rust shared library from this directory:
-
-```bash
-cargo build --manifest-path rust/Cargo.toml --features ffi --release
-```
+Object APIs use the shared [OpenKache value envelope](VALUE_FORMAT.md).
+Raw byte APIs remain available for application-owned cross-language formats.
 
 Each scaffold README lists its package-manager validation command. Those
 commands validate package structure only until the corresponding binding is
@@ -51,7 +46,6 @@ implemented.
 
 ## Configuration
 
-Implemented native bindings require the Rust shared library for the target
-platform. Packaging and library-discovery conventions are intentionally left
-open in the scaffolds so they can be chosen with each ecosystem's release
-workflow.
+The TypeScript release package includes Linux x64 and ARM64 Node-API adapters
+for Node.js, Bun, and Deno under `target/native/`. Other scaffolded clients
+choose their runtime integration when implemented.

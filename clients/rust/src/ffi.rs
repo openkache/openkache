@@ -1,4 +1,4 @@
-//! Stable C ABI used by the TypeScript client.
+//! Stable C ABI for native client integrations.
 
 use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -34,6 +34,10 @@ const OPERATION_DELETE: u32 = 4;
 const OPERATION_STATS: u32 = 5;
 const OPERATION_SYNC: u32 = 6;
 
+const SET_CONDITION_NONE: u32 = 0;
+const SET_CONDITION_IF_ABSENT: u32 = 1;
+const SET_CONDITION_IF_PRESENT: u32 = 2;
+
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Opaque result allocated by the FFI boundary.
@@ -43,7 +47,7 @@ pub struct FfiResult {
     client: Option<Box<FfiClient>>,
 }
 
-/// Opaque TypeScript-owned handle to a dedicated Rust client worker.
+/// Opaque native handle to a dedicated Rust client worker.
 pub struct FfiClient {
     commands: flume::Sender<Command>,
     request_timeout: Duration,
@@ -404,9 +408,9 @@ pub unsafe extern "C" fn openkache_client_execute(
         let key = copy_bytes(key, key_length, "key")?;
         let value = copy_bytes(value, value_length, "value")?;
         let condition = match set_condition {
-            0 => SetCondition::None,
-            1 => SetCondition::Nx,
-            2 => SetCondition::Xx,
+            SET_CONDITION_NONE => SetCondition::None,
+            SET_CONDITION_IF_ABSENT => SetCondition::IfAbsent,
+            SET_CONDITION_IF_PRESENT => SetCondition::IfPresent,
             _ => return Err(format!("unsupported SET condition {set_condition}")),
         };
         let set_options = SetOptions::new(condition, (ttl_ms != 0).then_some(ttl_ms));

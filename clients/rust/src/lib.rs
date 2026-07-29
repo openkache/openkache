@@ -4,6 +4,7 @@
 pub mod ffi;
 mod transport;
 pub mod value;
+pub mod value_envelope;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
@@ -376,7 +377,7 @@ impl Client {
     ///
     /// * `key` - Exact application key bytes.
     /// * `value` - Owned application value.
-    /// * `options` - Optional TTL and `NX` or `XX` condition.
+    /// * `options` - Optional TTL and `IfAbsent` or `IfPresent` condition.
     ///
     /// # Returns
     ///

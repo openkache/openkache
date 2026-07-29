@@ -21,8 +21,8 @@ public sealed class SetOptions
     internal ulong? ValidateAndGetTtlMilliseconds()
     {
         if (Condition is not SetCondition.None
-            and not SetCondition.Nx
-            and not SetCondition.Xx)
+            and not SetCondition.IfAbsent
+            and not SetCondition.IfPresent)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(Condition),

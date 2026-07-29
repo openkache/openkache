@@ -53,7 +53,7 @@ fn main() {
         "cxx",         // C++/Rust interop — requires a C++ compiler.
         "cxxbridge",   // CXX bridge macros — same requirement as `cxx`.
         "libc",        // Direct FFI to C's libc — links libc.
-        "napi",        // Node.js N-API — requires native Node.js bindings.
+        "napi",        // Node-API bindings belong in runtime-specific adapters.
         "napi-derive", // Procedural macros for napi — pulls in napi.
         "pkg-config",  // Locates system libraries via pkg-config.
         "vcpkg",       // Microsoft C++ package manager integration.

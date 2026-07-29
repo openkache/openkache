@@ -11,7 +11,7 @@ OpenKache uses SSD as primary storage instead of DRAM, reducing storage costs fr
 - **QUIC transport** — Multiplexed streams, TLS 1.3 baked in, no head-of-line blocking
 - **E2E encryption** — Zero-trust by default, configurable algorithm
 - **Transparent compression** — zstd for large values
-- **Multi-language SDKs** — Rust, TypeScript on Bun, and .NET; additional language packages are scaffolded for future Rust-backed bindings
+- **Multi-language SDKs** — Rust, TypeScript and JavaScript on Node.js, Bun, and Deno, and .NET; additional language packages are scaffolded for future Rust-backed bindings
 
 ## Getting Started
 
@@ -99,7 +99,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `server/` | Core cache server (BCF53, allocators, types) |
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/rust/` | Rust client SDK over QUIC |
-| `clients/typescript/` | Bun client backed by the Rust client ABI |
+| `clients/typescript/` | TypeScript client backed by Rust through Node-API |
 | `clients/dotnet/` | .NET / C# client SDK |
 
 ## License

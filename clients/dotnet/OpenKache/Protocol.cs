@@ -19,8 +19,8 @@ internal static class Protocol
     private const uint ValueCompressedBit = 1u << 31;
     private const uint ValueEncryptedBit = 1u << 30;
     private const uint SetTtlBit = 1u << 29;
-    private const uint SetNxBit = 1u << 28;
-    private const uint SetXxBit = 1u << 27;
+    private const uint SetIfAbsentBit = 1u << 28;
+    private const uint SetIfPresentBit = 1u << 27;
 
     internal enum Opcode : byte
     {
@@ -107,8 +107,8 @@ internal static class Protocol
         var optionBits = setCondition switch
         {
             SetCondition.None => 0u,
-            SetCondition.Nx => SetNxBit,
-            SetCondition.Xx => SetXxBit,
+            SetCondition.IfAbsent => SetIfAbsentBit,
+            SetCondition.IfPresent => SetIfPresentBit,
             _ => throw ProtocolError($"Unknown set condition {setCondition}."),
         };
         if (ttlMilliseconds.HasValue)

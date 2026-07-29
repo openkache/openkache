@@ -23,9 +23,9 @@ const RESPONSE_VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
 const VALUE_COMPRESSED_BIT: u32 = 1 << 31;
 const VALUE_ENCRYPTED_BIT: u32 = 1 << 30;
 const SET_TTL_BIT: u32 = 1 << 29;
-const SET_NX_BIT: u32 = 1 << 28;
-const SET_XX_BIT: u32 = 1 << 27;
-const SET_OPTION_BITS: u32 = SET_TTL_BIT | SET_NX_BIT | SET_XX_BIT;
+const SET_IF_ABSENT_BIT: u32 = 1 << 28;
+const SET_IF_PRESENT_BIT: u32 = 1 << 27;
+const SET_OPTION_BITS: u32 = SET_TTL_BIT | SET_IF_ABSENT_BIT | SET_IF_PRESENT_BIT;
 const SET_TTL_BYTES: usize = std::mem::size_of::<u64>();
 
 /// Operations supported by protocol v2.
@@ -199,9 +199,9 @@ pub enum SetCondition {
     #[default]
     None,
     /// Store only when the key does not exist.
-    Nx,
+    IfAbsent,
     /// Store only when the key already exists.
-    Xx,
+    IfPresent,
 }
 
 /// Optional behavior for one `SET` request.
@@ -228,8 +228,8 @@ impl SetOptions {
     fn wire_bits(self) -> u32 {
         let condition = match self.condition {
             SetCondition::None => 0,
-            SetCondition::Nx => SET_NX_BIT,
-            SetCondition::Xx => SET_XX_BIT,
+            SetCondition::IfAbsent => SET_IF_ABSENT_BIT,
+            SetCondition::IfPresent => SET_IF_PRESENT_BIT,
         };
         condition
             | if self.ttl_ms.is_some() {
@@ -241,12 +241,12 @@ impl SetOptions {
 
     fn from_wire_bits(encoded_length: u32) -> Result<Self> {
         let condition = match (
-            encoded_length & SET_NX_BIT != 0,
-            encoded_length & SET_XX_BIT != 0,
+            encoded_length & SET_IF_ABSENT_BIT != 0,
+            encoded_length & SET_IF_PRESENT_BIT != 0,
         ) {
             (false, false) => SetCondition::None,
-            (true, false) => SetCondition::Nx,
-            (false, true) => SetCondition::Xx,
+            (true, false) => SetCondition::IfAbsent,
+            (false, true) => SetCondition::IfPresent,
             (true, true) => return Err(ProtocolError::ConflictingSetConditions),
         };
         Ok(Self {
@@ -688,7 +688,7 @@ pub enum ProtocolError {
     },
     #[error("value transformation flags are not valid for {context}")]
     InvalidValueFlags { context: &'static str },
-    #[error("NX and XX cannot be combined")]
+    #[error("if-absent and if-present conditions cannot be combined")]
     ConflictingSetConditions,
     #[error("SET TTL must be greater than zero milliseconds")]
     InvalidSetTtl,
