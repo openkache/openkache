@@ -26,8 +26,8 @@ bun run pack:check
 
 `build` generates the JavaScript and declaration files under the ignored
 `dist/` directory. `pack:check` also cross-compiles the static Rust helper and
-previews the complete npm package. The public CI and publication workflows build
-these artifacts from source; generated output is not committed.
+previews the complete npm package. Public CI builds these artifacts from source;
+generated output is not committed.
 
 The repository uses Bun only for development and release tooling. Published
 applications run the client on Node.js 20 or newer without Bun or runtime npm
@@ -89,13 +89,21 @@ carries its encoding and type name. Schemas are therefore registered once
 instead of being passed to every `get` and `set`.
 
 The envelope, codec registry, and JSON fallback use only web-standard APIs and
-contain no Node.js imports. A future browser transport can reuse them unchanged.
+contain no Node.js imports. A separate browser configuration typechecks this
+subpath against DOM and ES declarations without loading Node declarations.
 Empty raw values are valid.
 
 The runtime-neutral layer is available from
 `@openkache/client/value-codec`. The package can be installed on any platform;
 the current Node.js transport supports Linux x64. `helper_path` can select
 another compatible helper implementation when one becomes available.
+
+The browser cannot open the UDP-based QUIC transport or spawn the native helper.
+A future browser client can instead use the browser `WebTransport` API against
+a WebTransport/HTTP3 server endpoint. Rust compiled to WebAssembly can reuse the
+canonical framing, codecs, compression, and encryption, while JavaScript owns
+the WebTransport streams. The runtime-neutral value-codec subpath preserves
+that boundary without adding a WebAssembly or browser transport dependency now.
 
 Every connection and cache method returns a promise. The helper process owns one
 reusable QUIC connection and keeps native networking off the Node.js event loop.

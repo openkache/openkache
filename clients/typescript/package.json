@@ -32,10 +32,12 @@
     "build:package": "bun run build && bun run build:native",
     "pack:check": "bun run build:package && bun pm pack --dry-run",
     "prepublishOnly": "bun run build:package",
-    "typecheck": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit"
+    "typecheck": "bun run typecheck:node && bun run typecheck:browser",
+    "typecheck:browser": "bun ./node_modules/typescript/bin/tsc --project tsconfig.browser.json",
+    "typecheck:node": "bun ./node_modules/typescript/bin/tsc --project tsconfig.json --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^24.10.13",
+    "@types/node": "^24.13.3",
     "typescript": "^7.0.2"
   }
 }
