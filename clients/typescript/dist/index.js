@@ -44,34 +44,35 @@ export class OpenKache_Client {
     constructor(helper, value_codecs) {
         this.#helper = helper;
         this.#value_codecs = value_codecs;
-        this.#channel = {
+        const channel = {
             decoder: new Helper_Response_Decoder(),
             pending: new Map(),
             closed: false,
             stderr: "",
         };
+        this.#channel = channel;
         helper.stdout.on("data", (chunk) => {
-            receive_helper_bytes(this.#channel, helper, chunk);
+            receive_helper_bytes(channel, helper, chunk);
         });
         helper.stderr.on("data", (chunk) => {
-            this.#channel.stderr = append_stderr(this.#channel.stderr, chunk);
+            channel.stderr = append_stderr(channel.stderr, chunk);
         });
         helper.on("error", (error) => {
-            close_failed_helper(this.#channel, helper, as_openkache_error(error));
+            close_failed_helper(channel, helper, as_openkache_error(error));
         });
         helper.on("exit", (code, signal) => {
-            if (this.#channel.closed)
+            if (channel.closed)
                 return;
             let truncated_error = "";
             try {
-                this.#channel.decoder.finish();
+                channel.decoder.finish();
             }
             catch (error) {
                 truncated_error = `: ${error_message(error)}`;
             }
             const status = signal === null ? `status ${code ?? "unknown"}` : `signal ${signal}`;
-            const stderr = this.#channel.stderr.length === 0 ? "" : `: ${this.#channel.stderr.trim()}`;
-            close_failed_helper(this.#channel, helper, new OpenKache_Error(`OpenKache native helper exited with ${status}${stderr}${truncated_error}`));
+            const stderr = channel.stderr.length === 0 ? "" : `: ${channel.stderr.trim()}`;
+            close_failed_helper(channel, helper, new OpenKache_Error(`OpenKache native helper exited with ${status}${stderr}${truncated_error}`));
         });
     }
     /**
@@ -160,6 +161,7 @@ export class OpenKache_Client {
      * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
      */
     async set(key, value, options = {}) {
+        validate_set_options(options);
         let bytes;
         try {
             bytes = this.#value_codecs.encode(value);
@@ -196,6 +198,7 @@ export class OpenKache_Client {
      * @throws {OpenKache_Error} When validation, transport, or storage fails.
      */
     async set_raw(key, value, options = {}) {
+        validate_set_options(options);
         validate_value_length(value);
         return this.#set_owned_bytes(key, value.slice(), options);
     }
@@ -252,7 +255,6 @@ export class OpenKache_Client {
         return this.#close_promise;
     }
     async #set_owned_bytes(key, bytes, options) {
-        validate_set_options(options);
         const response = await this.#execute(OPERATION_SET, key, bytes, options);
         const outcomes = {
             [RESULT_CREATED]: "created",
@@ -446,6 +448,11 @@ function validate_value_length(value) {
     }
 }
 function validate_set_options(options) {
+    if (options.condition !== undefined &&
+        options.condition !== "nx" &&
+        options.condition !== "xx") {
+        throw new OpenKache_Error("condition must be nx or xx");
+    }
     if (options.ttl_ms !== undefined &&
         (!Number.isSafeInteger(options.ttl_ms) || options.ttl_ms <= 0)) {
         throw new OpenKache_Error("ttl_ms must be a positive safe integer");

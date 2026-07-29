@@ -33,7 +33,7 @@ import { readFile } from "node:fs/promises"
 import { OpenKache_Client } from "@openkache/client"
 
 const client = await OpenKache_Client.connect({
-  address: "cache.example.com:4433",
+  address: "203.0.113.10:4433",
   server_name: "cache.example.com",
   certificate: await readFile("client-bundle/ca.crt"),
   identity: {

@@ -20,6 +20,8 @@ const COMMAND_CONNECT = 1;
 const COMMAND_EXECUTE = 2;
 const COMMAND_CLOSE = 3;
 const MAX_HELPER_FRAME_BYTES = 32 * 1024 * 1024;
+const INITIAL_HELPER_BUFFER_BYTES = 4 * 1024;
+const MAX_RETAINED_HELPER_BUFFER_BYTES = 64 * 1024;
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 export function encode_connect_request(request_id, options) {
@@ -60,30 +62,57 @@ export function encode_close_request(request_id) {
 }
 export class Helper_Response_Decoder {
     #buffer = new Uint8Array();
+    #length = 0;
     push(chunk) {
-        this.#buffer = concatenate(this.#buffer, chunk);
+        this.#append(chunk);
         const responses = [];
         let offset = 0;
-        while (this.#buffer.byteLength - offset >= 4) {
-            const view = new DataView(this.#buffer.buffer, this.#buffer.byteOffset + offset, this.#buffer.byteLength - offset);
+        while (this.#length - offset >= 4) {
+            const view = new DataView(this.#buffer.buffer, this.#buffer.byteOffset + offset, this.#length - offset);
             const frame_length = view.getUint32(0);
             if (frame_length > MAX_HELPER_FRAME_BYTES) {
                 throw new Error(`helper response contains ${frame_length} bytes, maximum is ${MAX_HELPER_FRAME_BYTES}`);
             }
             const encoded_length = 4 + frame_length;
-            if (this.#buffer.byteLength - offset < encoded_length)
+            if (this.#length - offset < encoded_length)
                 break;
             responses.push(decode_response(this.#buffer.subarray(offset + 4, offset + encoded_length)));
             offset += encoded_length;
         }
-        if (offset > 0)
-            this.#buffer = this.#buffer.slice(offset);
+        if (offset > 0) {
+            this.#buffer.copyWithin(0, offset, this.#length);
+            this.#length -= offset;
+            this.#shrink_if_idle();
+        }
         return responses;
     }
     finish() {
-        if (this.#buffer.byteLength !== 0) {
-            throw new Error(`helper response ended with ${this.#buffer.byteLength} truncated bytes`);
+        if (this.#length !== 0) {
+            throw new Error(`helper response ended with ${this.#length} truncated bytes`);
         }
+    }
+    #append(chunk) {
+        if (chunk.byteLength === 0)
+            return;
+        const required_length = this.#length + chunk.byteLength;
+        if (required_length > this.#buffer.byteLength) {
+            const next_capacity = Math.max(INITIAL_HELPER_BUFFER_BYTES, required_length, this.#buffer.byteLength * 2);
+            const next_buffer = new Uint8Array(next_capacity);
+            next_buffer.set(this.#buffer.subarray(0, this.#length));
+            this.#buffer = next_buffer;
+        }
+        this.#buffer.set(chunk, this.#length);
+        this.#length = required_length;
+    }
+    #shrink_if_idle() {
+        if (this.#buffer.byteLength <= MAX_RETAINED_HELPER_BUFFER_BYTES ||
+            this.#length >= MAX_RETAINED_HELPER_BUFFER_BYTES)
+            return;
+        const next_buffer = new Uint8Array(this.#length === 0
+            ? 0
+            : Math.max(INITIAL_HELPER_BUFFER_BYTES, this.#length));
+        next_buffer.set(this.#buffer.subarray(0, this.#length));
+        this.#buffer = next_buffer;
     }
 }
 function decode_response(frame) {
@@ -175,15 +204,5 @@ class Frame_Encoder {
         this.#parts.push(bytes);
         this.#length += bytes.byteLength;
     }
-}
-function concatenate(left, right) {
-    if (left.byteLength === 0)
-        return right.slice();
-    if (right.byteLength === 0)
-        return left;
-    const combined = new Uint8Array(left.byteLength + right.byteLength);
-    combined.set(left);
-    combined.set(right, left.byteLength);
-    return combined;
 }
 //# sourceMappingURL=helper-protocol.js.map
