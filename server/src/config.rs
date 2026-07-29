@@ -172,10 +172,28 @@ impl Config {
         self.data_path.with_extension("blob")
     }
 
+    pub(crate) fn checkpoint_path(&self) -> PathBuf {
+        self.data_path.with_extension("checkpoint")
+    }
+
+    pub(crate) fn next_checkpoint_path(&self) -> PathBuf {
+        self.data_path.with_extension("checkpoint.next")
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.blob_path() == self.data_path {
+        let blob_path = self.blob_path();
+        let checkpoint_path = self.checkpoint_path();
+        let next_checkpoint_path = self.next_checkpoint_path();
+        if blob_path == self.data_path
+            || checkpoint_path == self.data_path
+            || next_checkpoint_path == self.data_path
+            || checkpoint_path == blob_path
+            || next_checkpoint_path == blob_path
+            || next_checkpoint_path == checkpoint_path
+        {
             return Err(KvError::InvalidConfig(
-                "derived Blob path must differ from the Segment data path".into(),
+                "derived Blob path and checkpoint paths must be distinct from Segment storage"
+                    .into(),
             ));
         }
         if self.sg_index_bits == 0 || self.sg_index_bits > 16 {

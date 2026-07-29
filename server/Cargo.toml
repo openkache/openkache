@@ -35,6 +35,7 @@ clap = { version = "*", features = ["derive"] }
 comnoq = { version = "*", default-features = false, features = ["ring"], optional = true }
 compio = { version = "*", default-features = false, features = ["fs", "io-uring", "net", "runtime", "signal", "time"] }
 compio-quic = { version = "*", features = ["ring"], optional = true }
+crc32fast = "*"
 crossfire = { version = "*", optional = true }
 event-listener = { version = "*", optional = true }
 flume = { version = "*", optional = true }

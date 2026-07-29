@@ -306,9 +306,16 @@ impl KacheServer {
         let network = config.network.clone();
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
-        let sockets = bind_reuse_port_sockets(address, network.worker_count)?;
+        let mut cache = ThreadedKvkache::start(config)?;
+        let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
+            Ok(sockets) => sockets,
+            Err(error) => {
+                cache.shutdown()?;
+                return Err(error.into());
+            }
+        };
         let local_addr = sockets[0].local_addr()?;
-        let cache = Arc::new(ThreadedKvkache::start(config)?);
+        let cache = Arc::new(cache);
         Ok(Self {
             sockets,
             local_addr,

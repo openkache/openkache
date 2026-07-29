@@ -221,7 +221,11 @@ async fn process_worker_batch(
     }
 
     if shutdown_response.is_some() {
-        match cache.sync().await {
+        let result = match cache.sync().await {
+            Ok(()) => cache.checkpoint().await,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => {}
             Err(error) => {
                 let message = error.to_string();

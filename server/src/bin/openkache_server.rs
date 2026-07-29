@@ -97,11 +97,14 @@ async fn run(arguments: Arguments, config: AppConfig) -> Result<(), Box<dyn std:
     println!("Runtime: Compio (io_uring)");
     println!("QUIC backend: {}", quic_backend.as_str());
     println!("Allocator: {}", allocator::NAME);
-    println!("Press Ctrl-C to stop");
+    println!("Press Ctrl-C or send SIGTERM to stop");
 
     server
         .serve(async {
-            let _ = compio::signal::ctrl_c().await;
+            let interrupt = compio::signal::ctrl_c();
+            let terminate = compio::signal::unix::signal(libc::SIGTERM);
+            futures_util::pin_mut!(interrupt, terminate);
+            let _ = futures_util::future::select(interrupt, terminate).await;
         })
         .await?;
     Ok(())
