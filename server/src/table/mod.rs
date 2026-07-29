@@ -352,10 +352,12 @@ impl Table {
             (None, None) => return,
             (Some(candidate), None) => (first.0, candidate),
             (None, Some(candidate)) => (second.0, candidate),
-            (Some(first), Some(second)) if first.1.unary_index <= second.1.unary_index => {
-                (first.0, first)
+            (Some(first_entry), Some(second_entry))
+                if first_entry.1.unary_index <= second_entry.1.unary_index =>
+            {
+                (first.0, first_entry)
             }
-            (Some(_), Some(second)) => (second.0, second),
+            (Some(_), Some(second_entry)) => (second.0, second_entry),
         };
         let (back_subtable_index, (entry_slot, mut entry)) = selected;
         self.back_table[back_subtable_index].remove_at(
