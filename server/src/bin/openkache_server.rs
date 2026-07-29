@@ -49,8 +49,7 @@ struct Arguments {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     if let Some(command) = &arguments.command {
-        command.run()?;
-        return Ok(());
+        return Ok(command.run()?);
     }
     let sizing_plan = arguments.sizing.build_plan(arguments.config.is_some())?;
     if arguments.sizing.plan_only() {
