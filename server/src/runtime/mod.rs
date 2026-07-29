@@ -16,7 +16,7 @@ use aes::{
 };
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
-use openkache_protocol::ClientKeyDigest;
+use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{self, Sender};
 use crate::types::EncodedValue;
@@ -312,6 +312,7 @@ impl ThreadedKvkache {
         match self.request(worker, |response| WorkerRequest::Set {
             storage_key,
             value: EncodedValue::plain(value),
+            options: SetOptions::NONE,
             response,
         })? {
             WorkerResponse::Set(outcome) => Ok(outcome),
@@ -321,11 +322,11 @@ impl ThreadedKvkache {
         }
     }
 
-    /// Stores a value without blocking the caller's async executor thread.
-    pub(crate) async fn set_async(
+    pub(crate) async fn set_async_with_options(
         &self,
         client_key_digest: ClientKeyDigest,
         value: EncodedValue,
+        options: SetOptions,
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
@@ -333,6 +334,7 @@ impl ThreadedKvkache {
             .request_async(worker, |response| WorkerRequest::Set {
                 storage_key,
                 value,
+                options,
                 response,
             })
             .await?
@@ -513,6 +515,7 @@ impl ThreadedKvkache {
                     WorkerRequest::Set {
                         storage_key,
                         value: EncodedValue::plain(value),
+                        options: SetOptions::NONE,
                         response: response_tx,
                     },
                     BenchmarkResponseKind::Set,
@@ -573,6 +576,7 @@ impl ThreadedKvkache {
                 match outcome {
                     SetOutcome::Created => stats.creates += 1,
                     SetOutcome::Replaced => stats.replaces += 1,
+                    SetOutcome::NotStored => {}
                 }
             }
             (BenchmarkResponseKind::Delete, WorkerResponse::Deleted(deleted)) => {

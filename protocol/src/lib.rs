@@ -14,13 +14,19 @@ pub const CLIENT_KEY_DIGEST_BYTES: usize = 32;
 pub const MAX_VALUE_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
-    REQUEST_HEADER_BYTES + CLIENT_KEY_DIGEST_BYTES + MAX_VALUE_BYTES;
+    REQUEST_HEADER_BYTES + CLIENT_KEY_DIGEST_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
 /// Maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_VALUE_BYTES;
 
-const VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
+const REQUEST_VALUE_LENGTH_MASK: u32 = (1 << 27) - 1;
+const RESPONSE_VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
 const VALUE_COMPRESSED_BIT: u32 = 1 << 31;
 const VALUE_ENCRYPTED_BIT: u32 = 1 << 30;
+const SET_TTL_BIT: u32 = 1 << 29;
+const SET_NX_BIT: u32 = 1 << 28;
+const SET_XX_BIT: u32 = 1 << 27;
+const SET_OPTION_BITS: u32 = SET_TTL_BIT | SET_NX_BIT | SET_XX_BIT;
+const SET_TTL_BYTES: usize = std::mem::size_of::<u64>();
 
 /// Operations supported by protocol v2.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,6 +65,7 @@ pub enum Status {
     Created = 0x02,
     Replaced = 0x03,
     Deleted = 0x04,
+    NotStored = 0x05,
     InvalidRequest = 0x40,
     UnsupportedOpcode = 0x41,
     TooLarge = 0x42,
@@ -84,6 +91,7 @@ impl TryFrom<u8> for Status {
             0x02 => Ok(Self::Created),
             0x03 => Ok(Self::Replaced),
             0x04 => Ok(Self::Deleted),
+            0x05 => Ok(Self::NotStored),
             0x40 => Ok(Self::InvalidRequest),
             0x41 => Ok(Self::UnsupportedOpcode),
             0x42 => Ok(Self::TooLarge),
@@ -182,12 +190,77 @@ impl ValueFlags {
     }
 }
 
+/// Condition applied atomically by a `SET` request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SetCondition {
+    /// Store regardless of whether the key exists.
+    #[default]
+    None,
+    /// Store only when the key does not exist.
+    Nx,
+    /// Store only when the key already exists.
+    Xx,
+}
+
+/// Optional behavior for one `SET` request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SetOptions {
+    /// Atomic existence condition.
+    pub condition: SetCondition,
+    /// Relative lifetime in milliseconds. `None` stores a persistent item.
+    pub ttl_ms: Option<u64>,
+}
+
+impl SetOptions {
+    /// Creates persistent, unconditional `SET` behavior.
+    pub const NONE: Self = Self {
+        condition: SetCondition::None,
+        ttl_ms: None,
+    };
+
+    /// Creates options from an existence condition and optional positive TTL.
+    pub const fn new(condition: SetCondition, ttl_ms: Option<u64>) -> Self {
+        Self { condition, ttl_ms }
+    }
+
+    fn wire_bits(self) -> u32 {
+        let condition = match self.condition {
+            SetCondition::None => 0,
+            SetCondition::Nx => SET_NX_BIT,
+            SetCondition::Xx => SET_XX_BIT,
+        };
+        condition
+            | if self.ttl_ms.is_some() {
+                SET_TTL_BIT
+            } else {
+                0
+            }
+    }
+
+    fn from_wire_bits(encoded_length: u32) -> Result<Self> {
+        let condition = match (
+            encoded_length & SET_NX_BIT != 0,
+            encoded_length & SET_XX_BIT != 0,
+        ) {
+            (false, false) => SetCondition::None,
+            (true, false) => SetCondition::Nx,
+            (false, true) => SetCondition::Xx,
+            (true, true) => return Err(ProtocolError::ConflictingSetConditions),
+        };
+        Ok(Self {
+            condition,
+            ttl_ms: None,
+        })
+    }
+}
+
 /// A decoded OpenKache request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub opcode: Opcode,
     pub client_key_digest: Option<ClientKeyDigest>,
     pub value_flags: ValueFlags,
+    pub set_options: SetOptions,
     pub value: Vec<u8>,
 }
 
@@ -203,11 +276,19 @@ impl Request {
         let opcode = Opcode::try_from(header[0])?;
         let key_len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
         let encoded_value_len = u32::from_be_bytes(header[5..9].try_into().unwrap());
-        let value_len = (encoded_value_len & VALUE_LENGTH_MASK) as usize;
+        validate_set_option_bits(opcode, encoded_value_len)?;
+        let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
         validate_lengths(value_len)?;
         validate_wire_key_length(opcode, key_len)?;
         REQUEST_HEADER_BYTES
             .checked_add(key_len)
+            .and_then(|size| {
+                size.checked_add(if encoded_value_len & SET_TTL_BIT != 0 {
+                    SET_TTL_BYTES
+                } else {
+                    0
+                })
+            })
             .and_then(|size| size.checked_add(value_len))
             .ok_or(ProtocolError::FrameLengthOverflow)
     }
@@ -228,17 +309,36 @@ impl Request {
         value_flags: ValueFlags,
         value: Vec<u8>,
     ) -> Result<Self> {
+        Self::new_set(
+            opcode,
+            client_key_digest,
+            value_flags,
+            SetOptions::NONE,
+            value,
+        )
+    }
+
+    /// Creates and validates a request with explicit value and `SET` options.
+    pub fn new_set(
+        opcode: Opcode,
+        client_key_digest: Option<ClientKeyDigest>,
+        value_flags: ValueFlags,
+        set_options: SetOptions,
+        value: Vec<u8>,
+    ) -> Result<Self> {
         validate_lengths(value.len())?;
         validate_request_shape(
             opcode,
             client_key_digest.is_some(),
             value_flags,
+            set_options,
             value.len(),
         )?;
         Ok(Self {
             opcode,
             client_key_digest,
             value_flags,
+            set_options,
             value,
         })
     }
@@ -250,19 +350,26 @@ impl Request {
             self.opcode,
             self.client_key_digest.is_some(),
             self.value_flags,
+            self.set_options,
             self.value.len(),
         )?;
         let key_len = self
             .client_key_digest
             .map_or(0, |_| CLIENT_KEY_DIGEST_BYTES);
-        let mut frame = Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + self.value.len());
+        let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
+        let mut frame =
+            Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + ttl_len + self.value.len());
         frame.push(self.opcode as u8);
         frame.extend_from_slice(&(key_len as u32).to_be_bytes());
         frame.extend_from_slice(
-            &encode_value_length(self.value.len(), self.value_flags).to_be_bytes(),
+            &encode_request_value_length(self.value.len(), self.value_flags, self.set_options)
+                .to_be_bytes(),
         );
         if let Some(client_key_digest) = self.client_key_digest {
             frame.extend_from_slice(client_key_digest.as_bytes());
+        }
+        if let Some(ttl_ms) = self.set_options.ttl_ms {
+            frame.extend_from_slice(&ttl_ms.to_be_bytes());
         }
         frame.extend_from_slice(&self.value);
         Ok(frame)
@@ -275,23 +382,31 @@ impl Request {
             self.opcode,
             self.client_key_digest.is_some(),
             self.value_flags,
+            self.set_options,
             self.value.len(),
         )?;
         let key_len = self
             .client_key_digest
             .map_or(0, |_| CLIENT_KEY_DIGEST_BYTES);
-        let prefix_len = REQUEST_HEADER_BYTES + key_len;
+        let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
+        let prefix_len = REQUEST_HEADER_BYTES + key_len + ttl_len;
         let value_len = self.value.len();
         self.value.reserve(prefix_len);
         self.value.resize(prefix_len + value_len, 0);
         self.value.copy_within(0..value_len, prefix_len);
         self.value[0] = self.opcode as u8;
         self.value[1..5].copy_from_slice(&(key_len as u32).to_be_bytes());
-        self.value[5..9]
-            .copy_from_slice(&encode_value_length(value_len, self.value_flags).to_be_bytes());
+        self.value[5..9].copy_from_slice(
+            &encode_request_value_length(value_len, self.value_flags, self.set_options)
+                .to_be_bytes(),
+        );
         if let Some(client_key_digest) = self.client_key_digest {
-            self.value[REQUEST_HEADER_BYTES..prefix_len]
+            self.value[REQUEST_HEADER_BYTES..REQUEST_HEADER_BYTES + key_len]
                 .copy_from_slice(client_key_digest.as_bytes());
+        }
+        if let Some(ttl_ms) = self.set_options.ttl_ms {
+            self.value[REQUEST_HEADER_BYTES + key_len..prefix_len]
+                .copy_from_slice(&ttl_ms.to_be_bytes());
         }
         Ok(self.value)
     }
@@ -307,8 +422,10 @@ impl Request {
         let opcode = Opcode::try_from(frame[0])?;
         let key_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
         let encoded_value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap());
+        validate_set_option_bits(opcode, encoded_value_len)?;
         let value_flags = ValueFlags::from_wire_length(encoded_value_len);
-        let value_len = (encoded_value_len & VALUE_LENGTH_MASK) as usize;
+        let mut set_options = SetOptions::from_wire_bits(encoded_value_len)?;
+        let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
         validate_lengths(value_len)?;
         validate_wire_key_length(opcode, key_len)?;
         let expected = Self::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
@@ -318,7 +435,7 @@ impl Request {
                 actual: frame.len(),
             });
         }
-        validate_request_shape(opcode, key_len != 0, value_flags, value_len)?;
+        let has_ttl = encoded_value_len & SET_TTL_BIT != 0;
         let key_end = REQUEST_HEADER_BYTES + key_len;
         let client_key_digest = if key_len == 0 {
             None
@@ -329,11 +446,28 @@ impl Request {
                     .expect("validated client key digest length"),
             ))
         };
+        let value_start = if has_ttl {
+            let ttl_end = key_end + SET_TTL_BYTES;
+            let ttl_ms = u64::from_be_bytes(
+                frame[key_end..ttl_end]
+                    .try_into()
+                    .expect("validated SET TTL length"),
+            );
+            if ttl_ms == 0 {
+                return Err(ProtocolError::InvalidSetTtl);
+            }
+            set_options.ttl_ms = Some(ttl_ms);
+            ttl_end
+        } else {
+            key_end
+        };
+        validate_request_shape(opcode, key_len != 0, value_flags, set_options, value_len)?;
         Ok(Self {
             opcode,
             client_key_digest,
             value_flags,
-            value: frame[key_end..].to_vec(),
+            set_options,
+            value: frame[value_start..].to_vec(),
         })
     }
 }
@@ -357,7 +491,7 @@ impl Response {
         }
         Status::try_from(header[0])?;
         let encoded_payload_len = u32::from_be_bytes(header[1..5].try_into().unwrap());
-        let payload_len = (encoded_payload_len & VALUE_LENGTH_MASK) as usize;
+        let payload_len = (encoded_payload_len & RESPONSE_VALUE_LENGTH_MASK) as usize;
         validate_lengths(payload_len)?;
         RESPONSE_HEADER_BYTES
             .checked_add(payload_len)
@@ -418,7 +552,7 @@ impl Response {
         let status = Status::try_from(frame[0])?;
         let encoded_payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap());
         let value_flags = ValueFlags::from_wire_length(encoded_payload_len);
-        let payload_len = (encoded_payload_len & VALUE_LENGTH_MASK) as usize;
+        let payload_len = (encoded_payload_len & RESPONSE_VALUE_LENGTH_MASK) as usize;
         if payload_len > MAX_VALUE_BYTES {
             return Err(ProtocolError::ValueTooLarge {
                 size: payload_len,
@@ -451,7 +585,7 @@ impl Response {
         let status = Status::try_from(frame[0])?;
         let encoded_payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap());
         let value_flags = ValueFlags::from_wire_length(encoded_payload_len);
-        let payload_len = (encoded_payload_len & VALUE_LENGTH_MASK) as usize;
+        let payload_len = (encoded_payload_len & RESPONSE_VALUE_LENGTH_MASK) as usize;
         if payload_len > MAX_VALUE_BYTES {
             return Err(ProtocolError::ValueTooLarge {
                 size: payload_len,
@@ -505,6 +639,12 @@ pub enum ProtocolError {
     },
     #[error("value transformation flags are not valid for {context}")]
     InvalidValueFlags { context: &'static str },
+    #[error("NX and XX cannot be combined")]
+    ConflictingSetConditions,
+    #[error("SET TTL must be greater than zero milliseconds")]
+    InvalidSetTtl,
+    #[error("SET options are not valid for {opcode:?}")]
+    InvalidSetOptions { opcode: Opcode },
 }
 
 /// Convenience result type for protocol operations.
@@ -522,6 +662,21 @@ fn validate_lengths(value_len: usize) -> Result<()> {
 
 fn encode_value_length(value_len: usize, value_flags: ValueFlags) -> u32 {
     value_len as u32 | value_flags.wire_bits()
+}
+
+fn encode_request_value_length(
+    value_len: usize,
+    value_flags: ValueFlags,
+    set_options: SetOptions,
+) -> u32 {
+    value_len as u32 | value_flags.wire_bits() | set_options.wire_bits()
+}
+
+fn validate_set_option_bits(opcode: Opcode, encoded_value_len: u32) -> Result<()> {
+    if opcode != Opcode::Set && encoded_value_len & SET_OPTION_BITS != 0 {
+        return Err(ProtocolError::InvalidSetOptions { opcode });
+    }
+    SetOptions::from_wire_bits(encoded_value_len).map(|_| ())
 }
 
 fn validate_wire_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
@@ -544,8 +699,15 @@ fn validate_request_shape(
     opcode: Opcode,
     has_client_key: bool,
     value_flags: ValueFlags,
+    set_options: SetOptions,
     value_len: usize,
 ) -> Result<()> {
+    if set_options.ttl_ms == Some(0) {
+        return Err(ProtocolError::InvalidSetTtl);
+    }
+    if opcode != Opcode::Set && set_options != SetOptions::NONE {
+        return Err(ProtocolError::InvalidSetOptions { opcode });
+    }
     let valid = match opcode {
         Opcode::Ping | Opcode::Stats | Opcode::Sync => {
             !has_client_key && value_len == 0 && value_flags == ValueFlags::NONE

@@ -26,14 +26,17 @@ pairs. A lane has at most one in-flight request, so responses need no request
 identifier.
 
 ```text
-request  = opcode:u8 | key_len:u32be | value_len:u32be | client_key_digest | value
+request  = opcode:u8 | key_len:u32be | value_len_and_flags:u32be |
+           client_key_digest | [ttl_ms:u64be] | value
 response = status:u8 | payload_len:u32be | payload
 ```
 
 Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
 Clients encode KV keys as the 32-byte SHA-256 digest of the exact user-key
 bytes. The server rejects every other key length. Values and response payloads
-are limited to 16 MiB.
+are limited to 16 MiB. `SET` uses request length flag bits for an optional
+positive millisecond TTL and the mutually exclusive `NX` and `XX` conditions.
+The 8-byte relative TTL appears immediately before the value when present.
 
 ## Core components
 

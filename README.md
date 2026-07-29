@@ -71,8 +71,11 @@ The server listens on `127.0.0.1:4433`, stores shard files under
 self-signed certificate to
 `target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
 `SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/2` QUIC
-protocol. `SYNC` flushes each SSD worker before acknowledging the request.
-Pass `--port <port>` only when overriding the default port, or pass
+protocol. `SET` accepts an optional millisecond TTL and atomic `NX` or `XX`
+existence condition. Expired values are treated as absent immediately, while
+their SSD space is reclaimed when the containing Segment Group is reused.
+`SYNC` flushes each SSD worker before acknowledging the request. Pass
+`--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
 
 Without TOML, the server uses all CPUs permitted by process affinity, the

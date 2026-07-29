@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use openkache_protocol::ClientKeyDigest;
+use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
 use crate::types::EncodedValue;
@@ -19,6 +19,7 @@ pub(super) enum WorkerRequest {
     Set {
         storage_key: StorageKey,
         value: EncodedValue,
+        options: SetOptions,
         response: Sender<Result<WorkerResponse>>,
     },
     Delete {
@@ -177,8 +178,12 @@ async fn process_worker_batch(
             WorkerRequest::Set {
                 storage_key,
                 value,
+                options,
                 response,
-            } => match cache.set_encoded(storage_key, value).await {
+            } => match cache
+                .set_encoded_with_options(storage_key, value, options)
+                .await
+            {
                 Ok(outcome) => {
                     let _ = response.send(Ok(WorkerResponse::Set(outcome)));
                 }
