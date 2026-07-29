@@ -24,6 +24,7 @@ import {
   RESULT_DELETED,
   RESULT_NOT_DELETED,
   RESULT_NOT_FOUND,
+  RESULT_NOT_STORED,
   RESULT_OK,
   RESULT_REPLACED,
   RESULT_VALUE,
@@ -90,7 +91,17 @@ export interface Client_Options {
 /**
  * Outcome of a successful `set` operation.
  */
-export type Set_Outcome = "created" | "replaced"
+export type Set_Outcome = "created" | "replaced" | "not_stored"
+
+/**
+ * Optional TTL and atomic existence condition for `set`.
+ */
+export interface Set_Options {
+  /** Store only when the key is absent (`nx`) or present (`xx`). */
+  readonly condition?: "nx" | "xx"
+  /** Positive relative lifetime in milliseconds. */
+  readonly ttl_ms?: number
+}
 
 /**
  * Error returned by the shared Rust client implementation or Protobuf layer.
@@ -210,12 +221,14 @@ export class OpenKache_Client {
    * @param key - Exact string or binary cache key.
    * @param value - Message or initializer accepted by the generated schema.
    * @param schema - Generated Protobuf schema used for runtime encoding.
-   * @returns Whether the operation created or replaced the key.
+   * @param options - Optional TTL and `nx` or `xx` existence condition.
+   * @returns Whether the operation created, replaced, or did not store the key.
    */
   async set<Schema extends DescMessage>(
     key: string | Uint8Array,
     value: MessageInitShape<Schema>,
     schema: Schema,
+    options: Set_Options = {},
   ): Promise<Set_Outcome> {
     let bytes: Uint8Array
     try {
@@ -224,7 +237,7 @@ export class OpenKache_Client {
       throw new OpenKache_Error(`Protobuf encoding failed: ${error_message(error)}`)
     }
     validate_value_length(bytes)
-    return this.#set_owned_bytes(key, bytes)
+    return this.#set_owned_bytes(key, bytes, options)
   }
 
   /**
@@ -241,13 +254,16 @@ export class OpenKache_Client {
 
   /**
    * Stores exact bytes without Protobuf encoding.
+   *
+   * @param options - Optional TTL and `nx` or `xx` existence condition.
    */
   async setRaw(
     key: string | Uint8Array,
     value: Uint8Array,
+    options: Set_Options = {},
   ): Promise<Set_Outcome> {
     validate_value_length(value)
-    return this.#set_owned_bytes(key, value.slice())
+    return this.#set_owned_bytes(key, value.slice(), options)
   }
 
   /**
@@ -289,11 +305,14 @@ export class OpenKache_Client {
   async #set_owned_bytes(
     key: string | Uint8Array,
     bytes: Uint8Array,
+    options: Set_Options,
   ): Promise<Set_Outcome> {
-    const response = await this.#execute(OPERATION_SET, key, bytes)
+    validate_set_options(options)
+    const response = await this.#execute(OPERATION_SET, key, bytes, options)
     const outcomes: Readonly<Record<number, Set_Outcome | undefined>> = {
       [RESULT_CREATED]: "created",
       [RESULT_REPLACED]: "replaced",
+      [RESULT_NOT_STORED]: "not_stored",
     }
     const outcome = outcomes[response.result_kind]
     if (outcome === undefined) throw unexpected_result("SET", response.result_kind)
@@ -315,6 +334,7 @@ export class OpenKache_Client {
     operation: number,
     key: string | Uint8Array,
     value: Uint8Array,
+    set_options: Set_Options = {},
   ): Promise<Worker_Success_Response> {
     const key_bytes = owned_key_bytes(key)
     const owned_value = value.byteLength === 0 ? value : owned_bytes(value)
@@ -328,6 +348,9 @@ export class OpenKache_Client {
         operation,
         key: key_bytes,
         value: owned_value,
+        set_condition:
+          set_options.condition === "nx" ? 1 : set_options.condition === "xx" ? 2 : 0,
+        ttl_ms: set_options.ttl_ms ?? 0,
       },
       transfer,
     )
@@ -430,6 +453,15 @@ function validate_value_length(value: Uint8Array): void {
     throw new OpenKache_Error(
       `value contains ${value.byteLength} bytes, maximum is ${MAX_VALUE_BYTES}`,
     )
+  }
+}
+
+function validate_set_options(options: Set_Options): void {
+  if (
+    options.ttl_ms !== undefined &&
+    (!Number.isSafeInteger(options.ttl_ms) || options.ttl_ms <= 0)
+  ) {
+    throw new OpenKache_Error("ttl_ms must be a positive safe integer")
   }
 }
 

@@ -15,14 +15,17 @@ pub(crate) const ITEM_BYTE_OFFSET_BITS: usize = 12;
 pub(crate) const ITEM_STORAGE_KEY_SUFFIX_BYTES: usize = STORAGE_KEY_BYTES - 1;
 pub(crate) const ITEM_KIND_BYTES: usize = 1;
 pub(crate) const ITEM_FIXED_BYTES: usize = ITEM_STORAGE_KEY_SUFFIX_BYTES + ITEM_KIND_BYTES;
+pub(crate) const ITEM_EXPIRATION_BYTES: usize = std::mem::size_of::<u64>();
 pub(crate) const TOMBSTONE_KIND: u8 = 0;
 pub(crate) const LIVE_KIND: u8 = 1;
+pub(crate) const EXPIRING_LIVE_KIND: u8 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Item {
     pub(crate) storage_key: StorageKey,
     pub(crate) value: Vec<u8>,
     pub(crate) is_tombstone: bool,
+    pub(crate) expires_at_ms: u64,
 }
 
 impl Item {
@@ -31,6 +34,21 @@ impl Item {
             storage_key,
             value,
             is_tombstone: false,
+            expires_at_ms: 0,
+        }
+    }
+
+    pub(crate) fn live_expiring(
+        storage_key: StorageKey,
+        value: Vec<u8>,
+        expires_at_ms: u64,
+    ) -> Self {
+        debug_assert!(expires_at_ms > 0);
+        Self {
+            storage_key,
+            value,
+            is_tombstone: false,
+            expires_at_ms,
         }
     }
 
@@ -39,11 +57,26 @@ impl Item {
             storage_key,
             value: Vec::new(),
             is_tombstone: true,
+            expires_at_ms: 0,
         }
     }
 
     pub(crate) fn encoded_len(&self) -> usize {
-        ITEM_FIXED_BYTES + self.value.len()
+        ITEM_FIXED_BYTES
+            + if self.expires_at_ms == 0 {
+                0
+            } else {
+                ITEM_EXPIRATION_BYTES
+            }
+            + self.value.len()
+    }
+
+    pub(crate) fn is_expired_at(&self, now_ms: u64) -> bool {
+        !self.is_tombstone && self.expires_at_ms != 0 && self.expires_at_ms <= now_ms
+    }
+
+    pub(crate) fn is_live_at(&self, now_ms: u64) -> bool {
+        !self.is_tombstone && !self.is_expired_at(now_ms)
     }
 }
 
@@ -247,15 +280,29 @@ fn item_at(bucket: &[u8], item_slot: usize) -> Option<Item> {
     storage_key_bytes[0] = entry.key_prefix;
     let storage_key_end = span.start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
     storage_key_bytes[1..].copy_from_slice(&bucket[span.start..storage_key_end]);
-    let is_tombstone = match bucket[storage_key_end] {
-        TOMBSTONE_KIND => true,
-        LIVE_KIND => false,
+    let (is_tombstone, expires_at_ms, value_start) = match bucket[storage_key_end] {
+        TOMBSTONE_KIND => (true, 0, storage_key_end + ITEM_KIND_BYTES),
+        LIVE_KIND => (false, 0, storage_key_end + ITEM_KIND_BYTES),
+        EXPIRING_LIVE_KIND => {
+            let expiration_start = storage_key_end + ITEM_KIND_BYTES;
+            let expiration_end = expiration_start + ITEM_EXPIRATION_BYTES;
+            if expiration_end > span.end {
+                return None;
+            }
+            let expires_at_ms =
+                u64::from_le_bytes(bucket[expiration_start..expiration_end].try_into().unwrap());
+            if expires_at_ms == 0 {
+                return None;
+            }
+            (false, expires_at_ms, expiration_end)
+        }
         _ => return None,
     };
     Some(Item {
         storage_key: StorageKey::new(storage_key_bytes),
-        value: bucket[storage_key_end + ITEM_KIND_BYTES..span.end].to_vec(),
+        value: bucket[value_start..span.end].to_vec(),
         is_tombstone,
+        expires_at_ms,
     })
 }
 
@@ -270,10 +317,18 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
     bucket[start..storage_key_end].copy_from_slice(&item.storage_key.as_bytes()[1..]);
     bucket[storage_key_end] = if item.is_tombstone {
         TOMBSTONE_KIND
+    } else if item.expires_at_ms != 0 {
+        EXPIRING_LIVE_KIND
     } else {
         LIVE_KIND
     };
-    bucket[storage_key_end + ITEM_KIND_BYTES..end].copy_from_slice(&item.value);
+    let mut value_start = storage_key_end + ITEM_KIND_BYTES;
+    if item.expires_at_ms != 0 {
+        let expiration_end = value_start + ITEM_EXPIRATION_BYTES;
+        bucket[value_start..expiration_end].copy_from_slice(&item.expires_at_ms.to_le_bytes());
+        value_start = expiration_end;
+    }
+    bucket[value_start..end].copy_from_slice(&item.value);
     write_item_offset(
         bucket,
         count,

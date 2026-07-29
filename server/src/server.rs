@@ -612,6 +612,7 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
         opcode,
         client_key_digest,
         value_flags,
+        set_options,
         value,
     } = request;
     let result = match opcode {
@@ -624,14 +625,16 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
                 None => response(Status::NotFound, Vec::new()),
             }),
         Opcode::Set => cache
-            .set_async(
+            .set_async_with_options(
                 client_key_digest.expect("SET requests have a validated key digest"),
                 crate::types::EncodedValue::new(value, value_flags),
+                set_options,
             )
             .await
             .map(|outcome| match outcome {
                 SetOutcome::Created => response(Status::Created, Vec::new()),
                 SetOutcome::Replaced => response(Status::Replaced, Vec::new()),
+                SetOutcome::NotStored => response(Status::NotStored, Vec::new()),
             }),
         Opcode::Delete => cache
             .delete_async(client_key_digest.expect("DELETE requests have a validated key digest"))
@@ -671,6 +674,7 @@ fn cache_error_response(error: KvError) -> Response {
         KvError::Timeout(_) => Status::Timeout,
         KvError::TableFull | KvError::CapacityExhausted { .. } => Status::Overloaded,
         KvError::ItemTooLarge { .. } | KvError::BlobSegmentFull { .. } => Status::TooLarge,
+        KvError::InvalidRequest(_) => Status::InvalidRequest,
         KvError::Io(_) | KvError::InvalidConfig(_) | KvError::Worker(_) | KvError::Usage(_) => {
             Status::InternalError
         }

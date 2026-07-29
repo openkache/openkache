@@ -15,7 +15,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compio::BufResult;
 use compio::buf::{IoBuf, IoBufMut, SetLen};
@@ -23,6 +23,7 @@ use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
 use compio::io::AsyncWriteAt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use openkache_protocol::{SetCondition, SetOptions};
 
 use crate::types::EncodedValue;
 use crate::*;
@@ -392,6 +393,7 @@ pub(crate) fn require_complete_direct_io(
 pub enum SetOutcome {
     Created,
     Replaced,
+    NotStored,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -424,6 +426,7 @@ struct LocatedItem {
 #[derive(Debug)]
 pub(crate) struct PendingItem {
     pub(crate) value: Option<EncodedValue>,
+    pub(crate) expires_at_ms: u64,
     pub(crate) previous: Option<TableLocation>,
     pub(crate) previous_live: bool,
 }
@@ -431,6 +434,7 @@ pub(crate) struct PendingItem {
 struct FlushRecord {
     storage_key: StorageKey,
     value: Option<EncodedValue>,
+    expires_at_ms: u64,
     previous: Option<TableLocation>,
     previous_live: bool,
     table_location: Option<TableLocation>,
@@ -613,12 +617,15 @@ impl Kvkache {
         storage_key: &StorageKey,
     ) -> Result<Option<EncodedValue>> {
         if let Some(pending) = self.pending.get(storage_key) {
-            return Ok(pending.value.clone());
+            return Ok(pending
+                .is_live_at(unix_time_ms())
+                .then(|| pending.value.clone())
+                .flatten());
         }
         let Some(located) = self.locate_stable_record(storage_key).await? else {
             return Ok(None);
         };
-        if located.item.is_tombstone {
+        if !located.item.is_live_at(unix_time_ms()) {
             return Ok(None);
         }
         self.read_stored_value(located.table_location, &located.item.value)
@@ -660,38 +667,80 @@ impl Kvkache {
         storage_key: StorageKey,
         value: EncodedValue,
     ) -> Result<SetOutcome> {
-        self.validate_value(&value.bytes)?;
+        self.set_encoded_with_options(storage_key, value, SetOptions::NONE)
+            .await
+    }
+
+    pub(crate) async fn set_encoded_with_options(
+        &mut self,
+        storage_key: StorageKey,
+        value: EncodedValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        if options.ttl_ms == Some(0) {
+            return Err(KvError::InvalidRequest(
+                "SET TTL must be greater than zero milliseconds".into(),
+            ));
+        }
+        self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
         let now = Instant::now();
         let refresh_memory = now >= self.next_memory_capacity_check;
         if refresh_memory {
             self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
         }
         self.resource_guard.admit_set(refresh_memory)?;
+        let now_ms = unix_time_ms();
+        let expires_at_ms = match options.ttl_ms {
+            Some(ttl_ms) => now_ms.checked_add(ttl_ms).ok_or_else(|| {
+                KvError::InvalidRequest("SET TTL exceeds the supported time range".into())
+            })?,
+            None => 0,
+        };
         let (previous, previous_live, outcome) =
-            if let Some(pending) = self.take_pending(&storage_key) {
-                let outcome = if pending.value.is_some() {
-                    SetOutcome::Replaced
-                } else {
-                    SetOutcome::Created
-                };
-                (pending.previous, pending.previous_live, outcome)
+            if let Some(current) = self.pending.get(&storage_key) {
+                let current_live = current.is_live_at(now_ms);
+                if !set_condition_allows(options.condition, current_live) {
+                    return Ok(SetOutcome::NotStored);
+                }
+                let pending = self
+                    .take_pending(&storage_key)
+                    .expect("pending Item remains present");
+                (
+                    pending.previous,
+                    pending.previous_live,
+                    if current_live {
+                        SetOutcome::Replaced
+                    } else {
+                        SetOutcome::Created
+                    },
+                )
             } else {
                 let previous = self.locate_stable_record(&storage_key).await?;
-                let previous_live = previous
+                let current_live = previous
+                    .as_ref()
+                    .is_some_and(|located| located.item.is_live_at(now_ms));
+                let previous_stable_live = previous
                     .as_ref()
                     .is_some_and(|located| !located.item.is_tombstone);
-                let location = previous.map(|located| located.table_location);
-                let outcome = if previous_live {
-                    SetOutcome::Replaced
-                } else {
-                    SetOutcome::Created
-                };
-                (location, previous_live, outcome)
+                if !set_condition_allows(options.condition, current_live) {
+                    return Ok(SetOutcome::NotStored);
+                }
+                let location = previous.as_ref().map(|located| located.table_location);
+                (
+                    location,
+                    previous_stable_live,
+                    if current_live {
+                        SetOutcome::Replaced
+                    } else {
+                        SetOutcome::Created
+                    },
+                )
             };
         self.insert_pending(
             storage_key,
             PendingItem {
                 value: Some(value),
+                expires_at_ms,
                 previous,
                 previous_live,
             },
@@ -703,6 +752,20 @@ impl Kvkache {
     }
 
     pub(crate) async fn delete(&mut self, storage_key: &StorageKey) -> Result<bool> {
+        let now_ms = unix_time_ms();
+        if let Some(current) = self.pending.get(storage_key)
+            && !current.is_live_at(now_ms)
+        {
+            let mut pending = self
+                .take_pending(storage_key)
+                .expect("pending Item remains present");
+            if pending.previous.is_some() {
+                pending.value = None;
+                pending.expires_at_ms = 0;
+                self.insert_pending(*storage_key, pending);
+            }
+            return Ok(false);
+        }
         if let Some(mut pending) = self.take_pending(storage_key) {
             if pending.value.is_none() {
                 self.insert_pending(*storage_key, pending);
@@ -710,6 +773,7 @@ impl Kvkache {
             }
             if pending.previous.is_some() {
                 pending.value = None;
+                pending.expires_at_ms = 0;
                 self.insert_pending(*storage_key, pending);
             }
             if self.pending_should_flush() {
@@ -720,13 +784,14 @@ impl Kvkache {
         let Some(previous) = self.locate_stable_record(storage_key).await? else {
             return Ok(false);
         };
-        if previous.item.is_tombstone {
+        if !previous.item.is_live_at(now_ms) {
             return Ok(false);
         }
         self.insert_pending(
             *storage_key,
             PendingItem {
                 value: None,
+                expires_at_ms: 0,
                 previous: Some(previous.table_location),
                 previous_live: true,
             },
@@ -832,15 +897,21 @@ impl Kvkache {
         if self.pending.is_empty() {
             return Ok(());
         }
+        let now_ms = unix_time_ms();
         let pending = std::mem::take(&mut self.pending);
         self.pending_sg_bytes = 0;
         self.pending_blob_bytes = 0;
         let mut remaining = pending
             .into_iter()
-            .filter_map(|(storage_key, pending)| {
+            .filter_map(|(storage_key, mut pending)| {
+                if !pending.is_live_at(now_ms) {
+                    pending.value = None;
+                    pending.expires_at_ms = 0;
+                }
                 (pending.value.is_some() || pending.previous.is_some()).then_some(FlushRecord {
                     storage_key,
                     value: pending.value,
+                    expires_at_ms: pending.expires_at_ms,
                     previous: pending.previous,
                     previous_live: pending.previous_live,
                     table_location: None,
@@ -884,18 +955,23 @@ impl Kvkache {
                             continue;
                         }
                         let blob_ref = BlobRef::new(blob_used, value.bytes.len())?;
-                        (
-                            Item::live(record.storage_key, encode_blob_ref(blob_ref, value.flags)),
-                            Some(blob_ref),
-                        )
+                        let encoded = encode_blob_ref(blob_ref, value.flags);
+                        let item = if record.expires_at_ms == 0 {
+                            Item::live(record.storage_key, encoded)
+                        } else {
+                            Item::live_expiring(record.storage_key, encoded, record.expires_at_ms)
+                        };
+                        (item, Some(blob_ref))
                     }
-                    Some(value) => (
-                        Item::live(
-                            record.storage_key,
-                            encode_inline_value(&value.bytes, value.flags),
-                        ),
-                        None,
-                    ),
+                    Some(value) => {
+                        let encoded = encode_inline_value(&value.bytes, value.flags);
+                        let item = if record.expires_at_ms == 0 {
+                            Item::live(record.storage_key, encoded)
+                        } else {
+                            Item::live_expiring(record.storage_key, encoded, record.expires_at_ms)
+                        };
+                        (item, None)
+                    }
                 };
                 if let Some(table_location) = active.append(item, false) {
                     if blob_ref.is_some() {
@@ -1105,7 +1181,7 @@ impl Kvkache {
         Ok(())
     }
 
-    fn validate_value(&self, value: &[u8]) -> Result<()> {
+    fn validate_value(&self, value: &[u8], expiring: bool) -> Result<()> {
         if is_blob_item(value) {
             if value.len() > self.config.blob_segment_size || value.len() > u32::MAX as usize {
                 return Err(KvError::BlobSegmentFull {
@@ -1115,8 +1191,11 @@ impl Kvkache {
             }
             return Ok(());
         }
-        let item_bytes =
-            item_offsets_bytes(1) + ITEM_FIXED_BYTES + STORED_VALUE_TAG_BYTES + value.len();
+        let item_bytes = item_offsets_bytes(1)
+            + ITEM_FIXED_BYTES
+            + usize::from(expiring) * ITEM_EXPIRATION_BYTES
+            + STORED_VALUE_TAG_BYTES
+            + value.len();
         let capacity = BUCKET_BYTES - 1;
         if item_bytes > capacity {
             return Err(KvError::ItemTooLarge {
@@ -1128,8 +1207,10 @@ impl Kvkache {
     }
 
     fn insert_pending(&mut self, storage_key: StorageKey, pending: PendingItem) {
-        let (sg_bytes, blob_bytes) =
-            pending_accounted_bytes(pending.value.as_ref().map(|value| value.bytes.as_slice()));
+        let (sg_bytes, blob_bytes) = pending_accounted_bytes(
+            pending.value.as_ref().map(|value| value.bytes.as_slice()),
+            pending.expires_at_ms != 0,
+        );
         self.pending_sg_bytes = self.pending_sg_bytes.saturating_add(sg_bytes);
         self.pending_blob_bytes = self.pending_blob_bytes.saturating_add(blob_bytes);
         let replaced = self.pending.insert(storage_key, pending);
@@ -1138,8 +1219,10 @@ impl Kvkache {
 
     fn take_pending(&mut self, storage_key: &StorageKey) -> Option<PendingItem> {
         let pending = self.pending.remove(storage_key)?;
-        let (sg_bytes, blob_bytes) =
-            pending_accounted_bytes(pending.value.as_ref().map(|value| value.bytes.as_slice()));
+        let (sg_bytes, blob_bytes) = pending_accounted_bytes(
+            pending.value.as_ref().map(|value| value.bytes.as_slice()),
+            pending.expires_at_ms != 0,
+        );
         self.pending_sg_bytes = self.pending_sg_bytes.saturating_sub(sg_bytes);
         self.pending_blob_bytes = self.pending_blob_bytes.saturating_sub(blob_bytes);
         Some(pending)
@@ -1159,6 +1242,7 @@ impl Kvkache {
                 record.storage_key,
                 PendingItem {
                     value: record.value,
+                    expires_at_ms: record.expires_at_ms,
                     previous: record.previous,
                     previous_live: record.previous_live,
                 },
@@ -1253,8 +1337,9 @@ impl Kvkache {
 
     fn logical_key_count(&self) -> usize {
         let mut count = self.stable_live_keys;
+        let now_ms = unix_time_ms();
         for pending in self.pending.values() {
-            match (pending.previous_live, pending.value.is_some()) {
+            match (pending.previous_live, pending.is_live_at(now_ms)) {
                 (true, false) => count = count.saturating_sub(1),
                 (false, true) => count += 1,
                 _ => {}
@@ -1295,11 +1380,38 @@ fn stored_payload_len(value: &[u8]) -> usize {
     }
 }
 
-fn pending_accounted_bytes(value: Option<&[u8]>) -> (usize, usize) {
+fn pending_accounted_bytes(value: Option<&[u8]>, expiring: bool) -> (usize, usize) {
     let Some(value) = value else {
         return (item_offsets_bytes(1) + ITEM_FIXED_BYTES, 0);
     };
-    let sg_bytes = item_offsets_bytes(1) + ITEM_FIXED_BYTES + stored_payload_len(value);
+    let sg_bytes = item_offsets_bytes(1)
+        + ITEM_FIXED_BYTES
+        + usize::from(expiring) * ITEM_EXPIRATION_BYTES
+        + stored_payload_len(value);
     let blob_bytes = if is_blob_item(value) { value.len() } else { 0 };
     (sg_bytes, blob_bytes)
+}
+
+impl PendingItem {
+    fn is_live_at(&self, now_ms: u64) -> bool {
+        self.value.is_some() && (self.expires_at_ms == 0 || self.expires_at_ms > now_ms)
+    }
+}
+
+fn set_condition_allows(condition: SetCondition, current_live: bool) -> bool {
+    match condition {
+        SetCondition::None => true,
+        SetCondition::Nx => !current_live,
+        SetCondition::Xx => current_live,
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
 }

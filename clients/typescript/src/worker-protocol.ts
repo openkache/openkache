@@ -7,6 +7,7 @@ export const RESULT_REPLACED = 5
 export const RESULT_DELETED = 6
 export const RESULT_NOT_DELETED = 7
 export const RESULT_CONNECTED = 8
+export const RESULT_NOT_STORED = 9
 
 export const OPERATION_PING = 1
 export const OPERATION_GET = 2
@@ -37,6 +38,8 @@ export type Worker_Request_Body =
       readonly operation: number
       readonly key: Uint8Array
       readonly value: Uint8Array
+      readonly set_condition: number
+      readonly ttl_ms: number
     }
   | {
       readonly kind: "close"

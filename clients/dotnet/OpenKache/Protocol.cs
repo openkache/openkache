@@ -14,9 +14,13 @@ internal static class Protocol
 
     private const int RequestHeaderBytes = 9;
     private const int ClientKeyDigestBytes = 32;
-    private const uint ValueLengthMask = (1u << 30) - 1;
+    private const int SetTtlBytes = sizeof(ulong);
+    private const uint ResponseValueLengthMask = (1u << 30) - 1;
     private const uint ValueCompressedBit = 1u << 31;
     private const uint ValueEncryptedBit = 1u << 30;
+    private const uint SetTtlBit = 1u << 29;
+    private const uint SetNxBit = 1u << 28;
+    private const uint SetXxBit = 1u << 27;
 
     internal enum Opcode : byte
     {
@@ -35,6 +39,7 @@ internal static class Protocol
         Created = 0x02,
         Replaced = 0x03,
         Deleted = 0x04,
+        NotStored = 0x05,
         InvalidRequest = 0x40,
         UnsupportedOpcode = 0x41,
         TooLarge = 0x42,
@@ -64,7 +69,9 @@ internal static class Protocol
     internal static byte[] EncodeRequest(
         Opcode opcode,
         ReadOnlySpan<byte> userKey,
-        ReadOnlySpan<byte> value)
+        ReadOnlySpan<byte> value,
+        SetCondition setCondition = SetCondition.None,
+        ulong? ttlMilliseconds = null)
     {
         if (value.Length > MaximumValueBytes)
         {
@@ -85,16 +92,40 @@ internal static class Protocol
             throw ProtocolError($"{opcode} does not accept a key.");
         }
 
+        if (opcode is not Opcode.Set
+            && (setCondition is not SetCondition.None || ttlMilliseconds.HasValue))
+        {
+            throw ProtocolError($"{opcode} does not accept set options.");
+        }
+
+        if (ttlMilliseconds is 0)
+        {
+            throw ProtocolError("SET TTL must be greater than zero milliseconds.");
+        }
+
+        var optionBits = setCondition switch
+        {
+            SetCondition.None => 0u,
+            SetCondition.Nx => SetNxBit,
+            SetCondition.Xx => SetXxBit,
+            _ => throw ProtocolError($"Unknown set condition {setCondition}."),
+        };
+        if (ttlMilliseconds.HasValue)
+        {
+            optionBits |= SetTtlBit;
+        }
+
         var keyLength = usesKey ? ClientKeyDigestBytes : 0;
+        var ttlLength = ttlMilliseconds.HasValue ? SetTtlBytes : 0;
         var frame = GC.AllocateUninitializedArray<byte>(
-            checked(RequestHeaderBytes + keyLength + value.Length));
+            checked(RequestHeaderBytes + keyLength + ttlLength + value.Length));
         frame[0] = (byte)opcode;
         BinaryPrimitives.WriteUInt32BigEndian(
             frame.AsSpan(1, sizeof(uint)),
             (uint)keyLength);
         BinaryPrimitives.WriteUInt32BigEndian(
             frame.AsSpan(5, sizeof(uint)),
-            (uint)value.Length);
+            (uint)value.Length | optionBits);
         if (usesKey)
         {
             SHA256.HashData(
@@ -102,7 +133,16 @@ internal static class Protocol
                 frame.AsSpan(RequestHeaderBytes, ClientKeyDigestBytes));
         }
 
-        value.CopyTo(frame.AsSpan(RequestHeaderBytes + keyLength));
+        var valueOffset = RequestHeaderBytes + keyLength;
+        if (ttlMilliseconds is { } ttl)
+        {
+            BinaryPrimitives.WriteUInt64BigEndian(
+                frame.AsSpan(valueOffset, SetTtlBytes),
+                ttl);
+            valueOffset += SetTtlBytes;
+        }
+
+        value.CopyTo(frame.AsSpan(valueOffset));
         return frame;
     }
 
@@ -116,7 +156,7 @@ internal static class Protocol
 
         var status = DecodeStatus(header[0]);
         var encodedLength = BinaryPrimitives.ReadUInt32BigEndian(header[1..]);
-        var payloadLength = checked((int)(encodedLength & ValueLengthMask));
+        var payloadLength = checked((int)(encodedLength & ResponseValueLengthMask));
         if (payloadLength > MaximumValueBytes)
         {
             throw ProtocolError(
@@ -172,6 +212,7 @@ internal static class Protocol
             0x02 => Status.Created,
             0x03 => Status.Replaced,
             0x04 => Status.Deleted,
+            0x05 => Status.NotStored,
             0x40 => Status.InvalidRequest,
             0x41 => Status.UnsupportedOpcode,
             0x42 => Status.TooLarge,

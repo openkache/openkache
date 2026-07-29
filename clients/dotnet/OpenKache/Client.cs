@@ -13,6 +13,7 @@ namespace OpenKache;
 public sealed class Client : IAsyncDisposable
 {
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
+    private static readonly SetOptions DefaultSetOptions = new();
 
     private readonly QuicTransport _transport;
     private readonly TimeSpan _operationTimeout;
@@ -154,15 +155,41 @@ public sealed class Client : IAsyncDisposable
         ReadOnlyMemory<byte> value,
         CancellationToken cancellationToken = default)
     {
+        return await SetAsync(
+            key,
+            value,
+            DefaultSetOptions,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stores exact bytes under an exact binary key with optional expiration and an atomic
+    /// existence condition.
+    /// </summary>
+    /// <returns>
+    /// Whether the operation created, replaced, or did not store the key because its condition
+    /// failed.
+    /// </returns>
+    public async ValueTask<SetOutcome> SetAsync(
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> value,
+        SetOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
         var response = await RequestAsync(
             Protocol.Opcode.Set,
             key,
             value,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            options.Condition,
+            ttlMilliseconds).ConfigureAwait(false);
         return response.Status switch
         {
             Protocol.Status.Created => SetOutcome.Created,
             Protocol.Status.Replaced => SetOutcome.Replaced,
+            Protocol.Status.NotStored => SetOutcome.NotStored,
             _ => throw UnexpectedStatus("SET", response.Status),
         };
     }
@@ -178,6 +205,24 @@ public sealed class Client : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(key);
         return SetAsync(Encoding.UTF8.GetBytes(key), value, cancellationToken);
+    }
+
+    /// <summary>
+    /// Stores exact bytes under a UTF-8 key with optional expiration and an atomic existence
+    /// condition.
+    /// </summary>
+    /// <returns>
+    /// Whether the operation created, replaced, or did not store the key because its condition
+    /// failed.
+    /// </returns>
+    public ValueTask<SetOutcome> SetAsync(
+        string key,
+        ReadOnlyMemory<byte> value,
+        SetOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return SetAsync(Encoding.UTF8.GetBytes(key), value, options, cancellationToken);
     }
 
     /// <summary>
@@ -277,12 +322,19 @@ public sealed class Client : IAsyncDisposable
         Protocol.Opcode opcode,
         ReadOnlyMemory<byte> key,
         ReadOnlyMemory<byte> value,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SetCondition setCondition = SetCondition.None,
+        ulong? ttlMilliseconds = null)
     {
         ObjectDisposedException.ThrowIf(
             Volatile.Read(ref _disposed) != 0,
             this);
-        var frame = Protocol.EncodeRequest(opcode, key.Span, value.Span);
+        var frame = Protocol.EncodeRequest(
+            opcode,
+            key.Span,
+            value.Span,
+            setCondition,
+            ttlMilliseconds);
         using var timeout = CreateTimeout(cancellationToken, _operationTimeout);
         try
         {

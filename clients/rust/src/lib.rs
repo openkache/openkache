@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use openkache_protocol::{
     ClientKeyDigest, MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status,
 };
+pub use openkache_protocol::{SetCondition, SetOptions};
 use rustls::pki_types::CertificateDer;
 
 /// All client-level errors.
@@ -48,6 +49,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum SetOutcome {
     Created,
     Replaced,
+    NotStored,
 }
 
 /// Optional client behaviors layered over the OpenKache wire protocol.
@@ -144,7 +146,19 @@ impl Client {
 
     /// Stores a value and reports whether it created or replaced the key.
     pub async fn set(&self, key: &[u8], value: &[u8]) -> Result<SetOutcome> {
-        self.set_owned(key, value.to_vec()).await
+        self.set_owned_with_options(key, value.to_vec(), SetOptions::NONE)
+            .await
+    }
+
+    /// Stores a value with an optional TTL and atomic existence condition.
+    pub async fn set_with_options(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        self.set_owned_with_options(key, value.to_vec(), options)
+            .await
     }
 
     /// Stores an owned value while reusing its allocation when practical.
@@ -162,19 +176,46 @@ impl Client {
     ///
     /// Returns an error when value transformation, transport, protocol, or server execution fails.
     pub async fn set_owned(&self, key: &[u8], value: Vec<u8>) -> Result<SetOutcome> {
+        self.set_owned_with_options(key, value, SetOptions::NONE)
+            .await
+    }
+
+    /// Stores an owned value with an optional TTL and atomic existence condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact application key bytes.
+    /// * `value` - Owned application value.
+    /// * `options` - Optional TTL and `NX` or `XX` condition.
+    ///
+    /// # Returns
+    ///
+    /// Whether the key was created, replaced, or not stored because its condition failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when value transformation, transport, protocol, or server execution fails.
+    pub async fn set_owned_with_options(
+        &self,
+        key: &[u8],
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
         let client_key_digest = ClientKeyDigest::from_user_key(key);
         let sealed = self.value_codec.seal_owned(client_key_digest, value)?;
         let response = self
-            .request(Request::new_with_value_flags(
+            .request(Request::new_set(
                 Opcode::Set,
                 Some(client_key_digest),
                 sealed.flags,
+                options,
                 sealed.bytes,
             )?)
             .await?;
         match response.status {
             Status::Created => Ok(SetOutcome::Created),
             Status::Replaced => Ok(SetOutcome::Replaced),
+            Status::NotStored => Ok(SetOutcome::NotStored),
             status => Err(unexpected("SET", status)),
         }
     }
