@@ -26,6 +26,15 @@ export interface Client_Identity {
     readonly private_key: Uint8Array;
 }
 /**
+ * Native connection and complete request/response deadlines.
+ */
+export interface Client_Timeouts {
+    /** Maximum duration for connection setup and the QUIC/TLS handshake. */
+    readonly connect_ms?: number;
+    /** Maximum duration for one complete cache operation. */
+    readonly request_ms?: number;
+}
+/**
  * Connection settings for the Rust-backed Node.js client.
  */
 export interface Client_Options {
@@ -41,6 +50,8 @@ export interface Client_Options {
     readonly identity?: Client_Identity;
     /** Client-side compression settings. */
     readonly compression?: Zstandard_Options;
+    /** Bounded connection and operation durations. */
+    readonly timeouts?: Client_Timeouts;
     /** Optional Protobuf, FlatBuffers, or application value codecs. */
     readonly value_codecs?: readonly Value_Codec[];
     /** Explicit Rust helper executable path, primarily for custom packaging. */

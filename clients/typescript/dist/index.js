@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { decode_helper_error, encode_close_request, encode_connect_request, encode_execute_request, Helper_Response_Decoder, OPERATION_DELETE, OPERATION_GET, OPERATION_PING, OPERATION_SET, OPERATION_STATS, OPERATION_SYNC, RESULT_CONNECTED, RESULT_CREATED, RESULT_DELETED, RESULT_NOT_DELETED, RESULT_NOT_FOUND, RESULT_NOT_STORED, RESULT_OK, RESULT_REPLACED, RESULT_VALUE, } from "./helper-protocol.js";
 import { Value_Codec_Registry, } from "./value-codec.js";
 const EMPTY_BYTES = new Uint8Array();
-const MAX_VALUE_BYTES = 16 * 1024 * 1024;
+const MAX_VALUE_BYTES = 64 * 1024 * 1024;
 const ENCRYPTION_OVERHEAD_BYTES = 40;
 const MAX_PLAINTEXT_BYTES = MAX_VALUE_BYTES - ENCRYPTION_OVERHEAD_BYTES;
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -39,6 +39,7 @@ export class OpenKache_Client {
     #channel;
     #value_codecs;
     #next_request_id = 1;
+    #operation_tail = Promise.resolve();
     #close_promise;
     #closed = false;
     constructor(helper, value_codecs) {
@@ -98,6 +99,7 @@ export class OpenKache_Client {
         });
         const client = new OpenKache_Client(helper, value_codecs);
         const compression = options.compression ?? {};
+        const timeouts = options.timeouts ?? {};
         const helper_options = {
             address: options.address,
             server_name: options.server_name ?? "localhost",
@@ -108,6 +110,8 @@ export class OpenKache_Client {
             compression_level: compression.level ?? 1,
             minimum_input_size: compression.minimum_input_size ?? 1_024,
             minimum_savings: compression.minimum_savings ?? 64,
+            connect_timeout_ms: timeouts.connect_ms ?? 5_000,
+            request_timeout_ms: timeouts.request_ms ?? 2_000,
         };
         try {
             const response = await client.#request((request_id) => encode_connect_request(request_id, helper_options));
@@ -279,13 +283,15 @@ export class OpenKache_Client {
         const condition = set_options.condition === undefined
             ? 0
             : SET_CONDITIONS[set_options.condition];
-        return this.#request((request_id) => encode_execute_request(request_id, {
+        const operation_request = this.#operation_tail.then(() => this.#request((request_id) => encode_execute_request(request_id, {
             operation,
             condition,
             ttl_ms: set_options.ttl_ms ?? 0,
             key: key_bytes,
             value,
-        }));
+        })));
+        this.#operation_tail = operation_request.then(() => { }, () => { });
+        return operation_request;
     }
     #request(encode_request, allow_closing = false) {
         if (this.#closed ||
@@ -405,6 +411,8 @@ function validate_options(options) {
     }
     validate_identity(options.identity);
     validate_compression(options.compression);
+    validate_timeout(options.timeouts?.connect_ms, "timeouts.connect_ms");
+    validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms");
 }
 function validate_identity(identity) {
     if (identity === undefined)
@@ -440,6 +448,12 @@ function validate_compression(compression) {
         if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
             throw new OpenKache_Error(`compression.${name} must be a non-negative safe integer`);
         }
+    }
+}
+function validate_timeout(timeout_ms, name) {
+    if (timeout_ms !== undefined &&
+        (!Number.isSafeInteger(timeout_ms) || timeout_ms <= 0)) {
+        throw new OpenKache_Error(`${name} must be a positive safe integer`);
     }
 }
 function validate_value_length(value) {

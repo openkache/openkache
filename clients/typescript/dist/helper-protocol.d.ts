@@ -30,6 +30,8 @@ export interface Helper_Connection_Options {
     readonly compression_level: number;
     readonly minimum_input_size: number;
     readonly minimum_savings: number;
+    readonly connect_timeout_ms: number;
+    readonly request_timeout_ms: number;
 }
 export interface Helper_Execute_Request {
     readonly operation: number;

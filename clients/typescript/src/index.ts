@@ -176,6 +176,7 @@ export class OpenKache_Client {
   readonly #channel: Helper_Channel
   readonly #value_codecs: Value_Codec_Registry
   #next_request_id = 1
+  #operation_tail: Promise<void> = Promise.resolve()
   #close_promise: Promise<void> | undefined
   #closed = false
 
@@ -463,15 +464,23 @@ export class OpenKache_Client {
       set_options.condition === undefined
         ? 0
         : SET_CONDITIONS[set_options.condition]
-    return this.#request((request_id): Uint8Array =>
-      encode_execute_request(request_id, {
-        operation,
-        condition,
-        ttl_ms: set_options.ttl_ms ?? 0,
-        key: key_bytes,
-        value,
-      }),
+    const operation_request = this.#operation_tail.then(
+      (): Promise<Helper_Response> =>
+        this.#request((request_id): Uint8Array =>
+          encode_execute_request(request_id, {
+            operation,
+            condition,
+            ttl_ms: set_options.ttl_ms ?? 0,
+            key: key_bytes,
+            value,
+          }),
+        ),
     )
+    this.#operation_tail = operation_request.then(
+      (): void => {},
+      (): void => {},
+    )
+    return operation_request
   }
 
   #request(

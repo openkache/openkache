@@ -6,14 +6,16 @@ description = "Rust client for the OpenKache cache server"
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [[bin]]
 name = "openkache-client-helper"
 path = "src/bin/openkache_client_helper.rs"
+required-features = ["quic-quinn"]
 
 [features]
 default = ["quic-quinn"]
+ffi = ["quic-compio"]
 quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 
