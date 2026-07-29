@@ -525,7 +525,9 @@ impl Client {
         if !Arc::ptr_eq(&current, failed) {
             return Ok(());
         }
-        let timeout = remaining.min(self.connect_timeout);
+        let timeout = deadline
+            .remaining("connection retry")?
+            .min(self.connect_timeout);
         let replacement = transport::connect(
             self.backend,
             self.address,

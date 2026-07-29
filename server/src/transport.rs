@@ -1,12 +1,14 @@
 //! QUIC backend boundary used by the OpenKache protocol server.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 #[cfg(feature = "quic-quiche")]
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use compio::BufResult;
@@ -215,12 +217,19 @@ pub(super) struct RequestBudget {
 struct RequestBudgetState {
     capacity: usize,
     used: usize,
-    waiters: Vec<Waker>,
+    next_waiter_id: u64,
+    waiters: HashMap<u64, Waker>,
 }
 
 pub(super) struct RequestBudgetPermit {
     inner: Rc<RefCell<RequestBudgetState>>,
     bytes: usize,
+}
+
+struct RequestBudgetAcquire {
+    inner: Rc<RefCell<RequestBudgetState>>,
+    bytes: usize,
+    waiter_id: Option<u64>,
 }
 
 impl RequestBudget {
@@ -229,7 +238,8 @@ impl RequestBudget {
             inner: Rc::new(RefCell::new(RequestBudgetState {
                 capacity,
                 used: 0,
-                waiters: Vec::new(),
+                next_waiter_id: 0,
+                waiters: HashMap::new(),
             })),
         }
     }
@@ -250,27 +260,61 @@ impl RequestBudget {
         }
         compio::runtime::time::timeout(
             timeout,
-            std::future::poll_fn(|context| {
-                let mut state = self.inner.borrow_mut();
-                if state.used <= state.capacity - bytes {
-                    state.used += bytes;
-                    return Poll::Ready(RequestBudgetPermit {
-                        inner: Rc::clone(&self.inner),
-                        bytes,
-                    });
-                }
-                if !state
-                    .waiters
-                    .iter()
-                    .any(|waiter| waiter.will_wake(context.waker()))
-                {
-                    state.waiters.push(context.waker().clone());
-                }
-                Poll::Pending
-            }),
+            RequestBudgetAcquire {
+                inner: Rc::clone(&self.inner),
+                bytes,
+                waiter_id: None,
+            },
         )
         .await
         .map_err(|_| StreamReadError::Timeout)
+    }
+}
+
+impl Future for RequestBudgetAcquire {
+    type Output = RequestBudgetPermit;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = Rc::clone(&self.inner);
+        let bytes = self.bytes;
+        let mut state = inner.borrow_mut();
+        if state.used <= state.capacity - bytes {
+            if let Some(waiter_id) = self.waiter_id.take() {
+                state.waiters.remove(&waiter_id);
+            }
+            state.used += bytes;
+            return Poll::Ready(RequestBudgetPermit {
+                inner: Rc::clone(&inner),
+                bytes,
+            });
+        }
+
+        if let Some(waiter_id) = self.waiter_id
+            && let Some(waiter) = state.waiters.get_mut(&waiter_id)
+        {
+            if !waiter.will_wake(context.waker()) {
+                waiter.clone_from(context.waker());
+            }
+            return Poll::Pending;
+        }
+
+        let waiter_id = state.next_waiter_id;
+        state.next_waiter_id = state
+            .next_waiter_id
+            .checked_add(1)
+            .expect("request budget waiter identifier overflowed");
+        state.waiters.insert(waiter_id, context.waker().clone());
+        drop(state);
+        self.waiter_id = Some(waiter_id);
+        Poll::Pending
+    }
+}
+
+impl Drop for RequestBudgetAcquire {
+    fn drop(&mut self) {
+        if let Some(waiter_id) = self.waiter_id {
+            self.inner.borrow_mut().waiters.remove(&waiter_id);
+        }
     }
 }
 
@@ -287,7 +331,7 @@ impl Drop for RequestBudgetPermit {
                 .expect("released request bytes must be reserved");
             std::mem::take(&mut state.waiters)
         };
-        for waiter in waiters {
+        for waiter in waiters.into_values() {
             waiter.wake();
         }
     }
