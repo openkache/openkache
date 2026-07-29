@@ -65,6 +65,27 @@ One client owns one QUIC connection. Operations reuse a lazily grown pool of
 bidirectional stream lanes, with one request in flight per lane and at most 256
 lanes per connection.
 
+The transport-independent `value_envelope` module is the reference framing
+implementation for cross-language object values:
+
+```rust
+use openkache_client::value_envelope;
+
+let stored = value_envelope::encode(
+    "protobuf",
+    "acme.Profile",
+    &encoded_message,
+)?;
+let decoded = value_envelope::decode(&stored)?;
+assert_eq!(decoded.encoding, "protobuf");
+assert_eq!(decoded.type_name, "acme.Profile");
+```
+
+The server treats these bytes as opaque. Language clients remain responsible
+for converting regular language objects with JSON or a registered generated
+codec; the envelope carries codec and type identity so `get` and `set` do not
+need positional schema arguments.
+
 The default `quic-quinn` feature uses Quinn on Tokio. Call client futures from
 an active Tokio runtime. Builds may instead enable `quic-compio`; those futures
 require an active Compio runtime. A single-backend build selects that backend

@@ -25,6 +25,10 @@ Encoding identifiers contain lowercase ASCII letters, digits, dots, and
 hyphens, start with a letter, and contain at most 64 bytes. Type names and codec
 payloads are opaque to the envelope. A raw byte API bypasses the envelope.
 
+The Rust client's `value_envelope` module is the reference implementation. Its
+`encode` function produces owned bytes, while `decode` validates the envelope
+and borrows its metadata and payload without copying.
+
 ## Standard encodings
 
 `json` is built in. Its type name is empty and its payload is exactly one UTF-8
@@ -56,9 +60,10 @@ matches. If no custom codec accepts the object, it uses the JSON codec. For
 name. Unknown encodings fail explicitly; callers can still retrieve their exact
 bytes through the raw API.
 
-Rust and .NET can implement the envelope directly around `serde_json`,
-`prost`/`protobuf`, `System.Text.Json`, or their chosen generated-code runtime.
-The format does not depend on JavaScript.
+Language clients implement object conversion with their native JSON,
+Protobuf, FlatBuffers, or generated-code runtime. Fixed conformance vectors
+keep those implementations byte-compatible with the Rust reference. The
+format does not depend on JavaScript or a particular serializer.
 
 ## Browser preparation
 

@@ -4,6 +4,7 @@
 pub mod ffi;
 mod transport;
 pub mod value;
+pub mod value_envelope;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
