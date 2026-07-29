@@ -77,10 +77,12 @@ Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
 
 Without TOML, the server uses all CPUs permitted by process affinity, the
-smaller of available host RAM and common cgroup memory limits, and available
-space on the storage directory's filesystem. It then starts with the default
-`balanced` profile for 1 KiB values. `light` models 100-byte values and `heavy`
-models 2 KiB values.
+smaller of available host RAM and remaining common cgroup headroom, and
+available space on the storage directory's filesystem. The automatic process
+budget preserves at least 20% of currently available RAM, then limits the
+packed Table to half of that budget. It starts with the default `balanced`
+profile for 1 KiB values. `light` models 100-byte values and `heavy` models
+2 KiB values.
 
 ```bash
 cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
@@ -94,19 +96,26 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
 
 Every argument in this example is optional. `--plan` prints the automatically
 detected or overridden sizing result without starting. The planner reserves 5%
-of the SSD budget, limits the packed Table to 50% of RAM, and targets 75% of
-theoretical SG key capacity so updates and Tombstones have room.
+of available SSD space, limits the packed Table to 50% of the safe process RAM
+budget, and targets 75% of theoretical SG key capacity so updates and
+Tombstones have room.
 
 Sizing is a deterministic capacity estimate, not an adaptive benchmark. It
-detects the standard Linux cgroup memory files and filesystem availability but
-does not detect filesystem quotas, SSD type, or NVMe performance. The RAM
-estimate covers the packed Table rather than complete peak process RSS.
+detects the standard Linux cgroup limits and current usage plus filesystem
+availability, but does not detect filesystem quotas, SSD type, or NVMe
+performance. At runtime, workers reserve each Segment generation immediately
+before writing it instead of preallocating the whole sparse file. Memory or
+storage pressure temporarily rejects `SET` with an overloaded response while
+reads, deletes, and recovery remain available. `STATS` reports
+the memory and storage stop/resume thresholds, `memory_stop_writes`,
+`storage_stop_writes`, and `rejected_writes`.
+
 `--cpus` selects worker threads but does not impose a process CPU quota; use
-deployment affinity or cgroups for that boundary. `light` and `balanced` use 1
-MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that limit
-to 64 MiB. Reopen existing storage with the same automatically detected layout
-or explicit sizing overrides because worker count and Segment layout changes
-require cache recreation.
+deployment affinity or cgroups for that boundary. `light` and `balanced` use
+1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that
+limit to 64 MiB. Reopen existing storage with the same automatically detected
+layout or explicit sizing overrides because worker count and Segment layout
+changes require cache recreation.
 
 For a resource-sized configuration without TOML, provide the worker CPU count,
 RAM limit, SSD limit, and storage directory. The default `balanced` profile
@@ -123,18 +132,20 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server -- \
 ```
 
 Remove `--plan` to start the server with the displayed sizing result. The
-planner reserves 5% of the SSD budget, limits the packed Table to 50% of RAM,
-and targets 75% of theoretical SG key capacity so updates and Tombstones have
-room.
+planner reserves 5% of available SSD space, keeps at least 20% of currently
+available RAM outside the process budget, limits the packed Table to half of
+that budget, and targets 75% of theoretical SG key capacity so updates and
+Tombstones have room.
 
 Sizing is a deterministic capacity estimate, not an adaptive benchmark. It
-does not inspect cgroup memory limits, filesystem free space, or NVMe
-performance, and the RAM estimate covers the packed Table rather than complete
-peak process RSS. `--cpus` selects worker threads but does not impose a process
-CPU quota; use deployment affinity or cgroups for that boundary. `light` and
-`balanced` use 1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy`
-raises that limit to 64 MiB. Reuse the same sizing arguments when reopening
-existing storage because worker count and Segment layout changes require cache
+inspects cgroup memory headroom and filesystem free space, but does not detect
+filesystem quotas or NVMe performance. Runtime Segment reservation and
+stop-writes thresholds protect the remaining headroom from concurrent resource
+use. `--cpus` selects worker threads but does not impose a process CPU quota;
+use deployment affinity or cgroups for that boundary. `light` and `balanced`
+use 1 MiB Blob Segments, so one value cannot exceed 1 MiB; `heavy` raises that
+limit to 64 MiB. Reuse the same sizing arguments when reopening existing
+storage because worker count and Segment layout changes require cache
 recreation.
 
 ---

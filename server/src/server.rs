@@ -669,7 +669,7 @@ async fn execute_request(cache: &ThreadedKvkache, request: Request) -> Response 
 fn cache_error_response(error: KvError) -> Response {
     let status = match error {
         KvError::Timeout(_) => Status::Timeout,
-        KvError::TableFull => Status::Overloaded,
+        KvError::TableFull | KvError::CapacityExhausted { .. } => Status::Overloaded,
         KvError::ItemTooLarge { .. } | KvError::BlobSegmentFull { .. } => Status::TooLarge,
         KvError::Io(_) | KvError::InvalidConfig(_) | KvError::Worker(_) | KvError::Usage(_) => {
             Status::InternalError

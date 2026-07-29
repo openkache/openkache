@@ -100,11 +100,14 @@ pub(super) fn print_plan(plan: &SizingPlan) {
         plan.storage_budget_bytes as f64 / 1_000_000_000_000.0,
     );
     println!(
-        "Table: sg_index_bits={} capacity_per_worker={} memory={:.2}GiB budget={:.2}GiB",
-        plan.sg_index_bits,
-        plan.config.table.capacity_per_thread,
+        "Memory: process_budget={:.2}GiB table={:.2}GiB table_budget={:.2}GiB",
+        plan.process_memory_budget_bytes as f64 / GIB as f64,
         plan.table_memory_bytes as f64 / GIB as f64,
         plan.table_memory_budget_bytes as f64 / GIB as f64,
+    );
+    println!(
+        "Table: sg_index_bits={} capacity_per_worker={}",
+        plan.sg_index_bits, plan.config.table.capacity_per_thread,
     );
     println!(
         "Keys: raw_capacity={} planned_live_capacity={}",

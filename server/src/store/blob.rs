@@ -145,6 +145,27 @@ impl BlobSegment {
         })
     }
 
+    pub(crate) async fn reserve_segment(
+        &self,
+        sg_index: usize,
+        logical_bytes: usize,
+        resource_guard: &ResourceGuard,
+    ) -> Result<()> {
+        self.validate_segment_index(sg_index)?;
+        if logical_bytes == 0 {
+            return Ok(());
+        }
+        let physical_bytes = logical_bytes
+            .checked_next_multiple_of(BUCKET_BYTES)
+            .ok_or_else(|| KvError::Usage("Blob reservation extent overflow".into()))?;
+        let offset = (sg_index as u64)
+            .checked_mul(self.segment_capacity_bytes)
+            .ok_or_else(|| KvError::Usage("Blob reservation offset overflow".into()))?;
+        super::reserve_file_range(&self.file, offset, physical_bytes as u64)
+            .await
+            .map_err(|error| super::storage_io_error(resource_guard, error))
+    }
+
     /// Writes the logical concatenation of `values` into one paired Blob
     /// Segment and returns the physical bytes submitted through `O_DIRECT`.
     pub(crate) async fn write_segment(&mut self, sg_index: usize, values: &[&[u8]]) -> Result<u64> {

@@ -9,11 +9,17 @@ use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
+use std::time::{Duration, Instant};
 
 use compio::BufResult;
 use compio::buf::{IoBuf, IoBufMut, SetLen};
+use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
 use compio::io::AsyncWriteAt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -29,6 +35,9 @@ mod segment_io;
 pub(crate) use self::blob::*;
 pub(crate) use self::bucket::*;
 pub(crate) use self::recovery::*;
+
+const CAPACITY_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const STORAGE_RESERVE_PERCENT: u64 = 5;
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -123,6 +132,249 @@ pub(crate) async fn open_direct_file(path: &Path) -> std::io::Result<File> {
         .await
 }
 
+pub(crate) struct ResourceGuard {
+    directory: std::path::PathBuf,
+    memory_stop_available_bytes: u64,
+    memory_resume_available_bytes: u64,
+    storage_stop_available_bytes: u64,
+    storage_resume_available_bytes: u64,
+    memory_stop_writes: AtomicBool,
+    storage_stop_writes: AtomicBool,
+    rejected_writes: AtomicU64,
+}
+
+impl ResourceGuard {
+    pub(crate) fn for_app_config(config: &AppConfig) -> Result<Self> {
+        let workers = (0..config.runtime.thread_count)
+            .map(|thread_id| config.worker_config(thread_id))
+            .collect::<Vec<_>>();
+        Self::new(&config.storage.directory, &workers)
+    }
+
+    fn for_worker_config(config: &Config) -> Result<Self> {
+        let directory = config
+            .data_path
+            .parent()
+            .ok_or_else(|| {
+                KvError::InvalidConfig("storage data path has no parent directory".into())
+            })?
+            .to_path_buf();
+        Self::new(&directory, std::slice::from_ref(config))
+    }
+
+    fn new(directory: &Path, workers: &[Config]) -> Result<Self> {
+        let memory =
+            crate::sizing::automatic_memory_capacity(crate::sizing::detected_memory_snapshot()?)?;
+        let table_memory_bytes = workers.iter().try_fold(0u64, |total, worker| {
+            total
+                .checked_add(Table::modeled_memory_bytes(worker)? as u64)
+                .ok_or_else(|| KvError::InvalidConfig("host Table memory size overflowed".into()))
+        })?;
+        let table_memory_budget_bytes = memory.budget_bytes / 2;
+        if table_memory_bytes > table_memory_budget_bytes {
+            return Err(KvError::InvalidConfig(format!(
+                "modeled Table requires {table_memory_bytes} bytes but current safe Table budget is {table_memory_budget_bytes} bytes"
+            )));
+        }
+        let storage_available_bytes = crate::sizing::filesystem_available_bytes(directory)?;
+        let storage_allocated_bytes = workers.iter().try_fold(0u64, |total, worker| {
+            let data = allocated_file_bytes(&worker.data_path)?;
+            let blob = allocated_file_bytes(&worker.blob_path())?;
+            total
+                .checked_add(data)
+                .and_then(|value| value.checked_add(blob))
+                .ok_or_else(|| KvError::InvalidConfig("allocated storage size overflowed".into()))
+        })?;
+        let generation_bytes = workers.iter().try_fold(0u64, |total, worker| {
+            let worker_generation = (worker.segment_size as u64)
+                .checked_add(worker.blob_segment_size as u64)
+                .and_then(|value| value.checked_add(BUCKET_BYTES as u64))
+                .ok_or_else(|| {
+                    KvError::InvalidConfig("storage generation size overflowed".into())
+                })?;
+            total.checked_add(worker_generation).ok_or_else(|| {
+                KvError::InvalidConfig("host storage generation size overflowed".into())
+            })
+        })?;
+        let (storage_stop_available_bytes, storage_resume_available_bytes) =
+            storage_capacity_thresholds(
+                storage_available_bytes,
+                storage_allocated_bytes,
+                generation_bytes,
+            )?;
+
+        Ok(Self {
+            directory: directory.to_path_buf(),
+            memory_stop_available_bytes: memory.reserve_bytes,
+            memory_resume_available_bytes: memory
+                .reserve_bytes
+                .saturating_add(memory.reserve_bytes / 4)
+                .min(memory.available_bytes),
+            storage_stop_available_bytes,
+            storage_resume_available_bytes,
+            memory_stop_writes: AtomicBool::new(false),
+            storage_stop_writes: AtomicBool::new(
+                storage_available_bytes <= storage_stop_available_bytes,
+            ),
+            rejected_writes: AtomicU64::new(0),
+        })
+    }
+
+    fn admit_set(&self, refresh_memory: bool) -> Result<()> {
+        let memory_stopped = self.memory_stop_writes.load(Ordering::Acquire);
+        if refresh_memory || memory_stopped {
+            let available = crate::sizing::detected_memory_snapshot()?.available_bytes;
+            self.memory_stop_writes.store(
+                capacity_stop_writes(
+                    memory_stopped,
+                    available,
+                    self.memory_stop_available_bytes,
+                    self.memory_resume_available_bytes,
+                ),
+                Ordering::Release,
+            );
+        }
+        if self.memory_stop_writes.load(Ordering::Acquire) {
+            self.rejected_writes.fetch_add(1, Ordering::Relaxed);
+            return Err(KvError::CapacityExhausted { resource: "memory" });
+        }
+
+        if self.storage_stop_writes.load(Ordering::Acquire) {
+            let available = crate::sizing::filesystem_available_bytes(&self.directory)?;
+            let stopped = capacity_stop_writes(
+                true,
+                available,
+                self.storage_stop_available_bytes,
+                self.storage_resume_available_bytes,
+            );
+            self.storage_stop_writes.store(stopped, Ordering::Release);
+            if stopped {
+                self.rejected_writes.fetch_add(1, Ordering::Relaxed);
+                return Err(KvError::CapacityExhausted {
+                    resource: "storage",
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_storage_reservation(&self) -> Result<()> {
+        let available = crate::sizing::filesystem_available_bytes(&self.directory)?;
+        if available <= self.storage_stop_available_bytes {
+            self.storage_stop_writes.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    fn mark_storage_exhausted(&self) {
+        self.storage_stop_writes.store(true, Ordering::Release);
+    }
+
+    fn memory_stop_writes(&self) -> bool {
+        self.memory_stop_writes.load(Ordering::Acquire)
+    }
+
+    fn storage_stop_writes(&self) -> bool {
+        self.storage_stop_writes.load(Ordering::Acquire)
+    }
+
+    fn rejected_writes(&self) -> u64 {
+        self.rejected_writes.load(Ordering::Relaxed)
+    }
+}
+
+pub(crate) const fn capacity_stop_writes(
+    stopped: bool,
+    available_bytes: u64,
+    stop_available_bytes: u64,
+    resume_available_bytes: u64,
+) -> bool {
+    if stopped {
+        available_bytes < resume_available_bytes
+    } else {
+        available_bytes <= stop_available_bytes
+    }
+}
+
+pub(crate) fn storage_capacity_thresholds(
+    available_bytes: u64,
+    allocated_bytes: u64,
+    generation_bytes: u64,
+) -> Result<(u64, u64)> {
+    let managed_storage_bytes = available_bytes
+        .checked_add(allocated_bytes)
+        .ok_or_else(|| KvError::InvalidConfig("managed storage size overflowed".into()))?;
+    let proportional_reserve = managed_storage_bytes
+        .checked_mul(STORAGE_RESERVE_PERCENT)
+        .map(|bytes| bytes / 100)
+        .ok_or_else(|| KvError::InvalidConfig("storage reserve size overflowed".into()))?;
+    let generation_reserve = generation_bytes
+        .checked_mul(2)
+        .ok_or_else(|| KvError::InvalidConfig("storage generation reserve overflowed".into()))?;
+    let reserve_bytes = proportional_reserve.max(generation_reserve);
+    if reserve_bytes >= managed_storage_bytes {
+        return Err(KvError::InvalidConfig(
+            "available storage cannot preserve two complete Segment generations".into(),
+        ));
+    }
+    Ok(((reserve_bytes / 2).max(generation_bytes), reserve_bytes))
+}
+
+fn allocated_file_bytes(path: &Path) -> Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => metadata
+            .blocks()
+            .checked_mul(512)
+            .ok_or_else(|| KvError::InvalidConfig("allocated file size overflowed".into())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    let offset = i64::try_from(offset).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "offset is too large")
+    })?;
+    let len = i64::try_from(len).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "length is too large")
+    })?;
+    let file = file.clone();
+    compio::runtime::spawn_blocking(move || {
+        let result = unsafe { libc::posix_fallocate(file.as_raw_fd(), offset, len) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::from_raw_os_error(result))
+        }
+    })
+    .await
+    .map_err(std::io::Error::from)?
+}
+
+fn storage_io_error(guard: &ResourceGuard, error: std::io::Error) -> KvError {
+    if error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::ENOSPC || code == libc::EDQUOT)
+    {
+        guard.mark_storage_exhausted();
+        KvError::CapacityExhausted {
+            resource: "storage",
+        }
+    } else {
+        error.into()
+    }
+}
+
+fn storage_operation_error(guard: &ResourceGuard, error: KvError) -> KvError {
+    match error {
+        KvError::Io(error) => storage_io_error(guard, error),
+        error => error,
+    }
+}
+
 pub(crate) fn require_complete_direct_io(
     operation: &str,
     completed: usize,
@@ -208,18 +460,31 @@ pub(crate) struct Kvkache {
     pub(crate) segment_sync_fill_used_bytes: u64,
     pub(crate) segment_sync_fill_capacity_bytes: u64,
     pub(crate) segment_reuses: u64,
+    resource_guard: Arc<ResourceGuard>,
+    next_memory_capacity_check: Instant,
     io: IoCounters,
 }
 
 impl Kvkache {
     #[allow(dead_code)]
     pub(crate) async fn open(config: Config) -> Result<Self> {
-        Self::open_with_storage_key_id(config, [0; 16]).await
+        let resource_guard = Arc::new(ResourceGuard::for_worker_config(&config)?);
+        Self::open_with_resource_guard(config, [0; 16], resource_guard).await
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn open_with_storage_key_id(
         config: Config,
         storage_key_id: [u8; 16],
+    ) -> Result<Self> {
+        let resource_guard = Arc::new(ResourceGuard::for_worker_config(&config)?);
+        Self::open_with_resource_guard(config, storage_key_id, resource_guard).await
+    }
+
+    pub(crate) async fn open_with_resource_guard(
+        config: Config,
+        storage_key_id: [u8; 16],
+        resource_guard: Arc<ResourceGuard>,
     ) -> Result<Self> {
         config.validate()?;
         if let Some(parent) = config.data_path.parent() {
@@ -283,6 +548,8 @@ impl Kvkache {
             segment_sync_fill_used_bytes: 0,
             segment_sync_fill_capacity_bytes: 0,
             segment_reuses: 0,
+            resource_guard,
+            next_memory_capacity_check: Instant::now(),
             io: IoCounters::default(),
             config,
             data,
@@ -394,6 +661,12 @@ impl Kvkache {
         value: EncodedValue,
     ) -> Result<SetOutcome> {
         self.validate_value(&value.bytes)?;
+        let now = Instant::now();
+        let refresh_memory = now >= self.next_memory_capacity_check;
+        if refresh_memory {
+            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
+        }
+        self.resource_guard.admit_set(refresh_memory)?;
         let (previous, previous_live, outcome) =
             if let Some(pending) = self.take_pending(&storage_key) {
                 let outcome = if pending.value.is_some() {
@@ -466,8 +739,14 @@ impl Kvkache {
 
     pub(crate) async fn sync(&mut self) -> Result<()> {
         self.flush_pending(SegmentFlushReason::Sync).await?;
-        self.blob_segment.sync().await?;
-        self.data.sync_data().await?;
+        self.blob_segment
+            .sync()
+            .await
+            .map_err(|error| storage_operation_error(&self.resource_guard, error))?;
+        self.data
+            .sync_data()
+            .await
+            .map_err(|error| storage_io_error(&self.resource_guard, error))?;
         Ok(())
     }
 
@@ -645,13 +924,17 @@ impl Kvkache {
                     "pending Item cannot fit in an empty Segment generation".into(),
                 ));
             }
+            if let Err(error) = self.reserve_segment_generation(sg_index, blob_used).await {
+                self.restore_flush_records(planned.into_iter().chain(deferred));
+                return Err(error);
+            }
             if self.occupied_segments[sg_index] {
                 let invalidated =
                     match invalidate_segment(&mut self.data, &self.config, sg_index).await {
                         Ok(bytes) => bytes,
                         Err(error) => {
                             self.restore_flush_records(planned.into_iter().chain(deferred));
-                            return Err(error);
+                            return Err(storage_operation_error(&self.resource_guard, error));
                         }
                     };
                 self.io
@@ -694,7 +977,7 @@ impl Kvkache {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     self.restore_flush_records(planned.into_iter().chain(deferred));
-                    return Err(error);
+                    return Err(storage_operation_error(&self.resource_guard, error));
                 }
             };
             self.io
@@ -709,7 +992,7 @@ impl Kvkache {
                 .await
             {
                 self.restore_flush_records(planned.into_iter().chain(deferred));
-                return Err(error);
+                return Err(storage_operation_error(&self.resource_guard, error));
             }
 
             let mut published = 0usize;
@@ -744,6 +1027,24 @@ impl Kvkache {
             remaining = deferred;
         }
         Ok(())
+    }
+
+    async fn reserve_segment_generation(
+        &self,
+        sg_index: usize,
+        blob_logical_bytes: usize,
+    ) -> Result<()> {
+        let data_offset = self.config.segment_control_offset(sg_index);
+        let data_bytes = (self.config.segment_size as u64)
+            .checked_add(BUCKET_BYTES as u64)
+            .ok_or_else(|| KvError::InvalidConfig("Segment reservation size overflowed".into()))?;
+        reserve_file_range(&self.data, data_offset, data_bytes)
+            .await
+            .map_err(|error| storage_io_error(&self.resource_guard, error))?;
+        self.blob_segment
+            .reserve_segment(sg_index, blob_logical_bytes, &self.resource_guard)
+            .await?;
+        self.resource_guard.observe_storage_reservation()
     }
 
     async fn write_segment(
@@ -874,7 +1175,7 @@ impl Kvkache {
         let segment_sync_fill_percent = self.segment_sync_fill_used_bytes as f64 * 100.0
             / self.segment_sync_fill_capacity_bytes.max(1) as f64;
         format!(
-            "keys={} stable_keys={} pending_items={} pending_value_bytes={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
+            "keys={} stable_keys={} pending_items={} pending_value_bytes={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
             self.logical_key_count(),
             self.stable_live_keys,
             self.pending.len(),
@@ -901,6 +1202,13 @@ impl Kvkache {
             self.segment_capacity_flushes,
             self.segment_sync_flushes,
             self.segment_reuses,
+            self.resource_guard.memory_stop_writes(),
+            self.resource_guard.memory_stop_available_bytes,
+            self.resource_guard.memory_resume_available_bytes,
+            self.resource_guard.storage_stop_writes(),
+            self.resource_guard.storage_stop_available_bytes,
+            self.resource_guard.storage_resume_available_bytes,
+            self.resource_guard.rejected_writes(),
             segment_fill_percent,
             self.segment_fill_used_bytes,
             self.segment_fill_capacity_bytes,
