@@ -2,13 +2,9 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
-use hkdf::Hkdf;
-use hmac::{Hmac, KeyInit, Mac};
-use openkache_protocol::ITEM_KEY_BYTES;
-use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::{Error, Result};
+use crate::{Error, ITEM_KEY_BYTES, Result};
 
 pub(crate) const PROTECTION_KEY_BYTES: usize = 32;
 
@@ -77,16 +73,21 @@ impl AsRef<[u8]> for ItemKey {
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct DataProtectionKey {
     master_key: [u8; DATA_PROTECTION_KEY_BYTES],
-    item_key: [u8; DATA_PROTECTION_KEY_BYTES],
+    item_key_root: [u8; DATA_PROTECTION_KEY_BYTES],
+    value_root_key: [u8; DATA_PROTECTION_KEY_BYTES],
 }
 
 impl DataProtectionKey {
     /// Creates a data protection key from exact random bytes.
     pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
-        let item_key = derive_subkey(&bytes, b"openkache/v1/key");
+        let item_key_root =
+            blake3::derive_key("OpenKache client item key root v1", bytes.as_slice());
+        let value_root_key =
+            blake3::derive_key("OpenKache value format v1 root key", bytes.as_slice());
         Self {
             master_key: bytes,
-            item_key,
+            item_key_root,
+            value_root_key,
         }
     }
 
@@ -159,26 +160,22 @@ impl DataProtectionKey {
         STANDARD.encode(self.master_key)
     }
 
-    /// Derives the deterministic HMAC-SHA-256 item key for application key bytes.
+    /// Derives the deterministic BLAKE3 item key for application key bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_key` - Exact application key bytes without normalization or framing.
+    ///
+    /// # Returns
+    ///
+    /// The deterministic item key scoped to this data protection key.
     pub fn derive_item_key(&self, application_key: impl AsRef<[u8]>) -> ItemKey {
-        let mut mac = Hmac::<Sha256>::new_from_slice(&self.item_key)
-            .expect("HMAC-SHA-256 accepts a 32-byte key");
-        mac.update(application_key.as_ref());
-        ItemKey::from_bytes(mac.finalize().into_bytes().into())
+        ItemKey::from_bytes(
+            *blake3::keyed_hash(&self.item_key_root, application_key.as_ref()).as_bytes(),
+        )
     }
 
-    pub(crate) fn derive_value_key(&self) -> [u8; DATA_PROTECTION_KEY_BYTES] {
-        derive_subkey(&self.master_key, b"openkache/v1/value")
+    pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
+        Zeroizing::new(self.value_root_key)
     }
-}
-
-fn derive_subkey(
-    master_key: &[u8; DATA_PROTECTION_KEY_BYTES],
-    context: &[u8],
-) -> [u8; DATA_PROTECTION_KEY_BYTES] {
-    let hkdf = Hkdf::<Sha256>::new(Some(b"openkache/v1"), master_key);
-    let mut output = [0; DATA_PROTECTION_KEY_BYTES];
-    hkdf.expand(context, &mut output)
-        .expect("SHA-256 HKDF supports a 32-byte output");
-    output
 }

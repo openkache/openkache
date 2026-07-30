@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::value::Compression;
+use crate::value::{Compression, Encryption, Value};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, Result, RetryPolicy, ServerTrust,
@@ -16,6 +16,7 @@ use crate::{RawClient, RawClientBuilder};
 
 struct ProtectionSettings {
     compression: Compression,
+    encryption: Encryption,
     key: DataProtectionKey,
 }
 
@@ -23,12 +24,13 @@ impl ProtectionSettings {
     fn new(key: DataProtectionKey) -> Self {
         Self {
             compression: Compression::Disabled,
+            encryption: Encryption::Robust,
             key,
         }
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
-        DataProtection::new(self.key, self.compression).map(Arc::new)
+        DataProtection::with_profile(self.key, self.compression, self.encryption).map(Arc::new)
     }
 }
 
@@ -76,6 +78,20 @@ macro_rules! protected_builder_methods {
                 self.protection.compression = compression;
                 self
             }
+
+            /// Selects the authenticated-encryption profile for stored values.
+            ///
+            /// # Arguments
+            ///
+            /// * `encryption` - Compact or Robust authenticated-encryption profile.
+            ///
+            /// # Returns
+            ///
+            /// This builder with the selected value protection profile.
+            pub fn encryption(mut self, encryption: Encryption) -> Self {
+                self.protection.encryption = encryption;
+                self
+            }
         }
     };
 }
@@ -94,9 +110,38 @@ macro_rules! protected_client_methods {
 
         /// Retrieves, authenticates, and decodes a value for arbitrary application key bytes.
         pub async fn get(&self, application_key: impl AsRef<[u8]>) -> Result<GetOutcome<Vec<u8>>> {
+            match self.get_value(application_key).await? {
+                GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
+                GetOutcome::Found(Value::Json(_)) => {
+                    Err(crate::value::Error::ExpectedRawValue.into())
+                }
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
+        /// Retrieves a formatted value in the core logical model.
+        ///
+        /// # Arguments
+        ///
+        /// * `application_key` - Exact application key bytes used for item-key derivation.
+        ///
+        /// # Returns
+        ///
+        /// The decoded value or a not-found outcome.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when transport, authentication, decompression, or deserialization
+        /// fails.
+        pub async fn get_value(
+            &self,
+            application_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Value>> {
             let key = self.protection.item_key(application_key);
             match self.raw.get(key).await? {
-                GetOutcome::Found(value) => self.protection.open(key, value).map(GetOutcome::Found),
+                GetOutcome::Found(value) => {
+                    self.protection.decode(key, value).map(GetOutcome::Found)
+                }
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
             }
         }
@@ -108,8 +153,34 @@ macro_rules! protected_client_methods {
             plaintext: Vec<u8>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
+            self.set_value(application_key, Value::Raw(plaintext), options)
+                .await
+        }
+
+        /// Serializes, protects, and stores a core logical value.
+        ///
+        /// # Arguments
+        ///
+        /// * `application_key` - Exact application key bytes used for item-key derivation.
+        /// * `value` - Raw or logical JSON value to encode.
+        /// * `options` - Existence condition and optional expiration.
+        ///
+        /// # Returns
+        ///
+        /// The server's set outcome.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when serialization, protection, transport, or the server operation
+        /// fails.
+        pub async fn set_value(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            value: Value,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
             let key = self.protection.item_key(application_key);
-            let value = self.protection.seal_owned(key, plaintext)?;
+            let value = self.protection.encode(key, value)?;
             self.raw.set(key, value, options).await
         }
 

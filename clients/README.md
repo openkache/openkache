@@ -22,9 +22,9 @@ formats or protocol behavior.
 
 | Package | Path | Implementation |
 |---|---|---|
-| Shared core | [`core/`](core/) | Protocol v3 raw and protected engine; protected values still use a pre-v1 format |
-| Rust | [`rust/`](rust/) | Protocol v3 end-user SDK over the shared core |
-| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v3 Node-API SDK for Node.js, Bun, and Deno |
+| Shared core | [`core/`](core/) | Protocol v3 raw and protected engine; value format v1 implementation |
+| Rust | [`rust/`](rust/) | Protocol v3 end-user SDK; byte APIs use v1 Raw serialization |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v3 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the legacy envelope |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v2 client |
 | Python | `python/` | Package scaffold |
 | Go | `go/` | Package scaffold |
@@ -38,11 +38,12 @@ formats or protocol behavior.
 A scaffold contains registry metadata and a reserved source layout. It does not
 connect to OpenKache or expose cache operations.
 
-The [value format](VALUE_FORMAT.md) specifies the planned formatted API v1.
-Current Rust and TypeScript protection and envelope bytes predate that
-specification and have no compatibility guarantee. Migration status belongs in
-this table; byte-level v1 requirements belong only in the value-format
-specification.
+The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
+format v1. The core owns Raw and canonical JSON serialization, but
+language-native JSON adapters are not implemented yet. TypeScript's legacy
+logical-value envelope predates v1 and has no compatibility guarantee;
+migration status belongs in this table, while byte-level v1 requirements
+belong only in the value-format specification.
 
 ## Binding architecture
 

@@ -11,22 +11,29 @@ quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 
 [dependencies]
+# Exact direct feature dependencies clear the AEAD key schedules and MAC state.
+aes = { version = "=0.9.1", features = ["zeroize"] }
+aes-gcm-siv = { version = "=0.12.0-rc.3", features = ["zeroize"] }
+aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
 base64 = "*"
-chacha20poly1305 = { version = "*", features = ["zeroize"] }
+blake3 = { version = "*", features = ["zeroize"] }
+cmac = { version = "=0.8.0", features = ["zeroize"] }
 compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
 compio-quic = { version = "*", features = ["ring"], optional = true }
 flume = "*"
 futures-util = "*"
 getrandom = "*"
-hkdf = "*"
-hmac = "*"
 http = "*"
 openkache-protocol = { path = "../../protocol" }
+polyval = { version = "=0.7.3", features = ["zeroize"] }
 quinn = { version = "*", default-features = false, features = ["ring", "runtime-tokio", "rustls-ring"], optional = true }
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "*"
-sha2 = "*"
+serde = "*"
+serde_json = "*"
+serde_json_canonicalizer = "*"
 thiserror = "*"
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"], optional = true }
+vu128 = "*"
 zeroize = { version = "*", features = ["derive"] }
 zstd-pure-rs = "*"
