@@ -1,16 +1,21 @@
-# OpenKache Protocol
+# OpenKache protocol
 
-`openkache-protocol` defines the shared binary wire format used by OpenKache
-QUIC clients and servers.
+`openkache-protocol` is the Rust implementation of the binary contract shared
+by OpenKache protocol v3 clients and servers.
 
 ## Purpose
 
-The crate keeps opcode, status, framing, and size validation in one place so
-clients and servers cannot silently drift onto incompatible formats.
+The crate provides validated request and response types so implementations do
+not duplicate framing, opcode, status, or size checks.
+
+The [wire protocol specification](SPEC.md) defines transport negotiation, frame
+bytes, operation semantics, limits, malformed input handling, and retry
+ambiguity. This README covers crate usage, implementation structure, and
+project status.
 
 ## Commands
 
-From this directory:
+From `protocol`:
 
 ```bash
 cargo build
@@ -18,38 +23,40 @@ cargo check
 cargo fmt --check
 ```
 
-## Wire format
+## Usage
 
-Protocol v2 uses the QUIC ALPN identifier `openkache/2`. Each bidirectional
-stream is a reusable sequential lane carrying any number of request/response
-pairs. A lane has at most one in-flight request, so responses need no request
-identifier.
+Construct or decode complete frames through validated types:
 
-```text
-request  = opcode:u8 | key_len:u32be | value_len_and_flags:u32be |
-           client_key_digest | [ttl_ms:u64be] | value
-response = status:u8 | payload_len:u32be | payload
+```rust
+use openkache_protocol::{Opcode, Request, Response};
+
+let request = Request::new(Opcode::Ping, None, Vec::new())?;
+let request_bytes = request.encode()?;
+
+let response_bytes = [0x00, 0x04, b'P', b'O', b'N', b'G'];
+let response = Response::decode(&response_bytes)?;
 ```
 
-Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
-Clients encode KV keys as the 32-byte SHA-256 digest of the exact user-key
-bytes. The server rejects every other key length. Values and response payloads
-are limited to 64 MiB. Servers may enforce a smaller operational item limit.
-`SET` uses request length flag bits for an optional positive millisecond TTL
-and the mutually exclusive `if_absent` and `if_present` conditions.
-`STATS` and `SYNC` return `Forbidden` when the authenticated client lacks
-administrator authorization.
-The 8-byte relative TTL appears immediately before the value when present.
+Incremental transports can use `Request::decode_header`,
+`Request::frame_len`, `Response::decode_header`, and `Response::frame_len` to
+determine how many bytes a complete frame requires without duplicating
+variable-integer parsing.
 
 ## Core components
 
-- `Opcode` and `Status` define stable wire identifiers.
-- `Request` and `Response` validate and encode complete stream frames.
-- Fixed request and response headers report the next complete frame length for
-  persistent-lane readers.
-- `ProtocolError` reports malformed, unsupported, and oversized frames.
+- `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
+- `Request` and `Response` validate and encode complete frames.
+- `RequestHeader` and `ResponseHeader` support bounded incremental reads.
+- `ProtocolError` classifies malformed, unsupported, and oversized frames.
+- `SPEC.md` defines the implementation-independent contract.
+
+## Implementation status
+
+The shared Rust client and server use protocol v3 through this crate.
+Production durability guarantees for `SYNC` remain deployment and storage
+policy; protocol v3 specifies only when a successful response may be sent.
 
 ## Configuration
 
-The v2 limits and ALPN identifier are compile-time constants. There are no
-environment variables or runtime configuration files.
+Protocol identifiers and wire ceilings are compile-time constants. The crate
+has no environment variables or runtime configuration files.

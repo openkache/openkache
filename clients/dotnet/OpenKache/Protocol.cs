@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Buffers.Binary;
-using System.Security.Cryptography;
 
 namespace OpenKache;
 
@@ -13,7 +12,7 @@ internal static class Protocol
     internal const int MaximumValueBytes = 64 * 1024 * 1024;
 
     private const int RequestHeaderBytes = 9;
-    private const int ClientKeyDigestBytes = 32;
+    private const int ItemKeyBytes = 32;
     private const int SetTtlBytes = sizeof(ulong);
     private const uint ResponseValueLengthMask = (1u << 30) - 1;
     private const uint ValueCompressedBit = 1u << 31;
@@ -69,7 +68,7 @@ internal static class Protocol
 
     internal static byte[] EncodeRequest(
         Opcode opcode,
-        ReadOnlySpan<byte> userKey,
+        ReadOnlySpan<byte> itemKey,
         ReadOnlySpan<byte> value,
         SetCondition setCondition = SetCondition.None,
         ulong? ttlMilliseconds = null)
@@ -88,9 +87,15 @@ internal static class Protocol
             throw ProtocolError($"{opcode} does not accept a value.");
         }
 
-        if (!usesKey && !userKey.IsEmpty)
+        if (!usesKey && !itemKey.IsEmpty)
         {
             throw ProtocolError($"{opcode} does not accept a key.");
+        }
+
+        if (usesKey && itemKey.Length != ItemKeyBytes)
+        {
+            throw ProtocolError(
+                $"{opcode} key must contain exactly {ItemKeyBytes} bytes.");
         }
 
         if (opcode is not Opcode.Set
@@ -116,7 +121,7 @@ internal static class Protocol
             optionBits |= SetTtlBit;
         }
 
-        var keyLength = usesKey ? ClientKeyDigestBytes : 0;
+        var keyLength = usesKey ? ItemKeyBytes : 0;
         var ttlLength = ttlMilliseconds.HasValue ? SetTtlBytes : 0;
         var frame = GC.AllocateUninitializedArray<byte>(
             checked(RequestHeaderBytes + keyLength + ttlLength + value.Length));
@@ -129,9 +134,7 @@ internal static class Protocol
             (uint)value.Length | optionBits);
         if (usesKey)
         {
-            SHA256.HashData(
-                userKey,
-                frame.AsSpan(RequestHeaderBytes, ClientKeyDigestBytes));
+            itemKey.CopyTo(frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
         }
 
         var valueOffset = RequestHeaderBytes + keyLength;
@@ -207,23 +210,10 @@ internal static class Protocol
 
     private static Status DecodeStatus(byte value)
     {
-        return value switch
-        {
-            0x00 => Status.Ok,
-            0x01 => Status.NotFound,
-            0x02 => Status.Created,
-            0x03 => Status.Replaced,
-            0x04 => Status.Deleted,
-            0x05 => Status.NotStored,
-            0x40 => Status.InvalidRequest,
-            0x41 => Status.UnsupportedOpcode,
-            0x42 => Status.TooLarge,
-            0x43 => Status.Overloaded,
-            0x44 => Status.Timeout,
-            0x45 => Status.Forbidden,
-            0x7f => Status.InternalError,
-            _ => throw ProtocolError($"Unknown response status 0x{value:x2}."),
-        };
+        var status = (Status)value;
+        return Enum.IsDefined(status)
+            ? status
+            : throw ProtocolError($"Unknown response status 0x{value:x2}.");
     }
 
     private static OpenKacheException ProtocolError(string message)

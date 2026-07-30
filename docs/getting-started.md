@@ -90,24 +90,20 @@ cargo run --package openkache --bin breadcrumb --release
 ### Use the SDK (Rust)
 
 ```rust
-use openkache_client::value::{Compression, ValueCodec, ZstandardOptions};
-use openkache_client::{Client, ClientOptions};
+use openkache_client::value::{Compression, ZstandardOptions};
+use openkache_client::{Certificate, Client, DataProtectionKey, Endpoint};
 
 let certificate = std::fs::read(
     "target/openkache-local/certificate.local.der",
 )?;
-let client = Client::connect_with_options(
-    "127.0.0.1:4433".parse()?,
-    "localhost",
-    &certificate,
-    ClientOptions {
-        value_codec: ValueCodec::encrypted(
-            encryption_key,
-            Compression::Zstandard(ZstandardOptions::default()),
-        )?,
-    },
-)
-.await?;
+let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
+let certificate = Certificate::from_der(certificate)?;
+let protection_key = DataProtectionKey::from_base64(configured_base64_secret)?;
+let client = Client::builder(endpoint, protection_key)
+    .trust_certificate(certificate)
+    .compression(Compression::Zstandard(ZstandardOptions::default()))
+    .connect()
+    .await?;
 client.set(b"mykey", b"myvalue").await?;
 let value = client.get(b"mykey").await?;
 ```
@@ -116,6 +112,7 @@ let value = client.get(b"mykey").await?;
 
 - See [Architecture](../README.md#-architecture) for how OpenKache works
 - See the client status and binding architecture in `clients/README.md`
+- See the low-level shared client core under `clients/core/`
 - See the Rust client SDK under `clients/rust/`
 - See the TypeScript client SDK under `clients/typescript/`
 - See the .NET client SDK under `clients/dotnet/`

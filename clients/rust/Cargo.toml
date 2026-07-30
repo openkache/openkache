@@ -2,7 +2,7 @@
 name = "openkache-client"
 version = "0.1.0"
 edition = "2024"
-description = "Rust client for the OpenKache cache server"
+description = "Ergonomic Rust client for the OpenKache cache server"
 license = "Apache-2.0"
 
 [lib]
@@ -10,21 +10,12 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["quic-quinn"]
-ffi = ["quic-compio"]
-quic-compio = ["dep:compio", "dep:compio-quic"]
-quic-quinn = ["dep:quinn", "dep:tokio"]
+ffi = ["quic-compio", "dep:compio", "dep:flume"]
+quic-compio = ["openkache-client-core/quic-compio"]
+quic-quinn = ["openkache-client-core/quic-quinn"]
 
 [dependencies]
-chacha20poly1305 = { version = "*", features = ["zeroize"] }
-compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
-compio-quic = { version = "*", features = ["ring"], optional = true }
-flume = "*"
+compio = { version = "*", default-features = false, features = ["runtime"], optional = true }
+flume = { version = "*", optional = true }
 futures-util = "*"
-getrandom = "*"
-openkache-protocol = { path = "../../protocol" }
-quinn = { version = "*", default-features = false, features = ["ring", "runtime-tokio", "rustls-ring"], optional = true }
-rustls = { version = "*", default-features = false, features = ["ring", "std"] }
-thiserror = "*"
-tokio = { version = "*", features = ["io-util", "rt", "time"], optional = true }
-zeroize = "*"
-zstd-pure-rs = "*"
+openkache-client-core = { path = "../core", default-features = false }

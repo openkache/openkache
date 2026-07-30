@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = [
+    "protocol",
+    "server",
+    "clients/core",
+    "clients/rust",
+    "clients/typescript/native",
+]
+default-members = [
+    "protocol",
+    "server",
+    "clients/core",
+    "clients/rust",
+]
+
+[profile.dev.package.tikv-jemalloc-sys]
+# Nix fortify rejects jemalloc's configure probes at the default -O0.
+opt-level = 1
+
+[profile.release]
+# Favor state integrity while retaining source locations for production triage.
+codegen-units = 1
+debug = "line-tables-only"
+lto = "fat"
+overflow-checks = true
+
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = "none"

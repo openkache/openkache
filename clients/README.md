@@ -1,16 +1,31 @@
 # OpenKache client SDKs
 
-OpenKache keeps transport, protocol framing, compression, and encryption in the
-Rust client. Language packages should remain thin adapters over the Rust
-transport instead of implementing the wire or security protocols again.
+OpenKache client packages share one Rust engine for connection management,
+protocol operations, key protection, compression, and encryption. Implemented
+language packages add only their native API and runtime integration.
 
-## Status
+## Documentation
 
-| Language | Path | Status |
+Shared client topics are documented here:
+
+| Topic | Reference |
+|---|---|
+| SDK inventory, implementation status, and binding boundaries | This README |
+| Formatted value bytes, serialization, compression, and application-level encryption | [Value format](VALUE_FORMAT.md) |
+| QUIC framing, operations, limits, and retry ambiguity | [Wire protocol](../protocol/SPEC.md) |
+| Language API, build, packaging, and runtime configuration | The implemented package's README |
+
+Package documentation links to these references instead of restating shared
+formats or protocol behavior.
+
+## SDK status
+
+| Package | Path | Implementation |
 |---|---|---|
-| Rust | `rust/` | Implemented core client |
-| TypeScript / JavaScript | `typescript/` | Node.js, Bun, and Deno Node-API SDK |
-| C# / .NET | `dotnet/` | Implemented managed client |
+| Shared core | [`core/`](core/) | Protocol v3 raw and protected engine; value format v1 implementation |
+| Rust | [`rust/`](rust/) | Protocol v3 end-user SDK; byte APIs use v1 Raw serialization |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v3 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the legacy envelope |
+| C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v2 client |
 | Python | `python/` | Package scaffold |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
@@ -20,32 +35,58 @@ transport instead of implementing the wire or security protocols again.
 | Swift | `swift/` | Package scaffold |
 | Dart | `dart/` | Package scaffold |
 
-A package scaffold contains registry metadata and the conventional source
-layout only. It does not connect to OpenKache or expose cache operations yet.
+A scaffold contains registry metadata and a reserved source layout. It does not
+connect to OpenKache or expose cache operations.
+
+The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
+format v1. The core owns Raw and canonical JSON serialization, but
+language-native JSON adapters are not implemented yet. TypeScript's legacy
+logical-value envelope predates v1 and has no compatibility guarantee;
+migration status belongs in this table, while byte-level v1 requirements
+belong only in the value-format specification.
 
 ## Binding architecture
 
-Future bindings should own only language-native concerns:
+The shared layers have these responsibilities:
 
-- native adapter discovery and lifecycle;
-- conversion between language values and Rust byte buffers;
-- asynchronous execution appropriate to the runtime;
-- deterministic client cleanup;
-- idiomatic errors and package-level API names.
+- `protocol/` defines and validates server-visible wire frames.
+- `core/` handles transport, TLS, retries, raw operations, key derivation,
+  compression, encryption, and formatted-value processing.
+- implemented language packages convert native values and configuration into
+  core types, expose runtime-appropriate asynchronous APIs, and clean up native
+  resources.
+- raw APIs accept exact protocol item keys and values and bypass formatted-value
+  processing.
 
-Do not duplicate QUIC, wire framing, hashing, compression, encryption, or
-certificate behavior outside `rust/`. Extend the Rust core and add only the
-smallest runtime-specific adapter when a binding needs new behavior.
+Language adapters must not implement their own wire framing, retry semantics,
+key derivation, compression, encryption, or value containers. Extend the shared
+core when a binding needs shared behavior.
 
-Object APIs use the shared [OpenKache value envelope](VALUE_FORMAT.md).
-Raw byte APIs remain available for application-owned cross-language formats.
+The managed .NET client predates this boundary. Do not extend its duplicated
+protocol v2 transport; replace it with a core-backed protocol v3 adapter when
+the protected .NET API is implemented.
 
-Each scaffold README lists its package-manager validation command. Those
-commands validate package structure only until the corresponding binding is
-implemented.
+## Scaffold commands and entry points
 
-## Configuration
+Run each command from the listed package directory. These commands validate
+package structure only.
 
-The TypeScript release package includes Linux x64 and ARM64 Node-API adapters
-for Node.js, Bun, and Deno under `target/native/`. Other scaffolded clients
-choose their runtime integration when implemented.
+| Package | Validation command | Reserved package surface |
+|---|---|---|
+| C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
+| C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
+| Dart | `dart analyze` | `lib/openkache.dart` |
+| Go | `go vet ./... && go build ./...` | `doc.go` |
+| Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
+| Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
+| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |
+| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
+
+Native linkage, artifact distribution, and runtime integration for scaffolds
+are intentionally undefined until each binding is implemented.
+
+## Shared configuration
+
+The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
+See each implemented package README for accepted configuration fields, platform
+requirements, and packaging commands.

@@ -4,17 +4,6 @@ version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
-[profile.dev.package.tikv-jemalloc-sys]
-# Nix fortify rejects jemalloc's configure probes at the default -O0.
-opt-level = 1
-
-[profile.release]
-# Favor state integrity while retaining source locations for production triage.
-codegen-units = 1
-debug = "line-tables-only"
-lto = "fat"
-overflow-checks = true
-
 [features]
 default = ["allocator-jemalloc", "channel-crossfire", "quic-noq"]
 # Forces the portable lookup paths for cross-architecture benchmarking.
@@ -56,6 +45,7 @@ rand = "*"
 rcgen = { version = "*", features = ["x509-parser"] }
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 serde = { version = "*", features = ["derive"] }
+sha2 = "*"
 smallvec = "*"
 snmalloc-rs = { version = "*", optional = true, default-features = false, features = ["build_cc", "usewait-on-address"] }
 socket2 = { version = "*", features = ["all"] }

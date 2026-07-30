@@ -92,7 +92,7 @@ impl Kvkache {
                         continue;
                     };
                     if !item.is_tombstone
-                        && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?.value
+                        && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?
                     {
                         validate_recovered_blob_ref(blob_ref, commit.blob_logical_len)?;
                     }

@@ -1,16 +1,14 @@
 //! Shared byte-oriented types used across the KV cache.
 
-use openkache_protocol::ValueFlags;
-
 /// Number of bytes in every server-derived storage key.
 pub const STORAGE_KEY_BYTES: usize = 32;
 
-/// Variable-length value bytes associated with a storage key.
+/// Variable-length application value associated with an item key.
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Value(Vec<u8>);
+pub struct ItemValue(Vec<u8>);
 
-impl Value {
+impl ItemValue {
     /// Creates a value by taking ownership of its bytes.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
@@ -37,45 +35,40 @@ impl Value {
     }
 }
 
-impl AsRef<[u8]> for Value {
+impl AsRef<[u8]> for ItemValue {
     /// Borrows the value bytes for APIs accepting `AsRef<[u8]>`.
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-impl From<Vec<u8>> for Value {
+impl From<Vec<u8>> for ItemValue {
     /// Wraps an owned byte vector as a value without copying.
     fn from(bytes: Vec<u8>) -> Self {
         Self::new(bytes)
     }
 }
 
-impl From<&[u8]> for Value {
+impl From<&[u8]> for ItemValue {
     /// Copies a borrowed byte slice into an owned value.
     fn from(bytes: &[u8]) -> Self {
         Self::new(bytes.to_vec())
     }
 }
 
-/// Opaque client value plus transformation bits propagated without server-side decoding.
+/// Opaque client value propagated without server-side decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EncodedValue {
+pub(crate) struct StoredItemValue {
     pub(crate) bytes: Vec<u8>,
-    pub(crate) flags: ValueFlags,
 }
 
-impl EncodedValue {
-    pub(crate) fn new(bytes: Vec<u8>, flags: ValueFlags) -> Self {
-        Self { bytes, flags }
-    }
-
-    pub(crate) fn plain(bytes: Vec<u8>) -> Self {
-        Self::new(bytes, ValueFlags::NONE)
+impl StoredItemValue {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
     }
 }
 
-impl std::ops::Deref for EncodedValue {
+impl std::ops::Deref for StoredItemValue {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {

@@ -28,7 +28,7 @@ pub struct Cli {
     pub max_inflight: Option<usize>,
 
     #[arg(long, value_name = "MIB")]
-    pub max_inflight_value_mib_per_worker: Option<usize>,
+    pub max_inflight_value_mib: Option<usize>,
 
     #[arg(long, value_name = "N")]
     pub batch_size: Option<usize>,
@@ -146,8 +146,8 @@ impl AppConfig {
         if let Some(v) = cli.max_inflight {
             config.io_uring.max_inflight_per_worker = v;
         }
-        if let Some(v) = cli.max_inflight_value_mib_per_worker {
-            config.network.max_inflight_value_mib_per_worker = v;
+        if let Some(v) = cli.max_inflight_value_mib {
+            config.network.max_inflight_value_mib = v;
         }
         if let Some(v) = cli.batch_size {
             config.io_uring.batch_size = v;

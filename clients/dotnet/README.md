@@ -1,36 +1,36 @@
-# OpenKache .NET Client
+# OpenKache .NET client
 
-The OpenKache package is a managed .NET client for the OpenKache protocol v2
-server. It uses `System.Net.Quic` directly and does not require the Rust client
-library or another native OpenKache binding.
+The OpenKache package is a managed .NET client that uses `System.Net.Quic`
+directly.
 
 ## Purpose
 
-The client provides binary-safe cache operations over one authenticated QUIC
-connection. Concurrent operations use a bounded pool of reusable bidirectional
-streams so packet loss on one request does not block unrelated requests.
+The package provides binary-safe cache operations over one authenticated QUIC
+connection. It accepts exact 32-byte item keys and plaintext values and uses a
+bounded pool of reusable bidirectional streams.
+
+The [client status table](../README.md#sdk-status) describes this package's
+implementation and migration status.
 
 ## Build and package
 
-Run these commands from the public repository root:
+Run from the public repository root:
 
 ```bash
 dotnet build clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 dotnet pack clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 ```
 
-The package targets .NET 8 and opts into the .NET 8 preview QUIC APIs. Windows
-ships MsQuic with .NET. Linux installations must make a compatible
-`libmsquic` available to the .NET runtime.
+The package targets .NET 8 and opts into its preview QUIC APIs. Windows ships
+MsQuic with .NET. Linux must make a compatible `libmsquic` available to the
+runtime.
 
 ## Connect and use
 
-The server creates a self-signed certificate for each run and writes it to the
-path selected by `--certificate-out`. Pass those exact DER bytes to the client;
-there is no certificate-verification bypass.
+Pass the exact DER bytes of the server's certificate; the client has no
+certificate-verification bypass.
 
 ```csharp
-using System.Text;
 using OpenKache;
 
 var certificate = await File.ReadAllBytesAsync(
@@ -42,37 +42,39 @@ await using var client = await Client.ConnectAsync(
     certificate);
 
 await client.PingAsync();
+var itemKey = new byte[32];
+itemKey[^1] = 1;
 var outcome = await client.SetAsync(
-    "greeting",
-    Encoding.UTF8.GetBytes("hello"),
+    itemKey,
+    "hello"u8.ToArray(),
     new SetOptions
     {
         Condition = SetCondition.IfAbsent,
         TimeToLive = TimeSpan.FromMinutes(5),
     });
-var value = await client.GetAsync("greeting");
+var value = await client.GetAsync(itemKey);
 var statisticsJson = await client.StatsAsync();
 await client.SyncAsync();
-var deleted = await client.DeleteAsync("greeting");
+var deleted = await client.DeleteAsync(itemKey);
 ```
 
-`SetAsync` reports `NotStored` when an `IfAbsent` or `IfPresent` condition
-fails; otherwise it reports `Created` or `Replaced`. A positive `TimeToLive` is
-rounded up to the next millisecond. Expired keys are treated as missing.
-`GetAsync` returns `null` for a missing key, and `DeleteAsync` returns whether
-the key existed. String keys are encoded as UTF-8; binary overloads preserve
-exact key bytes.
+`SetAsync` returns `NotStored` when a condition fails and `Created` or
+`Replaced` after a write. `GetAsync` returns `null` for a missing key.
+`DeleteAsync` reports whether the key existed. Every key-taking operation
+requires exactly 32 bytes and sends them unchanged.
 
 ## Protocol and configuration
 
-The connection requires TLS 1.3 and ALPN `openkache/2`. Each key is converted
-to its 32-byte SHA-256 protocol digest. Request and response payloads are
-limited to 16 MiB.
+This package requires TLS 1.3 and ALPN `openkache/2`. It is not compatible with
+the current protocol v3 server contract in
+[`protocol/SPEC.md`](../../protocol/SPEC.md).
 
-`ClientOptions` controls the request timeout and maximum number of reusable
-stream lanes. Both default to the server-oriented values of 10 seconds and 256
-lanes.
+`ClientOptions` controls the request timeout and maximum reusable stream lanes.
+The defaults are 10 seconds and 256 lanes.
 
-This release reads and writes plaintext values. If another SDK stores a value
-with OpenKache compression or encryption flags, `GetAsync` reports
-`UNSUPPORTED_VALUE_ENCODING` instead of returning encoded bytes as plaintext.
+The package reads and writes plaintext values. It does not implement the
+[shared formatted value contract](../VALUE_FORMAT.md).
+
+Do not extend the duplicated v2 protocol implementation. The migration path is
+a thin protocol v3 adapter over `clients/core`, as specified by the
+[client architecture](../README.md#binding-architecture).

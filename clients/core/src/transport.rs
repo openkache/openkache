@@ -6,189 +6,145 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{RESPONSE_HEADER_BYTES, Response};
+use openkache_protocol::{RESPONSE_FIXED_BYTES, Response};
 
-use crate::{Error, QuicBackend, Result};
+use crate::{Backend, Error, Operation, Result};
 
 #[cfg(feature = "quic-compio")]
 mod compio;
 #[cfg(feature = "quic-quinn")]
 mod quinn;
 
-const MAX_STREAM_LANES: usize = 256;
+pub(crate) trait ClientConnection: Sized {
+    type Lane<'a>: ClientLane
+    where
+        Self: 'a;
 
-pub(crate) struct Connection(ConnectionInner);
+    fn connect(
+        address: SocketAddr,
+        server_name: &str,
+        tls: rustls::ClientConfig,
+        timeout: Duration,
+        max_stream_lanes: usize,
+    ) -> impl Future<Output = Result<Self>>;
 
-enum ConnectionInner {
-    #[cfg(feature = "quic-compio")]
-    Compio(PooledConnection<compio::Connection>),
-    #[cfg(feature = "quic-quinn")]
-    Quinn(PooledConnection<quinn::Connection>),
+    fn acquire_lane(&self, deadline: Deadline) -> impl Future<Output = Result<Self::Lane<'_>>>;
+
+    fn timeout<F: Future>(
+        duration: Duration,
+        future: F,
+    ) -> impl Future<Output = Result<Option<F::Output>>>;
+
+    fn close(&self);
 }
 
-pub(crate) struct Lane<'a>(LaneInner<'a>);
+pub(crate) trait ClientLane {
+    fn write_request(
+        &mut self,
+        frame: Vec<u8>,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<()>>;
 
-enum LaneInner<'a> {
-    #[cfg(feature = "quic-compio")]
-    Compio(PooledLane<'a, compio::Connection>),
-    #[cfg(feature = "quic-quinn")]
-    Quinn(PooledLane<'a, quinn::Connection>),
-}
-
-pub(crate) async fn connect(
-    backend: QuicBackend,
-    address: SocketAddr,
-    server_name: &str,
-    tls: rustls::ClientConfig,
-    timeout: Duration,
-) -> Result<Connection> {
-    match backend {
-        QuicBackend::Compio => {
-            #[cfg(feature = "quic-compio")]
-            {
-                compio::connect(address, server_name, tls, timeout)
-                    .await
-                    .map(PooledConnection::new)
-                    .map(ConnectionInner::Compio)
-                    .map(Connection)
-                    .map_err(Error::from)
-            }
-            #[cfg(not(feature = "quic-compio"))]
-            {
-                Err(TransportError::not_compiled(backend, "quic-compio").into())
-            }
-        }
-        QuicBackend::Quinn => {
-            #[cfg(feature = "quic-quinn")]
-            {
-                quinn::connect(address, server_name, tls, timeout)
-                    .await
-                    .map(PooledConnection::new)
-                    .map(ConnectionInner::Quinn)
-                    .map(Connection)
-                    .map_err(Error::from)
-            }
-            #[cfg(not(feature = "quic-quinn"))]
-            {
-                Err(TransportError::not_compiled(backend, "quic-quinn").into())
-            }
-        }
-    }
-}
-
-pub(crate) async fn timeout<F: Future>(
-    backend: QuicBackend,
-    duration: Duration,
-    future: F,
-) -> Result<Option<F::Output>> {
-    match backend {
-        QuicBackend::Compio => {
-            #[cfg(feature = "quic-compio")]
-            {
-                if ::compio::runtime::Runtime::try_current().is_none() {
-                    return Err(TransportError::runtime(
-                        "compio",
-                        "an active Compio runtime is required",
-                    )
-                    .into());
-                }
-                Ok(::compio::runtime::time::timeout(duration, future)
-                    .await
-                    .ok())
-            }
-            #[cfg(not(feature = "quic-compio"))]
-            {
-                drop(future);
-                Err(TransportError::not_compiled(backend, "quic-compio").into())
-            }
-        }
-        QuicBackend::Quinn => {
-            #[cfg(feature = "quic-quinn")]
-            {
-                if tokio::runtime::Handle::try_current().is_err() {
-                    return Err(TransportError::runtime(
-                        "quinn",
-                        "an active Tokio runtime is required",
-                    )
-                    .into());
-                }
-                Ok(tokio::time::timeout(duration, future).await.ok())
-            }
-            #[cfg(not(feature = "quic-quinn"))]
-            {
-                drop(future);
-                Err(TransportError::not_compiled(backend, "quic-quinn").into())
-            }
-        }
-    }
-}
-
-impl Connection {
-    pub(crate) async fn acquire_lane(&self, deadline: Deadline) -> Result<Lane<'_>> {
-        match &self.0 {
-            #[cfg(feature = "quic-compio")]
-            ConnectionInner::Compio(connection) => {
-                acquire_lane_with_deadline(QuicBackend::Compio, connection, deadline)
-                    .await
-                    .map(LaneInner::Compio)
-                    .map(Lane)
-            }
-            #[cfg(feature = "quic-quinn")]
-            ConnectionInner::Quinn(connection) => {
-                acquire_lane_with_deadline(QuicBackend::Quinn, connection, deadline)
-                    .await
-                    .map(LaneInner::Quinn)
-                    .map(Lane)
-            }
-        }
-    }
-}
-
-async fn acquire_lane_with_deadline<B: BackendConnection>(
-    backend: QuicBackend,
-    connection: &PooledConnection<B>,
-    deadline: Deadline,
-) -> Result<PooledLane<'_, B>> {
-    let remaining = deadline.remaining("stream acquisition")?;
-    match timeout(backend, remaining, connection.acquire_lane(deadline)).await? {
-        Some(result) => result,
-        None => Err(Error::Timeout {
-            operation: "stream acquisition",
-        }),
-    }
-}
-
-impl Lane<'_> {
-    pub(crate) async fn write_request(&mut self, frame: Vec<u8>, deadline: Deadline) -> Result<()> {
-        match &mut self.0 {
-            #[cfg(feature = "quic-compio")]
-            LaneInner::Compio(lane) => lane.write_request(frame, deadline).await,
-            #[cfg(feature = "quic-quinn")]
-            LaneInner::Quinn(lane) => lane.write_request(frame, deadline).await,
-        }
-    }
-
-    pub(crate) async fn read_response(
+    fn read_response(
         &mut self,
         maximum: usize,
         deadline: Deadline,
-    ) -> Result<Vec<u8>> {
-        match &mut self.0 {
-            #[cfg(feature = "quic-compio")]
-            LaneInner::Compio(lane) => lane.read_response(maximum, deadline).await,
-            #[cfg(feature = "quic-quinn")]
-            LaneInner::Quinn(lane) => lane.read_response(maximum, deadline).await,
-        }
-    }
+    ) -> impl Future<Output = Result<Vec<u8>>>;
 
-    pub(crate) fn release(self) {
-        match self.0 {
-            #[cfg(feature = "quic-compio")]
-            LaneInner::Compio(lane) => lane.release(),
-            #[cfg(feature = "quic-quinn")]
-            LaneInner::Quinn(lane) => lane.release(),
+    fn release(self);
+}
+
+macro_rules! connection_backend {
+    ($connection:ident, $lane:ident, $module:ident, $timeout:ident) => {
+        pub(crate) struct $connection(PooledConnection<$module::Connection>);
+
+        pub(crate) struct $lane<'a>(PooledLane<'a, $module::Connection>);
+
+        impl ClientConnection for $connection {
+            type Lane<'a> = $lane<'a>;
+
+            async fn connect(
+                address: SocketAddr,
+                server_name: &str,
+                tls: rustls::ClientConfig,
+                timeout: Duration,
+                max_stream_lanes: usize,
+            ) -> Result<Self> {
+                $module::connect(address, server_name, tls, timeout)
+                    .await
+                    .map(|connection| Self(PooledConnection::new(connection, max_stream_lanes)))
+                    .map_err(Error::from)
+            }
+
+            async fn acquire_lane(&self, deadline: Deadline) -> Result<Self::Lane<'_>> {
+                let remaining = deadline.remaining(Operation::StreamAcquisition)?;
+                match $timeout(remaining, self.0.acquire_lane(deadline)).await? {
+                    Some(result) => result.map($lane),
+                    None => Err(Error::Timeout {
+                        operation: Operation::StreamAcquisition,
+                    }),
+                }
+            }
+
+            async fn timeout<F: Future>(
+                duration: Duration,
+                future: F,
+            ) -> Result<Option<F::Output>> {
+                $timeout(duration, future).await
+            }
+
+            fn close(&self) {
+                self.0.inner.close();
+            }
         }
+
+        impl ClientLane for $lane<'_> {
+            async fn write_request(&mut self, frame: Vec<u8>, timeout: Duration) -> Result<()> {
+                self.0.write_request(frame, timeout).await
+            }
+
+            async fn read_response(
+                &mut self,
+                maximum: usize,
+                deadline: Deadline,
+            ) -> Result<Vec<u8>> {
+                self.0.read_response(maximum, deadline).await
+            }
+
+            fn release(self) {
+                self.0.release();
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-quinn")]
+connection_backend!(QuinnConnection, QuinnLane, quinn, timeout_quinn);
+#[cfg(feature = "quic-compio")]
+connection_backend!(CompioConnection, CompioLane, compio, timeout_compio);
+
+#[cfg(feature = "quic-quinn")]
+async fn timeout_quinn<F: Future>(duration: Duration, future: F) -> Result<Option<F::Output>> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(
+            TransportError::runtime(Backend::Quinn, "an active Tokio runtime is required").into(),
+        );
     }
+    Ok(tokio::time::timeout(duration, future).await.ok())
+}
+
+#[cfg(feature = "quic-compio")]
+async fn timeout_compio<F: Future>(duration: Duration, future: F) -> Result<Option<F::Output>> {
+    if ::compio::runtime::Runtime::try_current().is_none() {
+        return Err(TransportError::runtime(
+            Backend::Compio,
+            "an active Compio runtime is required",
+        )
+        .into());
+    }
+    Ok(::compio::runtime::time::timeout(duration, future)
+        .await
+        .ok())
 }
 
 trait BackendConnection {
@@ -198,6 +154,8 @@ trait BackendConnection {
         &self,
         timeout: Duration,
     ) -> impl Future<Output = std::result::Result<Self::Stream, TransportError>>;
+
+    fn close(&self);
 }
 
 trait BackendStream {
@@ -221,6 +179,7 @@ struct PooledConnection<B: BackendConnection> {
     lane_capacity_tx: flume::Sender<()>,
     lane_capacity_rx: flume::Receiver<()>,
     open_lanes: AtomicUsize,
+    max_stream_lanes: usize,
 }
 
 struct PooledLane<'a, B: BackendConnection> {
@@ -229,9 +188,9 @@ struct PooledLane<'a, B: BackendConnection> {
 }
 
 impl<B: BackendConnection> PooledConnection<B> {
-    fn new(inner: B) -> Self {
-        let (idle_lanes_tx, idle_lanes_rx) = flume::bounded(MAX_STREAM_LANES);
-        let (lane_capacity_tx, lane_capacity_rx) = flume::bounded(MAX_STREAM_LANES);
+    fn new(inner: B, max_stream_lanes: usize) -> Self {
+        let (idle_lanes_tx, idle_lanes_rx) = flume::bounded(max_stream_lanes);
+        let (lane_capacity_tx, lane_capacity_rx) = flume::bounded(max_stream_lanes);
         Self {
             inner,
             idle_lanes_tx,
@@ -239,6 +198,7 @@ impl<B: BackendConnection> PooledConnection<B> {
             lane_capacity_tx,
             lane_capacity_rx,
             open_lanes: AtomicUsize::new(0),
+            max_stream_lanes,
         }
     }
 
@@ -264,7 +224,7 @@ impl<B: BackendConnection> PooledConnection<B> {
             let reservation = LaneReservation::new(self);
             let opening = self
                 .inner
-                .open_bi(deadline.remaining("stream acquisition")?)
+                .open_bi(deadline.remaining(Operation::StreamAcquisition)?)
                 .fuse();
             let idle = self.idle_lanes_rx.recv_async().fuse();
             pin_mut!(opening, idle);
@@ -286,7 +246,7 @@ impl<B: BackendConnection> PooledConnection<B> {
     fn reserve_lane(&self) -> bool {
         self.open_lanes
             .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
-                (open < MAX_STREAM_LANES).then_some(open + 1)
+                (open < self.max_stream_lanes).then_some(open + 1)
             })
             .is_ok()
     }
@@ -317,11 +277,11 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         }
     }
 
-    async fn write_request(&mut self, frame: Vec<u8>, deadline: Deadline) -> Result<()> {
+    async fn write_request(&mut self, frame: Vec<u8>, timeout: Duration) -> Result<()> {
         self.stream
             .as_mut()
             .expect("a checked-out lane must own its stream")
-            .write_all(frame, deadline.remaining("request write")?)
+            .write_all(frame, timeout)
             .await?;
         Ok(())
     }
@@ -333,18 +293,27 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
             .expect("a checked-out lane must own its stream");
         let mut frame = stream
             .read_exact(
-                RESPONSE_HEADER_BYTES,
-                deadline.remaining("response header read")?,
+                RESPONSE_FIXED_BYTES,
+                deadline.remaining(Operation::ResponseHeaderRead)?,
             )
             .await?;
-        let frame_len = Response::frame_len_from_header(&frame)?;
+        let header = loop {
+            if let Some(header) = Response::decode_header(&frame).map_err(Error::protocol)? {
+                break header;
+            }
+            let next = stream
+                .read_exact(1, deadline.remaining(Operation::ResponseHeaderRead)?)
+                .await?;
+            frame.extend_from_slice(&next);
+        };
+        let frame_len = header.frame_len().map_err(Error::protocol)?;
         if frame_len > maximum {
             return Err(Error::ResponseTooLarge { maximum });
         }
-        let body_len = frame_len - RESPONSE_HEADER_BYTES;
+        let body_len = header.payload_len();
         if body_len > 0 {
             let body = stream
-                .read_exact(body_len, deadline.remaining("response body read")?)
+                .read_exact(body_len, deadline.remaining(Operation::ResponseBodyRead)?)
                 .await?;
             frame.extend_from_slice(&body);
         }
@@ -403,11 +372,11 @@ impl Deadline {
             .checked_add(timeout)
             .map(Self)
             .ok_or_else(|| {
-                Error::Configuration("request timeout exceeds the platform clock range".into())
+                Error::configuration("request_timeout", "exceeds the platform clock range")
             })
     }
 
-    pub(crate) fn remaining(self, operation: &'static str) -> Result<Duration> {
+    pub(crate) fn remaining(self, operation: Operation) -> Result<Duration> {
         self.0
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
@@ -418,8 +387,8 @@ impl Deadline {
 #[derive(Debug, thiserror::Error)]
 #[error("{backend} QUIC {operation} failed: {message}")]
 pub(crate) struct TransportError {
-    backend: &'static str,
-    operation: &'static str,
+    backend: Backend,
+    operation: Operation,
     message: String,
     kind: TransportErrorKind,
 }
@@ -432,11 +401,7 @@ enum TransportErrorKind {
 }
 
 impl TransportError {
-    fn backend(
-        backend: &'static str,
-        operation: &'static str,
-        error: impl std::fmt::Display,
-    ) -> Self {
+    fn backend(backend: Backend, operation: Operation, error: impl std::fmt::Display) -> Self {
         Self {
             backend,
             operation,
@@ -445,31 +410,21 @@ impl TransportError {
         }
     }
 
-    fn runtime(backend: &'static str, message: &'static str) -> Self {
+    fn runtime(backend: Backend, message: &'static str) -> Self {
         Self {
             backend,
-            operation: "runtime selection",
+            operation: Operation::ConnectionSetup,
             message: message.into(),
             kind: TransportErrorKind::Runtime,
         }
     }
 
-    fn timeout(backend: &'static str, operation: &'static str, timeout: Duration) -> Self {
+    fn timeout(backend: Backend, operation: Operation, timeout: Duration) -> Self {
         Self {
             backend,
             operation,
             message: format!("timed out after {timeout:?}"),
             kind: TransportErrorKind::Timeout,
-        }
-    }
-
-    #[cfg(any(not(feature = "quic-compio"), not(feature = "quic-quinn")))]
-    fn not_compiled(backend: QuicBackend, feature: &'static str) -> Self {
-        Self {
-            backend: backend.as_str(),
-            operation: "selection",
-            message: format!("backend was not compiled; enable Cargo feature `{feature}`"),
-            kind: TransportErrorKind::Transport,
         }
     }
 }

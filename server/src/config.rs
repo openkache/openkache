@@ -461,8 +461,8 @@ pub struct NetworkConfig {
     pub event_interval: usize,
     pub io_uring_entries_per_worker: u32,
     pub max_stream_lanes_per_connection: usize,
-    /// Aggregate request/GET-response bytes admitted concurrently by each network worker.
-    pub max_inflight_value_mib_per_worker: usize,
+    /// Aggregate request/GET-response bytes admitted concurrently across the server.
+    pub max_inflight_value_mib: usize,
     pub sqpoll: bool,
     pub napi_busy_poll: bool,
 }
@@ -484,7 +484,7 @@ impl NetworkConfig {
             event_interval: 31,
             io_uring_entries_per_worker: 4_096,
             max_stream_lanes_per_connection: 256,
-            max_inflight_value_mib_per_worker: 256,
+            max_inflight_value_mib: 256,
             sqpoll: false,
             napi_busy_poll: false,
         }
@@ -647,10 +647,10 @@ impl AppConfig {
             || self.network.io_uring_entries_per_worker == 0
             || self.network.max_stream_lanes_per_connection == 0
             || self.network.max_stream_lanes_per_connection > u32::MAX as usize
-            || self.network.max_inflight_value_mib_per_worker == 0
+            || self.network.max_inflight_value_mib == 0
             || self
                 .network
-                .max_inflight_value_mib_per_worker
+                .max_inflight_value_mib
                 .checked_mul(1024 * 1024)
                 .is_none()
         {
@@ -800,10 +800,9 @@ impl AppConfig {
                     .min(openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
             )));
         }
-        if self.network.max_inflight_value_mib_per_worker < self.storage.max_item_size_mib {
+        if self.network.max_inflight_value_mib < self.storage.max_item_size_mib {
             return Err(KvError::InvalidConfig(
-                "network.max_inflight_value_mib_per_worker must be at least storage.max_item_size_mib"
-                    .into(),
+                "network.max_inflight_value_mib must be at least storage.max_item_size_mib".into(),
             ));
         }
         let data_names = (0..self.runtime.thread_count)

@@ -15,13 +15,13 @@ export interface Native_Client_Options {
   readonly server_name: string
   readonly certificate: Uint8Array
   readonly identity?: Native_Identity
-  readonly encryption_key: Uint8Array
+  readonly data_protection_key: Uint8Array
   readonly compression_enabled: boolean
-  readonly compression_level: number
-  readonly minimum_input_size: number
-  readonly minimum_savings: number
-  readonly connect_timeout_ms: number
-  readonly request_timeout_ms: number
+  readonly compression_level?: number
+  readonly minimum_input_size?: number
+  readonly minimum_savings?: number
+  readonly connect_timeout_ms?: number
+  readonly request_timeout_ms?: number
 }
 
 interface Native_Value_Envelope {
