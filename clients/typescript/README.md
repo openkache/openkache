@@ -8,12 +8,11 @@ do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
 ## Purpose
 
 Applications use regular JavaScript objects while OpenKache keeps envelope
-framing, transport, and security behavior in one Rust implementation. JavaScript
-codecs produce metadata and payload bytes; the adapter composes the same low-level core tools used
-by the Rust SDK, wraps bytes in the shared
-[OpenKache value envelope](../VALUE_FORMAT.md), compresses beneficial values,
-and encrypts every value before it leaves the client. The server stores opaque
-bytes without parsing, decrypting, or decompressing them.
+framing, transport, and security behavior in one Rust implementation. The current pre-release
+adapter still serializes codec payloads in JavaScript and stores the earlier magic-prefixed
+envelope. It will migrate to the planned shared
+[OpenKache value format](../VALUE_FORMAT.md), where serialization also moves into the core.
+The server stores opaque bytes without parsing, decrypting, or decompressing them.
 
 ## Commands
 
