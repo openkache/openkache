@@ -37,15 +37,15 @@ pub struct NativeClientOptions {
     #[napi(js_name = "compression_enabled")]
     pub compression_enabled: bool,
     #[napi(js_name = "compression_level")]
-    pub compression_level: i32,
+    pub compression_level: Option<i32>,
     #[napi(js_name = "minimum_input_size")]
-    pub minimum_input_size: f64,
+    pub minimum_input_size: Option<f64>,
     #[napi(js_name = "minimum_savings")]
-    pub minimum_savings: f64,
+    pub minimum_savings: Option<f64>,
     #[napi(js_name = "connect_timeout_ms")]
-    pub connect_timeout_ms: f64,
+    pub connect_timeout_ms: Option<f64>,
     #[napi(js_name = "request_timeout_ms")]
-    pub request_timeout_ms: f64,
+    pub request_timeout_ms: Option<f64>,
 }
 
 /// Decoded components of a canonical OpenKache value envelope.
@@ -214,7 +214,6 @@ impl NativeClient {
             SetCondition::None => SetOptions::new(),
             SetCondition::IfAbsent => SetOptions::new().if_absent(),
             SetCondition::IfPresent => SetOptions::new().if_present(),
-            _ => return Err(invalid_argument("unsupported SET condition")),
         };
         if let Some(ttl_ms) = ttl_ms {
             options = options.expires_after_millis(ttl_ms);
@@ -265,21 +264,39 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         DataProtectionKey::from_slice(options.data_protection_key.as_ref())
             .map_err(native_error)?;
     let compression = if options.compression_enabled {
+        let defaults = ZstandardOptions::default();
         Compression::Zstandard(ZstandardOptions {
-            level: options.compression_level,
-            minimum_input_size: parse_usize(
-                options.minimum_input_size,
-                "minimum_input_size",
-                true,
-            )?,
-            minimum_savings: parse_usize(options.minimum_savings, "minimum_savings", true)?,
+            level: options.compression_level.unwrap_or(defaults.level),
+            minimum_input_size: options
+                .minimum_input_size
+                .map(|value| parse_usize(value, "minimum_input_size", true))
+                .transpose()?
+                .unwrap_or(defaults.minimum_input_size),
+            minimum_savings: options
+                .minimum_savings
+                .map(|value| parse_usize(value, "minimum_savings", true))
+                .transpose()?
+                .unwrap_or(defaults.minimum_savings),
         })
     } else {
         Compression::Disabled
     };
     let identity = parse_identity(options.identity)?;
-    let connect_timeout_ms = parse_u64(options.connect_timeout_ms, "connect_timeout_ms", false)?;
-    let request_timeout_ms = parse_u64(options.request_timeout_ms, "request_timeout_ms", false)?;
+    let mut timeouts = ClientTimeouts::default();
+    if let Some(connect_timeout_ms) = options.connect_timeout_ms {
+        timeouts.connect = Duration::from_millis(parse_u64(
+            connect_timeout_ms,
+            "connect_timeout_ms",
+            false,
+        )?);
+    }
+    if let Some(request_timeout_ms) = options.request_timeout_ms {
+        timeouts.request = Duration::from_millis(parse_u64(
+            request_timeout_ms,
+            "request_timeout_ms",
+            false,
+        )?);
+    }
 
     let endpoint =
         Endpoint::from_socket_addr(address, options.server_name).map_err(native_error)?;
@@ -287,10 +304,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
         .trust_certificate(trusted_certificate)
         .compression(compression)
-        .timeouts(ClientTimeouts {
-            connect: Duration::from_millis(connect_timeout_ms),
-            request: Duration::from_millis(request_timeout_ms),
-        });
+        .timeouts(timeouts);
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }

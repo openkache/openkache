@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 
+use openkache_protocol::SetCondition;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -408,19 +409,6 @@ impl Default for RetryPolicy {
     }
 }
 
-/// Atomic existence condition for one set operation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum SetCondition {
-    /// Store regardless of whether the key exists.
-    #[default]
-    None,
-    /// Store only when the key does not exist.
-    IfAbsent,
-    /// Store only when the key already exists.
-    IfPresent,
-}
-
 /// Optional behavior for one set operation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SetOptions {
@@ -466,11 +454,6 @@ impl SetOptions {
     }
 
     pub(crate) fn into_protocol(self) -> Result<openkache_protocol::SetOptions> {
-        let condition = match self.condition {
-            SetCondition::None => openkache_protocol::SetCondition::None,
-            SetCondition::IfAbsent => openkache_protocol::SetCondition::IfAbsent,
-            SetCondition::IfPresent => openkache_protocol::SetCondition::IfPresent,
-        };
         if self.time_to_live_ms == Some(0) {
             return Err(Error::configuration(
                 "set.time_to_live_ms",
@@ -478,7 +461,7 @@ impl SetOptions {
             ));
         }
         Ok(openkache_protocol::SetOptions::new(
-            condition,
+            self.condition,
             self.time_to_live_ms,
         ))
     }

@@ -4,16 +4,16 @@ use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
+use openkache_protocol::ITEM_KEY_BYTES;
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, Result};
 
-/// Bytes in every OpenKache item key.
-pub const ITEM_KEY_BYTES: usize = openkache_protocol::ITEM_KEY_BYTES;
+pub(crate) const PROTECTION_KEY_BYTES: usize = 32;
 
 /// Bytes in an application-managed data protection key.
-pub const DATA_PROTECTION_KEY_BYTES: usize = 32;
+pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 
 /// Exact fixed-size item key sent through the OpenKache protocol.
 #[repr(transparent)]
@@ -167,14 +167,17 @@ impl DataProtectionKey {
         ItemKey::from_bytes(mac.finalize().into_bytes().into())
     }
 
-    pub(crate) fn derive_value_key(&self) -> [u8; 32] {
+    pub(crate) fn derive_value_key(&self) -> [u8; DATA_PROTECTION_KEY_BYTES] {
         derive_subkey(&self.master_key, b"openkache/v1/value")
     }
 }
 
-fn derive_subkey(master_key: &[u8; DATA_PROTECTION_KEY_BYTES], context: &[u8]) -> [u8; 32] {
+fn derive_subkey(
+    master_key: &[u8; DATA_PROTECTION_KEY_BYTES],
+    context: &[u8],
+) -> [u8; DATA_PROTECTION_KEY_BYTES] {
     let hkdf = Hkdf::<Sha256>::new(Some(b"openkache/v1"), master_key);
-    let mut output = [0; 32];
+    let mut output = [0; DATA_PROTECTION_KEY_BYTES];
     hkdf.expand(context, &mut output)
         .expect("SHA-256 HKDF supports a 32-byte output");
     output

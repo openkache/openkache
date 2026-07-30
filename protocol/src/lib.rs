@@ -12,92 +12,89 @@ pub const MAX_VARUINT_BYTES: usize = 9;
 pub const ITEM_KEY_BYTES: usize = 32;
 /// Absolute value or response payload ceiling representable by protocol v3.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
+
+const MIN_VARUINT_BYTES: usize = 1;
+const MIN_REQUEST_FRAME_BYTES: usize = REQUEST_FIXED_BYTES + MIN_VARUINT_BYTES * 2;
+const MIN_RESPONSE_FRAME_BYTES: usize = RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES;
+const MAX_REQUEST_PREFIX_BYTES: usize =
+    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_KEY_BYTES;
+const MAX_RESPONSE_PREFIX_BYTES: usize = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
+
 /// Conservative maximum complete request frame size.
-pub const MAX_REQUEST_FRAME_BYTES: usize =
-    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_KEY_BYTES + MAX_VALUE_BYTES;
+pub const MAX_REQUEST_FRAME_BYTES: usize = MAX_REQUEST_PREFIX_BYTES + MAX_VALUE_BYTES;
 /// Conservative maximum complete response frame size.
-pub const MAX_RESPONSE_FRAME_BYTES: usize =
-    RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
+pub const MAX_RESPONSE_FRAME_BYTES: usize = MAX_RESPONSE_PREFIX_BYTES + MAX_VALUE_BYTES;
 
 const SET_TTL_FLAG: u8 = 1 << 0;
 const SET_IF_ABSENT_FLAG: u8 = 1 << 1;
 const SET_IF_PRESENT_FLAG: u8 = 1 << 2;
 const KNOWN_SET_FLAGS: u8 = SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG;
 
-/// Operations supported by protocol v3.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Opcode {
-    Ping = 0x01,
-    Get = 0x02,
-    Set = 0x03,
-    Delete = 0x04,
-    Stats = 0x05,
-    Sync = 0x06,
-}
-
-impl TryFrom<u8> for Opcode {
-    type Error = ProtocolError;
-
-    fn try_from(value: u8) -> Result<Self> {
-        match value {
-            0x01 => Ok(Self::Ping),
-            0x02 => Ok(Self::Get),
-            0x03 => Ok(Self::Set),
-            0x04 => Ok(Self::Delete),
-            0x05 => Ok(Self::Stats),
-            0x06 => Ok(Self::Sync),
-            _ => Err(ProtocolError::UnknownOpcode(value)),
+macro_rules! wire_enum {
+    (
+        $(#[$metadata:meta])*
+        pub enum $name:ident {
+            $($variant:ident = $value:expr),+ $(,)?
         }
-    }
+        unknown => $unknown:ident
+    ) => {
+        $(#[$metadata])*
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        #[repr(u8)]
+        pub enum $name {
+            $($variant = $value),+
+        }
+
+        impl TryFrom<u8> for $name {
+            type Error = ProtocolError;
+
+            fn try_from(value: u8) -> Result<Self> {
+                match value {
+                    $(value if value == Self::$variant as u8 => Ok(Self::$variant),)+
+                    _ => Err(ProtocolError::$unknown(value)),
+                }
+            }
+        }
+    };
 }
 
-/// Status returned in every protocol response.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Status {
-    Ok = 0x00,
-    NotFound = 0x01,
-    Created = 0x02,
-    Replaced = 0x03,
-    Deleted = 0x04,
-    NotStored = 0x05,
-    InvalidRequest = 0x40,
-    UnsupportedOpcode = 0x41,
-    TooLarge = 0x42,
-    Overloaded = 0x43,
-    Timeout = 0x44,
-    Forbidden = 0x45,
-    InternalError = 0x7f,
+wire_enum! {
+    /// Operations supported by protocol v3.
+    pub enum Opcode {
+        Ping = 0x01,
+        Get = 0x02,
+        Set = 0x03,
+        Delete = 0x04,
+        Stats = 0x05,
+        Sync = 0x06,
+    }
+    unknown => UnknownOpcode
+}
+
+wire_enum! {
+    /// Status returned in every protocol response.
+    pub enum Status {
+        Ok = 0x00,
+        NotFound = 0x01,
+        Created = 0x02,
+        Replaced = 0x03,
+        Deleted = 0x04,
+        NotStored = 0x05,
+        InvalidRequest = 0x40,
+        UnsupportedOpcode = 0x41,
+        TooLarge = 0x42,
+        Overloaded = 0x43,
+        Timeout = 0x44,
+        Forbidden = 0x45,
+        InternalError = 0x7f,
+    }
+    unknown => UnknownStatus
 }
 
 impl Status {
     /// Returns whether this status represents a server-side error.
     pub fn is_error(self) -> bool {
         (self as u8) >= Status::InvalidRequest as u8
-    }
-}
-
-impl TryFrom<u8> for Status {
-    type Error = ProtocolError;
-
-    fn try_from(value: u8) -> Result<Self> {
-        match value {
-            0x00 => Ok(Self::Ok),
-            0x01 => Ok(Self::NotFound),
-            0x02 => Ok(Self::Created),
-            0x03 => Ok(Self::Replaced),
-            0x04 => Ok(Self::Deleted),
-            0x05 => Ok(Self::NotStored),
-            0x40 => Ok(Self::InvalidRequest),
-            0x41 => Ok(Self::UnsupportedOpcode),
-            0x42 => Ok(Self::TooLarge),
-            0x43 => Ok(Self::Overloaded),
-            0x44 => Ok(Self::Timeout),
-            0x45 => Ok(Self::Forbidden),
-            0x7f => Ok(Self::InternalError),
-            _ => Err(ProtocolError::UnknownStatus(value)),
-        }
     }
 }
 
@@ -363,40 +360,26 @@ impl Request {
 
     /// Encodes this request into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        validate_value_length(self.value.len())?;
-        validate_request_shape(
-            self.opcode,
-            self.key.is_some(),
-            self.set_options,
-            self.value.len(),
-        )?;
-        let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
-        let mut key_len_encoded = [0; MAX_VARUINT_BYTES];
-        let key_len_bytes = vu128::encode_u64(&mut key_len_encoded, key_len as u64);
-        let mut value_len_encoded = [0; MAX_VARUINT_BYTES];
-        let value_len_bytes = vu128::encode_u64(&mut value_len_encoded, self.value.len() as u64);
-        let mut ttl_encoded = [0; MAX_VARUINT_BYTES];
-        let ttl_bytes = self
-            .set_options
-            .ttl_ms
-            .map_or(0, |ttl_ms| vu128::encode_u64(&mut ttl_encoded, ttl_ms));
-        let prefix_len =
-            REQUEST_FIXED_BYTES + key_len_bytes + value_len_bytes + key_len + ttl_bytes;
-        let mut frame = Vec::with_capacity(prefix_len + self.value.len());
-        frame.push(self.opcode as u8);
-        frame.push(self.set_options.flags());
-        frame.extend_from_slice(&key_len_encoded[..key_len_bytes]);
-        frame.extend_from_slice(&value_len_encoded[..value_len_bytes]);
-        if let Some(key) = self.key {
-            frame.extend_from_slice(key.as_bytes());
-        }
-        frame.extend_from_slice(&ttl_encoded[..ttl_bytes]);
+        let prefix = self.encode_prefix()?;
+        let mut frame = Vec::with_capacity(prefix.len + self.value.len());
+        frame.extend_from_slice(prefix.as_slice());
         frame.extend_from_slice(&self.value);
         Ok(frame)
     }
 
     /// Encodes this request while reusing its value allocation when practical.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
+        let prefix = self.encode_prefix()?;
+        let prefix_len = prefix.len;
+        let value_len = self.value.len();
+        self.value.reserve(prefix_len);
+        self.value.resize(prefix_len + value_len, 0);
+        self.value.copy_within(0..value_len, prefix_len);
+        self.value[..prefix_len].copy_from_slice(prefix.as_slice());
+        Ok(self.value)
+    }
+
+    fn encode_prefix(&self) -> Result<RequestPrefix> {
         validate_value_length(self.value.len())?;
         validate_request_shape(
             self.opcode,
@@ -414,27 +397,22 @@ impl Request {
             .set_options
             .ttl_ms
             .map_or(0, |ttl_ms| vu128::encode_u64(&mut ttl_encoded, ttl_ms));
-        let prefix_len =
-            REQUEST_FIXED_BYTES + key_len_bytes + value_len_bytes + key_len + ttl_bytes;
-        let value_len = self.value.len();
-        self.value.reserve(prefix_len);
-        self.value.resize(prefix_len + value_len, 0);
-        self.value.copy_within(0..value_len, prefix_len);
-        self.value[0] = self.opcode as u8;
-        self.value[1] = self.set_options.flags();
+        let len = REQUEST_FIXED_BYTES + key_len_bytes + value_len_bytes + key_len + ttl_bytes;
+        let mut bytes = [0; MAX_REQUEST_PREFIX_BYTES];
+        bytes[0] = self.opcode as u8;
+        bytes[1] = self.set_options.flags();
         let mut offset = REQUEST_FIXED_BYTES;
-        self.value[offset..offset + key_len_bytes]
-            .copy_from_slice(&key_len_encoded[..key_len_bytes]);
+        bytes[offset..offset + key_len_bytes].copy_from_slice(&key_len_encoded[..key_len_bytes]);
         offset += key_len_bytes;
-        self.value[offset..offset + value_len_bytes]
+        bytes[offset..offset + value_len_bytes]
             .copy_from_slice(&value_len_encoded[..value_len_bytes]);
         offset += value_len_bytes;
         if let Some(key) = self.key {
-            self.value[offset..offset + key_len].copy_from_slice(key.as_bytes());
+            bytes[offset..offset + key_len].copy_from_slice(key.as_bytes());
             offset += key_len;
         }
-        self.value[offset..offset + ttl_bytes].copy_from_slice(&ttl_encoded[..ttl_bytes]);
-        Ok(self.value)
+        bytes[offset..offset + ttl_bytes].copy_from_slice(&ttl_encoded[..ttl_bytes]);
+        Ok(RequestPrefix { bytes, len })
     }
 
     /// Decodes and validates one complete request frame.
@@ -462,6 +440,17 @@ impl Request {
     }
 }
 
+struct RequestPrefix {
+    bytes: [u8; MAX_REQUEST_PREFIX_BYTES],
+    len: usize,
+}
+
+impl RequestPrefix {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 struct DecodedRequestFrame {
     opcode: Opcode,
     key: Option<ItemKey>,
@@ -472,7 +461,7 @@ struct DecodedRequestFrame {
 
 fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     let header = Request::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-        expected: REQUEST_FIXED_BYTES + 2,
+        expected: MIN_REQUEST_FRAME_BYTES,
         actual: frame.len(),
     })?;
     let expected = header
@@ -632,13 +621,9 @@ impl Response {
 
     /// Encodes this response into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        validate_value_length(self.payload.len())?;
-        let mut length = [0; MAX_VARUINT_BYTES];
-        let length_bytes = vu128::encode_u64(&mut length, self.payload.len() as u64);
-        let mut frame =
-            Vec::with_capacity(RESPONSE_FIXED_BYTES + length_bytes + self.payload.len());
-        frame.push(self.status as u8);
-        frame.extend_from_slice(&length[..length_bytes]);
+        let prefix = self.encode_prefix()?;
+        let mut frame = Vec::with_capacity(prefix.len + self.payload.len());
+        frame.extend_from_slice(prefix.as_slice());
         frame.extend_from_slice(&self.payload);
         Ok(frame)
     }
@@ -653,23 +638,31 @@ impl Response {
     ///
     /// Returns an error when the payload exceeds the protocol limit.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
-        validate_value_length(self.payload.len())?;
+        let prefix = self.encode_prefix()?;
         let payload_len = self.payload.len();
-        let mut length = [0; MAX_VARUINT_BYTES];
-        let length_bytes = vu128::encode_u64(&mut length, payload_len as u64);
-        let prefix_len = RESPONSE_FIXED_BYTES + length_bytes;
+        let prefix_len = prefix.len;
         self.payload.reserve(prefix_len);
         self.payload.resize(prefix_len + payload_len, 0);
         self.payload.copy_within(0..payload_len, prefix_len);
-        self.payload[0] = self.status as u8;
-        self.payload[RESPONSE_FIXED_BYTES..prefix_len].copy_from_slice(&length[..length_bytes]);
+        self.payload[..prefix_len].copy_from_slice(prefix.as_slice());
         Ok(self.payload)
+    }
+
+    fn encode_prefix(&self) -> Result<ResponsePrefix> {
+        validate_value_length(self.payload.len())?;
+        let mut length = [0; MAX_VARUINT_BYTES];
+        let length_bytes = vu128::encode_u64(&mut length, self.payload.len() as u64);
+        let len = RESPONSE_FIXED_BYTES + length_bytes;
+        let mut bytes = [0; MAX_RESPONSE_PREFIX_BYTES];
+        bytes[0] = self.status as u8;
+        bytes[RESPONSE_FIXED_BYTES..len].copy_from_slice(&length[..length_bytes]);
+        Ok(ResponsePrefix { bytes, len })
     }
 
     /// Decodes and validates one complete response frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
         let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + 1,
+            expected: MIN_RESPONSE_FRAME_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;
@@ -688,7 +681,7 @@ impl Response {
     /// Decodes a response while reusing the frame allocation for its payload.
     pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
         let header = Self::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + 1,
+            expected: MIN_RESPONSE_FRAME_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;
@@ -704,6 +697,17 @@ impl Response {
             status: header.status,
             payload: frame,
         })
+    }
+}
+
+struct ResponsePrefix {
+    bytes: [u8; MAX_RESPONSE_PREFIX_BYTES],
+    len: usize,
+}
+
+impl ResponsePrefix {
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
     }
 }
 
@@ -737,7 +741,7 @@ pub enum ProtocolError {
     #[error("{opcode:?} requires key_len={expected_key} and value_len={expected_value}")]
     InvalidRequestShape {
         opcode: Opcode,
-        expected_key: &'static str,
+        expected_key: usize,
         expected_value: &'static str,
     },
     #[error("if-absent and if-present conditions cannot be combined")]
@@ -841,9 +845,9 @@ fn validate_request_shape(
         return Ok(());
     }
     let (expected_key, expected_value) = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => ("0", "0"),
-        Opcode::Get | Opcode::Delete => ("32", "0"),
-        Opcode::Set => ("32", "any"),
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => (0, "0"),
+        Opcode::Get | Opcode::Delete => (ITEM_KEY_BYTES, "0"),
+        Opcode::Set => (ITEM_KEY_BYTES, "any"),
     };
     Err(ProtocolError::InvalidRequestShape {
         opcode,

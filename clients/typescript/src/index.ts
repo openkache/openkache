@@ -15,9 +15,6 @@ export type {
   Value_Envelope,
 } from "./value-codec.js"
 
-const MAX_VALUE_BYTES = 64 * 1024 * 1024
-const ENCRYPTION_OVERHEAD_BYTES = 40
-const MAX_PLAINTEXT_BYTES = MAX_VALUE_BYTES - ENCRYPTION_OVERHEAD_BYTES
 const TEXT_ENCODER = new TextEncoder()
 
 const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
@@ -171,11 +168,11 @@ export class OpenKache_Client {
       identity: owned_identity(options.identity),
       data_protection_key: options.data_protection_key.slice(),
       compression_enabled: compression.enabled !== false,
-      compression_level: compression.level ?? 1,
-      minimum_input_size: compression.minimum_input_size ?? 1_024,
-      minimum_savings: compression.minimum_savings ?? 64,
-      connect_timeout_ms: timeouts.connect_ms ?? 5_000,
-      request_timeout_ms: timeouts.request_ms ?? 2_000,
+      compression_level: compression.level,
+      minimum_input_size: compression.minimum_input_size,
+      minimum_savings: compression.minimum_savings,
+      connect_timeout_ms: timeouts.connect_ms,
+      request_timeout_ms: timeouts.request_ms,
     }
     try {
       const native_module = load_native_module(options.native_path)
@@ -244,7 +241,6 @@ export class OpenKache_Client {
     value: Value,
     options: Set_Options = {},
   ): Promise<Set_Outcome> {
-    validate_set_options(options)
     let envelope: Value_Envelope
     try {
       envelope = this.#value_codecs.encode(value)
@@ -298,8 +294,6 @@ export class OpenKache_Client {
     value: Uint8Array,
     options: Set_Options = {},
   ): Promise<Set_Outcome> {
-    validate_set_options(options)
-    validate_value_length(value)
     return this.#set_owned_bytes(key, value.slice(), options)
   }
 
@@ -421,97 +415,8 @@ function owned_identity(identity: Client_Identity | undefined): Client_Identity 
 }
 
 function validate_options(options: Client_Options): void {
-  if (options.address.length === 0) throw new OpenKache_Error("address must not be empty")
-  if (options.certificate.byteLength === 0) {
-    throw new OpenKache_Error("certificate must not be empty")
-  }
-  if (options.data_protection_key.byteLength !== 32) {
-    throw new OpenKache_Error(
-      `data_protection_key must contain 32 bytes, got ${options.data_protection_key.byteLength}`,
-    )
-  }
-  if (options.server_name !== undefined && options.server_name.length === 0) {
-    throw new OpenKache_Error("server_name must not be empty")
-  }
   if (options.native_path !== undefined && options.native_path.length === 0) {
     throw new OpenKache_Error("native_path must not be empty")
-  }
-  validate_identity(options.identity)
-  validate_compression(options.compression)
-  validate_timeout(options.timeouts?.connect_ms, "timeouts.connect_ms")
-  validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms")
-}
-
-function validate_identity(identity: Client_Identity | undefined): void {
-  if (identity === undefined) return
-  if (identity.certificate_chain.length === 0) {
-    throw new OpenKache_Error("identity.certificate_chain must not be empty")
-  }
-  if (identity.certificate_chain.length > 0xffff) {
-    throw new OpenKache_Error("identity.certificate_chain contains too many certificates")
-  }
-  for (const certificate of identity.certificate_chain) {
-    if (certificate.byteLength === 0) {
-      throw new OpenKache_Error("identity certificates must not be empty")
-    }
-  }
-  if (identity.private_key.byteLength === 0) {
-    throw new OpenKache_Error("identity.private_key must not be empty")
-  }
-}
-
-function validate_compression(compression: Zstandard_Options | undefined): void {
-  if (compression === undefined) return
-  if (
-    compression.level !== undefined &&
-    (!Number.isInteger(compression.level) ||
-      compression.level < 1 ||
-      compression.level > 22)
-  ) {
-    throw new OpenKache_Error("compression.level must be an integer from 1 through 22")
-  }
-  for (const [name, value] of [
-    ["minimum_input_size", compression.minimum_input_size],
-    ["minimum_savings", compression.minimum_savings],
-  ] as const) {
-    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
-      throw new OpenKache_Error(`compression.${name} must be a non-negative safe integer`)
-    }
-  }
-}
-
-function validate_timeout(timeout_ms: number | undefined, name: string): void {
-  if (
-    timeout_ms !== undefined &&
-    (!Number.isSafeInteger(timeout_ms) || timeout_ms <= 0)
-  ) {
-    throw new OpenKache_Error(`${name} must be a positive safe integer`)
-  }
-}
-
-function validate_value_length(value: Uint8Array): void {
-  if (value.byteLength > MAX_PLAINTEXT_BYTES) {
-    throw new OpenKache_Error(
-      `value contains ${value.byteLength} bytes, maximum is ${MAX_PLAINTEXT_BYTES}`,
-    )
-  }
-}
-
-function validate_set_options(options: Set_Options): void {
-  if (
-    options.condition !== undefined &&
-    options.condition !== "if_absent" &&
-    options.condition !== "if_present"
-  ) {
-    throw new OpenKache_Error(
-      "condition must be if_absent or if_present",
-    )
-  }
-  if (
-    options.ttl_ms !== undefined &&
-    (!Number.isSafeInteger(options.ttl_ms) || options.ttl_ms <= 0)
-  ) {
-    throw new OpenKache_Error("ttl_ms must be a positive safe integer")
   }
 }
 
