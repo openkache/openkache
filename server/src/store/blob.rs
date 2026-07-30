@@ -10,7 +10,7 @@ use std::time::Duration;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
-use compio::io::{AsyncReadAt, AsyncWriteAt};
+use compio::io::AsyncReadAt;
 
 use super::{ResourceGuard, open_direct_file, require_complete_direct_io};
 use crate::BUCKET_BYTES;
@@ -240,16 +240,18 @@ impl BlobSegment {
             buffer[chunk_logical_bytes..chunk_physical_bytes].fill(0);
 
             let write_offset = segment_base + logical_written as u64;
-            let write = self
-                .file
-                .write_at(buffer.slice(..chunk_physical_bytes), write_offset);
+            let write = super::write_all_at_retrying_transient(
+                &mut self.file,
+                buffer.slice(..chunk_physical_bytes),
+                write_offset,
+            );
             let BufResult(result, returned) = compio::runtime::time::timeout(
                 Duration::from_micros(self.write_max_time_us),
                 write,
             )
             .await
             .map_err(|_| KvError::Timeout("Blob Segment write"))?;
-            require_complete_direct_io("Blob Segment write", result?, chunk_physical_bytes)?;
+            super::contextualize_would_block("Blob Segment write", result)?;
             buffer = returned.into_inner();
             logical_written += chunk_logical_bytes;
             physical_written += chunk_physical_bytes as u64;
@@ -278,14 +280,18 @@ impl BlobSegment {
             compio::runtime::time::timeout(Duration::from_micros(self.read_max_time_us), read)
                 .await
                 .map_err(|_| KvError::Timeout("Blob Segment read"))?;
-        require_complete_direct_io("Blob Segment read", result?, read_len)?;
+        require_complete_direct_io(
+            "Blob Segment read",
+            super::contextualize_would_block("Blob Segment read", result)?,
+            read_len,
+        )?;
         let relative_start = (value_start - read_start) as usize;
         let relative_end = relative_start + blob_ref.value_len as usize;
         Ok(bytes[relative_start..relative_end].to_vec())
     }
 
     pub(crate) async fn sync(&self) -> Result<()> {
-        self.file.sync_data().await?;
+        super::contextualize_would_block("Blob Segment sync", self.file.sync_data().await)?;
         Ok(())
     }
 

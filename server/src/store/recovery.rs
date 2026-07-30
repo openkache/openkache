@@ -7,7 +7,7 @@ use std::time::Duration;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
 use compio::fs::{File, OpenOptions};
-use compio::io::{AsyncReadAt, AsyncWriteAt};
+use compio::io::AsyncReadAt;
 
 use super::require_complete_direct_io;
 use crate::BUCKET_BYTES;
@@ -76,7 +76,7 @@ pub(crate) async fn initialize_segment_file(
         "Segment file header write",
     )
     .await?;
-    file.sync_data().await?;
+    super::contextualize_would_block("Segment file header sync", file.sync_data().await)?;
     Ok(())
 }
 
@@ -221,12 +221,16 @@ pub(crate) async fn write_table_checkpoint(
             logical_payload_bytes,
         );
         checkpoint_checksum.update(&bytes);
-        let write = file.write_at(bytes, (BUCKET_BYTES + payload_offset) as u64);
+        let write = super::write_all_at_retrying_transient(
+            &mut file,
+            bytes,
+            (BUCKET_BYTES + payload_offset) as u64,
+        );
         let BufResult(result, returned) =
             compio::runtime::time::timeout(Duration::from_micros(config.write_max_time_us), write)
                 .await
                 .map_err(|_| KvError::Timeout("Table checkpoint write"))?;
-        require_complete_direct_io("Table checkpoint write", result?, extent_bytes)?;
+        super::contextualize_would_block("Table checkpoint write", result)?;
         payload_buffer = returned.into_inner();
         payload_offset += extent_bytes;
     }
@@ -239,7 +243,7 @@ pub(crate) async fn write_table_checkpoint(
         config.write_max_time_us,
     )
     .await?;
-    file.sync_data().await?;
+    super::contextualize_would_block("Table checkpoint sync", file.sync_data().await)?;
     drop(file);
     replace_checkpoint(next_path, checkpoint_path).await?;
     Ok(())
@@ -666,13 +670,12 @@ async fn write_checkpoint_extent(
     offset: u64,
     timeout_us: u64,
 ) -> Result<()> {
-    let expected = bytes.len();
-    let write = file.write_at(bytes, offset);
+    let write = super::write_all_at_retrying_transient(file, bytes, offset);
     let BufResult(result, _) =
         compio::runtime::time::timeout(Duration::from_micros(timeout_us), write)
             .await
             .map_err(|_| KvError::Timeout("Table checkpoint write"))?;
-    require_complete_direct_io("Table checkpoint write", result?, expected)
+    super::contextualize_would_block("Table checkpoint write", result)
 }
 
 async fn replace_checkpoint(
@@ -705,7 +708,7 @@ pub(crate) async fn commit_segment(
         "SG control page write",
     )
     .await?;
-    file.sync_data().await?;
+    super::contextualize_would_block("SG control page sync", file.sync_data().await)?;
     Ok((BUCKET_BYTES as u64, buffer))
 }
 
@@ -726,7 +729,7 @@ pub(crate) async fn invalidate_segment(
         "SG control page invalidation",
     )
     .await?;
-    file.sync_data().await?;
+    super::contextualize_would_block("SG invalidation sync", file.sync_data().await)?;
     Ok((BUCKET_BYTES as u64, buffer))
 }
 
@@ -866,7 +869,11 @@ async fn read_page_into(
         compio::runtime::time::timeout(Duration::from_micros(timeout_us), read)
             .await
             .map_err(|_| KvError::Timeout(operation))?;
-    require_complete_direct_io(operation, result?, BUCKET_BYTES)?;
+    require_complete_direct_io(
+        operation,
+        super::contextualize_would_block(operation, result)?,
+        BUCKET_BYTES,
+    )?;
     Ok(bytes)
 }
 
@@ -877,12 +884,12 @@ async fn write_page(
     timeout_us: u64,
     operation: &'static str,
 ) -> Result<DirectIoBuffer> {
-    let write = file.write_at(bytes, offset);
+    let write = super::write_all_at_retrying_transient(file, bytes, offset);
     let BufResult(result, bytes) =
         compio::runtime::time::timeout(Duration::from_micros(timeout_us), write)
             .await
             .map_err(|_| KvError::Timeout(operation))?;
-    require_complete_direct_io(operation, result?, BUCKET_BYTES)?;
+    super::contextualize_would_block(operation, result)?;
     debug_assert_eq!(bytes.len(), BUCKET_BYTES);
     Ok(bytes)
 }

@@ -16,9 +16,10 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compio::BufResult;
+use compio::buf::{IntoInner, IoBuf};
 use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
-use compio::io::AsyncWriteAtExt;
+use compio::io::AsyncWriteAt;
 use openkache_protocol::{SetCondition, SetOptions};
 
 use crate::BUCKET_BYTES;
@@ -295,6 +296,77 @@ fn storage_operation_error(guard: &ResourceGuard, error: KvError) -> KvError {
         KvError::Io(error) => storage_io_error(guard, error),
         error => error,
     }
+}
+
+pub(crate) fn contextualize_would_block<T>(
+    operation: &'static str,
+    result: std::io::Result<T>,
+) -> Result<T> {
+    result.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            KvError::Worker(format!("{operation}: {error}"))
+        } else {
+            error.into()
+        }
+    })
+}
+
+/// Completes a positional write, including short completions and transient
+/// kernel retry results. Callers must apply their operation deadline around
+/// this future.
+pub(crate) async fn write_all_at_retrying_transient<W, T>(
+    writer: &mut W,
+    mut buffer: T,
+    position: u64,
+) -> BufResult<(), T>
+where
+    W: AsyncWriteAt + ?Sized,
+    T: IoBuf,
+{
+    let length = buffer.buf_len();
+    let mut written = 0usize;
+    while written < length {
+        let Some(write_position) = position.checked_add(written as u64) else {
+            return BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "write position overflowed u64",
+                )),
+                buffer,
+            );
+        };
+        let write = writer.write_at(buffer.slice(written..), write_position);
+        let BufResult(result, returned) = write.await;
+        buffer = returned.into_inner();
+        match result {
+            Ok(0) => {
+                return BufResult(
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    )),
+                    buffer,
+                );
+            }
+            Ok(completed) if completed <= length - written => written += completed,
+            Ok(_) => {
+                return BufResult(
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "write completed beyond the remaining buffer",
+                    )),
+                    buffer,
+                );
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(error) => return BufResult(Err(error), buffer),
+        }
+    }
+    BufResult(Ok(()), buffer)
 }
 
 pub(crate) fn require_complete_direct_io(
@@ -1195,19 +1267,19 @@ impl Kvkache {
         let fill_used_bytes = active.used_bytes() as u64;
         let sg_index = active.sg_index;
         let offset = self.config.segment_data_offset(sg_index);
-        let write = self.data.write_all_at(active.bytes, offset);
+        let write = write_all_at_retrying_transient(&mut self.data, active.bytes, offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
             Duration::from_micros(self.config.write_max_time_us),
             write,
         )
         .await
         .map_err(|_| KvError::Timeout("Segment write"))?;
-        result?;
+        contextualize_would_block("Segment data write", result)?;
         self.io
             .data_written
             .set(self.io.data_written.get() + bytes.len() as u64);
         self.blob_segment.sync().await?;
-        self.data.sync_data().await?;
+        contextualize_would_block("Segment data sync", self.data.sync_data().await)?;
         let commit = SegmentCommit {
             sg_index,
             generation: self.next_generation,
