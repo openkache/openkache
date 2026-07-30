@@ -52,21 +52,45 @@ pub struct ItemValue {
 
 impl ItemValue {
     /// Wraps exact opaque bytes for raw storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Complete bytes to store without interpretation.
+    ///
+    /// # Returns
+    ///
+    /// An item value that preserves the supplied allocation.
     pub const fn new(bytes: Vec<u8>) -> Self {
         Self { bytes }
     }
 
     /// Wraps exact plaintext bytes for raw protocol storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Exact plaintext bytes that bypass formatted-value processing.
+    ///
+    /// # Returns
+    ///
+    /// An item value that preserves the supplied allocation.
     pub const fn plaintext(bytes: Vec<u8>) -> Self {
         Self::new(bytes)
     }
 
     /// Returns the exact opaque bytes stored by the server.
+    ///
+    /// # Returns
+    ///
+    /// A borrowed view of the complete item value.
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
 
     /// Consumes the value and returns its exact opaque bytes.
+    ///
+    /// # Returns
+    ///
+    /// The complete owned item-value allocation.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
@@ -92,6 +116,14 @@ pub enum JsonValue {
 impl JsonValue {
     /// Creates a finite JSON number.
     ///
+    /// # Arguments
+    ///
+    /// * `value` - Finite IEEE-754 binary64 value to represent.
+    ///
+    /// # Returns
+    ///
+    /// A logical JSON number.
+    ///
     /// # Errors
     ///
     /// Returns an error for NaN or positive or negative infinity.
@@ -106,6 +138,14 @@ impl JsonValue {
     }
 
     /// Creates a JSON object with unique property names.
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - Object properties in any order.
+    ///
+    /// # Returns
+    ///
+    /// A logical JSON object. Encoding later applies canonical property ordering.
     ///
     /// # Errors
     ///
@@ -308,6 +348,10 @@ impl Default for ValueCodec {
 
 impl ValueCodec {
     /// Creates an unprotected formatted codec without compression.
+    ///
+    /// # Returns
+    ///
+    /// A codec that emits version 1 containers without compression or encryption.
     pub const fn plaintext() -> Self {
         Self {
             compression: Compression::Disabled,
@@ -317,6 +361,14 @@ impl ValueCodec {
     }
 
     /// Creates an unprotected formatted codec with an explicit compression policy.
+    ///
+    /// # Arguments
+    ///
+    /// * `compression` - Compression policy applied to serialized values.
+    ///
+    /// # Returns
+    ///
+    /// An unprotected version 1 codec using the supplied compression policy.
     ///
     /// # Errors
     ///
@@ -332,6 +384,15 @@ impl ValueCodec {
 
     /// Creates the recommended Robust encrypted codec.
     ///
+    /// # Arguments
+    ///
+    /// * `key` - Application-managed data protection key.
+    /// * `compression` - Compression policy applied before encryption.
+    ///
+    /// # Returns
+    ///
+    /// A version 1 codec using Robust AES-256-GCM-SIV protection.
+    ///
     /// # Errors
     ///
     /// Returns an error when the compression level is unsupported.
@@ -340,6 +401,16 @@ impl ValueCodec {
     }
 
     /// Creates an encrypted codec with the selected protection profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Application-managed data protection key.
+    /// * `compression` - Compression policy applied before encryption.
+    /// * `encryption` - Compact or Robust authenticated-encryption profile.
+    ///
+    /// # Returns
+    ///
+    /// A version 1 codec using the selected protection profile.
     ///
     /// # Errors
     ///
@@ -362,6 +433,15 @@ impl ValueCodec {
 
     /// Creates the recommended Robust codec from exact data-protection-key bytes.
     ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact 32-byte data protection key.
+    /// * `compression` - Compression policy applied before encryption.
+    ///
+    /// # Returns
+    ///
+    /// A version 1 codec using Robust AES-256-GCM-SIV protection.
+    ///
     /// # Errors
     ///
     /// Returns an error when the compression level is unsupported.
@@ -375,6 +455,16 @@ impl ValueCodec {
     }
 
     /// Creates a protected codec from exact key bytes and an explicit profile.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact 32-byte data protection key.
+    /// * `compression` - Compression policy applied before encryption.
+    /// * `encryption` - Compact or Robust authenticated-encryption profile.
+    ///
+    /// # Returns
+    ///
+    /// A version 1 codec using the selected protection profile.
     ///
     /// # Errors
     ///
@@ -390,6 +480,15 @@ impl ValueCodec {
     }
 
     /// Encodes a core logical value for opaque server storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key bound into authenticated encryption.
+    /// * `value` - Raw or logical JSON value to serialize.
+    ///
+    /// # Returns
+    ///
+    /// A complete version 1 value-format container.
     ///
     /// # Errors
     ///
@@ -439,16 +538,53 @@ impl ValueCodec {
     }
 
     /// Encodes exact application bytes as the standard Raw serialization.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key bound into authenticated encryption.
+    /// * `plaintext` - Exact application bytes to copy into Raw serialization.
+    ///
+    /// # Returns
+    ///
+    /// A complete version 1 value-format container.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for size-limit violations, compression failures, entropy failures, or
+    /// encryption failures.
     pub fn seal(&self, key: ItemKey, plaintext: &[u8]) -> Result<ItemValue> {
         self.seal_owned(key, plaintext.to_vec())
     }
 
     /// Encodes owned application bytes as the standard Raw serialization.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key bound into authenticated encryption.
+    /// * `plaintext` - Owned application bytes to use as Raw serialization.
+    ///
+    /// # Returns
+    ///
+    /// A complete version 1 value-format container.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for size-limit violations, compression failures, entropy failures, or
+    /// encryption failures.
     pub fn seal_owned(&self, key: ItemKey, plaintext: Vec<u8>) -> Result<ItemValue> {
         self.encode(key, Value::Raw(plaintext))
     }
 
     /// Authenticates and decodes a formatted value into the core logical model.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key expected by authenticated encryption.
+    /// * `encoded` - Complete version 1 container returned by the raw client.
+    ///
+    /// # Returns
+    ///
+    /// The decoded Raw or logical JSON value.
     ///
     /// # Errors
     ///
@@ -535,6 +671,15 @@ impl ValueCodec {
     }
 
     /// Decodes a formatted Raw value and returns its exact application bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key expected by authenticated encryption.
+    /// * `encoded` - Complete version 1 container returned by the raw client.
+    ///
+    /// # Returns
+    ///
+    /// The exact Raw serialization payload.
     ///
     /// # Errors
     ///

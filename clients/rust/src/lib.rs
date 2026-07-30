@@ -74,6 +74,14 @@ macro_rules! builder_methods {
             }
 
             /// Selects the authenticated-encryption profile for stored values.
+            ///
+            /// # Arguments
+            ///
+            /// * `encryption` - Compact or Robust authenticated-encryption profile.
+            ///
+            /// # Returns
+            ///
+            /// This builder with the selected value protection profile.
             pub fn encryption(mut self, encryption: value::Encryption) -> Self {
                 self.inner = self.inner.encryption(encryption);
                 self

@@ -116,4 +116,5 @@ does not provide one.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
-- `src/value_envelope.rs` contains the current TypeScript codec envelope.
+- `src/value_envelope.rs` contains the legacy pre-v1 TypeScript codec envelope
+  pending replacement by a thin logical-value adapter.

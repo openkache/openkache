@@ -161,6 +161,14 @@ impl DataProtectionKey {
     }
 
     /// Derives the deterministic BLAKE3 item key for application key bytes.
+    ///
+    /// # Arguments
+    ///
+    /// * `application_key` - Exact application key bytes without normalization or framing.
+    ///
+    /// # Returns
+    ///
+    /// The deterministic item key scoped to this data protection key.
     pub fn derive_item_key(&self, application_key: impl AsRef<[u8]>) -> ItemKey {
         ItemKey::from_bytes(
             *blake3::keyed_hash(&self.item_key_root, application_key.as_ref()).as_bytes(),

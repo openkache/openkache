@@ -31,6 +31,16 @@ impl DataProtection {
 
     /// Creates protection with an explicit authenticated-encryption profile.
     ///
+    /// # Arguments
+    ///
+    /// * `key` - Application-managed data protection key.
+    /// * `compression` - Compression policy applied before encryption.
+    /// * `encryption` - Compact or Robust authenticated-encryption profile.
+    ///
+    /// # Returns
+    ///
+    /// A reusable application-key and value transformation.
+    ///
     /// # Errors
     ///
     /// Returns an error for an unprotected profile or invalid compression settings.
@@ -50,6 +60,15 @@ impl DataProtection {
 
     /// Serializes and protects one core logical value.
     ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key bound into authenticated encryption.
+    /// * `value` - Raw or logical JSON value to encode.
+    ///
+    /// # Returns
+    ///
+    /// A complete value-format container for opaque storage.
+    ///
     /// # Errors
     ///
     /// Returns an error for invalid logical values, size-limit violations, compression failures,
@@ -59,6 +78,15 @@ impl DataProtection {
     }
 
     /// Authenticates and decodes one stored value into the core logical model.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Exact item key expected by authenticated encryption.
+    /// * `encoded` - Complete value-format container returned by the raw client.
+    ///
+    /// # Returns
+    ///
+    /// The decoded Raw or logical JSON value.
     ///
     /// # Errors
     ///

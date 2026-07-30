@@ -80,6 +80,14 @@ macro_rules! protected_builder_methods {
             }
 
             /// Selects the authenticated-encryption profile for stored values.
+            ///
+            /// # Arguments
+            ///
+            /// * `encryption` - Compact or Robust authenticated-encryption profile.
+            ///
+            /// # Returns
+            ///
+            /// This builder with the selected value protection profile.
             pub fn encryption(mut self, encryption: Encryption) -> Self {
                 self.protection.encryption = encryption;
                 self
@@ -112,6 +120,19 @@ macro_rules! protected_client_methods {
         }
 
         /// Retrieves a formatted value in the core logical model.
+        ///
+        /// # Arguments
+        ///
+        /// * `application_key` - Exact application key bytes used for item-key derivation.
+        ///
+        /// # Returns
+        ///
+        /// The decoded value or a not-found outcome.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when transport, authentication, decompression, or deserialization
+        /// fails.
         pub async fn get_value(
             &self,
             application_key: impl AsRef<[u8]>,
@@ -137,6 +158,21 @@ macro_rules! protected_client_methods {
         }
 
         /// Serializes, protects, and stores a core logical value.
+        ///
+        /// # Arguments
+        ///
+        /// * `application_key` - Exact application key bytes used for item-key derivation.
+        /// * `value` - Raw or logical JSON value to encode.
+        /// * `options` - Existence condition and optional expiration.
+        ///
+        /// # Returns
+        ///
+        /// The server's set outcome.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error when serialization, protection, transport, or the server operation
+        /// fails.
         pub async fn set_value(
             &self,
             application_key: impl AsRef<[u8]>,
