@@ -9,8 +9,8 @@ The package provides binary-safe cache operations over one authenticated QUIC
 connection. It accepts exact 32-byte item keys and plaintext values and uses a
 bounded pool of reusable bidirectional streams.
 
-The [client status table](../README.md#sdk-status) is the canonical source for
-this package's implementation and migration status.
+The [client status table](../README.md#sdk-status) describes this package's
+implementation and migration status.
 
 ## Build and package
 

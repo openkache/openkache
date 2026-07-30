@@ -5,10 +5,10 @@ bindings.
 
 ## Purpose
 
-The core owns connection lifecycle, TLS, retries, stream concurrency, protocol
-operations, application-key protection, compression, encryption, and
-formatted-value processing. Language adapters convert native types and delegate
-to this crate.
+The core handles connection lifecycle, TLS, retries, stream concurrency,
+protocol operations, application-key protection, compression, encryption, and
+formatted-value processing. Language adapters convert native types and
+delegate to this crate.
 
 The main API layers are:
 
@@ -22,15 +22,15 @@ The main API layers are:
 The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
 adapter depends on this core directly.
 
-## Documentation ownership
+## Related documentation
 
-- The [client index](../README.md) owns binding architecture and implementation
-  status.
-- The [value-format specification](../VALUE_FORMAT.md) owns formatted value
+- The [client index](../README.md) covers binding architecture and
+  implementation status.
+- The [value-format specification](../VALUE_FORMAT.md) defines formatted value
   bytes and algorithms.
-- The [wire protocol specification](../../protocol/SPEC.md) owns framing,
+- The [wire protocol specification](../../protocol/SPEC.md) defines framing,
   operations, limits, and retry ambiguity.
-- This README owns core crate usage, configuration, and source layout.
+- This README covers core crate usage, configuration, and source layout.
 
 This README intentionally does not specify protected-value bytes. Consult the
 client index for implemented-format status and the value-format specification
@@ -49,8 +49,7 @@ cargo fmt --check
 
 ## Usage
 
-Use the raw layer when the caller already owns the exact protocol key and
-value:
+Use the raw layer when the caller supplies the exact protocol key and value:
 
 ```rust
 use openkache_client_core::{ItemKey, ItemValue, RawClient, SetOptions};
@@ -89,11 +88,12 @@ does not provide one.
 
 ## Core components
 
-- `src/lib.rs` owns raw lifecycle, retries, operations, and stable errors.
-- `src/transport.rs` owns reusable stream lanes and backend-neutral deadlines.
-- `src/config.rs` owns public transport and TLS configuration wrappers.
-- `src/key.rs` owns exact item keys and data-protection key handling.
-- `src/protection.rs` owns application-key and value transformations.
+- `src/lib.rs` provides raw lifecycle, retries, operations, and stable errors.
+- `src/transport.rs` manages reusable stream lanes and backend-neutral
+  deadlines.
+- `src/config.rs` provides public transport and TLS configuration wrappers.
+- `src/key.rs` handles exact item keys and data-protection keys.
+- `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` contains the current compression and encryption
   implementation.

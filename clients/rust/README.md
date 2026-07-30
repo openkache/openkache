@@ -129,7 +129,7 @@ client
     .await?;
 ```
 
-Use the raw layer when the application already owns protocol values:
+Use the raw layer when the application supplies exact protocol values:
 
 ```rust
 use openkache_client::{ItemKey, ItemValue, SetOptions};
@@ -148,7 +148,7 @@ The raw layer bypasses key derivation and formatted-value processing.
 The builder configures explicit trust, mutual TLS, request deadlines, retries
 for response-safe operations, `max_in_flight`, and compression.
 
-One client owns one QUIC connection and lazily opens reusable bidirectional
+One client maintains one QUIC connection and lazily opens reusable bidirectional
 stream lanes up to `max_in_flight`. One request is active on each lane.
 Additional operations wait for a free lane.
 
@@ -166,5 +166,5 @@ follow the [wire protocol rules](../../protocol/SPEC.md#retry-and-outcome-rules)
 
 - `src/lib.rs` exposes the ergonomic Rust client and request builders.
 - `src/ffi.rs` exposes the versioned C ABI.
-- [`../core`](../core) owns shared transport, protocol, protection, and
+- [`../core`](../core) provides shared transport, protocol, protection, and
   binding behavior.

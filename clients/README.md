@@ -4,20 +4,19 @@ OpenKache client packages share one Rust engine for connection management,
 protocol operations, key protection, compression, and encryption. Implemented
 language packages add only their native API and runtime integration.
 
-## Documentation ownership
+## Documentation
 
-Each client topic has one canonical document:
+Shared client topics are documented here:
 
-| Topic | Canonical document |
+| Topic | Reference |
 |---|---|
 | SDK inventory, implementation status, and binding boundaries | This README |
 | Formatted value bytes, serialization, compression, and application-level encryption | [Value format](VALUE_FORMAT.md) |
 | QUIC framing, operations, limits, and retry ambiguity | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
 
-Package documentation links to these documents instead of restating shared
-formats or protocol behavior. Changes to a shared contract belong in its
-canonical specification.
+Package documentation links to these references instead of restating shared
+formats or protocol behavior.
 
 ## SDK status
 
@@ -50,7 +49,7 @@ specification.
 The shared layers have these responsibilities:
 
 - `protocol/` defines and validates server-visible wire frames.
-- `core/` owns transport, TLS, retries, raw operations, key derivation,
+- `core/` handles transport, TLS, retries, raw operations, key derivation,
   compression, encryption, and formatted-value processing.
 - implemented language packages convert native values and configuration into
   core types, expose runtime-appropriate asynchronous APIs, and clean up native
@@ -88,5 +87,5 @@ are intentionally undefined until each binding is implemented.
 ## Shared configuration
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
-Each implemented package README owns its accepted configuration fields,
-platform requirements, and packaging commands.
+See each implemented package README for accepted configuration fields, platform
+requirements, and packaging commands.

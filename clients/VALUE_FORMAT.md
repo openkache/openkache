@@ -4,10 +4,9 @@ This document specifies the complete client-owned representation of values store
 OpenKache's formatted APIs. It covers serialization, compression, authenticated encryption, key
 derivation, validation, and the boundary between the shared client core and language adapters.
 
-This is the sole source of truth for formatted value bytes. The
-[client index](README.md) owns implementation and migration status, while the
-[wire protocol specification](../protocol/SPEC.md) owns server-visible framing
-and operation semantics.
+The [client index](README.md) describes implementation and migration status.
+The [wire protocol specification](../protocol/SPEC.md) defines server-visible
+framing and operation semantics.
 
 The format is a pre-release design. Implementations may replace earlier
 envelope and value-protection code without a compatibility path. Format version
@@ -187,7 +186,7 @@ the format entirely.
 ### Canonical JSON
 
 JSON serialization follows the
-[JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785) in RFC 8785. The core owns
+[JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785) in RFC 8785. The core handles
 both encoding and decoding. Language adapters convert native values into the core's logical value
 model and MUST NOT call facilities such as `JSON.stringify` to produce stored bytes.
 
@@ -559,7 +558,7 @@ returning that error.
 
 ## Protocol integration
 
-The [wire protocol specification](../protocol/SPEC.md) owns value limits,
+The [wire protocol specification](../protocol/SPEC.md) defines value limits,
 server opacity, and `SET` flags. This format begins with the exact opaque value
 slice carried by a protocol request or response; it does not add protocol
 fields.
@@ -570,7 +569,7 @@ formatted APIs.
 
 ## Core and language responsibilities
 
-`openkache-client-core` owns:
+`openkache-client-core` handles:
 
 - value-format parsing and production;
 - canonical VU128 handling;
@@ -581,7 +580,7 @@ formatted APIs.
 - format validation and stable error categories;
 - the protected application-key and plaintext-value operations used by bindings.
 
-Language adapters own only:
+Language adapters handle only:
 
 - conversion between native values and core logical values;
 - transfer of raw byte buffers without reformatting them;

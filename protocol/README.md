@@ -8,10 +8,10 @@ by OpenKache protocol v3 clients and servers.
 The crate provides validated request and response types so implementations do
 not duplicate framing, opcode, status, or size checks.
 
-The [wire protocol specification](SPEC.md) is the sole normative source for
-transport negotiation, frame bytes, operation semantics, limits, malformed
-input handling, and retry ambiguity. This README owns only crate usage,
-implementation structure, and project status.
+The [wire protocol specification](SPEC.md) defines transport negotiation, frame
+bytes, operation semantics, limits, malformed input handling, and retry
+ambiguity. This README covers crate usage, implementation structure, and
+project status.
 
 ## Commands
 

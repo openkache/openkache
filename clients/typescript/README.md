@@ -86,8 +86,7 @@ such as Base64.
 Custom `Value_Codec` implementations can register Protobuf, FlatBuffers, or
 application formats. The codec registry is a package API, not the shared
 value-format registry. The
-[client status table](../README.md#sdk-status) is the canonical migration
-record.
+[client status table](../README.md#sdk-status) tracks format migration.
 
 The runtime-neutral codec layer is available from
 `@openkache/client/value-codec`.
@@ -123,8 +122,8 @@ transport. The `value-codec` subpath is runtime-neutral, but the client
 connection API is not a browser transport.
 
 Every connection and cache method returns a Promise. The adapter runs native
-networking outside the JavaScript event loop and owns one reusable connection.
-Call and await `close()` when finished.
+networking outside the JavaScript event loop and maintains one reusable
+connection. Call and await `close()` when finished.
 
 Protocol limits, operation outcomes, and retry safety follow the
 [wire protocol specification](../../protocol/SPEC.md).

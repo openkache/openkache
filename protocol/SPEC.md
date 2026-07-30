@@ -6,7 +6,6 @@ This document is the normative specification for OpenKache wire protocol
 version 3. An implementation conforms to version 3 only when its transport,
 framing, validation, and operation behavior satisfy this document.
 
-This is the sole source of truth for server-visible protocol behavior.
 Client-owned formatted values are specified separately by the
 [OpenKache value format](../clients/VALUE_FORMAT.md).
 
