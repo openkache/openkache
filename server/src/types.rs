@@ -1,6 +1,10 @@
 //! Shared byte-oriented types used across the KV cache.
 
 use openkache_protocol::ValueFlags;
+use std::ops::Range;
+use std::sync::Arc;
+
+use crate::store::DirectIoBuffer;
 
 /// Number of bytes in every server-derived storage key.
 pub const STORAGE_KEY_BYTES: usize = 32;
@@ -80,6 +84,71 @@ impl std::ops::Deref for EncodedValue {
 
     fn deref(&self) -> &Self::Target {
         &self.bytes
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum RetrievedValue {
+    Owned(EncodedValue),
+    Shared(Arc<EncodedValue>),
+    Direct {
+        buffer: DirectIoBuffer,
+        value_range: Range<usize>,
+        flags: ValueFlags,
+    },
+}
+
+impl RetrievedValue {
+    pub(crate) fn direct(
+        buffer: DirectIoBuffer,
+        value_range: Range<usize>,
+        flags: ValueFlags,
+    ) -> Self {
+        debug_assert!(value_range.start <= value_range.end);
+        debug_assert!(value_range.end <= buffer.len());
+        Self::Direct {
+            buffer,
+            value_range,
+            flags,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Owned(value) => &value.bytes,
+            Self::Shared(value) => &value.bytes,
+            Self::Direct {
+                buffer,
+                value_range,
+                ..
+            } => &buffer[value_range.clone()],
+        }
+    }
+
+    pub(crate) fn flags(&self) -> ValueFlags {
+        match self {
+            Self::Owned(value) => value.flags,
+            Self::Shared(value) => value.flags,
+            Self::Direct { flags, .. } => *flags,
+        }
+    }
+
+    pub(crate) fn into_encoded(self) -> EncodedValue {
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => {
+                Arc::try_unwrap(value).unwrap_or_else(|value| value.as_ref().clone())
+            }
+            Self::Direct {
+                buffer,
+                value_range,
+                flags,
+            } => EncodedValue::new(buffer[value_range].to_vec(), flags),
+        }
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.into_encoded().bytes
     }
 }
 

@@ -1,8 +1,9 @@
 //! Core cache engine and its Segment lifecycle.
 //!
-//! A bounded pending map coalesces the latest writes before flush. Live Items
-//! and Tombstones form a circular SG log; each SG is reused with its paired
-//! dense Blob generation.
+//! A bounded pending map coalesces the latest writes before flush. Capacity
+//! flushes seal at most one worker-local generation for background I/O while a
+//! new pending map accepts requests. The active map shadows that sealed RAM
+//! generation, which shadows the stable circular SG and paired dense Blob log.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -22,10 +23,11 @@ use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
 use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
 use compio::io::{AsyncReadAt, AsyncWriteAt};
+use compio::runtime::JoinHandle;
 use futures_util::future::join_all;
 use openkache_protocol::{SetCondition, SetOptions};
 
-use crate::types::EncodedValue;
+use crate::types::{EncodedValue, RetrievedValue};
 use crate::*;
 
 mod blob;
@@ -54,27 +56,40 @@ pub(crate) const BUCKET_READ_POOL_CAPACITY: usize = 256;
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct DirectIoPage([u8; BUCKET_BYTES]);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DirectIoBuffer {
-    pages: Vec<DirectIoPage>,
+    pages: Vec<MaybeUninit<DirectIoPage>>,
     initialized_len: usize,
+}
+
+impl std::fmt::Debug for DirectIoBuffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DirectIoBuffer")
+            .field("len", &self.initialized_len)
+            .field("capacity", &self.capacity())
+            .finish()
+    }
 }
 
 impl DirectIoBuffer {
     pub(crate) fn zeroed(len: usize) -> Self {
-        assert!(len > 0 && len.is_multiple_of(BUCKET_BYTES));
-        Self {
-            pages: (0..len / BUCKET_BYTES)
-                .map(|_| DirectIoPage([0; BUCKET_BYTES]))
-                .collect(),
-            initialized_len: len,
+        let mut buffer = Self::for_read(len);
+        for page in &mut buffer.pages {
+            page.write(DirectIoPage([0; BUCKET_BYTES]));
         }
+        buffer.initialized_len = len;
+        buffer
     }
 
     pub(crate) fn for_read(len: usize) -> Self {
-        let mut buffer = Self::zeroed(len);
-        buffer.initialized_len = 0;
-        buffer
+        assert!(len > 0 && len.is_multiple_of(BUCKET_BYTES));
+        let page_count = len / BUCKET_BYTES;
+        let mut pages = Vec::with_capacity(page_count);
+        pages.resize_with(page_count, MaybeUninit::uninit);
+        Self {
+            pages,
+            initialized_len: 0,
+        }
     }
 
     fn capacity(&self) -> usize {
@@ -94,8 +109,8 @@ impl Deref for DirectIoBuffer {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY: every DirectIoPage byte is initialized when allocated, and
-        // initialized_len never exceeds the allocation.
+        // SAFETY: initialized_len covers only bytes initialized by zeroed()
+        // or a completed read, and never exceeds the allocation.
         unsafe { std::slice::from_raw_parts(self.as_ptr(), self.initialized_len) }
     }
 }
@@ -469,24 +484,56 @@ fn direct_io_timeout(
 
 pub(crate) async fn read_exact_direct(
     file: &File,
-    mut buffer: DirectIoBuffer,
+    buffer: DirectIoBuffer,
     offset: u64,
     len: usize,
     timeout_us: u64,
     operation: &'static str,
 ) -> Result<DirectIoBuffer> {
-    let timeout = Duration::from_micros(timeout_us);
-    let started = Instant::now();
+    read_exact_direct_inner(
+        file,
+        buffer,
+        offset,
+        len,
+        Some(Duration::from_micros(timeout_us)),
+        operation,
+    )
+    .await
+}
+
+pub(crate) async fn read_exact_direct_without_timeout(
+    file: &File,
+    buffer: DirectIoBuffer,
+    offset: u64,
+    len: usize,
+    operation: &'static str,
+) -> Result<DirectIoBuffer> {
+    read_exact_direct_inner(file, buffer, offset, len, None, operation).await
+}
+
+async fn read_exact_direct_inner(
+    file: &File,
+    mut buffer: DirectIoBuffer,
+    offset: u64,
+    len: usize,
+    timeout: Option<Duration>,
+    operation: &'static str,
+) -> Result<DirectIoBuffer> {
+    let started = timeout.map(|_| Instant::now());
     let mut completed = 0usize;
     while completed < len {
         let read_offset = offset
             .checked_add(completed as u64)
             .ok_or_else(|| KvError::Worker(format!("{operation} offset overflowed")))?;
         let read = file.read_at(buffer.slice(completed..len), read_offset);
-        let BufResult(result, returned) =
+        let BufResult(result, returned) = if let (Some(started), Some(timeout)) = (started, timeout)
+        {
             compio::runtime::time::timeout(direct_io_timeout(started, timeout, operation)?, read)
                 .await
-                .map_err(|_| KvError::Timeout(operation))?;
+                .map_err(|_| KvError::Timeout(operation))?
+        } else {
+            read.await
+        };
         let read_bytes = match result {
             Ok(read_bytes) => read_bytes,
             Err(error) if is_transient_io_error(&error) => {
@@ -592,20 +639,53 @@ struct LocatedItemState {
 
 #[derive(Debug)]
 pub(crate) struct PendingItem {
-    pub(crate) value: Option<EncodedValue>,
+    pub(crate) value: Option<Arc<EncodedValue>>,
     pub(crate) expires_at_ms: u64,
     pub(crate) previous: Option<TableLocation>,
     pub(crate) previous_live: bool,
 }
 
+#[derive(Clone)]
 struct FlushRecord {
     storage_key: StorageKey,
-    value: Option<EncodedValue>,
+    value: Option<Arc<EncodedValue>>,
     expires_at_ms: u64,
     previous: Option<TableLocation>,
     previous_live: bool,
     table_location: Option<TableLocation>,
     blob_ref: Option<BlobRef>,
+}
+
+impl FlushRecord {
+    fn is_live_at(&self, now_ms: u64) -> bool {
+        self.value.is_some() && (self.expires_at_ms == 0 || self.expires_at_ms > now_ms)
+    }
+}
+
+struct FlushIoOutput {
+    segment_buffer: DirectIoBuffer,
+    blob_buffer: Option<DirectIoBuffer>,
+    control_buffer: DirectIoBuffer,
+    blob_logical_bytes: usize,
+    blob_physical_bytes: u64,
+    segment_physical_bytes: u64,
+    control_physical_bytes: u64,
+    blob_write_ns: u64,
+    segment_commit_ns: u64,
+}
+
+struct InflightFlush {
+    // One task per worker is the memory and ordering bound. Table publication
+    // happens only after the task has persisted the commit control page.
+    records: Arc<Vec<FlushRecord>>,
+    handle: JoinHandle<Result<FlushIoOutput>>,
+    reason: SegmentFlushReason,
+    sg_index: usize,
+    generation: u64,
+    next_generation: u64,
+    fill_used_bytes: u64,
+    started: Instant,
+    timings: FlushTimings,
 }
 
 struct FlushLane {
@@ -704,11 +784,18 @@ pub(crate) struct Kvkache {
     pub(crate) flush_blob_write_ns: u64,
     pub(crate) flush_segment_commit_ns: u64,
     pub(crate) flush_publish_ns: u64,
+    pub(crate) background_flush_starts: u64,
+    pub(crate) background_flush_completions: u64,
+    pub(crate) background_flush_failures: u64,
+    pub(crate) flush_backpressure_ns: u64,
     resource_guard: Arc<ResourceGuard>,
     next_memory_capacity_check: Instant,
     io: IoCounters,
     bucket_read_pool: DirectIoBufferPool,
     pub(crate) mutable_segment_buffers: Vec<DirectIoBuffer>,
+    inflight_flush: Option<InflightFlush>,
+    blob_write_buffer: Option<DirectIoBuffer>,
+    control_buffer: Option<DirectIoBuffer>,
 }
 
 impl Kvkache {
@@ -837,11 +924,18 @@ impl Kvkache {
             flush_blob_write_ns: 0,
             flush_segment_commit_ns: 0,
             flush_publish_ns: 0,
+            background_flush_starts: 0,
+            background_flush_completions: 0,
+            background_flush_failures: 0,
+            flush_backpressure_ns: 0,
             resource_guard,
             next_memory_capacity_check: Instant::now(),
             io: IoCounters::default(),
             bucket_read_pool: DirectIoBufferPool::default(),
             mutable_segment_buffers,
+            inflight_flush: None,
+            blob_write_buffer: None,
+            control_buffer: None,
             config,
             data,
         };
@@ -877,9 +971,9 @@ impl Kvkache {
     }
 
     pub(crate) async fn checkpoint(&self) -> Result<()> {
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || self.inflight_flush.is_some() {
             return Err(KvError::Worker(
-                "Table checkpoint requires an empty pending map".into(),
+                "Table checkpoint requires no pending or in-flight generation".into(),
             ));
         }
         write_table_checkpoint(
@@ -899,13 +993,13 @@ impl Kvkache {
         Ok(self
             .get_encoded(storage_key)
             .await?
-            .map(|value| value.bytes))
+            .map(RetrievedValue::into_bytes))
     }
 
     pub(crate) async fn get_encoded(
         &self,
         storage_key: &StorageKey,
-    ) -> Result<Option<EncodedValue>> {
+    ) -> Result<Option<RetrievedValue>> {
         if let Some(pending) = self.pending.get(storage_key) {
             self.io
                 .pending_gets
@@ -913,11 +1007,31 @@ impl Kvkache {
             return Ok(pending
                 .is_live_at(unix_time_ms())
                 .then(|| pending.value.clone())
-                .flatten());
+                .flatten()
+                .map(RetrievedValue::Shared));
+        }
+        if let Some(inflight) = self.inflight_record(storage_key) {
+            self.io
+                .pending_gets
+                .set(self.io.pending_gets.get().saturating_add(1));
+            return Ok(inflight
+                .is_live_at(unix_time_ms())
+                .then(|| inflight.value.clone())
+                .flatten()
+                .map(RetrievedValue::Shared));
         }
         self.io
             .stable_gets
             .set(self.io.stable_gets.get().saturating_add(1));
+        compio::runtime::time::timeout(
+            Duration::from_micros(self.config.read_max_time_us),
+            self.get_stable_encoded(storage_key),
+        )
+        .await
+        .map_err(|_| KvError::Timeout("stable GET"))?
+    }
+
+    async fn get_stable_encoded(&self, storage_key: &StorageKey) -> Result<Option<RetrievedValue>> {
         let Some(located) = self.locate_stable_record(storage_key).await? else {
             return Ok(None);
         };
@@ -991,6 +1105,20 @@ impl Kvkache {
                         SetOutcome::Created
                     },
                 )
+            } else if let Some(inflight) = self.inflight_record(&storage_key) {
+                let current_live = inflight.is_live_at(now_ms);
+                if !set_condition_allows(options.condition, current_live) {
+                    return Ok(SetOutcome::NotStored);
+                }
+                (
+                    inflight.table_location,
+                    inflight.value.is_some(),
+                    if current_live {
+                        SetOutcome::Replaced
+                    } else {
+                        SetOutcome::Created
+                    },
+                )
             } else {
                 let previous = self.locate_stable_state(&storage_key).await?;
                 let current_live = previous
@@ -1016,7 +1144,7 @@ impl Kvkache {
         self.insert_pending(
             storage_key,
             PendingItem {
-                value: Some(value),
+                value: Some(Arc::new(value)),
                 expires_at_ms,
                 previous,
                 previous_live,
@@ -1058,6 +1186,24 @@ impl Kvkache {
             }
             return Ok(true);
         }
+        if let Some(inflight) = self.inflight_record(storage_key) {
+            if !inflight.is_live_at(now_ms) {
+                return Ok(false);
+            }
+            self.insert_pending(
+                *storage_key,
+                PendingItem {
+                    value: None,
+                    expires_at_ms: 0,
+                    previous: inflight.table_location,
+                    previous_live: inflight.value.is_some(),
+                },
+            );
+            if self.pending_should_flush() {
+                self.flush_pending(SegmentFlushReason::Capacity).await?;
+            }
+            return Ok(true);
+        }
         let Some(previous) = self.locate_stable_state(storage_key).await? else {
             return Ok(false);
         };
@@ -1086,7 +1232,7 @@ impl Kvkache {
     }
 
     async fn locate_stable_record(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
-        self.locate_stable_record_with_bucket(storage_key, None)
+        self.locate_stable_record_with_bucket(storage_key, None, false)
             .await
     }
 
@@ -1094,11 +1240,12 @@ impl Kvkache {
         &self,
         storage_key: &StorageKey,
         scanned: Option<(TableLocation, &[u8])>,
+        per_io_timeout: bool,
     ) -> Result<Option<LocatedItem>> {
         let locations = self.table.candidate_locations(storage_key);
         if let [table_location] = locations.as_slice() {
             let Some(item) = self
-                .read_record_candidate(storage_key, *table_location, scanned)
+                .read_record_candidate(storage_key, *table_location, scanned, per_io_timeout)
                 .await?
             else {
                 return Ok(None);
@@ -1110,7 +1257,7 @@ impl Kvkache {
         }
         let mut newest: Option<(usize, LocatedItem)> = None;
         let reads = locations.into_iter().map(|table_location| async move {
-            self.read_record_candidate(storage_key, table_location, scanned)
+            self.read_record_candidate(storage_key, table_location, scanned, per_io_timeout)
                 .await
                 .map(|item| (table_location, item))
         });
@@ -1141,13 +1288,15 @@ impl Kvkache {
         storage_key: &StorageKey,
         table_location: TableLocation,
         scanned: Option<(TableLocation, &[u8])>,
+        per_io_timeout: bool,
     ) -> Result<Option<Item>> {
         if let Some((scanned_location, bucket)) = scanned
             && table_location == scanned_location
         {
             Ok(find_item_in_bucket(bucket, storage_key))
         } else {
-            self.read_location(storage_key, table_location).await
+            self.read_location(storage_key, table_location, per_io_timeout)
+                .await
         }
     }
 
@@ -1200,7 +1349,7 @@ impl Kvkache {
         &self,
         table_location: TableLocation,
         mut encoded: Vec<u8>,
-    ) -> Result<EncodedValue> {
+    ) -> Result<RetrievedValue> {
         let decoded = decode_stored_value(&encoded)?;
         let flags = decoded.flags;
         let blob_ref = match decoded.value {
@@ -1214,15 +1363,19 @@ impl Kvkache {
             }
             StoredValue::Blob(blob_ref) => Some(blob_ref),
         };
-        let bytes = match blob_ref {
+        match blob_ref {
             None => {
                 remove_stored_value_tag(&mut encoded);
-                encoded
+                Ok(RetrievedValue::Owned(EncodedValue::new(encoded, flags)))
             }
             Some(blob_ref) => {
                 let value = self
                     .blob_segment
-                    .read(table_location.sg_index as usize, blob_ref)
+                    .read_retrieved_without_timeout(
+                        table_location.sg_index as usize,
+                        blob_ref,
+                        flags,
+                    )
                     .await?;
                 let physical_bytes = self.blob_segment.physical_read_bytes(blob_ref);
                 self.io
@@ -1231,10 +1384,9 @@ impl Kvkache {
                 self.io
                     .blob_data_read
                     .set(self.io.blob_data_read.get() + physical_bytes);
-                value
+                Ok(value)
             }
-        };
-        Ok(EncodedValue::new(bytes, flags))
+        }
     }
 
     fn ssd_segment_age(&self, sg_index: usize) -> usize {
@@ -1247,6 +1399,7 @@ impl Kvkache {
         &self,
         storage_key: &StorageKey,
         table_location: TableLocation,
+        per_io_timeout: bool,
     ) -> Result<Option<Item>> {
         let sg_index = table_location.sg_index as usize;
         if !self
@@ -1262,7 +1415,12 @@ impl Kvkache {
             table_location.bucket_hash_index,
             self.config.bucket_count(),
         );
-        let bytes = self.read_bucket(sg_index, bucket_index).await?;
+        let bytes = if per_io_timeout {
+            self.read_bucket(sg_index, bucket_index).await?
+        } else {
+            self.read_bucket_without_timeout(sg_index, bucket_index)
+                .await?
+        };
         let item = find_item_in_bucket(&bytes, storage_key);
         self.bucket_read_pool.recycle_bucket(bytes);
         Ok(item)
@@ -1294,9 +1452,53 @@ impl Kvkache {
     }
 
     async fn flush_pending(&mut self, reason: SegmentFlushReason) -> Result<()> {
-        if self.pending.is_empty() {
-            return Ok(());
+        match reason {
+            SegmentFlushReason::Capacity => {
+                if self.pending.is_empty() {
+                    return Ok(());
+                }
+                if self.inflight_flush.is_some() {
+                    self.finish_inflight_flush(true).await?;
+                }
+                self.start_one_flush(reason).await.map(drop)
+            }
+            SegmentFlushReason::Sync => {
+                if self.inflight_flush.is_some() {
+                    self.finish_inflight_flush(false).await?;
+                }
+                while !self.pending.is_empty() {
+                    if !self.start_one_flush(reason).await? {
+                        break;
+                    }
+                    self.finish_inflight_flush(false).await?;
+                }
+                Ok(())
+            }
         }
+    }
+
+    pub(super) async fn finish_inflight_if_ready(&mut self) -> Result<()> {
+        let ready = self
+            .inflight_flush
+            .as_ref()
+            .is_some_and(|flush| flush.handle.is_finished());
+        if ready {
+            self.finish_inflight_flush(false).await
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(super) fn has_inflight_flush(&self) -> bool {
+        self.inflight_flush.is_some()
+    }
+
+    async fn start_one_flush(&mut self, reason: SegmentFlushReason) -> Result<bool> {
+        debug_assert!(self.inflight_flush.is_none());
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+
         let flush_started = Instant::now();
         let mut timings = FlushTimings::default();
         let plan_started = Instant::now();
@@ -1332,171 +1534,116 @@ impl Kvkache {
                 .then_with(|| left.storage_key.cmp(&right.storage_key))
         });
         timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
+        if remaining.is_empty() {
+            return Ok(false);
+        }
 
-        let mut blob_buffer = None;
-        let mut control_buffer = None;
-        while !remaining.is_empty() {
-            let plan_started = Instant::now();
-            let next_generation = match next_sg_generation(self.next_generation) {
-                Ok(next_generation) => next_generation,
-                Err(error) => {
-                    self.restore_flush_records(remaining);
-                    return Err(error);
-                }
-            };
-            let sg_index = self.next_segment_index;
-            let lane_count = self.config.ram_segment_count;
-            let lane_record_capacity = remaining.len().div_ceil(lane_count);
-            // The extra lanes are packing lookahead. Only lane zero becomes the next
-            // durable generation; overflow remains readable through `pending`.
-            let mut lanes = Vec::with_capacity(lane_count);
-            for _ in 0..lane_count {
-                let segment = match self.mutable_segment_buffers.pop() {
-                    Some(bytes) => MutableSegment::reuse(&self.config, sg_index, bytes),
-                    None => MutableSegment::new(&self.config, sg_index),
-                };
-                lanes.push(FlushLane::new(segment, lane_record_capacity));
-            }
-            let mut deferred = Vec::new();
-            for mut record in remaining.drain(..) {
-                let mut placed_lane = None;
-                let mut planning_error = None;
-                for (lane_index, lane) in lanes.iter_mut().enumerate() {
-                    match lane.try_append(&mut record, self.config.blob_segment_size) {
-                        Ok(true) => {
-                            placed_lane = Some(lane_index);
-                            break;
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            planning_error = Some(error);
-                            break;
-                        }
-                    }
-                }
-                if let Some(error) = planning_error {
-                    let mut restore = Vec::with_capacity(
-                        1 + deferred.len()
-                            + lanes.iter().map(|lane| lane.records.len()).sum::<usize>(),
-                    );
-                    restore.push(record);
-                    restore.append(&mut deferred);
-                    for lane in lanes {
-                        restore.extend(lane.records);
-                        self.mutable_segment_buffers.push(lane.segment.bytes);
-                    }
-                    self.restore_flush_records(restore);
-                    return Err(error);
-                }
-                if let Some(lane_index) = placed_lane {
-                    lanes[lane_index].records.push(record);
-                } else {
-                    deferred.push(record);
-                }
-            }
-
-            let selected = lanes.remove(0);
-            for mut lane in lanes {
-                for mut record in lane.records.drain(..) {
-                    record.table_location = None;
-                    record.blob_ref = None;
-                    deferred.push(record);
-                }
-                self.mutable_segment_buffers.push(lane.segment.bytes);
-            }
-            let active = selected.segment;
-            let mut planned = selected.records;
-            let blob_used = selected.blob_used;
-            timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
-            if planned.is_empty() {
-                self.mutable_segment_buffers.push(active.bytes);
-                self.restore_flush_records(deferred);
-                return Err(KvError::Worker(
-                    "pending Item cannot fit in an empty Segment generation".into(),
-                ));
-            }
-            let reserve_started = Instant::now();
-            let reserve_result = self.reserve_segment_generation(sg_index, blob_used).await;
-            timings.reserve_ns = timings
-                .reserve_ns
-                .saturating_add(elapsed_ns(reserve_started));
-            if let Err(error) = reserve_result {
-                self.mutable_segment_buffers.push(active.bytes);
-                self.restore_flush_records(planned.into_iter().chain(deferred));
+        let plan_started = Instant::now();
+        let next_generation = match next_sg_generation(self.next_generation) {
+            Ok(next_generation) => next_generation,
+            Err(error) => {
+                self.restore_flush_records(remaining);
                 return Err(error);
             }
-            if self.occupied_segments[sg_index] {
-                let reclaim_started = Instant::now();
-                let Some(reclaimed_commit) = self.segment_commits[sg_index] else {
-                    self.mutable_segment_buffers.push(active.bytes);
-                    self.restore_flush_records(planned.into_iter().chain(deferred));
-                    return Err(KvError::Worker(
-                        "occupied Segment is missing its commit metadata".into(),
-                    ));
-                };
-                let invalidated = match invalidate_segment(
-                    &mut self.data,
-                    &self.config,
-                    sg_index,
-                    control_buffer.take(),
-                )
-                .await
-                {
-                    Ok((bytes, buffer)) => {
-                        control_buffer = Some(buffer);
-                        bytes
+        };
+        let sg_index = self.next_segment_index;
+        let lane_count = self.config.ram_segment_count;
+        let lane_record_capacity = remaining.len().div_ceil(lane_count);
+        let mut lanes = Vec::with_capacity(lane_count);
+        for _ in 0..lane_count {
+            let segment = match self.mutable_segment_buffers.pop() {
+                Some(bytes) => MutableSegment::reuse(&self.config, sg_index, bytes),
+                None => MutableSegment::new(&self.config, sg_index),
+            };
+            lanes.push(FlushLane::new(segment, lane_record_capacity));
+        }
+        let mut deferred = Vec::new();
+        for mut record in remaining {
+            let mut placed_lane = None;
+            let mut planning_error = None;
+            for (lane_index, lane) in lanes.iter_mut().enumerate() {
+                match lane.try_append(&mut record, self.config.blob_segment_size) {
+                    Ok(true) => {
+                        placed_lane = Some(lane_index);
+                        break;
                     }
+                    Ok(false) => {}
                     Err(error) => {
-                        self.mutable_segment_buffers.push(active.bytes);
-                        self.restore_flush_records(planned.into_iter().chain(deferred));
-                        return Err(storage_operation_error(&self.resource_guard, error));
-                    }
-                };
-                self.io
-                    .data_written
-                    .set(self.io.data_written.get() + invalidated);
-                if let Err(error) = self.prepare_segment_for_reuse(reclaimed_commit).await {
-                    self.mutable_segment_buffers.push(active.bytes);
-                    self.restore_flush_records(planned.into_iter().chain(deferred));
-                    return Err(error);
-                }
-                self.segment_commits[sg_index] = None;
-                for record in planned.iter_mut().chain(&mut deferred) {
-                    if record
-                        .previous
-                        .is_some_and(|location| location.sg_index as usize == sg_index)
-                    {
-                        // Reuse invalidates every previous location in this
-                        // Segment, regardless of whether the key is present in
-                        // the newly planned generation.
-                        record.previous = None;
-                        record.previous_live = false;
+                        planning_error = Some(error);
+                        break;
                     }
                 }
-                timings.reclaim_ns = timings
-                    .reclaim_ns
-                    .saturating_add(elapsed_ns(reclaim_started));
             }
+            if let Some(error) = planning_error {
+                let mut restore = Vec::with_capacity(
+                    1 + deferred.len() + lanes.iter().map(|lane| lane.records.len()).sum::<usize>(),
+                );
+                restore.push(record);
+                restore.append(&mut deferred);
+                for lane in lanes {
+                    restore.extend(lane.records);
+                    self.mutable_segment_buffers.push(lane.segment.bytes);
+                }
+                self.restore_flush_records(restore);
+                return Err(error);
+            }
+            if let Some(lane_index) = placed_lane {
+                lanes[lane_index].records.push(record);
+            } else {
+                deferred.push(record);
+            }
+        }
 
-            let blob_values = planned
-                .iter()
-                .filter(|record| record.blob_ref.is_some())
-                .map(|record| {
-                    record
-                        .value
-                        .as_ref()
-                        .expect("Blob record has a live value")
-                        .bytes
-                        .as_slice()
-                });
-            let blob_write_started = Instant::now();
-            let blob_physical_bytes = match self
-                .blob_segment
-                .write_segment(sg_index, blob_values, blob_buffer.take())
-                .await
+        let selected = lanes.remove(0);
+        for mut lane in lanes {
+            for mut record in lane.records.drain(..) {
+                record.table_location = None;
+                record.blob_ref = None;
+                deferred.push(record);
+            }
+            self.mutable_segment_buffers.push(lane.segment.bytes);
+        }
+        let active = selected.segment;
+        let mut planned = selected.records;
+        let blob_used = selected.blob_used;
+        timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
+        if planned.is_empty() {
+            self.mutable_segment_buffers.push(active.bytes);
+            self.restore_flush_records(deferred);
+            return Err(KvError::Worker(
+                "pending Item cannot fit in an empty Segment generation".into(),
+            ));
+        }
+
+        let reserve_started = Instant::now();
+        let reserve_result = self.reserve_segment_generation(sg_index, blob_used).await;
+        timings.reserve_ns = timings
+            .reserve_ns
+            .saturating_add(elapsed_ns(reserve_started));
+        if let Err(error) = reserve_result {
+            self.mutable_segment_buffers.push(active.bytes);
+            self.restore_flush_records(planned.into_iter().chain(deferred));
+            return Err(error);
+        }
+        if self.occupied_segments[sg_index] {
+            let reclaim_started = Instant::now();
+            let Some(reclaimed_commit) = self.segment_commits[sg_index] else {
+                self.mutable_segment_buffers.push(active.bytes);
+                self.restore_flush_records(planned.into_iter().chain(deferred));
+                return Err(KvError::Worker(
+                    "occupied Segment is missing its commit metadata".into(),
+                ));
+            };
+            let invalidated = match invalidate_segment(
+                &mut self.data,
+                &self.config,
+                sg_index,
+                self.control_buffer.take(),
+            )
+            .await
             {
                 Ok((bytes, buffer)) => {
-                    blob_buffer = buffer;
+                    self.control_buffer = Some(buffer);
                     bytes
                 }
                 Err(error) => {
@@ -1505,91 +1652,220 @@ impl Kvkache {
                     return Err(storage_operation_error(&self.resource_guard, error));
                 }
             };
-            timings.blob_write_ns = timings
-                .blob_write_ns
-                .saturating_add(elapsed_ns(blob_write_started));
             self.io
                 .data_written
-                .set(self.io.data_written.get() + blob_physical_bytes);
-            self.io
-                .blob_data_written
-                .set(self.io.blob_data_written.get() + blob_physical_bytes);
-
-            let segment_commit_started = Instant::now();
-            let (returned_segment_buffer, returned_control_buffer) = match self
-                .write_segment(
-                    active,
-                    reason,
-                    blob_used,
-                    next_generation,
-                    control_buffer.take(),
-                )
-                .await
-            {
-                Ok(buffers) => buffers,
-                Err(error) => {
-                    self.restore_flush_records(planned.into_iter().chain(deferred));
-                    return Err(storage_operation_error(&self.resource_guard, error));
-                }
-            };
-            timings.segment_commit_ns = timings
-                .segment_commit_ns
-                .saturating_add(elapsed_ns(segment_commit_started));
-            self.mutable_segment_buffers.push(returned_segment_buffer);
-            control_buffer = Some(returned_control_buffer);
-
-            let publish_started = Instant::now();
-            let mut published = 0usize;
-            let mut publish_error = None;
-            for record in &planned {
-                let table_location = record.table_location.unwrap();
-                let new_live = record.value.is_some();
-                let replaced = record.previous.is_some_and(|previous| {
-                    self.table
-                        .replace_location(&record.storage_key, previous, table_location)
-                });
-                if replaced {
-                    match (record.previous_live, new_live) {
-                        (true, false) => {
-                            self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
-                        }
-                        (false, true) => self.stable_live_keys += 1,
-                        _ => {}
-                    }
-                } else if let Err(error) = self.table.insert(&record.storage_key, table_location) {
-                    publish_error = Some(error);
-                    break;
-                } else if new_live {
-                    self.stable_live_keys += 1;
-                }
-                published += 1;
-            }
-            timings.publish_ns = timings
-                .publish_ns
-                .saturating_add(elapsed_ns(publish_started));
-            if let Some(error) = publish_error {
-                self.restore_flush_records(planned.into_iter().skip(published).chain(deferred));
+                .set(self.io.data_written.get() + invalidated);
+            if let Err(error) = self.prepare_segment_for_reuse(reclaimed_commit).await {
+                self.mutable_segment_buffers.push(active.bytes);
+                self.restore_flush_records(planned.into_iter().chain(deferred));
                 return Err(error);
             }
-            if reason == SegmentFlushReason::Capacity && self.config.ram_segment_count > 1 {
-                self.restore_flush_records(deferred);
-                self.record_flush_timings(flush_started, &timings);
-                return Ok(());
+            self.segment_commits[sg_index] = None;
+            for record in planned.iter_mut().chain(&mut deferred) {
+                if record
+                    .previous
+                    .is_some_and(|location| location.sg_index as usize == sg_index)
+                {
+                    record.previous = None;
+                    record.previous_live = false;
+                }
             }
-            remaining = deferred;
-            let plan_started = Instant::now();
-            remaining.sort_unstable_by(|left, right| {
-                right
-                    .value
-                    .as_ref()
-                    .map_or(0, |value| value.bytes.len())
-                    .cmp(&left.value.as_ref().map_or(0, |value| value.bytes.len()))
-                    .then_with(|| left.storage_key.cmp(&right.storage_key))
-            });
-            timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
+            timings.reclaim_ns = timings
+                .reclaim_ns
+                .saturating_add(elapsed_ns(reclaim_started));
         }
-        self.record_flush_timings(flush_started, &timings);
+
+        planned.sort_unstable_by_key(|record| record.storage_key);
+        let records = Arc::new(planned);
+        let mut blob_order = records
+            .iter()
+            .enumerate()
+            .filter_map(|(index, record)| record.blob_ref.map(|blob_ref| (index, blob_ref)))
+            .collect::<Vec<_>>();
+        blob_order.sort_unstable_by_key(|(_, blob_ref)| blob_ref.value_offset);
+        let blob_order = blob_order
+            .into_iter()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let fill_used_bytes = active.used_bytes() as u64;
+        let generation = self.next_generation;
+        let data = self.data.clone();
+        let blob_io = self.blob_segment.io();
+        let config = self.config.clone();
+        let storage_key_id = self.storage_key_id;
+        let task_records = Arc::clone(&records);
+        let blob_buffer = self.blob_write_buffer.take();
+        let control_buffer = self.control_buffer.take();
+        let handle = compio::runtime::spawn(async move {
+            write_flush_generation(
+                data,
+                blob_io,
+                config,
+                storage_key_id,
+                active,
+                task_records,
+                blob_order,
+                blob_buffer,
+                control_buffer,
+                generation,
+                blob_used,
+            )
+            .await
+        });
+        self.background_flush_starts += 1;
+        self.inflight_flush = Some(InflightFlush {
+            records,
+            handle,
+            reason,
+            sg_index,
+            generation,
+            next_generation,
+            fill_used_bytes,
+            started: flush_started,
+            timings,
+        });
+        self.restore_flush_records(deferred);
+        Ok(true)
+    }
+
+    async fn finish_inflight_flush(&mut self, backpressure: bool) -> Result<()> {
+        let Some(inflight) = self.inflight_flush.take() else {
+            return Ok(());
+        };
+        let was_finished = inflight.handle.is_finished();
+        let wait_started = Instant::now();
+        let task_result = inflight.handle.await;
+        if backpressure && !was_finished {
+            self.flush_backpressure_ns = self
+                .flush_backpressure_ns
+                .saturating_add(elapsed_ns(wait_started));
+        }
+        let output = match task_result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => {
+                self.background_flush_failures += 1;
+                self.restore_failed_flush_records(&inflight.records);
+                return Err(storage_operation_error(&self.resource_guard, error));
+            }
+            Err(error) => {
+                self.background_flush_failures += 1;
+                self.restore_failed_flush_records(&inflight.records);
+                return Err(KvError::Worker(format!(
+                    "background Segment flush task failed: {error}"
+                )));
+            }
+        };
+
+        self.mutable_segment_buffers.push(output.segment_buffer);
+        self.blob_write_buffer = output.blob_buffer;
+        self.control_buffer = Some(output.control_buffer);
+        self.blob_segment.record_validated_written_segment(
+            inflight.sg_index,
+            output.blob_logical_bytes,
+            output.blob_physical_bytes,
+        );
+        self.io.data_written.set(
+            self.io.data_written.get()
+                + output.blob_physical_bytes
+                + output.segment_physical_bytes
+                + output.control_physical_bytes,
+        );
+        self.io
+            .blob_data_written
+            .set(self.io.blob_data_written.get() + output.blob_physical_bytes);
+
+        let commit = SegmentCommit {
+            sg_index: inflight.sg_index,
+            generation: inflight.generation,
+            blob_logical_len: output.blob_logical_bytes,
+            bucket_choice_count: self.config.bucket_choice_count,
+        };
+        self.occupied_segments[inflight.sg_index] = true;
+        self.segment_commits[inflight.sg_index] = Some(commit);
+        self.next_segment_index = (inflight.sg_index + 1) % self.config.segment_count;
+        self.next_generation = inflight.next_generation;
+        self.segment_flushes += 1;
+        match inflight.reason {
+            SegmentFlushReason::Capacity => {
+                self.segment_capacity_flushes += 1;
+                self.segment_capacity_fill_used_bytes += inflight.fill_used_bytes;
+                self.segment_capacity_fill_capacity_bytes += self.config.segment_size as u64;
+            }
+            SegmentFlushReason::Sync => {
+                self.segment_sync_flushes += 1;
+                self.segment_sync_fill_used_bytes += inflight.fill_used_bytes;
+                self.segment_sync_fill_capacity_bytes += self.config.segment_size as u64;
+            }
+        }
+        self.segment_fill_used_bytes += inflight.fill_used_bytes;
+        self.segment_fill_capacity_bytes += self.config.segment_size as u64;
+
+        let mut timings = inflight.timings;
+        timings.blob_write_ns = timings.blob_write_ns.saturating_add(output.blob_write_ns);
+        timings.segment_commit_ns = timings
+            .segment_commit_ns
+            .saturating_add(output.segment_commit_ns);
+        let publish_started = Instant::now();
+        let publish_result = self.publish_flush_records(&inflight.records);
+        timings.publish_ns = timings
+            .publish_ns
+            .saturating_add(elapsed_ns(publish_started));
+        if publish_result.is_ok() {
+            self.background_flush_completions += 1;
+        } else {
+            self.background_flush_failures += 1;
+        }
+        self.record_flush_timings(inflight.started, &timings);
+        publish_result
+    }
+
+    fn publish_flush_records(&mut self, records: &[FlushRecord]) -> Result<()> {
+        for (index, record) in records.iter().enumerate() {
+            let table_location = record
+                .table_location
+                .expect("in-flight record has a planned Table location");
+            let new_live = record.value.is_some();
+            let replaced = record.previous.is_some_and(|previous| {
+                self.table
+                    .replace_location(&record.storage_key, previous, table_location)
+            });
+            if replaced {
+                match (record.previous_live, new_live) {
+                    (true, false) => {
+                        self.stable_live_keys = self.stable_live_keys.saturating_sub(1);
+                    }
+                    (false, true) => self.stable_live_keys += 1,
+                    _ => {}
+                }
+            } else if let Err(error) = self.table.insert(&record.storage_key, table_location) {
+                self.restore_failed_flush_records(&records[index..]);
+                return Err(error);
+            } else if new_live {
+                self.stable_live_keys += 1;
+            }
+        }
         Ok(())
+    }
+
+    fn restore_failed_flush_records(&mut self, records: &[FlushRecord]) {
+        for record in records {
+            if let Some(pending) = self.pending.get_mut(&record.storage_key) {
+                if pending.previous == record.table_location {
+                    pending.previous = record.previous;
+                    pending.previous_live = record.previous_live;
+                }
+                continue;
+            }
+            self.insert_pending(
+                record.storage_key,
+                PendingItem {
+                    value: record.value.clone(),
+                    expires_at_ms: record.expires_at_ms,
+                    previous: record.previous,
+                    previous_live: record.previous_live,
+                },
+            );
+        }
     }
 
     fn record_flush_timings(&mut self, flush_started: Instant, timings: &FlushTimings) {
@@ -1626,73 +1902,6 @@ impl Kvkache {
             .reserve_segment(sg_index, blob_logical_bytes, &self.resource_guard)
             .await?;
         self.resource_guard.observe_storage_reservation()
-    }
-
-    async fn write_segment(
-        &mut self,
-        active: MutableSegment,
-        reason: SegmentFlushReason,
-        blob_logical_len: usize,
-        next_generation: u64,
-        control_buffer: Option<DirectIoBuffer>,
-    ) -> Result<(DirectIoBuffer, DirectIoBuffer)> {
-        let fill_used_bytes = active.used_bytes() as u64;
-        let sg_index = active.sg_index;
-        let offset = self.config.segment_data_offset(sg_index);
-        let expected = active.bytes.len();
-        let bytes = write_all_direct(
-            &self.data,
-            active.bytes,
-            offset,
-            expected,
-            self.config.write_max_time_us,
-            "Segment write",
-        )
-        .await?;
-        self.io
-            .data_written
-            .set(self.io.data_written.get() + bytes.len() as u64);
-        if blob_logical_len != 0 {
-            self.blob_segment.sync().await?;
-        }
-        self.data.sync_data().await?;
-        let commit = SegmentCommit {
-            sg_index,
-            generation: self.next_generation,
-            blob_logical_len,
-            bucket_choice_count: self.config.bucket_choice_count,
-        };
-        let (control_bytes, control_buffer) = commit_segment(
-            &mut self.data,
-            &self.config,
-            self.storage_key_id,
-            commit,
-            control_buffer,
-        )
-        .await?;
-        self.io
-            .data_written
-            .set(self.io.data_written.get() + control_bytes);
-        self.occupied_segments[sg_index] = true;
-        self.segment_commits[sg_index] = Some(commit);
-        self.next_segment_index = (sg_index + 1) % self.config.segment_count;
-        self.next_generation = next_generation;
-        self.segment_flushes += 1;
-        match reason {
-            SegmentFlushReason::Capacity => {
-                self.segment_capacity_flushes += 1;
-                self.segment_capacity_fill_used_bytes += fill_used_bytes;
-                self.segment_capacity_fill_capacity_bytes += self.config.segment_size as u64;
-            }
-            SegmentFlushReason::Sync => {
-                self.segment_sync_flushes += 1;
-                self.segment_sync_fill_used_bytes += fill_used_bytes;
-                self.segment_sync_fill_capacity_bytes += self.config.segment_size as u64;
-            }
-        }
-        self.segment_fill_used_bytes += fill_used_bytes;
-        self.segment_fill_capacity_bytes += self.config.segment_size as u64;
-        Ok((bytes, control_buffer))
     }
 
     fn validate_value(&self, value: &[u8], expiring: bool) -> Result<()> {
@@ -1748,6 +1957,14 @@ impl Kvkache {
         Some(pending)
     }
 
+    fn inflight_record(&self, storage_key: &StorageKey) -> Option<&FlushRecord> {
+        let records = &self.inflight_flush.as_ref()?.records;
+        records
+            .binary_search_by_key(storage_key, |record| record.storage_key)
+            .ok()
+            .map(|index| &records[index])
+    }
+
     fn pending_should_flush(&self) -> bool {
         self.pending_sg_bytes >= self.config.segment_size * self.config.ram_segment_count
             || self.pending_blob_bytes
@@ -1779,13 +1996,22 @@ impl Kvkache {
             / self.segment_capacity_fill_capacity_bytes.max(1) as f64;
         let segment_sync_fill_percent = self.segment_sync_fill_used_bytes as f64 * 100.0
             / self.segment_sync_fill_capacity_bytes.max(1) as f64;
+        let inflight_items = self
+            .inflight_flush
+            .as_ref()
+            .map_or(0, |flush| flush.records.len());
         format!(
-            "keys={} stable_keys={} pending_items={} pending_value_bytes={} ram_segments={} pending_gets={} stable_gets={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} flush_total_ns={} flush_plan_ns={} flush_reserve_ns={} flush_reclaim_ns={} flush_blob_write_ns={} flush_segment_commit_ns={} flush_publish_ns={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
+            "keys={} stable_keys={} pending_items={} pending_value_bytes={} ram_segments={} inflight_flushes={} background_flush_starts={} background_flush_completions={} background_flush_failures={} flush_backpressure_ns={} pending_gets={} stable_gets={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} flush_total_ns={} flush_plan_ns={} flush_reserve_ns={} flush_reclaim_ns={} flush_blob_write_ns={} flush_segment_commit_ns={} flush_publish_ns={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
             self.logical_key_count(),
             self.stable_live_keys,
-            self.pending.len(),
+            self.pending.len() + inflight_items,
             self.pending_value_bytes(),
             self.config.ram_segment_count,
+            usize::from(self.inflight_flush.is_some()),
+            self.background_flush_starts,
+            self.background_flush_completions,
+            self.background_flush_failures,
+            self.flush_backpressure_ns,
             io.pending_gets,
             io.stable_gets,
             self.table.load_factor() * 100.0,
@@ -1862,18 +2088,33 @@ impl Kvkache {
     }
 
     pub(super) fn memory_bytes(&self) -> usize {
+        let inflight_record_bytes = self.inflight_flush.as_ref().map_or(0, |flush| {
+            flush.records.capacity() * std::mem::size_of::<FlushRecord>()
+        });
         self.table.memory_bytes()
             + self.pending.capacity()
                 * (std::mem::size_of::<StorageKey>() + std::mem::size_of::<PendingItem>())
+            + inflight_record_bytes
             + self.pending_value_bytes()
+            + self.shared_value_allocation_bytes()
             + self.occupied_segments.capacity() * std::mem::size_of::<bool>()
             + self.blob_segment.memory_bytes()
             + self.config.segment_size * self.config.ram_segment_count
+            + BUCKET_BYTES
     }
 
     fn logical_key_count(&self) -> usize {
         let mut count = self.stable_live_keys;
         let now_ms = unix_time_ms();
+        if let Some(inflight) = &self.inflight_flush {
+            for record in inflight.records.iter() {
+                match (record.previous_live, record.is_live_at(now_ms)) {
+                    (true, false) => count = count.saturating_sub(1),
+                    (false, true) => count += 1,
+                    _ => {}
+                }
+            }
+        }
         for pending in self.pending.values() {
             match (pending.previous_live, pending.is_live_at(now_ms)) {
                 (true, false) => count = count.saturating_sub(1),
@@ -1885,12 +2126,114 @@ impl Kvkache {
     }
 
     fn pending_value_bytes(&self) -> usize {
-        self.pending
+        let active = self
+            .pending
             .values()
             .filter_map(|pending| pending.value.as_ref())
             .map(|value| value.bytes.capacity())
-            .sum()
+            .sum::<usize>();
+        active
+            + self.inflight_flush.as_ref().map_or(0, |flush| {
+                flush
+                    .records
+                    .iter()
+                    .filter_map(|record| record.value.as_ref())
+                    .map(|value| value.bytes.capacity())
+                    .sum()
+            })
     }
+
+    fn shared_value_allocation_bytes(&self) -> usize {
+        let active = self
+            .pending
+            .values()
+            .filter(|pending| pending.value.is_some())
+            .count();
+        let inflight = self.inflight_flush.as_ref().map_or(0, |flush| {
+            flush
+                .records
+                .iter()
+                .filter(|record| record.value.is_some())
+                .count()
+        });
+        let arc_allocation_bytes =
+            2 * std::mem::size_of::<usize>() + std::mem::size_of::<EncodedValue>();
+        (active + inflight) * arc_allocation_bytes
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_flush_generation(
+    mut data: File,
+    blob: BlobSegmentIo,
+    config: Config,
+    storage_key_id: [u8; 16],
+    active: MutableSegment,
+    records: Arc<Vec<FlushRecord>>,
+    blob_order: Vec<usize>,
+    blob_buffer: Option<DirectIoBuffer>,
+    control_buffer: Option<DirectIoBuffer>,
+    generation: u64,
+    expected_blob_logical_bytes: usize,
+) -> Result<FlushIoOutput> {
+    let sg_index = active.sg_index;
+    let blob_values = blob_order.iter().map(|&index| {
+        records[index]
+            .value
+            .as_ref()
+            .expect("Blob record has a live value")
+            .bytes
+            .as_slice()
+    });
+    let blob_write_started = Instant::now();
+    let blob_written = blob
+        .write_segment(sg_index, blob_values, blob_buffer)
+        .await?;
+    let blob_write_ns = elapsed_ns(blob_write_started);
+    if blob_written.logical_bytes != expected_blob_logical_bytes {
+        return Err(KvError::Worker(format!(
+            "planned Blob length {} differs from written length {}",
+            expected_blob_logical_bytes, blob_written.logical_bytes
+        )));
+    }
+
+    let segment_commit_started = Instant::now();
+    let offset = config.segment_data_offset(sg_index);
+    let expected_segment_bytes = active.bytes.len();
+    let segment_buffer = write_all_direct(
+        &data,
+        active.bytes,
+        offset,
+        expected_segment_bytes,
+        config.write_max_time_us,
+        "Segment write",
+    )
+    .await?;
+    if blob_written.logical_bytes != 0 {
+        blob.sync().await?;
+    }
+    data.sync_data().await?;
+    let commit = SegmentCommit {
+        sg_index,
+        generation,
+        blob_logical_len: blob_written.logical_bytes,
+        bucket_choice_count: config.bucket_choice_count,
+    };
+    let (control_physical_bytes, control_buffer) =
+        commit_segment(&mut data, &config, storage_key_id, commit, control_buffer).await?;
+    let segment_commit_ns = elapsed_ns(segment_commit_started);
+
+    Ok(FlushIoOutput {
+        segment_buffer,
+        blob_buffer: blob_written.buffer,
+        control_buffer,
+        blob_logical_bytes: blob_written.logical_bytes,
+        blob_physical_bytes: blob_written.physical_bytes,
+        segment_physical_bytes: expected_segment_bytes as u64,
+        control_physical_bytes,
+        blob_write_ns,
+        segment_commit_ns,
+    })
 }
 
 pub(crate) fn validate_recovered_blob_ref(

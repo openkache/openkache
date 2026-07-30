@@ -36,7 +36,7 @@ pub struct RespServer {
     local_addr: SocketAddr,
     cache: Arc<ThreadedKvkache>,
     network: crate::NetworkConfig,
-    request_timeout: Duration,
+    tcp_user_timeout: Duration,
 }
 
 impl RespServer {
@@ -64,7 +64,8 @@ impl RespServer {
         }
         config.validate()?;
         let network = config.network.clone();
-        let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
+        let tcp_user_timeout =
+            Duration::from_micros(config.timeouts.output_max_time_us).max(Duration::from_millis(1));
         let mut cache = ThreadedKvkache::start_validated(config)?;
         let sockets = match bind_reuse_port_tcp_listeners(address, network.worker_count) {
             Ok(sockets) => sockets,
@@ -79,7 +80,7 @@ impl RespServer {
             local_addr,
             cache: Arc::new(cache),
             network,
-            request_timeout,
+            tcp_user_timeout,
         })
     }
 
@@ -114,7 +115,7 @@ impl RespServer {
             sockets,
             cache,
             network,
-            request_timeout,
+            tcp_user_timeout,
             ..
         } = self;
         let (started_tx, started_rx) =
@@ -171,7 +172,7 @@ impl RespServer {
                             return;
                         }
                         let result =
-                            run_resp_worker(listener, &worker_cache, request_timeout, stop_rx)
+                            run_resp_worker(listener, &worker_cache, tcp_user_timeout, stop_rx)
                                 .await
                                 .map_err(|error| error.to_string());
                         reporter.finish(result);
@@ -253,7 +254,7 @@ fn bind_reuse_port_tcp_listeners(
 async fn run_resp_worker(
     listener: TcpListener,
     cache: &ThreadedKvkache,
-    request_timeout: Duration,
+    tcp_user_timeout: Duration,
     stop: AsyncReceiver<()>,
 ) -> std::io::Result<()> {
     let mut connections = FuturesUnordered::new();
@@ -265,8 +266,8 @@ async fn run_resp_worker(
             select! {
                 incoming = incoming => {
                     let (stream, _) = incoming?;
-                    stream.set_nodelay(true)?;
-                    connections.push(serve_resp_connection(stream, cache, request_timeout));
+                    configure_resp_stream(&stream, tcp_user_timeout)?;
+                    connections.push(serve_resp_connection(stream, cache));
                 }
                 _ = stopping => break,
             }
@@ -278,8 +279,8 @@ async fn run_resp_worker(
             select! {
                 incoming = incoming => {
                     let (stream, _) = incoming?;
-                    stream.set_nodelay(true)?;
-                    connections.push(serve_resp_connection(stream, cache, request_timeout));
+                    configure_resp_stream(&stream, tcp_user_timeout)?;
+                    connections.push(serve_resp_connection(stream, cache));
                 }
                 _ = completed => {}
                 _ = stopping => break,
@@ -289,10 +290,14 @@ async fn run_resp_worker(
     Ok(())
 }
 
+fn configure_resp_stream(stream: &TcpStream, tcp_user_timeout: Duration) -> std::io::Result<()> {
+    stream.set_nodelay(true)?;
+    socket2::SockRef::from(stream).set_tcp_user_timeout(Some(tcp_user_timeout))
+}
+
 async fn serve_resp_connection(
     mut stream: TcpStream,
     cache: &ThreadedKvkache,
-    request_timeout: Duration,
 ) -> std::io::Result<()> {
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut responses = Vec::new();
@@ -310,7 +315,7 @@ async fn serve_resp_connection(
         if pending.len() > MAX_BUFFER_BYTES {
             responses.clear();
             error(&mut responses, "request buffer exceeds RESP limit");
-            write_with_timeout(&mut stream, responses, request_timeout).await?;
+            write_response(&mut stream, responses).await?;
             return Ok(());
         }
 
@@ -324,18 +329,7 @@ async fn serve_resp_connection(
                     consumed: command_bytes,
                 } => {
                     consumed += command_bytes;
-                    close = match compio::runtime::time::timeout(
-                        request_timeout,
-                        execute_command(cache, &command, &mut responses),
-                    )
-                    .await
-                    {
-                        Ok(close) => close,
-                        Err(_) => {
-                            error(&mut responses, "request timed out");
-                            true
-                        }
-                    };
+                    close = execute_command(cache, &command, &mut responses).await;
                     if close {
                         break;
                     }
@@ -353,7 +347,7 @@ async fn serve_resp_connection(
             pending.drain(..consumed);
         }
         if !responses.is_empty() {
-            responses = write_with_timeout(&mut stream, responses, request_timeout).await?;
+            responses = write_response(&mut stream, responses).await?;
         }
         if close {
             return Ok(());
@@ -361,21 +355,10 @@ async fn serve_resp_connection(
     }
 }
 
-async fn write_with_timeout(
-    stream: &mut TcpStream,
-    response: Vec<u8>,
-    timeout: Duration,
-) -> std::io::Result<Vec<u8>> {
-    match compio::runtime::time::timeout(timeout, stream.write_all(response)).await {
-        Ok(BufResult(result, response)) => {
-            result?;
-            Ok(response)
-        }
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            "RESP response write timed out",
-        )),
-    }
+async fn write_response(stream: &mut TcpStream, response: Vec<u8>) -> std::io::Result<Vec<u8>> {
+    let BufResult(result, response) = stream.write_all(response).await;
+    result?;
+    Ok(response)
 }
 
 async fn execute_command(
@@ -391,8 +374,8 @@ async fn execute_command(
                     .get_async_without_timeout(ClientKeyDigest::from_user_key(key))
                     .await
                 {
-                    Ok(Some(value)) if value.flags == ValueFlags::NONE => {
-                        bulk(response, Some(&value.bytes));
+                    Ok(Some(value)) if value.flags() == ValueFlags::NONE => {
+                        bulk(response, Some(value.bytes()));
                     }
                     Ok(Some(_)) => error(response, "RESP cannot decode transformed client values"),
                     Ok(None) => bulk(response, None),

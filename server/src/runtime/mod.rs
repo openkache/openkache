@@ -20,7 +20,7 @@ use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
-use crate::types::EncodedValue;
+use crate::types::{EncodedValue, RetrievedValue};
 use crate::*;
 
 pub(super) mod completion;
@@ -300,11 +300,18 @@ impl ThreadedKvkache {
         build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
     ) -> Result<WorkerResponse> {
         let (response_tx, response_rx) = self.workers[worker].completions.register();
-        self.workers[worker]
-            .sender
-            .send_async(build(WorkerResponseSender::completion(response_tx)))
-            .await
-            .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
+        let sender = &self.workers[worker].sender;
+        let request = build(WorkerResponseSender::completion(response_tx));
+        match sender.try_send(request) {
+            Ok(()) => {}
+            Err(channel::TrySendError::Full(request)) => sender
+                .send_async(request)
+                .await
+                .map_err(|_| KvError::Worker("request queue disconnected".into()))?,
+            Err(channel::TrySendError::Disconnected(_)) => {
+                return Err(KvError::Worker("request queue disconnected".into()));
+            }
+        }
         response_rx
             .await
             .map_err(|_| KvError::Worker("worker response disconnected".into()))?
@@ -317,7 +324,7 @@ impl ThreadedKvkache {
             storage_key,
             response,
         })? {
-            WorkerResponse::Value(value) => Ok(value.map(|value| value.bytes)),
+            WorkerResponse::Value(value) => Ok(value.map(RetrievedValue::into_bytes)),
             response => Err(KvError::Worker(format!(
                 "unexpected get response: {response:?}"
             ))),
@@ -338,7 +345,7 @@ impl ThreadedKvkache {
             })
             .await?
         {
-            WorkerResponse::Value(value) => Ok(value),
+            WorkerResponse::Value(value) => Ok(value.map(RetrievedValue::into_encoded)),
             response => Err(KvError::Worker(format!(
                 "unexpected get response: {response:?}"
             ))),
@@ -349,7 +356,7 @@ impl ThreadedKvkache {
     pub(crate) async fn get_async_without_timeout(
         &self,
         client_key_digest: ClientKeyDigest,
-    ) -> Result<Option<EncodedValue>> {
+    ) -> Result<Option<RetrievedValue>> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
         match self

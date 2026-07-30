@@ -16,7 +16,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::store::{
-    BLOB_ITEM_THRESHOLD_BYTES, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES, STORED_VALUE_TAG_BYTES,
+    BLOB_ITEM_THRESHOLD_BYTES, BUCKET_READ_POOL_CAPACITY, ITEM_FIXED_BYTES, STORED_BLOB_REF_BYTES,
+    STORED_VALUE_TAG_BYTES,
 };
 use crate::table::Table;
 use crate::types::STORAGE_KEY_BYTES;
@@ -30,6 +31,7 @@ const STORAGE_USE_PERCENT: u64 = 95;
 const TABLE_RAM_PERCENT: u64 = 50;
 const LIVE_KEY_PERCENT: u64 = 75;
 const MAX_SEGMENTS_PER_THREAD: usize = 1 << 16;
+const MAX_SIZED_RAM_SEGMENTS_PER_THREAD: usize = 3;
 
 /// A coarse value-size distribution used to choose the SG and Blob layout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -187,8 +189,11 @@ impl SizingRequest {
         config.storage.max_item_size_mib = config.storage.blob_segment_size_mib.min(16);
 
         let keys_per_segment = keys_per_segment(self.profile)?;
-        let candidate = |segments_per_thread: usize| -> Result<Option<SizingPlan>> {
+        let candidate = |ram_segments_per_thread: usize,
+                         segments_per_thread: usize|
+         -> Result<Option<SizingPlan>> {
             let mut config = config.clone();
+            config.storage.ram_segments_per_thread = ram_segments_per_thread;
             config.storage.segments_per_thread = segments_per_thread;
             let raw_key_capacity = checked_product(
                 [
@@ -221,6 +226,15 @@ impl SizingRequest {
             if table_memory_bytes > table_memory_budget_bytes {
                 return Ok(None);
             }
+            let ram_segment_memory_bytes = ram_segment_memory_bytes(&config)?;
+            let modeled_process_memory_bytes = table_memory_bytes
+                .checked_add(ram_segment_memory_bytes)
+                .ok_or_else(|| {
+                    KvError::InvalidConfig("modeled process memory size overflowed".into())
+                })?;
+            if modeled_process_memory_bytes > self.memory_bytes {
+                return Ok(None);
+            }
 
             Ok(Some(SizingPlan {
                 config,
@@ -232,30 +246,46 @@ impl SizingRequest {
                 planned_key_capacity,
                 table_memory_bytes,
                 table_memory_budget_bytes,
+                ram_segment_memory_bytes,
                 storage_file_bytes,
                 storage_budget_bytes,
             }))
         };
 
-        let mut first_unchecked = 1usize;
-        let mut first_infeasible = MAX_SEGMENTS_PER_THREAD + 1;
         let mut best = None;
-        // File length, key capacity, and the modeled Table allocation are
-        // monotonic in the Segment count, so the feasible counts form a prefix.
-        while first_unchecked < first_infeasible {
-            let segments_per_thread = first_unchecked + (first_infeasible - first_unchecked) / 2;
-            if let Some(plan) = candidate(segments_per_thread)? {
+        for ram_segments_per_thread in 1..=MAX_SIZED_RAM_SEGMENTS_PER_THREAD {
+            let mut first_unchecked = 1usize;
+            let mut first_infeasible = MAX_SEGMENTS_PER_THREAD + 1;
+            let mut best_for_ram_count = None;
+            // File length, key capacity, and the modeled Table allocation are
+            // monotonic in the Segment count, so feasible counts form a prefix.
+            while first_unchecked < first_infeasible {
+                let segments_per_thread =
+                    first_unchecked + (first_infeasible - first_unchecked) / 2;
+                if let Some(plan) = candidate(ram_segments_per_thread, segments_per_thread)? {
+                    best_for_ram_count = Some(plan);
+                    first_unchecked = segments_per_thread + 1;
+                } else {
+                    first_infeasible = segments_per_thread;
+                }
+            }
+            if let Some(plan) = best_for_ram_count
+                && best.as_ref().is_none_or(|current: &SizingPlan| {
+                    plan.config.storage.segments_per_thread
+                        > current.config.storage.segments_per_thread
+                        || (plan.config.storage.segments_per_thread
+                            == current.config.storage.segments_per_thread
+                            && plan.config.storage.ram_segments_per_thread
+                                > current.config.storage.ram_segments_per_thread)
+                })
+            {
                 best = Some(plan);
-                first_unchecked = segments_per_thread + 1;
-            } else {
-                first_infeasible = segments_per_thread;
             }
         }
 
         best.ok_or_else(|| {
             KvError::InvalidConfig(
-                "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD"
-                    .into(),
+                "resource budgets cannot fit one SG, its modeled Table, and mutable RAM Segments; increase RAM or SSD".into(),
             )
         })
     }
@@ -464,6 +494,10 @@ pub struct SizingPlan {
     pub table_memory_bytes: u64,
     /// Maximum Table allocation admitted by the planner.
     pub table_memory_budget_bytes: u64,
+    /// Host-wide upper bound for mutable Segment payloads and staging buffers.
+    ///
+    /// This excludes per-record map metadata, the Table, and network requests.
+    pub ram_segment_memory_bytes: u64,
     /// Host-wide Segment, control-page, and Blob file address space.
     pub storage_file_bytes: u64,
     /// Maximum storage address space admitted by the planner.
@@ -492,6 +526,45 @@ fn storage_file_bytes(config: &AppConfig) -> Result<u64> {
         .checked_add(per_worker.blob_bytes())
         .and_then(|bytes| bytes.checked_mul(config.runtime.thread_count as u64))
         .ok_or_else(|| KvError::InvalidConfig("sized storage file length overflowed".into()))
+}
+
+fn ram_segment_memory_bytes(config: &AppConfig) -> Result<u64> {
+    let segment_bytes = checked_product(
+        [config.storage.segment_size_mib as u64, MIB],
+        "RAM Segment byte size",
+    )?;
+    let blob_bytes = checked_product(
+        [config.storage.blob_segment_size_mib as u64, MIB],
+        "RAM Blob byte size",
+    )?;
+    let generation_bytes = segment_bytes
+        .checked_add(blob_bytes)
+        .ok_or_else(|| KvError::InvalidConfig("RAM generation size overflowed".into()))?;
+    let lane_count = config.storage.ram_segments_per_thread as u64;
+    let active_payload_bytes = checked_product(
+        [lane_count, generation_bytes],
+        "active RAM Segment payload capacity",
+    )?;
+    let mutable_segment_bytes = checked_product(
+        [lane_count, segment_bytes],
+        "mutable RAM Segment buffer capacity",
+    )?;
+    let blob_write_buffer_bytes = blob_bytes.min(MIB);
+    let read_pool_bytes = checked_product(
+        [BUCKET_READ_POOL_CAPACITY as u64, BUCKET_BYTES as u64],
+        "Bucket read pool capacity",
+    )?;
+    let per_worker_bytes = active_payload_bytes
+        .checked_add(mutable_segment_bytes)
+        .and_then(|bytes| bytes.checked_add(generation_bytes))
+        .and_then(|bytes| bytes.checked_add(blob_write_buffer_bytes))
+        .and_then(|bytes| bytes.checked_add(read_pool_bytes))
+        .and_then(|bytes| bytes.checked_add(BUCKET_BYTES as u64))
+        .ok_or_else(|| KvError::InvalidConfig("worker RAM Segment memory overflowed".into()))?;
+    checked_product(
+        [config.runtime.thread_count as u64, per_worker_bytes],
+        "host-wide RAM Segment memory",
+    )
 }
 
 fn keys_per_segment(profile: SizingProfile) -> Result<u64> {

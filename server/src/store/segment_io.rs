@@ -35,6 +35,27 @@ impl Kvkache {
         Ok(bytes)
     }
 
+    pub(super) async fn read_bucket_without_timeout(
+        &self,
+        sg_index: usize,
+        bucket_index: usize,
+    ) -> Result<DirectIoBuffer> {
+        let offset =
+            self.config.segment_data_offset(sg_index) + bucket_index as u64 * BUCKET_BYTES as u64;
+        let bytes = read_exact_direct_without_timeout(
+            &self.data,
+            self.bucket_read_pool.take_bucket(),
+            offset,
+            BUCKET_BYTES,
+            "Bucket read",
+        )
+        .await?;
+        self.io
+            .data_read
+            .set(self.io.data_read.get() + bytes.len() as u64);
+        Ok(bytes)
+    }
+
     async fn read_segment_extent(
         &self,
         sg_index: usize,
@@ -159,6 +180,7 @@ impl Kvkache {
                         .locate_stable_record_with_bucket(
                             &item.storage_key,
                             Some((table_location, bucket)),
+                            true,
                         )
                         .await?
                         .is_some_and(|located| {
