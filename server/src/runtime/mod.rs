@@ -19,17 +19,15 @@ use compio::runtime::RuntimeBuilder;
 use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{self, Sender};
-use crate::store::{Kvkache, ResourceGuard, SetOutcome};
+use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::types::EncodedValue;
-use crate::{KvError, Result, StorageKey};
+use crate::*;
 
+pub(super) mod completion;
 mod worker;
-pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
-use worker::{BenchmarkResponse, PendingBenchmarkRequest, WorkerRequest, worker_loop};
+pub use worker::*;
 
-pub(crate) const fn worker_request_slot_bytes() -> usize {
-    std::mem::size_of::<WorkerRequest>()
-}
+use self::completion::CompletionSlab;
 
 pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
 pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
@@ -46,6 +44,7 @@ pub(crate) struct ServerSecret {
 
 struct WorkerHandle {
     sender: Sender<WorkerRequest>,
+    completions: CompletionSlab<Result<WorkerResponse>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -198,6 +197,9 @@ impl ThreadedKvkache {
                 })?;
             workers.push(WorkerHandle {
                 sender,
+                // Match idle completion retention to request-queue backpressure. Slots created
+                // for callers beyond this bound are released after their request completes.
+                completions: CompletionSlab::with_retained_capacity(queue_capacity),
                 thread: Some(thread),
             });
         }
@@ -212,7 +214,9 @@ impl ThreadedKvkache {
                 Err(message) => {
                     for worker in &workers {
                         let (response, _) = channel::bounded(1);
-                        let _ = worker.sender.send(WorkerRequest::Shutdown { response });
+                        let _ = worker.sender.send(WorkerRequest::Shutdown {
+                            response: WorkerResponseSender::channel(response),
+                        });
                     }
                     for worker in &mut workers {
                         if let Some(thread) = worker.thread.take() {
@@ -240,17 +244,17 @@ impl ThreadedKvkache {
         derive_storage_key(&self.server_cipher, client_key_digest)
     }
 
-    fn request<T: Send + Unpin + 'static>(
+    fn request(
         &self,
         worker: usize,
-        build: impl FnOnce(Sender<Result<T>>) -> WorkerRequest,
-    ) -> Result<T> {
+        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
+    ) -> Result<WorkerResponse> {
         let (response_tx, response_rx) = channel::bounded(1);
         let request_started = std::time::Instant::now();
         self.workers[worker]
             .sender
             .send_timeout(
-                build(response_tx),
+                build(WorkerResponseSender::channel(response_tx)),
                 Duration::from_micros(self.config.timeouts.input_max_time_us),
             )
             .map_err(|_| KvError::Timeout("request input"))?;
@@ -263,17 +267,19 @@ impl ThreadedKvkache {
             .map_err(|_| KvError::Timeout("request output"))?
     }
 
-    /// Sends one worker request using async channel operations and bounded timeouts.
-    async fn request_async<T: Send + Unpin + 'static>(
+    /// Sends one worker request using a reusable completion slot and bounded timeouts.
+    async fn request_async(
         &self,
         worker: usize,
-        build: impl FnOnce(Sender<Result<T>>) -> WorkerRequest,
-    ) -> Result<T> {
-        let (response_tx, response_rx) = channel::bounded_sync_async(1);
+        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
+    ) -> Result<WorkerResponse> {
+        let (response_tx, response_rx) = self.workers[worker].completions.register();
         let request_started = std::time::Instant::now();
         compio::runtime::time::timeout(
             Duration::from_micros(self.config.timeouts.input_max_time_us),
-            self.workers[worker].sender.send_async(build(response_tx)),
+            self.workers[worker]
+                .sender
+                .send_async(build(WorkerResponseSender::completion(response_tx))),
         )
         .await
         .map_err(|_| KvError::Timeout("request input"))?
@@ -282,37 +288,40 @@ impl ThreadedKvkache {
         let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
         let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
         let remaining = request_limit.saturating_sub(elapsed).min(output_limit);
-        compio::runtime::time::timeout(remaining, response_rx.recv_async())
+        compio::runtime::time::timeout(remaining, response_rx)
             .await
             .map_err(|_| KvError::Timeout("request output"))?
-            .map_err(|_| KvError::Worker("response queue disconnected".into()))?
+            .map_err(|_| KvError::Worker("worker response disconnected".into()))?
     }
 
-    async fn request_async_without_timeout<T: Send + Unpin + 'static>(
+    async fn request_async_without_timeout(
         &self,
         worker: usize,
-        build: impl FnOnce(Sender<Result<T>>) -> WorkerRequest,
-    ) -> Result<T> {
-        let (response_tx, response_rx) = channel::bounded_sync_async(1);
+        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
+    ) -> Result<WorkerResponse> {
+        let (response_tx, response_rx) = self.workers[worker].completions.register();
         self.workers[worker]
             .sender
-            .send_async(build(response_tx))
+            .send_async(build(WorkerResponseSender::completion(response_tx)))
             .await
             .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
         response_rx
-            .recv_async()
             .await
-            .map_err(|_| KvError::Worker("response queue disconnected".into()))?
+            .map_err(|_| KvError::Worker("worker response disconnected".into()))?
     }
 
     pub fn get(&self, client_key_digest: ClientKeyDigest) -> Result<Option<Vec<u8>>> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request(worker, |response| WorkerRequest::Get {
+        match self.request(worker, |response| WorkerRequest::Get {
             storage_key,
             response,
-        })
-        .map(|value| value.map(|value| value.bytes))
+        })? {
+            WorkerResponse::Value(value) => Ok(value.map(|value| value.bytes)),
+            response => Err(KvError::Worker(format!(
+                "unexpected get response: {response:?}"
+            ))),
+        }
     }
 
     /// Retrieves a value without blocking the caller's async executor thread.
@@ -322,11 +331,18 @@ impl ThreadedKvkache {
     ) -> Result<Option<EncodedValue>> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request_async(worker, |response| WorkerRequest::Get {
-            storage_key,
-            response,
-        })
-        .await
+        match self
+            .request_async(worker, |response| WorkerRequest::Get {
+                storage_key,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Value(value) => Ok(value),
+            response => Err(KvError::Worker(format!(
+                "unexpected get response: {response:?}"
+            ))),
+        }
     }
 
     /// Retrieves a value while the caller enforces the complete request deadline.
@@ -336,22 +352,34 @@ impl ThreadedKvkache {
     ) -> Result<Option<EncodedValue>> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request_async_without_timeout(worker, |response| WorkerRequest::Get {
-            storage_key,
-            response,
-        })
-        .await
+        match self
+            .request_async_without_timeout(worker, |response| WorkerRequest::Get {
+                storage_key,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Value(value) => Ok(value),
+            response => Err(KvError::Worker(format!(
+                "unexpected get response: {response:?}"
+            ))),
+        }
     }
 
     pub fn set(&self, client_key_digest: ClientKeyDigest, value: Vec<u8>) -> Result<SetOutcome> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request(worker, |response| WorkerRequest::Set {
+        match self.request(worker, |response| WorkerRequest::Set {
             storage_key,
             value: EncodedValue::plain(value),
             options: SetOptions::NONE,
             response,
-        })
+        })? {
+            WorkerResponse::Set(outcome) => Ok(outcome),
+            response => Err(KvError::Worker(format!(
+                "unexpected set response: {response:?}"
+            ))),
+        }
     }
 
     pub(crate) async fn set_async_with_options(
@@ -362,13 +390,20 @@ impl ThreadedKvkache {
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request_async(worker, |response| WorkerRequest::Set {
-            storage_key,
-            value,
-            options,
-            response,
-        })
-        .await
+        match self
+            .request_async(worker, |response| WorkerRequest::Set {
+                storage_key,
+                value,
+                options,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Set(outcome) => Ok(outcome),
+            response => Err(KvError::Worker(format!(
+                "unexpected set response: {response:?}"
+            ))),
+        }
     }
 
     /// Stores a value while the caller enforces the complete request deadline.
@@ -380,33 +415,52 @@ impl ThreadedKvkache {
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request_async_without_timeout(worker, |response| WorkerRequest::Set {
-            storage_key,
-            value,
-            options,
-            response,
-        })
-        .await
+        match self
+            .request_async_without_timeout(worker, |response| WorkerRequest::Set {
+                storage_key,
+                value,
+                options,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Set(outcome) => Ok(outcome),
+            response => Err(KvError::Worker(format!(
+                "unexpected set response: {response:?}"
+            ))),
+        }
     }
 
     pub fn delete(&self, client_key_digest: ClientKeyDigest) -> Result<bool> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request(worker, |response| WorkerRequest::Delete {
+        match self.request(worker, |response| WorkerRequest::Delete {
             storage_key,
             response,
-        })
+        })? {
+            WorkerResponse::Deleted(deleted) => Ok(deleted),
+            response => Err(KvError::Worker(format!(
+                "unexpected delete response: {response:?}"
+            ))),
+        }
     }
 
     /// Deletes a value without blocking the caller's async executor thread.
     pub(crate) async fn delete_async(&self, client_key_digest: ClientKeyDigest) -> Result<bool> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request_async(worker, |response| WorkerRequest::Delete {
-            storage_key,
-            response,
-        })
-        .await
+        match self
+            .request_async(worker, |response| WorkerRequest::Delete {
+                storage_key,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Deleted(deleted) => Ok(deleted),
+            response => Err(KvError::Worker(format!(
+                "unexpected delete response: {response:?}"
+            ))),
+        }
     }
 
     /// Deletes a value while the caller enforces the complete request deadline.
@@ -416,11 +470,18 @@ impl ThreadedKvkache {
     ) -> Result<bool> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
-        self.request_async_without_timeout(worker, |response| WorkerRequest::Delete {
-            storage_key,
-            response,
-        })
-        .await
+        match self
+            .request_async_without_timeout(worker, |response| WorkerRequest::Delete {
+                storage_key,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Deleted(deleted) => Ok(deleted),
+            response => Err(KvError::Worker(format!(
+                "unexpected delete response: {response:?}"
+            ))),
+        }
     }
 
     pub fn for_trace_benchmark(
@@ -434,7 +495,7 @@ impl ThreadedKvkache {
             cpu_ids,
             total_segment_count,
             total_table_capacity,
-            2,
+            DEFAULT_BUCKET_CHOICE_COUNT,
         )
     }
 
@@ -547,59 +608,45 @@ impl ThreadedKvkache {
             }
             let storage_key = self.storage_key(operation.client_key_digest());
             let worker = self.owner(&storage_key);
-            let (response, started) = match operation {
-                BenchmarkOperation::Get(_) => {
-                    let (response_tx, response_rx) = channel::bounded(1);
-                    let request = WorkerRequest::Get {
+            let (response_tx, response_rx) = channel::bounded(1);
+            let (request, kind) = match operation {
+                BenchmarkOperation::Get(_) => (
+                    WorkerRequest::Get {
                         storage_key,
-                        response: response_tx,
-                    };
-                    let started = std::time::Instant::now();
-                    self.workers[worker]
-                        .sender
-                        .send_timeout(
-                            request,
-                            Duration::from_micros(self.config.timeouts.input_max_time_us),
-                        )
-                        .map_err(|_| KvError::Timeout("benchmark request input"))?;
-                    (BenchmarkResponse::Get(response_rx), started)
-                }
-                BenchmarkOperation::Set(_, value) => {
-                    let (response_tx, response_rx) = channel::bounded(1);
-                    let request = WorkerRequest::Set {
+                        response: WorkerResponseSender::channel(response_tx),
+                    },
+                    BenchmarkResponseKind::Get,
+                ),
+                BenchmarkOperation::Set(_, value) => (
+                    WorkerRequest::Set {
                         storage_key,
                         value: EncodedValue::plain(value),
                         options: SetOptions::NONE,
-                        response: response_tx,
-                    };
-                    let started = std::time::Instant::now();
-                    self.workers[worker]
-                        .sender
-                        .send_timeout(
-                            request,
-                            Duration::from_micros(self.config.timeouts.input_max_time_us),
-                        )
-                        .map_err(|_| KvError::Timeout("benchmark request input"))?;
-                    (BenchmarkResponse::Set(response_rx), started)
-                }
-                BenchmarkOperation::Delete(_) => {
-                    let (response_tx, response_rx) = channel::bounded(1);
-                    let request = WorkerRequest::Delete {
+                        response: WorkerResponseSender::channel(response_tx),
+                    },
+                    BenchmarkResponseKind::Set,
+                ),
+                BenchmarkOperation::Delete(_) => (
+                    WorkerRequest::Delete {
                         storage_key,
-                        response: response_tx,
-                    };
-                    let started = std::time::Instant::now();
-                    self.workers[worker]
-                        .sender
-                        .send_timeout(
-                            request,
-                            Duration::from_micros(self.config.timeouts.input_max_time_us),
-                        )
-                        .map_err(|_| KvError::Timeout("benchmark request input"))?;
-                    (BenchmarkResponse::Delete(response_rx), started)
-                }
+                        response: WorkerResponseSender::channel(response_tx),
+                    },
+                    BenchmarkResponseKind::Delete,
+                ),
             };
-            pending.push_back(PendingBenchmarkRequest { response, started });
+            let started = std::time::Instant::now();
+            self.workers[worker]
+                .sender
+                .send_timeout(
+                    request,
+                    Duration::from_micros(self.config.timeouts.input_max_time_us),
+                )
+                .map_err(|_| KvError::Timeout("benchmark request input"))?;
+            pending.push_back(PendingBenchmarkRequest {
+                response: response_rx,
+                kind,
+                started,
+            });
         }
         while let Some(request) = pending.pop_front() {
             self.finish_benchmark_request(request, &mut stats)?;
@@ -612,14 +659,25 @@ impl ThreadedKvkache {
         pending: PendingBenchmarkRequest,
         stats: &mut BenchmarkBatchStats,
     ) -> Result<()> {
-        match pending.response {
-            BenchmarkResponse::Get(response) => {
-                let value = self.receive_benchmark_response(response, pending.started)?;
+        let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
+        let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
+        let remaining = request_limit
+            .saturating_sub(pending.started.elapsed())
+            .min(output_limit);
+        let response = pending
+            .response
+            .recv_timeout(remaining)
+            .map_err(|_| KvError::Timeout("benchmark request output"))??;
+        stats.operations += 1;
+        stats
+            .latency_ns
+            .push(pending.started.elapsed().as_nanos() as u64);
+        match (pending.kind, response) {
+            (BenchmarkResponseKind::Get, WorkerResponse::Value(value)) => {
                 stats.gets += 1;
                 stats.hits += value.is_some() as usize;
             }
-            BenchmarkResponse::Set(response) => {
-                let outcome = self.receive_benchmark_response(response, pending.started)?;
+            (BenchmarkResponseKind::Set, WorkerResponse::Set(outcome)) => {
                 stats.sets += 1;
                 match outcome {
                     SetOutcome::Created => stats.creates += 1,
@@ -627,32 +685,17 @@ impl ThreadedKvkache {
                     SetOutcome::NotStored => {}
                 }
             }
-            BenchmarkResponse::Delete(response) => {
-                let deleted = self.receive_benchmark_response(response, pending.started)?;
+            (BenchmarkResponseKind::Delete, WorkerResponse::Deleted(deleted)) => {
                 stats.deletes += 1;
                 stats.deleted += deleted as usize;
             }
+            (_, response) => {
+                return Err(KvError::Worker(format!(
+                    "unexpected benchmark response: {response:?}"
+                )));
+            }
         }
-        stats.operations += 1;
-        stats
-            .latency_ns
-            .push(pending.started.elapsed().as_nanos() as u64);
         Ok(())
-    }
-
-    fn receive_benchmark_response<T: Send + Unpin + 'static>(
-        &self,
-        response: channel::Receiver<Result<T>>,
-        started: std::time::Instant,
-    ) -> Result<T> {
-        let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
-        let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
-        let remaining = request_limit
-            .saturating_sub(started.elapsed())
-            .min(output_limit);
-        response
-            .recv_timeout(remaining)
-            .map_err(|_| KvError::Timeout("benchmark request output"))?
     }
 
     pub fn stats(&self) -> Result<Vec<String>> {
@@ -660,8 +703,12 @@ impl ThreadedKvkache {
             .iter()
             .enumerate()
             .map(|(thread_id, _)| {
-                self.request(thread_id, |response| WorkerRequest::Stats { response })
-                    .map(|stats| format!("thread={thread_id} {stats}"))
+                match self.request(thread_id, |response| WorkerRequest::Stats { response })? {
+                    WorkerResponse::Stats(stats) => Ok(format!("thread={thread_id} {stats}")),
+                    response => Err(KvError::Worker(format!(
+                        "unexpected stats response: {response:?}"
+                    ))),
+                }
             })
             .collect()
     }
@@ -670,17 +717,33 @@ impl ThreadedKvkache {
     pub(crate) async fn stats_async(&self) -> Result<Vec<String>> {
         let mut stats = Vec::with_capacity(self.workers.len());
         for thread_id in 0..self.workers.len() {
-            let worker_stats = self
+            match self
                 .request_async(thread_id, |response| WorkerRequest::Stats { response })
-                .await?;
-            stats.push(format!("thread={thread_id} {worker_stats}"));
+                .await?
+            {
+                WorkerResponse::Stats(worker_stats) => {
+                    stats.push(format!("thread={thread_id} {worker_stats}"));
+                }
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected stats response: {response:?}"
+                    )));
+                }
+            }
         }
         Ok(stats)
     }
 
     pub fn sync(&self) -> Result<()> {
         for thread_id in 0..self.workers.len() {
-            self.request(thread_id, |response| WorkerRequest::Sync { response })?;
+            match self.request(thread_id, |response| WorkerRequest::Sync { response })? {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -688,8 +751,17 @@ impl ThreadedKvkache {
     /// Flushes every worker without blocking the caller's async executor thread.
     pub(crate) async fn sync_async(&self) -> Result<()> {
         for thread_id in 0..self.workers.len() {
-            self.request_async(thread_id, |response| WorkerRequest::Sync { response })
-                .await?;
+            match self
+                .request_async(thread_id, |response| WorkerRequest::Sync { response })
+                .await?
+            {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -702,7 +774,7 @@ impl ThreadedKvkache {
             if worker
                 .sender
                 .send(WorkerRequest::Shutdown {
-                    response: response_tx,
+                    response: WorkerResponseSender::channel(response_tx),
                 })
                 .is_err()
                 && shutdown_error.is_none()
@@ -716,7 +788,12 @@ impl ThreadedKvkache {
         }
         for response in responses {
             match response.recv() {
-                Ok(Ok(())) => {}
+                Ok(Ok(WorkerResponse::Shutdown)) => {}
+                Ok(Ok(response)) if shutdown_error.is_none() => {
+                    shutdown_error = Some(KvError::Worker(format!(
+                        "unexpected shutdown response: {response:?}"
+                    )));
+                }
                 Ok(Err(error)) if shutdown_error.is_none() => {
                     shutdown_error = Some(error);
                 }

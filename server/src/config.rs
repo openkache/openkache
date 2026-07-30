@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
 
+pub(crate) const DEFAULT_BUCKET_CHOICE_COUNT: usize = 4;
+
 const DEFAULT_MAX_ITEM_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -167,7 +169,7 @@ impl Default for Config {
             fingerprint_bits: 8,
             unary_count: 32,
             front_back_ratio: 8,
-            bucket_choice_count: 2,
+            bucket_choice_count: DEFAULT_BUCKET_CHOICE_COUNT,
             bucket_selection_policy: BucketSelectionPolicy::LeastUsed,
             sg_index_bits: 6,
             fingerprint_hash_offset_bits: 64,
@@ -531,8 +533,8 @@ impl Default for IoUringConfig {
             sqpoll: false,
             iopoll: false,
             entries_per_worker: 256,
-            max_inflight_per_worker: 8,
-            batch_size: 16,
+            max_inflight_per_worker: 32,
+            batch_size: 64,
             batch_max_wait_us: 10,
         }
     }
@@ -606,7 +608,7 @@ impl Default for TableConfig {
             fingerprint_bits: 8,
             unary_count: 32,
             front_back_ratio: 8,
-            bucket_choice_count: 2,
+            bucket_choice_count: DEFAULT_BUCKET_CHOICE_COUNT,
             bucket_selection_policy: BucketSelectionPolicy::LeastUsed,
             fingerprint_hash_offset_bits: 64,
         }
@@ -817,8 +819,8 @@ impl AppConfig {
             },
             io_uring: IoUringConfig {
                 entries_per_worker: 256,
-                max_inflight_per_worker: 8,
-                batch_size: 16,
+                max_inflight_per_worker: 32,
+                batch_size: 64,
                 ..IoUringConfig::default()
             },
             timeouts: TimeoutConfig {

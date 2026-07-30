@@ -5,19 +5,10 @@
 //! padding in the paired Blob Segment. Only the end of the complete Blob write
 //! is padded for `O_DIRECT`.
 
-use std::time::Duration;
-
-use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf};
 use compio::fs::File;
-use compio::io::AsyncReadAt;
 
-use super::{ResourceGuard, open_direct_file, require_complete_direct_io};
-use crate::BUCKET_BYTES;
-use crate::buffer::DirectIoBuffer;
-use crate::config::Config;
-use crate::error::{KvError, Result};
 use crate::types::STORAGE_KEY_BYTES;
+use crate::*;
 
 pub(crate) const BLOB_ITEM_THRESHOLD_BYTES: usize = 2 * 1024;
 pub(crate) const BLOB_REF_BYTES: usize = 8;
@@ -240,19 +231,15 @@ impl BlobSegment {
             buffer[chunk_logical_bytes..chunk_physical_bytes].fill(0);
 
             let write_offset = segment_base + logical_written as u64;
-            let write = super::write_all_at_retrying_transient(
-                &mut self.file,
-                buffer.slice(..chunk_physical_bytes),
+            buffer = write_all_direct(
+                &self.file,
+                buffer,
                 write_offset,
-            );
-            let BufResult(result, returned) = compio::runtime::time::timeout(
-                Duration::from_micros(self.write_max_time_us),
-                write,
+                chunk_physical_bytes,
+                self.write_max_time_us,
+                "Blob Segment write",
             )
-            .await
-            .map_err(|_| KvError::Timeout("Blob Segment write"))?;
-            super::contextualize_would_block("Blob Segment write", result)?;
-            buffer = returned.into_inner();
+            .await?;
             logical_written += chunk_logical_bytes;
             physical_written += chunk_physical_bytes as u64;
         }
@@ -272,26 +259,22 @@ impl BlobSegment {
             .ok_or_else(|| KvError::Worker("BlobRef read extent overflow".into()))?;
         let read_len = (read_end - read_start) as usize;
         let segment_base = sg_index as u64 * self.segment_capacity_bytes;
-        let read = self.file.read_at(
+        let bytes = read_exact_direct(
+            &self.file,
             DirectIoBuffer::for_read(read_len),
             segment_base + read_start,
-        );
-        let BufResult(result, bytes) =
-            compio::runtime::time::timeout(Duration::from_micros(self.read_max_time_us), read)
-                .await
-                .map_err(|_| KvError::Timeout("Blob Segment read"))?;
-        require_complete_direct_io(
-            "Blob Segment read",
-            super::contextualize_would_block("Blob Segment read", result)?,
             read_len,
-        )?;
+            self.read_max_time_us,
+            "Blob Segment read",
+        )
+        .await?;
         let relative_start = (value_start - read_start) as usize;
         let relative_end = relative_start + blob_ref.value_len as usize;
         Ok(bytes[relative_start..relative_end].to_vec())
     }
 
     pub(crate) async fn sync(&self) -> Result<()> {
-        super::contextualize_would_block("Blob Segment sync", self.file.sync_data().await)?;
+        self.file.sync_data().await?;
         Ok(())
     }
 
