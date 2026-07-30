@@ -145,6 +145,16 @@ impl Kvkache {
                         sg_index: sg_index as u16,
                         bucket_hash_index,
                     };
+                    if !self
+                        .table
+                        .candidate_locations(&item.storage_key)
+                        .contains(&table_location)
+                    {
+                        // Publication removes a superseded exact location from
+                        // the Table. Only fingerprint collisions that still
+                        // name this Segment need the full bucket verification.
+                        continue;
+                    }
                     let is_latest = self
                         .locate_stable_record_with_bucket(
                             &item.storage_key,
