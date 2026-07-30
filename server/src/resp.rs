@@ -164,11 +164,10 @@ impl RespServer {
         drop(started_tx);
         drop(finished_tx);
 
-        let mut started_workers = 0;
         let mut startup_error = launch_error;
         for _ in 0..network.worker_count {
             match started_rx.recv() {
-                Ok(Ok(())) => started_workers += 1,
+                Ok(Ok(())) => {}
                 Ok(Err(message)) => {
                     startup_error.get_or_insert(message);
                 }
@@ -180,7 +179,8 @@ impl RespServer {
             }
         }
         if let Some(message) = startup_error {
-            shutdown_network_workers_and_cache(workers, &finished_rx, started_workers, cache)
+            let remaining_completions = workers.len();
+            shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
                 .await?;
             return Err(ServerError::NetworkWorker(message));
         }
@@ -198,13 +198,9 @@ impl RespServer {
                 Err(_) => "RESP worker completion channel closed".into(),
             }), 1),
         };
-        shutdown_network_workers_and_cache(
-            workers,
-            &finished_rx,
-            network.worker_count.saturating_sub(completed_workers),
-            cache,
-        )
-        .await?;
+        let remaining_completions = workers.len().saturating_sub(completed_workers);
+        shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
+            .await?;
         match worker_failure {
             Some(message) => Err(ServerError::NetworkWorker(message)),
             None => Ok(()),
@@ -220,12 +216,12 @@ async fn run_resp_role(
     request_timeout: Duration,
     stop: AsyncReceiver<()>,
     mut reporter: NetworkWorkerReporter,
-) {
+) -> Option<std::result::Result<(), String>> {
     let listener = match TcpListener::from_std(socket) {
         Ok(listener) => listener,
         Err(error) => {
             reporter.startup_failed(error.to_string());
-            return;
+            return None;
         }
     };
     let actual_cpu = unsafe { libc::sched_getcpu() };
@@ -233,15 +229,16 @@ async fn run_resp_role(
         reporter.startup_failed(format!(
             "RESP worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
         ));
-        return;
+        return None;
     }
     if !reporter.started() {
-        return;
+        return None;
     }
-    let result = run_resp_worker(listener, &cache, request_timeout, stop)
-        .await
-        .map_err(|error| error.to_string());
-    reporter.finish(result);
+    Some(
+        run_resp_worker(listener, &cache, request_timeout, stop)
+            .await
+            .map_err(|error| error.to_string()),
+    )
 }
 
 fn bind_reuse_port_tcp_listeners(

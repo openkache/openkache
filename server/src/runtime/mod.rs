@@ -109,56 +109,6 @@ impl ThreadedKvkache {
         config: crate::config::AppConfig,
         attach_network_roles: bool,
     ) -> Result<Self> {
-        fs::create_dir_all(&config.storage.directory)?;
-        let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
-            let worker = config.worker_config(thread_id);
-            worker.data_path.exists() || worker.blob_path().exists()
-        });
-        let server_secret =
-            load_or_create_server_secret(&config.storage.directory, existing_storage)?;
-        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
-        Self::start_with_server_secret(
-            config,
-            server_secret,
-            allow_checkpoint,
-            attach_network_roles,
-        )
-    }
-
-    fn start_with_server_key(
-        config: crate::config::AppConfig,
-        server_key: [u8; 32],
-    ) -> Result<Self> {
-        config.validate()?;
-        fs::create_dir_all(&config.storage.directory)?;
-        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
-        let mut id = [0; 16];
-        id.copy_from_slice(&server_key[..16]);
-        Self::start_with_server_secret(
-            config,
-            ServerSecret {
-                id,
-                key: server_key,
-            },
-            allow_checkpoint,
-            false,
-        )
-    }
-
-    fn start_with_server_secret(
-        config: crate::config::AppConfig,
-        server_secret: ServerSecret,
-        allow_checkpoint: bool,
-        attach_network_roles: bool,
-    ) -> Result<Self> {
-        let server_cipher = Aes256::new(&server_secret.key.into());
-        let (started_tx, started_rx) =
-            channel::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
-        let queue_capacity = config
-            .io_uring
-            .batch_size
-            .saturating_mul(config.io_uring.max_inflight_per_worker)
-            .max(64);
         let has_combined_worker = attach_network_roles
             && config
                 .runtime
@@ -178,13 +128,58 @@ impl ThreadedKvkache {
                     })
             })
             .transpose()?;
+        fs::create_dir_all(&config.storage.directory)?;
+        let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
+            let worker = config.worker_config(thread_id);
+            worker.data_path.exists() || worker.blob_path().exists()
+        });
+        let server_secret =
+            load_or_create_server_secret(&config.storage.directory, existing_storage)?;
+        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
+        Self::start_with_server_secret(config, server_secret, allow_checkpoint, combined_entries)
+    }
+
+    fn start_with_server_key(
+        config: crate::config::AppConfig,
+        server_key: [u8; 32],
+    ) -> Result<Self> {
+        config.validate()?;
+        fs::create_dir_all(&config.storage.directory)?;
+        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
+        let mut id = [0; 16];
+        id.copy_from_slice(&server_key[..16]);
+        Self::start_with_server_secret(
+            config,
+            ServerSecret {
+                id,
+                key: server_key,
+            },
+            allow_checkpoint,
+            None,
+        )
+    }
+
+    fn start_with_server_secret(
+        config: crate::config::AppConfig,
+        server_secret: ServerSecret,
+        allow_checkpoint: bool,
+        combined_entries: Option<u32>,
+    ) -> Result<Self> {
+        let server_cipher = Aes256::new(&server_secret.key.into());
+        let (started_tx, started_rx) =
+            channel::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
+        let queue_capacity = config
+            .io_uring
+            .batch_size
+            .saturating_mul(config.io_uring.max_inflight_per_worker)
+            .max(64);
         let mut workers = Vec::with_capacity(config.runtime.thread_count);
         let resource_guard = Arc::new(ResourceGuard::for_app_config(&config)?);
 
         for thread_id in 0..config.runtime.thread_count {
             let (sender, receiver) = channel::bounded_async(queue_capacity);
             let cpu_id = config.runtime.cpu_ids[thread_id];
-            let combined = attach_network_roles && config.network.cpu_ids.contains(&cpu_id);
+            let combined = combined_entries.is_some() && config.network.cpu_ids.contains(&cpu_id);
             let (core_tasks, core_task_receiver) = if combined {
                 let (sender, receiver) = channel::bounded_async(1);
                 (Some(sender), Some(receiver))
