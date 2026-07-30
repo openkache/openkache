@@ -1,6 +1,13 @@
 //! Binary request and response framing shared by OpenKache clients and servers.
 
+mod compact_length;
+
 use sha2::{Digest, Sha256};
+
+pub use compact_length::{
+    CompactLengthError, EncodedCompactLength, MAX_COMPACT_LENGTH, MAX_COMPACT_LENGTH_BYTES,
+    decode_compact_length, encode_compact_length,
+};
 
 /// QUIC application protocol identifier for persistent request lanes.
 pub const ALPN: &[u8] = b"openkache/2";
