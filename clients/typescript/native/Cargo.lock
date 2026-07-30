@@ -542,14 +542,12 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "openkache-client-core",
- "rustls",
 ]
 
 [[package]]
 name = "openkache-protocol"
 version = "0.1.0"
 dependencies = [
- "sha2",
  "thiserror",
 ]
 

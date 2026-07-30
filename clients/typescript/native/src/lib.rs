@@ -7,13 +7,12 @@ use std::time::Duration;
 use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client_core::value::{Compression, ValueCodec, ZstandardOptions};
+use openkache_client_core::value::{Compression, ZstandardOptions};
 use openkache_client_core::{
-    Certificate, ClientIdentity, ClientTimeouts, DATA_PROTECTION_KEY_BYTES, DataProtectionKey,
-    DeleteOutcome, Endpoint, GetOutcome, ItemKey, PrivateKey, RawClient, SetCondition, SetOptions,
-    SetOutcome, value_envelope,
+    Certificate, ClientIdentity, ClientTimeouts, DataProtection, DataProtectionKey, DeleteOutcome,
+    Endpoint, GetOutcome, PrivateKey, RawClient, SetCondition, SetOptions, SetOutcome,
+    value_envelope,
 };
-use rustls::pki_types::{CertificateDer, pem::PemObject};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
@@ -67,15 +66,10 @@ pub struct NativeClient {
 
 struct CoreClient {
     raw: RawClient,
-    data_protection_key: DataProtectionKey,
-    codec: ValueCodec,
+    protection: DataProtection,
 }
 
 impl CoreClient {
-    fn item_key(&self, application_key: &[u8]) -> ItemKey {
-        self.data_protection_key.derive_item_key(application_key)
-    }
-
     async fn ping(&self) -> openkache_client_core::Result<Duration> {
         self.raw.ping().await
     }
@@ -84,13 +78,11 @@ impl CoreClient {
         &self,
         application_key: &[u8],
     ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
-        let key = self.item_key(application_key);
+        let key = self.protection.item_key(application_key);
         match self.raw.get(key).await? {
-            GetOutcome::Found(value) => self
-                .codec
-                .open(key, value)
-                .map(GetOutcome::Found)
-                .map_err(Into::into),
+            GetOutcome::Found(value) => {
+                self.protection.open(key, value).map(GetOutcome::Found)
+            }
             GetOutcome::NotFound => Ok(GetOutcome::NotFound),
         }
     }
@@ -101,13 +93,15 @@ impl CoreClient {
         value: Vec<u8>,
         options: SetOptions,
     ) -> openkache_client_core::Result<SetOutcome> {
-        let key = self.item_key(application_key);
-        let value = self.codec.seal_owned(key, value)?;
+        let key = self.protection.item_key(application_key);
+        let value = self.protection.seal_owned(key, value)?;
         self.raw.set(key, value, options).await
     }
 
     async fn delete(&self, application_key: &[u8]) -> openkache_client_core::Result<DeleteOutcome> {
-        self.raw.delete(self.item_key(application_key)).await
+        self.raw
+            .delete(self.protection.item_key(application_key))
+            .await
     }
 
     async fn stats(&self) -> openkache_client_core::Result<String> {
@@ -308,7 +302,8 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .address
         .parse()
         .map_err(|error| invalid_argument(format!("invalid server address: {error}")))?;
-    let mut trusted_certificates = parse_certificates(options.certificate.as_ref())?;
+    let mut trusted_certificates =
+        Certificate::from_der_or_pem_chain(options.certificate.as_ref()).map_err(native_error)?;
     if trusted_certificates.len() != 1 {
         return Err(invalid_argument(format!(
             "certificate must contain exactly one DER or PEM certificate, got {}",
@@ -316,14 +311,9 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         )));
     }
 
-    let data_protection_key_bytes = options.data_protection_key.as_ref();
-    let data_protection_key: [u8; DATA_PROTECTION_KEY_BYTES] =
-        data_protection_key_bytes.try_into().map_err(|_| {
-            invalid_argument(format!(
-                "data protection key must contain {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
-                data_protection_key_bytes.len()
-            ))
-        })?;
+    let data_protection_key =
+        DataProtectionKey::from_slice(options.data_protection_key.as_ref())
+            .map_err(native_error)?;
     let compression = if options.compression_enabled {
         Compression::Zstandard(ZstandardOptions {
             level: options.compression_level,
@@ -337,17 +327,15 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     } else {
         Compression::Disabled
     };
-    let data_protection_key = DataProtectionKey::from_bytes(data_protection_key);
-    let codec = ValueCodec::protected(&data_protection_key, compression).map_err(native_error)?;
+    let protection =
+        DataProtection::new(data_protection_key, compression).map_err(native_error)?;
     let identity = parse_identity(options.identity)?;
     let connect_timeout_ms = parse_u64(options.connect_timeout_ms, "connect_timeout_ms", false)?;
     let request_timeout_ms = parse_u64(options.request_timeout_ms, "request_timeout_ms", false)?;
 
     let endpoint =
         Endpoint::from_socket_addr(address, options.server_name).map_err(native_error)?;
-    let trusted_certificate =
-        Certificate::from_der(trusted_certificates.remove(0).as_ref().to_vec())
-            .map_err(native_error)?;
+    let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = RawClient::builder(endpoint)
         .trust_certificate(trusted_certificate)
         .timeouts(ClientTimeouts {
@@ -360,8 +348,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let raw = builder.connect().await.map_err(native_error)?;
     let client = CoreClient {
         raw,
-        data_protection_key,
-        codec,
+        protection,
     };
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
@@ -374,49 +361,23 @@ fn parse_identity(identity: Option<NativeIdentity>) -> Result<Option<ClientIdent
     };
     let mut certificate_chain = Vec::new();
     for certificate in identity.certificate_chain {
-        certificate_chain.extend(parse_certificates(certificate.as_ref())?);
+        certificate_chain.extend(
+            Certificate::from_der_or_pem_chain(certificate.as_ref()).map_err(native_error)?,
+        );
     }
     if certificate_chain.is_empty() {
         return Err(invalid_argument(
             "client certificate chain must not be empty",
         ));
     }
-    let certificate_chain = certificate_chain
-        .into_iter()
-        .map(|certificate| Certificate::from_der(certificate.as_ref().to_vec()))
-        .collect::<openkache_client_core::Result<Vec<_>>>()
-        .map_err(native_error)?;
     let private_key = parse_private_key(identity.private_key.as_ref())?;
     ClientIdentity::new(certificate_chain, private_key)
         .map(Some)
         .map_err(native_error)
 }
 
-fn parse_certificates(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
-    if bytes.is_empty() {
-        return Err(invalid_argument("certificate must not be empty"));
-    }
-    if bytes.starts_with(b"-----BEGIN") {
-        let certificates = CertificateDer::pem_slice_iter(bytes)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| invalid_argument(format!("invalid PEM certificate: {error}")))?;
-        if certificates.is_empty() {
-            return Err(invalid_argument("PEM input contains no certificates"));
-        }
-        Ok(certificates)
-    } else {
-        Ok(vec![CertificateDer::from(bytes.to_vec())])
-    }
-}
-
 fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey> {
-    if bytes.is_empty() {
-        return Err(invalid_argument("client private key must not be empty"));
-    }
-    if bytes.starts_with(b"-----BEGIN") {
-        return PrivateKey::from_pem(bytes).map_err(native_error);
-    }
-    PrivateKey::from_der(bytes.to_vec()).map_err(native_error)
+    PrivateKey::from_der_or_pem(bytes).map_err(native_error)
 }
 
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {

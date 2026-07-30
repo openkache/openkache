@@ -10,8 +10,8 @@ use std::time::Duration;
 
 pub use openkache_client_core::{
     Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    DATA_PROTECTION_KEY_BYTES, DataProtectionKey, DeleteOutcome, Endpoint, Error, GetOutcome,
-    ITEM_KEY_BYTES, ItemKey, ItemValue, Operation, PrivateKey, Result, RetryPolicy,
+    DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
+    GetOutcome, ITEM_KEY_BYTES, ItemKey, ItemValue, Operation, PrivateKey, Result, RetryPolicy,
     ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
@@ -19,51 +19,21 @@ pub use openkache_client_core::{LocalRawClient, LocalRawClientBuilder};
 #[cfg(feature = "quic-quinn")]
 pub use openkache_client_core::{RawClient, RawClientBuilder};
 
-struct ValueLayer {
-    data_protection_key: Option<DataProtectionKey>,
-    codec: value::ValueCodec,
-}
-
-impl ValueLayer {
-    fn new(
-        data_protection_key: Option<DataProtectionKey>,
-        compression: value::Compression,
-    ) -> Result<Self> {
-        let codec = match &data_protection_key {
-            Some(key) => value::ValueCodec::protected(key, compression)?,
-            None => value::ValueCodec::compressed(compression)?,
-        };
-        Ok(Self {
-            data_protection_key,
-            codec,
-        })
-    }
-
-    fn key(&self, application_key: &[u8]) -> ItemKey {
-        self.data_protection_key.as_ref().map_or_else(
-            || ItemKey::derive(application_key),
-            |key| key.derive_item_key(application_key),
-        )
-    }
-}
-
 struct ValueSettings {
     compression: value::Compression,
-    data_protection_key: Option<DataProtectionKey>,
-}
-
-impl Default for ValueSettings {
-    fn default() -> Self {
-        Self {
-            compression: value::Compression::Disabled,
-            data_protection_key: None,
-        }
-    }
+    data_protection_key: DataProtectionKey,
 }
 
 impl ValueSettings {
-    fn finish(self) -> Result<Arc<ValueLayer>> {
-        ValueLayer::new(self.data_protection_key, self.compression).map(Arc::new)
+    fn new(data_protection_key: DataProtectionKey) -> Self {
+        Self {
+            compression: value::Compression::Disabled,
+            data_protection_key,
+        }
+    }
+
+    fn finish(self) -> Result<Arc<DataProtection>> {
+        DataProtection::new(self.data_protection_key, self.compression).map(Arc::new)
     }
 }
 
@@ -106,15 +76,9 @@ macro_rules! builder_methods {
                 self
             }
 
-            /// Applies client-side compression before optional encryption.
+            /// Applies optional client-side compression before encryption.
             pub fn compression(mut self, compression: value::Compression) -> Self {
                 self.values.compression = compression;
-                self
-            }
-
-            /// Hides application keys and encrypts values with one master key.
-            pub fn data_protection_key(mut self, key: DataProtectionKey) -> Self {
-                self.values.data_protection_key = Some(key);
                 self
             }
         }
@@ -126,7 +90,7 @@ macro_rules! builder_methods {
 #[derive(Clone)]
 pub struct Client {
     raw: RawClient,
-    values: Arc<ValueLayer>,
+    values: Arc<DataProtection>,
 }
 
 #[cfg(feature = "quic-quinn")]
@@ -156,16 +120,18 @@ impl ClientBuilder {
 
 #[cfg(feature = "quic-quinn")]
 impl Client {
-    /// Connects with system trust and default client behavior.
-    pub async fn connect(endpoint: &str) -> Result<Self> {
-        Self::builder(endpoint.parse()?).connect().await
+    /// Connects with mandatory data protection, system trust, and default client behavior.
+    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
+        Self::builder(endpoint.parse()?, data_protection_key)
+            .connect()
+            .await
     }
 
     /// Starts explicit client configuration.
-    pub fn builder(endpoint: Endpoint) -> ClientBuilder {
+    pub fn builder(endpoint: Endpoint, data_protection_key: DataProtectionKey) -> ClientBuilder {
         ClientBuilder {
             raw: RawClient::builder(endpoint),
-            values: ValueSettings::default(),
+            values: ValueSettings::new(data_protection_key),
         }
     }
 
@@ -181,14 +147,9 @@ impl Client {
 
     /// Retrieves and decodes a value for arbitrary application key bytes.
     pub async fn get(&self, application_key: impl AsRef<[u8]>) -> Result<GetOutcome<Vec<u8>>> {
-        let key = self.values.key(application_key.as_ref());
+        let key = self.values.item_key(application_key.as_ref());
         match self.raw.get(key).await? {
-            GetOutcome::Found(value) => self
-                .values
-                .codec
-                .open(key, value)
-                .map(GetOutcome::Found)
-                .map_err(Error::from),
+            GetOutcome::Found(value) => self.values.open(key, value).map(GetOutcome::Found),
             GetOutcome::NotFound => Ok(GetOutcome::NotFound),
         }
     }
@@ -201,7 +162,7 @@ impl Client {
     ) -> SetRequest<'a> {
         SetRequest {
             client: self,
-            key: self.values.key(application_key.as_ref()),
+            key: self.values.item_key(application_key.as_ref()),
             value: value.into_value(),
             options: SetOptions::new(),
         }
@@ -210,7 +171,7 @@ impl Client {
     /// Deletes a value for arbitrary application key bytes.
     pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
         self.raw
-            .delete(self.values.key(application_key.as_ref()))
+            .delete(self.values.item_key(application_key.as_ref()))
             .await
     }
 
@@ -245,7 +206,7 @@ impl Client {
 #[derive(Clone)]
 pub struct LocalClient {
     raw: LocalRawClient,
-    values: Arc<ValueLayer>,
+    values: Arc<DataProtection>,
 }
 
 #[cfg(feature = "quic-compio")]
@@ -275,16 +236,21 @@ impl LocalClientBuilder {
 
 #[cfg(feature = "quic-compio")]
 impl LocalClient {
-    /// Connects with system trust and default behavior on an active Compio runtime.
-    pub async fn connect(endpoint: &str) -> Result<Self> {
-        Self::builder(endpoint.parse()?).connect().await
+    /// Connects with mandatory data protection, system trust, and default Compio behavior.
+    pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
+        Self::builder(endpoint.parse()?, data_protection_key)
+            .connect()
+            .await
     }
 
     /// Starts explicit Compio client configuration.
-    pub fn builder(endpoint: Endpoint) -> LocalClientBuilder {
+    pub fn builder(
+        endpoint: Endpoint,
+        data_protection_key: DataProtectionKey,
+    ) -> LocalClientBuilder {
         LocalClientBuilder {
             raw: LocalRawClient::builder(endpoint),
-            values: ValueSettings::default(),
+            values: ValueSettings::new(data_protection_key),
         }
     }
 
@@ -300,14 +266,9 @@ impl LocalClient {
 
     /// Retrieves and decodes a value for arbitrary application key bytes.
     pub async fn get(&self, application_key: impl AsRef<[u8]>) -> Result<GetOutcome<Vec<u8>>> {
-        let key = self.values.key(application_key.as_ref());
+        let key = self.values.item_key(application_key.as_ref());
         match self.raw.get(key).await? {
-            GetOutcome::Found(value) => self
-                .values
-                .codec
-                .open(key, value)
-                .map(GetOutcome::Found)
-                .map_err(Error::from),
+            GetOutcome::Found(value) => self.values.open(key, value).map(GetOutcome::Found),
             GetOutcome::NotFound => Ok(GetOutcome::NotFound),
         }
     }
@@ -320,7 +281,7 @@ impl LocalClient {
     ) -> LocalSetRequest<'a> {
         LocalSetRequest {
             client: self,
-            key: self.values.key(application_key.as_ref()),
+            key: self.values.item_key(application_key.as_ref()),
             value: value.into_value(),
             options: SetOptions::new(),
         }
@@ -329,7 +290,7 @@ impl LocalClient {
     /// Deletes a value for arbitrary application key bytes.
     pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
         self.raw
-            .delete(self.values.key(application_key.as_ref()))
+            .delete(self.values.item_key(application_key.as_ref()))
             .await
     }
 
@@ -432,7 +393,7 @@ impl<'a> IntoFuture for SetRequest<'a> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let value = self.client.values.codec.seal_owned(self.key, self.value)?;
+            let value = self.client.values.seal_owned(self.key, self.value)?;
             self.client.raw.set(self.key, value, self.options).await
         })
     }
@@ -481,7 +442,7 @@ impl<'a> IntoFuture for LocalSetRequest<'a> {
 
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
-            let value = self.client.values.codec.seal_owned(self.key, self.value)?;
+            let value = self.client.values.seal_owned(self.key, self.value)?;
             self.client.raw.set(self.key, value, self.options).await
         })
     }

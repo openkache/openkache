@@ -2,6 +2,7 @@
 
 mod config;
 mod key;
+mod protection;
 mod transport;
 pub mod value;
 pub mod value_envelope;
@@ -21,6 +22,7 @@ pub use config::{
     SetCondition, SetOptions,
 };
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ITEM_KEY_BYTES, ItemKey};
+pub use protection::DataProtection;
 pub use value::ItemValue;
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
@@ -532,7 +534,7 @@ impl<C: ClientConnection> Core<C> {
                 Ok(response) => return Ok(response),
                 Err(failure) => {
                     if failure.invalidates_connection {
-                        self.mark_disconnected();
+                        self.mark_disconnected(&connection);
                     }
                     if response_safe && failure.invalidates_connection && attempt < max_attempts {
                         self.reconnect_failed(&connection, deadline).await?;
@@ -583,7 +585,13 @@ impl<C: ClientConnection> Core<C> {
         Ok(response)
     }
 
-    fn mark_disconnected(&self) {
+    fn mark_disconnected(&self, failed: &Arc<C>) {
+        let Ok(current) = self.connection.read() else {
+            return;
+        };
+        if !Arc::ptr_eq(&current, failed) {
+            return;
+        }
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -625,6 +633,9 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Closed {
             return Err(Error::ClientClosed);
         }
+        if self.connection_state() == ConnectionState::Connected {
+            return Ok(());
+        }
         let current = self.current_connection()?;
         if !Arc::ptr_eq(&current, failed) {
             return Ok(());
@@ -644,7 +655,7 @@ impl<C: ClientConnection> Core<C> {
         {
             Ok(connection) => connection,
             Err(error) => {
-                self.mark_disconnected();
+                self.mark_disconnected(failed);
                 return Err(error);
             }
         };
@@ -666,8 +677,9 @@ impl<C: ClientConnection> Core<C> {
 
     async fn reconnect(&self) -> Result<()> {
         let deadline = transport::Deadline::after(self.connect_timeout)?;
-        self.mark_disconnected();
-        self.reconnect_before(deadline).await
+        let current = self.current_connection()?;
+        self.mark_disconnected(&current);
+        self.reconnect_failed(&current, deadline).await
     }
 
     async fn close(&self) -> Result<()> {

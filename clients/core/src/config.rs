@@ -32,12 +32,10 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns an error when `host` is empty or `port` is zero.
+    /// Returns an error when `host` is not a valid TLS DNS name or IP address, or `port` is zero.
     pub fn new(host: impl Into<String>, port: u16) -> Result<Self> {
         let host = host.into();
-        if host.is_empty() {
-            return Err(Error::configuration("endpoint.host", "must not be empty"));
-        }
+        validate_server_name("endpoint.host", &host)?;
         if port == 0 {
             return Err(Error::configuration(
                 "endpoint.port",
@@ -69,7 +67,8 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns an error when the address port is zero or the server name is empty.
+    /// Returns an error when the address port is zero or `server_name` is not a valid TLS DNS name
+    /// or IP address.
     pub fn from_socket_addr(address: SocketAddr, server_name: impl Into<String>) -> Result<Self> {
         let server_name = server_name.into();
         if address.port() == 0 {
@@ -78,12 +77,7 @@ impl Endpoint {
                 "must be greater than zero",
             ));
         }
-        if server_name.is_empty() {
-            return Err(Error::configuration(
-                "endpoint.server_name",
-                "must not be empty",
-            ));
-        }
+        validate_server_name("endpoint.server_name", &server_name)?;
         Ok(Self {
             host: address.ip().to_string(),
             port: address.port(),
@@ -107,6 +101,12 @@ impl Endpoint {
     pub(crate) fn server_name(&self) -> &str {
         &self.server_name
     }
+}
+
+fn validate_server_name(field: &'static str, value: &str) -> Result<()> {
+    rustls::pki_types::ServerName::try_from(value.to_owned())
+        .map(|_| ())
+        .map_err(|error| Error::configuration(field, error.to_string()))
 }
 
 impl FromStr for Endpoint {
@@ -177,24 +177,67 @@ impl Certificate {
     ///
     /// Returns an error when PEM decoding fails or contains other than one certificate.
     pub fn from_pem(bytes: &[u8]) -> Result<Self> {
-        let certificates = CertificateDer::pem_slice_iter(bytes)
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|error| Error::configuration("certificate", error.to_string()))?;
-        let [certificate] = <[_; 1]>::try_from(certificates).map_err(|certificates: Vec<_>| {
-            Error::configuration(
+        let certificates = decode_pem_certificates(bytes)?;
+        let [certificate] =
+            <[_; 1]>::try_from(certificates).map_err(|certificates: Vec<Self>| {
+                Error::configuration(
+                    "certificate",
+                    format!(
+                        "PEM input must contain exactly one certificate, got {}",
+                        certificates.len()
+                    ),
+                )
+            })?;
+        Ok(certificate)
+    }
+
+    /// Parses one DER certificate or a non-empty PEM certificate chain.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - One DER certificate or one or more PEM certificates.
+    ///
+    /// # Returns
+    ///
+    /// A certificate chain in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty, PEM decoding fails, or a PEM input contains no
+    /// certificates.
+    pub fn from_der_or_pem_chain(bytes: &[u8]) -> Result<Vec<Self>> {
+        if bytes.is_empty() {
+            return Err(Error::configuration(
                 "certificate",
-                format!(
-                    "PEM input must contain exactly one certificate, got {}",
-                    certificates.len()
-                ),
-            )
-        })?;
-        Ok(Self(certificate))
+                "input must not be empty",
+            ));
+        }
+        if bytes.starts_with(b"-----BEGIN") {
+            decode_pem_certificates(bytes)
+        } else {
+            Self::from_der(bytes.to_vec()).map(|certificate| vec![certificate])
+        }
     }
 
     pub(crate) fn into_der(self) -> CertificateDer<'static> {
         self.0
     }
+}
+
+fn decode_pem_certificates(bytes: &[u8]) -> Result<Vec<Certificate>> {
+    let certificates = CertificateDer::pem_slice_iter(bytes)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::configuration("certificate", error.to_string()))?
+        .into_iter()
+        .map(Certificate)
+        .collect::<Vec<_>>();
+    if certificates.is_empty() {
+        return Err(Error::configuration(
+            "certificate",
+            "PEM input contains no certificates",
+        ));
+    }
+    Ok(certificates)
 }
 
 /// Private key accepted by the stable client API.
@@ -238,6 +281,34 @@ impl PrivateKey {
         PrivateKeyDer::from_pem_slice(bytes)
             .map(Self)
             .map_err(|error| Error::configuration("private_key", error.to_string()))
+    }
+
+    /// Parses one DER- or PEM-encoded private key.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - DER or PEM PKCS#1, PKCS#8, or SEC1 private-key bytes.
+    ///
+    /// # Returns
+    ///
+    /// An owned private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is empty, PEM decoding fails, or the key format is
+    /// unsupported.
+    pub fn from_der_or_pem(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err(Error::configuration(
+                "private_key",
+                "input must not be empty",
+            ));
+        }
+        if bytes.starts_with(b"-----BEGIN") {
+            Self::from_pem(bytes)
+        } else {
+            Self::from_der(bytes.to_vec())
+        }
     }
 
     pub(crate) fn into_der(self) -> PrivateKeyDer<'static> {

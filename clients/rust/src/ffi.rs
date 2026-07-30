@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use crate::value::{Compression, ZstandardOptions};
 use crate::{
-    Certificate, ClientTimeouts, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, DeleteOutcome,
-    Endpoint, GetOutcome, LocalClient, SetCondition, SetOptions, SetOutcome,
+    Certificate, ClientTimeouts, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
+    LocalClient, SetCondition, SetOptions, SetOutcome,
 };
 
 const RESULT_ERROR: u32 = 0;
@@ -70,7 +70,7 @@ struct WorkerOptions {
     address: SocketAddr,
     server_name: String,
     certificate: Vec<u8>,
-    data_protection_key: Option<DataProtectionKey>,
+    data_protection_key: DataProtectionKey,
     compression: Compression,
     timeouts: ClientTimeouts,
 }
@@ -106,7 +106,7 @@ impl FfiClient {
         address: SocketAddr,
         server_name: String,
         certificate: Vec<u8>,
-        data_protection_key: Option<DataProtectionKey>,
+        data_protection_key: DataProtectionKey,
         compression: Compression,
         timeouts: ClientTimeouts,
     ) -> std::result::Result<Self, String> {
@@ -232,13 +232,10 @@ fn run_worker(
             return;
         }
     };
-    let mut builder = LocalClient::builder(endpoint)
+    let builder = LocalClient::builder(endpoint, data_protection_key)
         .trust_certificate(certificate)
         .compression(compression)
         .timeouts(timeouts);
-    if let Some(key) = data_protection_key {
-        builder = builder.data_protection_key(key);
-    }
     let client = match runtime.block_on(builder.connect()) {
         Ok(client) => client,
         Err(error) => {
@@ -328,7 +325,7 @@ pub extern "C" fn openkache_client_abi_version() -> u32 {
 /// # Safety
 ///
 /// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call. `data_protection_key` must contain either zero bytes or exactly 32 bytes.
+/// call. `data_protection_key` must contain exactly 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect(
     address: *const u8,
@@ -356,11 +353,8 @@ pub unsafe extern "C" fn openkache_client_connect(
         if certificate.is_empty() {
             return Err("certificate must not be empty".to_string());
         }
-        let data_protection_key = copy_bytes(
-            data_protection_key,
-            data_protection_key_length,
-            "data protection key",
-        )?;
+        let data_protection_key =
+            copy_data_protection_key(data_protection_key, data_protection_key_length)?;
         let compression = if compression_enabled == 0 {
             Compression::Disabled
         } else {
@@ -369,19 +363,6 @@ pub unsafe extern "C" fn openkache_client_connect(
                 minimum_input_size,
                 minimum_savings,
             })
-        };
-        let data_protection_key = match data_protection_key.len() {
-            0 => None,
-            DATA_PROTECTION_KEY_BYTES => Some(DataProtectionKey::from_bytes(
-                data_protection_key
-                    .try_into()
-                    .expect("validated data protection key length"),
-            )),
-            actual => {
-                return Err(format!(
-                    "data protection key must contain {DATA_PROTECTION_KEY_BYTES} bytes, got {actual}"
-                ));
-            }
         };
         if connect_timeout_ms == 0 || request_timeout_ms == 0 {
             return Err("client timeouts must be greater than zero milliseconds".to_string());
@@ -567,6 +548,22 @@ fn catch_result(operation: impl FnOnce() -> std::result::Result<FfiResult, Strin
 fn copy_utf8(pointer: *const u8, length: usize, name: &str) -> std::result::Result<String, String> {
     let bytes = copy_bytes(pointer, length, name)?;
     String::from_utf8(bytes).map_err(|error| format!("{name} is not valid UTF-8: {error}"))
+}
+
+fn copy_data_protection_key(
+    pointer: *const u8,
+    length: usize,
+) -> std::result::Result<DataProtectionKey, String> {
+    if length == 0 {
+        return DataProtectionKey::from_slice(&[]).map_err(|error| error.to_string());
+    }
+    if pointer.is_null() {
+        return Err(format!(
+            "data protection key pointer is null for {length} bytes"
+        ));
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
+    DataProtectionKey::from_slice(bytes).map_err(|error| error.to_string())
 }
 
 fn copy_bytes(

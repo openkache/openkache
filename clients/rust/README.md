@@ -11,7 +11,7 @@ re-exports the core's stable public types so callers can still reach the raw lay
 connection.
 
 - `Client` accepts application keys and plaintext values. It derives 32-byte item keys and applies
-  optional key hiding, value encryption, and compression.
+  mandatory key hiding and value encryption plus optional compression.
 - `RawClient`, implemented in `clients/core`, accepts an exact 32-byte `ItemKey` and an
   `ItemValue`. It does not hash keys or transform values.
 - `LocalClient` and `LocalRawClient` provide the same layers for a Compio runtime. The primary
@@ -29,15 +29,17 @@ cargo fmt --check
 
 ## Core components
 
-- `src/lib.rs` derives item keys, applies value protection, and exposes `Client`/`LocalClient`.
+- `src/lib.rs` exposes ergonomic Rust request builders over the shared core behavior.
 - `src/ffi.rs` adapts the high-level Compio client to the versioned C ABI.
-- `../core` owns transport, TLS configuration, raw operations, and shared protection tools.
+- `../core` owns transport, TLS configuration, raw operations, key derivation, compression,
+  encryption, and the cross-language value envelope.
 
 ## Configuration
 
-The one-string connection uses system trust and defaults for deadlines, retries, compression, and
-stream concurrency. The builder configures self-signed trust, mutual TLS, request deadlines,
-retry-safe attempts, `max_in_flight`, compression, and `DataProtectionKey`.
+The shortest connection accepts one `host:port` string plus the mandatory data protection key. It
+uses system trust and defaults for deadlines, retries, compression, and stream concurrency. The
+builder configures self-signed trust, mutual TLS, request deadlines, retry-safe attempts,
+`max_in_flight`, and compression.
 
 ## Connect
 
@@ -45,20 +47,22 @@ The shortest connection path resolves the hostname, derives its TLS server name,
 operating system trust store:
 
 ```rust
-use openkache_client::Client;
+use openkache_client::{Client, DataProtectionKey};
 
-let client = Client::connect("cache.example.com:4433").await?;
+let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let client = Client::connect("cache.example.com:4433", protection_key).await?;
 ```
 
 Explicitly trust a development or self-signed certificate with the builder. The stable client API
 owns its certificate types and does not expose rustls:
 
 ```rust
-use openkache_client::{Certificate, Client, Endpoint};
+use openkache_client::{Certificate, Client, DataProtectionKey, Endpoint};
 
 let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
 let certificate = Certificate::from_der(certificate_der)?;
-let client = Client::builder(endpoint)
+let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let client = Client::builder(endpoint, protection_key)
     .trust_certificate(certificate)
     .connect()
     .await?;
@@ -78,7 +82,7 @@ let identity = ClientIdentity::new(
     PrivateKey::from_pem(&client_private_key_pem)?,
 )?;
 
-let client = Client::builder(endpoint)
+let client = Client::builder(endpoint, protection_key)
     .trust_certificate(server_ca)
     .client_identity(identity)
     .connect()
@@ -96,8 +100,7 @@ use openkache_client::{Client, DataProtectionKey};
 use openkache_client::value::{Compression, ZstandardOptions};
 
 let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
-let client = Client::builder(endpoint)
-    .data_protection_key(protection_key)
+let client = Client::builder(endpoint, protection_key)
     .compression(Compression::Zstandard(ZstandardOptions::default()))
     .connect()
     .await?;
@@ -105,24 +108,22 @@ let client = Client::builder(endpoint)
 
 The client derives independent HKDF-SHA-256 subkeys. Application keys become deterministic
 HMAC-SHA-256 item keys, while values use XChaCha20-Poly1305 with a fresh nonce and the item key as
-authenticated data. Without `data_protection_key`, the high-level client uses SHA-256 item keys and
-stores plaintext or compression-only values. A human passphrase API using Argon2id and an explicit
-salt is deferred.
+authenticated data. The high-level client always requires this protection. A human passphrase API
+using Argon2id and an explicit salt is deferred.
 
-Clients must use the same data protection key to share entries. Enabling, disabling, or rotating
-the key changes the derived item keys, so previously stored entries become unreachable and must be
-repopulated. The client does not retain old keys or perform dual-key reads.
+Clients must use the same data protection key to share entries. Rotating the key changes the
+derived item keys, so previously stored entries become unreachable and must be repopulated. The
+client does not retain old keys or perform dual-key reads.
 
 Every binary-protocol key is exactly 32 bytes:
 
 ```rust
 use openkache_client::ItemKey;
 
-let derived = ItemKey::derive(b"arbitrary application key");
 let exact = ItemKey::from_bytes([0x42; 32]);
 ```
 
-`RawClient` sends `exact` without hashing it again. Language adapters should depend on
+`RawClient` sends `exact` without deriving or hashing it. Language adapters should depend on
 `openkache-client-core` directly; Rust applications can use the re-exported raw types when they
 already own a 32-byte item key.
 

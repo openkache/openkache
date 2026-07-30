@@ -34,7 +34,7 @@ Future bindings should own only language-native concerns:
 - deterministic client cleanup;
 - idiomatic errors and package-level API names.
 
-Do not duplicate QUIC, wire framing, hashing, compression, encryption, or
+Do not duplicate QUIC, wire framing, keyed derivation, compression, encryption, or
 certificate behavior outside `core/`. Extend the shared core and add only the
 smallest runtime-specific adapter when a binding needs new behavior.
 

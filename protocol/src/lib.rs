@@ -1,7 +1,5 @@
 //! Binary request and response framing shared by OpenKache clients and servers.
 
-use sha2::{Digest, Sha256};
-
 /// QUIC application protocol identifier for persistent request lanes.
 pub const ALPN: &[u8] = b"openkache/2";
 /// Bytes in an encoded request header.
@@ -111,11 +109,6 @@ impl TryFrom<u8> for Status {
 pub struct ItemKey([u8; ITEM_KEY_BYTES]);
 
 impl ItemKey {
-    /// Derives a item key with the cross-language SHA-256 helper.
-    pub fn derive(application_key: impl AsRef<[u8]>) -> Self {
-        Self(Sha256::digest(application_key.as_ref()).into())
-    }
-
     /// Wraps an exact 32-byte item key.
     pub const fn new(bytes: [u8; ITEM_KEY_BYTES]) -> Self {
         Self(bytes)

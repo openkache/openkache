@@ -1,11 +1,11 @@
-//! Fixed-size item keys and reusable application-key derivation helpers.
+//! Fixed-size item keys and reusable keyed derivation helpers.
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
-use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use sha2::Sha256;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, Result};
 
@@ -21,11 +21,6 @@ pub const DATA_PROTECTION_KEY_BYTES: usize = 32;
 pub struct ItemKey([u8; ITEM_KEY_BYTES]);
 
 impl ItemKey {
-    /// Derives the canonical item key from arbitrary application key bytes.
-    pub fn derive(application_key: impl AsRef<[u8]>) -> Self {
-        Self(Sha256::digest(application_key.as_ref()).into())
-    }
-
     /// Wraps an exact item key without hashing it again.
     pub const fn from_bytes(bytes: [u8; ITEM_KEY_BYTES]) -> Self {
         Self(bytes)
@@ -54,12 +49,45 @@ impl AsRef<[u8]> for ItemKey {
 
 /// Application-managed master secret used to hide keys and encrypt values.
 #[derive(Zeroize, ZeroizeOnDrop)]
-pub struct DataProtectionKey([u8; DATA_PROTECTION_KEY_BYTES]);
+pub struct DataProtectionKey {
+    master_key: [u8; DATA_PROTECTION_KEY_BYTES],
+    item_key: [u8; DATA_PROTECTION_KEY_BYTES],
+}
 
 impl DataProtectionKey {
     /// Creates a data protection key from exact random bytes.
-    pub const fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
-        Self(bytes)
+    pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
+        let item_key = derive_subkey(&bytes, b"openkache/v1/key");
+        Self {
+            master_key: bytes,
+            item_key,
+        }
+    }
+
+    /// Copies an exact data protection key from a language binding or configuration buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Exactly 32 random secret bytes.
+    ///
+    /// # Returns
+    ///
+    /// An owned data protection key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `bytes` does not contain exactly 32 bytes.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        let exact: &[u8; DATA_PROTECTION_KEY_BYTES] = bytes.try_into().map_err(|_| {
+            Error::configuration(
+                "data_protection_key",
+                format!(
+                    "must contain exactly {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
+                    bytes.len()
+                ),
+            )
+        })?;
+        Ok(Self::from_bytes(*exact))
     }
 
     /// Decodes a Base64-encoded 32-byte random secret.
@@ -76,52 +104,52 @@ impl DataProtectionKey {
     ///
     /// Returns an error when Base64 decoding fails or does not produce exactly 32 bytes.
     pub fn from_base64(encoded: &str) -> Result<Self> {
-        let decoded = STANDARD
-            .decode(encoded)
-            .or_else(|_| {
-                STANDARD.decode(format!(
-                    "{encoded}{}",
-                    "=".repeat((4 - encoded.len() % 4) % 4)
-                ))
-            })
-            .map_err(|error| Error::configuration("data_protection_key", error.to_string()))?;
-        let bytes =
-            <[u8; DATA_PROTECTION_KEY_BYTES]>::try_from(decoded).map_err(|decoded: Vec<u8>| {
-                Error::configuration(
-                    "data_protection_key",
-                    format!(
-                        "must decode to exactly {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
-                        decoded.len()
-                    ),
-                )
-            })?;
-        Ok(Self(bytes))
+        let engine = if encoded.ends_with('=') {
+            &STANDARD
+        } else {
+            &STANDARD_NO_PAD
+        };
+        let decoded = Zeroizing::new(
+            engine
+                .decode(encoded)
+                .map_err(|error| Error::configuration("data_protection_key", error.to_string()))?,
+        );
+        if decoded.len() != DATA_PROTECTION_KEY_BYTES {
+            return Err(Error::configuration(
+                "data_protection_key",
+                format!(
+                    "must decode to exactly {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
+                    decoded.len()
+                ),
+            ));
+        }
+        let mut bytes = [0; DATA_PROTECTION_KEY_BYTES];
+        bytes.copy_from_slice(&decoded);
+        Ok(Self::from_bytes(bytes))
     }
 
     /// Returns the canonical padded Base64 representation for secret storage.
     pub fn to_base64(&self) -> String {
-        STANDARD.encode(self.0)
+        STANDARD.encode(self.master_key)
     }
 
     /// Derives the deterministic HMAC-SHA-256 item key for application key bytes.
     pub fn derive_item_key(&self, application_key: impl AsRef<[u8]>) -> ItemKey {
-        let mut key = self.derive_subkey(b"openkache/v1/key");
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA-256 accepts a 32-byte key");
-        key.zeroize();
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.item_key)
+            .expect("HMAC-SHA-256 accepts a 32-byte key");
         mac.update(application_key.as_ref());
         ItemKey::from_bytes(mac.finalize().into_bytes().into())
     }
 
     pub(crate) fn derive_value_key(&self) -> [u8; 32] {
-        self.derive_subkey(b"openkache/v1/value")
+        derive_subkey(&self.master_key, b"openkache/v1/value")
     }
+}
 
-    fn derive_subkey(&self, context: &[u8]) -> [u8; 32] {
-        let hkdf = Hkdf::<Sha256>::new(Some(b"openkache/v1"), &self.0);
-        let mut output = [0; 32];
-        hkdf.expand(context, &mut output)
-            .expect("SHA-256 HKDF supports a 32-byte output");
-        output
-    }
+fn derive_subkey(master_key: &[u8; DATA_PROTECTION_KEY_BYTES], context: &[u8]) -> [u8; 32] {
+    let hkdf = Hkdf::<Sha256>::new(Some(b"openkache/v1"), master_key);
+    let mut output = [0; 32];
+    hkdf.expand(context, &mut output)
+        .expect("SHA-256 HKDF supports a 32-byte output");
+    output
 }

@@ -6,6 +6,11 @@ use std::error::Error;
 
 use openkache::{AppConfig, Command, KvError, ThreadedKvkache};
 use openkache_protocol::ItemKey;
+use sha2::{Digest, Sha256};
+
+fn item_key(key: &[u8]) -> ItemKey {
+    ItemKey::new(Sha256::digest(key).into())
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let (config, command) = match AppConfig::parse() {
@@ -19,15 +24,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut cache = ThreadedKvkache::start(config)?;
     let operation = (|| -> Result<(), Box<dyn Error>> {
         match command {
-            Command::Get(key) => match cache.get(ItemKey::derive(&key))? {
+            Command::Get(key) => match cache.get(item_key(&key))? {
                 Some(value) => println!("{}", String::from_utf8_lossy(&value)),
                 None => println!("(nil)"),
             },
-            Command::Set(key, value) => println!("{:?}", cache.set(ItemKey::derive(&key), value)?),
+            Command::Set(key, value) => println!("{:?}", cache.set(item_key(&key), value)?),
             Command::Delete(key) => {
                 println!(
                     "{}",
-                    if cache.delete(ItemKey::derive(&key))? {
+                    if cache.delete(item_key(&key))? {
                         "Deleted"
                     } else {
                         "NotFound"
