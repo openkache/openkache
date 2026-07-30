@@ -22,7 +22,7 @@ impl Kvkache {
             self.config.segment_data_offset(sg_index) + bucket_index as u64 * BUCKET_BYTES as u64;
         let bytes = read_exact_direct(
             &self.data,
-            DirectIoBuffer::for_read(BUCKET_BYTES),
+            self.bucket_read_pool.take_bucket(),
             offset,
             BUCKET_BYTES,
             self.config.read_max_time_us,

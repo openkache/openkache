@@ -533,8 +533,8 @@ impl Default for IoUringConfig {
             sqpoll: false,
             iopoll: false,
             entries_per_worker: 256,
-            max_inflight_per_worker: 8,
-            batch_size: 16,
+            max_inflight_per_worker: 32,
+            batch_size: 64,
             batch_max_wait_us: 10,
         }
     }
@@ -819,8 +819,8 @@ impl AppConfig {
             },
             io_uring: IoUringConfig {
                 entries_per_worker: 256,
-                max_inflight_per_worker: 8,
-                batch_size: 16,
+                max_inflight_per_worker: 32,
+                batch_size: 64,
                 ..IoUringConfig::default()
             },
             timeouts: TimeoutConfig {
