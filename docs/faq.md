@@ -63,7 +63,7 @@ NSS certificate-database integration.
 ### Can I select a different in-process channel implementation?
 
 Yes. The server uses one compile-time channel backend for its worker,
-request/reply, and transport channels. `channel-crossfire` is enabled by
-default; replace it with exactly one of `channel-flume` or `channel-kanal` in a
-`--no-default-features` build. This is a build choice and does not add a runtime
-configuration field.
+request/reply, and transport channels. `channel-kanal` is enabled by
+default; replace it with exactly one of `channel-crossfire` or `channel-flume`
+in a `--no-default-features` build. This is a build choice and does not add a
+runtime configuration field.

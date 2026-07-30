@@ -262,7 +262,7 @@ feature:
 cargo build --release --manifest-path server/Cargo.toml \
   --bin openkache-server \
   --no-default-features \
-  --features allocator-mimalloc,channel-crossfire,quic-noq
+  --features allocator-mimalloc,channel-kanal,quic-noq
 ```
 
 The allocator features are mutually exclusive. The server reports the selected
@@ -270,7 +270,7 @@ allocator during startup.
 
 ### Server channel
 
-The server uses Crossfire by default for worker, request/reply, and transport
+The server uses Kanal by default for worker, request/reply, and transport
 channels. Select exactly one of `channel-crossfire`, `channel-flume`, or
 `channel-kanal` at compile time:
 
