@@ -16,33 +16,71 @@ use crate::{
     LocalClient, SetCondition, SetOptions, SetOutcome,
 };
 
-const RESULT_ERROR: u32 = 0;
-const RESULT_OK: u32 = 1;
-const RESULT_VALUE: u32 = 2;
-const RESULT_NOT_FOUND: u32 = 3;
-const RESULT_CREATED: u32 = 4;
-const RESULT_REPLACED: u32 = 5;
-const RESULT_DELETED: u32 = 6;
-const RESULT_NOT_DELETED: u32 = 7;
-const RESULT_CONNECTED: u32 = 8;
-const RESULT_NOT_STORED: u32 = 9;
-
-const OPERATION_PING: u32 = 1;
-const OPERATION_GET: u32 = 2;
-const OPERATION_SET: u32 = 3;
-const OPERATION_DELETE: u32 = 4;
-const OPERATION_STATS: u32 = 5;
-const OPERATION_SYNC: u32 = 6;
-
-const SET_CONDITION_NONE: u32 = 0;
-const SET_CONDITION_IF_ABSENT: u32 = 1;
-const SET_CONDITION_IF_PRESENT: u32 = 2;
-
+const ABI_VERSION: u32 = 4;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy)]
+#[repr(u32)]
+enum FfiResultKind {
+    Error = 0,
+    Ok = 1,
+    Value = 2,
+    NotFound = 3,
+    Created = 4,
+    Replaced = 5,
+    Deleted = 6,
+    NotDeleted = 7,
+    Connected = 8,
+    NotStored = 9,
+}
+
+macro_rules! ffi_input_enum {
+    (
+        enum $name:ident {
+            $($variant:ident = $value:expr),+ $(,)?
+        }
+    ) => {
+        #[derive(Clone, Copy)]
+        #[repr(u32)]
+        enum $name {
+            $($variant = $value),+
+        }
+
+        impl TryFrom<u32> for $name {
+            type Error = u32;
+
+            fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+                match value {
+                    $(value if value == Self::$variant as u32 => Ok(Self::$variant),)+
+                    _ => Err(value),
+                }
+            }
+        }
+    };
+}
+
+ffi_input_enum! {
+    enum FfiOperation {
+        Ping = 1,
+        Get = 2,
+        Set = 3,
+        Delete = 4,
+        Stats = 5,
+        Sync = 6,
+    }
+}
+
+ffi_input_enum! {
+    enum FfiSetCondition {
+        None = 0,
+        IfAbsent = 1,
+        IfPresent = 2,
+    }
+}
 
 /// Opaque result allocated by the FFI boundary.
 pub struct FfiResult {
-    kind: u32,
+    kind: FfiResultKind,
     payload: Vec<u8>,
     client: Option<Box<FfiClient>>,
 }
@@ -57,7 +95,7 @@ pub struct FfiClient {
 
 enum Command {
     Execute {
-        operation: u32,
+        operation: FfiOperation,
         key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
@@ -78,13 +116,13 @@ struct WorkerOptions {
 impl FfiResult {
     fn error(message: impl Into<String>) -> Self {
         Self {
-            kind: RESULT_ERROR,
+            kind: FfiResultKind::Error,
             payload: message.into().into_bytes(),
             client: None,
         }
     }
 
-    fn success(kind: u32, payload: Vec<u8>) -> Self {
+    fn success(kind: FfiResultKind, payload: Vec<u8>) -> Self {
         Self {
             kind,
             payload,
@@ -94,7 +132,7 @@ impl FfiResult {
 
     fn connected(client: FfiClient) -> Self {
         Self {
-            kind: RESULT_CONNECTED,
+            kind: FfiResultKind::Connected,
             payload: Vec::new(),
             client: Some(Box::new(client)),
         }
@@ -151,7 +189,7 @@ impl FfiClient {
 
     fn execute(
         &self,
-        operation: u32,
+        operation: FfiOperation,
         key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
@@ -269,47 +307,46 @@ fn run_worker(
 
 async fn execute(
     client: &LocalClient,
-    operation: u32,
+    operation: FfiOperation,
     key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> FfiResult {
     let result = match operation {
-        OPERATION_PING => client
+        FfiOperation::Ping => client
             .ping()
             .await
-            .map(|_| FfiResult::success(RESULT_OK, Vec::new())),
-        OPERATION_GET => client.get(&key).await.map(|value| match value {
-            GetOutcome::Found(value) => FfiResult::success(RESULT_VALUE, value),
-            GetOutcome::NotFound => FfiResult::success(RESULT_NOT_FOUND, Vec::new()),
+            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Get => client.get(&key).await.map(|value| match value {
+            GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
+            GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
         }),
-        OPERATION_SET => client
+        FfiOperation::Set => client
             .set(&key, value)
             .options(set_options)
             .await
             .map(|outcome| match outcome {
-                SetOutcome::Created => FfiResult::success(RESULT_CREATED, Vec::new()),
-                SetOutcome::Replaced => FfiResult::success(RESULT_REPLACED, Vec::new()),
-                SetOutcome::NotStored => FfiResult::success(RESULT_NOT_STORED, Vec::new()),
+                SetOutcome::Created => FfiResult::success(FfiResultKind::Created, Vec::new()),
+                SetOutcome::Replaced => FfiResult::success(FfiResultKind::Replaced, Vec::new()),
+                SetOutcome::NotStored => FfiResult::success(FfiResultKind::NotStored, Vec::new()),
             }),
-        OPERATION_DELETE => client.delete(&key).await.map(|deleted| {
+        FfiOperation::Delete => client.delete(&key).await.map(|deleted| {
             FfiResult::success(
                 match deleted {
-                    DeleteOutcome::Deleted => RESULT_DELETED,
-                    DeleteOutcome::NotFound => RESULT_NOT_DELETED,
+                    DeleteOutcome::Deleted => FfiResultKind::Deleted,
+                    DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
                 },
                 Vec::new(),
             )
         }),
-        OPERATION_STATS => client
+        FfiOperation::Stats => client
             .stats()
             .await
-            .map(|stats| FfiResult::success(RESULT_VALUE, stats.into_bytes())),
-        OPERATION_SYNC => client
+            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
+        FfiOperation::Sync => client
             .sync()
             .await
-            .map(|()| FfiResult::success(RESULT_OK, Vec::new())),
-        _ => return FfiResult::error(format!("unsupported operation {operation}")),
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
     };
     result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
 }
@@ -317,7 +354,7 @@ async fn execute(
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    4
+    ABI_VERSION
 }
 
 /// Connects a native client and returns an opaque result.
@@ -410,17 +447,19 @@ pub unsafe extern "C" fn openkache_client_execute(
         };
         let key = copy_bytes(key, key_length, "key")?;
         let value = copy_bytes(value, value_length, "value")?;
-        let condition = match set_condition {
-            SET_CONDITION_NONE => SetCondition::None,
-            SET_CONDITION_IF_ABSENT => SetCondition::IfAbsent,
-            SET_CONDITION_IF_PRESENT => SetCondition::IfPresent,
-            _ => return Err(format!("unsupported SET condition {set_condition}")),
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        let condition = match FfiSetCondition::try_from(set_condition)
+            .map_err(|condition| format!("unsupported SET condition {condition}"))?
+        {
+            FfiSetCondition::None => SetCondition::None,
+            FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
+            FfiSetCondition::IfPresent => SetCondition::IfPresent,
         };
         let mut set_options = match condition {
             SetCondition::None => SetOptions::new(),
             SetCondition::IfAbsent => SetOptions::new().if_absent(),
             SetCondition::IfPresent => SetOptions::new().if_present(),
-            _ => return Err("unsupported SET condition".to_string()),
         };
         if ttl_enabled != 0 {
             if ttl_ms == 0 {
@@ -429,21 +468,24 @@ pub unsafe extern "C" fn openkache_client_execute(
             set_options = set_options.expires_after_millis(ttl_ms);
         }
         match operation {
-            OPERATION_GET | OPERATION_SET | OPERATION_DELETE if key.is_empty() => {
+            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete if key.is_empty() => {
                 Err("key must not be empty".to_string())
             }
-            OPERATION_PING | OPERATION_STATS | OPERATION_SYNC if !key.is_empty() => {
+            FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync if !key.is_empty() => {
                 Err("operation does not accept a key".to_string())
             }
-            OPERATION_SET if value.is_empty() => Err("SET value must not be empty".to_string()),
-            OPERATION_PING | OPERATION_GET | OPERATION_DELETE | OPERATION_STATS
-            | OPERATION_SYNC
+            FfiOperation::Set if value.is_empty() => Err("SET value must not be empty".to_string()),
+            FfiOperation::Ping
+            | FfiOperation::Get
+            | FfiOperation::Delete
+            | FfiOperation::Stats
+            | FfiOperation::Sync
                 if !value.is_empty() =>
             {
                 Err("operation does not accept a value".to_string())
             }
             operation
-                if operation != OPERATION_SET
+                if !matches!(operation, FfiOperation::Set)
                     && (set_options.condition() != SetCondition::None
                         || set_options.time_to_live_millis().is_some()) =>
             {
@@ -461,7 +503,7 @@ pub unsafe extern "C" fn openkache_client_execute(
 /// `result` must be a live pointer returned by this library.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_kind(result: *const FfiResult) -> u32 {
-    unsafe { result.as_ref() }.map_or(RESULT_ERROR, |result| result.kind)
+    unsafe { result.as_ref() }.map_or(FfiResultKind::Error as u32, |result| result.kind as u32)
 }
 
 /// Returns a borrowed pointer to an FFI result payload.

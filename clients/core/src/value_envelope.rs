@@ -1,7 +1,7 @@
 //! Canonical framing for self-describing, cross-language values.
 
 /// Magic bytes and version written at the start of every value envelope.
-pub const MAGIC_AND_VERSION: [u8; 4] = [0x4f, 0x4b, 0x56, 0x01];
+pub const MAGIC_AND_VERSION: [u8; 4] = *b"OKV\x01";
 
 /// Maximum UTF-8 byte length of an encoding identifier.
 pub const MAX_ENCODING_BYTES: usize = 64;
@@ -9,7 +9,10 @@ pub const MAX_ENCODING_BYTES: usize = 64;
 /// Maximum UTF-8 byte length of a logical type name.
 pub const MAX_TYPE_NAME_BYTES: usize = u16::MAX as usize;
 
-const HEADER_BYTES: usize = 8;
+const LENGTH_FIELD_BYTES: usize = std::mem::size_of::<u16>();
+const ENCODING_LENGTH_OFFSET: usize = MAGIC_AND_VERSION.len();
+const TYPE_NAME_LENGTH_OFFSET: usize = ENCODING_LENGTH_OFFSET + LENGTH_FIELD_BYTES;
+const HEADER_BYTES: usize = TYPE_NAME_LENGTH_OFFSET + LENGTH_FIELD_BYTES;
 
 /// A decoded OpenKache value envelope borrowing its source bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,8 +158,8 @@ pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
         return Err(Error::UnsupportedMagicOrVersion { found });
     }
 
-    let encoding_length = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
-    let type_name_length = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
+    let encoding_length = decode_length(bytes, ENCODING_LENGTH_OFFSET);
+    let type_name_length = decode_length(bytes, TYPE_NAME_LENGTH_OFFSET);
     let payload_offset = HEADER_BYTES
         .checked_add(encoding_length)
         .and_then(|length| length.checked_add(type_name_length))
@@ -180,6 +183,14 @@ pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
         type_name,
         payload: &bytes[payload_offset..],
     })
+}
+
+fn decode_length(bytes: &[u8], offset: usize) -> usize {
+    u16::from_be_bytes(
+        bytes[offset..offset + LENGTH_FIELD_BYTES]
+            .try_into()
+            .expect("validated envelope header contains metadata length"),
+    ) as usize
 }
 
 fn validate_encoding(encoding: &str) -> Result<()> {

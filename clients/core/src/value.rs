@@ -2,7 +2,7 @@
 
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{Key as CipherKey, Tag, XChaCha20Poly1305, XNonce};
-use openkache_protocol::MAX_VALUE_BYTES;
+use openkache_protocol::{ITEM_KEY_BYTES, MAX_VALUE_BYTES};
 use zeroize::Zeroize;
 use zstd_pure_rs::prelude::{
     ERR_getErrorName, ERR_isError, ZSTD_CONTENTSIZE_ERROR, ZSTD_CONTENTSIZE_UNKNOWN, ZSTD_compress,
@@ -12,17 +12,17 @@ use zstd_pure_rs::prelude::{
 use crate::{DataProtectionKey, ItemKey};
 
 /// Bytes required for an XChaCha20-Poly1305 key.
-pub const ENCRYPTION_KEY_BYTES: usize = 32;
+pub const ENCRYPTION_KEY_BYTES: usize = crate::key::PROTECTION_KEY_BYTES;
 
 const NONCE_BYTES: usize = 24;
 const TAG_BYTES: usize = 16;
 const ENCRYPTED_OVERHEAD_BYTES: usize = NONCE_BYTES + TAG_BYTES;
-const VALUE_HEADER: [u8; 4] = [0x4f, 0x4b, 0x54, 0x01];
+const VALUE_HEADER: [u8; 4] = *b"OKT\x01";
 const VALUE_HEADER_BYTES: usize = VALUE_HEADER.len() + 1;
 const VALUE_COMPRESSED_FLAG: u8 = 1 << 0;
 const VALUE_ENCRYPTED_FLAG: u8 = 1 << 1;
 const KNOWN_VALUE_FLAGS: u8 = VALUE_COMPRESSED_FLAG | VALUE_ENCRYPTED_FLAG;
-const AAD_BYTES: usize = 32 + VALUE_HEADER_BYTES;
+const AAD_BYTES: usize = ITEM_KEY_BYTES + VALUE_HEADER_BYTES;
 
 /// Client-owned encoded bytes stored opaquely by the server.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -469,8 +469,8 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
 
 fn make_aad(key: ItemKey, flags: u8) -> [u8; AAD_BYTES] {
     let mut aad = [0_u8; AAD_BYTES];
-    aad[..32].copy_from_slice(key.as_bytes());
-    aad[32..32 + VALUE_HEADER.len()].copy_from_slice(&VALUE_HEADER);
+    aad[..ITEM_KEY_BYTES].copy_from_slice(key.as_bytes());
+    aad[ITEM_KEY_BYTES..ITEM_KEY_BYTES + VALUE_HEADER.len()].copy_from_slice(&VALUE_HEADER);
     aad[AAD_BYTES - 1] = flags;
     aad
 }

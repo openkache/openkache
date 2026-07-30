@@ -20,9 +20,10 @@ use transport::{ClientConnection, ClientLane};
 
 pub use config::{
     Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy, ServerTrust,
-    SetCondition, SetOptions,
+    SetOptions,
 };
-pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ITEM_KEY_BYTES, ItemKey};
+pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemKey};
+pub use openkache_protocol::{ITEM_KEY_BYTES, SetCondition};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -34,10 +35,6 @@ pub use value::ItemValue;
 compile_error!("enable at least one client QUIC backend feature");
 
 const DEFAULT_MAX_IN_FLIGHT: usize = 256;
-const STATE_CONNECTED: u8 = 0;
-const STATE_RECONNECTING: u8 = 1;
-const STATE_DISCONNECTED: u8 = 2;
-const STATE_CLOSED: u8 = 3;
 
 /// Client-owned identifier for an asynchronous runtime and QUIC backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -326,6 +323,7 @@ pub enum DeleteOutcome {
 /// Current best-effort connection state snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
+#[repr(u8)]
 pub enum ConnectionState {
     /// The latest connection is available.
     Connected,
@@ -404,16 +402,16 @@ impl<C: ClientConnection> Core<C> {
             request_timeout: timeouts.request,
             retry,
             max_in_flight,
-            state: AtomicU8::new(STATE_CONNECTED),
+            state: AtomicU8::new(ConnectionState::Connected as u8),
         })
     }
 
     fn connection_state(&self) -> ConnectionState {
         match self.state.load(Ordering::Acquire) {
-            STATE_CONNECTED => ConnectionState::Connected,
-            STATE_RECONNECTING => ConnectionState::Reconnecting,
-            STATE_DISCONNECTED => ConnectionState::Disconnected,
-            STATE_CLOSED => ConnectionState::Closed,
+            state if state == ConnectionState::Connected as u8 => ConnectionState::Connected,
+            state if state == ConnectionState::Reconnecting as u8 => ConnectionState::Reconnecting,
+            state if state == ConnectionState::Disconnected as u8 => ConnectionState::Disconnected,
+            state if state == ConnectionState::Closed as u8 => ConnectionState::Closed,
             _ => unreachable!("connection state is always a known discriminator"),
         }
     }
@@ -595,14 +593,15 @@ impl<C: ClientConnection> Core<C> {
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (state != STATE_CLOSED).then_some(STATE_DISCONNECTED)
+                (state != ConnectionState::Closed as u8)
+                    .then_some(ConnectionState::Disconnected as u8)
             });
     }
 
-    fn set_state_unless_closed(&self, next: u8) -> Result<()> {
+    fn set_state_unless_closed(&self, next: ConnectionState) -> Result<()> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (state != STATE_CLOSED).then_some(next)
+                (state != ConnectionState::Closed as u8).then_some(next as u8)
             })
             .map(|_| ())
             .map_err(|_| Error::ClientClosed)
@@ -640,7 +639,7 @@ impl<C: ClientConnection> Core<C> {
         if !Arc::ptr_eq(&current, failed) {
             return Ok(());
         }
-        self.set_state_unless_closed(STATE_RECONNECTING)?;
+        self.set_state_unless_closed(ConnectionState::Reconnecting)?;
         let timeout = deadline
             .remaining(Operation::ConnectionRetry)?
             .min(self.connect_timeout);
@@ -671,7 +670,7 @@ impl<C: ClientConnection> Core<C> {
             failed.close();
             *connection = Arc::new(replacement);
         }
-        self.set_state_unless_closed(STATE_CONNECTED)?;
+        self.set_state_unless_closed(ConnectionState::Connected)?;
         Ok(())
     }
 
@@ -683,8 +682,10 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn close(&self) -> Result<()> {
-        let previous = self.state.swap(STATE_CLOSED, Ordering::AcqRel);
-        if previous != STATE_CLOSED {
+        let previous = self
+            .state
+            .swap(ConnectionState::Closed as u8, Ordering::AcqRel);
+        if previous != ConnectionState::Closed as u8 {
             let connection = self
                 .connection
                 .read()
@@ -812,6 +813,62 @@ macro_rules! builder_methods {
     };
 }
 
+macro_rules! raw_client_methods {
+    ($client:ident) => {
+        impl $client {
+            /// Verifies the connection and returns the complete request round-trip time.
+            pub async fn ping(&self) -> Result<Duration> {
+                self.0.ping().await
+            }
+
+            /// Retrieves exact encoded bytes for a fixed-size item key.
+            pub async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>> {
+                self.0.get(key).await
+            }
+
+            /// Stores exact encoded bytes with explicit wire-level set options.
+            pub async fn set(
+                &self,
+                key: ItemKey,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.0.set(key, value, options).await
+            }
+
+            /// Deletes a fixed-size item key.
+            pub async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome> {
+                self.0.delete(key).await
+            }
+
+            /// Returns server statistics as their JSON text.
+            pub async fn stats(&self) -> Result<String> {
+                self.0.stats().await
+            }
+
+            /// Waits until prior mutations satisfy the server durability barrier.
+            pub async fn sync(&self) -> Result<()> {
+                self.0.sync().await
+            }
+
+            /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
+            pub fn connection_state(&self) -> ConnectionState {
+                self.0.connection_state()
+            }
+
+            /// Explicitly replaces the current connection without replaying an operation.
+            pub async fn reconnect(&self) -> Result<()> {
+                self.0.reconnect().await
+            }
+
+            /// Permanently and idempotently closes this client instance.
+            pub async fn close(&self) -> Result<()> {
+                self.0.close().await
+            }
+        }
+    };
+}
+
 #[cfg(feature = "quic-quinn")]
 /// Exact-key, exact-value protocol client running on Tokio and Quinn.
 #[derive(Clone)]
@@ -847,57 +904,10 @@ impl RawClient {
             settings: BuilderSettings::new(endpoint),
         }
     }
-
-    /// Verifies the connection and returns the complete request round-trip time.
-    pub async fn ping(&self) -> Result<Duration> {
-        self.0.ping().await
-    }
-
-    /// Retrieves exact encoded bytes for an exact 32-byte item key.
-    pub async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>> {
-        self.0.get(key).await
-    }
-
-    /// Stores exact encoded bytes with explicit wire-level set options.
-    pub async fn set(
-        &self,
-        key: ItemKey,
-        value: ItemValue,
-        options: SetOptions,
-    ) -> Result<SetOutcome> {
-        self.0.set(key, value, options).await
-    }
-
-    /// Deletes an exact 32-byte item key.
-    pub async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome> {
-        self.0.delete(key).await
-    }
-
-    /// Returns server statistics as their JSON text.
-    pub async fn stats(&self) -> Result<String> {
-        self.0.stats().await
-    }
-
-    /// Waits until prior mutations satisfy the server durability barrier.
-    pub async fn sync(&self) -> Result<()> {
-        self.0.sync().await
-    }
-
-    /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
-    pub fn connection_state(&self) -> ConnectionState {
-        self.0.connection_state()
-    }
-
-    /// Explicitly replaces the current connection without replaying an operation.
-    pub async fn reconnect(&self) -> Result<()> {
-        self.0.reconnect().await
-    }
-
-    /// Permanently and idempotently closes this client instance.
-    pub async fn close(&self) -> Result<()> {
-        self.0.close().await
-    }
 }
+
+#[cfg(feature = "quic-quinn")]
+raw_client_methods!(RawClient);
 
 #[cfg(feature = "quic-compio")]
 /// Exact-key, exact-value protocol client confined to a Compio runtime.
@@ -936,57 +946,10 @@ impl LocalRawClient {
             settings: BuilderSettings::new(endpoint),
         }
     }
-
-    /// Verifies the connection and returns the complete request round-trip time.
-    pub async fn ping(&self) -> Result<Duration> {
-        self.0.ping().await
-    }
-
-    /// Retrieves exact encoded bytes for an exact 32-byte item key.
-    pub async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>> {
-        self.0.get(key).await
-    }
-
-    /// Stores exact encoded bytes with explicit wire-level set options.
-    pub async fn set(
-        &self,
-        key: ItemKey,
-        value: ItemValue,
-        options: SetOptions,
-    ) -> Result<SetOutcome> {
-        self.0.set(key, value, options).await
-    }
-
-    /// Deletes an exact 32-byte item key.
-    pub async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome> {
-        self.0.delete(key).await
-    }
-
-    /// Returns server statistics as their JSON text.
-    pub async fn stats(&self) -> Result<String> {
-        self.0.stats().await
-    }
-
-    /// Waits until prior mutations satisfy the server durability barrier.
-    pub async fn sync(&self) -> Result<()> {
-        self.0.sync().await
-    }
-
-    /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
-    pub fn connection_state(&self) -> ConnectionState {
-        self.0.connection_state()
-    }
-
-    /// Explicitly replaces the current connection without replaying an operation.
-    pub async fn reconnect(&self) -> Result<()> {
-        self.0.reconnect().await
-    }
-
-    /// Permanently and idempotently closes this client instance.
-    pub async fn close(&self) -> Result<()> {
-        self.0.close().await
-    }
 }
+
+#[cfg(feature = "quic-compio")]
+raw_client_methods!(LocalRawClient);
 
 #[cfg(feature = "quic-quinn")]
 async fn connect_quinn(

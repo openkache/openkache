@@ -76,6 +76,55 @@ macro_rules! builder_methods {
     };
 }
 
+macro_rules! client_methods {
+    ($client:ident) => {
+        impl $client {
+            /// Verifies the connection and returns the complete request round-trip time.
+            pub async fn ping(&self) -> Result<Duration> {
+                self.inner.ping().await
+            }
+
+            /// Retrieves and decodes a value for arbitrary application key bytes.
+            pub async fn get(
+                &self,
+                application_key: impl AsRef<[u8]>,
+            ) -> Result<GetOutcome<Vec<u8>>> {
+                self.inner.get(application_key).await
+            }
+
+            /// Deletes a value for arbitrary application key bytes.
+            pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
+                self.inner.delete(application_key).await
+            }
+
+            /// Returns server statistics as their JSON text.
+            pub async fn stats(&self) -> Result<String> {
+                self.inner.stats().await
+            }
+
+            /// Waits until prior mutations satisfy the server durability barrier.
+            pub async fn sync(&self) -> Result<()> {
+                self.inner.sync().await
+            }
+
+            /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
+            pub fn connection_state(&self) -> ConnectionState {
+                self.inner.connection_state()
+            }
+
+            /// Explicitly replaces the current connection without replaying an operation.
+            pub async fn reconnect(&self) -> Result<()> {
+                self.inner.reconnect().await
+            }
+
+            /// Permanently and idempotently closes this client instance.
+            pub async fn close(&self) -> Result<()> {
+                self.inner.close().await
+            }
+        }
+    };
+}
+
 #[cfg(feature = "quic-quinn")]
 /// High-level application-key and plaintext-value client running on Tokio and Quinn.
 #[derive(Clone)]
@@ -121,16 +170,6 @@ impl Client {
         self.inner.raw()
     }
 
-    /// Verifies the connection and returns the complete request round-trip time.
-    pub async fn ping(&self) -> Result<Duration> {
-        self.inner.ping().await
-    }
-
-    /// Retrieves and decodes a value for arbitrary application key bytes.
-    pub async fn get(&self, application_key: impl AsRef<[u8]>) -> Result<GetOutcome<Vec<u8>>> {
-        self.inner.get(application_key).await
-    }
-
     /// Starts an awaitable set request with persistent, unconditional defaults.
     pub fn set<'a>(
         &'a self,
@@ -144,37 +183,10 @@ impl Client {
             options: SetOptions::new(),
         }
     }
-
-    /// Deletes a value for arbitrary application key bytes.
-    pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
-        self.inner.delete(application_key).await
-    }
-
-    /// Returns server statistics as their JSON text.
-    pub async fn stats(&self) -> Result<String> {
-        self.inner.stats().await
-    }
-
-    /// Waits until prior mutations satisfy the server durability barrier.
-    pub async fn sync(&self) -> Result<()> {
-        self.inner.sync().await
-    }
-
-    /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
-    pub fn connection_state(&self) -> ConnectionState {
-        self.inner.connection_state()
-    }
-
-    /// Explicitly replaces the current connection without replaying an operation.
-    pub async fn reconnect(&self) -> Result<()> {
-        self.inner.reconnect().await
-    }
-
-    /// Permanently and idempotently closes this client instance.
-    pub async fn close(&self) -> Result<()> {
-        self.inner.close().await
-    }
 }
+
+#[cfg(feature = "quic-quinn")]
+client_methods!(Client);
 
 #[cfg(feature = "quic-compio")]
 /// High-level application-key and plaintext-value client confined to a Compio runtime.
@@ -227,16 +239,6 @@ impl LocalClient {
         self.inner.raw()
     }
 
-    /// Verifies the connection and returns the complete request round-trip time.
-    pub async fn ping(&self) -> Result<Duration> {
-        self.inner.ping().await
-    }
-
-    /// Retrieves and decodes a value for arbitrary application key bytes.
-    pub async fn get(&self, application_key: impl AsRef<[u8]>) -> Result<GetOutcome<Vec<u8>>> {
-        self.inner.get(application_key).await
-    }
-
     /// Starts an awaitable set request with persistent, unconditional defaults.
     pub fn set<'a>(
         &'a self,
@@ -250,37 +252,10 @@ impl LocalClient {
             options: SetOptions::new(),
         }
     }
-
-    /// Deletes a value for arbitrary application key bytes.
-    pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
-        self.inner.delete(application_key).await
-    }
-
-    /// Returns server statistics as their JSON text.
-    pub async fn stats(&self) -> Result<String> {
-        self.inner.stats().await
-    }
-
-    /// Waits until prior mutations satisfy the server durability barrier.
-    pub async fn sync(&self) -> Result<()> {
-        self.inner.sync().await
-    }
-
-    /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
-    pub fn connection_state(&self) -> ConnectionState {
-        self.inner.connection_state()
-    }
-
-    /// Explicitly replaces the current connection without replaying an operation.
-    pub async fn reconnect(&self) -> Result<()> {
-        self.inner.reconnect().await
-    }
-
-    /// Permanently and idempotently closes this client instance.
-    pub async fn close(&self) -> Result<()> {
-        self.inner.close().await
-    }
 }
+
+#[cfg(feature = "quic-compio")]
+client_methods!(LocalClient);
 
 /// Conversion into an owned value buffer without separate borrowed and owned method names.
 pub trait IntoValue {
