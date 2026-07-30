@@ -59,6 +59,10 @@ impl BackendConnection for Connection {
             .map_err(|error| TransportError::backend(NAME, "stream open", error))?;
         Ok(Stream { send, receive })
     }
+
+    fn close(&self) {
+        self.inner.close(0_u32.into(), b"client closed");
+    }
 }
 
 impl BackendStream for Stream {

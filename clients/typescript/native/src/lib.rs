@@ -7,12 +7,13 @@ use std::time::Duration;
 use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client::value::{Compression, ENCRYPTION_KEY_BYTES, ValueCodec, ZstandardOptions};
+use openkache_client::value::{Compression, ZstandardOptions};
 use openkache_client::{
-    Client, ClientIdentity, ClientOptions, ClientTimeouts, SetCondition, SetOptions, SetOutcome,
+    Certificate, Client, ClientIdentity, ClientTimeouts, DataProtectionKey, DeleteOutcome,
+    Endpoint, GetOutcome, PrivateKey, SetCondition, SetOutcome, DATA_PROTECTION_KEY_BYTES,
     value_envelope,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
@@ -33,8 +34,8 @@ pub struct NativeClientOptions {
     pub server_name: String,
     pub certificate: Uint8Array,
     pub identity: Option<NativeIdentity>,
-    #[napi(js_name = "encryption_key")]
-    pub encryption_key: Uint8Array,
+    #[napi(js_name = "data_protection_key")]
+    pub data_protection_key: Uint8Array,
     #[napi(js_name = "compression_enabled")]
     pub compression_enabled: bool,
     #[napi(js_name = "compression_level")]
@@ -69,7 +70,11 @@ impl NativeClient {
     /// Verifies that the server is reachable.
     #[napi]
     pub async fn ping(&self) -> Result<()> {
-        self.active_client()?.ping().await.map_err(native_error)
+        self.active_client()?
+            .ping()
+            .await
+            .map(|_| ())
+            .map_err(native_error)
     }
 
     /// Retrieves exact decoded bytes or `null` when the key is absent.
@@ -78,7 +83,7 @@ impl NativeClient {
         self.active_client()?
             .get(key.as_ref())
             .await
-            .map(|value| value.map(Uint8Array::new))
+            .map(|value| value.into_option().map(Uint8Array::new))
             .map_err(native_error)
     }
 
@@ -98,7 +103,7 @@ impl NativeClient {
     /// the stored bytes are not a supported value envelope.
     #[napi(js_name = "get_value")]
     pub async fn get_value(&self, key: Uint8Array) -> Result<Option<NativeValueEnvelope>> {
-        let Some(bytes) = self
+        let GetOutcome::Found(bytes) = self
             .active_client()?
             .get(key.as_ref())
             .await
@@ -167,6 +172,7 @@ impl NativeClient {
         self.active_client()?
             .delete(key.as_ref())
             .await
+            .map(|outcome| outcome == DeleteOutcome::Deleted)
             .map_err(native_error)
     }
 
@@ -205,8 +211,18 @@ impl NativeClient {
         let ttl_ms = ttl_ms
             .map(|value| parse_u64(value, "ttl_ms", false))
             .transpose()?;
-        self.active_client()?
-            .set_owned_with_options(key, value, SetOptions::new(condition, ttl_ms))
+        let client = self.active_client()?;
+        let mut request = client.set(key, value);
+        request = match condition {
+            SetCondition::None => request,
+            SetCondition::IfAbsent => request.if_absent(),
+            SetCondition::IfPresent => request.if_present(),
+            _ => return Err(invalid_argument("unsupported SET condition")),
+        };
+        if let Some(ttl_ms) = ttl_ms {
+            request = request.expires_after_millis(ttl_ms);
+        }
+        request
             .await
             .map(|outcome| match outcome {
                 SetOutcome::Created => "created".to_string(),
@@ -238,7 +254,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .address
         .parse()
         .map_err(|error| invalid_argument(format!("invalid server address: {error}")))?;
-    let trusted_certificates = parse_certificates(options.certificate.as_ref())?;
+    let mut trusted_certificates = parse_certificates(options.certificate.as_ref())?;
     if trusted_certificates.len() != 1 {
         return Err(invalid_argument(format!(
             "certificate must contain exactly one DER or PEM certificate, got {}",
@@ -246,12 +262,12 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         )));
     }
 
-    let encryption_key_bytes = options.encryption_key.as_ref();
-    let encryption_key: [u8; ENCRYPTION_KEY_BYTES] =
-        encryption_key_bytes.try_into().map_err(|_| {
+    let data_protection_key_bytes = options.data_protection_key.as_ref();
+    let data_protection_key: [u8; DATA_PROTECTION_KEY_BYTES] =
+        data_protection_key_bytes.try_into().map_err(|_| {
             invalid_argument(format!(
-                "encryption key must contain {ENCRYPTION_KEY_BYTES} bytes, got {}",
-                encryption_key_bytes.len()
+                "data protection key must contain {DATA_PROTECTION_KEY_BYTES} bytes, got {}",
+                data_protection_key_bytes.len()
             ))
         })?;
     let compression = if options.compression_enabled {
@@ -267,27 +283,28 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     } else {
         Compression::Disabled
     };
-    let value_codec = ValueCodec::encrypted(encryption_key, compression).map_err(native_error)?;
+    let data_protection_key = DataProtectionKey::from_bytes(data_protection_key);
     let identity = parse_identity(options.identity)?;
     let connect_timeout_ms = parse_u64(options.connect_timeout_ms, "connect_timeout_ms", false)?;
     let request_timeout_ms = parse_u64(options.request_timeout_ms, "request_timeout_ms", false)?;
 
-    let client = Client::connect_with_options(
-        address,
-        &options.server_name,
-        trusted_certificates[0].as_ref(),
-        ClientOptions {
-            value_codec,
-            identity,
-            timeouts: ClientTimeouts {
-                connect: Duration::from_millis(connect_timeout_ms),
-                request: Duration::from_millis(request_timeout_ms),
-            },
-            ..ClientOptions::default()
-        },
-    )
-    .await
-    .map_err(native_error)?;
+    let endpoint =
+        Endpoint::from_socket_addr(address, options.server_name).map_err(native_error)?;
+    let trusted_certificate =
+        Certificate::from_der(trusted_certificates.remove(0).as_ref().to_vec())
+            .map_err(native_error)?;
+    let mut builder = Client::builder(endpoint)
+        .trust_certificate(trusted_certificate)
+        .data_protection_key(data_protection_key)
+        .compression(compression)
+        .timeouts(ClientTimeouts {
+            connect: Duration::from_millis(connect_timeout_ms),
+            request: Duration::from_millis(request_timeout_ms),
+        });
+    if let Some(identity) = identity {
+        builder = builder.client_identity(identity);
+    }
+    let client = builder.connect().await.map_err(native_error)?;
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
     })
@@ -306,8 +323,15 @@ fn parse_identity(identity: Option<NativeIdentity>) -> Result<Option<ClientIdent
             "client certificate chain must not be empty",
         ));
     }
+    let certificate_chain = certificate_chain
+        .into_iter()
+        .map(|certificate| Certificate::from_der(certificate.as_ref().to_vec()))
+        .collect::<openkache_client::Result<Vec<_>>>()
+        .map_err(native_error)?;
     let private_key = parse_private_key(identity.private_key.as_ref())?;
-    Ok(Some(ClientIdentity::new(certificate_chain, private_key)))
+    ClientIdentity::new(certificate_chain, private_key)
+        .map(Some)
+        .map_err(native_error)
 }
 
 fn parse_certificates(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
@@ -327,16 +351,14 @@ fn parse_certificates(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>> {
     }
 }
 
-fn parse_private_key(bytes: &[u8]) -> Result<PrivateKeyDer<'static>> {
+fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey> {
     if bytes.is_empty() {
         return Err(invalid_argument("client private key must not be empty"));
     }
     if bytes.starts_with(b"-----BEGIN") {
-        return PrivateKeyDer::from_pem_slice(bytes)
-            .map_err(|error| invalid_argument(format!("invalid PEM private key: {error}")));
+        return PrivateKey::from_pem(bytes).map_err(native_error);
     }
-    PrivateKeyDer::try_from(bytes.to_vec())
-        .map_err(|_| invalid_argument("private key DER is invalid"))
+    PrivateKey::from_der(bytes.to_vec()).map_err(native_error)
 }
 
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {

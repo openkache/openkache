@@ -27,14 +27,15 @@ identifier.
 
 ```text
 request  = opcode:u8 | key_len:u32be | value_len_and_flags:u32be |
-           client_key_digest | [ttl_ms:u64be] | value
-response = status:u8 | payload_len:u32be | payload
+           key[32] | [ttl_ms:u64be] | value
+response = status:u8 | payload_len_and_flags:u32be | payload
 ```
 
 Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
-Clients encode KV keys as the 32-byte SHA-256 digest of the exact user-key
-bytes. The server rejects every other key length. Values and response payloads
-are limited to 64 MiB. Servers may enforce a smaller operational item limit.
+KV keys are exact 32-byte opaque wire values. A high-level client may derive
+them from arbitrary application keys with SHA-256 or keyed HMAC-SHA-256. The
+server rejects every other key length. Values and response payloads are limited to 64 MiB. Servers may
+enforce a smaller operational item limit.
 `SET` uses request length flag bits for an optional positive millisecond TTL
 and the mutually exclusive `if_absent` and `if_present` conditions.
 `STATS` and `SYNC` return `Forbidden` when the authenticated client lacks

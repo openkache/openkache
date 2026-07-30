@@ -48,7 +48,7 @@ const client = await OpenKache_Client.connect({
     certificate_chain: [await readFile("client-bundle/client.crt")],
     private_key: await readFile("client-bundle/client.key"),
   },
-  encryption_key: crypto.getRandomValues(new Uint8Array(32)),
+  data_protection_key: crypto.getRandomValues(new Uint8Array(32)),
 })
 
 await client.set("profile", {
@@ -121,7 +121,7 @@ loop. Call and await `close()` when finished.
 - `identity` contains the DER or PEM client certificate chain and private key
   required by production mutual TLS. An administrator identity is required for
   `stats()` and `sync()`.
-- `encryption_key` is an application-managed 32-byte secret. Clients sharing
+- `data_protection_key` is an application-managed 32-byte secret. Clients sharing
   values must use the same key. OpenKache never sends it to the server.
 - `compression` controls Zstandard level, minimum input size, and required
   savings. Defaults are level 1, 1 KiB, and 64 bytes.

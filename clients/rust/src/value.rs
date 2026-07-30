@@ -1,13 +1,15 @@
 //! Client-side compression and authenticated value encryption.
 
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
-use chacha20poly1305::{Key, Tag, XChaCha20Poly1305, XNonce};
-use openkache_protocol::{ClientKeyDigest, MAX_VALUE_BYTES, ValueFlags};
+use chacha20poly1305::{Key as CipherKey, Tag, XChaCha20Poly1305, XNonce};
+use openkache_protocol::{MAX_VALUE_BYTES, ValueFlags};
 use zeroize::Zeroize;
 use zstd_pure_rs::prelude::{
     ERR_getErrorName, ERR_isError, ZSTD_CONTENTSIZE_ERROR, ZSTD_CONTENTSIZE_UNKNOWN, ZSTD_compress,
     ZSTD_compressBound, ZSTD_decompress, ZSTD_getFrameContentSize,
 };
+
+use crate::Key;
 
 /// Bytes required for an XChaCha20-Poly1305 key.
 pub const ENCRYPTION_KEY_BYTES: usize = 32;
@@ -19,11 +21,70 @@ const AAD_BYTES: usize = 32 + 1;
 
 /// Encoded bytes and transformation flags sent through the protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SealedValue {
-    /// Exact opaque bytes stored by the server.
-    pub bytes: Vec<u8>,
-    /// Compression and encryption bits carried in the protocol length field.
-    pub flags: ValueFlags,
+pub struct EncodedValue {
+    bytes: Vec<u8>,
+    compressed: bool,
+    encrypted: bool,
+}
+
+impl EncodedValue {
+    /// Wraps exact wire bytes and their client-owned transformation metadata.
+    ///
+    /// Raw clients can use this constructor to preserve every protocol value pattern without
+    /// exposing protocol-crate flag types in the stable client API.
+    pub const fn from_parts(bytes: Vec<u8>, compressed: bool, encrypted: bool) -> Self {
+        Self {
+            bytes,
+            compressed,
+            encrypted,
+        }
+    }
+
+    /// Wraps exact plaintext bytes for raw storage.
+    pub const fn plaintext(bytes: Vec<u8>) -> Self {
+        Self::from_parts(bytes, false, false)
+    }
+
+    /// Returns the exact opaque bytes stored by the server.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Consumes the value and returns its exact opaque bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    /// Consumes the value and returns its wire bytes and transformation metadata.
+    pub fn into_parts(self) -> (Vec<u8>, bool, bool) {
+        (self.bytes, self.compressed, self.encrypted)
+    }
+
+    /// Returns whether the bytes contain a Zstandard frame before encryption.
+    pub const fn is_compressed(&self) -> bool {
+        self.compressed
+    }
+
+    /// Returns whether the bytes contain authenticated ciphertext.
+    pub const fn is_encrypted(&self) -> bool {
+        self.encrypted
+    }
+
+    pub(crate) fn from_protocol(bytes: Vec<u8>, flags: ValueFlags) -> Self {
+        Self {
+            bytes,
+            compressed: flags.is_compressed(),
+            encrypted: flags.is_encrypted(),
+        }
+    }
+
+    pub(crate) const fn protocol_flags(&self) -> ValueFlags {
+        ValueFlags::new(self.compressed, self.encrypted)
+    }
+
+    pub(crate) fn into_protocol(self) -> (ValueFlags, Vec<u8>) {
+        (self.protocol_flags(), self.bytes)
+    }
 }
 
 /// Zstandard settings used before values are encrypted.
@@ -123,7 +184,7 @@ impl ValueCodec {
     ) -> Result<Self> {
         validate_compression(compression)?;
         let cipher = XChaCha20Poly1305::new(
-            &Key::try_from(&key[..]).expect("encryption key has the required fixed length"),
+            &CipherKey::try_from(&key[..]).expect("encryption key has the required fixed length"),
         );
         key.zeroize();
         Ok(Self {
@@ -136,7 +197,7 @@ impl ValueCodec {
     ///
     /// # Arguments
     ///
-    /// * `key_digest` - Wire key used to bind ciphertext to its cache key.
+    /// * `key` - Wire key used to bind ciphertext to its cache key.
     /// * `plaintext` - Exact application value.
     ///
     /// # Returns
@@ -147,15 +208,15 @@ impl ValueCodec {
     ///
     /// Returns an error for oversized values, entropy failures, compression failures, or
     /// encryption failures.
-    pub fn seal(&self, key_digest: ClientKeyDigest, plaintext: &[u8]) -> Result<SealedValue> {
-        self.seal_owned(key_digest, plaintext.to_vec())
+    pub fn seal(&self, key: Key, plaintext: &[u8]) -> Result<EncodedValue> {
+        self.seal_owned(key, plaintext.to_vec())
     }
 
     /// Encodes an owned plaintext value while reusing its allocation when practical.
     ///
     /// # Arguments
     ///
-    /// * `key_digest` - Wire key used to bind ciphertext to its cache key.
+    /// * `key` - Wire key used to bind ciphertext to its cache key.
     /// * `plaintext` - Owned application value whose allocation may be reused.
     ///
     /// # Returns
@@ -166,11 +227,7 @@ impl ValueCodec {
     ///
     /// Returns an error for oversized values, entropy failures, compression failures, or
     /// encryption failures.
-    pub fn seal_owned(
-        &self,
-        key_digest: ClientKeyDigest,
-        plaintext: Vec<u8>,
-    ) -> Result<SealedValue> {
+    pub fn seal_owned(&self, key: Key, plaintext: Vec<u8>) -> Result<EncodedValue> {
         if plaintext.len() > MAX_VALUE_BYTES {
             return Err(Error::PlaintextTooLarge {
                 size: plaintext.len(),
@@ -178,9 +235,10 @@ impl ValueCodec {
             });
         }
         if self.cipher.is_none() && self.compression == Compression::Disabled {
-            return Ok(SealedValue {
+            return Ok(EncodedValue {
                 bytes: plaintext,
-                flags: ValueFlags::NONE,
+                compressed: false,
+                encrypted: false,
             });
         }
 
@@ -198,7 +256,7 @@ impl ValueCodec {
             body[..NONCE_BYTES].copy_from_slice(&nonce);
 
             let nonce = XNonce::try_from(&nonce[..]).expect("nonce has the required fixed length");
-            let aad = make_aad(key_digest, flags);
+            let aad = make_aad(key, flags);
             let tag = cipher
                 .encrypt_inout_detached(&nonce, &aad, (&mut body[NONCE_BYTES..]).into())
                 .map_err(|_| Error::Encryption)?;
@@ -210,14 +268,18 @@ impl ValueCodec {
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        Ok(SealedValue { bytes: body, flags })
+        Ok(EncodedValue {
+            bytes: body,
+            compressed,
+            encrypted,
+        })
     }
 
     /// Decodes a value returned by the server.
     ///
     /// # Arguments
     ///
-    /// * `key_digest` - Wire key that must match the key used while sealing.
+    /// * `key` - Wire key that must match the key used while sealing.
     /// * `encoded` - Owned server payload whose allocation is reused when possible.
     ///
     /// # Returns
@@ -228,12 +290,9 @@ impl ValueCodec {
     ///
     /// Returns an error when the encoded value is malformed, too large, cannot be authenticated,
     /// or cannot be decompressed.
-    pub fn open(
-        &self,
-        key_digest: ClientKeyDigest,
-        value_flags: ValueFlags,
-        mut encoded: Vec<u8>,
-    ) -> Result<Vec<u8>> {
+    pub fn open(&self, key: Key, encoded: EncodedValue) -> Result<Vec<u8>> {
+        let value_flags = encoded.protocol_flags();
+        let mut encoded = encoded.bytes;
         if encoded.len() > MAX_VALUE_BYTES {
             return Err(Error::EncodedValueTooLarge {
                 size: encoded.len(),
@@ -268,7 +327,7 @@ impl ValueCodec {
                 .expect("validated authentication tag length"),
         );
         let nonce = XNonce::try_from(&nonce[..]).expect("nonce has the required fixed length");
-        let aad = make_aad(key_digest, value_flags);
+        let aad = make_aad(key, value_flags);
         cipher
             .decrypt_inout_detached(
                 &nonce,
@@ -293,31 +352,59 @@ impl ValueCodec {
 /// Client-side value transformation errors.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The configured Zstandard level is unsupported.
     #[error("Zstandard level {0} is outside the supported range 1..=22")]
     InvalidCompressionLevel(i32),
+    /// Plaintext exceeded the protocol limit before transformation.
     #[error("plaintext is too large: {size} bytes exceeds {maximum}")]
-    PlaintextTooLarge { size: usize, maximum: usize },
+    PlaintextTooLarge {
+        /// Actual plaintext size.
+        size: usize,
+        /// Maximum accepted plaintext size.
+        maximum: usize,
+    },
+    /// Encoded bytes exceeded the protocol limit.
     #[error("encoded value is too large: {size} bytes exceeds {maximum}")]
-    EncodedValueTooLarge { size: usize, maximum: usize },
+    EncodedValueTooLarge {
+        /// Actual encoded size.
+        size: usize,
+        /// Maximum accepted encoded size.
+        maximum: usize,
+    },
+    /// The operating system could not provide nonce entropy.
     #[error("operating-system entropy failed: {0}")]
     Entropy(String),
+    /// XChaCha20-Poly1305 encryption failed.
     #[error("value encryption failed")]
     Encryption,
+    /// Ciphertext, flags, or associated key authentication failed.
     #[error("value authentication failed")]
     Authentication,
+    /// Encrypted input was provided to a codec without a key.
     #[error("encrypted value requires an encryption key")]
     EncryptionKeyRequired,
+    /// Plain input was provided to a codec that requires encryption.
     #[error("client policy requires encrypted values")]
     EncryptionRequired,
+    /// The encoded value was structurally malformed.
     #[error("invalid encoded value: {0}")]
     InvalidEncodedValue(&'static str),
+    /// Zstandard compression or decompression failed.
     #[error("Zstandard {operation} failed: {message}")]
     Zstandard {
+        /// Stable codec operation name.
         operation: &'static str,
+        /// Human-readable codec detail.
         message: String,
     },
+    /// A Zstandard frame produced a different length than declared.
     #[error("decoded value length mismatch: expected {expected} bytes, got {actual}")]
-    DecompressedLength { expected: usize, actual: usize },
+    DecompressedLength {
+        /// Length declared by the frame.
+        expected: usize,
+        /// Length produced by decompression.
+        actual: usize,
+    },
 }
 
 /// Convenience result type for value transformations.
@@ -364,9 +451,9 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(key_digest: ClientKeyDigest, value_flags: ValueFlags) -> [u8; AAD_BYTES] {
+fn make_aad(key: Key, value_flags: ValueFlags) -> [u8; AAD_BYTES] {
     let mut aad = [0_u8; AAD_BYTES];
-    aad[..32].copy_from_slice(key_digest.as_bytes());
+    aad[..32].copy_from_slice(key.as_bytes());
     aad[32] = value_flags.authentication_byte();
     aad
 }

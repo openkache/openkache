@@ -90,24 +90,21 @@ cargo run --package openkache --bin breadcrumb --release
 ### Use the SDK (Rust)
 
 ```rust
-use openkache_client::value::{Compression, ValueCodec, ZstandardOptions};
-use openkache_client::{Client, ClientOptions};
+use openkache_client::value::{Compression, ZstandardOptions};
+use openkache_client::{Certificate, Client, DataProtectionKey, Endpoint};
 
 let certificate = std::fs::read(
     "target/openkache-local/certificate.local.der",
 )?;
-let client = Client::connect_with_options(
-    "127.0.0.1:4433".parse()?,
-    "localhost",
-    &certificate,
-    ClientOptions {
-        value_codec: ValueCodec::encrypted(
-            encryption_key,
-            Compression::Zstandard(ZstandardOptions::default()),
-        )?,
-    },
-)
-.await?;
+let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
+let certificate = Certificate::from_der(certificate)?;
+let protection_key = DataProtectionKey::from_base64(configured_base64_secret)?;
+let client = Client::builder(endpoint)
+    .trust_certificate(certificate)
+    .data_protection_key(protection_key)
+    .compression(Compression::Zstandard(ZstandardOptions::default()))
+    .connect()
+    .await?;
 client.set(b"mykey", b"myvalue").await?;
 let value = client.get(b"mykey").await?;
 ```

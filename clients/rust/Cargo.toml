@@ -15,16 +15,21 @@ quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 
 [dependencies]
+base64 = "*"
 chacha20poly1305 = { version = "*", features = ["zeroize"] }
 compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
 compio-quic = { version = "*", features = ["ring"], optional = true }
 flume = "*"
 futures-util = "*"
 getrandom = "*"
+hkdf = "*"
+hmac = "*"
 openkache-protocol = { path = "../../protocol" }
 quinn = { version = "*", default-features = false, features = ["ring", "runtime-tokio", "rustls-ring"], optional = true }
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "*"
+sha2 = "*"
 thiserror = "*"
-tokio = { version = "*", features = ["io-util", "rt", "time"], optional = true }
-zeroize = "*"
+tokio = { version = "*", features = ["io-util", "net", "rt", "time"], optional = true }
+zeroize = { version = "*", features = ["derive"] }
 zstd-pure-rs = "*"

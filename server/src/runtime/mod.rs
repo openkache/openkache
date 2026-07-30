@@ -16,7 +16,7 @@ use aes::{
 };
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
-use openkache_protocol::{ClientKeyDigest, SetOptions};
+use openkache_protocol::{Key, SetOptions};
 
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
@@ -51,11 +51,8 @@ struct WorkerHandle {
 
 type CoreTask = Box<dyn FnOnce() + Send + 'static>;
 
-pub(crate) fn derive_storage_key(
-    server_cipher: &Aes256,
-    client_key_digest: ClientKeyDigest,
-) -> StorageKey {
-    let mut bytes = client_key_digest.into_bytes();
+pub(crate) fn derive_storage_key(server_cipher: &Aes256, key: Key) -> StorageKey {
+    let mut bytes = key.into_bytes();
 
     // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks exactly cover
     // the 32-byte digest buffer while preserving its alignment and exclusive borrow.
@@ -337,8 +334,8 @@ impl ThreadedKvkache {
             % self.workers.len()
     }
 
-    fn storage_key(&self, client_key_digest: ClientKeyDigest) -> StorageKey {
-        derive_storage_key(&self.server_cipher, client_key_digest)
+    fn storage_key(&self, key: Key) -> StorageKey {
+        derive_storage_key(&self.server_cipher, key)
     }
 
     fn request(
@@ -391,8 +388,8 @@ impl ThreadedKvkache {
             .map_err(|_| KvError::Worker("worker response disconnected".into()))?
     }
 
-    pub fn get(&self, client_key_digest: ClientKeyDigest) -> Result<Option<Vec<u8>>> {
-        let storage_key = self.storage_key(client_key_digest);
+    pub fn get(&self, key: Key) -> Result<Option<Vec<u8>>> {
+        let storage_key = self.storage_key(key);
         let worker = self.owner(&storage_key);
         match self.request(worker, |response| WorkerRequest::Get {
             storage_key,
@@ -406,11 +403,8 @@ impl ThreadedKvkache {
     }
 
     /// Retrieves a value without blocking the caller's async executor thread.
-    pub(crate) async fn get_async(
-        &self,
-        client_key_digest: ClientKeyDigest,
-    ) -> Result<Option<EncodedValue>> {
-        let storage_key = self.storage_key(client_key_digest);
+    pub(crate) async fn get_async(&self, key: Key) -> Result<Option<EncodedValue>> {
+        let storage_key = self.storage_key(key);
         let worker = self.owner(&storage_key);
         match self
             .request_async(worker, |response| WorkerRequest::Get {
@@ -426,8 +420,8 @@ impl ThreadedKvkache {
         }
     }
 
-    pub fn set(&self, client_key_digest: ClientKeyDigest, value: Vec<u8>) -> Result<SetOutcome> {
-        let storage_key = self.storage_key(client_key_digest);
+    pub fn set(&self, key: Key, value: Vec<u8>) -> Result<SetOutcome> {
+        let storage_key = self.storage_key(key);
         let worker = self.owner(&storage_key);
         match self.request(worker, |response| WorkerRequest::Set {
             storage_key,
@@ -444,11 +438,11 @@ impl ThreadedKvkache {
 
     pub(crate) async fn set_async_with_options(
         &self,
-        client_key_digest: ClientKeyDigest,
+        key: Key,
         value: EncodedValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
-        let storage_key = self.storage_key(client_key_digest);
+        let storage_key = self.storage_key(key);
         let worker = self.owner(&storage_key);
         match self
             .request_async(worker, |response| WorkerRequest::Set {
@@ -466,8 +460,8 @@ impl ThreadedKvkache {
         }
     }
 
-    pub fn delete(&self, client_key_digest: ClientKeyDigest) -> Result<bool> {
-        let storage_key = self.storage_key(client_key_digest);
+    pub fn delete(&self, key: Key) -> Result<bool> {
+        let storage_key = self.storage_key(key);
         let worker = self.owner(&storage_key);
         match self.request(worker, |response| WorkerRequest::Delete {
             storage_key,
@@ -481,8 +475,8 @@ impl ThreadedKvkache {
     }
 
     /// Deletes a value without blocking the caller's async executor thread.
-    pub(crate) async fn delete_async(&self, client_key_digest: ClientKeyDigest) -> Result<bool> {
-        let storage_key = self.storage_key(client_key_digest);
+    pub(crate) async fn delete_async(&self, key: Key) -> Result<bool> {
+        let storage_key = self.storage_key(key);
         let worker = self.owner(&storage_key);
         match self
             .request_async(worker, |response| WorkerRequest::Delete {
@@ -620,7 +614,7 @@ impl ThreadedKvkache {
             if pending.len() == max_outstanding {
                 self.finish_benchmark_request(pending.pop_front().unwrap(), &mut stats)?;
             }
-            let storage_key = self.storage_key(operation.client_key_digest());
+            let storage_key = self.storage_key(operation.key());
             let worker = self.owner(&storage_key);
             let (response_tx, response_rx) = channel::bounded(1);
             let (request, kind) = match operation {

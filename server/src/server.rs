@@ -1010,7 +1010,7 @@ async fn execute_request(
 ) -> Response {
     let Request {
         opcode,
-        client_key_digest,
+        key,
         value_flags,
         set_options,
         value,
@@ -1018,7 +1018,7 @@ async fn execute_request(
     let result = match opcode {
         Opcode::Ping => return response_bytes(Status::Ok, b"PONG"),
         Opcode::Get => cache
-            .get_async(client_key_digest.expect("GET requests have a validated key digest"))
+            .get_async(key.expect("GET requests have a validated key digest"))
             .await
             .map(|value| match value {
                 Some(value) => response_with_value_flags(Status::Ok, value.flags, value.bytes),
@@ -1026,7 +1026,7 @@ async fn execute_request(
             }),
         Opcode::Set => cache
             .set_async_with_options(
-                client_key_digest.expect("SET requests have a validated key digest"),
+                key.expect("SET requests have a validated key digest"),
                 crate::types::EncodedValue::new(value, value_flags),
                 set_options,
             )
@@ -1037,7 +1037,7 @@ async fn execute_request(
                 SetOutcome::NotStored => response(Status::NotStored, Vec::new()),
             }),
         Opcode::Delete => cache
-            .delete_async(client_key_digest.expect("DELETE requests have a validated key digest"))
+            .delete_async(key.expect("DELETE requests have a validated key digest"))
             .await
             .map(|deleted| {
                 response(

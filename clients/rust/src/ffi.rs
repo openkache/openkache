@@ -10,10 +10,10 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::value::{Compression, ENCRYPTION_KEY_BYTES, ValueCodec, ZstandardOptions};
+use crate::value::{Compression, ZstandardOptions};
 use crate::{
-    Client, ClientOptions, ClientTimeouts, QuicBackend, QuicOptions, SetCondition, SetOptions,
-    SetOutcome,
+    Certificate, ClientTimeouts, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, DeleteOutcome,
+    Endpoint, GetOutcome, LocalClient, SetCondition, SetOptions, SetOutcome,
 };
 
 const RESULT_ERROR: u32 = 0;
@@ -70,7 +70,8 @@ struct WorkerOptions {
     address: SocketAddr,
     server_name: String,
     certificate: Vec<u8>,
-    value_codec: ValueCodec,
+    data_protection_key: Option<DataProtectionKey>,
+    compression: Compression,
     timeouts: ClientTimeouts,
 }
 
@@ -105,7 +106,8 @@ impl FfiClient {
         address: SocketAddr,
         server_name: String,
         certificate: Vec<u8>,
-        value_codec: ValueCodec,
+        data_protection_key: Option<DataProtectionKey>,
+        compression: Compression,
         timeouts: ClientTimeouts,
     ) -> std::result::Result<Self, String> {
         let (commands, receiver) = flume::bounded(COMMAND_QUEUE_CAPACITY);
@@ -116,7 +118,8 @@ impl FfiClient {
             address,
             server_name,
             certificate,
-            value_codec,
+            data_protection_key,
+            compression,
             timeouts,
         };
         let worker = thread::Builder::new()
@@ -198,7 +201,8 @@ fn run_worker(
         address,
         server_name,
         certificate,
-        value_codec,
+        data_protection_key,
+        compression,
         timeouts,
     } = options;
     let runtime = match compio::runtime::Runtime::new() {
@@ -214,20 +218,28 @@ fn run_worker(
         ));
         return;
     }
-    let client = match runtime.block_on(Client::connect_with_options(
-        address,
-        &server_name,
-        &certificate,
-        ClientOptions {
-            value_codec,
-            identity: None,
-            quic: QuicOptions {
-                backend: Some(QuicBackend::Compio),
-            },
-            timeouts,
-            ..ClientOptions::default()
-        },
-    )) {
+    let endpoint = match Endpoint::from_socket_addr(address, server_name) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+    let certificate = match Certificate::from_der(certificate) {
+        Ok(certificate) => certificate,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
+    let mut builder = LocalClient::builder(endpoint)
+        .trust_certificate(certificate)
+        .compression(compression)
+        .timeouts(timeouts);
+    if let Some(key) = data_protection_key {
+        builder = builder.data_protection_key(key);
+    }
+    let client = match runtime.block_on(builder.connect()) {
         Ok(client) => client,
         Err(error) => {
             let _ = ready.send(Err(error.to_string()));
@@ -259,7 +271,7 @@ fn run_worker(
 }
 
 async fn execute(
-    client: &Client,
+    client: &LocalClient,
     operation: u32,
     key: Vec<u8>,
     value: Vec<u8>,
@@ -269,13 +281,14 @@ async fn execute(
         OPERATION_PING => client
             .ping()
             .await
-            .map(|()| FfiResult::success(RESULT_OK, Vec::new())),
+            .map(|_| FfiResult::success(RESULT_OK, Vec::new())),
         OPERATION_GET => client.get(&key).await.map(|value| match value {
-            Some(value) => FfiResult::success(RESULT_VALUE, value),
-            None => FfiResult::success(RESULT_NOT_FOUND, Vec::new()),
+            GetOutcome::Found(value) => FfiResult::success(RESULT_VALUE, value),
+            GetOutcome::NotFound => FfiResult::success(RESULT_NOT_FOUND, Vec::new()),
         }),
         OPERATION_SET => client
-            .set_owned_with_options(&key, value, set_options)
+            .set(&key, value)
+            .options(set_options)
             .await
             .map(|outcome| match outcome {
                 SetOutcome::Created => FfiResult::success(RESULT_CREATED, Vec::new()),
@@ -284,10 +297,9 @@ async fn execute(
             }),
         OPERATION_DELETE => client.delete(&key).await.map(|deleted| {
             FfiResult::success(
-                if deleted {
-                    RESULT_DELETED
-                } else {
-                    RESULT_NOT_DELETED
+                match deleted {
+                    DeleteOutcome::Deleted => RESULT_DELETED,
+                    DeleteOutcome::NotFound => RESULT_NOT_DELETED,
                 },
                 Vec::new(),
             )
@@ -308,7 +320,7 @@ async fn execute(
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    3
+    4
 }
 
 /// Connects a native client and returns an opaque result.
@@ -316,7 +328,7 @@ pub extern "C" fn openkache_client_abi_version() -> u32 {
 /// # Safety
 ///
 /// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call. `encryption_key` must contain either zero bytes or exactly 32 bytes.
+/// call. `data_protection_key` must contain either zero bytes or exactly 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect(
     address: *const u8,
@@ -325,8 +337,8 @@ pub unsafe extern "C" fn openkache_client_connect(
     server_name_length: usize,
     certificate: *const u8,
     certificate_length: usize,
-    encryption_key: *const u8,
-    encryption_key_length: usize,
+    data_protection_key: *const u8,
+    data_protection_key_length: usize,
     compression_enabled: u8,
     compression_level: i32,
     minimum_input_size: usize,
@@ -344,7 +356,11 @@ pub unsafe extern "C" fn openkache_client_connect(
         if certificate.is_empty() {
             return Err("certificate must not be empty".to_string());
         }
-        let encryption_key = copy_bytes(encryption_key, encryption_key_length, "encryption key")?;
+        let data_protection_key = copy_bytes(
+            data_protection_key,
+            data_protection_key_length,
+            "data protection key",
+        )?;
         let compression = if compression_enabled == 0 {
             Compression::Disabled
         } else {
@@ -354,21 +370,19 @@ pub unsafe extern "C" fn openkache_client_connect(
                 minimum_savings,
             })
         };
-        let value_codec = match encryption_key.len() {
-            0 => ValueCodec::compressed(compression),
-            ENCRYPTION_KEY_BYTES => ValueCodec::encrypted(
-                encryption_key
+        let data_protection_key = match data_protection_key.len() {
+            0 => None,
+            DATA_PROTECTION_KEY_BYTES => Some(DataProtectionKey::from_bytes(
+                data_protection_key
                     .try_into()
-                    .expect("validated encryption key length"),
-                compression,
-            ),
+                    .expect("validated data protection key length"),
+            )),
             actual => {
                 return Err(format!(
-                    "encryption key must contain {ENCRYPTION_KEY_BYTES} bytes, got {actual}"
+                    "data protection key must contain {DATA_PROTECTION_KEY_BYTES} bytes, got {actual}"
                 ));
             }
-        }
-        .map_err(|error| error.to_string())?;
+        };
         if connect_timeout_ms == 0 || request_timeout_ms == 0 {
             return Err("client timeouts must be greater than zero milliseconds".to_string());
         }
@@ -376,8 +390,15 @@ pub unsafe extern "C" fn openkache_client_connect(
             connect: Duration::from_millis(connect_timeout_ms),
             request: Duration::from_millis(request_timeout_ms),
         };
-        FfiClient::connect(address, server_name, certificate, value_codec, timeouts)
-            .map(FfiResult::connected)
+        FfiClient::connect(
+            address,
+            server_name,
+            certificate,
+            data_protection_key,
+            compression,
+            timeouts,
+        )
+        .map(FfiResult::connected)
     }))
 }
 
@@ -397,6 +418,7 @@ pub unsafe extern "C" fn openkache_client_execute(
     value: *const u8,
     value_length: usize,
     set_condition: u32,
+    ttl_enabled: u8,
     ttl_ms: u64,
 ) -> *mut FfiResult {
     boxed_result(catch_result(|| {
@@ -413,7 +435,17 @@ pub unsafe extern "C" fn openkache_client_execute(
             SET_CONDITION_IF_PRESENT => SetCondition::IfPresent,
             _ => return Err(format!("unsupported SET condition {set_condition}")),
         };
-        let set_options = SetOptions::new(condition, (ttl_ms != 0).then_some(ttl_ms));
+        let mut set_options = match condition {
+            SetCondition::None => SetOptions::new(),
+            SetCondition::IfAbsent => SetOptions::new().if_absent(),
+            SetCondition::IfPresent => SetOptions::new().if_present(),
+        };
+        if ttl_enabled != 0 {
+            if ttl_ms == 0 {
+                return Err("SET TTL must be greater than zero milliseconds".to_string());
+            }
+            set_options = set_options.expires_after_millis(ttl_ms);
+        }
         match operation {
             OPERATION_GET | OPERATION_SET | OPERATION_DELETE if key.is_empty() => {
                 Err("key must not be empty".to_string())
@@ -430,8 +462,8 @@ pub unsafe extern "C" fn openkache_client_execute(
             }
             operation
                 if operation != OPERATION_SET
-                    && (set_options.condition != SetCondition::None
-                        || set_options.ttl_ms.is_some()) =>
+                    && (set_options.condition() != SetCondition::None
+                        || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_string())
             }

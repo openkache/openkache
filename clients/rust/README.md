@@ -1,132 +1,182 @@
-# OpenKache Rust Client
+# OpenKache Rust client
 
-`openkache-client` is the production QUIC client shared by native Rust callers
-and the TypeScript SDK. It owns the transport, binary framing, transparent
-Zstandard compression, and XChaCha20-Poly1305 value encryption.
+`openkache-client` provides a high-level Rust API and an exact protocol API over one reusable
+QUIC connection.
 
-## Purpose
+- `Client` accepts application keys and plaintext values. It derives 32-byte wire keys and applies
+  optional key hiding, value encryption, and compression.
+- `RawClient` accepts an exact 32-byte `Key` and an `EncodedValue`. It does not hash keys or
+  transform values.
+- `LocalClient` and `LocalRawClient` provide the same layers for a Compio runtime. The primary
+  `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
 
-Keeping value transformation and protocol logic in one crate prevents
-language-specific SDKs from drifting. Secure values are compressed when
-beneficial, encrypted in place, and authenticated against their cache-key
-digest before transmission. The server stores these bytes without parsing or
-decompressing them.
+## Connect
 
-## Commands
-
-From `clients/rust`:
-
-```bash
-cargo build
-cargo check
-cargo fmt --check
-```
-
-## Usage
+The shortest connection path resolves the hostname, derives its TLS server name, and loads the
+operating system trust store:
 
 ```rust
-use openkache_client::value::{Compression, ValueCodec, ZstandardOptions};
-use openkache_client::{Client, ClientOptions};
+use openkache_client::Client;
 
-let client = Client::connect_with_options(
-    "127.0.0.1:4433".parse()?,
-    "localhost",
-    &certificate_der,
-    ClientOptions {
-        value_codec: ValueCodec::encrypted(
-            encryption_key,
-            Compression::Zstandard(ZstandardOptions::default()),
-        )?,
-        ..ClientOptions::default()
-    },
-)
-.await?;
-
-client.set(b"greeting", b"hello").await?;
-let value = client.get(b"greeting").await?;
+let client = Client::connect("cache.example.com:4433").await?;
 ```
 
-`Client::connect` remains available for unwrapped plaintext values. Prefer
-`connect_with_options` with an application-managed 32-byte encryption key when
-the server must not observe value plaintext.
-
-Production servers also require `ClientOptions.identity` containing a
-`ClientIdentity` certificate chain and private key. Every CA-authenticated
-identity can use data operations, while `STATS` and `SYNC` additionally require
-the exact leaf certificate to appear in the server administrator allowlist.
-
-One client owns one QUIC connection. Operations reuse a lazily grown pool of
-bidirectional stream lanes, with one request in flight per lane and at most 256
-lanes per connection.
-
-The transport-independent `value_envelope` module is the reference framing
-implementation for cross-language object values:
+Explicitly trust a development or self-signed certificate with the builder. The stable client API
+owns its certificate types and does not expose rustls:
 
 ```rust
-use openkache_client::value_envelope;
+use openkache_client::{Certificate, Client, Endpoint};
 
-let stored = value_envelope::encode(
-    "protobuf",
-    "acme.Profile",
-    &encoded_message,
+let endpoint = Endpoint::from_socket_addr("127.0.0.1:4433".parse()?, "localhost")?;
+let certificate = Certificate::from_der(certificate_der)?;
+let client = Client::builder(endpoint)
+    .trust_certificate(certificate)
+    .connect()
+    .await?;
+```
+
+`server_name` is needed only when a pre-resolved socket address cannot supply the certificate name.
+`Endpoint::new("cache.example.com", 4433)` and the one-string connection path derive it
+automatically.
+
+Production mutual TLS uses client-owned types:
+
+```rust
+use openkache_client::{Certificate, ClientIdentity, PrivateKey};
+
+let identity = ClientIdentity::new(
+    vec![Certificate::from_pem(&client_certificate_pem)?],
+    PrivateKey::from_pem(&client_private_key_pem)?,
 )?;
-let decoded = value_envelope::decode(&stored)?;
-assert_eq!(decoded.encoding, "protobuf");
-assert_eq!(decoded.type_name, "acme.Profile");
+
+let client = Client::builder(endpoint)
+    .trust_certificate(server_ca)
+    .client_identity(identity)
+    .connect()
+    .await?;
 ```
 
-The server treats these bytes as opaque. Language clients remain responsible
-for converting regular language objects with JSON or a registered generated
-codec; the envelope carries codec and type identity so `get` and `set` do not
-need positional schema arguments.
+## Protect keys and values
 
-The default `quic-quinn` feature uses Quinn on Tokio. Call client futures from
-an active Tokio runtime. Builds may instead enable `quic-compio`; those futures
-require an active Compio runtime. A single-backend build selects that backend
-automatically. When both backends are compiled, the client selects the active
-Compio or Tokio runtime, or callers can set `QuicOptions.backend` explicitly.
-Missing runtime support is returned as `Error::Runtime`.
+`DataProtectionKey` is the application-managed 32-byte master secret for both key hiding and value
+encryption. Generate 32 random bytes and store their Base64 representation. Do not hash, truncate,
+or pad an arbitrary UTF-8 string into a key.
 
-The TypeScript package links this crate through an isolated Node-API adapter
-used by Node.js, Bun, and Deno. Keeping that adapter outside this crate
-preserves the core's native Rust, C ABI, and future WebAssembly portability.
+```rust
+use openkache_client::{Client, DataProtectionKey};
+use openkache_client::value::{Compression, ZstandardOptions};
 
-Connection setup has a 5-second deadline and complete request exchanges have a
-2-second deadline by default. Configure both with `ClientTimeouts`. `PING`,
-`GET`, and `STATS` retry once after reconnectable transport failures by
-default. `SET`, `DELETE`, and `SYNC` are never retried automatically because
-the server may already have applied them. Configure safe-operation attempts
-with `RetryPolicy`.
-
-## Configuration
-
-`ZstandardOptions` defaults to level 1, skips values below 1 KiB, and requires
-at least 64 bytes of savings. The codec uses a fresh 24-byte nonce for every
-encrypted value. Clients that share cached values must use the same encryption
-key.
-
-The stored representation has no magic, version, fixed original-length field,
-or padding:
-
-```text
-encrypted: nonce[24] | ciphertext[N] | authentication_tag[16]
+let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let client = Client::builder(endpoint)
+    .data_protection_key(protection_key)
+    .compression(Compression::Zstandard(ZstandardOptions::default()))
+    .connect()
+    .await?;
 ```
 
-The existing request and response length fields carry `compressed` and
-`encrypted` in their two unused high bits. The server preserves those bits in
-unused bits of its existing stored-value tag and never adds them to the value
-bytes. Encryption therefore adds exactly 40 bytes. Compression-only values use
-the Zstandard frame directly when compression is beneficial and otherwise
-remain exact plaintext bytes.
+The client derives independent HKDF-SHA-256 subkeys. Application keys become deterministic
+HMAC-SHA-256 wire keys, while values use XChaCha20-Poly1305 with a fresh nonce and the wire key as
+authenticated data. Without `data_protection_key`, the high-level client uses SHA-256 wire keys and
+stores plaintext or compression-only values. A human passphrase API using Argon2id and an explicit
+salt is deferred.
 
-The flags are authenticated with the cache-key digest whenever encryption is
-enabled. Clients can distinguish all four plain, compressed, encrypted, and
-compressed-encrypted representations without inspecting value contents.
+Every binary-protocol key is exactly 32 bytes:
 
-Encoded values are limited to the protocol's 64 MiB wire ceiling. Servers may
-configure a smaller operational item limit; the default is 16 MiB.
+```rust
+use openkache_client::Key;
 
-Owned buffers are reused across value transformation and protocol framing when
-possible. Uncompressed decryptions compact in place. Compressed reads allocate
-one output buffer from the authenticated Zstandard frame content size after
-decryption.
+let derived = Key::derive(b"arbitrary application key");
+let exact = Key::from_bytes([0x42; 32]);
+```
+
+`RawClient` sends `exact` without hashing it again. This is the interoperability path for clients
+that already own a 32-byte wire key.
+
+## Operations
+
+```rust
+use openkache_client::{DeleteOutcome, GetOutcome, SetOutcome};
+
+let round_trip_time = client.ping().await?;
+
+assert_eq!(
+    client.set(b"greeting", b"hello").await?,
+    SetOutcome::Created,
+);
+assert_eq!(
+    client.get(b"greeting").await?,
+    GetOutcome::Found(b"hello".to_vec()),
+);
+assert_eq!(
+    client.delete(b"greeting").await?,
+    DeleteOutcome::Deleted,
+);
+```
+
+`Result<T>` represents client, transport, protocol, or server failure. Outcome enums represent
+successful domain results:
+
+```rust
+pub enum GetOutcome<T> { Found(T), NotFound }
+pub enum SetOutcome { Created, Replaced, NotStored }
+pub enum DeleteOutcome { Deleted, NotFound }
+```
+
+Set options are methods on the awaitable request rather than separate `with_options` functions:
+
+```rust
+client
+    .set(b"lease", b"value")
+    .if_absent()
+    .expires_after_millis(5_000)
+    .await?;
+```
+
+TTL is an optional positive `u64` millisecond value. Zero is invalid. It is not a `Duration`
+because the wire format has an exact millisecond unit.
+
+The raw signatures are:
+
+```rust
+async fn get(&self, key: Key) -> Result<GetOutcome<EncodedValue>>;
+async fn set(
+    &self,
+    key: Key,
+    value: EncodedValue,
+    options: SetOptions,
+) -> Result<SetOutcome>;
+async fn delete(&self, key: Key) -> Result<DeleteOutcome>;
+```
+
+`EncodedValue::from_parts` preserves exact opaque bytes and client-owned compression/encryption
+metadata without exposing protocol-crate types.
+
+## Concurrency and connection lifecycle
+
+One client owns one QUIC connection. It lazily creates up to 256 reusable bidirectional stream
+lanes by default, with one untagged request in flight per lane. A free lane is reused immediately;
+otherwise another lane is opened until `max_in_flight` is reached. Additional requests wait for a
+lane. Configure the bound with `.max_in_flight(n)`.
+
+Multiple in-flight requests are not pipelined on one busy lane. The protocol has no request IDs, so
+doing so would make cancellation and response recovery ambiguous. Applications requiring more
+parallelism than one connection should use multiple clients until a multi-connection pool is
+provided.
+
+```rust
+let state = client.connection_state();
+client.reconnect().await?;
+client.close().await?;
+```
+
+`connection_state()` is a best-effort snapshot and does not guarantee the next request will
+succeed. Response-safe operations (`PING`, `GET`, and `STATS`) may reconnect and retry according to
+`RetryPolicy`. Mutations are never replayed after a connection failure because the server may
+already have applied them; the operation returns `Error::AmbiguousOutcome`, the client becomes
+disconnected, and the next operation reconnects before sending its own request.
+
+## Deferred capabilities
+
+Telemetry hooks, batch and multi-key operations, multi-connection pooling, DNS refresh, advanced
+TLS controls, connection-state subscriptions, passphrase derivation, and codec
+registry/schema-negotiation are intentionally deferred.

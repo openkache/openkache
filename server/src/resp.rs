@@ -12,7 +12,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{ClientKeyDigest, SetOptions, ValueFlags};
+use openkache_protocol::{Key, SetOptions, ValueFlags};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -397,7 +397,12 @@ async fn execute_command(
     match command.first() {
         Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
-            [_, key] => match cache.get_async(ClientKeyDigest::from_user_key(key)).await {
+            [_, key] if key.len() == openkache_protocol::KEY_BYTES => match cache
+                .get_async(Key::new(
+                    (*key).try_into().expect("validated RESP key length"),
+                ))
+                .await
+            {
                 Ok(Some(value)) if value.flags == ValueFlags::NONE => {
                     bulk(response, Some(&value.bytes));
                 }
@@ -405,12 +410,13 @@ async fn execute_command(
                 Ok(None) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
+            [_, _] => error(response, "OpenKache keys must contain exactly 32 bytes"),
             _ => error(response, "wrong number of arguments for GET"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
-            [_, key, value] => match cache
+            [_, key, value] if key.len() == openkache_protocol::KEY_BYTES => match cache
                 .set_async_with_options(
-                    ClientKeyDigest::from_user_key(key),
+                    Key::new((*key).try_into().expect("validated RESP key length")),
                     EncodedValue::plain(value.to_vec()),
                     SetOptions::NONE,
                 )
@@ -420,6 +426,7 @@ async fn execute_command(
                 Ok(SetOutcome::NotStored) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
+            [_, _, _] => error(response, "OpenKache keys must contain exactly 32 bytes"),
             _ => error(response, "SET options are not supported"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"DEL") => {
@@ -428,10 +435,11 @@ async fn execute_command(
             } else {
                 let mut deleted = 0;
                 for key in &command[1..] {
-                    match cache
-                        .delete_async(ClientKeyDigest::from_user_key(key))
-                        .await
-                    {
+                    let Ok(key) = <[u8; openkache_protocol::KEY_BYTES]>::try_from(*key) else {
+                        error(response, "OpenKache keys must contain exactly 32 bytes");
+                        return false;
+                    };
+                    match cache.delete_async(Key::new(key)).await {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
                         Err(cache_error) => {

@@ -5,7 +5,7 @@
 use std::error::Error;
 
 use openkache::{AppConfig, Command, KvError, ThreadedKvkache};
-use openkache_protocol::ClientKeyDigest;
+use openkache_protocol::Key;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let (config, command) = match AppConfig::parse() {
@@ -19,18 +19,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut cache = ThreadedKvkache::start(config)?;
     let operation = (|| -> Result<(), Box<dyn Error>> {
         match command {
-            Command::Get(key) => match cache.get(ClientKeyDigest::from_user_key(&key))? {
+            Command::Get(key) => match cache.get(parse_key(&key)?)? {
                 Some(value) => println!("{}", String::from_utf8_lossy(&value)),
                 None => println!("(nil)"),
             },
-            Command::Set(key, value) => println!(
-                "{:?}",
-                cache.set(ClientKeyDigest::from_user_key(&key), value)?
-            ),
+            Command::Set(key, value) => println!("{:?}", cache.set(parse_key(&key)?, value)?),
             Command::Delete(key) => {
                 println!(
                     "{}",
-                    if cache.delete(ClientKeyDigest::from_user_key(&key))? {
+                    if cache.delete(parse_key(&key)?)? {
                         "Deleted"
                     } else {
                         "NotFound"
@@ -53,4 +50,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     operation?;
     shutdown?;
     Ok(())
+}
+
+fn parse_key(bytes: &[u8]) -> Result<Key, Box<dyn Error>> {
+    let bytes = <[u8; openkache_protocol::KEY_BYTES]>::try_from(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "OpenKache keys must contain exactly 32 bytes",
+        )
+    })?;
+    Ok(Key::new(bytes))
 }
