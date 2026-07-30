@@ -833,7 +833,7 @@ impl Kvkache {
         storage_key: StorageKey,
         value: &[u8],
     ) -> Result<SetOutcome> {
-        self.set_encoded(storage_key, StoredItemValue::plain(value.to_vec()))
+        self.set_encoded(storage_key, StoredItemValue::new(value.to_vec()))
             .await
     }
 
@@ -1099,9 +1099,7 @@ impl Kvkache {
         table_location: TableLocation,
         mut encoded: Vec<u8>,
     ) -> Result<StoredItemValue> {
-        let decoded = decode_stored_value(&encoded)?;
-        let flags = decoded.flags;
-        let blob_ref = match decoded.value {
+        let blob_ref = match decode_stored_value(&encoded)? {
             StoredValue::Inline(value) => {
                 debug_assert_eq!(
                     value.len() + STORED_VALUE_TAG_BYTES,
@@ -1132,7 +1130,7 @@ impl Kvkache {
                 value
             }
         };
-        Ok(StoredItemValue::new(bytes, flags))
+        Ok(StoredItemValue::new(bytes))
     }
 
     fn ssd_segment_age(&self, sg_index: usize) -> usize {
@@ -1263,7 +1261,7 @@ impl Kvkache {
                             continue;
                         }
                         let blob_ref = BlobRef::new(blob_used, value.bytes.len())?;
-                        let encoded = encode_blob_ref(blob_ref, value.flags);
+                        let encoded = encode_blob_ref(blob_ref);
                         let item = if record.expires_at_ms == 0 {
                             Item::live(record.storage_key, encoded)
                         } else {
@@ -1272,7 +1270,7 @@ impl Kvkache {
                         (item, Some(blob_ref))
                     }
                     Some(value) => {
-                        let encoded = encode_inline_value(&value.bytes, value.flags);
+                        let encoded = encode_inline_value(&value.bytes);
                         let item = if record.expires_at_ms == 0 {
                             Item::live(record.storage_key, encoded)
                         } else {

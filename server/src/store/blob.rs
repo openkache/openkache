@@ -17,9 +17,7 @@ pub(crate) const STORED_BLOB_REF_BYTES: usize = STORED_VALUE_TAG_BYTES + BLOB_RE
 
 const INLINE_VALUE_TAG: u8 = 0;
 const BLOB_VALUE_TAG: u8 = 1;
-const COMPRESSED_VALUE_TAG: u8 = 1 << 1;
-const ENCRYPTED_VALUE_TAG: u8 = 1 << 2;
-const KNOWN_VALUE_TAG_BITS: u8 = BLOB_VALUE_TAG | COMPRESSED_VALUE_TAG | ENCRYPTED_VALUE_TAG;
+const KNOWN_VALUE_TAG_BITS: u8 = BLOB_VALUE_TAG;
 const BLOB_WRITE_BUFFER_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,26 +56,21 @@ pub(crate) enum StoredValue<'a> {
     Blob(BlobRef),
 }
 
-pub(crate) struct DecodedStoredValue<'a> {
-    pub(crate) value: StoredValue<'a>,
-    pub(crate) flags: openkache_protocol::ValueFlags,
-}
-
-pub(crate) fn encode_inline_value(value: &[u8], flags: openkache_protocol::ValueFlags) -> Vec<u8> {
+pub(crate) fn encode_inline_value(value: &[u8]) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(STORED_VALUE_TAG_BYTES + value.len());
-    encoded.push(encode_stored_value_tag(INLINE_VALUE_TAG, flags));
+    encoded.push(INLINE_VALUE_TAG);
     encoded.extend_from_slice(value);
     encoded
 }
 
-pub(crate) fn encode_blob_ref(blob_ref: BlobRef, flags: openkache_protocol::ValueFlags) -> Vec<u8> {
+pub(crate) fn encode_blob_ref(blob_ref: BlobRef) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(STORED_BLOB_REF_BYTES);
-    encoded.push(encode_stored_value_tag(BLOB_VALUE_TAG, flags));
+    encoded.push(BLOB_VALUE_TAG);
     encoded.extend_from_slice(&blob_ref.encode());
     encoded
 }
 
-pub(crate) fn decode_stored_value(encoded: &[u8]) -> Result<DecodedStoredValue<'_>> {
+pub(crate) fn decode_stored_value(encoded: &[u8]) -> Result<StoredValue<'_>> {
     let Some((&tag, body)) = encoded.split_first() else {
         return Err(KvError::Worker(
             "Segment Item has no stored-value tag".into(),
@@ -88,10 +81,6 @@ pub(crate) fn decode_stored_value(encoded: &[u8]) -> Result<DecodedStoredValue<'
             "Segment Item has unknown stored-value tag {tag}"
         )));
     }
-    let flags = openkache_protocol::ValueFlags::new(
-        tag & COMPRESSED_VALUE_TAG != 0,
-        tag & ENCRYPTED_VALUE_TAG != 0,
-    );
     let value = match tag & BLOB_VALUE_TAG {
         INLINE_VALUE_TAG => StoredValue::Inline(body),
         BLOB_VALUE_TAG => BlobRef::decode(body)
@@ -99,25 +88,13 @@ pub(crate) fn decode_stored_value(encoded: &[u8]) -> Result<DecodedStoredValue<'
             .ok_or_else(|| KvError::Worker("Segment Item has a malformed BlobRef".into()))?,
         _ => unreachable!("the Blob tag occupies one bit"),
     };
-    Ok(DecodedStoredValue { value, flags })
+    Ok(value)
 }
 
 pub(crate) fn remove_stored_value_tag(encoded: &mut Vec<u8>) {
     debug_assert!(encoded.len() >= STORED_VALUE_TAG_BYTES);
     encoded.copy_within(STORED_VALUE_TAG_BYTES.., 0);
     encoded.truncate(encoded.len() - STORED_VALUE_TAG_BYTES);
-}
-
-fn encode_stored_value_tag(kind: u8, flags: openkache_protocol::ValueFlags) -> u8 {
-    kind | if flags.is_compressed() {
-        COMPRESSED_VALUE_TAG
-    } else {
-        0
-    } | if flags.is_encrypted() {
-        ENCRYPTED_VALUE_TAG
-    } else {
-        0
-    }
 }
 
 pub(crate) struct BlobSegment {

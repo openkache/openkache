@@ -149,7 +149,7 @@ limited to the 64 MiB wire ceiling; servers may enforce a smaller operational
 limit.
 
 Stored encrypted values contain a 24-byte nonce, ciphertext, and a 16-byte
-authentication tag. Existing request, response, and on-disk metadata fields
-carry the compression and encryption bits without adding bytes to the value.
-Encryption therefore adds exactly 40 bytes. The flags are authenticated with
-the exact item key.
+authentication tag inside a client-owned envelope. Its `OKT\x01` header and
+flags add another 5 bytes, so encryption adds exactly 45 bytes. The envelope
+header and flags are authenticated with the exact item key. The wire protocol
+and server storage treat the complete envelope as opaque value bytes.

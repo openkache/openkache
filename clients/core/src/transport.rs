@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{RESPONSE_HEADER_BYTES, Response};
+use openkache_protocol::{RESPONSE_FIXED_BYTES, Response};
 
 use crate::{Backend, Error, Operation, Result};
 
@@ -293,15 +293,24 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
             .expect("a checked-out lane must own its stream");
         let mut frame = stream
             .read_exact(
-                RESPONSE_HEADER_BYTES,
+                RESPONSE_FIXED_BYTES,
                 deadline.remaining(Operation::ResponseHeaderRead)?,
             )
             .await?;
-        let frame_len = Response::frame_len_from_header(&frame).map_err(Error::protocol)?;
+        let header = loop {
+            if let Some(header) = Response::decode_header(&frame).map_err(Error::protocol)? {
+                break header;
+            }
+            let next = stream
+                .read_exact(1, deadline.remaining(Operation::ResponseHeaderRead)?)
+                .await?;
+            frame.extend_from_slice(&next);
+        };
+        let frame_len = header.frame_len().map_err(Error::protocol)?;
         if frame_len > maximum {
             return Err(Error::ResponseTooLarge { maximum });
         }
-        let body_len = frame_len - RESPONSE_HEADER_BYTES;
+        let body_len = header.payload_len();
         if body_len > 0 {
             let body = stream
                 .read_exact(body_len, deadline.remaining(Operation::ResponseBodyRead)?)
