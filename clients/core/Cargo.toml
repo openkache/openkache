@@ -11,11 +11,13 @@ quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 
 [dependencies]
-# Cipher state must clear derived keys when each value operation completes.
+# Exact direct feature dependencies clear the AEAD key schedules and MAC state.
+aes = { version = "=0.9.1", features = ["zeroize"] }
 aes-gcm-siv = { version = "=0.12.0-rc.3", features = ["zeroize"] }
 aes-siv = { version = "=0.8.0-rc.3", features = ["zeroize"] }
 base64 = "*"
 blake3 = { version = "*", features = ["zeroize"] }
+cmac = { version = "=0.8.0", features = ["zeroize"] }
 compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
 compio-quic = { version = "*", features = ["ring"], optional = true }
 flume = "*"
@@ -23,6 +25,7 @@ futures-util = "*"
 getrandom = "*"
 http = "*"
 openkache-protocol = { path = "../../protocol" }
+polyval = { version = "=0.7.3", features = ["zeroize"] }
 quinn = { version = "*", default-features = false, features = ["ring", "runtime-tokio", "rustls-ring"], optional = true }
 rustls = { version = "*", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "*"
