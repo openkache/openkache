@@ -550,6 +550,8 @@ pub(crate) struct KvkacheIoStats {
     pub(crate) data_read: u64,
     pub(crate) blob_data_written: u64,
     pub(crate) blob_data_read: u64,
+    pub(crate) pending_gets: u64,
+    pub(crate) stable_gets: u64,
 }
 
 #[derive(Default)]
@@ -558,12 +560,24 @@ struct IoCounters {
     data_read: Cell<u64>,
     blob_data_written: Cell<u64>,
     blob_data_read: Cell<u64>,
+    pending_gets: Cell<u64>,
+    stable_gets: Cell<u64>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum SegmentFlushReason {
     Capacity,
     Sync,
+}
+
+#[derive(Default)]
+struct FlushTimings {
+    plan_ns: u64,
+    reserve_ns: u64,
+    reclaim_ns: u64,
+    blob_write_ns: u64,
+    segment_commit_ns: u64,
+    publish_ns: u64,
 }
 
 struct LocatedItem {
@@ -683,6 +697,13 @@ pub(crate) struct Kvkache {
     pub(crate) segment_sync_fill_used_bytes: u64,
     pub(crate) segment_sync_fill_capacity_bytes: u64,
     pub(crate) segment_reuses: u64,
+    pub(crate) flush_total_ns: u64,
+    pub(crate) flush_plan_ns: u64,
+    pub(crate) flush_reserve_ns: u64,
+    pub(crate) flush_reclaim_ns: u64,
+    pub(crate) flush_blob_write_ns: u64,
+    pub(crate) flush_segment_commit_ns: u64,
+    pub(crate) flush_publish_ns: u64,
     resource_guard: Arc<ResourceGuard>,
     next_memory_capacity_check: Instant,
     io: IoCounters,
@@ -809,6 +830,13 @@ impl Kvkache {
             segment_sync_fill_used_bytes: 0,
             segment_sync_fill_capacity_bytes: 0,
             segment_reuses: 0,
+            flush_total_ns: 0,
+            flush_plan_ns: 0,
+            flush_reserve_ns: 0,
+            flush_reclaim_ns: 0,
+            flush_blob_write_ns: 0,
+            flush_segment_commit_ns: 0,
+            flush_publish_ns: 0,
             resource_guard,
             next_memory_capacity_check: Instant::now(),
             io: IoCounters::default(),
@@ -879,11 +907,17 @@ impl Kvkache {
         storage_key: &StorageKey,
     ) -> Result<Option<EncodedValue>> {
         if let Some(pending) = self.pending.get(storage_key) {
+            self.io
+                .pending_gets
+                .set(self.io.pending_gets.get().saturating_add(1));
             return Ok(pending
                 .is_live_at(unix_time_ms())
                 .then(|| pending.value.clone())
                 .flatten());
         }
+        self.io
+            .stable_gets
+            .set(self.io.stable_gets.get().saturating_add(1));
         let Some(located) = self.locate_stable_record(storage_key).await? else {
             return Ok(None);
         };
@@ -1263,6 +1297,9 @@ impl Kvkache {
         if self.pending.is_empty() {
             return Ok(());
         }
+        let flush_started = Instant::now();
+        let mut timings = FlushTimings::default();
+        let plan_started = Instant::now();
         let now_ms = unix_time_ms();
         self.pending_sg_bytes = 0;
         self.pending_blob_bytes = 0;
@@ -1294,10 +1331,12 @@ impl Kvkache {
                 .cmp(&left.value.as_ref().map_or(0, |value| value.bytes.len()))
                 .then_with(|| left.storage_key.cmp(&right.storage_key))
         });
+        timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
 
         let mut blob_buffer = None;
         let mut control_buffer = None;
         while !remaining.is_empty() {
+            let plan_started = Instant::now();
             let next_generation = match next_sg_generation(self.next_generation) {
                 Ok(next_generation) => next_generation,
                 Err(error) => {
@@ -1368,6 +1407,7 @@ impl Kvkache {
             let active = selected.segment;
             let mut planned = selected.records;
             let blob_used = selected.blob_used;
+            timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
             if planned.is_empty() {
                 self.mutable_segment_buffers.push(active.bytes);
                 self.restore_flush_records(deferred);
@@ -1375,12 +1415,18 @@ impl Kvkache {
                     "pending Item cannot fit in an empty Segment generation".into(),
                 ));
             }
-            if let Err(error) = self.reserve_segment_generation(sg_index, blob_used).await {
+            let reserve_started = Instant::now();
+            let reserve_result = self.reserve_segment_generation(sg_index, blob_used).await;
+            timings.reserve_ns = timings
+                .reserve_ns
+                .saturating_add(elapsed_ns(reserve_started));
+            if let Err(error) = reserve_result {
                 self.mutable_segment_buffers.push(active.bytes);
                 self.restore_flush_records(planned.into_iter().chain(deferred));
                 return Err(error);
             }
             if self.occupied_segments[sg_index] {
+                let reclaim_started = Instant::now();
                 let Some(reclaimed_commit) = self.segment_commits[sg_index] else {
                     self.mutable_segment_buffers.push(active.bytes);
                     self.restore_flush_records(planned.into_iter().chain(deferred));
@@ -1427,6 +1473,9 @@ impl Kvkache {
                         record.previous_live = false;
                     }
                 }
+                timings.reclaim_ns = timings
+                    .reclaim_ns
+                    .saturating_add(elapsed_ns(reclaim_started));
             }
 
             let blob_values = planned
@@ -1440,6 +1489,7 @@ impl Kvkache {
                         .bytes
                         .as_slice()
                 });
+            let blob_write_started = Instant::now();
             let blob_physical_bytes = match self
                 .blob_segment
                 .write_segment(sg_index, blob_values, blob_buffer.take())
@@ -1455,6 +1505,9 @@ impl Kvkache {
                     return Err(storage_operation_error(&self.resource_guard, error));
                 }
             };
+            timings.blob_write_ns = timings
+                .blob_write_ns
+                .saturating_add(elapsed_ns(blob_write_started));
             self.io
                 .data_written
                 .set(self.io.data_written.get() + blob_physical_bytes);
@@ -1462,6 +1515,7 @@ impl Kvkache {
                 .blob_data_written
                 .set(self.io.blob_data_written.get() + blob_physical_bytes);
 
+            let segment_commit_started = Instant::now();
             let (returned_segment_buffer, returned_control_buffer) = match self
                 .write_segment(
                     active,
@@ -1478,9 +1532,13 @@ impl Kvkache {
                     return Err(storage_operation_error(&self.resource_guard, error));
                 }
             };
+            timings.segment_commit_ns = timings
+                .segment_commit_ns
+                .saturating_add(elapsed_ns(segment_commit_started));
             self.mutable_segment_buffers.push(returned_segment_buffer);
             control_buffer = Some(returned_control_buffer);
 
+            let publish_started = Instant::now();
             let mut published = 0usize;
             let mut publish_error = None;
             for record in &planned {
@@ -1506,15 +1564,20 @@ impl Kvkache {
                 }
                 published += 1;
             }
+            timings.publish_ns = timings
+                .publish_ns
+                .saturating_add(elapsed_ns(publish_started));
             if let Some(error) = publish_error {
                 self.restore_flush_records(planned.into_iter().skip(published).chain(deferred));
                 return Err(error);
             }
             if reason == SegmentFlushReason::Capacity && self.config.ram_segment_count > 1 {
                 self.restore_flush_records(deferred);
+                self.record_flush_timings(flush_started, &timings);
                 return Ok(());
             }
             remaining = deferred;
+            let plan_started = Instant::now();
             remaining.sort_unstable_by(|left, right| {
                 right
                     .value
@@ -1523,8 +1586,26 @@ impl Kvkache {
                     .cmp(&left.value.as_ref().map_or(0, |value| value.bytes.len()))
                     .then_with(|| left.storage_key.cmp(&right.storage_key))
             });
+            timings.plan_ns = timings.plan_ns.saturating_add(elapsed_ns(plan_started));
         }
+        self.record_flush_timings(flush_started, &timings);
         Ok(())
+    }
+
+    fn record_flush_timings(&mut self, flush_started: Instant, timings: &FlushTimings) {
+        self.flush_total_ns = self
+            .flush_total_ns
+            .saturating_add(elapsed_ns(flush_started));
+        self.flush_plan_ns = self.flush_plan_ns.saturating_add(timings.plan_ns);
+        self.flush_reserve_ns = self.flush_reserve_ns.saturating_add(timings.reserve_ns);
+        self.flush_reclaim_ns = self.flush_reclaim_ns.saturating_add(timings.reclaim_ns);
+        self.flush_blob_write_ns = self
+            .flush_blob_write_ns
+            .saturating_add(timings.blob_write_ns);
+        self.flush_segment_commit_ns = self
+            .flush_segment_commit_ns
+            .saturating_add(timings.segment_commit_ns);
+        self.flush_publish_ns = self.flush_publish_ns.saturating_add(timings.publish_ns);
     }
 
     async fn reserve_segment_generation(
@@ -1699,12 +1780,14 @@ impl Kvkache {
         let segment_sync_fill_percent = self.segment_sync_fill_used_bytes as f64 * 100.0
             / self.segment_sync_fill_capacity_bytes.max(1) as f64;
         format!(
-            "keys={} stable_keys={} pending_items={} pending_value_bytes={} ram_segments={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
+            "keys={} stable_keys={} pending_items={} pending_value_bytes={} ram_segments={} pending_gets={} stable_gets={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} flush_total_ns={} flush_plan_ns={} flush_reserve_ns={} flush_reclaim_ns={} flush_blob_write_ns={} flush_segment_commit_ns={} flush_publish_ns={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
             self.logical_key_count(),
             self.stable_live_keys,
             self.pending.len(),
             self.pending_value_bytes(),
             self.config.ram_segment_count,
+            io.pending_gets,
+            io.stable_gets,
             self.table.load_factor() * 100.0,
             self.table.memory_bytes() as f64 / (1024.0 * 1024.0),
             self.table.memory_bytes() as f64 / self.config.table_capacity as f64,
@@ -1727,6 +1810,13 @@ impl Kvkache {
             self.segment_capacity_flushes,
             self.segment_sync_flushes,
             self.segment_reuses,
+            self.flush_total_ns,
+            self.flush_plan_ns,
+            self.flush_reserve_ns,
+            self.flush_reclaim_ns,
+            self.flush_blob_write_ns,
+            self.flush_segment_commit_ns,
+            self.flush_publish_ns,
             self.resource_guard.memory_stop_writes(),
             self.resource_guard.memory_stop_available_bytes,
             self.resource_guard.memory_resume_available_bytes,
@@ -1756,6 +1846,8 @@ impl Kvkache {
         self.io.data_read.set(0);
         self.io.blob_data_written.set(0);
         self.io.blob_data_read.set(0);
+        self.io.pending_gets.set(0);
+        self.io.stable_gets.set(0);
     }
 
     pub(super) fn io_stats(&self) -> KvkacheIoStats {
@@ -1764,6 +1856,8 @@ impl Kvkache {
             data_read: self.io.data_read.get(),
             blob_data_written: self.io.blob_data_written.get(),
             blob_data_read: self.io.blob_data_read.get(),
+            pending_gets: self.io.pending_gets.get(),
+            stable_gets: self.io.stable_gets.get(),
         }
     }
 
@@ -1856,4 +1950,8 @@ fn unix_time_ms() -> u64 {
             .as_millis(),
     )
     .unwrap_or(u64::MAX)
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
