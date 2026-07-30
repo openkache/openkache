@@ -100,15 +100,10 @@ pub(super) fn print_plan(plan: &SizingPlan) {
         plan.storage_budget_bytes as f64 / 1_000_000_000_000.0,
     );
     println!(
-        "Memory: process_budget={:.2}GiB modeled_resident={:.2}GiB table={:.2}GiB table_budget={:.2}GiB network_values={:.2}GiB storage_metadata={:.2}MiB queues={:.2}MiB read_buffers={:.2}MiB",
+        "Memory: process_budget={:.2}GiB table={:.2}GiB table_budget={:.2}GiB",
         plan.process_memory_budget_bytes as f64 / GIB as f64,
-        plan.modeled_resident_bytes as f64 / GIB as f64,
         plan.table_memory_bytes as f64 / GIB as f64,
         plan.table_memory_budget_bytes as f64 / GIB as f64,
-        plan.network_value_budget_bytes as f64 / GIB as f64,
-        plan.storage_metadata_bytes as f64 / (1024.0 * 1024.0),
-        plan.storage_request_queue_bytes as f64 / (1024.0 * 1024.0),
-        plan.storage_read_buffer_bytes as f64 / (1024.0 * 1024.0),
     );
     println!(
         "Table: sg_index_bits={} capacity_per_worker={}",

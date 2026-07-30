@@ -1,9 +1,14 @@
 //! QUIC backend boundary used by the OpenKache protocol server.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::future::Future;
 #[cfg(feature = "quic-quiche")]
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use compio::BufResult;
@@ -15,9 +20,6 @@ use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
-
-mod budget;
-pub(super) use budget::{RequestBudget, RequestBudgetPermit};
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
@@ -204,6 +206,139 @@ impl RequestFrame {
         Self {
             bytes,
             _permit: permit,
+        }
+    }
+}
+
+/// Byte-weighted memory budget shared by every connection on one network worker.
+#[derive(Clone)]
+pub(super) struct RequestBudget {
+    inner: Rc<RefCell<RequestBudgetState>>,
+}
+
+struct RequestBudgetState {
+    capacity: usize,
+    used: usize,
+    next_waiter_id: u64,
+    waiters: HashMap<u64, Waker>,
+}
+
+pub(super) struct RequestBudgetPermit {
+    inner: Rc<RefCell<RequestBudgetState>>,
+    bytes: usize,
+}
+
+struct RequestBudgetAcquire {
+    inner: Rc<RefCell<RequestBudgetState>>,
+    bytes: usize,
+    waiter_id: Option<u64>,
+}
+
+impl RequestBudget {
+    pub(super) fn new(capacity: usize) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(RequestBudgetState {
+                capacity,
+                used: 0,
+                next_waiter_id: 0,
+                waiters: HashMap::new(),
+            })),
+        }
+    }
+
+    pub(super) async fn acquire(
+        &self,
+        bytes: usize,
+        timeout: Duration,
+    ) -> Result<RequestBudgetPermit, StreamReadError> {
+        if bytes == 0 {
+            return Ok(RequestBudgetPermit {
+                inner: Rc::clone(&self.inner),
+                bytes: 0,
+            });
+        }
+        if bytes > self.inner.borrow().capacity {
+            return Err(StreamReadError::TooLarge);
+        }
+        compio::runtime::time::timeout(
+            timeout,
+            RequestBudgetAcquire {
+                inner: Rc::clone(&self.inner),
+                bytes,
+                waiter_id: None,
+            },
+        )
+        .await
+        .map_err(|_| StreamReadError::Timeout)
+    }
+}
+
+impl Future for RequestBudgetAcquire {
+    type Output = RequestBudgetPermit;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = Rc::clone(&self.inner);
+        let bytes = self.bytes;
+        let mut state = inner.borrow_mut();
+        if state.used <= state.capacity - bytes {
+            if let Some(waiter_id) = self.waiter_id.take() {
+                state.waiters.remove(&waiter_id);
+            }
+            state.used += bytes;
+            return Poll::Ready(RequestBudgetPermit {
+                inner: Rc::clone(&inner),
+                bytes,
+            });
+        }
+
+        if let Some(waiter_id) = self.waiter_id
+            && let Some(waiter) = state.waiters.get_mut(&waiter_id)
+        {
+            if !waiter.will_wake(context.waker()) {
+                waiter.clone_from(context.waker());
+            }
+            return Poll::Pending;
+        }
+
+        let waiter_id = state.next_waiter_id;
+        state.next_waiter_id = state
+            .next_waiter_id
+            .checked_add(1)
+            .expect("request budget waiter identifier overflowed");
+        state.waiters.insert(waiter_id, context.waker().clone());
+        drop(state);
+        self.waiter_id = Some(waiter_id);
+        Poll::Pending
+    }
+}
+
+impl Drop for RequestBudgetAcquire {
+    fn drop(&mut self) {
+        if let Some(waiter_id) = self.waiter_id {
+            self.inner.borrow_mut().waiters.remove(&waiter_id);
+        }
+    }
+}
+
+impl Drop for RequestBudgetPermit {
+    fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        let mut waiters = {
+            let mut state = self.inner.borrow_mut();
+            state.used = state
+                .used
+                .checked_sub(self.bytes)
+                .expect("released request bytes must be reserved");
+            std::mem::take(&mut state.waiters)
+        };
+        for (_, waiter) in waiters.drain() {
+            waiter.wake();
+        }
+        let mut state = self.inner.borrow_mut();
+        if state.waiters.is_empty() {
+            state.waiters = waiters;
         }
     }
 }
