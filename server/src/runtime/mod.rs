@@ -288,6 +288,23 @@ impl ThreadedKvkache {
             .map_err(|_| KvError::Worker("response queue disconnected".into()))?
     }
 
+    async fn request_async_without_timeout<T: Send + Unpin + 'static>(
+        &self,
+        worker: usize,
+        build: impl FnOnce(Sender<Result<T>>) -> WorkerRequest,
+    ) -> Result<T> {
+        let (response_tx, response_rx) = channel::bounded_sync_async(1);
+        self.workers[worker]
+            .sender
+            .send_async(build(response_tx))
+            .await
+            .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
+        response_rx
+            .recv_async()
+            .await
+            .map_err(|_| KvError::Worker("response queue disconnected".into()))?
+    }
+
     pub fn get(&self, client_key_digest: ClientKeyDigest) -> Result<Option<Vec<u8>>> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
@@ -306,6 +323,20 @@ impl ThreadedKvkache {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
         self.request_async(worker, |response| WorkerRequest::Get {
+            storage_key,
+            response,
+        })
+        .await
+    }
+
+    /// Retrieves a value while the caller enforces the complete request deadline.
+    pub(crate) async fn get_async_without_timeout(
+        &self,
+        client_key_digest: ClientKeyDigest,
+    ) -> Result<Option<EncodedValue>> {
+        let storage_key = self.storage_key(client_key_digest);
+        let worker = self.owner(&storage_key);
+        self.request_async_without_timeout(worker, |response| WorkerRequest::Get {
             storage_key,
             response,
         })
@@ -340,6 +371,24 @@ impl ThreadedKvkache {
         .await
     }
 
+    /// Stores a value while the caller enforces the complete request deadline.
+    pub(crate) async fn set_async_with_options_without_timeout(
+        &self,
+        client_key_digest: ClientKeyDigest,
+        value: EncodedValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        let storage_key = self.storage_key(client_key_digest);
+        let worker = self.owner(&storage_key);
+        self.request_async_without_timeout(worker, |response| WorkerRequest::Set {
+            storage_key,
+            value,
+            options,
+            response,
+        })
+        .await
+    }
+
     pub fn delete(&self, client_key_digest: ClientKeyDigest) -> Result<bool> {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
@@ -354,6 +403,20 @@ impl ThreadedKvkache {
         let storage_key = self.storage_key(client_key_digest);
         let worker = self.owner(&storage_key);
         self.request_async(worker, |response| WorkerRequest::Delete {
+            storage_key,
+            response,
+        })
+        .await
+    }
+
+    /// Deletes a value while the caller enforces the complete request deadline.
+    pub(crate) async fn delete_async_without_timeout(
+        &self,
+        client_key_digest: ClientKeyDigest,
+    ) -> Result<bool> {
+        let storage_key = self.storage_key(client_key_digest);
+        let worker = self.owner(&storage_key);
+        self.request_async_without_timeout(worker, |response| WorkerRequest::Delete {
             storage_key,
             response,
         })

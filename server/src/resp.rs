@@ -299,15 +299,9 @@ async fn serve_resp_connection(
     loop {
         let read_start = pending.len();
         pending.reserve(READ_BUFFER_BYTES);
-        let read = compio::runtime::time::timeout(
-            request_timeout,
-            stream.read(pending.slice(read_start..read_start + READ_BUFFER_BYTES)),
-        )
-        .await;
-        let BufResult(result, input) = match read {
-            Ok(read) => read,
-            Err(_) => return Ok(()),
-        };
+        let BufResult(result, input) = stream
+            .read(pending.slice(read_start..read_start + READ_BUFFER_BYTES))
+            .await;
         let bytes_read = result?;
         pending = input.into_inner();
         if bytes_read == 0 {
@@ -330,7 +324,18 @@ async fn serve_resp_connection(
                     consumed: command_bytes,
                 } => {
                     consumed += command_bytes;
-                    close = execute_command(cache, &command, &mut responses).await;
+                    close = match compio::runtime::time::timeout(
+                        request_timeout,
+                        execute_command(cache, &command, &mut responses),
+                    )
+                    .await
+                    {
+                        Ok(close) => close,
+                        Err(_) => {
+                            error(&mut responses, "request timed out");
+                            true
+                        }
+                    };
                     if close {
                         break;
                     }
@@ -381,19 +386,24 @@ async fn execute_command(
     match command.first() {
         Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
-            [_, key] => match cache.get_async(ClientKeyDigest::from_user_key(key)).await {
-                Ok(Some(value)) if value.flags == ValueFlags::NONE => {
-                    bulk(response, Some(&value.bytes));
+            [_, key] => {
+                match cache
+                    .get_async_without_timeout(ClientKeyDigest::from_user_key(key))
+                    .await
+                {
+                    Ok(Some(value)) if value.flags == ValueFlags::NONE => {
+                        bulk(response, Some(&value.bytes));
+                    }
+                    Ok(Some(_)) => error(response, "RESP cannot decode transformed client values"),
+                    Ok(None) => bulk(response, None),
+                    Err(cache_error) => resp_cache_error(response, cache_error),
                 }
-                Ok(Some(_)) => error(response, "RESP cannot decode transformed client values"),
-                Ok(None) => bulk(response, None),
-                Err(cache_error) => resp_cache_error(response, cache_error),
-            },
+            }
             _ => error(response, "wrong number of arguments for GET"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
             [_, key, value] => match cache
-                .set_async_with_options(
+                .set_async_with_options_without_timeout(
                     ClientKeyDigest::from_user_key(key),
                     EncodedValue::plain(value.to_vec()),
                     SetOptions::NONE,
@@ -413,7 +423,7 @@ async fn execute_command(
                 let mut deleted = 0;
                 for key in &command[1..] {
                     match cache
-                        .delete_async(ClientKeyDigest::from_user_key(key))
+                        .delete_async_without_timeout(ClientKeyDigest::from_user_key(key))
                         .await
                     {
                         Ok(true) => deleted += 1,
