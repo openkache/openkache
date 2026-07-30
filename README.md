@@ -82,6 +82,8 @@ immediately, while their SSD space is reclaimed when the containing Segment
 Group is reused. `SYNC` flushes each SSD worker before acknowledging the
 request. Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
+The complete byte-level contract is the
+[wire protocol v3 specification](./protocol/SPEC.md).
 
 The default loopback endpoint accepts unauthenticated clients and grants them
 administrative commands for local development. `--insecure-development` is

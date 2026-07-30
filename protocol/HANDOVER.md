@@ -1,5 +1,8 @@
 # OpenKache Protocol Handover
 
+Normative wire requirements live in [SPEC.md](./SPEC.md). This handover records
+implementation status, architectural context, and follow-up work.
+
 ## Current status
 
 Protocol v3 defines binary frames for `PING`, `GET`, `SET`, `DELETE`, `STATS`,
@@ -37,5 +40,3 @@ inside its value bytes.
 ## Next steps
 
 1. Define production durability guarantees for `SYNC`.
-2. Add version-negotiation guidance before introducing a future protocol
-   version.

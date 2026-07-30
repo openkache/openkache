@@ -8,6 +8,9 @@ QUIC clients and servers.
 The crate keeps opcode, status, framing, and size validation in one place so
 clients and servers cannot silently drift onto incompatible formats.
 
+The normative wire contract is [SPEC.md](./SPEC.md). Implementation status and
+follow-up work are recorded in [HANDOVER.md](./HANDOVER.md).
+
 ## Commands
 
 From this directory:
@@ -21,10 +24,8 @@ cargo fmt --check
 ## Wire format
 
 Protocol v3 uses the QUIC ALPN identifier `openkache/3`. The ALPN selects the
-wire version for the connection; frames do not repeat a version byte. Each bidirectional
-stream is a reusable sequential lane carrying any number of request/response
-pairs. A lane has at most one in-flight request, so responses need no request
-identifier.
+wire version for the connection; frames do not repeat a version byte. Each
+bidirectional stream is a reusable sequential lane with one request in flight.
 
 ```text
 request  = opcode:u8 | flags:u8 | key_len:vu128 | value_len:vu128 |
@@ -32,27 +33,14 @@ request  = opcode:u8 | flags:u8 | key_len:vu128 | value_len:vu128 |
 response = status:u8 | payload_len:vu128 | payload
 ```
 
-Supported operations are `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC`.
-KV keys are exact 32-byte opaque item keys. A high-level client may derive
-them from arbitrary application keys with SHA-256 or keyed HMAC-SHA-256. The
-server rejects every other key length. `PING`, `STATS`, and `SYNC` carry no key.
-Values and response payloads are limited to 64 MiB. Servers may enforce a
-smaller operational item limit.
-For `SET`, flag bit 0 indicates an optional positive millisecond TTL, bit 1 is
-`if_absent`, and bit 2 is `if_present`. Bits 3 through 7 are reserved and must
-be zero. `if_absent` and `if_present` are mutually exclusive. Flags must be
-zero for every other opcode.
-`STATS` and `SYNC` return `Forbidden` when the authenticated client lacks
-administrator authorization.
-The TTL appears after the key and before the value so a server can validate
-all server-owned metadata before reading a large opaque value.
+Lengths and TTLs use canonical shortest unsigned `vu128`. Item keys are exact
+32-byte identifiers, values are opaque, and values and response payloads have
+a 64 MiB wire ceiling. The TTL appears after the key and before the value so a
+server can validate server-owned metadata before reading a large body.
 
-Lengths and TTLs use the unsigned [`vu128`](https://github.com/jmillikin/rust-vu128)
-format. Protocol v3 accepts only the canonical shortest encoding and only
-values representable as `u64`; overlong and wider encodings are invalid.
-Compression, application-level encryption, serialization, and other value
-metadata are not part of the wire protocol. The server stores value bytes
-without interpreting them.
+See the [wire protocol specification](./SPEC.md) for the byte-level encoding,
+operation semantics, status registry, validation rules, error recovery, and
+conformance vectors.
 
 ## Core components
 
@@ -61,6 +49,7 @@ without interpreting them.
 - Incremental request and response header decoders report when enough prefix
   bytes are available to determine the complete frame length.
 - `ProtocolError` reports malformed, unsupported, and oversized frames.
+- `SPEC.md` defines the normative protocol independent of the Rust API.
 
 ## Configuration
 
