@@ -5,6 +5,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
+const DEFAULT_RETAINED_CAPACITY: usize = 256;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CompletionDisconnected;
 
@@ -41,15 +43,15 @@ impl<T> Default for CompletionSlot<T> {
 }
 
 impl<T> CompletionSlot<T> {
-    fn activate(&self) -> u64 {
+    fn activate(&self) -> Option<u64> {
         let mut state = lock(&self.state);
         debug_assert!(!state.active);
-        state.generation = state.generation.wrapping_add(1);
+        state.generation = state.generation.checked_add(1)?;
         state.active = true;
         state.disconnected = false;
         state.value = None;
         state.waker = None;
-        state.generation
+        Some(state.generation)
     }
 
     fn complete(&self, generation: u64, value: T) -> Result<(), T> {
@@ -113,15 +115,15 @@ impl<T> CompletionSlot<T> {
 }
 
 struct CompletionSlabState<T> {
-    slots: Vec<Arc<CompletionSlot<T>>>,
-    free: Vec<usize>,
+    free: Vec<Arc<CompletionSlot<T>>>,
+    retained_capacity: usize,
 }
 
-impl<T> Default for CompletionSlabState<T> {
-    fn default() -> Self {
+impl<T> CompletionSlabState<T> {
+    fn with_retained_capacity(retained_capacity: usize) -> Self {
         Self {
-            slots: Vec::new(),
             free: Vec::new(),
+            retained_capacity,
         }
     }
 }
@@ -132,26 +134,29 @@ pub(super) struct CompletionSlab<T> {
 
 impl<T> Default for CompletionSlab<T> {
     fn default() -> Self {
-        Self {
-            state: Mutex::new(CompletionSlabState::default()),
-        }
+        Self::with_retained_capacity(DEFAULT_RETAINED_CAPACITY)
     }
 }
 
 impl<T> CompletionSlab<T> {
+    pub(super) fn with_retained_capacity(retained_capacity: usize) -> Self {
+        Self {
+            state: Mutex::new(CompletionSlabState::with_retained_capacity(
+                retained_capacity,
+            )),
+        }
+    }
+
     pub(super) fn register(&self) -> (CompletionSender<T>, CompletionReceiver<'_, T>) {
-        let (index, slot) = {
-            let mut state = lock(&self.state);
-            if let Some(index) = state.free.pop() {
-                (index, state.slots[index].clone())
-            } else {
-                let index = state.slots.len();
-                let slot = Arc::new(CompletionSlot::default());
-                state.slots.push(slot.clone());
-                (index, slot)
-            }
-        };
-        let generation = slot.activate();
+        let mut slot = lock(&self.state)
+            .free
+            .pop()
+            .unwrap_or_else(|| Arc::new(CompletionSlot::default()));
+        let generation = slot.activate().unwrap_or_else(|| {
+            slot = Arc::new(CompletionSlot::default());
+            slot.activate()
+                .expect("a new completion slot has an available generation")
+        });
         (
             CompletionSender {
                 slot: slot.clone(),
@@ -160,17 +165,19 @@ impl<T> CompletionSlab<T> {
             },
             CompletionReceiver {
                 slab: self,
-                slot,
-                index,
+                slot: Some(slot),
                 generation,
-                released: false,
             },
         )
     }
 
-    fn recycle(&self, index: usize, slot: &CompletionSlot<T>, generation: u64) {
-        if slot.deactivate(generation) {
-            lock(&self.state).free.push(index);
+    fn recycle(&self, slot: Arc<CompletionSlot<T>>, generation: u64) {
+        if !slot.deactivate(generation) {
+            return;
+        }
+        let mut state = lock(&self.state);
+        if state.free.len() < state.retained_capacity {
+            state.free.push(slot);
         }
     }
 }
@@ -199,17 +206,14 @@ impl<T> Drop for CompletionSender<T> {
 
 pub(super) struct CompletionReceiver<'a, T> {
     slab: &'a CompletionSlab<T>,
-    slot: Arc<CompletionSlot<T>>,
-    index: usize,
+    slot: Option<Arc<CompletionSlot<T>>>,
     generation: u64,
-    released: bool,
 }
 
 impl<T> CompletionReceiver<'_, T> {
     fn release(&mut self) {
-        if !self.released {
-            self.slab.recycle(self.index, &self.slot, self.generation);
-            self.released = true;
+        if let Some(slot) = self.slot.take() {
+            self.slab.recycle(slot, self.generation);
         }
     }
 }
@@ -218,7 +222,11 @@ impl<T: Unpin> Future for CompletionReceiver<'_, T> {
     type Output = Result<T, CompletionDisconnected>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let result = self.slot.poll(self.generation, cx);
+        let result = self
+            .slot
+            .as_ref()
+            .expect("completion receiver is not polled after completion")
+            .poll(self.generation, cx);
         if result.is_ready() {
             self.release();
         }

@@ -197,7 +197,9 @@ impl ThreadedKvkache {
                 })?;
             workers.push(WorkerHandle {
                 sender,
-                completions: CompletionSlab::default(),
+                // Match idle completion retention to request-queue backpressure. Slots created
+                // for callers beyond this bound are released after their request completes.
+                completions: CompletionSlab::with_retained_capacity(queue_capacity),
                 thread: Some(thread),
             });
         }

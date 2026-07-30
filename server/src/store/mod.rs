@@ -47,6 +47,7 @@ const FILE_RESERVATION_RETRY_DELAYS: [Duration; 6] = [
     Duration::from_millis(32),
 ];
 const STORAGE_RESERVE_PERCENT: u64 = 5;
+/// Retains at most 1 MiB of idle 4 KiB read buffers per storage worker.
 pub(crate) const BUCKET_READ_POOL_CAPACITY: usize = 256;
 
 #[repr(C, align(4096))]
