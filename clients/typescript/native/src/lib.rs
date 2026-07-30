@@ -7,11 +7,11 @@ use std::time::Duration;
 use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client::value::{Compression, ZstandardOptions};
-use openkache_client::{
-    Certificate, Client, ClientIdentity, ClientTimeouts, DataProtectionKey, DeleteOutcome,
-    Endpoint, GetOutcome, PrivateKey, SetCondition, SetOutcome, DATA_PROTECTION_KEY_BYTES,
-    value_envelope,
+use openkache_client_core::value::{Compression, ValueCodec, ZstandardOptions};
+use openkache_client_core::{
+    Certificate, ClientIdentity, ClientTimeouts, DATA_PROTECTION_KEY_BYTES, DataProtectionKey,
+    DeleteOutcome, Endpoint, GetOutcome, ItemKey, PrivateKey, RawClient, SetCondition, SetOptions,
+    SetOutcome, value_envelope,
 };
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 
@@ -62,7 +62,61 @@ pub struct NativeValueEnvelope {
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
-    client: RwLock<Option<Arc<Client>>>,
+    client: RwLock<Option<Arc<CoreClient>>>,
+}
+
+struct CoreClient {
+    raw: RawClient,
+    data_protection_key: DataProtectionKey,
+    codec: ValueCodec,
+}
+
+impl CoreClient {
+    fn item_key(&self, application_key: &[u8]) -> ItemKey {
+        self.data_protection_key.derive_item_key(application_key)
+    }
+
+    async fn ping(&self) -> openkache_client_core::Result<Duration> {
+        self.raw.ping().await
+    }
+
+    async fn get(
+        &self,
+        application_key: &[u8],
+    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
+        let key = self.item_key(application_key);
+        match self.raw.get(key).await? {
+            GetOutcome::Found(value) => self
+                .codec
+                .open(key, value)
+                .map(GetOutcome::Found)
+                .map_err(Into::into),
+            GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+        }
+    }
+
+    async fn set(
+        &self,
+        application_key: &[u8],
+        value: Vec<u8>,
+        options: SetOptions,
+    ) -> openkache_client_core::Result<SetOutcome> {
+        let key = self.item_key(application_key);
+        let value = self.codec.seal_owned(key, value)?;
+        self.raw.set(key, value, options).await
+    }
+
+    async fn delete(&self, application_key: &[u8]) -> openkache_client_core::Result<DeleteOutcome> {
+        self.raw.delete(self.item_key(application_key)).await
+    }
+
+    async fn stats(&self) -> openkache_client_core::Result<String> {
+        self.raw.stats().await
+    }
+
+    async fn sync(&self) -> openkache_client_core::Result<()> {
+        self.raw.sync().await
+    }
 }
 
 #[napi]
@@ -212,17 +266,17 @@ impl NativeClient {
             .map(|value| parse_u64(value, "ttl_ms", false))
             .transpose()?;
         let client = self.active_client()?;
-        let mut request = client.set(key, value);
-        request = match condition {
-            SetCondition::None => request,
-            SetCondition::IfAbsent => request.if_absent(),
-            SetCondition::IfPresent => request.if_present(),
+        let mut options = match condition {
+            SetCondition::None => SetOptions::new(),
+            SetCondition::IfAbsent => SetOptions::new().if_absent(),
+            SetCondition::IfPresent => SetOptions::new().if_present(),
             _ => return Err(invalid_argument("unsupported SET condition")),
         };
         if let Some(ttl_ms) = ttl_ms {
-            request = request.expires_after_millis(ttl_ms);
+            options = options.expires_after_millis(ttl_ms);
         }
-        request
+        client
+            .set(key, value, options)
             .await
             .map(|outcome| match outcome {
                 SetOutcome::Created => "created".to_string(),
@@ -232,7 +286,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    fn active_client(&self) -> Result<Arc<Client>> {
+    fn active_client(&self) -> Result<Arc<CoreClient>> {
         self.client
             .read()
             .map_err(|_| state_error("native client state lock is poisoned"))?
@@ -284,6 +338,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         Compression::Disabled
     };
     let data_protection_key = DataProtectionKey::from_bytes(data_protection_key);
+    let codec = ValueCodec::protected(&data_protection_key, compression).map_err(native_error)?;
     let identity = parse_identity(options.identity)?;
     let connect_timeout_ms = parse_u64(options.connect_timeout_ms, "connect_timeout_ms", false)?;
     let request_timeout_ms = parse_u64(options.request_timeout_ms, "request_timeout_ms", false)?;
@@ -293,10 +348,8 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let trusted_certificate =
         Certificate::from_der(trusted_certificates.remove(0).as_ref().to_vec())
             .map_err(native_error)?;
-    let mut builder = Client::builder(endpoint)
+    let mut builder = RawClient::builder(endpoint)
         .trust_certificate(trusted_certificate)
-        .data_protection_key(data_protection_key)
-        .compression(compression)
         .timeouts(ClientTimeouts {
             connect: Duration::from_millis(connect_timeout_ms),
             request: Duration::from_millis(request_timeout_ms),
@@ -304,7 +357,12 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
-    let client = builder.connect().await.map_err(native_error)?;
+    let raw = builder.connect().await.map_err(native_error)?;
+    let client = CoreClient {
+        raw,
+        data_protection_key,
+        codec,
+    };
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
     })
@@ -326,7 +384,7 @@ fn parse_identity(identity: Option<NativeIdentity>) -> Result<Option<ClientIdent
     let certificate_chain = certificate_chain
         .into_iter()
         .map(|certificate| Certificate::from_der(certificate.as_ref().to_vec()))
-        .collect::<openkache_client::Result<Vec<_>>>()
+        .collect::<openkache_client_core::Result<Vec<_>>>()
         .map_err(native_error)?;
     let private_key = parse_private_key(identity.private_key.as_ref())?;
     ClientIdentity::new(certificate_chain, private_key)

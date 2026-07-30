@@ -12,7 +12,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{Key, SetOptions, ValueFlags};
+use openkache_protocol::{ItemKey, SetOptions, ValueFlags};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -21,7 +21,7 @@ use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,
 };
-use crate::types::EncodedValue;
+use crate::types::StoredItemValue;
 use crate::{AppConfig, SetOutcome, ThreadedKvkache};
 
 const MAX_ARRAY_ITEMS: usize = 64;
@@ -397,12 +397,7 @@ async fn execute_command(
     match command.first() {
         Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
-            [_, key] if key.len() == openkache_protocol::KEY_BYTES => match cache
-                .get_async(Key::new(
-                    (*key).try_into().expect("validated RESP key length"),
-                ))
-                .await
-            {
+            [_, key] => match cache.get_async(ItemKey::derive(key)).await {
                 Ok(Some(value)) if value.flags == ValueFlags::NONE => {
                     bulk(response, Some(&value.bytes));
                 }
@@ -410,14 +405,13 @@ async fn execute_command(
                 Ok(None) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
-            [_, _] => error(response, "OpenKache keys must contain exactly 32 bytes"),
             _ => error(response, "wrong number of arguments for GET"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
-            [_, key, value] if key.len() == openkache_protocol::KEY_BYTES => match cache
+            [_, key, value] => match cache
                 .set_async_with_options(
-                    Key::new((*key).try_into().expect("validated RESP key length")),
-                    EncodedValue::plain(value.to_vec()),
+                    ItemKey::derive(key),
+                    StoredItemValue::plain(value.to_vec()),
                     SetOptions::NONE,
                 )
                 .await
@@ -426,7 +420,6 @@ async fn execute_command(
                 Ok(SetOutcome::NotStored) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
-            [_, _, _] => error(response, "OpenKache keys must contain exactly 32 bytes"),
             _ => error(response, "SET options are not supported"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"DEL") => {
@@ -435,11 +428,7 @@ async fn execute_command(
             } else {
                 let mut deleted = 0;
                 for key in &command[1..] {
-                    let Ok(key) = <[u8; openkache_protocol::KEY_BYTES]>::try_from(*key) else {
-                        error(response, "OpenKache keys must contain exactly 32 bytes");
-                        return false;
-                    };
-                    match cache.delete_async(Key::new(key)).await {
+                    match cache.delete_async(ItemKey::derive(key)).await {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
                         Err(cache_error) => {

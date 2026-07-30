@@ -8,13 +8,13 @@ pub const ALPN: &[u8] = b"openkache/2";
 pub const REQUEST_HEADER_BYTES: usize = 9;
 /// Bytes in an encoded response header.
 pub const RESPONSE_HEADER_BYTES: usize = 5;
-/// Bytes in every application key.
-pub const KEY_BYTES: usize = 32;
+/// Bytes in every canonical item key carried by the protocol.
+pub const ITEM_KEY_BYTES: usize = 32;
 /// Absolute value or response payload ceiling representable by protocol v2.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
-    REQUEST_HEADER_BYTES + KEY_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
+    REQUEST_HEADER_BYTES + ITEM_KEY_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
 /// Maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_VALUE_BYTES;
 
@@ -105,34 +105,34 @@ impl TryFrom<u8> for Status {
     }
 }
 
-/// The exact fixed-size application key carried by the protocol.
+/// The exact fixed-size item identifier carried by the protocol.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Key([u8; KEY_BYTES]);
+pub struct ItemKey([u8; ITEM_KEY_BYTES]);
 
-impl Key {
-    /// Derives a wire key with the cross-language SHA-256 helper.
+impl ItemKey {
+    /// Derives a item key with the cross-language SHA-256 helper.
     pub fn derive(application_key: impl AsRef<[u8]>) -> Self {
         Self(Sha256::digest(application_key.as_ref()).into())
     }
 
-    /// Wraps an exact 32-byte application key.
-    pub const fn new(bytes: [u8; KEY_BYTES]) -> Self {
+    /// Wraps an exact 32-byte item key.
+    pub const fn new(bytes: [u8; ITEM_KEY_BYTES]) -> Self {
         Self(bytes)
     }
 
     /// Returns the complete key bytes.
-    pub const fn as_bytes(&self) -> &[u8; KEY_BYTES] {
+    pub const fn as_bytes(&self) -> &[u8; ITEM_KEY_BYTES] {
         &self.0
     }
 
     /// Consumes the key and returns its bytes.
-    pub const fn into_bytes(self) -> [u8; KEY_BYTES] {
+    pub const fn into_bytes(self) -> [u8; ITEM_KEY_BYTES] {
         self.0
     }
 }
 
-impl AsRef<[u8]> for Key {
+impl AsRef<[u8]> for ItemKey {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
     }
@@ -260,7 +260,7 @@ impl SetOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub opcode: Opcode,
-    pub key: Option<Key>,
+    pub key: Option<ItemKey>,
     pub value_flags: ValueFlags,
     pub set_options: SetOptions,
     pub value: Vec<u8>,
@@ -293,7 +293,7 @@ impl Request {
         validate_set_option_bits(opcode, encoded_value_len)?;
         let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
         validate_lengths(value_len)?;
-        validate_wire_key_length(opcode, key_len)?;
+        validate_item_key_length(opcode, key_len)?;
         REQUEST_HEADER_BYTES
             .checked_add(key_len)
             .and_then(|size| {
@@ -308,14 +308,14 @@ impl Request {
     }
 
     /// Creates and validates a request.
-    pub fn new(opcode: Opcode, key: Option<Key>, value: Vec<u8>) -> Result<Self> {
+    pub fn new(opcode: Opcode, key: Option<ItemKey>, value: Vec<u8>) -> Result<Self> {
         Self::new_with_value_flags(opcode, key, ValueFlags::NONE, value)
     }
 
     /// Creates and validates a request with explicit value transformation flags.
     pub fn new_with_value_flags(
         opcode: Opcode,
-        key: Option<Key>,
+        key: Option<ItemKey>,
         value_flags: ValueFlags,
         value: Vec<u8>,
     ) -> Result<Self> {
@@ -325,7 +325,7 @@ impl Request {
     /// Creates and validates a request with explicit value and `SET` options.
     pub fn new_set(
         opcode: Opcode,
-        key: Option<Key>,
+        key: Option<ItemKey>,
         value_flags: ValueFlags,
         set_options: SetOptions,
         value: Vec<u8>,
@@ -351,7 +351,7 @@ impl Request {
             self.set_options,
             self.value.len(),
         )?;
-        let key_len = self.key.map_or(0, |_| KEY_BYTES);
+        let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
         let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
         let mut frame =
             Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + ttl_len + self.value.len());
@@ -381,7 +381,7 @@ impl Request {
             self.set_options,
             self.value.len(),
         )?;
-        let key_len = self.key.map_or(0, |_| KEY_BYTES);
+        let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
         let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
         let prefix_len = REQUEST_HEADER_BYTES + key_len + ttl_len;
         let value_len = self.value.len();
@@ -434,7 +434,7 @@ impl Request {
 
 struct DecodedRequestFrame {
     opcode: Opcode,
-    key: Option<Key>,
+    key: Option<ItemKey>,
     value_flags: ValueFlags,
     set_options: SetOptions,
     value_start: usize,
@@ -456,7 +456,7 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     let mut set_options = SetOptions::from_wire_bits(encoded_value_len)?;
     let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
     validate_lengths(value_len)?;
-    validate_wire_key_length(opcode, key_len)?;
+    validate_item_key_length(opcode, key_len)?;
     let expected = Request::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
     if frame.len() != expected {
         return Err(ProtocolError::FrameLength {
@@ -469,7 +469,7 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     let key = if key_len == 0 {
         None
     } else {
-        Some(Key::new(
+        Some(ItemKey::new(
             frame[REQUEST_HEADER_BYTES..key_end]
                 .try_into()
                 .expect("validated key length"),
@@ -689,8 +689,8 @@ pub enum ProtocolError {
     FrameLength { expected: usize, actual: usize },
     #[error("frame length overflow")]
     FrameLengthOverflow,
-    #[error("{opcode:?} requires a {expected}-byte key, received {actual} key bytes")]
-    InvalidClientKeyLength {
+    #[error("{opcode:?} requires a {expected}-byte item key, received {actual} key bytes")]
+    InvalidItemKeyLength {
         opcode: Opcode,
         expected: usize,
         actual: usize,
@@ -745,15 +745,15 @@ fn validate_set_option_bits(opcode: Opcode, encoded_value_len: u32) -> Result<()
     SetOptions::from_wire_bits(encoded_value_len).map(|_| ())
 }
 
-fn validate_wire_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
+fn validate_item_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
     let expected = match opcode {
         Opcode::Ping | Opcode::Stats | Opcode::Sync => 0,
-        Opcode::Get | Opcode::Set | Opcode::Delete => KEY_BYTES,
+        Opcode::Get | Opcode::Set | Opcode::Delete => ITEM_KEY_BYTES,
     };
     if key_len == expected {
         Ok(())
     } else {
-        Err(ProtocolError::InvalidClientKeyLength {
+        Err(ProtocolError::InvalidItemKeyLength {
             opcode,
             expected,
             actual: key_len,

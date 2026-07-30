@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{RESPONSE_HEADER_BYTES, Response};
 
-use crate::{Error, Result};
+use crate::{Backend, Error, Operation, Result};
 
 #[cfg(feature = "quic-compio")]
 mod compio;
@@ -42,7 +42,7 @@ pub(crate) trait ClientLane {
     fn write_request(
         &mut self,
         frame: Vec<u8>,
-        deadline: Deadline,
+        timeout: Duration,
     ) -> impl Future<Output = Result<()>>;
 
     fn read_response(
@@ -77,11 +77,11 @@ macro_rules! connection_backend {
             }
 
             async fn acquire_lane(&self, deadline: Deadline) -> Result<Self::Lane<'_>> {
-                let remaining = deadline.remaining("stream acquisition")?;
+                let remaining = deadline.remaining(Operation::StreamAcquisition)?;
                 match $timeout(remaining, self.0.acquire_lane(deadline)).await? {
                     Some(result) => result.map($lane),
                     None => Err(Error::Timeout {
-                        operation: "stream acquisition",
+                        operation: Operation::StreamAcquisition,
                     }),
                 }
             }
@@ -99,8 +99,8 @@ macro_rules! connection_backend {
         }
 
         impl ClientLane for $lane<'_> {
-            async fn write_request(&mut self, frame: Vec<u8>, deadline: Deadline) -> Result<()> {
-                self.0.write_request(frame, deadline).await
+            async fn write_request(&mut self, frame: Vec<u8>, timeout: Duration) -> Result<()> {
+                self.0.write_request(frame, timeout).await
             }
 
             async fn read_response(
@@ -126,7 +126,9 @@ connection_backend!(CompioConnection, CompioLane, compio, timeout_compio);
 #[cfg(feature = "quic-quinn")]
 async fn timeout_quinn<F: Future>(duration: Duration, future: F) -> Result<Option<F::Output>> {
     if tokio::runtime::Handle::try_current().is_err() {
-        return Err(TransportError::runtime("quinn", "an active Tokio runtime is required").into());
+        return Err(
+            TransportError::runtime(Backend::Quinn, "an active Tokio runtime is required").into(),
+        );
     }
     Ok(tokio::time::timeout(duration, future).await.ok())
 }
@@ -134,9 +136,11 @@ async fn timeout_quinn<F: Future>(duration: Duration, future: F) -> Result<Optio
 #[cfg(feature = "quic-compio")]
 async fn timeout_compio<F: Future>(duration: Duration, future: F) -> Result<Option<F::Output>> {
     if ::compio::runtime::Runtime::try_current().is_none() {
-        return Err(
-            TransportError::runtime("compio", "an active Compio runtime is required").into(),
-        );
+        return Err(TransportError::runtime(
+            Backend::Compio,
+            "an active Compio runtime is required",
+        )
+        .into());
     }
     Ok(::compio::runtime::time::timeout(duration, future)
         .await
@@ -220,7 +224,7 @@ impl<B: BackendConnection> PooledConnection<B> {
             let reservation = LaneReservation::new(self);
             let opening = self
                 .inner
-                .open_bi(deadline.remaining("stream acquisition")?)
+                .open_bi(deadline.remaining(Operation::StreamAcquisition)?)
                 .fuse();
             let idle = self.idle_lanes_rx.recv_async().fuse();
             pin_mut!(opening, idle);
@@ -273,11 +277,11 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         }
     }
 
-    async fn write_request(&mut self, frame: Vec<u8>, deadline: Deadline) -> Result<()> {
+    async fn write_request(&mut self, frame: Vec<u8>, timeout: Duration) -> Result<()> {
         self.stream
             .as_mut()
             .expect("a checked-out lane must own its stream")
-            .write_all(frame, deadline.remaining("request write")?)
+            .write_all(frame, timeout)
             .await?;
         Ok(())
     }
@@ -290,17 +294,17 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         let mut frame = stream
             .read_exact(
                 RESPONSE_HEADER_BYTES,
-                deadline.remaining("response header read")?,
+                deadline.remaining(Operation::ResponseHeaderRead)?,
             )
             .await?;
-        let frame_len = Response::frame_len_from_header(&frame)?;
+        let frame_len = Response::frame_len_from_header(&frame).map_err(Error::protocol)?;
         if frame_len > maximum {
             return Err(Error::ResponseTooLarge { maximum });
         }
         let body_len = frame_len - RESPONSE_HEADER_BYTES;
         if body_len > 0 {
             let body = stream
-                .read_exact(body_len, deadline.remaining("response body read")?)
+                .read_exact(body_len, deadline.remaining(Operation::ResponseBodyRead)?)
                 .await?;
             frame.extend_from_slice(&body);
         }
@@ -363,7 +367,7 @@ impl Deadline {
             })
     }
 
-    pub(crate) fn remaining(self, operation: &'static str) -> Result<Duration> {
+    pub(crate) fn remaining(self, operation: Operation) -> Result<Duration> {
         self.0
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
@@ -374,8 +378,8 @@ impl Deadline {
 #[derive(Debug, thiserror::Error)]
 #[error("{backend} QUIC {operation} failed: {message}")]
 pub(crate) struct TransportError {
-    backend: &'static str,
-    operation: &'static str,
+    backend: Backend,
+    operation: Operation,
     message: String,
     kind: TransportErrorKind,
 }
@@ -388,11 +392,7 @@ enum TransportErrorKind {
 }
 
 impl TransportError {
-    fn backend(
-        backend: &'static str,
-        operation: &'static str,
-        error: impl std::fmt::Display,
-    ) -> Self {
+    fn backend(backend: Backend, operation: Operation, error: impl std::fmt::Display) -> Self {
         Self {
             backend,
             operation,
@@ -401,16 +401,16 @@ impl TransportError {
         }
     }
 
-    fn runtime(backend: &'static str, message: &'static str) -> Self {
+    fn runtime(backend: Backend, message: &'static str) -> Self {
         Self {
             backend,
-            operation: "runtime selection",
+            operation: Operation::ConnectionSetup,
             message: message.into(),
             kind: TransportErrorKind::Runtime,
         }
     }
 
-    fn timeout(backend: &'static str, operation: &'static str, timeout: Duration) -> Self {
+    fn timeout(backend: Backend, operation: Operation, timeout: Duration) -> Self {
         Self {
             backend,
             operation,

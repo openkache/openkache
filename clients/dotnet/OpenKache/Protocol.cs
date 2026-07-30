@@ -13,7 +13,7 @@ internal static class Protocol
     internal const int MaximumValueBytes = 64 * 1024 * 1024;
 
     private const int RequestHeaderBytes = 9;
-    private const int ClientKeyDigestBytes = 32;
+    private const int ItemKeyBytes = 32;
     private const int SetTtlBytes = sizeof(ulong);
     private const uint ResponseValueLengthMask = (1u << 30) - 1;
     private const uint ValueCompressedBit = 1u << 31;
@@ -116,7 +116,7 @@ internal static class Protocol
             optionBits |= SetTtlBit;
         }
 
-        var keyLength = usesKey ? ClientKeyDigestBytes : 0;
+        var keyLength = usesKey ? ItemKeyBytes : 0;
         var ttlLength = ttlMilliseconds.HasValue ? SetTtlBytes : 0;
         var frame = GC.AllocateUninitializedArray<byte>(
             checked(RequestHeaderBytes + keyLength + ttlLength + value.Length));
@@ -131,7 +131,7 @@ internal static class Protocol
         {
             SHA256.HashData(
                 userKey,
-                frame.AsSpan(RequestHeaderBytes, ClientKeyDigestBytes));
+                frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
         }
 
         var valueOffset = RequestHeaderBytes + keyLength;

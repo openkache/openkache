@@ -39,9 +39,11 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 ### 🔒 End-to-end encryption
 
 Secure clients compress values and encrypt them with XChaCha20-Poly1305 before
-transmission. The compact authenticated value is bound to the SHA-256 wire-key
-digest, so moving ciphertext to another cache key fails authentication. The
-server observes key digests and encoded sizes, but not value plaintext.
+transmission. The compact authenticated value is bound to its exact 32-byte wire
+key, so moving ciphertext to another cache key fails authentication. Protected
+clients hide application keys behind HMAC-SHA-256 item keys. The server observes
+deterministic item keys and encoded sizes, but not application keys or value
+plaintext.
 
 ### 📦 Transparent compression
 
@@ -51,7 +53,7 @@ Large values are automatically compressed with zstd before storage and decompres
 
 Implemented client libraries are available for Rust, TypeScript and JavaScript
 on Node.js, Bun, and Deno, and .NET. JavaScript runtimes share the TypeScript
-package, which calls the production Rust client through Node-API so transport,
+package, which calls the shared low-level client core through Node-API so transport,
 compression, and encryption behavior stay identical. Package scaffolds for
 Python, Go, Java, Kotlin, C, C++, Swift, and Dart are available under
 [`clients/`](./clients/README.md) for future Rust-backed bindings.
@@ -348,7 +350,8 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `protocol/` | Shared binary request, response, opcode, and status definitions |
 | `server/` | SSD cache engine plus the runnable QUIC server |
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
-| `clients/rust/` | Rust client SDK over QUIC |
+| `clients/core/` | Low-level QUIC client core shared by language adapters |
+| `clients/rust/` | Ergonomic Rust end-user SDK over the client core |
 | `clients/typescript/` | Node.js, Bun, and Deno client backed by Rust through Node-API |
 | `clients/dotnet/` | Managed .NET client over QUIC |
 

@@ -439,6 +439,7 @@ pub unsafe extern "C" fn openkache_client_execute(
             SetCondition::None => SetOptions::new(),
             SetCondition::IfAbsent => SetOptions::new().if_absent(),
             SetCondition::IfPresent => SetOptions::new().if_present(),
+            _ => return Err("unsupported SET condition".to_string()),
         };
         if ttl_enabled != 0 {
             if ttl_ms == 0 {

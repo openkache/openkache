@@ -1,14 +1,15 @@
 # OpenKache client SDKs
 
-OpenKache keeps transport, protocol framing, compression, and encryption in the
-Rust client. Language packages should remain thin adapters over the Rust
-transport instead of implementing the wire or security protocols again.
+OpenKache keeps transport, protocol framing, compression, and encryption tools in
+`core/`. Language packages should remain thin adapters over that low-level crate
+instead of implementing the wire or security protocols again.
 
 ## Status
 
 | Language | Path | Status |
 |---|---|---|
-| Rust | `rust/` | Implemented core client |
+| Shared core | `core/` | Implemented low-level QUIC and protocol client |
+| Rust | `rust/` | Implemented ergonomic end-user SDK |
 | TypeScript / JavaScript | `typescript/` | Node.js, Bun, and Deno Node-API SDK |
 | C# / .NET | `dotnet/` | Implemented managed client |
 | Python | `python/` | Package scaffold |
@@ -34,7 +35,7 @@ Future bindings should own only language-native concerns:
 - idiomatic errors and package-level API names.
 
 Do not duplicate QUIC, wire framing, hashing, compression, encryption, or
-certificate behavior outside `rust/`. Extend the Rust core and add only the
+certificate behavior outside `core/`. Extend the shared core and add only the
 smallest runtime-specific adapter when a binding needs new behavior.
 
 Object APIs use the shared [OpenKache value envelope](VALUE_FORMAT.md).

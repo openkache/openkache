@@ -1,4 +1,4 @@
-//! Client-side compression and authenticated value encryption.
+//! Reusable compression and authenticated item-value protection tools.
 
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{Key as CipherKey, Tag, XChaCha20Poly1305, XNonce};
@@ -9,7 +9,7 @@ use zstd_pure_rs::prelude::{
     ZSTD_compressBound, ZSTD_decompress, ZSTD_getFrameContentSize,
 };
 
-use crate::Key;
+use crate::{DataProtectionKey, ItemKey};
 
 /// Bytes required for an XChaCha20-Poly1305 key.
 pub const ENCRYPTION_KEY_BYTES: usize = 32;
@@ -21,13 +21,13 @@ const AAD_BYTES: usize = 32 + 1;
 
 /// Encoded bytes and transformation flags sent through the protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EncodedValue {
+pub struct ItemValue {
     bytes: Vec<u8>,
     compressed: bool,
     encrypted: bool,
 }
 
-impl EncodedValue {
+impl ItemValue {
     /// Wraps exact wire bytes and their client-owned transformation metadata.
     ///
     /// Raw clients can use this constructor to preserve every protocol value pattern without
@@ -164,6 +164,24 @@ impl ValueCodec {
         })
     }
 
+    /// Creates a codec from the value-encryption subkey derived by a master secret.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - Master secret shared with the application key-hiding layer.
+    /// * `compression` - Compression policy applied before encryption.
+    ///
+    /// # Returns
+    ///
+    /// A codec that encrypts values with a domain-separated key derived from `key`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the compression settings are outside supported bounds.
+    pub fn protected(key: &DataProtectionKey, compression: Compression) -> Result<Self> {
+        Self::encrypted(key.derive_value_key(), compression)
+    }
+
     /// Creates a codec that compresses and then encrypts every value.
     ///
     /// # Arguments
@@ -197,7 +215,7 @@ impl ValueCodec {
     ///
     /// # Arguments
     ///
-    /// * `key` - Wire key used to bind ciphertext to its cache key.
+    /// * `key` - Item key used to bind ciphertext to its cache key.
     /// * `plaintext` - Exact application value.
     ///
     /// # Returns
@@ -208,7 +226,7 @@ impl ValueCodec {
     ///
     /// Returns an error for oversized values, entropy failures, compression failures, or
     /// encryption failures.
-    pub fn seal(&self, key: Key, plaintext: &[u8]) -> Result<EncodedValue> {
+    pub fn seal(&self, key: ItemKey, plaintext: &[u8]) -> Result<ItemValue> {
         self.seal_owned(key, plaintext.to_vec())
     }
 
@@ -216,7 +234,7 @@ impl ValueCodec {
     ///
     /// # Arguments
     ///
-    /// * `key` - Wire key used to bind ciphertext to its cache key.
+    /// * `key` - Item key used to bind ciphertext to its cache key.
     /// * `plaintext` - Owned application value whose allocation may be reused.
     ///
     /// # Returns
@@ -227,7 +245,7 @@ impl ValueCodec {
     ///
     /// Returns an error for oversized values, entropy failures, compression failures, or
     /// encryption failures.
-    pub fn seal_owned(&self, key: Key, plaintext: Vec<u8>) -> Result<EncodedValue> {
+    pub fn seal_owned(&self, key: ItemKey, plaintext: Vec<u8>) -> Result<ItemValue> {
         if plaintext.len() > MAX_VALUE_BYTES {
             return Err(Error::PlaintextTooLarge {
                 size: plaintext.len(),
@@ -235,7 +253,7 @@ impl ValueCodec {
             });
         }
         if self.cipher.is_none() && self.compression == Compression::Disabled {
-            return Ok(EncodedValue {
+            return Ok(ItemValue {
                 bytes: plaintext,
                 compressed: false,
                 encrypted: false,
@@ -268,7 +286,7 @@ impl ValueCodec {
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        Ok(EncodedValue {
+        Ok(ItemValue {
             bytes: body,
             compressed,
             encrypted,
@@ -279,7 +297,7 @@ impl ValueCodec {
     ///
     /// # Arguments
     ///
-    /// * `key` - Wire key that must match the key used while sealing.
+    /// * `key` - Item key that must match the key used while sealing.
     /// * `encoded` - Owned server payload whose allocation is reused when possible.
     ///
     /// # Returns
@@ -290,7 +308,7 @@ impl ValueCodec {
     ///
     /// Returns an error when the encoded value is malformed, too large, cannot be authenticated,
     /// or cannot be decompressed.
-    pub fn open(&self, key: Key, encoded: EncodedValue) -> Result<Vec<u8>> {
+    pub fn open(&self, key: ItemKey, encoded: ItemValue) -> Result<Vec<u8>> {
         let value_flags = encoded.protocol_flags();
         let mut encoded = encoded.bytes;
         if encoded.len() > MAX_VALUE_BYTES {
@@ -451,7 +469,7 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(key: Key, value_flags: ValueFlags) -> [u8; AAD_BYTES] {
+fn make_aad(key: ItemKey, value_flags: ValueFlags) -> [u8; AAD_BYTES] {
     let mut aad = [0_u8; AAD_BYTES];
     aad[..32].copy_from_slice(key.as_bytes());
     aad[32] = value_flags.authentication_byte();

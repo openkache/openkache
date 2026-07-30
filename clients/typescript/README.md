@@ -2,14 +2,15 @@
 
 `@openkache/client` is the TypeScript and JavaScript SDK for Node.js, Bun, and
 Deno applications. It delegates QUIC, mutual TLS, compression, and value encryption
-to the production Rust client through a packaged Node-API adapter. Applications
+to `openkache-client-core` through a packaged Node-API adapter. Applications
 do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
 
 ## Purpose
 
 Applications use regular JavaScript objects while OpenKache keeps envelope
 framing, transport, and security behavior in one Rust implementation. JavaScript
-codecs produce metadata and payload bytes; Rust wraps them in the shared
+codecs produce metadata and payload bytes; the adapter composes the same low-level core tools used
+by the Rust SDK, wraps bytes in the shared
 [OpenKache value envelope](../VALUE_FORMAT.md), compresses beneficial values,
 and encrypts every value before it leaves the client. The server stores opaque
 bytes without parsing, decrypting, or decompressing them.
@@ -132,6 +133,11 @@ loop. Call and await `close()` when finished.
 - `value_codecs` registers optional Protobuf, FlatBuffers, or application codecs.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
 
+`data_protection_key` replaces the previous `encryption_key` option and changes both key and value
+derivation. Reusing the same 32 bytes does not preserve old cache entries: item keys now use a
+derived HMAC-SHA-256 key and values use an independently derived encryption key. Repopulate entries
+when migrating or rotating this secret.
+
 `stats()` validates the server response and returns
 `{ storage: string, workers: readonly string[] }`.
 
@@ -144,4 +150,4 @@ Stored encrypted values contain a 24-byte nonce, ciphertext, and a 16-byte
 authentication tag. Existing request, response, and on-disk metadata fields
 carry the compression and encryption bits without adding bytes to the value.
 Encryption therefore adds exactly 40 bytes. The flags are authenticated with
-the cache-key digest.
+the exact item key.

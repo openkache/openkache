@@ -1,4 +1,4 @@
-//! Stable client configuration types independent of the TLS and QUIC implementations.
+//! Stable core configuration types independent of the TLS and QUIC implementations.
 
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -113,19 +113,23 @@ impl FromStr for Endpoint {
     type Err = Error;
 
     fn from_str(value: &str) -> Result<Self> {
-        if let Ok(address) = value.parse::<SocketAddr>() {
-            return Self::from_socket_addr(address, address.ip().to_string());
+        let authority = value
+            .parse::<http::uri::Authority>()
+            .map_err(|error| Error::configuration("endpoint", error.to_string()))?;
+        if authority.as_str().contains('@') {
+            return Err(Error::configuration(
+                "endpoint",
+                "must not contain user information",
+            ));
         }
-        let (host, port) = value
-            .rsplit_once(':')
-            .ok_or_else(|| Error::configuration("endpoint", "must use host:port syntax"))?;
-        let host = host
+        let port = authority
+            .port_u16()
+            .ok_or_else(|| Error::configuration("endpoint.port", "is required"))?;
+        let host = authority
+            .host()
             .strip_prefix('[')
             .and_then(|host| host.strip_suffix(']'))
-            .unwrap_or(host);
-        let port = port
-            .parse::<u16>()
-            .map_err(|_| Error::configuration("endpoint.port", "must be a valid u16"))?;
+            .unwrap_or_else(|| authority.host());
         Self::new(host, port)
     }
 }

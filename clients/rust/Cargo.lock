@@ -556,6 +556,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "http"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+dependencies = [
+ "bytes",
+ "itoa",
+]
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -713,6 +723,16 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "openkache-client"
 version = "0.1.0"
 dependencies = [
+ "compio",
+ "flume",
+ "futures-util",
+ "openkache-client-core",
+]
+
+[[package]]
+name = "openkache-client-core"
+version = "0.1.0"
+dependencies = [
  "base64",
  "chacha20poly1305",
  "compio",
@@ -722,6 +742,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac",
+ "http",
  "openkache-protocol",
  "quinn",
  "rustls",

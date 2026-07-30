@@ -8,8 +8,9 @@ use compio::BufResult;
 use compio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{BackendConnection, BackendStream, TransportError};
+use crate::{Backend, Operation};
 
-const NAME: &str = "compio";
+const BACKEND: Backend = Backend::Compio;
 
 pub(super) struct Connection {
     _endpoint: compio_quic::Endpoint,
@@ -29,12 +30,12 @@ pub(super) async fn connect(
 ) -> Result<Connection, TransportError> {
     if compio::runtime::Runtime::try_current().is_none() {
         return Err(TransportError::runtime(
-            NAME,
+            BACKEND,
             "an active Compio runtime is required",
         ));
     }
     let crypto = compio_quic::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
+        .map_err(|error| TransportError::backend(BACKEND, Operation::TlsInitialization, error))?;
     let config = compio_quic::ClientConfig::new(Arc::new(crypto));
     let local_address = if address.is_ipv4() {
         "0.0.0.0:0"
@@ -44,19 +45,23 @@ pub(super) async fn connect(
     compio::runtime::time::timeout(timeout, async {
         let endpoint = compio_quic::Endpoint::client(local_address)
             .await
-            .map_err(|error| TransportError::backend(NAME, "endpoint initialization", error))?;
+            .map_err(|error| {
+                TransportError::backend(BACKEND, Operation::EndpointInitialization, error)
+            })?;
         let inner = endpoint
             .connect(address, server_name, Some(config))
-            .map_err(|error| TransportError::backend(NAME, "connection initialization", error))?
+            .map_err(|error| {
+                TransportError::backend(BACKEND, Operation::ConnectionInitialization, error)
+            })?
             .await
-            .map_err(|error| TransportError::backend(NAME, "handshake", error))?;
+            .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?;
         Ok(Connection {
             _endpoint: endpoint,
             inner,
         })
     })
     .await
-    .map_err(|_| TransportError::timeout(NAME, "connection", timeout))?
+    .map_err(|_| TransportError::timeout(BACKEND, Operation::ConnectionSetup, timeout))?
 }
 
 impl BackendConnection for Connection {
@@ -65,8 +70,8 @@ impl BackendConnection for Connection {
     async fn open_bi(&self, timeout: Duration) -> Result<Self::Stream, TransportError> {
         let (send, receive) = compio::runtime::time::timeout(timeout, self.inner.open_bi_wait())
             .await
-            .map_err(|_| TransportError::timeout(NAME, "stream open", timeout))?
-            .map_err(|error| TransportError::backend(NAME, "stream open", error))?;
+            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamOpen, timeout))?
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamOpen, error))?;
         Ok(Stream { send, receive })
     }
 
@@ -80,8 +85,8 @@ impl BackendStream for Stream {
         let BufResult(result, _) =
             compio::runtime::time::timeout(timeout, self.send.write_all(bytes))
                 .await
-                .map_err(|_| TransportError::timeout(NAME, "stream write", timeout))?;
-        result.map_err(|error| TransportError::backend(NAME, "stream write", error))
+                .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?;
+        result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
     async fn read_exact(
@@ -94,8 +99,8 @@ impl BackendStream for Stream {
             self.receive.read_exact(Vec::with_capacity(length)),
         )
         .await
-        .map_err(|_| TransportError::timeout(NAME, "stream read", timeout))?;
-        result.map_err(|error| TransportError::backend(NAME, "stream read", error))?;
+        .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?;
+        result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
         Ok(bytes)
     }
 }

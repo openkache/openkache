@@ -9,13 +9,14 @@ share these types directly.
 
 ## Architecture
 
-Each QUIC bidirectional stream carries exactly one request and one response.
-Fixed-width big-endian lengths make framing deterministic, while explicit
-status codes keep cache misses separate from protocol or server errors.
+Each QUIC bidirectional stream carries a sequential series of request-response
+pairs with at most one request in flight. Fixed-width big-endian lengths make
+framing deterministic, while explicit status codes keep cache misses separate
+from protocol or server errors.
 
 `SET` encodes its options in the high bits of the request value-length word.
 When the TTL bit is present, an unsigned 8-byte relative TTL in milliseconds
-appears after the key digest and before the value. A zero TTL is invalid.
+appears after the exact 32-byte item key and before the value. A zero TTL is invalid.
 `if_absent` stores only when the key is absent, while `if_present` stores only
 when the key is present. An expired key is absent for both conditions.
 

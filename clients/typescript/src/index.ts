@@ -68,7 +68,7 @@ export interface Client_Options {
   readonly address: string
   /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
   readonly certificate: Uint8Array
-  /** Exact 32-byte XChaCha20-Poly1305 key. */
+  /** Exact 32-byte master secret used to derive key-hiding and value-encryption subkeys. */
   readonly data_protection_key: Uint8Array
   /** TLS server name. Defaults to `localhost`. */
   readonly server_name?: string

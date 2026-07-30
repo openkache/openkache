@@ -1,14 +1,43 @@
 # OpenKache Rust client
 
-`openkache-client` provides a high-level Rust API and an exact protocol API over one reusable
-QUIC connection.
+`openkache-client` provides the ergonomic Rust end-user API over the reusable
+[`openkache-client-core`](../core) transport and protocol implementation.
 
-- `Client` accepts application keys and plaintext values. It derives 32-byte wire keys and applies
+## Purpose
+
+Rust applications get ergonomic defaults while language adapters and advanced callers can depend
+on `openkache-client-core` directly for every protocol value pattern. The high-level crate
+re-exports the core's stable public types so callers can still reach the raw layer without a second
+connection.
+
+- `Client` accepts application keys and plaintext values. It derives 32-byte item keys and applies
   optional key hiding, value encryption, and compression.
-- `RawClient` accepts an exact 32-byte `Key` and an `EncodedValue`. It does not hash keys or
-  transform values.
+- `RawClient`, implemented in `clients/core`, accepts an exact 32-byte `ItemKey` and an
+  `ItemValue`. It does not hash keys or transform values.
 - `LocalClient` and `LocalRawClient` provide the same layers for a Compio runtime. The primary
   `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
+
+## Commands
+
+From `clients/rust`:
+
+```bash
+cargo build
+cargo check --no-default-features --features quic-compio
+cargo fmt --check
+```
+
+## Core components
+
+- `src/lib.rs` derives item keys, applies value protection, and exposes `Client`/`LocalClient`.
+- `src/ffi.rs` adapts the high-level Compio client to the versioned C ABI.
+- `../core` owns transport, TLS configuration, raw operations, and shared protection tools.
+
+## Configuration
+
+The one-string connection uses system trust and defaults for deadlines, retries, compression, and
+stream concurrency. The builder configures self-signed trust, mutual TLS, request deadlines,
+retry-safe attempts, `max_in_flight`, compression, and `DataProtectionKey`.
 
 ## Connect
 
@@ -75,22 +104,27 @@ let client = Client::builder(endpoint)
 ```
 
 The client derives independent HKDF-SHA-256 subkeys. Application keys become deterministic
-HMAC-SHA-256 wire keys, while values use XChaCha20-Poly1305 with a fresh nonce and the wire key as
-authenticated data. Without `data_protection_key`, the high-level client uses SHA-256 wire keys and
+HMAC-SHA-256 item keys, while values use XChaCha20-Poly1305 with a fresh nonce and the item key as
+authenticated data. Without `data_protection_key`, the high-level client uses SHA-256 item keys and
 stores plaintext or compression-only values. A human passphrase API using Argon2id and an explicit
 salt is deferred.
+
+Clients must use the same data protection key to share entries. Enabling, disabling, or rotating
+the key changes the derived item keys, so previously stored entries become unreachable and must be
+repopulated. The client does not retain old keys or perform dual-key reads.
 
 Every binary-protocol key is exactly 32 bytes:
 
 ```rust
-use openkache_client::Key;
+use openkache_client::ItemKey;
 
-let derived = Key::derive(b"arbitrary application key");
-let exact = Key::from_bytes([0x42; 32]);
+let derived = ItemKey::derive(b"arbitrary application key");
+let exact = ItemKey::from_bytes([0x42; 32]);
 ```
 
-`RawClient` sends `exact` without hashing it again. This is the interoperability path for clients
-that already own a 32-byte wire key.
+`RawClient` sends `exact` without hashing it again. Language adapters should depend on
+`openkache-client-core` directly; Rust applications can use the re-exported raw types when they
+already own a 32-byte item key.
 
 ## Operations
 
@@ -122,6 +156,11 @@ pub enum SetOutcome { Created, Replaced, NotStored }
 pub enum DeleteOutcome { Deleted, NotFound }
 ```
 
+`Error` is a non-exhaustive client-owned enum. `Backend` and `Operation` provide stable identifiers
+for runtime, transport, timeout, and mutation errors; backend library errors remain diagnostic
+messages rather than leaked Quinn, Compio, rustls, or protocol types. `AmbiguousOutcome` retains its
+structured underlying `Error` as `cause`.
+
 Set options are methods on the awaitable request rather than separate `with_options` functions:
 
 ```rust
@@ -138,17 +177,17 @@ because the wire format has an exact millisecond unit.
 The raw signatures are:
 
 ```rust
-async fn get(&self, key: Key) -> Result<GetOutcome<EncodedValue>>;
+async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>>;
 async fn set(
     &self,
-    key: Key,
-    value: EncodedValue,
+    key: ItemKey,
+    value: ItemValue,
     options: SetOptions,
 ) -> Result<SetOutcome>;
-async fn delete(&self, key: Key) -> Result<DeleteOutcome>;
+async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome>;
 ```
 
-`EncodedValue::from_parts` preserves exact opaque bytes and client-owned compression/encryption
+`ItemValue::from_parts` preserves exact opaque bytes and client-owned compression/encryption
 metadata without exposing protocol-crate types.
 
 ## Concurrency and connection lifecycle
@@ -171,9 +210,11 @@ client.close().await?;
 
 `connection_state()` is a best-effort snapshot and does not guarantee the next request will
 succeed. Response-safe operations (`PING`, `GET`, and `STATS`) may reconnect and retry according to
-`RetryPolicy`. Mutations are never replayed after a connection failure because the server may
-already have applied them; the operation returns `Error::AmbiguousOutcome`, the client becomes
-disconnected, and the next operation reconnects before sending its own request.
+`RetryPolicy`. Mutations are never replayed after request transmission when the response cannot be
+confirmed because the server may already have applied them; the operation returns
+`Error::AmbiguousOutcome`. Connection failures mark the client disconnected, and the next operation
+reconnects before sending its own request. A timeout while waiting for an unused lane is not
+ambiguous because no request was sent and does not invalidate a healthy connection.
 
 ## Deferred capabilities
 

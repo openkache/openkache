@@ -1,4 +1,4 @@
-//! Fixed-size wire keys and the canonical SHA-256 derivation helper.
+//! Fixed-size item keys and reusable application-key derivation helpers.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -9,52 +9,46 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{Error, Result};
 
-/// Bytes in every OpenKache wire key.
-pub const KEY_BYTES: usize = openkache_protocol::KEY_BYTES;
+/// Bytes in every OpenKache item key.
+pub const ITEM_KEY_BYTES: usize = openkache_protocol::ITEM_KEY_BYTES;
 
 /// Bytes in an application-managed data protection key.
 pub const DATA_PROTECTION_KEY_BYTES: usize = 32;
 
-/// Exact fixed-size key sent through the OpenKache protocol.
+/// Exact fixed-size item key sent through the OpenKache protocol.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Key([u8; KEY_BYTES]);
+pub struct ItemKey([u8; ITEM_KEY_BYTES]);
 
-impl Key {
-    /// Derives the canonical wire key from arbitrary application key bytes.
+impl ItemKey {
+    /// Derives the canonical item key from arbitrary application key bytes.
     pub fn derive(application_key: impl AsRef<[u8]>) -> Self {
         Self(Sha256::digest(application_key.as_ref()).into())
     }
 
-    /// Wraps an exact wire key without hashing it again.
-    pub const fn from_bytes(bytes: [u8; KEY_BYTES]) -> Self {
+    /// Wraps an exact item key without hashing it again.
+    pub const fn from_bytes(bytes: [u8; ITEM_KEY_BYTES]) -> Self {
         Self(bytes)
     }
 
     /// Returns the exact wire bytes.
-    pub const fn as_bytes(&self) -> &[u8; KEY_BYTES] {
+    pub const fn as_bytes(&self) -> &[u8; ITEM_KEY_BYTES] {
         &self.0
     }
 
     /// Consumes the key and returns its exact wire bytes.
-    pub const fn into_bytes(self) -> [u8; KEY_BYTES] {
+    pub const fn into_bytes(self) -> [u8; ITEM_KEY_BYTES] {
         self.0
     }
 
-    pub(crate) const fn into_protocol(self) -> openkache_protocol::Key {
-        openkache_protocol::Key::new(self.0)
+    pub(crate) const fn into_protocol(self) -> openkache_protocol::ItemKey {
+        openkache_protocol::ItemKey::new(self.0)
     }
 }
 
-impl AsRef<[u8]> for Key {
+impl AsRef<[u8]> for ItemKey {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
-    }
-}
-
-impl From<openkache_protocol::Key> for Key {
-    fn from(key: openkache_protocol::Key) -> Self {
-        Self::from_bytes(key.into_bytes())
     }
 }
 
@@ -109,13 +103,14 @@ impl DataProtectionKey {
         STANDARD.encode(self.0)
     }
 
-    /// Derives the deterministic HMAC-SHA-256 wire key for application key bytes.
-    pub fn derive_key(&self, application_key: impl AsRef<[u8]>) -> Key {
-        let key = self.derive_subkey(b"openkache/v1/key");
+    /// Derives the deterministic HMAC-SHA-256 item key for application key bytes.
+    pub fn derive_item_key(&self, application_key: impl AsRef<[u8]>) -> ItemKey {
+        let mut key = self.derive_subkey(b"openkache/v1/key");
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&key).expect("HMAC-SHA-256 accepts a 32-byte key");
+        key.zeroize();
         mac.update(application_key.as_ref());
-        Key::from_bytes(mac.finalize().into_bytes().into())
+        ItemKey::from_bytes(mac.finalize().into_bytes().into())
     }
 
     pub(crate) fn derive_value_key(&self) -> [u8; 32] {

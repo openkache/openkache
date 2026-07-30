@@ -25,7 +25,7 @@ use compio::io::{AsyncReadAt, AsyncWriteAt};
 use futures_util::future::join_all;
 use openkache_protocol::{SetCondition, SetOptions};
 
-use crate::types::EncodedValue;
+use crate::types::StoredItemValue;
 use crate::*;
 
 mod blob;
@@ -578,7 +578,7 @@ struct LocatedItemState {
 
 #[derive(Debug)]
 pub(crate) struct PendingItem {
-    pub(crate) value: Option<EncodedValue>,
+    pub(crate) value: Option<StoredItemValue>,
     pub(crate) expires_at_ms: u64,
     pub(crate) previous: Option<TableLocation>,
     pub(crate) previous_live: bool,
@@ -586,7 +586,7 @@ pub(crate) struct PendingItem {
 
 struct FlushRecord {
     storage_key: StorageKey,
-    value: Option<EncodedValue>,
+    value: Option<StoredItemValue>,
     expires_at_ms: u64,
     previous: Option<TableLocation>,
     previous_live: bool,
@@ -809,7 +809,7 @@ impl Kvkache {
     pub(crate) async fn get_encoded(
         &self,
         storage_key: &StorageKey,
-    ) -> Result<Option<EncodedValue>> {
+    ) -> Result<Option<StoredItemValue>> {
         if let Some(pending) = self.pending.get(storage_key) {
             return Ok(pending
                 .is_live_at(unix_time_ms())
@@ -833,14 +833,14 @@ impl Kvkache {
         storage_key: StorageKey,
         value: &[u8],
     ) -> Result<SetOutcome> {
-        self.set_encoded(storage_key, EncodedValue::plain(value.to_vec()))
+        self.set_encoded(storage_key, StoredItemValue::plain(value.to_vec()))
             .await
     }
 
     pub(crate) async fn set_encoded(
         &mut self,
         storage_key: StorageKey,
-        value: EncodedValue,
+        value: StoredItemValue,
     ) -> Result<SetOutcome> {
         self.set_encoded_with_options(storage_key, value, SetOptions::NONE)
             .await
@@ -849,7 +849,7 @@ impl Kvkache {
     pub(crate) async fn set_encoded_with_options(
         &mut self,
         storage_key: StorageKey,
-        value: EncodedValue,
+        value: StoredItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
         if options.ttl_ms == Some(0) {
@@ -1098,7 +1098,7 @@ impl Kvkache {
         &self,
         table_location: TableLocation,
         mut encoded: Vec<u8>,
-    ) -> Result<EncodedValue> {
+    ) -> Result<StoredItemValue> {
         let decoded = decode_stored_value(&encoded)?;
         let flags = decoded.flags;
         let blob_ref = match decoded.value {
@@ -1132,7 +1132,7 @@ impl Kvkache {
                 value
             }
         };
-        Ok(EncodedValue::new(bytes, flags))
+        Ok(StoredItemValue::new(bytes, flags))
     }
 
     fn ssd_segment_age(&self, sg_index: usize) -> usize {

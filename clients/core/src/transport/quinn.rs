@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::{BackendConnection, BackendStream, TransportError};
+use crate::{Backend, Operation};
 
-const NAME: &str = "quinn";
+const BACKEND: Backend = Backend::Quinn;
 
 pub(super) struct Connection {
     _endpoint: quinn::Endpoint,
@@ -25,24 +26,27 @@ pub(super) async fn connect(
     timeout: Duration,
 ) -> Result<Connection, TransportError> {
     tokio::runtime::Handle::try_current()
-        .map_err(|_| TransportError::runtime(NAME, "an active Tokio runtime is required"))?;
+        .map_err(|_| TransportError::runtime(BACKEND, "an active Tokio runtime is required"))?;
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
-        .map_err(|error| TransportError::backend(NAME, "TLS initialization", error))?;
+        .map_err(|error| TransportError::backend(BACKEND, Operation::TlsInitialization, error))?;
     let config = quinn::ClientConfig::new(Arc::new(crypto));
     let local_address = if address.is_ipv4() {
         "0.0.0.0:0".parse().expect("valid IPv4 wildcard address")
     } else {
         "[::]:0".parse().expect("valid IPv6 wildcard address")
     };
-    let endpoint = quinn::Endpoint::client(local_address)
-        .map_err(|error| TransportError::backend(NAME, "endpoint initialization", error))?;
+    let endpoint = quinn::Endpoint::client(local_address).map_err(|error| {
+        TransportError::backend(BACKEND, Operation::EndpointInitialization, error)
+    })?;
     let connecting = endpoint
         .connect_with(config, address, server_name)
-        .map_err(|error| TransportError::backend(NAME, "connection initialization", error))?;
+        .map_err(|error| {
+            TransportError::backend(BACKEND, Operation::ConnectionInitialization, error)
+        })?;
     let inner = tokio::time::timeout(timeout, connecting)
         .await
-        .map_err(|_| TransportError::timeout(NAME, "connection", timeout))?
-        .map_err(|error| TransportError::backend(NAME, "handshake", error))?;
+        .map_err(|_| TransportError::timeout(BACKEND, Operation::ConnectionSetup, timeout))?
+        .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?;
     Ok(Connection {
         _endpoint: endpoint,
         inner,
@@ -55,8 +59,8 @@ impl BackendConnection for Connection {
     async fn open_bi(&self, timeout: Duration) -> Result<Self::Stream, TransportError> {
         let (send, receive) = tokio::time::timeout(timeout, self.inner.open_bi())
             .await
-            .map_err(|_| TransportError::timeout(NAME, "stream open", timeout))?
-            .map_err(|error| TransportError::backend(NAME, "stream open", error))?;
+            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamOpen, timeout))?
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamOpen, error))?;
         Ok(Stream { send, receive })
     }
 
@@ -69,8 +73,8 @@ impl BackendStream for Stream {
     async fn write_all(&mut self, bytes: Vec<u8>, timeout: Duration) -> Result<(), TransportError> {
         tokio::time::timeout(timeout, self.send.write_all(&bytes))
             .await
-            .map_err(|_| TransportError::timeout(NAME, "stream write", timeout))?
-            .map_err(|error| TransportError::backend(NAME, "stream write", error))
+            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamWrite, timeout))?
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamWrite, error))
     }
 
     async fn read_exact(
@@ -81,8 +85,8 @@ impl BackendStream for Stream {
         let mut bytes = vec![0; length];
         tokio::time::timeout(timeout, self.receive.read_exact(&mut bytes))
             .await
-            .map_err(|_| TransportError::timeout(NAME, "stream read", timeout))?
-            .map_err(|error| TransportError::backend(NAME, "stream read", error))?;
+            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
         Ok(bytes)
     }
 }
