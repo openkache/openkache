@@ -43,8 +43,9 @@ The existing raw managed .NET client predates this boundary. Do not extend its d
 transport or protocol implementation; replace it with a thin core-backed adapter when the
 protected .NET API is implemented.
 
-Object APIs use the shared [OpenKache value envelope](VALUE_FORMAT.md).
-Raw byte APIs remain available for application-owned cross-language formats.
+The next formatted API revision is specified by the shared
+[OpenKache value format](VALUE_FORMAT.md).
+Low-level raw APIs remain available for callers that already own exact protocol values.
 
 Each scaffold README lists its package-manager validation command. Those
 commands validate package structure only until the corresponding binding is
