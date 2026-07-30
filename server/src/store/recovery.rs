@@ -2,27 +2,19 @@
 
 use std::io::ErrorKind;
 use std::path::Path;
-use std::time::Duration;
 
-use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf};
 use compio::fs::{File, OpenOptions};
-use compio::io::{AsyncReadAt, AsyncWriteAt};
 
-use super::require_complete_direct_io;
-use crate::BUCKET_BYTES;
-use crate::buffer::DirectIoBuffer;
-use crate::config::Config;
-use crate::error::{KvError, Result};
-use crate::table::Table;
+use crate::*;
 
 const FILE_MAGIC: &[u8; 8] = b"OKSGFILE";
 const CONTROL_MAGIC: &[u8; 8] = b"OKSGCTL\0";
-const FORMAT_VERSION: u32 = 2;
+pub(crate) const LEGACY_FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKTABLE\0";
 const CHECKPOINT_FOOTER_MAGIC: &[u8; 8] = b"OKTBLEND";
-const CHECKPOINT_VERSION: u32 = 1;
-const CHECKPOINT_COMMIT_BYTES: usize = 16;
+const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_COMMIT_BYTES: usize = 24;
 const CHECKPOINT_IO_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +22,7 @@ pub(crate) struct SegmentCommit {
     pub(crate) sg_index: usize,
     pub(crate) generation: u64,
     pub(crate) blob_logical_len: usize,
+    pub(crate) bucket_choice_count: usize,
 }
 
 pub(crate) struct RecoveryState {
@@ -212,22 +205,23 @@ pub(crate) async fn write_table_checkpoint(
     let mut payload_buffer = DirectIoBuffer::zeroed(CHECKPOINT_IO_BYTES.min(payload_bytes));
     while payload_offset < payload_bytes {
         let extent_bytes = CHECKPOINT_IO_BYTES.min(payload_bytes - payload_offset);
-        let mut bytes = payload_buffer.slice(..extent_bytes);
         copy_checkpoint_payload(
             &commit_bytes,
             table_slices,
             payload_offset,
-            &mut bytes,
+            &mut payload_buffer[..extent_bytes],
             logical_payload_bytes,
         );
-        checkpoint_checksum.update(&bytes);
-        let write = file.write_at(bytes, (BUCKET_BYTES + payload_offset) as u64);
-        let BufResult(result, returned) =
-            compio::runtime::time::timeout(Duration::from_micros(config.write_max_time_us), write)
-                .await
-                .map_err(|_| KvError::Timeout("Table checkpoint write"))?;
-        require_complete_direct_io("Table checkpoint write", result?, extent_bytes)?;
-        payload_buffer = returned.into_inner();
+        checkpoint_checksum.update(&payload_buffer[..extent_bytes]);
+        payload_buffer = write_all_direct(
+            &file,
+            payload_buffer,
+            (BUCKET_BYTES + payload_offset) as u64,
+            extent_bytes,
+            config.write_max_time_us,
+            "Table checkpoint write",
+        )
+        .await?;
         payload_offset += extent_bytes;
     }
 
@@ -294,24 +288,23 @@ pub(crate) async fn load_table_checkpoint(
         DirectIoBuffer::for_read(CHECKPOINT_IO_BYTES.min(header.payload_bytes));
     while payload_offset < header.payload_bytes {
         let extent_bytes = CHECKPOINT_IO_BYTES.min(header.payload_bytes - payload_offset);
-        let read = file.read_at(
-            payload_buffer.slice(..extent_bytes),
+        payload_buffer = read_exact_direct(
+            &file,
+            payload_buffer,
             (BUCKET_BYTES + payload_offset) as u64,
-        );
-        let BufResult(result, bytes) =
-            compio::runtime::time::timeout(Duration::from_micros(config.read_max_time_us), read)
-                .await
-                .map_err(|_| KvError::Timeout("Table checkpoint payload read"))?;
-        require_complete_direct_io("Table checkpoint payload read", result?, extent_bytes)?;
-        checkpoint_checksum.update(&bytes);
+            extent_bytes,
+            config.read_max_time_us,
+            "Table checkpoint payload read",
+        )
+        .await?;
+        checkpoint_checksum.update(&payload_buffer[..extent_bytes]);
         restore_checkpoint_payload(
             &mut commit_bytes,
             &mut table,
             payload_offset,
-            &bytes,
+            &payload_buffer[..extent_bytes],
             logical_payload_bytes,
         );
-        payload_buffer = bytes.into_inner();
         payload_offset += extent_bytes;
     }
 
@@ -482,7 +475,11 @@ fn encode_checkpoint_commits(commits: &[Option<SegmentCommit>]) -> Result<Vec<u8
         let Some(commit) = commit else {
             continue;
         };
-        if commit.sg_index != sg_index || commit.generation == 0 {
+        if commit.sg_index != sg_index
+            || commit.generation == 0
+            || !(1..=32).contains(&commit.bucket_choice_count)
+            || !commit.bucket_choice_count.is_power_of_two()
+        {
             return Err(KvError::Worker(
                 "Table checkpoint contains an invalid Segment commit".into(),
             ));
@@ -492,6 +489,11 @@ fn encode_checkpoint_commits(commits: &[Option<SegmentCommit>]) -> Result<Vec<u8
         bytes[offset + 8..offset + 16].copy_from_slice(
             &u64::try_from(commit.blob_logical_len)
                 .map_err(|_| KvError::Worker("Blob length does not fit checkpoint".into()))?
+                .to_le_bytes(),
+        );
+        bytes[offset + 16..offset + 24].copy_from_slice(
+            &u64::try_from(commit.bucket_choice_count)
+                .map_err(|_| KvError::Worker("Bucket choice count does not fit checkpoint".into()))?
                 .to_le_bytes(),
         );
     }
@@ -511,8 +513,12 @@ fn decode_checkpoint_commits(bytes: &[u8], config: &Config) -> Result<Vec<Segmen
         let blob_logical_len =
             usize::try_from(u64::from_le_bytes(encoded[8..16].try_into().unwrap()))
                 .map_err(|_| KvError::Worker("checkpoint Blob length is too large".into()))?;
+        let bucket_choice_count = usize::try_from(u64::from_le_bytes(
+            encoded[16..24].try_into().unwrap(),
+        ))
+        .map_err(|_| KvError::Worker("checkpoint Bucket choice count is too large".into()))?;
         if generation == 0 {
-            if blob_logical_len != 0 {
+            if blob_logical_len != 0 || bucket_choice_count != 0 {
                 return Err(KvError::Worker(
                     "Table checkpoint contains invalid empty Segment metadata".into(),
                 ));
@@ -524,10 +530,16 @@ fn decode_checkpoint_commits(bytes: &[u8], config: &Config) -> Result<Vec<Segmen
                 "Table checkpoint Blob length exceeds its Segment".into(),
             ));
         }
+        validate_stored_bucket_choice_count(
+            bucket_choice_count,
+            config,
+            "Table checkpoint Segment",
+        )?;
         commits.push(SegmentCommit {
             sg_index,
             generation,
             blob_logical_len,
+            bucket_choice_count,
         });
     }
     Ok(commits)
@@ -651,13 +663,15 @@ async fn read_checkpoint_extent(
     timeout_us: u64,
     operation: &'static str,
 ) -> Result<DirectIoBuffer> {
-    let read = file.read_at(DirectIoBuffer::for_read(len), offset);
-    let BufResult(result, bytes) =
-        compio::runtime::time::timeout(Duration::from_micros(timeout_us), read)
-            .await
-            .map_err(|_| KvError::Timeout(operation))?;
-    require_complete_direct_io(operation, result?, len)?;
-    Ok(bytes)
+    read_exact_direct(
+        file,
+        DirectIoBuffer::for_read(len),
+        offset,
+        len,
+        timeout_us,
+        operation,
+    )
+    .await
 }
 
 async fn write_checkpoint_extent(
@@ -667,12 +681,16 @@ async fn write_checkpoint_extent(
     timeout_us: u64,
 ) -> Result<()> {
     let expected = bytes.len();
-    let write = file.write_at(bytes, offset);
-    let BufResult(result, _) =
-        compio::runtime::time::timeout(Duration::from_micros(timeout_us), write)
-            .await
-            .map_err(|_| KvError::Timeout("Table checkpoint write"))?;
-    require_complete_direct_io("Table checkpoint write", result?, expected)
+    write_all_direct(
+        file,
+        bytes,
+        offset,
+        expected,
+        timeout_us,
+        "Table checkpoint write",
+    )
+    .await
+    .map(drop)
 }
 
 async fn replace_checkpoint(
@@ -739,14 +757,16 @@ fn encode_file_header(config: &Config, storage_key_id: [u8; 16]) -> DirectIoBuff
     bytes[36..40].copy_from_slice(&(config.segment_count as u32).to_le_bytes());
     bytes[40..44].copy_from_slice(&(BUCKET_BYTES as u32).to_le_bytes());
     bytes[44..52].copy_from_slice(&(config.blob_segment_size as u64).to_le_bytes());
+    bytes[52..56].copy_from_slice(&(config.bucket_choice_count as u32).to_le_bytes());
     let checksum = checksum(&bytes[..BUCKET_BYTES - 4]);
     bytes[BUCKET_BYTES - 4..].copy_from_slice(&checksum.to_le_bytes());
     bytes
 }
 
 fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16]) -> Result<()> {
+    let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     if &bytes[..8] != FILE_MAGIC
-        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != FORMAT_VERSION
+        || (format_version != LEGACY_FORMAT_VERSION && format_version != FORMAT_VERSION)
         || u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize != BUCKET_BYTES
         || checksum(&bytes[..BUCKET_BYTES - 4])
             != u32::from_le_bytes(bytes[BUCKET_BYTES - 4..].try_into().unwrap())
@@ -763,6 +783,13 @@ fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16])
     let segment_size = u64::from_le_bytes(bytes[28..36].try_into().unwrap());
     let segment_count = u32::from_le_bytes(bytes[36..40].try_into().unwrap()) as usize;
     let blob_segment_size = u64::from_le_bytes(bytes[44..52].try_into().unwrap());
+    let bucket_choice_count = if format_version == LEGACY_FORMAT_VERSION {
+        // Version 2 did not persist this field. Its production default was two;
+        // nondefault experimental v2 storage requires repopulation.
+        2
+    } else {
+        u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize
+    };
     if segment_size != config.segment_size as u64
         || segment_count != config.segment_count
         || blob_segment_size != config.blob_segment_size as u64
@@ -770,6 +797,27 @@ fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16])
         return Err(KvError::Worker(
             "Segment file does not match the configured Segment geometry".into(),
         ));
+    }
+    validate_bucket_choice_count(bucket_choice_count, "Segment file")?;
+    Ok(())
+}
+
+fn validate_bucket_choice_count(stored: usize, source: &str) -> Result<()> {
+    if !(1..=32).contains(&stored) || !stored.is_power_of_two() {
+        return Err(KvError::Worker(format!(
+            "{source} contains an invalid Bucket choice count"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_stored_bucket_choice_count(stored: usize, config: &Config, source: &str) -> Result<()> {
+    validate_bucket_choice_count(stored, source)?;
+    if stored > config.bucket_choice_count {
+        return Err(KvError::Worker(format!(
+            "{source} uses {stored} Bucket choices, but the configured {} cannot safely locate its records",
+            config.bucket_choice_count
+        )));
     }
     Ok(())
 }
@@ -780,6 +828,11 @@ fn encode_control_page(
     commit: SegmentCommit,
     buffer: Option<DirectIoBuffer>,
 ) -> Result<DirectIoBuffer> {
+    if commit.bucket_choice_count != config.bucket_choice_count {
+        return Err(KvError::Worker(
+            "Segment commit Bucket choice count does not match the active configuration".into(),
+        ));
+    }
     let sg_index = u32::try_from(commit.sg_index)
         .map_err(|_| KvError::Worker("SG index does not fit the control page".into()))?;
     let blob_logical_len = u64::try_from(commit.blob_logical_len)
@@ -793,6 +846,7 @@ fn encode_control_page(
     bytes[28..32].copy_from_slice(&sg_index.to_le_bytes());
     bytes[32..40].copy_from_slice(&commit.generation.to_le_bytes());
     bytes[40..48].copy_from_slice(&blob_logical_len.to_le_bytes());
+    bytes[48..52].copy_from_slice(&(commit.bucket_choice_count as u32).to_le_bytes());
     bytes[52..60].copy_from_slice(&(config.segment_size as u64).to_le_bytes());
     bytes[60..64].copy_from_slice(&(config.segment_count as u32).to_le_bytes());
     bytes[64..72].copy_from_slice(&(config.blob_segment_size as u64).to_le_bytes());
@@ -807,16 +861,23 @@ fn decode_control_page(
     storage_key_id: [u8; 16],
     sg_index: usize,
 ) -> Result<SegmentCommit> {
+    let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     let stored_sg_index = u32::from_le_bytes(bytes[28..32].try_into().unwrap()) as usize;
     let generation = u64::from_le_bytes(bytes[32..40].try_into().unwrap());
     let blob_logical_len =
         usize::try_from(u64::from_le_bytes(bytes[40..48].try_into().unwrap()))
             .map_err(|_| KvError::Worker("stored Blob length is too large".into()))?;
+    let bucket_choice_count = if format_version == LEGACY_FORMAT_VERSION {
+        // See validate_file_header for the legacy-default compatibility rule.
+        2
+    } else {
+        u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize
+    };
     let segment_size = u64::from_le_bytes(bytes[52..60].try_into().unwrap());
     let segment_count = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
     let blob_segment_size = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
     if &bytes[..8] != CONTROL_MAGIC
-        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != FORMAT_VERSION
+        || (format_version != LEGACY_FORMAT_VERSION && format_version != FORMAT_VERSION)
         || bytes[12..28] != storage_key_id
         || stored_sg_index != sg_index
         || generation == 0
@@ -831,10 +892,16 @@ fn decode_control_page(
             "SG control page {sg_index} is invalid"
         )));
     }
+    validate_stored_bucket_choice_count(
+        bucket_choice_count,
+        config,
+        &format!("SG control page {sg_index}"),
+    )?;
     Ok(SegmentCommit {
         sg_index,
         generation,
         blob_logical_len,
+        bucket_choice_count,
     })
 }
 
@@ -861,13 +928,7 @@ async fn read_page_into(
     timeout_us: u64,
     operation: &'static str,
 ) -> Result<DirectIoBuffer> {
-    let read = file.read_at(bytes, offset);
-    let BufResult(result, bytes) =
-        compio::runtime::time::timeout(Duration::from_micros(timeout_us), read)
-            .await
-            .map_err(|_| KvError::Timeout(operation))?;
-    require_complete_direct_io(operation, result?, BUCKET_BYTES)?;
-    Ok(bytes)
+    read_exact_direct(file, bytes, offset, BUCKET_BYTES, timeout_us, operation).await
 }
 
 async fn write_page(
@@ -877,12 +938,7 @@ async fn write_page(
     timeout_us: u64,
     operation: &'static str,
 ) -> Result<DirectIoBuffer> {
-    let write = file.write_at(bytes, offset);
-    let BufResult(result, bytes) =
-        compio::runtime::time::timeout(Duration::from_micros(timeout_us), write)
-            .await
-            .map_err(|_| KvError::Timeout(operation))?;
-    require_complete_direct_io(operation, result?, BUCKET_BYTES)?;
+    let bytes = write_all_direct(file, bytes, offset, BUCKET_BYTES, timeout_us, operation).await?;
     debug_assert_eq!(bytes.len(), BUCKET_BYTES);
     Ok(bytes)
 }
