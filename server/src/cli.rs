@@ -46,6 +46,9 @@ pub struct Cli {
     pub segment_mib: Option<usize>,
 
     #[arg(long, value_name = "N")]
+    pub ram_segments_per_thread: Option<usize>,
+
+    #[arg(long, value_name = "N")]
     pub blob_segment_mib: Option<usize>,
 
     #[arg(long, value_name = "MIB")]
@@ -178,6 +181,9 @@ impl AppConfig {
         }
         if let Some(v) = cli.segment_mib {
             config.storage.segment_size_mib = v;
+        }
+        if let Some(v) = cli.ram_segments_per_thread {
+            config.storage.ram_segments_per_thread = v;
         }
         if let Some(v) = cli.blob_segment_mib {
             config.storage.blob_segment_size_mib = v;

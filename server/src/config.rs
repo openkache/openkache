@@ -140,6 +140,7 @@ pub fn bits_for_count(count: usize) -> usize {
 pub struct Config {
     pub data_path: PathBuf,
     pub segment_size: usize,
+    pub ram_segment_count: usize,
     pub blob_segment_size: usize,
     pub max_item_bytes: usize,
     pub segment_count: usize,
@@ -161,6 +162,7 @@ impl Default for Config {
         Self {
             data_path: PathBuf::from("target/kvkache-v1/kvkache.data"),
             segment_size: 16 * 1024 * 1024,
+            ram_segment_count: 1,
             blob_segment_size: 64 * 1024 * 1024,
             max_item_bytes: DEFAULT_MAX_ITEM_BYTES,
             segment_count: 64,
@@ -223,6 +225,20 @@ impl Config {
         if self.segment_size == 0 || !self.segment_size.is_multiple_of(BUCKET_BYTES) {
             return Err(KvError::InvalidConfig(
                 "Segment size must be a non-zero multiple of 4096 bytes".into(),
+            ));
+        }
+        if !(1..=8).contains(&self.ram_segment_count) {
+            return Err(KvError::InvalidConfig(
+                "RAM Segment count must be between 1 and 8".into(),
+            ));
+        }
+        if self
+            .segment_size
+            .checked_mul(self.ram_segment_count)
+            .is_none()
+        {
+            return Err(KvError::InvalidConfig(
+                "total RAM Segment size is too large".into(),
             ));
         }
         if self.segment_size.checked_mul(self.segment_count).is_none() {
@@ -569,6 +585,8 @@ pub struct StorageConfig {
     pub data_file_pattern: String,
     pub segments_per_thread: usize,
     pub segment_size_mib: usize,
+    /// Mutable SG packing lanes retained by each storage worker.
+    pub ram_segments_per_thread: usize,
     pub blob_segment_size_mib: usize,
     /// Maximum encoded cache-item size accepted by the server.
     pub max_item_size_mib: usize,
@@ -581,6 +599,7 @@ impl Default for StorageConfig {
             data_file_pattern: "data-{thread_id:02}.sg".into(),
             segments_per_thread: 4,
             segment_size_mib: 16,
+            ram_segments_per_thread: 1,
             blob_segment_size_mib: 64,
             max_item_size_mib: DEFAULT_MAX_ITEM_BYTES / (1024 * 1024),
         }
@@ -750,6 +769,22 @@ impl AppConfig {
                 "storage.segment_size_mib is invalid".into(),
             ));
         }
+        if !(1..=8).contains(&self.storage.ram_segments_per_thread) {
+            return Err(KvError::InvalidConfig(
+                "storage.ram_segments_per_thread must be between 1 and 8".into(),
+            ));
+        }
+        if self
+            .storage
+            .segment_size_mib
+            .checked_mul(self.storage.ram_segments_per_thread)
+            .and_then(|mib| mib.checked_mul(1024 * 1024))
+            .is_none()
+        {
+            return Err(KvError::InvalidConfig(
+                "total storage RAM Segment size is too large".into(),
+            ));
+        }
         if self.storage.blob_segment_size_mib == 0
             || self
                 .storage
@@ -835,6 +870,7 @@ impl AppConfig {
                 data_file_pattern: "data-{thread_id:02}.sg".into(),
                 segments_per_thread,
                 segment_size_mib: 16,
+                ram_segments_per_thread: 1,
                 blob_segment_size_mib: 64,
                 max_item_size_mib: 16,
             },
@@ -852,6 +888,7 @@ impl AppConfig {
         Config {
             data_path: self.storage.directory.join(data_name),
             segment_size: self.storage.segment_size_mib * 1024 * 1024,
+            ram_segment_count: self.storage.ram_segments_per_thread,
             blob_segment_size: self.storage.blob_segment_size_mib * 1024 * 1024,
             max_item_bytes: self.storage.max_item_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,

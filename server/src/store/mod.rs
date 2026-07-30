@@ -560,7 +560,7 @@ struct IoCounters {
     blob_data_read: Cell<u64>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum SegmentFlushReason {
     Capacity,
     Sync,
@@ -594,6 +594,71 @@ struct FlushRecord {
     blob_ref: Option<BlobRef>,
 }
 
+struct FlushLane {
+    segment: MutableSegment,
+    records: Vec<FlushRecord>,
+    blob_used: usize,
+}
+
+impl FlushLane {
+    fn new(segment: MutableSegment, record_capacity: usize) -> Self {
+        Self {
+            segment,
+            records: Vec::with_capacity(record_capacity),
+            blob_used: 0,
+        }
+    }
+
+    fn try_append(&mut self, record: &mut FlushRecord, blob_capacity: usize) -> Result<bool> {
+        let (item, blob_ref) = match record.value.as_ref() {
+            None => (Item::tombstone(record.storage_key), None),
+            Some(value) if is_blob_item(&value.bytes) => {
+                let Some(blob_end) = self.blob_used.checked_add(value.bytes.len()) else {
+                    return Ok(false);
+                };
+                if blob_end > blob_capacity {
+                    return Ok(false);
+                }
+                let blob_ref = BlobRef::new(self.blob_used, value.bytes.len())?;
+                let encoded = encode_blob_ref(blob_ref, value.flags);
+                let item = if record.expires_at_ms == 0 {
+                    Item::live(record.storage_key, encoded)
+                } else {
+                    Item::live_expiring(record.storage_key, encoded, record.expires_at_ms)
+                };
+                (item, Some(blob_ref))
+            }
+            Some(value) => {
+                let encoded = encode_inline_value(&value.bytes, value.flags);
+                let item = if record.expires_at_ms == 0 {
+                    Item::live(record.storage_key, encoded)
+                } else {
+                    Item::live_expiring(record.storage_key, encoded, record.expires_at_ms)
+                };
+                (item, None)
+            }
+        };
+        let Some(table_location) = self.segment.append(item, false) else {
+            return Ok(false);
+        };
+        if blob_ref.is_some() {
+            self.blob_used += record
+                .value
+                .as_ref()
+                .expect("Blob record has a live value")
+                .bytes
+                .len();
+        }
+        if let Some(value) = &record.value {
+            self.segment.accepted_item_bytes +=
+                (crate::types::STORAGE_KEY_BYTES + value.bytes.len()) as u64;
+        }
+        record.table_location = Some(table_location);
+        record.blob_ref = blob_ref;
+        Ok(true)
+    }
+}
+
 pub(crate) struct Kvkache {
     config: Config,
     data: File,
@@ -622,6 +687,7 @@ pub(crate) struct Kvkache {
     next_memory_capacity_check: Instant,
     io: IoCounters,
     bucket_read_pool: DirectIoBufferPool,
+    pub(crate) mutable_segment_buffers: Vec<DirectIoBuffer>,
 }
 
 impl Kvkache {
@@ -719,6 +785,7 @@ impl Kvkache {
         let blob_segment = BlobSegment::open(&config).await?;
         let next_segment_index = recovery_state.next_segment_index;
         let next_generation = recovery_state.next_generation;
+        let mutable_segment_buffers = Vec::with_capacity(config.ram_segment_count);
 
         let mut cache = Self {
             table,
@@ -746,6 +813,7 @@ impl Kvkache {
             next_memory_capacity_check: Instant::now(),
             io: IoCounters::default(),
             bucket_read_pool: DirectIoBufferPool::default(),
+            mutable_segment_buffers,
             config,
             data,
         };
@@ -1227,11 +1295,8 @@ impl Kvkache {
                 .then_with(|| left.storage_key.cmp(&right.storage_key))
         });
 
-        let mut segment_buffer = None;
         let mut blob_buffer = None;
         let mut control_buffer = None;
-        let mut planned_buffer = Vec::new();
-        let mut deferred_buffer = Vec::new();
         while !remaining.is_empty() {
             let next_generation = match next_sg_generation(self.next_generation) {
                 Ok(next_generation) => next_generation,
@@ -1241,81 +1306,88 @@ impl Kvkache {
                 }
             };
             let sg_index = self.next_segment_index;
-            let mut active = match segment_buffer.take() {
-                Some(bytes) => MutableSegment::reuse(&self.config, sg_index, bytes),
-                None => MutableSegment::new(&self.config, sg_index),
-            };
-            let mut planned = std::mem::take(&mut planned_buffer);
-            planned.reserve(remaining.len());
-            let mut deferred = std::mem::take(&mut deferred_buffer);
-            let mut blob_used = 0usize;
-
-            for mut record in remaining.drain(..) {
-                let (item, blob_ref) = match record.value.as_ref() {
-                    None => (Item::tombstone(record.storage_key), None),
-                    Some(value) if is_blob_item(&value.bytes) => {
-                        let Some(blob_end) = blob_used.checked_add(value.bytes.len()) else {
-                            deferred.push(record);
-                            continue;
-                        };
-                        if blob_end > self.config.blob_segment_size {
-                            deferred.push(record);
-                            continue;
-                        }
-                        let blob_ref = BlobRef::new(blob_used, value.bytes.len())?;
-                        let encoded = encode_blob_ref(blob_ref, value.flags);
-                        let item = if record.expires_at_ms == 0 {
-                            Item::live(record.storage_key, encoded)
-                        } else {
-                            Item::live_expiring(record.storage_key, encoded, record.expires_at_ms)
-                        };
-                        (item, Some(blob_ref))
-                    }
-                    Some(value) => {
-                        let encoded = encode_inline_value(&value.bytes, value.flags);
-                        let item = if record.expires_at_ms == 0 {
-                            Item::live(record.storage_key, encoded)
-                        } else {
-                            Item::live_expiring(record.storage_key, encoded, record.expires_at_ms)
-                        };
-                        (item, None)
-                    }
+            let lane_count = self.config.ram_segment_count;
+            let lane_record_capacity = remaining.len().div_ceil(lane_count);
+            // The extra lanes are packing lookahead. Only lane zero becomes the next
+            // durable generation; overflow remains readable through `pending`.
+            let mut lanes = Vec::with_capacity(lane_count);
+            for _ in 0..lane_count {
+                let segment = match self.mutable_segment_buffers.pop() {
+                    Some(bytes) => MutableSegment::reuse(&self.config, sg_index, bytes),
+                    None => MutableSegment::new(&self.config, sg_index),
                 };
-                if let Some(table_location) = active.append(item, false) {
-                    if blob_ref.is_some() {
-                        blob_used += record
-                            .value
-                            .as_ref()
-                            .expect("Blob record has a live value")
-                            .bytes
-                            .len();
+                lanes.push(FlushLane::new(segment, lane_record_capacity));
+            }
+            let mut deferred = Vec::new();
+            for mut record in remaining.drain(..) {
+                let mut placed_lane = None;
+                let mut planning_error = None;
+                for (lane_index, lane) in lanes.iter_mut().enumerate() {
+                    match lane.try_append(&mut record, self.config.blob_segment_size) {
+                        Ok(true) => {
+                            placed_lane = Some(lane_index);
+                            break;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            planning_error = Some(error);
+                            break;
+                        }
                     }
-                    if let Some(value) = &record.value {
-                        active.accepted_item_bytes +=
-                            (crate::types::STORAGE_KEY_BYTES + value.bytes.len()) as u64;
+                }
+                if let Some(error) = planning_error {
+                    let mut restore = Vec::with_capacity(
+                        1 + deferred.len()
+                            + lanes.iter().map(|lane| lane.records.len()).sum::<usize>(),
+                    );
+                    restore.push(record);
+                    restore.append(&mut deferred);
+                    for lane in lanes {
+                        restore.extend(lane.records);
+                        self.mutable_segment_buffers.push(lane.segment.bytes);
                     }
-                    record.table_location = Some(table_location);
-                    record.blob_ref = blob_ref;
-                    planned.push(record);
+                    self.restore_flush_records(restore);
+                    return Err(error);
+                }
+                if let Some(lane_index) = placed_lane {
+                    lanes[lane_index].records.push(record);
                 } else {
                     deferred.push(record);
                 }
             }
 
+            let selected = lanes.remove(0);
+            for mut lane in lanes {
+                for mut record in lane.records.drain(..) {
+                    record.table_location = None;
+                    record.blob_ref = None;
+                    deferred.push(record);
+                }
+                self.mutable_segment_buffers.push(lane.segment.bytes);
+            }
+            let active = selected.segment;
+            let mut planned = selected.records;
+            let blob_used = selected.blob_used;
             if planned.is_empty() {
+                self.mutable_segment_buffers.push(active.bytes);
                 self.restore_flush_records(deferred);
                 return Err(KvError::Worker(
                     "pending Item cannot fit in an empty Segment generation".into(),
                 ));
             }
             if let Err(error) = self.reserve_segment_generation(sg_index, blob_used).await {
+                self.mutable_segment_buffers.push(active.bytes);
                 self.restore_flush_records(planned.into_iter().chain(deferred));
                 return Err(error);
             }
             if self.occupied_segments[sg_index] {
-                let reclaimed_commit = self.segment_commits[sg_index].ok_or_else(|| {
-                    KvError::Worker("occupied Segment is missing its commit metadata".into())
-                })?;
+                let Some(reclaimed_commit) = self.segment_commits[sg_index] else {
+                    self.mutable_segment_buffers.push(active.bytes);
+                    self.restore_flush_records(planned.into_iter().chain(deferred));
+                    return Err(KvError::Worker(
+                        "occupied Segment is missing its commit metadata".into(),
+                    ));
+                };
                 let invalidated = match invalidate_segment(
                     &mut self.data,
                     &self.config,
@@ -1329,6 +1401,7 @@ impl Kvkache {
                         bytes
                     }
                     Err(error) => {
+                        self.mutable_segment_buffers.push(active.bytes);
                         self.restore_flush_records(planned.into_iter().chain(deferred));
                         return Err(storage_operation_error(&self.resource_guard, error));
                     }
@@ -1337,6 +1410,7 @@ impl Kvkache {
                     .data_written
                     .set(self.io.data_written.get() + invalidated);
                 if let Err(error) = self.prepare_segment_for_reuse(reclaimed_commit).await {
+                    self.mutable_segment_buffers.push(active.bytes);
                     self.restore_flush_records(planned.into_iter().chain(deferred));
                     return Err(error);
                 }
@@ -1376,6 +1450,7 @@ impl Kvkache {
                     bytes
                 }
                 Err(error) => {
+                    self.mutable_segment_buffers.push(active.bytes);
                     self.restore_flush_records(planned.into_iter().chain(deferred));
                     return Err(storage_operation_error(&self.resource_guard, error));
                 }
@@ -1403,7 +1478,7 @@ impl Kvkache {
                     return Err(storage_operation_error(&self.resource_guard, error));
                 }
             };
-            segment_buffer = Some(returned_segment_buffer);
+            self.mutable_segment_buffers.push(returned_segment_buffer);
             control_buffer = Some(returned_control_buffer);
 
             let mut published = 0usize;
@@ -1435,10 +1510,19 @@ impl Kvkache {
                 self.restore_flush_records(planned.into_iter().skip(published).chain(deferred));
                 return Err(error);
             }
-            planned.clear();
-            planned_buffer = planned;
-            std::mem::swap(&mut remaining, &mut deferred);
-            deferred_buffer = deferred;
+            if reason == SegmentFlushReason::Capacity && self.config.ram_segment_count > 1 {
+                self.restore_flush_records(deferred);
+                return Ok(());
+            }
+            remaining = deferred;
+            remaining.sort_unstable_by(|left, right| {
+                right
+                    .value
+                    .as_ref()
+                    .map_or(0, |value| value.bytes.len())
+                    .cmp(&left.value.as_ref().map_or(0, |value| value.bytes.len()))
+                    .then_with(|| left.storage_key.cmp(&right.storage_key))
+            });
         }
         Ok(())
     }
@@ -1584,8 +1668,9 @@ impl Kvkache {
     }
 
     fn pending_should_flush(&self) -> bool {
-        self.pending_sg_bytes >= self.config.segment_size
-            || self.pending_blob_bytes >= self.config.blob_segment_size
+        self.pending_sg_bytes >= self.config.segment_size * self.config.ram_segment_count
+            || self.pending_blob_bytes
+                >= self.config.blob_segment_size * self.config.ram_segment_count
     }
 
     fn restore_flush_records<I>(&mut self, records: I)
@@ -1614,11 +1699,12 @@ impl Kvkache {
         let segment_sync_fill_percent = self.segment_sync_fill_used_bytes as f64 * 100.0
             / self.segment_sync_fill_capacity_bytes.max(1) as f64;
         format!(
-            "keys={} stable_keys={} pending_items={} pending_value_bytes={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
+            "keys={} stable_keys={} pending_items={} pending_value_bytes={} ram_segments={} table_load={:.2}% table_memory={:.2}MiB ({:.3}B/planned-key) modeled_resident={:.2}MiB front_subtables={} front_capacity={} back_subtables={} back_capacity={} bucket_choices={} bucket_selection={} blob_used={} blob_logical_used={} blob_capacity={} next_segment_index={} occupied_segments={} flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} memory_stop_writes={} memory_stop_available_bytes={} memory_resume_available_bytes={} storage_stop_writes={} storage_stop_available_bytes={} storage_resume_available_bytes={} rejected_writes={} sg_fill_percent={:.3}% sg_fill_used_bytes={} sg_fill_capacity_bytes={} capacity_sg_fill_percent={:.3}% capacity_sg_fill_used_bytes={} capacity_sg_fill_capacity_bytes={} sync_sg_fill_percent={:.3}% sync_sg_fill_used_bytes={} sync_sg_fill_capacity_bytes={} data_read={} data_written={} blob_data_read={} blob_data_written={}",
             self.logical_key_count(),
             self.stable_live_keys,
             self.pending.len(),
             self.pending_value_bytes(),
+            self.config.ram_segment_count,
             self.table.load_factor() * 100.0,
             self.table.memory_bytes() as f64 / (1024.0 * 1024.0),
             self.table.memory_bytes() as f64 / self.config.table_capacity as f64,
@@ -1688,6 +1774,7 @@ impl Kvkache {
             + self.pending_value_bytes()
             + self.occupied_segments.capacity() * std::mem::size_of::<bool>()
             + self.blob_segment.memory_bytes()
+            + self.config.segment_size * self.config.ram_segment_count
     }
 
     fn logical_key_count(&self) -> usize {
