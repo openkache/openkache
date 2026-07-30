@@ -1041,6 +1041,12 @@ async fn connect_compio(
 
 #[cfg(feature = "quic-quinn")]
 async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(Error::Runtime {
+            backend: Backend::Quinn,
+            message: "an active Tokio runtime is required".into(),
+        });
+    }
     if let Some(address) = endpoint.resolved_address() {
         return Ok(address);
     }
@@ -1064,6 +1070,12 @@ async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketA
 
 #[cfg(feature = "quic-compio")]
 async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+    if compio::runtime::Runtime::try_current().is_none() {
+        return Err(Error::Runtime {
+            backend: Backend::Compio,
+            message: "an active Compio runtime is required".into(),
+        });
+    }
     if let Some(address) = endpoint.resolved_address() {
         return Ok(address);
     }

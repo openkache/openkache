@@ -9,11 +9,11 @@ do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
 
 Applications use regular JavaScript objects while OpenKache keeps envelope
 framing, transport, and security behavior in one Rust implementation. JavaScript
-codecs produce metadata and payload bytes; the adapter composes the same low-level core tools used
-by the Rust SDK, wraps bytes in the shared
-[OpenKache value envelope](../VALUE_FORMAT.md), compresses beneficial values,
-and encrypts every value before it leaves the client. The server stores opaque
-bytes without parsing, decrypting, or decompressing them.
+codecs produce metadata and payload bytes; the adapter passes them to the shared
+core's [OpenKache value envelope](../VALUE_FORMAT.md) implementation and delegates
+the resulting plaintext envelope to `ProtectedClient`. The core then compresses
+beneficial values and encrypts every value before it leaves the client. The
+server stores opaque bytes without parsing, decrypting, or decompressing them.
 
 ## Commands
 
@@ -49,7 +49,7 @@ const client = await OpenKache_Client.connect({
     certificate_chain: [await readFile("client-bundle/client.crt")],
     private_key: await readFile("client-bundle/client.key"),
   },
-  data_protection_key: crypto.getRandomValues(new Uint8Array(32)),
+  data_protection_key: await readFile("client-bundle/data-protection.key"),
 })
 
 await client.set("profile", {
@@ -123,7 +123,9 @@ loop. Call and await `close()` when finished.
   required by production mutual TLS. An administrator identity is required for
   `stats()` and `sync()`.
 - `data_protection_key` is an application-managed 32-byte secret. Clients sharing
-  values must use the same key. OpenKache never sends it to the server.
+  values must use the same key. Generate it once with a cryptographically secure
+  random source and persist it in secret storage; do not generate a new key for
+  each connection. OpenKache never sends it to the server.
 - `compression` controls Zstandard level, minimum input size, and required
   savings. Defaults are level 1, 1 KiB, and 64 bytes.
 - `timeouts.connect_ms` bounds endpoint setup and the QUIC/TLS handshake;

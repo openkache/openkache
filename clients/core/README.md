@@ -44,9 +44,10 @@ let outcome = client
     .await?;
 ```
 
-`ItemKey::from_bytes` is the only raw-key constructor and preserves caller-supplied bytes exactly.
-Use `DataProtectionKey::derive_item_key` or `DataProtection::item_key` when a language adapter
-needs the shared HMAC-SHA-256 derivation.
+`ItemKey::from_bytes` preserves a Rust array directly, while `ItemKey::from_slice` validates and
+copies a dynamic language-binding buffer. Neither constructor hashes the supplied bytes. Use
+`DataProtectionKey::derive_item_key` or `DataProtection::item_key` when a language adapter needs
+the shared HMAC-SHA-256 derivation.
 
 ## Configuration
 
