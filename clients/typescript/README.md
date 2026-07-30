@@ -48,7 +48,7 @@ const client = await OpenKache_Client.connect({
     certificate_chain: [await readFile("client-bundle/client.crt")],
     private_key: await readFile("client-bundle/client.key"),
   },
-  data_protection_key: crypto.getRandomValues(new Uint8Array(32)),
+  data_protection_key: await readFile("client-bundle/data-protection.key"),
 })
 
 await client.set("profile", {
@@ -122,7 +122,9 @@ loop. Call and await `close()` when finished.
   required by production mutual TLS. An administrator identity is required for
   `stats()` and `sync()`.
 - `data_protection_key` is an application-managed 32-byte secret. Clients sharing
-  values must use the same key. OpenKache never sends it to the server.
+  values must use the same key. Generate it once with a cryptographically secure
+  random source and persist it in secret storage; do not generate a new key for
+  each connection. OpenKache never sends it to the server.
 - `compression` controls Zstandard level, minimum input size, and required
   savings. Defaults are level 1, 1 KiB, and 64 bytes.
 - `timeouts.connect_ms` bounds endpoint setup and the QUIC/TLS handshake;
@@ -146,7 +148,7 @@ limited to the 64 MiB wire ceiling; servers may enforce a smaller operational
 limit.
 
 Stored encrypted values contain a 24-byte nonce, ciphertext, and a 16-byte
-authentication tag. Existing request, response, and on-disk metadata fields
-carry the compression and encryption bits without adding bytes to the value.
-Encryption therefore adds exactly 40 bytes. The flags are authenticated with
-the exact item key.
+authentication tag inside a client-owned envelope. Its `OKT\x01` header and
+flags add another 5 bytes, so encryption adds exactly 45 bytes. The envelope
+header and flags are authenticated with the exact item key. The wire protocol
+and server storage treat the complete envelope as opaque value bytes.

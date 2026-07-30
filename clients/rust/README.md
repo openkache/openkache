@@ -123,9 +123,10 @@ use openkache_client::ItemKey;
 let exact = ItemKey::from_bytes([0x42; 32]);
 ```
 
-`RawClient` sends `exact` without deriving or hashing it. Language adapters should depend on
-`openkache-client-core` directly; Rust applications can use the re-exported raw types when they
-already own a 32-byte item key.
+`ItemKey::from_slice` provides the same exact-byte behavior for a dynamic buffer and rejects every
+other length. `RawClient` sends the resulting key without deriving or hashing it. Language adapters
+should depend on `openkache-client-core` directly; Rust applications can use the re-exported raw
+types when they already own a 32-byte item key.
 
 ## Operations
 
@@ -188,8 +189,14 @@ async fn set(
 async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome>;
 ```
 
-`ItemValue::from_parts` preserves exact opaque bytes and client-owned compression/encryption
-metadata without exposing protocol-crate types.
+`ItemValue::new` preserves exact opaque bytes. Compression and encryption metadata
+live in the client-owned value envelope rather than the wire protocol.
+
+Plaintext mode is exact passthrough. Configured transformation values use
+`"OKT\x01" | flags:u8 | body`, where bit 0 means compressed and bit 1 means
+encrypted. Encrypted bodies contain a 24-byte nonce, ciphertext, and a 16-byte
+authentication tag. For encrypted values, the envelope header and flags are
+authenticated with the item key.
 
 ## Concurrency and connection lifecycle
 

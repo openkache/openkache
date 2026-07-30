@@ -522,8 +522,7 @@ An encoder implements these steps:
    - Robust: derive the per-item AES-GCM-SIV key, generate a 12-byte nonce, and append the 16-byte
      tag.
 8. Reject the result if the complete container exceeds the protocol value limit.
-9. Send the complete container through the raw protocol client with protocol-level compression and
-   encryption flags cleared.
+9. Send the complete container as the raw protocol operation's opaque value bytes.
 
 The encoder MUST NOT emit a length field, magic bytes, reserved algorithm identifier, or
 non-canonical VU128.
@@ -554,15 +553,16 @@ returning that error.
 
 ## Protocol and server behavior
 
-The server treats the complete container as opaque bytes. Formatted clients MUST set the existing
-protocol compression and encryption metadata to `false`; the container header is the only source
-of transform metadata for this format.
+Protocol v3 treats the complete container as an opaque request value or response payload. It
+carries no compression or encryption metadata; the container format byte is the only source of
+value-transform metadata.
 
-A formatted decoder MUST reject a version-1 container received with nonzero protocol transform
-flags. Legacy flag-based decoding is not part of this specification.
+Protocol request flags encode server-owned `SET` semantics only. They MUST NOT be interpreted as
+value compression, encryption, serialization, or container-version metadata.
 
-The low-level raw protocol API remains capable of sending exact item keys, bytes, and protocol
-flags. It is an explicit escape hatch and does not claim compatibility with formatted APIs.
+The low-level raw protocol API remains capable of sending exact item keys and value bytes without
+wrapping them in this container. It is an explicit escape hatch and does not claim compatibility
+with formatted APIs.
 
 ## Core and language responsibilities
 

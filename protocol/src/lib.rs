@@ -1,32 +1,30 @@
 //! Binary request and response framing shared by OpenKache clients and servers.
 
-/// QUIC application protocol identifier for persistent request lanes.
-pub const ALPN: &[u8] = b"openkache/2";
-/// Bytes in an encoded request header.
-pub const REQUEST_HEADER_BYTES: usize = 9;
-/// Bytes in an encoded response header.
-pub const RESPONSE_HEADER_BYTES: usize = 5;
+/// QUIC application protocol identifier for wire protocol version 3.
+pub const ALPN: &[u8] = b"openkache/3";
+/// Bytes before the variable-length request lengths.
+pub const REQUEST_FIXED_BYTES: usize = 2;
+/// Bytes before the variable-length response payload length.
+pub const RESPONSE_FIXED_BYTES: usize = 1;
+/// Maximum bytes in one unsigned `vu128` accepted by this protocol.
+pub const MAX_VARUINT_BYTES: usize = 9;
 /// Bytes in every canonical item key carried by the protocol.
 pub const ITEM_KEY_BYTES: usize = 32;
-/// Absolute value or response payload ceiling representable by protocol v2.
+/// Absolute value or response payload ceiling representable by protocol v3.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
-/// Maximum complete request frame size.
+/// Conservative maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
-    REQUEST_HEADER_BYTES + ITEM_KEY_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
-/// Maximum complete response frame size.
-pub const MAX_RESPONSE_FRAME_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_VALUE_BYTES;
+    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_KEY_BYTES + MAX_VALUE_BYTES;
+/// Conservative maximum complete response frame size.
+pub const MAX_RESPONSE_FRAME_BYTES: usize =
+    RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
 
-const REQUEST_VALUE_LENGTH_MASK: u32 = (1 << 27) - 1;
-const RESPONSE_VALUE_LENGTH_MASK: u32 = (1 << 30) - 1;
-const VALUE_COMPRESSED_BIT: u32 = 1 << 31;
-const VALUE_ENCRYPTED_BIT: u32 = 1 << 30;
-const SET_TTL_BIT: u32 = 1 << 29;
-const SET_IF_ABSENT_BIT: u32 = 1 << 28;
-const SET_IF_PRESENT_BIT: u32 = 1 << 27;
-const SET_OPTION_BITS: u32 = SET_TTL_BIT | SET_IF_ABSENT_BIT | SET_IF_PRESENT_BIT;
-const SET_TTL_BYTES: usize = std::mem::size_of::<u64>();
+const SET_TTL_FLAG: u8 = 1 << 0;
+const SET_IF_ABSENT_FLAG: u8 = 1 << 1;
+const SET_IF_PRESENT_FLAG: u8 = 1 << 2;
+const KNOWN_SET_FLAGS: u8 = SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG;
 
-/// Operations supported by protocol v2.
+/// Operations supported by protocol v3.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Opcode {
@@ -131,60 +129,6 @@ impl AsRef<[u8]> for ItemKey {
     }
 }
 
-/// Transformation metadata packed into unused high bits of the wire value length.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ValueFlags {
-    compressed: bool,
-    encrypted: bool,
-}
-
-impl ValueFlags {
-    /// No client-side value transformation.
-    pub const NONE: Self = Self::new(false, false);
-
-    /// Creates flags for one encoded value.
-    pub const fn new(compressed: bool, encrypted: bool) -> Self {
-        Self {
-            compressed,
-            encrypted,
-        }
-    }
-
-    /// Returns whether the value body is a Zstandard frame before encryption.
-    pub const fn is_compressed(self) -> bool {
-        self.compressed
-    }
-
-    /// Returns whether the value body is authenticated ciphertext.
-    pub const fn is_encrypted(self) -> bool {
-        self.encrypted
-    }
-
-    /// Returns a stable byte representation suitable for authenticated metadata.
-    pub const fn authentication_byte(self) -> u8 {
-        self.compressed as u8 | ((self.encrypted as u8) << 1)
-    }
-
-    const fn wire_bits(self) -> u32 {
-        (if self.compressed {
-            VALUE_COMPRESSED_BIT
-        } else {
-            0
-        }) | (if self.encrypted {
-            VALUE_ENCRYPTED_BIT
-        } else {
-            0
-        })
-    }
-
-    const fn from_wire_length(encoded_length: u32) -> Self {
-        Self::new(
-            encoded_length & VALUE_COMPRESSED_BIT != 0,
-            encoded_length & VALUE_ENCRYPTED_BIT != 0,
-        )
-    }
-}
-
 /// Condition applied atomically by a `SET` request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SetCondition {
@@ -218,34 +162,96 @@ impl SetOptions {
         Self { condition, ttl_ms }
     }
 
-    fn wire_bits(self) -> u32 {
+    fn flags(self) -> u8 {
         let condition = match self.condition {
             SetCondition::None => 0,
-            SetCondition::IfAbsent => SET_IF_ABSENT_BIT,
-            SetCondition::IfPresent => SET_IF_PRESENT_BIT,
+            SetCondition::IfAbsent => SET_IF_ABSENT_FLAG,
+            SetCondition::IfPresent => SET_IF_PRESENT_FLAG,
         };
         condition
             | if self.ttl_ms.is_some() {
-                SET_TTL_BIT
+                SET_TTL_FLAG
             } else {
                 0
             }
     }
+}
 
-    fn from_wire_bits(encoded_length: u32) -> Result<Self> {
-        let condition = match (
-            encoded_length & SET_IF_ABSENT_BIT != 0,
-            encoded_length & SET_IF_PRESENT_BIT != 0,
-        ) {
-            (false, false) => SetCondition::None,
-            (true, false) => SetCondition::IfAbsent,
-            (false, true) => SetCondition::IfPresent,
-            (true, true) => return Err(ProtocolError::ConflictingSetConditions),
+/// A validated variable-length request header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestHeader {
+    opcode: Opcode,
+    encoded_len: usize,
+    key_len: usize,
+    value_len: usize,
+    condition: SetCondition,
+    has_ttl: bool,
+}
+
+impl RequestHeader {
+    /// Returns the decoded operation.
+    pub const fn opcode(self) -> Opcode {
+        self.opcode
+    }
+
+    /// Returns the number of encoded header bytes before the key.
+    pub const fn encoded_len(self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns the encoded key length.
+    pub const fn key_len(self) -> usize {
+        self.key_len
+    }
+
+    /// Returns the opaque value length.
+    pub const fn value_len(self) -> usize {
+        self.value_len
+    }
+
+    /// Returns whether a TTL varuint follows the key.
+    pub const fn has_ttl(self) -> bool {
+        self.has_ttl
+    }
+
+    /// Reports the complete frame length once enough key and TTL prefix bytes are present.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Frame bytes beginning at the opcode and extending through the TTL when present.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(length))` when the complete frame length is known, or `Ok(None)` when more prefix
+    /// bytes are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a malformed, non-canonical, zero, or overflowing TTL.
+    pub fn frame_len(self, prefix: &[u8]) -> Result<Option<usize>> {
+        let key_end = self
+            .encoded_len
+            .checked_add(self.key_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        if prefix.len() < key_end {
+            return Ok(None);
+        }
+        let ttl_len = if self.has_ttl {
+            let Some((ttl_ms, encoded_len)) = decode_varuint(&prefix[key_end..], "SET TTL")? else {
+                return Ok(None);
+            };
+            if ttl_ms == 0 {
+                return Err(ProtocolError::InvalidSetTtl);
+            }
+            encoded_len
+        } else {
+            0
         };
-        Ok(Self {
-            condition,
-            ttl_ms: None,
-        })
+        key_end
+            .checked_add(ttl_len)
+            .and_then(|size| size.checked_add(self.value_len))
+            .map(Some)
+            .ok_or(ProtocolError::FrameLengthOverflow)
     }
 }
 
@@ -254,81 +260,102 @@ impl SetOptions {
 pub struct Request {
     pub opcode: Opcode,
     pub key: Option<ItemKey>,
-    pub value_flags: ValueFlags,
     pub set_options: SetOptions,
     pub value: Vec<u8>,
 }
 
 impl Request {
-    /// Returns the value payload length encoded by a fixed-size request header.
-    pub fn value_len_from_header(header: &[u8]) -> Result<usize> {
-        if header.len() < REQUEST_HEADER_BYTES {
-            return Err(ProtocolError::FrameTooShort {
-                expected: REQUEST_HEADER_BYTES,
-                actual: header.len(),
-            });
+    /// Decodes and validates a request header when enough prefix bytes are available.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Frame bytes beginning at the opcode.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(header))` after both canonical length fields are present, or `Ok(None)` when more
+    /// bytes are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown opcode, invalid flags, malformed lengths, an unsupported
+    /// key length, or an oversized value.
+    pub fn decode_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
+        if prefix.len() < REQUEST_FIXED_BYTES {
+            return Ok(None);
         }
-        let encoded_value_len = u32::from_be_bytes(header[5..9].try_into().unwrap());
-        Ok((encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize)
+        let opcode = Opcode::try_from(prefix[0])?;
+        let (condition, has_ttl) = decode_request_flags(opcode, prefix[1])?;
+        let Some((key_len, key_len_bytes)) =
+            decode_varuint(&prefix[REQUEST_FIXED_BYTES..], "request key length")?
+        else {
+            return Ok(None);
+        };
+        let value_len_start = REQUEST_FIXED_BYTES + key_len_bytes;
+        let Some((value_len, value_len_bytes)) =
+            decode_varuint(&prefix[value_len_start..], "request value length")?
+        else {
+            return Ok(None);
+        };
+        let key_len = usize::try_from(key_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+        let value_len =
+            usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+        validate_item_key_length(opcode, key_len)?;
+        validate_value_length(value_len)?;
+        validate_request_shape(
+            opcode,
+            key_len != 0,
+            SetOptions::new(condition, None),
+            value_len,
+        )?;
+        Ok(Some(RequestHeader {
+            opcode,
+            encoded_len: value_len_start + value_len_bytes,
+            key_len,
+            value_len,
+            condition,
+            has_ttl,
+        }))
     }
 
-    /// Returns the complete frame length encoded by a fixed-size request header.
-    pub fn frame_len_from_header(header: &[u8]) -> Result<usize> {
-        if header.len() < REQUEST_HEADER_BYTES {
-            return Err(ProtocolError::FrameTooShort {
-                expected: REQUEST_HEADER_BYTES,
-                actual: header.len(),
-            });
-        }
-        let opcode = Opcode::try_from(header[0])?;
-        let key_len = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
-        let encoded_value_len = u32::from_be_bytes(header[5..9].try_into().unwrap());
-        validate_set_option_bits(opcode, encoded_value_len)?;
-        let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
-        validate_lengths(value_len)?;
-        validate_item_key_length(opcode, key_len)?;
-        REQUEST_HEADER_BYTES
-            .checked_add(key_len)
-            .and_then(|size| {
-                size.checked_add(if encoded_value_len & SET_TTL_BIT != 0 {
-                    SET_TTL_BYTES
-                } else {
-                    0
-                })
-            })
-            .and_then(|size| size.checked_add(value_len))
-            .ok_or(ProtocolError::FrameLengthOverflow)
+    /// Reports the complete request frame length once its variable prefix is available.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Frame bytes beginning at the opcode.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(length))` when the key and optional TTL prefix are complete, or `Ok(None)` when
+    /// more prefix bytes are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the header, key length, value length, flags, or TTL is invalid.
+    pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
+        let Some(header) = Self::decode_header(prefix)? else {
+            return Ok(None);
+        };
+        header.frame_len(prefix)
     }
 
     /// Creates and validates a request.
     pub fn new(opcode: Opcode, key: Option<ItemKey>, value: Vec<u8>) -> Result<Self> {
-        Self::new_with_value_flags(opcode, key, ValueFlags::NONE, value)
+        Self::new_set(opcode, key, SetOptions::NONE, value)
     }
 
-    /// Creates and validates a request with explicit value transformation flags.
-    pub fn new_with_value_flags(
-        opcode: Opcode,
-        key: Option<ItemKey>,
-        value_flags: ValueFlags,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        Self::new_set(opcode, key, value_flags, SetOptions::NONE, value)
-    }
-
-    /// Creates and validates a request with explicit value and `SET` options.
+    /// Creates and validates a request with explicit `SET` options.
     pub fn new_set(
         opcode: Opcode,
         key: Option<ItemKey>,
-        value_flags: ValueFlags,
         set_options: SetOptions,
         value: Vec<u8>,
     ) -> Result<Self> {
-        validate_lengths(value.len())?;
-        validate_request_shape(opcode, key.is_some(), value_flags, set_options, value.len())?;
+        validate_value_length(value.len())?;
+        validate_request_shape(opcode, key.is_some(), set_options, value.len())?;
         Ok(Self {
             opcode,
             key,
-            value_flags,
             set_options,
             value,
         })
@@ -336,65 +363,77 @@ impl Request {
 
     /// Encodes this request into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        validate_lengths(self.value.len())?;
+        validate_value_length(self.value.len())?;
         validate_request_shape(
             self.opcode,
             self.key.is_some(),
-            self.value_flags,
             self.set_options,
             self.value.len(),
         )?;
         let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
-        let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
-        let mut frame =
-            Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + ttl_len + self.value.len());
+        let mut key_len_encoded = [0; MAX_VARUINT_BYTES];
+        let key_len_bytes = vu128::encode_u64(&mut key_len_encoded, key_len as u64);
+        let mut value_len_encoded = [0; MAX_VARUINT_BYTES];
+        let value_len_bytes = vu128::encode_u64(&mut value_len_encoded, self.value.len() as u64);
+        let mut ttl_encoded = [0; MAX_VARUINT_BYTES];
+        let ttl_bytes = self
+            .set_options
+            .ttl_ms
+            .map_or(0, |ttl_ms| vu128::encode_u64(&mut ttl_encoded, ttl_ms));
+        let prefix_len =
+            REQUEST_FIXED_BYTES + key_len_bytes + value_len_bytes + key_len + ttl_bytes;
+        let mut frame = Vec::with_capacity(prefix_len + self.value.len());
         frame.push(self.opcode as u8);
-        frame.extend_from_slice(&(key_len as u32).to_be_bytes());
-        frame.extend_from_slice(
-            &encode_request_value_length(self.value.len(), self.value_flags, self.set_options)
-                .to_be_bytes(),
-        );
+        frame.push(self.set_options.flags());
+        frame.extend_from_slice(&key_len_encoded[..key_len_bytes]);
+        frame.extend_from_slice(&value_len_encoded[..value_len_bytes]);
         if let Some(key) = self.key {
             frame.extend_from_slice(key.as_bytes());
         }
-        if let Some(ttl_ms) = self.set_options.ttl_ms {
-            frame.extend_from_slice(&ttl_ms.to_be_bytes());
-        }
+        frame.extend_from_slice(&ttl_encoded[..ttl_bytes]);
         frame.extend_from_slice(&self.value);
         Ok(frame)
     }
 
     /// Encodes this request while reusing its value allocation when practical.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
-        validate_lengths(self.value.len())?;
+        validate_value_length(self.value.len())?;
         validate_request_shape(
             self.opcode,
             self.key.is_some(),
-            self.value_flags,
             self.set_options,
             self.value.len(),
         )?;
         let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
-        let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
-        let prefix_len = REQUEST_HEADER_BYTES + key_len + ttl_len;
+        let mut key_len_encoded = [0; MAX_VARUINT_BYTES];
+        let key_len_bytes = vu128::encode_u64(&mut key_len_encoded, key_len as u64);
+        let mut value_len_encoded = [0; MAX_VARUINT_BYTES];
+        let value_len_bytes = vu128::encode_u64(&mut value_len_encoded, self.value.len() as u64);
+        let mut ttl_encoded = [0; MAX_VARUINT_BYTES];
+        let ttl_bytes = self
+            .set_options
+            .ttl_ms
+            .map_or(0, |ttl_ms| vu128::encode_u64(&mut ttl_encoded, ttl_ms));
+        let prefix_len =
+            REQUEST_FIXED_BYTES + key_len_bytes + value_len_bytes + key_len + ttl_bytes;
         let value_len = self.value.len();
         self.value.reserve(prefix_len);
         self.value.resize(prefix_len + value_len, 0);
         self.value.copy_within(0..value_len, prefix_len);
         self.value[0] = self.opcode as u8;
-        self.value[1..5].copy_from_slice(&(key_len as u32).to_be_bytes());
-        self.value[5..9].copy_from_slice(
-            &encode_request_value_length(value_len, self.value_flags, self.set_options)
-                .to_be_bytes(),
-        );
+        self.value[1] = self.set_options.flags();
+        let mut offset = REQUEST_FIXED_BYTES;
+        self.value[offset..offset + key_len_bytes]
+            .copy_from_slice(&key_len_encoded[..key_len_bytes]);
+        offset += key_len_bytes;
+        self.value[offset..offset + value_len_bytes]
+            .copy_from_slice(&value_len_encoded[..value_len_bytes]);
+        offset += value_len_bytes;
         if let Some(key) = self.key {
-            self.value[REQUEST_HEADER_BYTES..REQUEST_HEADER_BYTES + key_len]
-                .copy_from_slice(key.as_bytes());
+            self.value[offset..offset + key_len].copy_from_slice(key.as_bytes());
+            offset += key_len;
         }
-        if let Some(ttl_ms) = self.set_options.ttl_ms {
-            self.value[REQUEST_HEADER_BYTES + key_len..prefix_len]
-                .copy_from_slice(&ttl_ms.to_be_bytes());
-        }
+        self.value[offset..offset + ttl_bytes].copy_from_slice(&ttl_encoded[..ttl_bytes]);
         Ok(self.value)
     }
 
@@ -404,7 +443,6 @@ impl Request {
         Ok(Self {
             opcode: decoded.opcode,
             key: decoded.key,
-            value_flags: decoded.value_flags,
             set_options: decoded.set_options,
             value: frame[decoded.value_start..].to_vec(),
         })
@@ -418,7 +456,6 @@ impl Request {
         Ok(Self {
             opcode: decoded.opcode,
             key: decoded.key,
-            value_flags: decoded.value_flags,
             set_options: decoded.set_options,
             value: frame,
         })
@@ -428,137 +465,180 @@ impl Request {
 struct DecodedRequestFrame {
     opcode: Opcode,
     key: Option<ItemKey>,
-    value_flags: ValueFlags,
     set_options: SetOptions,
     value_start: usize,
     value_len: usize,
 }
 
 fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
-    if frame.len() < REQUEST_HEADER_BYTES {
-        return Err(ProtocolError::FrameTooShort {
-            expected: REQUEST_HEADER_BYTES,
+    let header = Request::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
+        expected: REQUEST_FIXED_BYTES + 2,
+        actual: frame.len(),
+    })?;
+    let expected = header
+        .frame_len(frame)?
+        .ok_or(ProtocolError::FrameTooShort {
+            expected: header.encoded_len + header.key_len + usize::from(header.has_ttl),
             actual: frame.len(),
-        });
-    }
-    let opcode = Opcode::try_from(frame[0])?;
-    let key_len = u32::from_be_bytes(frame[1..5].try_into().unwrap()) as usize;
-    let encoded_value_len = u32::from_be_bytes(frame[5..9].try_into().unwrap());
-    validate_set_option_bits(opcode, encoded_value_len)?;
-    let value_flags = ValueFlags::from_wire_length(encoded_value_len);
-    let mut set_options = SetOptions::from_wire_bits(encoded_value_len)?;
-    let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
-    validate_lengths(value_len)?;
-    validate_item_key_length(opcode, key_len)?;
-    let expected = Request::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
+        })?;
     if frame.len() != expected {
         return Err(ProtocolError::FrameLength {
             expected,
             actual: frame.len(),
         });
     }
-    let has_ttl = encoded_value_len & SET_TTL_BIT != 0;
-    let key_end = REQUEST_HEADER_BYTES + key_len;
-    let key = if key_len == 0 {
+    let key_end = header.encoded_len + header.key_len;
+    let key = if header.key_len == 0 {
         None
     } else {
         Some(ItemKey::new(
-            frame[REQUEST_HEADER_BYTES..key_end]
+            frame[header.encoded_len..key_end]
                 .try_into()
-                .expect("validated key length"),
+                .expect("validated item key length"),
         ))
     };
-    let value_start = if has_ttl {
-        let ttl_end = key_end + SET_TTL_BYTES;
-        let ttl_ms = u64::from_be_bytes(
-            frame[key_end..ttl_end]
-                .try_into()
-                .expect("validated SET TTL length"),
-        );
-        if ttl_ms == 0 {
-            return Err(ProtocolError::InvalidSetTtl);
-        }
+    let mut set_options = SetOptions::new(header.condition, None);
+    let value_start = if header.has_ttl {
+        let (ttl_ms, ttl_len) = decode_varuint(&frame[key_end..], "SET TTL")?
+            .expect("frame length requires a complete TTL");
         set_options.ttl_ms = Some(ttl_ms);
-        ttl_end
+        key_end + ttl_len
     } else {
         key_end
     };
-    validate_request_shape(opcode, key_len != 0, value_flags, set_options, value_len)?;
+    validate_request_shape(
+        header.opcode,
+        header.key_len != 0,
+        set_options,
+        header.value_len,
+    )?;
     Ok(DecodedRequestFrame {
-        opcode,
+        opcode: header.opcode,
         key,
-        value_flags,
         set_options,
         value_start,
-        value_len,
+        value_len: header.value_len,
     })
+}
+
+/// A validated variable-length response header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseHeader {
+    status: Status,
+    encoded_len: usize,
+    payload_len: usize,
+}
+
+impl ResponseHeader {
+    /// Returns the decoded status.
+    pub const fn status(self) -> Status {
+        self.status
+    }
+
+    /// Returns the number of encoded header bytes before the payload.
+    pub const fn encoded_len(self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns the response payload length.
+    pub const fn payload_len(self) -> usize {
+        self.payload_len
+    }
+
+    /// Returns the complete response frame length.
+    ///
+    /// # Returns
+    ///
+    /// The encoded header length plus the opaque payload length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the complete length cannot be represented as a `usize`.
+    pub fn frame_len(self) -> Result<usize> {
+        self.encoded_len
+            .checked_add(self.payload_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    }
 }
 
 /// A decoded OpenKache response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Response {
     pub status: Status,
-    pub value_flags: ValueFlags,
     pub payload: Vec<u8>,
 }
 
 impl Response {
-    /// Returns the complete frame length encoded by a fixed-size response header.
-    pub fn frame_len_from_header(header: &[u8]) -> Result<usize> {
-        if header.len() < RESPONSE_HEADER_BYTES {
-            return Err(ProtocolError::FrameTooShort {
-                expected: RESPONSE_HEADER_BYTES,
-                actual: header.len(),
-            });
+    /// Decodes and validates a response header when enough prefix bytes are available.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Frame bytes beginning at the status.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(header))` after the canonical payload length is present, or `Ok(None)` when more
+    /// bytes are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown status, malformed length, or oversized payload.
+    pub fn decode_header(prefix: &[u8]) -> Result<Option<ResponseHeader>> {
+        if prefix.len() < RESPONSE_FIXED_BYTES {
+            return Ok(None);
         }
-        Status::try_from(header[0])?;
-        let encoded_payload_len = u32::from_be_bytes(header[1..5].try_into().unwrap());
-        let payload_len = (encoded_payload_len & RESPONSE_VALUE_LENGTH_MASK) as usize;
-        validate_lengths(payload_len)?;
-        RESPONSE_HEADER_BYTES
-            .checked_add(payload_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)
+        let status = Status::try_from(prefix[0])?;
+        let Some((payload_len, payload_len_bytes)) =
+            decode_varuint(&prefix[RESPONSE_FIXED_BYTES..], "response payload length")?
+        else {
+            return Ok(None);
+        };
+        let payload_len =
+            usize::try_from(payload_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+        validate_value_length(payload_len)?;
+        Ok(Some(ResponseHeader {
+            status,
+            encoded_len: RESPONSE_FIXED_BYTES + payload_len_bytes,
+            payload_len,
+        }))
+    }
+
+    /// Reports the complete response frame length once its variable prefix is available.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Frame bytes beginning at the status.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(Some(length))` when the canonical payload length is complete, or `Ok(None)` when more
+    /// prefix bytes are required.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the status or payload length is invalid or the complete length
+    /// overflows.
+    pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
+        Self::decode_header(prefix)?
+            .map(ResponseHeader::frame_len)
+            .transpose()
     }
 
     /// Creates a response after checking the payload limit.
     pub fn new(status: Status, payload: Vec<u8>) -> Result<Self> {
-        Self::new_with_value_flags(status, ValueFlags::NONE, payload)
-    }
-
-    /// Creates a response with explicit value transformation flags.
-    pub fn new_with_value_flags(
-        status: Status,
-        value_flags: ValueFlags,
-        payload: Vec<u8>,
-    ) -> Result<Self> {
-        if payload.len() > MAX_VALUE_BYTES {
-            return Err(ProtocolError::ValueTooLarge {
-                size: payload.len(),
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-        validate_response_flags(status, value_flags, payload.len())?;
-        Ok(Self {
-            status,
-            value_flags,
-            payload,
-        })
+        validate_value_length(payload.len())?;
+        Ok(Self { status, payload })
     }
 
     /// Encodes this response into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if self.payload.len() > MAX_VALUE_BYTES {
-            return Err(ProtocolError::ValueTooLarge {
-                size: self.payload.len(),
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-        let mut frame = Vec::with_capacity(RESPONSE_HEADER_BYTES + self.payload.len());
+        validate_value_length(self.payload.len())?;
+        let mut length = [0; MAX_VARUINT_BYTES];
+        let length_bytes = vu128::encode_u64(&mut length, self.payload.len() as u64);
+        let mut frame =
+            Vec::with_capacity(RESPONSE_FIXED_BYTES + length_bytes + self.payload.len());
         frame.push(self.status as u8);
-        validate_response_flags(self.status, self.value_flags, self.payload.len())?;
-        frame.extend_from_slice(
-            &encode_value_length(self.payload.len(), self.value_flags).to_be_bytes(),
-        );
+        frame.extend_from_slice(&length[..length_bytes]);
         frame.extend_from_slice(&self.payload);
         Ok(frame)
     }
@@ -571,99 +651,57 @@ impl Response {
     ///
     /// # Errors
     ///
-    /// Returns an error when the payload exceeds the protocol limit or its value flags are
-    /// invalid for the response status.
+    /// Returns an error when the payload exceeds the protocol limit.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
-        if self.payload.len() > MAX_VALUE_BYTES {
-            return Err(ProtocolError::ValueTooLarge {
-                size: self.payload.len(),
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
+        validate_value_length(self.payload.len())?;
         let payload_len = self.payload.len();
-        validate_response_flags(self.status, self.value_flags, payload_len)?;
-        if self.payload.capacity() - payload_len < RESPONSE_HEADER_BYTES {
-            let mut frame = Vec::with_capacity(RESPONSE_HEADER_BYTES + payload_len);
-            frame.push(self.status as u8);
-            frame.extend_from_slice(
-                &encode_value_length(payload_len, self.value_flags).to_be_bytes(),
-            );
-            frame.extend_from_slice(&self.payload);
-            return Ok(frame);
-        }
-        self.payload.resize(RESPONSE_HEADER_BYTES + payload_len, 0);
-        self.payload
-            .copy_within(0..payload_len, RESPONSE_HEADER_BYTES);
+        let mut length = [0; MAX_VARUINT_BYTES];
+        let length_bytes = vu128::encode_u64(&mut length, payload_len as u64);
+        let prefix_len = RESPONSE_FIXED_BYTES + length_bytes;
+        self.payload.reserve(prefix_len);
+        self.payload.resize(prefix_len + payload_len, 0);
+        self.payload.copy_within(0..payload_len, prefix_len);
         self.payload[0] = self.status as u8;
-        self.payload[1..RESPONSE_HEADER_BYTES]
-            .copy_from_slice(&encode_value_length(payload_len, self.value_flags).to_be_bytes());
+        self.payload[RESPONSE_FIXED_BYTES..prefix_len].copy_from_slice(&length[..length_bytes]);
         Ok(self.payload)
     }
 
     /// Decodes and validates one complete response frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
-        if frame.len() < RESPONSE_HEADER_BYTES {
-            return Err(ProtocolError::FrameTooShort {
-                expected: RESPONSE_HEADER_BYTES,
-                actual: frame.len(),
-            });
-        }
-        let status = Status::try_from(frame[0])?;
-        let encoded_payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap());
-        let value_flags = ValueFlags::from_wire_length(encoded_payload_len);
-        let payload_len = (encoded_payload_len & RESPONSE_VALUE_LENGTH_MASK) as usize;
-        if payload_len > MAX_VALUE_BYTES {
-            return Err(ProtocolError::ValueTooLarge {
-                size: payload_len,
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-        let expected = Self::frame_len_from_header(&frame[..RESPONSE_HEADER_BYTES])?;
+        let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
+            expected: RESPONSE_FIXED_BYTES + 1,
+            actual: frame.len(),
+        })?;
+        let expected = header.frame_len()?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,
                 actual: frame.len(),
             });
         }
-        validate_response_flags(status, value_flags, payload_len)?;
         Ok(Self {
-            status,
-            value_flags,
-            payload: frame[RESPONSE_HEADER_BYTES..].to_vec(),
+            status: header.status,
+            payload: frame[header.encoded_len..].to_vec(),
         })
     }
 
     /// Decodes a response while reusing the frame allocation for its payload.
     pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
-        if frame.len() < RESPONSE_HEADER_BYTES {
-            return Err(ProtocolError::FrameTooShort {
-                expected: RESPONSE_HEADER_BYTES,
-                actual: frame.len(),
-            });
-        }
-        let status = Status::try_from(frame[0])?;
-        let encoded_payload_len = u32::from_be_bytes(frame[1..5].try_into().unwrap());
-        let value_flags = ValueFlags::from_wire_length(encoded_payload_len);
-        let payload_len = (encoded_payload_len & RESPONSE_VALUE_LENGTH_MASK) as usize;
-        if payload_len > MAX_VALUE_BYTES {
-            return Err(ProtocolError::ValueTooLarge {
-                size: payload_len,
-                maximum: MAX_VALUE_BYTES,
-            });
-        }
-        let expected = Self::frame_len_from_header(&frame[..RESPONSE_HEADER_BYTES])?;
+        let header = Self::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
+            expected: RESPONSE_FIXED_BYTES + 1,
+            actual: frame.len(),
+        })?;
+        let expected = header.frame_len()?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,
                 actual: frame.len(),
             });
         }
-        validate_response_flags(status, value_flags, payload_len)?;
-        frame.copy_within(RESPONSE_HEADER_BYTES.., 0);
-        frame.truncate(payload_len);
+        frame.copy_within(header.encoded_len.., 0);
+        frame.truncate(header.payload_len);
         Ok(Self {
-            status,
-            value_flags,
+            status: header.status,
             payload: frame,
         })
     }
@@ -676,12 +714,18 @@ pub enum ProtocolError {
     UnknownOpcode(u8),
     #[error("unknown status 0x{0:02x}")]
     UnknownStatus(u8),
+    #[error("request flags contain unknown bits 0x{0:02x}")]
+    UnknownRequestFlags(u8),
     #[error("frame is too short: expected at least {expected} bytes, got {actual}")]
     FrameTooShort { expected: usize, actual: usize },
     #[error("frame length does not match header: expected {expected} bytes, got {actual}")]
     FrameLength { expected: usize, actual: usize },
     #[error("frame length overflow")]
     FrameLengthOverflow,
+    #[error("{context} uses a non-canonical vu128 encoding")]
+    NonCanonicalVaruint { context: &'static str },
+    #[error("{context} exceeds the supported 64-bit vu128 range")]
+    VaruintOverflow { context: &'static str },
     #[error("{opcode:?} requires a {expected}-byte item key, received {actual} key bytes")]
     InvalidItemKeyLength {
         opcode: Opcode,
@@ -696,8 +740,6 @@ pub enum ProtocolError {
         expected_key: &'static str,
         expected_value: &'static str,
     },
-    #[error("value transformation flags are not valid for {context}")]
-    InvalidValueFlags { context: &'static str },
     #[error("if-absent and if-present conditions cannot be combined")]
     ConflictingSetConditions,
     #[error("SET TTL must be greater than zero milliseconds")]
@@ -709,7 +751,50 @@ pub enum ProtocolError {
 /// Convenience result type for protocol operations.
 pub type Result<T> = std::result::Result<T, ProtocolError>;
 
-fn validate_lengths(value_len: usize) -> Result<()> {
+fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, usize)>> {
+    let Some(&first) = input.first() else {
+        return Ok(None);
+    };
+    let encoded_len = vu128::encoded_len(first);
+    if encoded_len > MAX_VARUINT_BYTES {
+        return Err(ProtocolError::VaruintOverflow { context });
+    }
+    if input.len() < encoded_len {
+        return Ok(None);
+    }
+    let mut encoded = [0; MAX_VARUINT_BYTES];
+    encoded[..encoded_len].copy_from_slice(&input[..encoded_len]);
+    let (value, decoded_len) = vu128::decode_u64(&encoded);
+    debug_assert_eq!(decoded_len, encoded_len);
+
+    let mut canonical = [0; MAX_VARUINT_BYTES];
+    let canonical_len = vu128::encode_u64(&mut canonical, value);
+    if canonical_len != encoded_len || canonical[..canonical_len] != input[..encoded_len] {
+        return Err(ProtocolError::NonCanonicalVaruint { context });
+    }
+    Ok(Some((value, encoded_len)))
+}
+
+fn decode_request_flags(opcode: Opcode, flags: u8) -> Result<(SetCondition, bool)> {
+    if flags & !KNOWN_SET_FLAGS != 0 {
+        return Err(ProtocolError::UnknownRequestFlags(flags & !KNOWN_SET_FLAGS));
+    }
+    if opcode != Opcode::Set && flags != 0 {
+        return Err(ProtocolError::InvalidSetOptions { opcode });
+    }
+    let condition = match (
+        flags & SET_IF_ABSENT_FLAG != 0,
+        flags & SET_IF_PRESENT_FLAG != 0,
+    ) {
+        (false, false) => SetCondition::None,
+        (true, false) => SetCondition::IfAbsent,
+        (false, true) => SetCondition::IfPresent,
+        (true, true) => return Err(ProtocolError::ConflictingSetConditions),
+    };
+    Ok((condition, flags & SET_TTL_FLAG != 0))
+}
+
+fn validate_value_length(value_len: usize) -> Result<()> {
     if value_len > MAX_VALUE_BYTES {
         return Err(ProtocolError::ValueTooLarge {
             size: value_len,
@@ -717,25 +802,6 @@ fn validate_lengths(value_len: usize) -> Result<()> {
         });
     }
     Ok(())
-}
-
-fn encode_value_length(value_len: usize, value_flags: ValueFlags) -> u32 {
-    value_len as u32 | value_flags.wire_bits()
-}
-
-fn encode_request_value_length(
-    value_len: usize,
-    value_flags: ValueFlags,
-    set_options: SetOptions,
-) -> u32 {
-    value_len as u32 | value_flags.wire_bits() | set_options.wire_bits()
-}
-
-fn validate_set_option_bits(opcode: Opcode, encoded_value_len: u32) -> Result<()> {
-    if opcode != Opcode::Set && encoded_value_len & SET_OPTION_BITS != 0 {
-        return Err(ProtocolError::InvalidSetOptions { opcode });
-    }
-    SetOptions::from_wire_bits(encoded_value_len).map(|_| ())
 }
 
 fn validate_item_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
@@ -757,7 +823,6 @@ fn validate_item_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
 fn validate_request_shape(
     opcode: Opcode,
     has_client_key: bool,
-    value_flags: ValueFlags,
     set_options: SetOptions,
     value_len: usize,
 ) -> Result<()> {
@@ -768,12 +833,8 @@ fn validate_request_shape(
         return Err(ProtocolError::InvalidSetOptions { opcode });
     }
     let valid = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => {
-            !has_client_key && value_len == 0 && value_flags == ValueFlags::NONE
-        }
-        Opcode::Get | Opcode::Delete => {
-            has_client_key && value_len == 0 && value_flags == ValueFlags::NONE
-        }
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_client_key && value_len == 0,
+        Opcode::Get | Opcode::Delete => has_client_key && value_len == 0,
         Opcode::Set => has_client_key,
     };
     if valid {
@@ -789,18 +850,4 @@ fn validate_request_shape(
         expected_key,
         expected_value,
     })
-}
-
-fn validate_response_flags(
-    status: Status,
-    value_flags: ValueFlags,
-    payload_len: usize,
-) -> Result<()> {
-    if value_flags == ValueFlags::NONE || (status == Status::Ok && payload_len > 0) {
-        Ok(())
-    } else {
-        Err(ProtocolError::InvalidValueFlags {
-            context: "response status or empty payload",
-        })
-    }
 }

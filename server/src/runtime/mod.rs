@@ -425,7 +425,7 @@ impl ThreadedKvkache {
         let worker = self.owner(&storage_key);
         match self.request(worker, |response| WorkerRequest::Set {
             storage_key,
-            value: StoredItemValue::plain(value),
+            value: StoredItemValue::new(value),
             options: SetOptions::NONE,
             response,
         })? {
@@ -628,7 +628,7 @@ impl ThreadedKvkache {
                 BenchmarkOperation::Set(_, value) => (
                     WorkerRequest::Set {
                         storage_key,
-                        value: StoredItemValue::plain(value),
+                        value: StoredItemValue::new(value),
                         options: SetOptions::NONE,
                         response: WorkerResponseSender::channel(response_tx),
                     },

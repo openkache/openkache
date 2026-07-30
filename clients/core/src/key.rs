@@ -26,6 +26,32 @@ impl ItemKey {
         Self(bytes)
     }
 
+    /// Copies an exact item key from a language binding or dynamic buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Exactly 32 opaque item-key bytes.
+    ///
+    /// # Returns
+    ///
+    /// An item key that preserves the supplied bytes without hashing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `bytes` does not contain exactly 32 bytes.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        let exact: &[u8; ITEM_KEY_BYTES] = bytes.try_into().map_err(|_| {
+            Error::configuration(
+                "item_key",
+                format!(
+                    "must contain exactly {ITEM_KEY_BYTES} bytes, got {}",
+                    bytes.len()
+                ),
+            )
+        })?;
+        Ok(Self::from_bytes(*exact))
+    }
+
     /// Returns the exact wire bytes.
     pub const fn as_bytes(&self) -> &[u8; ITEM_KEY_BYTES] {
         &self.0

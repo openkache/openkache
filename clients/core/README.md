@@ -14,7 +14,8 @@ keys and values.
 - `ProtectedClient` and `LocalProtectedClient` compose raw operations with mandatory
   application-key hiding and value encryption.
 - `ItemKey` is the exact 32-byte item identifier sent over the wire.
-- `ItemValue` carries exact bytes plus compression and encryption metadata.
+- `ItemValue` carries exact opaque bytes. Compression and encryption metadata, when used, live
+  inside the client-owned value envelope.
 - `DataProtection`, `DataProtectionKey`, `ValueCodec`, and `value_envelope` remain reusable
   primitives for custom low-level integrations.
 
@@ -44,9 +45,24 @@ let outcome = client
     .await?;
 ```
 
-`ItemKey::from_bytes` is the only raw-key constructor and preserves caller-supplied bytes exactly.
-Use `DataProtectionKey::derive_item_key` or `DataProtection::item_key` when a language adapter
-needs the shared HMAC-SHA-256 derivation.
+`ItemKey::from_bytes` preserves a Rust array directly, while `ItemKey::from_slice` validates and
+copies a dynamic language-binding buffer. Neither constructor hashes the supplied bytes. Use
+`DataProtectionKey::derive_item_key` or `DataProtection::item_key` when a language adapter needs
+the shared HMAC-SHA-256 derivation.
+
+Plaintext `ValueCodec` mode is exact passthrough. When compression or encryption
+is configured, the codec stores its metadata inside the opaque value:
+
+```text
+"OKT\x01" | flags:u8 | body
+
+flags bit 0 = compressed
+flags bit 1 = encrypted
+encrypted body = nonce[24] | ciphertext | authentication_tag[16]
+```
+
+For encrypted values, the header and flags are authenticated with the item key.
+Neither the wire protocol nor the server parses this envelope.
 
 ## Configuration
 

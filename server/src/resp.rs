@@ -12,7 +12,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{ItemKey, SetOptions, ValueFlags};
+use openkache_protocol::{ItemKey, SetOptions};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -403,10 +403,7 @@ async fn execute_command(
         Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
             [_, key] => match cache.get_async(resp_item_key(key)).await {
-                Ok(Some(value)) if value.flags == ValueFlags::NONE => {
-                    bulk(response, Some(&value.bytes));
-                }
-                Ok(Some(_)) => error(response, "RESP cannot decode transformed client values"),
+                Ok(Some(value)) => bulk(response, Some(&value.bytes)),
                 Ok(None) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
@@ -416,7 +413,7 @@ async fn execute_command(
             [_, key, value] => match cache
                 .set_async_with_options(
                     resp_item_key(key),
-                    StoredItemValue::plain(value.to_vec()),
+                    StoredItemValue::new(value.to_vec()),
                     SetOptions::NONE,
                 )
                 .await

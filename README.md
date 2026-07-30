@@ -75,13 +75,15 @@ The server listens on `127.0.0.1:4433`, stores shard files under
 `target/kvkache-v1`, and writes an ephemeral
 self-signed certificate to
 `target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
-`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/2` QUIC
+`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned `openkache/3` QUIC
 protocol. `SET` accepts an optional millisecond TTL and atomic `if_absent` or
 `if_present` existence condition. Expired values are treated as absent
 immediately, while their SSD space is reclaimed when the containing Segment
 Group is reused. `SYNC` flushes each SSD worker before acknowledging the
 request. Pass `--port <port>` only when overriding the default port, or pass
 `--config <path>` to load an explicit TOML cache configuration.
+The complete byte-level contract is the
+[wire protocol v3 specification](./protocol/SPEC.md).
 
 The default loopback endpoint accepts unauthenticated clients and grants them
 administrative commands for local development. `--insecure-development` is
@@ -222,7 +224,7 @@ recreation.
 └──────────────┘                                     │  │ (Hugepage/NUMA)│  │
                                                      │  ├────────────────┤  │
                                                      │  │ KV Engine      │  │
-                                                     │  │ (SHA-256 keys) │  │
+                                                     │  │ (32-byte keys) │  │
                                                      │  ├────────────────┤  │
                                                      │  │ SSD Engine     │  │
                                                      │  └────────────────┘  │
@@ -316,7 +318,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 |---|---|---|
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
-| QUIC client (Rust) | 🚧 Preview | Compio QUIC, binary protocol v2, secure value codec |
+| QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v3, secure value codec |
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | QUIC client (.NET) | 🚧 Preview | Managed `System.Net.Quic`, binary protocol v2 |

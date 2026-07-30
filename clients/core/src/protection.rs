@@ -43,7 +43,7 @@ impl DataProtection {
     ///
     /// # Returns
     ///
-    /// Encrypted wire bytes with transformation metadata.
+    /// Opaque encrypted bytes containing the client-owned transformation envelope.
     ///
     /// # Errors
     ///
@@ -62,7 +62,7 @@ impl DataProtection {
     ///
     /// # Returns
     ///
-    /// Encrypted wire bytes with transformation metadata.
+    /// Opaque encrypted bytes containing the client-owned transformation envelope.
     ///
     /// # Errors
     ///
