@@ -27,7 +27,8 @@ bun run typecheck
 bun run pack:check
 ```
 
-`build` generates ignored JavaScript and declaration files under `dist/`.
+`build` requires Smithy CLI on `PATH` and generates the service API contract
+before compiling ignored JavaScript and declaration files under `dist/`.
 `pack:check` cross-compiles the Rust Node-API adapter and previews the complete
 npm package. Generated output is not committed.
 

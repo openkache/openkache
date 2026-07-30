@@ -28,7 +28,7 @@ macro_rules! wire_enum {
     };
 }
 
-include!("generated/wire_values.rs");
+include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
 const MIN_VARUINT_BYTES: usize = 1;
 const MIN_REQUEST_FRAME_BYTES: usize = REQUEST_FIXED_BYTES + MIN_VARUINT_BYTES * 2;

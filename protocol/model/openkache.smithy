@@ -115,22 +115,106 @@ service OpenKache {
 }
 
 @wireOpcode(value: 1)
-operation Ping {}
+operation Ping {
+    input: PingInput
+    output: PingOutput
+}
 
 @wireOpcode(value: 2)
-operation Get {}
+operation Get {
+    input: GetInput
+    output: GetOutput
+}
 
 @wireOpcode(value: 3)
-operation Set {}
+operation Set {
+    input: SetInput
+    output: SetOutput
+}
 
 @wireOpcode(value: 4)
-operation Delete {}
+operation Delete {
+    input: DeleteInput
+    output: DeleteOutput
+}
 
 @wireOpcode(value: 5)
-operation Stats {}
+operation Stats {
+    input: StatsInput
+    output: StatsOutput
+}
 
 @wireOpcode(value: 6)
-operation Sync {}
+operation Sync {
+    input: SyncInput
+    output: SyncOutput
+}
+
+blob Key
+
+blob Value
+
+structure PingInput {}
+
+structure PingOutput {}
+
+structure GetInput {
+    @required
+    key: Key
+}
+
+structure GetOutput {
+    value: Value
+}
+
+structure SetInput {
+    @required
+    key: Key
+
+    @required
+    value: Value
+
+    condition: SetCondition
+
+    ttlMilliseconds: Long
+}
+
+structure SetOutput {
+    @required
+    outcome: SetOutcome
+}
+
+structure DeleteInput {
+    @required
+    key: Key
+}
+
+structure DeleteOutput {
+    @required
+    deleted: Boolean
+}
+
+structure StatsInput {}
+
+structure StatsOutput {
+    @required
+    json: String
+}
+
+structure SyncInput {}
+
+structure SyncOutput {}
+
+enum SetCondition {
+    IF_ABSENT = "if_absent"
+    IF_PRESENT = "if_present"
+}
+
+enum SetOutcome {
+    CREATED = "created"
+    REPLACED = "replaced"
+    NOT_STORED = "not_stored"
+}
 
 enum Status {
     @wireStatus(value: 0)
