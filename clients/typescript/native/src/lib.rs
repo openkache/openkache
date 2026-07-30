@@ -260,9 +260,8 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         )));
     }
 
-    let data_protection_key =
-        DataProtectionKey::from_slice(options.data_protection_key.as_ref())
-            .map_err(native_error)?;
+    let data_protection_key = DataProtectionKey::from_slice(options.data_protection_key.as_ref())
+        .map_err(native_error)?;
     let compression = if options.compression_enabled {
         let defaults = ZstandardOptions::default();
         Compression::Zstandard(ZstandardOptions {
@@ -284,18 +283,12 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let identity = parse_identity(options.identity)?;
     let mut timeouts = ClientTimeouts::default();
     if let Some(connect_timeout_ms) = options.connect_timeout_ms {
-        timeouts.connect = Duration::from_millis(parse_u64(
-            connect_timeout_ms,
-            "connect_timeout_ms",
-            false,
-        )?);
+        timeouts.connect =
+            Duration::from_millis(parse_u64(connect_timeout_ms, "connect_timeout_ms", false)?);
     }
     if let Some(request_timeout_ms) = options.request_timeout_ms {
-        timeouts.request = Duration::from_millis(parse_u64(
-            request_timeout_ms,
-            "request_timeout_ms",
-            false,
-        )?);
+        timeouts.request =
+            Duration::from_millis(parse_u64(request_timeout_ms, "request_timeout_ms", false)?);
     }
 
     let endpoint =

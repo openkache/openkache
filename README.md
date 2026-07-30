@@ -250,11 +250,13 @@ recreation.
 ### Native (fast iteration)
 
 ```bash
-cargo build --manifest-path server/Cargo.toml
-cargo build --manifest-path clients/rust/Cargo.toml
-cargo build --manifest-path protocol/Cargo.toml
+cargo build --locked
 bun run --cwd clients/typescript build:native
 ```
+
+The root Cargo workspace owns the server, protocol, shared client core, Rust
+client, and Node-API adapter under one `Cargo.lock`. The default build omits
+only the Node-API adapter, which the TypeScript build stages separately.
 
 ### Server allocator
 
@@ -303,9 +305,7 @@ cargo release-all
 ## ✅ Verify the build
 
 ```bash
-cargo check --manifest-path server/Cargo.toml
-cargo check --manifest-path clients/rust/Cargo.toml
-cargo check --manifest-path protocol/Cargo.toml
+cargo check --locked
 ```
 
 ---
