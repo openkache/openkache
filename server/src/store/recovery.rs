@@ -9,8 +9,7 @@ use crate::*;
 
 const FILE_MAGIC: &[u8; 8] = b"OKSGFILE";
 const CONTROL_MAGIC: &[u8; 8] = b"OKSGCTL\0";
-pub(crate) const LEGACY_FORMAT_VERSION: u32 = 2;
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKTABLE\0";
 const CHECKPOINT_FOOTER_MAGIC: &[u8; 8] = b"OKTBLEND";
 const CHECKPOINT_VERSION: u32 = 2;
@@ -766,7 +765,7 @@ fn encode_file_header(config: &Config, storage_key_id: [u8; 16]) -> DirectIoBuff
 fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16]) -> Result<()> {
     let format_version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     if &bytes[..8] != FILE_MAGIC
-        || (format_version != LEGACY_FORMAT_VERSION && format_version != FORMAT_VERSION)
+        || format_version != FORMAT_VERSION
         || u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize != BUCKET_BYTES
         || checksum(&bytes[..BUCKET_BYTES - 4])
             != u32::from_le_bytes(bytes[BUCKET_BYTES - 4..].try_into().unwrap())
@@ -783,13 +782,7 @@ fn validate_file_header(bytes: &[u8], config: &Config, storage_key_id: [u8; 16])
     let segment_size = u64::from_le_bytes(bytes[28..36].try_into().unwrap());
     let segment_count = u32::from_le_bytes(bytes[36..40].try_into().unwrap()) as usize;
     let blob_segment_size = u64::from_le_bytes(bytes[44..52].try_into().unwrap());
-    let bucket_choice_count = if format_version == LEGACY_FORMAT_VERSION {
-        // Version 2 did not persist this field. Its production default was two;
-        // nondefault experimental v2 storage requires repopulation.
-        2
-    } else {
-        u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize
-    };
+    let bucket_choice_count = u32::from_le_bytes(bytes[52..56].try_into().unwrap()) as usize;
     if segment_size != config.segment_size as u64
         || segment_count != config.segment_count
         || blob_segment_size != config.blob_segment_size as u64
@@ -867,17 +860,12 @@ fn decode_control_page(
     let blob_logical_len =
         usize::try_from(u64::from_le_bytes(bytes[40..48].try_into().unwrap()))
             .map_err(|_| KvError::Worker("stored Blob length is too large".into()))?;
-    let bucket_choice_count = if format_version == LEGACY_FORMAT_VERSION {
-        // See validate_file_header for the legacy-default compatibility rule.
-        2
-    } else {
-        u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize
-    };
+    let bucket_choice_count = u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize;
     let segment_size = u64::from_le_bytes(bytes[52..60].try_into().unwrap());
     let segment_count = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
     let blob_segment_size = u64::from_le_bytes(bytes[64..72].try_into().unwrap());
     if &bytes[..8] != CONTROL_MAGIC
-        || (format_version != LEGACY_FORMAT_VERSION && format_version != FORMAT_VERSION)
+        || format_version != FORMAT_VERSION
         || bytes[12..28] != storage_key_id
         || stored_sg_index != sg_index
         || generation == 0

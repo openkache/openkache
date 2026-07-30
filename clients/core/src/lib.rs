@@ -441,23 +441,18 @@ impl<C: ClientConnection> Core<C> {
             )
             .await?;
         match response.status {
-            Status::Ok => Ok(GetOutcome::Found(ItemValue::from_protocol(
-                response.payload,
-                response.value_flags,
-            ))),
+            Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
             Status::NotFound => Ok(GetOutcome::NotFound),
             status => Err(unexpected_status(Operation::Get, status)),
         }
     }
 
     async fn set(&self, key: ItemKey, value: ItemValue, options: SetOptions) -> Result<SetOutcome> {
-        let (flags, bytes) = value.into_protocol();
         let request = Request::new_set(
             Opcode::Set,
             Some(key.into_protocol()),
-            flags,
             options.into_protocol()?,
-            bytes,
+            value.into_bytes(),
         )
         .map_err(Error::protocol)?;
         match self.request(request).await?.status {

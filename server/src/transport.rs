@@ -1,13 +1,12 @@
 //! QUIC backend boundary used by the OpenKache protocol server.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::future::Future;
 #[cfg(feature = "quic-quiche")]
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -16,7 +15,7 @@ use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 use compio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use openkache_protocol::{REQUEST_HEADER_BYTES, Request};
+use openkache_protocol::Request;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
@@ -195,7 +194,7 @@ pub(super) enum StreamReadError {
     Transport(#[from] TransportError),
 }
 
-/// Request bytes paired with the worker-local memory-budget reservation they consume.
+/// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
     _permit: RequestBudgetPermit,
@@ -210,10 +209,10 @@ impl RequestFrame {
     }
 }
 
-/// Byte-weighted memory budget shared by every connection on one network worker.
+/// Byte-weighted memory budget shared by every connection and network worker.
 #[derive(Clone)]
 pub(super) struct RequestBudget {
-    inner: Rc<RefCell<RequestBudgetState>>,
+    inner: Arc<Mutex<RequestBudgetState>>,
 }
 
 struct RequestBudgetState {
@@ -224,12 +223,12 @@ struct RequestBudgetState {
 }
 
 pub(super) struct RequestBudgetPermit {
-    inner: Rc<RefCell<RequestBudgetState>>,
+    inner: Arc<Mutex<RequestBudgetState>>,
     bytes: usize,
 }
 
 struct RequestBudgetAcquire {
-    inner: Rc<RefCell<RequestBudgetState>>,
+    inner: Arc<Mutex<RequestBudgetState>>,
     bytes: usize,
     waiter_id: Option<u64>,
 }
@@ -237,7 +236,7 @@ struct RequestBudgetAcquire {
 impl RequestBudget {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(RequestBudgetState {
+            inner: Arc::new(Mutex::new(RequestBudgetState {
                 capacity,
                 used: 0,
                 next_waiter_id: 0,
@@ -253,17 +252,23 @@ impl RequestBudget {
     ) -> Result<RequestBudgetPermit, StreamReadError> {
         if bytes == 0 {
             return Ok(RequestBudgetPermit {
-                inner: Rc::clone(&self.inner),
+                inner: Arc::clone(&self.inner),
                 bytes: 0,
             });
         }
-        if bytes > self.inner.borrow().capacity {
+        if bytes
+            > self
+                .inner
+                .lock()
+                .expect("request budget lock poisoned")
+                .capacity
+        {
             return Err(StreamReadError::TooLarge);
         }
         compio::runtime::time::timeout(
             timeout,
             RequestBudgetAcquire {
-                inner: Rc::clone(&self.inner),
+                inner: Arc::clone(&self.inner),
                 bytes,
                 waiter_id: None,
             },
@@ -277,16 +282,16 @@ impl Future for RequestBudgetAcquire {
     type Output = RequestBudgetPermit;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = Rc::clone(&self.inner);
+        let inner = Arc::clone(&self.inner);
         let bytes = self.bytes;
-        let mut state = inner.borrow_mut();
+        let mut state = inner.lock().expect("request budget lock poisoned");
         if state.used <= state.capacity - bytes {
             if let Some(waiter_id) = self.waiter_id.take() {
                 state.waiters.remove(&waiter_id);
             }
             state.used += bytes;
             return Poll::Ready(RequestBudgetPermit {
-                inner: Rc::clone(&inner),
+                inner: Arc::clone(&inner),
                 bytes,
             });
         }
@@ -315,7 +320,11 @@ impl Future for RequestBudgetAcquire {
 impl Drop for RequestBudgetAcquire {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
-            self.inner.borrow_mut().waiters.remove(&waiter_id);
+            self.inner
+                .lock()
+                .expect("request budget lock poisoned")
+                .waiters
+                .remove(&waiter_id);
         }
     }
 }
@@ -326,7 +335,7 @@ impl Drop for RequestBudgetPermit {
             return;
         }
         let mut waiters = {
-            let mut state = self.inner.borrow_mut();
+            let mut state = self.inner.lock().expect("request budget lock poisoned");
             state.used = state
                 .used
                 .checked_sub(self.bytes)
@@ -336,7 +345,7 @@ impl Drop for RequestBudgetPermit {
         for (_, waiter) in waiters.drain() {
             waiter.wake();
         }
-        let mut state = self.inner.borrow_mut();
+        let mut state = self.inner.lock().expect("request budget lock poisoned");
         if state.waiters.is_empty() {
             state.waiters = waiters;
         }
@@ -351,35 +360,56 @@ async fn read_buffered_request(
     timeout: Duration,
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
-    let header = Vec::with_capacity(REQUEST_HEADER_BYTES).slice(..1);
+    let header = Vec::with_capacity(1).slice(..1);
     let BufResult(result, header) = stream.read_exact(header).await;
     result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
 
     let frame = header.into_inner();
-    let BufResult(result, header) = compio::runtime::time::timeout(
-        timeout,
-        stream.read_exact(frame.slice(1..REQUEST_HEADER_BYTES)),
-    )
+    let (frame, header) = compio::runtime::time::timeout(timeout, async {
+        let mut frame = frame;
+        loop {
+            if let Some(header) = Request::decode_header(&frame)? {
+                break Ok::<_, StreamReadError>((frame, header));
+            }
+            let start = frame.len();
+            frame.reserve(1);
+            let BufResult(result, next) = stream.read_exact(frame.slice(start..start + 1)).await;
+            result
+                .map_err(|error| TransportError::backend(backend, "stream header read", error))?;
+            frame = next.into_inner();
+        }
+    })
     .await
-    .map_err(|_| StreamReadError::Timeout)?;
-    result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
-
-    let mut frame = header.into_inner();
-    let frame_len = Request::frame_len_from_header(&frame)?;
-    let value_len = Request::value_len_from_header(&frame)?;
+    .map_err(|_| StreamReadError::Timeout)??;
+    let (mut frame, frame_len) = compio::runtime::time::timeout(timeout, async {
+        let mut frame = frame;
+        loop {
+            if let Some(frame_len) = header.frame_len(&frame)? {
+                break Ok::<_, StreamReadError>((frame, frame_len));
+            }
+            let start = frame.len();
+            frame.reserve(1);
+            let BufResult(result, next) = stream.read_exact(frame.slice(start..start + 1)).await;
+            result
+                .map_err(|error| TransportError::backend(backend, "stream metadata read", error))?;
+            frame = next.into_inner();
+        }
+    })
+    .await
+    .map_err(|_| StreamReadError::Timeout)??;
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
-    let body_len = frame_len - REQUEST_HEADER_BYTES;
-    let permit = budget.acquire(value_len, timeout).await?;
-    if body_len == 0 {
+    let permit = budget.acquire(header.value_len(), timeout).await?;
+    let body_start = frame.len();
+    if body_start == frame_len {
         return Ok(RequestFrame::new(frame, permit));
     }
 
-    frame.reserve(body_len);
+    frame.reserve(frame_len - body_start);
     let BufResult(result, body) = compio::runtime::time::timeout(
         timeout,
-        stream.read_exact(frame.slice(REQUEST_HEADER_BYTES..frame_len)),
+        stream.read_exact(frame.slice(body_start..frame_len)),
     )
     .await
     .map_err(|_| StreamReadError::Timeout)?;
@@ -893,22 +923,32 @@ mod quiche_backend {
             while self.buffered.is_empty() {
                 self.buffered = self.next_chunk("stream header read").await?;
             }
-            compio::runtime::time::timeout(timeout, async {
-                while self.buffered.len() < REQUEST_HEADER_BYTES {
+            let header = compio::runtime::time::timeout(timeout, async {
+                loop {
+                    if let Some(header) = Request::decode_header(&self.buffered)? {
+                        break Ok::<_, StreamReadError>(header);
+                    }
                     let chunk = self.next_chunk("stream header read").await?;
                     self.buffered.extend_from_slice(&chunk);
                 }
-                Ok::<(), TransportError>(())
             })
             .await
-            .map_err(|_| StreamReadError::Timeout)?
-            .map_err(StreamReadError::Transport)?;
-            let frame_len = Request::frame_len_from_header(&self.buffered[..REQUEST_HEADER_BYTES])?;
-            let value_len = Request::value_len_from_header(&self.buffered[..REQUEST_HEADER_BYTES])?;
+            .map_err(|_| StreamReadError::Timeout)??;
+            let frame_len = compio::runtime::time::timeout(timeout, async {
+                loop {
+                    if let Some(frame_len) = header.frame_len(&self.buffered)? {
+                        break Ok::<_, StreamReadError>(frame_len);
+                    }
+                    let chunk = self.next_chunk("stream metadata read").await?;
+                    self.buffered.extend_from_slice(&chunk);
+                }
+            })
+            .await
+            .map_err(|_| StreamReadError::Timeout)??;
             if frame_len > maximum {
                 return Err(StreamReadError::TooLarge);
             }
-            let permit = budget.acquire(value_len, timeout).await?;
+            let permit = budget.acquire(header.value_len(), timeout).await?;
             compio::runtime::time::timeout(timeout, async {
                 while self.buffered.len() < frame_len {
                     let chunk = self.next_chunk("stream body read").await?;

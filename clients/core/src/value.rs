@@ -2,7 +2,7 @@
 
 use chacha20poly1305::aead::{AeadInOut, KeyInit};
 use chacha20poly1305::{Key as CipherKey, Tag, XChaCha20Poly1305, XNonce};
-use openkache_protocol::{MAX_VALUE_BYTES, ValueFlags};
+use openkache_protocol::MAX_VALUE_BYTES;
 use zeroize::Zeroize;
 use zstd_pure_rs::prelude::{
     ERR_getErrorName, ERR_isError, ZSTD_CONTENTSIZE_ERROR, ZSTD_CONTENTSIZE_UNKNOWN, ZSTD_compress,
@@ -17,32 +17,36 @@ pub const ENCRYPTION_KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
 const TAG_BYTES: usize = 16;
 const ENCRYPTED_OVERHEAD_BYTES: usize = NONCE_BYTES + TAG_BYTES;
-const AAD_BYTES: usize = 32 + 1;
+const VALUE_HEADER: [u8; 4] = [0x4f, 0x4b, 0x54, 0x01];
+const VALUE_HEADER_BYTES: usize = VALUE_HEADER.len() + 1;
+const VALUE_COMPRESSED_FLAG: u8 = 1 << 0;
+const VALUE_ENCRYPTED_FLAG: u8 = 1 << 1;
+const KNOWN_VALUE_FLAGS: u8 = VALUE_COMPRESSED_FLAG | VALUE_ENCRYPTED_FLAG;
+const AAD_BYTES: usize = 32 + VALUE_HEADER_BYTES;
 
-/// Encoded bytes and transformation flags sent through the protocol.
+/// Client-owned encoded bytes stored opaquely by the server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemValue {
     bytes: Vec<u8>,
-    compressed: bool,
-    encrypted: bool,
 }
 
 impl ItemValue {
-    /// Wraps exact wire bytes and their client-owned transformation metadata.
+    /// Wraps exact opaque bytes for raw storage.
     ///
-    /// Raw clients can use this constructor to preserve every protocol value pattern without
-    /// exposing protocol-crate flag types in the stable client API.
-    pub const fn from_parts(bytes: Vec<u8>, compressed: bool, encrypted: bool) -> Self {
-        Self {
-            bytes,
-            compressed,
-            encrypted,
-        }
+    /// # Arguments
+    ///
+    /// * `bytes` - Complete bytes to store without interpretation or transformation.
+    ///
+    /// # Returns
+    ///
+    /// An item value that preserves the supplied allocation.
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
     }
 
     /// Wraps exact plaintext bytes for raw storage.
     pub const fn plaintext(bytes: Vec<u8>) -> Self {
-        Self::from_parts(bytes, false, false)
+        Self::new(bytes)
     }
 
     /// Returns the exact opaque bytes stored by the server.
@@ -53,37 +57,6 @@ impl ItemValue {
     /// Consumes the value and returns its exact opaque bytes.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
-    }
-
-    /// Consumes the value and returns its wire bytes and transformation metadata.
-    pub fn into_parts(self) -> (Vec<u8>, bool, bool) {
-        (self.bytes, self.compressed, self.encrypted)
-    }
-
-    /// Returns whether the bytes contain a Zstandard frame before encryption.
-    pub const fn is_compressed(&self) -> bool {
-        self.compressed
-    }
-
-    /// Returns whether the bytes contain authenticated ciphertext.
-    pub const fn is_encrypted(&self) -> bool {
-        self.encrypted
-    }
-
-    pub(crate) fn from_protocol(bytes: Vec<u8>, flags: ValueFlags) -> Self {
-        Self {
-            bytes,
-            compressed: flags.is_compressed(),
-            encrypted: flags.is_encrypted(),
-        }
-    }
-
-    pub(crate) const fn protocol_flags(&self) -> ValueFlags {
-        ValueFlags::new(self.compressed, self.encrypted)
-    }
-
-    pub(crate) fn into_protocol(self) -> (ValueFlags, Vec<u8>) {
-        (self.protocol_flags(), self.bytes)
     }
 }
 
@@ -151,7 +124,7 @@ impl ValueCodec {
     ///
     /// # Returns
     ///
-    /// A codec that stores beneficial Zstandard frames without a wrapper.
+    /// A codec that stores values in the client-owned transformation envelope.
     ///
     /// # Errors
     ///
@@ -253,16 +226,13 @@ impl ValueCodec {
             });
         }
         if self.cipher.is_none() && self.compression == Compression::Disabled {
-            return Ok(ItemValue {
-                bytes: plaintext,
-                compressed: false,
-                encrypted: false,
-            });
+            return Ok(ItemValue::new(plaintext));
         }
 
         let (mut body, compressed) = compress_if_beneficial(plaintext, self.compression)?;
         let encrypted = self.cipher.is_some();
-        let flags = ValueFlags::new(compressed, encrypted);
+        let flags = ((compressed as u8) * VALUE_COMPRESSED_FLAG)
+            | ((encrypted as u8) * VALUE_ENCRYPTED_FLAG);
         if let Some(cipher) = &self.cipher {
             let mut nonce = [0_u8; NONCE_BYTES];
             getrandom::fill(&mut nonce).map_err(|error| Error::Entropy(error.to_string()))?;
@@ -280,17 +250,26 @@ impl ValueCodec {
                 .map_err(|_| Error::Encryption)?;
             body.extend_from_slice(&tag);
         }
-        if body.len() > MAX_VALUE_BYTES {
+        let encoded_len =
+            VALUE_HEADER_BYTES
+                .checked_add(body.len())
+                .ok_or(Error::EncodedValueTooLarge {
+                    size: usize::MAX,
+                    maximum: MAX_VALUE_BYTES,
+                })?;
+        if encoded_len > MAX_VALUE_BYTES {
             return Err(Error::EncodedValueTooLarge {
-                size: body.len(),
+                size: encoded_len,
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        Ok(ItemValue {
-            bytes: body,
-            compressed,
-            encrypted,
-        })
+        body.reserve(VALUE_HEADER_BYTES);
+        let body_len = body.len();
+        body.resize(encoded_len, 0);
+        body.copy_within(0..body_len, VALUE_HEADER_BYTES);
+        body[..VALUE_HEADER.len()].copy_from_slice(&VALUE_HEADER);
+        body[VALUE_HEADER.len()] = flags;
+        Ok(ItemValue::new(body))
     }
 
     /// Decodes a value returned by the server.
@@ -309,7 +288,6 @@ impl ValueCodec {
     /// Returns an error when the encoded value is malformed, too large, cannot be authenticated,
     /// or cannot be decompressed.
     pub fn open(&self, key: ItemKey, encoded: ItemValue) -> Result<Vec<u8>> {
-        let value_flags = encoded.protocol_flags();
         let mut encoded = encoded.bytes;
         if encoded.len() > MAX_VALUE_BYTES {
             return Err(Error::EncodedValueTooLarge {
@@ -317,14 +295,33 @@ impl ValueCodec {
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        if self.cipher.is_some() != value_flags.is_encrypted() {
-            return Err(if value_flags.is_encrypted() {
+        if self.cipher.is_none() && self.compression == Compression::Disabled {
+            return Ok(encoded);
+        }
+        if encoded.len() < VALUE_HEADER_BYTES || encoded[..VALUE_HEADER.len()] != VALUE_HEADER {
+            return Err(Error::InvalidEncodedValue(
+                "client transformation header is missing or unsupported",
+            ));
+        }
+        let flags = encoded[VALUE_HEADER.len()];
+        if flags & !KNOWN_VALUE_FLAGS != 0 {
+            return Err(Error::InvalidEncodedValue(
+                "client transformation flags contain unknown bits",
+            ));
+        }
+        let compressed = flags & VALUE_COMPRESSED_FLAG != 0;
+        let encrypted = flags & VALUE_ENCRYPTED_FLAG != 0;
+        if self.cipher.is_some() != encrypted {
+            return Err(if encrypted {
                 Error::EncryptionKeyRequired
             } else {
                 Error::EncryptionRequired
             });
         }
-        if !value_flags.is_encrypted() && !value_flags.is_compressed() {
+        let body_len = encoded.len() - VALUE_HEADER_BYTES;
+        encoded.copy_within(VALUE_HEADER_BYTES.., 0);
+        encoded.truncate(body_len);
+        if !encrypted && !compressed {
             return Ok(encoded);
         }
         let Some(cipher) = &self.cipher else {
@@ -345,7 +342,7 @@ impl ValueCodec {
                 .expect("validated authentication tag length"),
         );
         let nonce = XNonce::try_from(&nonce[..]).expect("nonce has the required fixed length");
-        let aad = make_aad(key, value_flags);
+        let aad = make_aad(key, flags);
         cipher
             .decrypt_inout_detached(
                 &nonce,
@@ -356,7 +353,7 @@ impl ValueCodec {
             .map_err(|_| Error::Authentication)?;
         encoded.truncate(tag_offset);
 
-        if value_flags.is_compressed() {
+        if compressed {
             return decompress_zstandard(&encoded[NONCE_BYTES..]);
         }
 
@@ -469,10 +466,11 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(key: ItemKey, value_flags: ValueFlags) -> [u8; AAD_BYTES] {
+fn make_aad(key: ItemKey, flags: u8) -> [u8; AAD_BYTES] {
     let mut aad = [0_u8; AAD_BYTES];
     aad[..32].copy_from_slice(key.as_bytes());
-    aad[32] = value_flags.authentication_byte();
+    aad[32..32 + VALUE_HEADER.len()].copy_from_slice(&VALUE_HEADER);
+    aad[AAD_BYTES - 1] = flags;
     aad
 }
 

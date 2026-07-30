@@ -13,7 +13,7 @@ use compio::runtime::RuntimeBuilder;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
-    MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status, ValueFlags,
+    MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -494,6 +494,7 @@ impl KacheServer {
             channel::bounded_sync_async::<NetworkWorkerCompletion>(network.worker_count);
         let mut workers = Vec::with_capacity(network.worker_count);
         let mut launch_error = None;
+        let request_budget = RequestBudget::new(network.max_inflight_value_mib * 1024 * 1024);
 
         for (worker_id, socket) in sockets.into_iter().enumerate() {
             let (stop_tx, stop_rx) = channel::bounded_sync_async(1);
@@ -508,7 +509,7 @@ impl KacheServer {
             let limits = NetworkWorkerLimits {
                 request_timeout,
                 max_stream_lanes: network.max_stream_lanes_per_connection,
-                request_budget_bytes: network.max_inflight_value_mib_per_worker * 1024 * 1024,
+                request_budget: request_budget.clone(),
                 max_item_bytes,
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
@@ -729,11 +730,11 @@ fn shutdown_cache(cache: Arc<ThreadedKvkache>) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct NetworkWorkerLimits {
     request_timeout: Duration,
     max_stream_lanes: usize,
-    request_budget_bytes: usize,
+    request_budget: RequestBudget,
     max_item_bytes: usize,
 }
 
@@ -770,10 +771,9 @@ async fn run_network_worker<E: TransportEndpoint>(
     let NetworkWorkerLimits {
         request_timeout,
         max_stream_lanes,
-        request_budget_bytes,
+        request_budget,
         max_item_bytes,
     } = limits;
-    let request_budget = RequestBudget::new(request_budget_bytes);
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {
@@ -959,7 +959,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         Err(_) => {
                             let response = response_bytes(
                                 Status::Overloaded,
-                                b"response exceeds the network worker memory budget",
+                                b"response exceeds the server memory budget",
                             );
                             if !write_response(&mut send, response, request_timeout).await {
                                 break;
@@ -1011,7 +1011,6 @@ async fn execute_request(
     let Request {
         opcode,
         key,
-        value_flags,
         set_options,
         value,
     } = request;
@@ -1021,13 +1020,13 @@ async fn execute_request(
             .get_async(key.expect("GET requests have a validated item key"))
             .await
             .map(|value| match value {
-                Some(value) => response_with_value_flags(Status::Ok, value.flags, value.bytes),
+                Some(value) => response(Status::Ok, value.bytes),
                 None => response(Status::NotFound, Vec::new()),
             }),
         Opcode::Set => cache
             .set_async_with_options(
                 key.expect("SET requests have a validated item key"),
-                crate::types::StoredItemValue::new(value, value_flags),
+                crate::types::StoredItemValue::new(value),
                 set_options,
             )
             .await
@@ -1107,7 +1106,9 @@ fn protocol_error_response(error: ProtocolError) -> Response {
 }
 
 fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
-    let mut payload = String::with_capacity(openkache_protocol::RESPONSE_HEADER_BYTES + 64);
+    let mut payload = String::with_capacity(
+        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
+    );
     write!(payload, "{value}").expect("writing to a String cannot fail");
     response(status, payload.into_bytes())
 }
@@ -1118,18 +1119,13 @@ fn response(status: Status, payload: Vec<u8>) -> Response {
 }
 
 fn response_bytes(status: Status, payload: &[u8]) -> Response {
-    let mut owned = Vec::with_capacity(openkache_protocol::RESPONSE_HEADER_BYTES + payload.len());
+    let mut owned = Vec::with_capacity(
+        openkache_protocol::RESPONSE_FIXED_BYTES
+            + openkache_protocol::MAX_VARUINT_BYTES
+            + payload.len(),
+    );
     owned.extend_from_slice(payload);
     response(status, owned)
-}
-
-fn response_with_value_flags(
-    status: Status,
-    value_flags: ValueFlags,
-    payload: Vec<u8>,
-) -> Response {
-    Response::new_with_value_flags(status, value_flags, payload)
-        .expect("server responses stay within protocol limits")
 }
 
 /// Errors produced while configuring or running the QUIC server.
