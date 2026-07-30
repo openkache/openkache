@@ -520,6 +520,7 @@ impl RuntimeConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IoUringConfig {
     pub sqpoll: bool,
+    pub sqpoll_cpu_ids: Vec<usize>,
     pub iopoll: bool,
     pub entries_per_worker: u32,
     pub max_inflight_per_worker: usize,
@@ -531,6 +532,7 @@ impl Default for IoUringConfig {
     fn default() -> Self {
         Self {
             sqpoll: false,
+            sqpoll_cpu_ids: Vec::new(),
             iopoll: false,
             entries_per_worker: 256,
             max_inflight_per_worker: 32,
@@ -704,9 +706,31 @@ impl AppConfig {
                 "runtime.event_interval must be non-zero".into(),
             ));
         }
-        if self.io_uring.sqpoll || self.io_uring.iopoll {
+        if self.io_uring.iopoll {
             return Err(KvError::InvalidConfig(
-                "io_uring SQPOLL and IOPOLL must remain false".into(),
+                "io_uring IOPOLL must remain false".into(),
+            ));
+        }
+        if self.io_uring.sqpoll {
+            if self.io_uring.sqpoll_cpu_ids.len() != self.runtime.thread_count {
+                return Err(KvError::InvalidConfig(
+                    "io_uring.sqpoll_cpu_ids length must equal runtime.thread_count when SQPOLL is enabled"
+                        .into(),
+                ));
+            }
+            if let Some(cpu) = self
+                .io_uring
+                .sqpoll_cpu_ids
+                .iter()
+                .find(|cpu| !allowed.contains(cpu) || u32::try_from(**cpu).is_err())
+            {
+                return Err(KvError::InvalidConfig(format!(
+                    "SQPOLL CPU {cpu} is not an allowed io_uring CPU"
+                )));
+            }
+        } else if !self.io_uring.sqpoll_cpu_ids.is_empty() {
+            return Err(KvError::InvalidConfig(
+                "io_uring.sqpoll_cpu_ids requires io_uring.sqpoll=true".into(),
             ));
         }
         if self.io_uring.entries_per_worker == 0

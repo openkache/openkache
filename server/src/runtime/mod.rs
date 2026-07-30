@@ -35,6 +35,7 @@ const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
 const SERVER_KEY_VERSION: u32 = 1;
 const SERVER_KEY_FILE_BYTES: usize = 64;
 const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
+const SQPOLL_IDLE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -209,6 +210,15 @@ impl ThreadedKvkache {
                 .spawn(move || {
                     let mut proactor = ProactorBuilder::new();
                     proactor.capacity(entries);
+                    if io_config.sqpoll {
+                        proactor
+                            .sqpoll_idle(SQPOLL_IDLE)
+                            .sqpoll_cpu(
+                                io_config.sqpoll_cpu_ids[thread_id]
+                                    .try_into()
+                                    .expect("SQPOLL CPU identifier was validated"),
+                            );
+                    }
                     let cpus = HashSet::from([cpu_id]);
                     let runtime = RuntimeBuilder::new()
                         .with_proactor(proactor)
@@ -575,6 +585,36 @@ impl ThreadedKvkache {
         bucket_choice_count: usize,
         bucket_selection_policy: crate::config::BucketSelectionPolicy,
     ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_policy_and_inflight(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            bucket_selection_policy,
+            TraceBenchmarkIoConfig::default(),
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with configurable Bucket placement and GET
+    /// concurrency.
+    ///
+    /// `io_config.max_inflight_per_worker` controls the rolling GET window on each storage worker.
+    /// Non-empty SQPOLL CPU identifiers pin one kernel polling thread per worker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when benchmark sizing or worker configuration is invalid, or when
+    /// worker startup fails.
+    pub fn for_trace_benchmark_with_bucket_policy_and_inflight(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_selection_policy: crate::config::BucketSelectionPolicy,
+        io_config: TraceBenchmarkIoConfig,
+    ) -> Result<Self> {
         let thread_count = cpu_ids.len();
         if thread_count == 0 {
             return Err(KvError::InvalidConfig(
@@ -594,6 +634,9 @@ impl ThreadedKvkache {
         )?;
         config.table.bucket_choice_count = bucket_choice_count;
         config.table.bucket_selection_policy = bucket_selection_policy;
+        config.io_uring.max_inflight_per_worker = io_config.max_inflight_per_worker;
+        config.io_uring.sqpoll = !io_config.sqpoll_cpu_ids.is_empty();
+        config.io_uring.sqpoll_cpu_ids = io_config.sqpoll_cpu_ids;
         Self::start_with_server_key(config, [0; 32])
     }
 

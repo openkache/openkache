@@ -1,11 +1,12 @@
 //! Per-worker request/response types, the worker event loop ([`worker_loop`]),
-//! batch processing ([`process_worker_batch`]), and benchmark support types
-//! ([`BenchmarkOperation`], [`BenchmarkBatchStats`]).
+//! rolling GET scheduling, and benchmark support types ([`BenchmarkOperation`],
+//! [`BenchmarkBatchStats`]).
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
@@ -113,6 +114,21 @@ pub struct BenchmarkBatchStats {
     pub latency_ns: Vec<u64>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TraceBenchmarkIoConfig {
+    pub max_inflight_per_worker: usize,
+    pub sqpoll_cpu_ids: Vec<usize>,
+}
+
+impl Default for TraceBenchmarkIoConfig {
+    fn default() -> Self {
+        Self {
+            max_inflight_per_worker: IoUringConfig::default().max_inflight_per_worker,
+            sqpoll_cpu_ids: Vec::new(),
+        }
+    }
+}
+
 impl BenchmarkBatchStats {
     pub fn merge(&mut self, mut other: Self) {
         self.operations += other.operations;
@@ -171,14 +187,108 @@ pub(super) async fn worker_loop(
             }
         }
 
-        if process_worker_batch(&mut cache, &mut batch, io_config.max_inflight_per_worker).await? {
+        if process_worker_batch(
+            &mut cache,
+            &receiver,
+            &mut batch,
+            io_config.max_inflight_per_worker,
+        )
+        .await?
+        {
             return Ok(());
+        }
+    }
+}
+
+enum GetRunExit {
+    QueueEmpty,
+    Barrier(WorkerRequest),
+    Disconnected,
+}
+
+enum GetRunEvent {
+    Completed(WorkerResponseSender, Result<Option<EncodedValue>>),
+    Request(Option<WorkerRequest>),
+}
+
+async fn process_get_run(
+    cache: &Kvkache,
+    receiver: &AsyncReceiver<WorkerRequest>,
+    batch: &mut VecDeque<WorkerRequest>,
+    first_storage_key: StorageKey,
+    first_response: WorkerResponseSender,
+    max_inflight: usize,
+) -> GetRunExit {
+    let mut pending = FuturesUnordered::new();
+    let get =
+        |storage_key, response| async move { (response, cache.get_encoded(&storage_key).await) };
+    pending.push(get(first_storage_key, first_response));
+    let mut barrier = None;
+    let mut disconnected = false;
+
+    loop {
+        while barrier.is_none() && !disconnected && pending.len() < max_inflight {
+            let request = if let Some(request) = batch.pop_front() {
+                Ok(request)
+            } else {
+                receiver.try_recv()
+            };
+            match request {
+                Ok(WorkerRequest::Get {
+                    storage_key,
+                    response,
+                }) => pending.push(get(storage_key, response)),
+                Ok(request) => barrier = Some(request),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => disconnected = true,
+            }
+        }
+
+        if pending.is_empty() {
+            return if let Some(request) = barrier {
+                GetRunExit::Barrier(request)
+            } else if disconnected {
+                GetRunExit::Disconnected
+            } else {
+                GetRunExit::QueueEmpty
+            };
+        }
+
+        if barrier.is_some() || disconnected || pending.len() == max_inflight {
+            let (response, result) = pending.next().await.unwrap();
+            response.send(result.map(WorkerResponse::Value));
+            continue;
+        }
+
+        let event = {
+            let completed = pending.next().fuse();
+            let incoming = receiver.recv_async().fuse();
+            pin_mut!(completed, incoming);
+            select! {
+                completed = completed => {
+                    let (response, result) = completed.unwrap();
+                    GetRunEvent::Completed(response, result)
+                }
+                incoming = incoming => GetRunEvent::Request(incoming.ok()),
+            }
+        };
+        match event {
+            GetRunEvent::Completed(response, result) => {
+                response.send(result.map(WorkerResponse::Value));
+            }
+            GetRunEvent::Request(Some(WorkerRequest::Get {
+                storage_key,
+                response,
+            })) => pending.push(get(storage_key, response)),
+            GetRunEvent::Request(Some(request)) => barrier = Some(request),
+            GetRunEvent::Request(None) => disconnected = true,
         }
     }
 }
 
 async fn process_worker_batch(
     cache: &mut Kvkache,
+    receiver: &AsyncReceiver<WorkerRequest>,
     batch: &mut VecDeque<WorkerRequest>,
     max_inflight: usize,
 ) -> Result<bool> {
@@ -190,27 +300,21 @@ async fn process_worker_batch(
                 storage_key,
                 response,
             } => {
-                let mut pending = FuturesUnordered::new();
-                let cache_ref = &*cache;
-                let get = |storage_key, response| async move {
-                    (response, cache_ref.get_encoded(&storage_key).await)
-                };
-                pending.push(get(storage_key, response));
-                while pending.len() < max_inflight {
-                    let Some(WorkerRequest::Get { .. }) = batch.front() else {
-                        break;
-                    };
-                    let WorkerRequest::Get {
-                        storage_key,
-                        response,
-                    } = batch.pop_front().unwrap()
-                    else {
-                        unreachable!()
-                    };
-                    pending.push(get(storage_key, response));
-                }
-                while let Some((response, result)) = pending.next().await {
-                    response.send(result.map(WorkerResponse::Value));
+                match process_get_run(
+                    &*cache,
+                    receiver,
+                    batch,
+                    storage_key,
+                    response,
+                    max_inflight,
+                )
+                .await
+                {
+                    GetRunExit::QueueEmpty => {}
+                    GetRunExit::Barrier(request) => batch.push_front(request),
+                    GetRunExit::Disconnected => {
+                        return Err(KvError::Worker("request queue disconnected".into()));
+                    }
                 }
             }
             WorkerRequest::Set {
