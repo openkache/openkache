@@ -68,7 +68,7 @@ internal static class Protocol
 
     internal static byte[] EncodeRequest(
         Opcode opcode,
-        ReadOnlySpan<byte> userKey,
+        ReadOnlySpan<byte> itemKey,
         ReadOnlySpan<byte> value,
         SetCondition setCondition = SetCondition.None,
         ulong? ttlMilliseconds = null)
@@ -87,12 +87,12 @@ internal static class Protocol
             throw ProtocolError($"{opcode} does not accept a value.");
         }
 
-        if (!usesKey && !userKey.IsEmpty)
+        if (!usesKey && !itemKey.IsEmpty)
         {
             throw ProtocolError($"{opcode} does not accept a key.");
         }
 
-        if (usesKey && userKey.Length != ItemKeyBytes)
+        if (usesKey && itemKey.Length != ItemKeyBytes)
         {
             throw ProtocolError(
                 $"{opcode} key must contain exactly {ItemKeyBytes} bytes.");
@@ -134,7 +134,7 @@ internal static class Protocol
             (uint)value.Length | optionBits);
         if (usesKey)
         {
-            userKey.CopyTo(frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
+            itemKey.CopyTo(frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
         }
 
         var valueOffset = RequestHeaderBytes + keyLength;

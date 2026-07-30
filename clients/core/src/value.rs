@@ -366,6 +366,7 @@ impl ValueCodec {
 
 /// Client-side value transformation errors.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The configured Zstandard level is unsupported.
     #[error("Zstandard level {0} is outside the supported range 1..=22")]

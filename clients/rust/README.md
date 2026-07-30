@@ -123,9 +123,10 @@ use openkache_client::ItemKey;
 let exact = ItemKey::from_bytes([0x42; 32]);
 ```
 
-`RawClient` sends `exact` without deriving or hashing it. Language adapters should depend on
-`openkache-client-core` directly; Rust applications can use the re-exported raw types when they
-already own a 32-byte item key.
+`ItemKey::from_slice` provides the same exact-byte behavior for a dynamic buffer and rejects every
+other length. `RawClient` sends the resulting key without deriving or hashing it. Language adapters
+should depend on `openkache-client-core` directly; Rust applications can use the re-exported raw
+types when they already own a 32-byte item key.
 
 ## Operations
 

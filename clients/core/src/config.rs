@@ -139,7 +139,7 @@ impl FromStr for Endpoint {
 pub struct Certificate(CertificateDer<'static>);
 
 impl Certificate {
-    /// Parses one DER-encoded X.509 certificate.
+    /// Wraps one non-empty DER-encoded X.509 certificate.
     ///
     /// # Arguments
     ///
@@ -147,7 +147,8 @@ impl Certificate {
     ///
     /// # Returns
     ///
-    /// An owned certificate.
+    /// Owned certificate bytes. Certificate validation occurs when the TLS
+    /// configuration is built.
     ///
     /// # Errors
     ///
@@ -191,7 +192,7 @@ impl Certificate {
         Ok(certificate)
     }
 
-    /// Parses one DER certificate or a non-empty PEM certificate chain.
+    /// Wraps one DER certificate or parses a non-empty PEM certificate chain.
     ///
     /// # Arguments
     ///
@@ -199,7 +200,8 @@ impl Certificate {
     ///
     /// # Returns
     ///
-    /// A certificate chain in input order.
+    /// A certificate chain in input order. DER certificate validation occurs
+    /// when the TLS configuration is built.
     ///
     /// # Errors
     ///
@@ -333,7 +335,9 @@ impl ClientIdentity {
     ///
     /// # Returns
     ///
-    /// A validated client identity.
+    /// An owned client identity. Remaining certificate and private-key
+    /// validation occurs while building TLS configuration or during the
+    /// handshake.
     ///
     /// # Errors
     ///
