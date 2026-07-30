@@ -4,7 +4,7 @@
 //! and Tombstones form a circular SG log; each SG is reused with its paired
 //! dense Blob generation.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
 use std::mem::MaybeUninit;
@@ -22,6 +22,7 @@ use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
 use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
 use compio::io::{AsyncReadAt, AsyncWriteAt};
+use futures_util::future::join_all;
 use openkache_protocol::{SetCondition, SetOptions};
 
 use crate::types::EncodedValue;
@@ -46,6 +47,7 @@ const FILE_RESERVATION_RETRY_DELAYS: [Duration; 6] = [
     Duration::from_millis(32),
 ];
 const STORAGE_RESERVE_PERCENT: u64 = 5;
+pub(crate) const BUCKET_READ_POOL_CAPACITY: usize = 256;
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,6 +128,31 @@ impl SetLen for DirectIoBuffer {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
         self.initialized_len = len;
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DirectIoBufferPool {
+    pub(crate) buffers: RefCell<Vec<DirectIoBuffer>>,
+}
+
+impl DirectIoBufferPool {
+    pub(crate) fn take_bucket(&self) -> DirectIoBuffer {
+        self.buffers
+            .borrow_mut()
+            .pop()
+            .unwrap_or_else(|| DirectIoBuffer::for_read(BUCKET_BYTES))
+    }
+
+    pub(crate) fn recycle_bucket(&self, mut buffer: DirectIoBuffer) {
+        if buffer.capacity() != BUCKET_BYTES {
+            return;
+        }
+        buffer.initialized_len = 0;
+        let mut buffers = self.buffers.borrow_mut();
+        if buffers.len() < BUCKET_READ_POOL_CAPACITY {
+            buffers.push(buffer);
+        }
     }
 }
 
@@ -593,6 +620,7 @@ pub(crate) struct Kvkache {
     resource_guard: Arc<ResourceGuard>,
     next_memory_capacity_check: Instant,
     io: IoCounters,
+    bucket_read_pool: DirectIoBufferPool,
 }
 
 impl Kvkache {
@@ -716,6 +744,7 @@ impl Kvkache {
             resource_guard,
             next_memory_capacity_check: Instant::now(),
             io: IoCounters::default(),
+            bucket_read_pool: DirectIoBufferPool::default(),
             config,
             data,
         };
@@ -963,15 +992,27 @@ impl Kvkache {
         storage_key: &StorageKey,
         scanned: Option<(TableLocation, &[u8])>,
     ) -> Result<Option<LocatedItem>> {
-        let mut newest: Option<(usize, LocatedItem)> = None;
-        for table_location in self.table.candidate_locations(storage_key) {
-            let item = if let Some((scanned_location, bucket)) = scanned
-                && table_location == scanned_location
-            {
-                find_item_in_bucket(bucket, storage_key)
-            } else {
-                self.read_location(storage_key, table_location).await?
+        let locations = self.table.candidate_locations(storage_key);
+        if let [table_location] = locations.as_slice() {
+            let Some(item) = self
+                .read_record_candidate(storage_key, *table_location, scanned)
+                .await?
+            else {
+                return Ok(None);
             };
+            return Ok(Some(LocatedItem {
+                table_location: *table_location,
+                item,
+            }));
+        }
+        let mut newest: Option<(usize, LocatedItem)> = None;
+        let reads = locations.into_iter().map(|table_location| async move {
+            self.read_record_candidate(storage_key, table_location, scanned)
+                .await
+                .map(|item| (table_location, item))
+        });
+        for result in join_all(reads).await {
+            let (table_location, item) = result?;
             let Some(item) = item else {
                 continue;
             };
@@ -992,16 +1033,47 @@ impl Kvkache {
         Ok(newest.map(|(_, located)| located))
     }
 
+    async fn read_record_candidate(
+        &self,
+        storage_key: &StorageKey,
+        table_location: TableLocation,
+        scanned: Option<(TableLocation, &[u8])>,
+    ) -> Result<Option<Item>> {
+        if let Some((scanned_location, bucket)) = scanned
+            && table_location == scanned_location
+        {
+            Ok(find_item_in_bucket(bucket, storage_key))
+        } else {
+            self.read_location(storage_key, table_location).await
+        }
+    }
+
     async fn locate_stable_state(
         &self,
         storage_key: &StorageKey,
     ) -> Result<Option<LocatedItemState>> {
-        let mut newest: Option<(usize, LocatedItemState)> = None;
-        for table_location in self.table.candidate_locations(storage_key) {
+        let locations = self.table.candidate_locations(storage_key);
+        if let [table_location] = locations.as_slice() {
             let Some(state) = self
-                .read_location_state(storage_key, table_location)
+                .read_location_state(storage_key, *table_location)
                 .await?
             else {
+                return Ok(None);
+            };
+            return Ok(Some(LocatedItemState {
+                table_location: *table_location,
+                state,
+            }));
+        }
+        let mut newest: Option<(usize, LocatedItemState)> = None;
+        let reads = locations.into_iter().map(|table_location| async move {
+            self.read_location_state(storage_key, table_location)
+                .await
+                .map(|state| (table_location, state))
+        });
+        for result in join_all(reads).await {
+            let (table_location, state) = result?;
+            let Some(state) = state else {
                 continue;
             };
             let age = self.ssd_segment_age(table_location.sg_index as usize);
@@ -1088,7 +1160,9 @@ impl Kvkache {
             self.config.bucket_count(),
         );
         let bytes = self.read_bucket(sg_index, bucket_index).await?;
-        Ok(find_item_in_bucket(&bytes, storage_key))
+        let item = find_item_in_bucket(&bytes, storage_key);
+        self.bucket_read_pool.recycle_bucket(bytes);
+        Ok(item)
     }
 
     async fn read_location_state(
@@ -1111,7 +1185,9 @@ impl Kvkache {
             self.config.bucket_count(),
         );
         let bytes = self.read_bucket(sg_index, bucket_index).await?;
-        Ok(find_item_state_in_bucket(&bytes, storage_key))
+        let state = find_item_state_in_bucket(&bytes, storage_key);
+        self.bucket_read_pool.recycle_bucket(bytes);
+        Ok(state)
     }
 
     async fn flush_pending(&mut self, reason: SegmentFlushReason) -> Result<()> {

@@ -23,8 +23,11 @@ use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::types::EncodedValue;
 use crate::*;
 
+pub(super) mod completion;
 mod worker;
 pub use worker::*;
+
+use self::completion::CompletionSlab;
 
 pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
 pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
@@ -41,6 +44,7 @@ pub(crate) struct ServerSecret {
 
 struct WorkerHandle {
     sender: Sender<WorkerRequest>,
+    completions: CompletionSlab<Result<WorkerResponse>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -193,6 +197,7 @@ impl ThreadedKvkache {
                 })?;
             workers.push(WorkerHandle {
                 sender,
+                completions: CompletionSlab::default(),
                 thread: Some(thread),
             });
         }
@@ -207,7 +212,9 @@ impl ThreadedKvkache {
                 Err(message) => {
                     for worker in &workers {
                         let (response, _) = channel::bounded(1);
-                        let _ = worker.sender.send(WorkerRequest::Shutdown { response });
+                        let _ = worker.sender.send(WorkerRequest::Shutdown {
+                            response: WorkerResponseSender::channel(response),
+                        });
                     }
                     for worker in &mut workers {
                         if let Some(thread) = worker.thread.take() {
@@ -238,14 +245,14 @@ impl ThreadedKvkache {
     fn request(
         &self,
         worker: usize,
-        build: impl FnOnce(Sender<Result<WorkerResponse>>) -> WorkerRequest,
+        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
     ) -> Result<WorkerResponse> {
         let (response_tx, response_rx) = channel::bounded(1);
         let request_started = std::time::Instant::now();
         self.workers[worker]
             .sender
             .send_timeout(
-                build(response_tx),
+                build(WorkerResponseSender::channel(response_tx)),
                 Duration::from_micros(self.config.timeouts.input_max_time_us),
             )
             .map_err(|_| KvError::Timeout("request input"))?;
@@ -258,17 +265,19 @@ impl ThreadedKvkache {
             .map_err(|_| KvError::Timeout("request output"))?
     }
 
-    /// Sends one worker request using async channel operations and bounded timeouts.
+    /// Sends one worker request using a reusable completion slot and bounded timeouts.
     async fn request_async(
         &self,
         worker: usize,
-        build: impl FnOnce(Sender<Result<WorkerResponse>>) -> WorkerRequest,
+        build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
     ) -> Result<WorkerResponse> {
-        let (response_tx, response_rx) = channel::bounded_sync_async(1);
+        let (response_tx, response_rx) = self.workers[worker].completions.register();
         let request_started = std::time::Instant::now();
         compio::runtime::time::timeout(
             Duration::from_micros(self.config.timeouts.input_max_time_us),
-            self.workers[worker].sender.send_async(build(response_tx)),
+            self.workers[worker]
+                .sender
+                .send_async(build(WorkerResponseSender::completion(response_tx))),
         )
         .await
         .map_err(|_| KvError::Timeout("request input"))?
@@ -277,10 +286,10 @@ impl ThreadedKvkache {
         let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
         let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
         let remaining = request_limit.saturating_sub(elapsed).min(output_limit);
-        compio::runtime::time::timeout(remaining, response_rx.recv_async())
+        compio::runtime::time::timeout(remaining, response_rx)
             .await
             .map_err(|_| KvError::Timeout("request output"))?
-            .map_err(|_| KvError::Worker("response queue disconnected".into()))?
+            .map_err(|_| KvError::Worker("worker response disconnected".into()))?
     }
 
     pub fn get(&self, client_key_digest: ClientKeyDigest) -> Result<Option<Vec<u8>>> {
@@ -519,7 +528,7 @@ impl ThreadedKvkache {
                 BenchmarkOperation::Get(_) => (
                     WorkerRequest::Get {
                         storage_key,
-                        response: response_tx,
+                        response: WorkerResponseSender::channel(response_tx),
                     },
                     BenchmarkResponseKind::Get,
                 ),
@@ -528,14 +537,14 @@ impl ThreadedKvkache {
                         storage_key,
                         value: EncodedValue::plain(value),
                         options: SetOptions::NONE,
-                        response: response_tx,
+                        response: WorkerResponseSender::channel(response_tx),
                     },
                     BenchmarkResponseKind::Set,
                 ),
                 BenchmarkOperation::Delete(_) => (
                     WorkerRequest::Delete {
                         storage_key,
-                        response: response_tx,
+                        response: WorkerResponseSender::channel(response_tx),
                     },
                     BenchmarkResponseKind::Delete,
                 ),
@@ -680,7 +689,7 @@ impl ThreadedKvkache {
             if worker
                 .sender
                 .send(WorkerRequest::Shutdown {
-                    response: response_tx,
+                    response: WorkerResponseSender::channel(response_tx),
                 })
                 .is_err()
                 && shutdown_error.is_none()
