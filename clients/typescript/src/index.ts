@@ -68,8 +68,8 @@ export interface Client_Options {
   readonly address: string
   /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
   readonly certificate: Uint8Array
-  /** Exact 32-byte XChaCha20-Poly1305 key. */
-  readonly encryption_key: Uint8Array
+  /** Exact 32-byte master secret used to derive key-hiding and value-encryption subkeys. */
+  readonly data_protection_key: Uint8Array
   /** TLS server name. Defaults to `localhost`. */
   readonly server_name?: string
   /** Client certificate and private key required by production mutual TLS. */
@@ -169,7 +169,7 @@ export class OpenKache_Client {
       server_name: options.server_name ?? "localhost",
       certificate: options.certificate.slice(),
       identity: owned_identity(options.identity),
-      encryption_key: options.encryption_key.slice(),
+      data_protection_key: options.data_protection_key.slice(),
       compression_enabled: compression.enabled !== false,
       compression_level: compression.level ?? 1,
       minimum_input_size: compression.minimum_input_size ?? 1_024,
@@ -425,9 +425,9 @@ function validate_options(options: Client_Options): void {
   if (options.certificate.byteLength === 0) {
     throw new OpenKache_Error("certificate must not be empty")
   }
-  if (options.encryption_key.byteLength !== 32) {
+  if (options.data_protection_key.byteLength !== 32) {
     throw new OpenKache_Error(
-      `encryption_key must contain 32 bytes, got ${options.encryption_key.byteLength}`,
+      `data_protection_key must contain 32 bytes, got ${options.data_protection_key.byteLength}`,
     )
   }
   if (options.server_name !== undefined && options.server_name.length === 0) {

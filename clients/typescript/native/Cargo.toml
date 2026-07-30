@@ -11,8 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "*", default-features = false, features = ["async", "napi8"] }
 napi-derive = "*"
-openkache-client = { path = "../../rust", default-features = false, features = ["quic-quinn"] }
-rustls = { version = "*", default-features = false, features = ["ring", "std"] }
+openkache-client-core = { path = "../../core", default-features = false, features = ["quic-quinn"] }
 
 [build-dependencies]
 napi-build = "*"

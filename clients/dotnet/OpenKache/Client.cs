@@ -135,18 +135,6 @@ public sealed class Client : IAsyncDisposable
     }
 
     /// <summary>
-    /// Retrieves the bytes stored for a UTF-8 key.
-    /// </summary>
-    /// <returns>The stored bytes, or <see langword="null"/> when the key is absent.</returns>
-    public ValueTask<byte[]?> GetAsync(
-        string key,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(key);
-        return GetAsync(Encoding.UTF8.GetBytes(key), cancellationToken);
-    }
-
-    /// <summary>
     /// Stores exact bytes under an exact binary key.
     /// </summary>
     /// <returns>Whether the operation created or replaced the key.</returns>
@@ -195,37 +183,6 @@ public sealed class Client : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stores exact bytes under a UTF-8 key.
-    /// </summary>
-    /// <returns>Whether the operation created or replaced the key.</returns>
-    public ValueTask<SetOutcome> SetAsync(
-        string key,
-        ReadOnlyMemory<byte> value,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(key);
-        return SetAsync(Encoding.UTF8.GetBytes(key), value, cancellationToken);
-    }
-
-    /// <summary>
-    /// Stores exact bytes under a UTF-8 key with optional expiration and an atomic existence
-    /// condition.
-    /// </summary>
-    /// <returns>
-    /// Whether the operation created, replaced, or did not store the key because its condition
-    /// failed.
-    /// </returns>
-    public ValueTask<SetOutcome> SetAsync(
-        string key,
-        ReadOnlyMemory<byte> value,
-        SetOptions options,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(key);
-        return SetAsync(Encoding.UTF8.GetBytes(key), value, options, cancellationToken);
-    }
-
-    /// <summary>
     /// Deletes an exact binary key.
     /// </summary>
     /// <returns><see langword="true"/> when the key existed.</returns>
@@ -244,18 +201,6 @@ public sealed class Client : IAsyncDisposable
             Protocol.Status.NotFound => false,
             _ => throw UnexpectedStatus("DELETE", response.Status),
         };
-    }
-
-    /// <summary>
-    /// Deletes a UTF-8 key.
-    /// </summary>
-    /// <returns><see langword="true"/> when the key existed.</returns>
-    public ValueTask<bool> DeleteAsync(
-        string key,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(key);
-        return DeleteAsync(Encoding.UTF8.GetBytes(key), cancellationToken);
     }
 
     /// <summary>

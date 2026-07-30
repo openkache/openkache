@@ -6,10 +6,10 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{ClientKeyDigest, SetOptions};
+use openkache_protocol::{ItemKey, SetOptions};
 
 use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
-use crate::types::EncodedValue;
+use crate::types::StoredItemValue;
 use crate::*;
 
 use super::CoreTask;
@@ -54,7 +54,7 @@ pub(super) enum WorkerRequest {
     },
     Set {
         storage_key: StorageKey,
-        value: EncodedValue,
+        value: StoredItemValue,
         options: SetOptions,
         response: WorkerResponseSender,
     },
@@ -75,7 +75,7 @@ pub(super) enum WorkerRequest {
 
 #[derive(Debug)]
 pub(super) enum WorkerResponse {
-    Value(Option<EncodedValue>),
+    Value(Option<StoredItemValue>),
     Set(SetOutcome),
     Deleted(bool),
     Stats(String),
@@ -85,17 +85,15 @@ pub(super) enum WorkerResponse {
 
 #[derive(Debug)]
 pub enum BenchmarkOperation {
-    Get(ClientKeyDigest),
-    Set(ClientKeyDigest, Vec<u8>),
-    Delete(ClientKeyDigest),
+    Get(ItemKey),
+    Set(ItemKey, Vec<u8>),
+    Delete(ItemKey),
 }
 
 impl BenchmarkOperation {
-    pub(crate) fn client_key_digest(&self) -> ClientKeyDigest {
+    pub(crate) fn key(&self) -> ItemKey {
         match self {
-            Self::Get(client_key_digest)
-            | Self::Delete(client_key_digest)
-            | Self::Set(client_key_digest, _) => *client_key_digest,
+            Self::Get(key) | Self::Delete(key) | Self::Set(key, _) => *key,
         }
     }
 }

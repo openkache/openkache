@@ -1537,6 +1537,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde",
+ "sha2",
  "smallvec",
  "snmalloc-rs",
  "socket2",
@@ -1550,7 +1551,6 @@ dependencies = [
 name = "openkache-protocol"
 version = "0.1.0"
 dependencies = [
- "sha2",
  "thiserror",
 ]
 

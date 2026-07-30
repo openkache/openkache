@@ -2,17 +2,18 @@
 
 `@openkache/client` is the TypeScript and JavaScript SDK for Node.js, Bun, and
 Deno applications. It delegates QUIC, mutual TLS, compression, and value encryption
-to the production Rust client through a packaged Node-API adapter. Applications
+to `openkache-client-core` through a packaged Node-API adapter. Applications
 do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
 
 ## Purpose
 
 Applications use regular JavaScript objects while OpenKache keeps envelope
 framing, transport, and security behavior in one Rust implementation. JavaScript
-codecs produce metadata and payload bytes; Rust wraps them in the shared
-[OpenKache value envelope](../VALUE_FORMAT.md), compresses beneficial values,
-and encrypts every value before it leaves the client. The server stores opaque
-bytes without parsing, decrypting, or decompressing them.
+codecs produce metadata and payload bytes; the adapter passes them to the shared
+core's [OpenKache value envelope](../VALUE_FORMAT.md) implementation and delegates
+the resulting plaintext envelope to `ProtectedClient`. The core then compresses
+beneficial values and encrypts every value before it leaves the client. The
+server stores opaque bytes without parsing, decrypting, or decompressing them.
 
 ## Commands
 
@@ -48,7 +49,7 @@ const client = await OpenKache_Client.connect({
     certificate_chain: [await readFile("client-bundle/client.crt")],
     private_key: await readFile("client-bundle/client.key"),
   },
-  encryption_key: crypto.getRandomValues(new Uint8Array(32)),
+  data_protection_key: await readFile("client-bundle/data-protection.key"),
 })
 
 await client.set("profile", {
@@ -121,8 +122,10 @@ loop. Call and await `close()` when finished.
 - `identity` contains the DER or PEM client certificate chain and private key
   required by production mutual TLS. An administrator identity is required for
   `stats()` and `sync()`.
-- `encryption_key` is an application-managed 32-byte secret. Clients sharing
-  values must use the same key. OpenKache never sends it to the server.
+- `data_protection_key` is an application-managed 32-byte secret. Clients sharing
+  values must use the same key. Generate it once with a cryptographically secure
+  random source and persist it in secret storage; do not generate a new key for
+  each connection. OpenKache never sends it to the server.
 - `compression` controls Zstandard level, minimum input size, and required
   savings. Defaults are level 1, 1 KiB, and 64 bytes.
 - `timeouts.connect_ms` bounds endpoint setup and the QUIC/TLS handshake;
@@ -131,6 +134,11 @@ loop. Call and await `close()` when finished.
   the default is 2000 ms.
 - `value_codecs` registers optional Protobuf, FlatBuffers, or application codecs.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
+
+`data_protection_key` replaces the previous `encryption_key` option and changes both key and value
+derivation. Reusing the same 32 bytes does not preserve old cache entries: item keys now use a
+derived HMAC-SHA-256 key and values use an independently derived encryption key. Repopulate entries
+when migrating or rotating this secret.
 
 `stats()` validates the server response and returns
 `{ storage: string, workers: readonly string[] }`.
@@ -144,4 +152,4 @@ Stored encrypted values contain a 24-byte nonce, ciphertext, and a 16-byte
 authentication tag. Existing request, response, and on-disk metadata fields
 carry the compression and encryption bits without adding bytes to the value.
 Encryption therefore adds exactly 40 bytes. The flags are authenticated with
-the cache-key digest.
+the exact item key.

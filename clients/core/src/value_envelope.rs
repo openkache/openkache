@@ -28,25 +28,49 @@ pub struct ValueEnvelope<'a> {
 pub enum Error {
     /// The encoding identifier does not follow the portable identifier grammar.
     #[error("invalid value encoding {encoding:?}")]
-    InvalidEncoding { encoding: String },
+    InvalidEncoding {
+        /// Rejected encoding identifier.
+        encoding: String,
+    },
     /// The logical type name cannot fit in the envelope header.
     #[error("value type name contains {size} bytes, maximum is {maximum}")]
-    TypeNameTooLong { size: usize, maximum: usize },
+    TypeNameTooLong {
+        /// Actual UTF-8 byte length.
+        size: usize,
+        /// Maximum representable byte length.
+        maximum: usize,
+    },
     /// The envelope length cannot be represented by the current platform.
     #[error("value envelope length overflow")]
     LengthOverflow,
     /// The output allocation could not be reserved.
     #[error("failed to allocate {size} bytes for value envelope")]
-    Allocation { size: usize },
+    Allocation {
+        /// Requested allocation size.
+        size: usize,
+    },
     /// The input does not contain a complete envelope header.
     #[error("value envelope contains {size} bytes, header requires {minimum}")]
-    HeaderTruncated { size: usize, minimum: usize },
+    HeaderTruncated {
+        /// Actual input size.
+        size: usize,
+        /// Minimum complete header size.
+        minimum: usize,
+    },
     /// The input uses a different magic value or envelope version.
     #[error("unsupported value envelope magic or version {found:02x?}")]
-    UnsupportedMagicOrVersion { found: [u8; 4] },
+    UnsupportedMagicOrVersion {
+        /// Four-byte prefix found in the input.
+        found: [u8; 4],
+    },
     /// The declared encoding and type-name bytes are not present.
     #[error("value envelope metadata requires {required} bytes, input contains {actual}")]
-    MetadataTruncated { required: usize, actual: usize },
+    MetadataTruncated {
+        /// Bytes required by the declared metadata lengths.
+        required: usize,
+        /// Bytes available in the input.
+        actual: usize,
+    },
     /// The encoding identifier is not valid UTF-8.
     #[error("value encoding is not valid UTF-8: {0}")]
     EncodingUtf8(#[source] std::str::Utf8Error),

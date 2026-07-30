@@ -25,7 +25,7 @@ Encoding identifiers contain lowercase ASCII letters, digits, dots, and
 hyphens, start with a letter, and contain at most 64 bytes. Type names and codec
 payloads are opaque to the envelope. A raw byte API bypasses the envelope.
 
-The Rust client's `value_envelope` module is the reference implementation. Its
+The shared core's `value_envelope` module is the reference implementation. Its
 `encode` function produces owned bytes, while `decode` validates the envelope
 and borrows its metadata and payload without copying.
 
@@ -56,15 +56,15 @@ document their type-name and payload contracts.
 
 For `set`, a client checks registered codecs first and rejects ambiguous
 matches. If no custom codec accepts the object, it uses the JSON codec. The
-shared Rust implementation wraps the resulting encoding, type name, and payload
-in the canonical binary envelope. For `get`, Rust validates and splits the
+shared core implementation wraps the resulting encoding, type name, and payload
+in the canonical binary envelope. For `get`, the core validates and splits the
 envelope before the language adapter routes its payload. Unknown encodings fail
 explicitly; callers can still retrieve their exact bytes through the raw API.
 
 Language clients implement object conversion with their native JSON,
 Protobuf, FlatBuffers, or generated-code runtime. Fixed conformance vectors
-keep independent raw implementations byte-compatible with the Rust reference.
-Native adapters should call the Rust encoder and decoder instead of duplicating
+keep independent raw implementations byte-compatible with the core reference.
+Native adapters should call the core encoder and decoder instead of duplicating
 magic bytes, offsets, or metadata-length rules. The format does not depend on
 JavaScript or a particular serializer.
 
@@ -72,6 +72,6 @@ JavaScript or a particular serializer.
 
 The TypeScript codec registry uses `Uint8Array`, `TextEncoder`, `TextDecoder`,
 and `JSON`, with no Node.js imports. Its native adapter passes codec metadata and
-payload bytes to the Rust envelope implementation. A future WebTransport client
+payload bytes to the core envelope implementation. A future WebTransport client
 can expose the same boundary through Rust compiled to WebAssembly without
 copying the binary constants into TypeScript.

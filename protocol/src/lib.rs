@@ -1,20 +1,18 @@
 //! Binary request and response framing shared by OpenKache clients and servers.
 
-use sha2::{Digest, Sha256};
-
 /// QUIC application protocol identifier for persistent request lanes.
 pub const ALPN: &[u8] = b"openkache/2";
 /// Bytes in an encoded request header.
 pub const REQUEST_HEADER_BYTES: usize = 9;
 /// Bytes in an encoded response header.
 pub const RESPONSE_HEADER_BYTES: usize = 5;
-/// Bytes in every client-computed SHA-256 key digest.
-pub const CLIENT_KEY_DIGEST_BYTES: usize = 32;
+/// Bytes in every canonical item key carried by the protocol.
+pub const ITEM_KEY_BYTES: usize = 32;
 /// Absolute value or response payload ceiling representable by protocol v2.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
 /// Maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
-    REQUEST_HEADER_BYTES + CLIENT_KEY_DIGEST_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
+    REQUEST_HEADER_BYTES + ITEM_KEY_BYTES + SET_TTL_BYTES + MAX_VALUE_BYTES;
 /// Maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = RESPONSE_HEADER_BYTES + MAX_VALUE_BYTES;
 
@@ -105,34 +103,29 @@ impl TryFrom<u8> for Status {
     }
 }
 
-/// The fixed-size SHA-256 digest sent by clients instead of a user-provided key.
+/// The exact fixed-size item identifier carried by the protocol.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ClientKeyDigest([u8; CLIENT_KEY_DIGEST_BYTES]);
+pub struct ItemKey([u8; ITEM_KEY_BYTES]);
 
-impl ClientKeyDigest {
-    /// Hashes the exact user-key bytes into the protocol's canonical wire key.
-    pub fn from_user_key(user_key: &[u8]) -> Self {
-        Self(Sha256::digest(user_key).into())
-    }
-
-    /// Wraps an already-computed client key digest.
-    pub const fn new(bytes: [u8; CLIENT_KEY_DIGEST_BYTES]) -> Self {
+impl ItemKey {
+    /// Wraps an exact 32-byte item key.
+    pub const fn new(bytes: [u8; ITEM_KEY_BYTES]) -> Self {
         Self(bytes)
     }
 
-    /// Returns the complete digest bytes.
-    pub const fn as_bytes(&self) -> &[u8; CLIENT_KEY_DIGEST_BYTES] {
+    /// Returns the complete key bytes.
+    pub const fn as_bytes(&self) -> &[u8; ITEM_KEY_BYTES] {
         &self.0
     }
 
-    /// Consumes the digest and returns its bytes.
-    pub const fn into_bytes(self) -> [u8; CLIENT_KEY_DIGEST_BYTES] {
+    /// Consumes the key and returns its bytes.
+    pub const fn into_bytes(self) -> [u8; ITEM_KEY_BYTES] {
         self.0
     }
 }
 
-impl AsRef<[u8]> for ClientKeyDigest {
+impl AsRef<[u8]> for ItemKey {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
     }
@@ -260,7 +253,7 @@ impl SetOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub opcode: Opcode,
-    pub client_key_digest: Option<ClientKeyDigest>,
+    pub key: Option<ItemKey>,
     pub value_flags: ValueFlags,
     pub set_options: SetOptions,
     pub value: Vec<u8>,
@@ -293,7 +286,7 @@ impl Request {
         validate_set_option_bits(opcode, encoded_value_len)?;
         let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
         validate_lengths(value_len)?;
-        validate_wire_key_length(opcode, key_len)?;
+        validate_item_key_length(opcode, key_len)?;
         REQUEST_HEADER_BYTES
             .checked_add(key_len)
             .and_then(|size| {
@@ -308,49 +301,33 @@ impl Request {
     }
 
     /// Creates and validates a request.
-    pub fn new(
-        opcode: Opcode,
-        client_key_digest: Option<ClientKeyDigest>,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        Self::new_with_value_flags(opcode, client_key_digest, ValueFlags::NONE, value)
+    pub fn new(opcode: Opcode, key: Option<ItemKey>, value: Vec<u8>) -> Result<Self> {
+        Self::new_with_value_flags(opcode, key, ValueFlags::NONE, value)
     }
 
     /// Creates and validates a request with explicit value transformation flags.
     pub fn new_with_value_flags(
         opcode: Opcode,
-        client_key_digest: Option<ClientKeyDigest>,
+        key: Option<ItemKey>,
         value_flags: ValueFlags,
         value: Vec<u8>,
     ) -> Result<Self> {
-        Self::new_set(
-            opcode,
-            client_key_digest,
-            value_flags,
-            SetOptions::NONE,
-            value,
-        )
+        Self::new_set(opcode, key, value_flags, SetOptions::NONE, value)
     }
 
     /// Creates and validates a request with explicit value and `SET` options.
     pub fn new_set(
         opcode: Opcode,
-        client_key_digest: Option<ClientKeyDigest>,
+        key: Option<ItemKey>,
         value_flags: ValueFlags,
         set_options: SetOptions,
         value: Vec<u8>,
     ) -> Result<Self> {
         validate_lengths(value.len())?;
-        validate_request_shape(
-            opcode,
-            client_key_digest.is_some(),
-            value_flags,
-            set_options,
-            value.len(),
-        )?;
+        validate_request_shape(opcode, key.is_some(), value_flags, set_options, value.len())?;
         Ok(Self {
             opcode,
-            client_key_digest,
+            key,
             value_flags,
             set_options,
             value,
@@ -362,14 +339,12 @@ impl Request {
         validate_lengths(self.value.len())?;
         validate_request_shape(
             self.opcode,
-            self.client_key_digest.is_some(),
+            self.key.is_some(),
             self.value_flags,
             self.set_options,
             self.value.len(),
         )?;
-        let key_len = self
-            .client_key_digest
-            .map_or(0, |_| CLIENT_KEY_DIGEST_BYTES);
+        let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
         let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
         let mut frame =
             Vec::with_capacity(REQUEST_HEADER_BYTES + key_len + ttl_len + self.value.len());
@@ -379,8 +354,8 @@ impl Request {
             &encode_request_value_length(self.value.len(), self.value_flags, self.set_options)
                 .to_be_bytes(),
         );
-        if let Some(client_key_digest) = self.client_key_digest {
-            frame.extend_from_slice(client_key_digest.as_bytes());
+        if let Some(key) = self.key {
+            frame.extend_from_slice(key.as_bytes());
         }
         if let Some(ttl_ms) = self.set_options.ttl_ms {
             frame.extend_from_slice(&ttl_ms.to_be_bytes());
@@ -394,14 +369,12 @@ impl Request {
         validate_lengths(self.value.len())?;
         validate_request_shape(
             self.opcode,
-            self.client_key_digest.is_some(),
+            self.key.is_some(),
             self.value_flags,
             self.set_options,
             self.value.len(),
         )?;
-        let key_len = self
-            .client_key_digest
-            .map_or(0, |_| CLIENT_KEY_DIGEST_BYTES);
+        let key_len = self.key.map_or(0, |_| ITEM_KEY_BYTES);
         let ttl_len = self.set_options.ttl_ms.map_or(0, |_| SET_TTL_BYTES);
         let prefix_len = REQUEST_HEADER_BYTES + key_len + ttl_len;
         let value_len = self.value.len();
@@ -414,9 +387,9 @@ impl Request {
             &encode_request_value_length(value_len, self.value_flags, self.set_options)
                 .to_be_bytes(),
         );
-        if let Some(client_key_digest) = self.client_key_digest {
+        if let Some(key) = self.key {
             self.value[REQUEST_HEADER_BYTES..REQUEST_HEADER_BYTES + key_len]
-                .copy_from_slice(client_key_digest.as_bytes());
+                .copy_from_slice(key.as_bytes());
         }
         if let Some(ttl_ms) = self.set_options.ttl_ms {
             self.value[REQUEST_HEADER_BYTES + key_len..prefix_len]
@@ -430,7 +403,7 @@ impl Request {
         let decoded = decode_request_frame(frame)?;
         Ok(Self {
             opcode: decoded.opcode,
-            client_key_digest: decoded.client_key_digest,
+            key: decoded.key,
             value_flags: decoded.value_flags,
             set_options: decoded.set_options,
             value: frame[decoded.value_start..].to_vec(),
@@ -444,7 +417,7 @@ impl Request {
         frame.truncate(decoded.value_len);
         Ok(Self {
             opcode: decoded.opcode,
-            client_key_digest: decoded.client_key_digest,
+            key: decoded.key,
             value_flags: decoded.value_flags,
             set_options: decoded.set_options,
             value: frame,
@@ -454,7 +427,7 @@ impl Request {
 
 struct DecodedRequestFrame {
     opcode: Opcode,
-    client_key_digest: Option<ClientKeyDigest>,
+    key: Option<ItemKey>,
     value_flags: ValueFlags,
     set_options: SetOptions,
     value_start: usize,
@@ -476,7 +449,7 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     let mut set_options = SetOptions::from_wire_bits(encoded_value_len)?;
     let value_len = (encoded_value_len & REQUEST_VALUE_LENGTH_MASK) as usize;
     validate_lengths(value_len)?;
-    validate_wire_key_length(opcode, key_len)?;
+    validate_item_key_length(opcode, key_len)?;
     let expected = Request::frame_len_from_header(&frame[..REQUEST_HEADER_BYTES])?;
     if frame.len() != expected {
         return Err(ProtocolError::FrameLength {
@@ -486,13 +459,13 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     }
     let has_ttl = encoded_value_len & SET_TTL_BIT != 0;
     let key_end = REQUEST_HEADER_BYTES + key_len;
-    let client_key_digest = if key_len == 0 {
+    let key = if key_len == 0 {
         None
     } else {
-        Some(ClientKeyDigest::new(
+        Some(ItemKey::new(
             frame[REQUEST_HEADER_BYTES..key_end]
                 .try_into()
-                .expect("validated client key digest length"),
+                .expect("validated key length"),
         ))
     };
     let value_start = if has_ttl {
@@ -513,7 +486,7 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     validate_request_shape(opcode, key_len != 0, value_flags, set_options, value_len)?;
     Ok(DecodedRequestFrame {
         opcode,
-        client_key_digest,
+        key,
         value_flags,
         set_options,
         value_start,
@@ -709,8 +682,8 @@ pub enum ProtocolError {
     FrameLength { expected: usize, actual: usize },
     #[error("frame length overflow")]
     FrameLengthOverflow,
-    #[error("{opcode:?} requires a {expected}-byte client key digest, received {actual} key bytes")]
-    InvalidClientKeyLength {
+    #[error("{opcode:?} requires a {expected}-byte item key, received {actual} key bytes")]
+    InvalidItemKeyLength {
         opcode: Opcode,
         expected: usize,
         actual: usize,
@@ -765,15 +738,15 @@ fn validate_set_option_bits(opcode: Opcode, encoded_value_len: u32) -> Result<()
     SetOptions::from_wire_bits(encoded_value_len).map(|_| ())
 }
 
-fn validate_wire_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
+fn validate_item_key_length(opcode: Opcode, key_len: usize) -> Result<()> {
     let expected = match opcode {
         Opcode::Ping | Opcode::Stats | Opcode::Sync => 0,
-        Opcode::Get | Opcode::Set | Opcode::Delete => CLIENT_KEY_DIGEST_BYTES,
+        Opcode::Get | Opcode::Set | Opcode::Delete => ITEM_KEY_BYTES,
     };
     if key_len == expected {
         Ok(())
     } else {
-        Err(ProtocolError::InvalidClientKeyLength {
+        Err(ProtocolError::InvalidItemKeyLength {
             opcode,
             expected,
             actual: key_len,

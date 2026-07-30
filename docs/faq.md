@@ -42,11 +42,12 @@ available.
 
 ### Is end-to-end encryption mandatory?
 
-The TypeScript client requires a 32-byte XChaCha20-Poly1305 key. Rust callers
-can select the same secure codec or use the backwards-compatible plaintext
-mode. Cache keys are sent as SHA-256 digests. With the secure codec, the server
-sees deterministic key digests and encrypted value sizes, but not value
-plaintext.
+High-level Rust and TypeScript clients require a random 32-byte data protection
+master key. The shared client core derives HMAC-SHA-256 item keys and an
+independent XChaCha20-Poly1305 value key. The server sees deterministic 32-byte
+item keys and encoded value sizes, but not application keys or value plaintext.
+The low-level raw API accepts exact item keys and encoded values for callers
+that intentionally own those transformations.
 
 ### Can I use my own QUIC implementation?
 

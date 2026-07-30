@@ -1,22 +1,9 @@
-// build.rs — Pure-Rust gate for `openkache-client`
+// Pure-Rust dependency gate for `openkache-client-core`.
 //
-// This build script is a **compile-time safety check** that enforces a
-// fundamental constraint of the client crate: it must remain entirely
-// free of native/C dependencies.
-//
-// ## Why this matters
-//
-// The `openkache-client` crate is designed to be cross-compilable to
-// every tier-1 and tier-2 Rust target without requiring a C toolchain,
-// a C compiler, or any platform-specific native libraries.  This
-// portability guarantee is essential for:
-//
-//   - WebAssembly (wasm32) targets, which have no C ABI.
-//   - Embedded targets and `no_std` environments.
-//   - Swift/Flutter bridge targets (iOS, Android) where linking
-//     native code adds significant build complexity.
-//   - Rapid CI pipelines that should not need `cmake`, `pkg-config`,
-//     or a C++ toolchain installed.
+// The shared client implementation must not require a C or C++ build toolchain. This keeps
+// supported cross-compilation targets and language adapters independent of native build systems.
+// Runtime and target support are still determined by the selected QUIC backend; this gate makes no
+// `no_std`, WebAssembly, or universal-target claim.
 //
 // If a dependency pulls in `libc`, `cxx`, `bindgen`, `cmake`,
 // `pkg-config`, `vcpkg`, or any `napi`/`napi-derive` crate, the
@@ -76,7 +63,7 @@ fn main() {
             if trimmed.starts_with(&format!("{dep} =")) || trimmed.starts_with(&format!("{dep}.")) {
                 panic!(
                     "\n❌ C dependency detected in Cargo.toml: '{dep}'\n\
-                     The `openkache-client` crate must remain pure Rust.\n\
+                     The `openkache-client-core` crate must remain pure Rust.\n\
                      Remove '{dep}' or find a pure-Rust alternative.\n"
                 );
             }
