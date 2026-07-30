@@ -5,49 +5,8 @@ using System.Buffers.Binary;
 
 namespace OpenKache;
 
-internal static class Protocol
+internal static partial class Protocol
 {
-    internal const string ApplicationProtocol = "openkache/2";
-    internal const int ResponseHeaderBytes = 5;
-    internal const int MaximumValueBytes = 64 * 1024 * 1024;
-
-    private const int RequestHeaderBytes = 9;
-    private const int ItemKeyBytes = 32;
-    private const int SetTtlBytes = sizeof(ulong);
-    private const uint ResponseValueLengthMask = (1u << 30) - 1;
-    private const uint ValueCompressedBit = 1u << 31;
-    private const uint ValueEncryptedBit = 1u << 30;
-    private const uint SetTtlBit = 1u << 29;
-    private const uint SetIfAbsentBit = 1u << 28;
-    private const uint SetIfPresentBit = 1u << 27;
-
-    internal enum Opcode : byte
-    {
-        Ping = 0x01,
-        Get = 0x02,
-        Set = 0x03,
-        Delete = 0x04,
-        Stats = 0x05,
-        Sync = 0x06,
-    }
-
-    internal enum Status : byte
-    {
-        Ok = 0x00,
-        NotFound = 0x01,
-        Created = 0x02,
-        Replaced = 0x03,
-        Deleted = 0x04,
-        NotStored = 0x05,
-        InvalidRequest = 0x40,
-        UnsupportedOpcode = 0x41,
-        TooLarge = 0x42,
-        Overloaded = 0x43,
-        Timeout = 0x44,
-        Forbidden = 0x45,
-        InternalError = 0x7f,
-    }
-
     [Flags]
     internal enum ValueFlags : byte
     {

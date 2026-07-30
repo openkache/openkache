@@ -1,35 +1,5 @@
 //! Binary request and response framing shared by OpenKache clients and servers.
 
-/// QUIC application protocol identifier for wire protocol version 3.
-pub const ALPN: &[u8] = b"openkache/3";
-/// Bytes before the variable-length request lengths.
-pub const REQUEST_FIXED_BYTES: usize = 2;
-/// Bytes before the variable-length response payload length.
-pub const RESPONSE_FIXED_BYTES: usize = 1;
-/// Maximum bytes in one unsigned `vu128` accepted by this protocol.
-pub const MAX_VARUINT_BYTES: usize = 9;
-/// Bytes in every canonical item key carried by the protocol.
-pub const ITEM_KEY_BYTES: usize = 32;
-/// Absolute value or response payload ceiling representable by protocol v3.
-pub const MAX_VALUE_BYTES: usize = 64 * 1024 * 1024;
-
-const MIN_VARUINT_BYTES: usize = 1;
-const MIN_REQUEST_FRAME_BYTES: usize = REQUEST_FIXED_BYTES + MIN_VARUINT_BYTES * 2;
-const MIN_RESPONSE_FRAME_BYTES: usize = RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES;
-const MAX_REQUEST_PREFIX_BYTES: usize =
-    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_KEY_BYTES;
-const MAX_RESPONSE_PREFIX_BYTES: usize = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
-
-/// Conservative maximum complete request frame size.
-pub const MAX_REQUEST_FRAME_BYTES: usize = MAX_REQUEST_PREFIX_BYTES + MAX_VALUE_BYTES;
-/// Conservative maximum complete response frame size.
-pub const MAX_RESPONSE_FRAME_BYTES: usize = MAX_RESPONSE_PREFIX_BYTES + MAX_VALUE_BYTES;
-
-const SET_TTL_FLAG: u8 = 1 << 0;
-const SET_IF_ABSENT_FLAG: u8 = 1 << 1;
-const SET_IF_PRESENT_FLAG: u8 = 1 << 2;
-const KNOWN_SET_FLAGS: u8 = SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG;
-
 macro_rules! wire_enum {
     (
         $(#[$metadata:meta])*
@@ -58,38 +28,20 @@ macro_rules! wire_enum {
     };
 }
 
-wire_enum! {
-    /// Operations supported by protocol v3.
-    pub enum Opcode {
-        Ping = 0x01,
-        Get = 0x02,
-        Set = 0x03,
-        Delete = 0x04,
-        Stats = 0x05,
-        Sync = 0x06,
-    }
-    unknown => UnknownOpcode
-}
+include!("generated/wire_values.rs");
 
-wire_enum! {
-    /// Status returned in every protocol response.
-    pub enum Status {
-        Ok = 0x00,
-        NotFound = 0x01,
-        Created = 0x02,
-        Replaced = 0x03,
-        Deleted = 0x04,
-        NotStored = 0x05,
-        InvalidRequest = 0x40,
-        UnsupportedOpcode = 0x41,
-        TooLarge = 0x42,
-        Overloaded = 0x43,
-        Timeout = 0x44,
-        Forbidden = 0x45,
-        InternalError = 0x7f,
-    }
-    unknown => UnknownStatus
-}
+const MIN_VARUINT_BYTES: usize = 1;
+const MIN_REQUEST_FRAME_BYTES: usize = REQUEST_FIXED_BYTES + MIN_VARUINT_BYTES * 2;
+const MIN_RESPONSE_FRAME_BYTES: usize = RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES;
+const MAX_REQUEST_PREFIX_BYTES: usize =
+    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_KEY_BYTES;
+const MAX_RESPONSE_PREFIX_BYTES: usize = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
+const KNOWN_SET_FLAGS: u8 = SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG;
+
+/// Conservative maximum complete request frame size.
+pub const MAX_REQUEST_FRAME_BYTES: usize = MAX_REQUEST_PREFIX_BYTES + MAX_VALUE_BYTES;
+/// Conservative maximum complete response frame size.
+pub const MAX_RESPONSE_FRAME_BYTES: usize = MAX_RESPONSE_PREFIX_BYTES + MAX_VALUE_BYTES;
 
 impl Status {
     /// Returns whether this status represents a server-side error.

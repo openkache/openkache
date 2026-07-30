@@ -44,6 +44,10 @@ variable-integer parsing.
 
 ## Core components
 
+- `model/openkache.smithy` is the canonical source for assigned wire values,
+  shared limits, and version-specific layouts used by language bindings.
+- `src/generated/wire_values.rs` contains the protocol v3 Rust definitions
+  generated from that model.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.
@@ -58,5 +62,6 @@ policy; protocol v3 specifies only when a successful response may be sent.
 
 ## Configuration
 
-Protocol identifiers and wire ceilings are compile-time constants. The crate
-has no environment variables or runtime configuration files.
+Protocol identifiers and wire ceilings are compile-time constants sourced from
+the Smithy model. The crate has no environment variables or runtime
+configuration files.
