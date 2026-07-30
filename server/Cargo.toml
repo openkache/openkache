@@ -16,7 +16,7 @@ lto = "fat"
 overflow-checks = true
 
 [features]
-default = ["allocator-jemalloc", "channel-crossfire", "quic-noq"]
+default = ["allocator-jemalloc", "channel-kanal", "quic-noq"]
 # Forces the portable lookup paths for cross-architecture benchmarking.
 force-scalar = []
 allocator-system = []
