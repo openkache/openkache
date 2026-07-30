@@ -1,26 +1,40 @@
 # OpenKache client core
 
-`openkache-client-core` is the reusable Rust client engine behind OpenKache language bindings.
+`openkache-client-core` is the reusable Rust engine behind OpenKache language
+bindings.
 
 ## Purpose
 
-The core owns connection lifecycle, retries, stream concurrency, binary protocol operations,
-application-key hiding, compression, and encryption. Language adapters convert native types and
-delegate to this engine. Raw clients remain available for callers that already own exact protocol
-keys and values.
+The core owns connection lifecycle, TLS, retries, stream concurrency, protocol
+operations, application-key protection, compression, encryption, and
+formatted-value processing. Language adapters convert native types and delegate
+to this crate.
 
-- `RawClient` uses Tokio and Quinn and is `Clone + Send + Sync`.
-- `LocalRawClient` exposes the same contract on a caller-owned Compio runtime.
-- `ProtectedClient` and `LocalProtectedClient` compose raw operations with mandatory
-  application-key hiding and value encryption.
-- `ItemKey` is the exact 32-byte item identifier sent over the wire.
-- `ItemValue` carries exact opaque bytes. Compression and encryption metadata, when used, live
-  inside the client-owned value envelope.
-- `DataProtection`, `DataProtectionKey`, `ValueCodec`, and `value_envelope` remain reusable
-  primitives for custom low-level integrations.
+The main API layers are:
 
-The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native adapter depends on this
-core directly instead of depending on the Rust end-user layer.
+- `RawClient` and `LocalRawClient`, which accept exact protocol item keys and
+  opaque values;
+- `ProtectedClient` and `LocalProtectedClient`, which accept application keys
+  and plaintext values;
+- reusable configuration, key, protection, and value types for binding
+  adapters.
+
+The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
+adapter depends on this core directly.
+
+## Documentation ownership
+
+- The [client index](../README.md) owns binding architecture and implementation
+  status.
+- The [value-format specification](../VALUE_FORMAT.md) owns formatted value
+  bytes and algorithms.
+- The [wire protocol specification](../../protocol/SPEC.md) owns framing,
+  operations, limits, and retry ambiguity.
+- This README owns core crate usage, configuration, and source layout.
+
+This README intentionally does not specify protected-value bytes. Consult the
+client index for implemented-format status and the value-format specification
+for the v1 contract.
 
 ## Commands
 
@@ -35,54 +49,52 @@ cargo fmt --check
 
 ## Usage
 
+Use the raw layer when the caller already owns the exact protocol key and
+value:
+
 ```rust
 use openkache_client_core::{ItemKey, ItemValue, RawClient, SetOptions};
 
 let client = RawClient::connect("cache.example.com:4433").await?;
 let key = ItemKey::from_bytes([0x42; 32]);
 let outcome = client
-    .set(key, ItemValue::plaintext(b"value".to_vec()), SetOptions::new())
+    .set(key, ItemValue::new(b"value".to_vec()), SetOptions::new())
     .await?;
 ```
 
-`ItemKey::from_bytes` preserves a Rust array directly, while `ItemKey::from_slice` validates and
-copies a dynamic language-binding buffer. Neither constructor hashes the supplied bytes. Use
-`DataProtectionKey::derive_item_key` or `DataProtection::item_key` when a language adapter needs
-the shared HMAC-SHA-256 derivation.
+`ItemKey::from_bytes` preserves a fixed array. `ItemKey::from_slice` validates
+and copies a dynamic buffer. Neither hashes the supplied bytes.
 
-Plaintext `ValueCodec` mode is exact passthrough. When compression or encryption
-is configured, the codec stores its metadata inside the opaque value:
+Use `ProtectedClient` when the core should derive the item key and transform
+plaintext values:
 
-```text
-"OKT\x01" | flags:u8 | body
+```rust
+use openkache_client_core::{DataProtectionKey, ProtectedClient};
 
-flags bit 0 = compressed
-flags bit 1 = encrypted
-encrypted body = nonce[24] | ciphertext | authentication_tag[16]
+let key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
+client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
-
-For encrypted values, the header and flags are authenticated with the item key.
-Neither the wire protocol nor the server parses this envelope.
 
 ## Configuration
 
-`RawClient::connect("host:port")` uses system trust and derives the TLS server name from the host.
-Use `Endpoint`, `Certificate`, `ClientIdentity`, and a builder for a pre-resolved address,
-self-signed trust, mutual TLS, deadlines, retry attempts, or a custom `max_in_flight` bound.
+`RawClient::connect("host:port")` and `ProtectedClient::connect` use system
+trust and derive the TLS server name from the host. Builders accept a
+pre-resolved endpoint, explicit trust roots, mutual TLS identity, deadlines,
+retry attempts, compression policy, and `max_in_flight`.
 
-`Endpoint` parsing uses the validated URI authority parser from the `http` crate and then enforces
-the OpenKache-specific requirement that a positive port is present. `server_name` remains explicit
-only for pre-resolved socket addresses because TLS must verify a certificate identity separately
-from the network destination.
+`Endpoint` requires a positive port. A pre-resolved socket address also
+requires an explicit certificate server name because the network destination
+does not provide one.
 
 ## Core components
 
-- `src/lib.rs` owns lifecycle, retries, structured errors, raw operations, and runtime-specific
-  client types.
-- `src/transport.rs` owns lazy reusable stream lanes and backend-neutral deadlines.
-- `src/config.rs` owns stable TLS-independent public configuration wrappers.
-- `src/key.rs` owns exact item keys and domain-separated data-protection derivation.
-- `src/protection.rs` composes mandatory keyed derivation and encrypted values for language layers.
-- `src/protected.rs` owns shared application-key and plaintext-value operations for bindings.
-- `src/value.rs` owns optional compression and authenticated encryption tools.
-- `src/value_envelope.rs` owns the cross-language self-describing value frame.
+- `src/lib.rs` owns raw lifecycle, retries, operations, and stable errors.
+- `src/transport.rs` owns reusable stream lanes and backend-neutral deadlines.
+- `src/config.rs` owns public transport and TLS configuration wrappers.
+- `src/key.rs` owns exact item keys and data-protection key handling.
+- `src/protection.rs` owns application-key and value transformations.
+- `src/protected.rs` composes protected operations for bindings.
+- `src/value.rs` contains the current compression and encryption
+  implementation.
+- `src/value_envelope.rs` contains the current TypeScript codec envelope.

@@ -1,21 +1,22 @@
 # OpenKache Rust client
 
-`openkache-client` provides the ergonomic Rust end-user API over the reusable
-[`openkache-client-core`](../core) transport and protocol implementation.
+`openkache-client` provides the ergonomic Rust API over
+[`openkache-client-core`](../core).
 
 ## Purpose
 
-Rust applications get ergonomic defaults while language adapters and advanced callers can depend
-on `openkache-client-core` directly for every protocol value pattern. The high-level crate
-re-exports the core's stable public types so callers can still reach the raw layer without a second
-connection.
+Rust applications get high-level request builders while advanced callers can
+use the re-exported raw core types over the same connection.
 
-- `Client` accepts application keys and plaintext values. It derives 32-byte item keys and applies
-  mandatory key hiding and value encryption plus optional compression.
-- `RawClient`, implemented in `clients/core`, accepts an exact 32-byte `ItemKey` and an
-  `ItemValue`. It does not hash keys or transform values.
-- `LocalClient` and `LocalRawClient` provide the same layers for a Compio runtime. The primary
-  `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
+- `Client` accepts application keys and plaintext values.
+- `RawClient` accepts exact 32-byte item keys and opaque values.
+- `LocalClient` and `LocalRawClient` provide equivalent Compio-local layers.
+- `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
+
+Shared SDK status and layering live in the [client index](../README.md).
+Formatted value bytes belong to the
+[value-format specification](../VALUE_FORMAT.md), and server-visible behavior
+belongs to the [wire protocol specification](../../protocol/SPEC.md).
 
 ## Commands
 
@@ -27,24 +28,10 @@ cargo check --no-default-features --features quic-compio
 cargo fmt --check
 ```
 
-## Core components
-
-- `src/lib.rs` exposes ergonomic Rust request builders over core's shared protected client.
-- `src/ffi.rs` adapts the high-level Compio client to the versioned C ABI.
-- `../core` owns transport, TLS configuration, raw operations, key derivation, compression,
-  encryption, protected cache operations, and the cross-language value envelope.
-
-## Configuration
-
-The shortest connection accepts one `host:port` string plus the mandatory data protection key. It
-uses system trust and defaults for deadlines, retries, compression, and stream concurrency. The
-builder configures self-signed trust, mutual TLS, request deadlines, retry-safe attempts,
-`max_in_flight`, and compression.
-
 ## Connect
 
-The shortest connection path resolves the hostname, derives its TLS server name, and loads the
-operating system trust store:
+The shortest connection path uses system trust and derives the TLS server name
+from the endpoint:
 
 ```rust
 use openkache_client::{Client, DataProtectionKey};
@@ -53,8 +40,7 @@ let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
 let client = Client::connect("cache.example.com:4433", protection_key).await?;
 ```
 
-Explicitly trust a development or self-signed certificate with the builder. The stable client API
-owns its certificate types and does not expose rustls:
+Use the builder for a pre-resolved address, explicit trust root, or mutual TLS:
 
 ```rust
 use openkache_client::{Certificate, Client, DataProtectionKey, Endpoint};
@@ -68,11 +54,10 @@ let client = Client::builder(endpoint, protection_key)
     .await?;
 ```
 
-`server_name` is needed only when a pre-resolved socket address cannot supply the certificate name.
-`Endpoint::new("cache.example.com", 4433)` and the one-string connection path derive it
-automatically.
+`server_name` is separate only for a pre-resolved socket address. Hostname
+endpoints derive it automatically.
 
-Production mutual TLS uses client-owned types:
+Production mutual TLS uses client-owned certificate and key types:
 
 ```rust
 use openkache_client::{Certificate, ClientIdentity, PrivateKey};
@@ -91,42 +76,18 @@ let client = Client::builder(endpoint, protection_key)
 
 ## Protect keys and values
 
-`DataProtectionKey` is the application-managed 32-byte master secret for both key hiding and value
-encryption. Generate 32 random bytes and store their Base64 representation. Do not hash, truncate,
-or pad an arbitrary UTF-8 string into a key.
+`DataProtectionKey` is an application-managed 32-byte random secret. Generate
+it with a cryptographically secure random source and store its Base64 form in
+secret storage. Do not hash, truncate, or pad a human-readable password into a
+key.
 
-```rust
-use openkache_client::{Client, DataProtectionKey};
-use openkache_client::value::{Compression, ZstandardOptions};
+Clients must use the same data-protection key to share protected entries.
+Rotating it changes derived item keys, so old entries become unreachable and
+must be repopulated.
 
-let protection_key = DataProtectionKey::from_base64(&configured_base64_secret)?;
-let client = Client::builder(endpoint, protection_key)
-    .compression(Compression::Zstandard(ZstandardOptions::default()))
-    .connect()
-    .await?;
-```
-
-The client derives independent HKDF-SHA-256 subkeys. Application keys become deterministic
-HMAC-SHA-256 item keys, while values use XChaCha20-Poly1305 with a fresh nonce and the item key as
-authenticated data. The high-level client always requires this protection. A human passphrase API
-using Argon2id and an explicit salt is deferred.
-
-Clients must use the same data protection key to share entries. Rotating the key changes the
-derived item keys, so previously stored entries become unreachable and must be repopulated. The
-client does not retain old keys or perform dual-key reads.
-
-Every binary-protocol key is exactly 32 bytes:
-
-```rust
-use openkache_client::ItemKey;
-
-let exact = ItemKey::from_bytes([0x42; 32]);
-```
-
-`ItemKey::from_slice` provides the same exact-byte behavior for a dynamic buffer and rejects every
-other length. `RawClient` sends the resulting key without deriving or hashing it. Language adapters
-should depend on `openkache-client-core` directly; Rust applications can use the re-exported raw
-types when they already own a 32-byte item key.
+The [client status table](../README.md#sdk-status) identifies the format
+implemented by this release. The
+[value-format specification](../VALUE_FORMAT.md) defines the v1 contract.
 
 ## Operations
 
@@ -149,8 +110,8 @@ assert_eq!(
 );
 ```
 
-`Result<T>` represents client, transport, protocol, or server failure. Outcome enums represent
-successful domain results:
+`Result<T>` represents failure. Outcome enums represent successful cache
+results:
 
 ```rust
 pub enum GetOutcome<T> { Found(T), NotFound }
@@ -158,12 +119,7 @@ pub enum SetOutcome { Created, Replaced, NotStored }
 pub enum DeleteOutcome { Deleted, NotFound }
 ```
 
-`Error` is a non-exhaustive client-owned enum. `Backend` and `Operation` provide stable identifiers
-for runtime, transport, timeout, and mutation errors; backend library errors remain diagnostic
-messages rather than leaked Quinn, Compio, rustls, or protocol types. `AmbiguousOutcome` retains its
-structured underlying `Error` as `cause`.
-
-Set options are methods on the awaitable request rather than separate `with_options` functions:
+Set options are methods on the awaitable request:
 
 ```rust
 client
@@ -173,42 +129,28 @@ client
     .await?;
 ```
 
-TTL is an optional positive `u64` millisecond value. Zero is invalid. It is not a `Duration`
-because the wire format has an exact millisecond unit.
-
-The raw signatures are:
+Use the raw layer when the application already owns protocol values:
 
 ```rust
-async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>>;
-async fn set(
-    &self,
-    key: ItemKey,
-    value: ItemValue,
-    options: SetOptions,
-) -> Result<SetOutcome>;
-async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome>;
+use openkache_client::{ItemKey, ItemValue, SetOptions};
+
+let key = ItemKey::from_bytes([0x42; 32]);
+let result = client
+    .raw()
+    .set(key, ItemValue::new(b"value".to_vec()), SetOptions::new())
+    .await?;
 ```
 
-`ItemValue::new` preserves exact opaque bytes. Compression and encryption metadata
-live in the client-owned value envelope rather than the wire protocol.
+The raw layer bypasses key derivation and formatted-value processing.
 
-Plaintext mode is exact passthrough. Configured transformation values use
-`"OKT\x01" | flags:u8 | body`, where bit 0 means compressed and bit 1 means
-encrypted. Encrypted bodies contain a 24-byte nonce, ciphertext, and a 16-byte
-authentication tag. For encrypted values, the envelope header and flags are
-authenticated with the item key.
+## Configuration and lifecycle
 
-## Concurrency and connection lifecycle
+The builder configures explicit trust, mutual TLS, request deadlines, retries
+for response-safe operations, `max_in_flight`, and compression.
 
-One client owns one QUIC connection. It lazily creates up to 256 reusable bidirectional stream
-lanes by default, with one untagged request in flight per lane. A free lane is reused immediately;
-otherwise another lane is opened until `max_in_flight` is reached. Additional requests wait for a
-lane. Configure the bound with `.max_in_flight(n)`.
-
-Multiple in-flight requests are not pipelined on one busy lane. The protocol has no request IDs, so
-doing so would make cancellation and response recovery ambiguous. Applications requiring more
-parallelism than one connection should use multiple clients until a multi-connection pool is
-provided.
+One client owns one QUIC connection and lazily opens reusable bidirectional
+stream lanes up to `max_in_flight`. One request is active on each lane.
+Additional operations wait for a free lane.
 
 ```rust
 let state = client.connection_state();
@@ -216,16 +158,13 @@ client.reconnect().await?;
 client.close().await?;
 ```
 
-`connection_state()` is a best-effort snapshot and does not guarantee the next request will
-succeed. Response-safe operations (`PING`, `GET`, and `STATS`) may reconnect and retry according to
-`RetryPolicy`. Mutations are never replayed after request transmission when the response cannot be
-confirmed because the server may already have applied them; the operation returns
-`Error::AmbiguousOutcome`. Connection failures mark the client disconnected, and the next operation
-reconnects before sending its own request. A timeout while waiting for an unused lane is not
-ambiguous because no request was sent and does not invalidate a healthy connection.
+`connection_state()` is a best-effort snapshot. `close()` is idempotent and
+permanent for that client. Automatic retry and ambiguous mutation outcomes
+follow the [wire protocol rules](../../protocol/SPEC.md#retry-and-outcome-rules).
 
-## Deferred capabilities
+## Core components
 
-Telemetry hooks, batch and multi-key operations, multi-connection pooling, DNS refresh, advanced
-TLS controls, connection-state subscriptions, passphrase derivation, and codec
-registry/schema-negotiation are intentionally deferred.
+- `src/lib.rs` exposes the ergonomic Rust client and request builders.
+- `src/ffi.rs` exposes the versioned C ABI.
+- [`../core`](../core) owns shared transport, protocol, protection, and
+  binding behavior.

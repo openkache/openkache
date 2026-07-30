@@ -1,18 +1,20 @@
-# OpenKache TypeScript Client
+# OpenKache TypeScript client
 
 `@openkache/client` is the TypeScript and JavaScript SDK for Node.js, Bun, and
-Deno applications. It delegates QUIC, mutual TLS, compression, and value encryption
-to `openkache-client-core` through a packaged Node-API adapter. Applications
-do not need runtime npm dependencies, Bun-specific APIs, or a helper process.
+Deno. A packaged Node-API adapter delegates network and protection behavior to
+`openkache-client-core`; applications need no helper process or runtime npm
+dependencies.
 
 ## Purpose
 
-Applications use regular JavaScript objects while OpenKache keeps envelope
-framing, transport, and security behavior in one Rust implementation. The current pre-release
-adapter still serializes codec payloads in JavaScript and stores the earlier magic-prefixed
-envelope. It will migrate to the planned shared
-[OpenKache value format](../VALUE_FORMAT.md), where serialization also moves into the core.
-The server stores opaque bytes without parsing, decrypting, or decompressing them.
+The package converts JavaScript values and configuration into shared-core
+operations and exposes a Promise-based API. It does not implement QUIC,
+protocol framing, compression, or encryption in JavaScript.
+
+Shared SDK status and native-binding boundaries live in the
+[client index](../README.md). Formatted value bytes belong to the
+[value-format specification](../VALUE_FORMAT.md), and server-visible behavior
+belongs to the [wire protocol specification](../../protocol/SPEC.md).
 
 ## Commands
 
@@ -25,14 +27,9 @@ bun run typecheck
 bun run pack:check
 ```
 
-`build` generates the JavaScript and declaration files under the ignored
-`dist/` directory. `pack:check` also cross-compiles the Rust Node-API adapter and
-previews the complete npm package. Generated output is not committed.
-
-The repository uses Bun only for development and release tooling. Published
-applications can use Node.js 20 or newer, Bun's Node-API support, or Deno's Node
-compatibility layer with `--allow-ffi`. Release packages contain Linux x64 and
-ARM64 adapters under `target/native/` and require glibc 2.17 or newer.
+`build` generates ignored JavaScript and declaration files under `dist/`.
+`pack:check` cross-compiles the Rust Node-API adapter and previews the complete
+npm package. Generated output is not committed.
 
 ## Usage
 
@@ -57,6 +54,7 @@ await client.set("profile", {
   labels: ["subscriber", "beta"],
   active: true,
 })
+
 const profile = await client.get<{
   name: string
   visits: number
@@ -72,83 +70,61 @@ const bytes = await client.get_raw("opaque")
 await client.close()
 ```
 
-`set` accepts regular objects without a positional schema argument. Registered
-codecs are checked first; otherwise the built-in JSON codec accepts nested
-objects, dense arrays, strings, finite numbers, booleans, and null. The stored
-envelope records the encoding and logical type so `get` can select the decoder.
-Its optional generic parameter documents the expected application shape.
-Properties whose value is `undefined` are omitted by the JSON codec.
+`set` accepts nested objects, dense arrays, strings, finite numbers, booleans,
+and null through the built-in JSON codec. Its optional generic parameter
+documents the expected result shape. Object properties whose value is
+`undefined` are omitted.
 
-Use `{ condition: "if_absent" }` to create without overwriting an existing key,
-or `{ condition: "if_present" }` to update without creating a missing key.
-Unsatisfied conditions return `"not_stored"`.
+Use `{ condition: "if_absent" }` to create without overwriting or
+`{ condition: "if_present" }` to update only an existing item. Use `set_raw`
+and `get_raw` when the complete value is binary or already serialized.
 
-Big integers should use decimal strings. Binary fields should use an
-application-selected base64 string representation. Use `set_raw` and `get_raw`
-when the entire value is binary or uses another shared serialization format.
+Big integers should use an application-defined decimal string representation.
+Binary object fields should use an application-defined textual representation,
+such as Base64.
 
-Custom `Value_Codec` implementations can add Protobuf, FlatBuffers, or an
-application format. A codec owns its schema registry, while each stored envelope
-carries its encoding and type name. Schemas are therefore registered once
-instead of being passed to every `get` and `set`.
+Custom `Value_Codec` implementations can register Protobuf, FlatBuffers, or
+application formats. The codec registry is a package API, not the shared
+value-format registry. The
+[client status table](../README.md#sdk-status) is the canonical migration
+record.
 
-The codec registry and JSON fallback use only web-standard APIs and contain no
-Node.js imports. Binary envelope framing stays in the Rust core instead of
-duplicating its constants in TypeScript. A separate browser configuration
-typechecks this subpath against DOM and ES declarations without loading Node
-declarations. Empty raw values are valid.
-
-The runtime-neutral layer is available from
-`@openkache/client/value-codec`. The package can be installed on any platform;
-the current native transport supports Linux x64 and ARM64. `native_path` can
-select another compatible Node-API build.
-
-The browser cannot open the UDP-based QUIC transport or load a native adapter.
-A future browser client can instead use the browser `WebTransport` API against a
-WebTransport/HTTP3 server endpoint. Rust compiled to WebAssembly can reuse the
-canonical framing, codecs, compression, and encryption, while JavaScript owns
-the WebTransport streams. The runtime-neutral value-codec subpath preserves that
-boundary without adding a WebAssembly or browser transport dependency now.
-
-Every connection and cache method returns a promise. The adapter owns one
-reusable QUIC connection and runs native networking outside the JavaScript event
-loop. Call and await `close()` when finished.
+The runtime-neutral codec layer is available from
+`@openkache/client/value-codec`.
 
 ## Configuration
 
 - `address` is the server UDP address.
-- `certificate` is one trusted DER or PEM server/CA certificate.
+- `server_name` is the certificate identity for a pre-resolved address.
+- `certificate` is one trusted DER or PEM server or CA certificate.
 - `identity` contains the DER or PEM client certificate chain and private key
-  required by production mutual TLS. An administrator identity is required for
-  `stats()` and `sync()`.
-- `data_protection_key` is an application-managed 32-byte secret. Clients sharing
-  values must use the same key. Generate it once with a cryptographically secure
-  random source and persist it in secret storage; do not generate a new key for
-  each connection. OpenKache never sends it to the server.
+  used for mutual TLS.
+- `data_protection_key` is a persistent application-managed 32-byte random
+  secret. Clients sharing protected values must use the same key.
 - `compression` controls Zstandard level, minimum input size, and required
-  savings. Defaults are level 1, 1 KiB, and 64 bytes.
-- `timeouts.connect_ms` bounds endpoint setup and the QUIC/TLS handshake;
-  the default is 5000 ms.
-- `timeouts.request_ms` bounds each complete request/response operation;
-  the default is 2000 ms.
-- `value_codecs` registers optional Protobuf, FlatBuffers, or application codecs.
+  savings.
+- `timeouts.connect_ms` and `timeouts.request_ms` bound connection and complete
+  request operations.
+- `value_codecs` registers current package codecs.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
 
-`data_protection_key` replaces the previous `encryption_key` option and changes both key and value
-derivation. Reusing the same 32 bytes does not preserve old cache entries: item keys now use a
-derived HMAC-SHA-256 key and values use an independently derived encryption key. Repopulate entries
-when migrating or rotating this secret.
+Generate the data-protection key once with a cryptographically secure random
+source and store it as a secret. Rotating it makes existing protected entries
+unreachable.
 
-`stats()` validates the server response and returns
-`{ storage: string, workers: readonly string[] }`.
+## Runtime and lifecycle
 
-`PING`, `GET`, and `STATS` may reconnect and retry once after a transport
-failure. Mutating operations are not retried automatically. Encoded values are
-limited to the 64 MiB wire ceiling; servers may enforce a smaller operational
-limit.
+Published applications can use Node.js 20 or newer, Bun's Node-API support, or
+Deno's Node compatibility layer with `--allow-ffi`. Release packages contain
+Linux x64 and ARM64 adapters and require glibc 2.17 or newer.
 
-Stored encrypted values contain a 24-byte nonce, ciphertext, and a 16-byte
-authentication tag inside a client-owned envelope. Its `OKT\x01` header and
-flags add another 5 bytes, so encryption adds exactly 45 bytes. The envelope
-header and flags are authenticated with the exact item key. The wire protocol
-and server storage treat the complete envelope as opaque value bytes.
+The browser cannot load the native adapter or open the UDP-based QUIC
+transport. The `value-codec` subpath is runtime-neutral, but the client
+connection API is not a browser transport.
+
+Every connection and cache method returns a Promise. The adapter runs native
+networking outside the JavaScript event loop and owns one reusable connection.
+Call and await `close()` when finished.
+
+Protocol limits, operation outcomes, and retry safety follow the
+[wire protocol specification](../../protocol/SPEC.md).
