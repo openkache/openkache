@@ -457,13 +457,14 @@ fn sorted_allowed_cpu_ids() -> Vec<usize> {
     cpu_ids
 }
 
-/// Preserves the four-CPU 2/2 baseline and reserves four front-end CPUs only
-/// when at least eight storage CPUs remain.
+/// Keeps most small-instance CPUs available for storage and reserves additional
+/// front-end CPUs only when at least four or eight storage CPUs remain.
 pub(crate) const fn default_network_worker_count(cpu_count: usize) -> usize {
     match cpu_count {
         0 => 0,
         1 => 1,
-        2..=11 => 2,
+        2..=5 => 1,
+        6..=11 => 2,
         _ => 4,
     }
 }

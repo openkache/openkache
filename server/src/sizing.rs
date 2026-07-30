@@ -1,8 +1,9 @@
 //! Resource-budget sizing for common cache value distributions.
 //!
 //! The planner deliberately favors predictable headroom over exhaustive hardware
-//! tuning. It selects power-of-two SG counts, limits the Table to half of the
-//! process RAM budget, and leaves five percent of the SSD budget unassigned.
+//! tuning. It selects the largest SG count admitted by both resource budgets,
+//! limits the Table to half of the process RAM budget, and leaves five percent
+//! of the SSD budget unassigned.
 //! Automatic RAM discovery also leaves at least twenty percent of currently
 //! available memory outside the process budget. Budgets are advisory inputs.
 //! Discovery recognizes common Linux cgroup memory limits and usage plus
@@ -28,6 +29,7 @@ const MEMORY_RESERVE_TOTAL_PERCENT: u64 = 5;
 const STORAGE_USE_PERCENT: u64 = 95;
 const TABLE_RAM_PERCENT: u64 = 50;
 const LIVE_KEY_PERCENT: u64 = 75;
+const MAX_SEGMENTS_PER_THREAD: usize = 1 << 16;
 
 /// A coarse value-size distribution used to choose the SG and Blob layout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -129,8 +131,8 @@ impl SizingRequest {
     ///
     /// # Returns
     ///
-    /// A plan using permitted CPU IDs and the largest power-of-two SG count that
-    /// stays within the SSD and Table-memory budgets.
+    /// A plan using permitted CPU IDs and the largest SG count that stays within
+    /// the SSD and Table-memory budgets.
     ///
     /// # Errors
     ///
@@ -184,10 +186,10 @@ impl SizingRequest {
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
         config.storage.max_item_size_mib = config.storage.blob_segment_size_mib.min(16);
 
-        for exponent in (0..=16).rev() {
-            let segments_per_thread = 1usize << exponent;
+        let keys_per_segment = keys_per_segment(self.profile)?;
+        let candidate = |segments_per_thread: usize| -> Result<Option<SizingPlan>> {
+            let mut config = config.clone();
             config.storage.segments_per_thread = segments_per_thread;
-            let keys_per_segment = keys_per_segment(self.profile)?;
             let raw_key_capacity = checked_product(
                 [
                     storage_worker_count as u64,
@@ -201,13 +203,13 @@ impl SizingRequest {
             let capacity_per_thread_u64 =
                 planned_key_capacity.div_ceil(storage_worker_count as u64);
             let Ok(capacity_per_thread) = usize::try_from(capacity_per_thread_u64) else {
-                continue;
+                return Ok(None);
             };
             config.table.capacity_per_thread = capacity_per_thread.max(1);
 
             let storage_file_bytes = storage_file_bytes(&config)?;
             if storage_file_bytes > storage_budget_bytes {
-                continue;
+                return Ok(None);
             }
             let worker_config = config.worker_config(0);
             worker_config.validate()?;
@@ -217,10 +219,10 @@ impl SizingRequest {
                     KvError::InvalidConfig("modeled Table memory size overflowed".into())
                 })?;
             if table_memory_bytes > table_memory_budget_bytes {
-                continue;
+                return Ok(None);
             }
 
-            return Ok(SizingPlan {
+            Ok(Some(SizingPlan {
                 config,
                 profile: self.profile,
                 value_bytes: self.profile.value_bytes(),
@@ -232,12 +234,30 @@ impl SizingRequest {
                 table_memory_budget_bytes,
                 storage_file_bytes,
                 storage_budget_bytes,
-            });
+            }))
+        };
+
+        let mut first_unchecked = 1usize;
+        let mut first_infeasible = MAX_SEGMENTS_PER_THREAD + 1;
+        let mut best = None;
+        // File length, key capacity, and the modeled Table allocation are
+        // monotonic in the Segment count, so the feasible counts form a prefix.
+        while first_unchecked < first_infeasible {
+            let segments_per_thread = first_unchecked + (first_infeasible - first_unchecked) / 2;
+            if let Some(plan) = candidate(segments_per_thread)? {
+                best = Some(plan);
+                first_unchecked = segments_per_thread + 1;
+            } else {
+                first_infeasible = segments_per_thread;
+            }
         }
 
-        Err(KvError::InvalidConfig(
-            "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD".into(),
-        ))
+        best.ok_or_else(|| {
+            KvError::InvalidConfig(
+                "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD"
+                    .into(),
+            )
+        })
     }
 }
 
