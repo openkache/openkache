@@ -6,6 +6,9 @@ This document is the normative specification for OpenKache wire protocol
 version 3. An implementation conforms to version 3 only when its transport,
 framing, validation, and operation behavior satisfy this document.
 
+Client-owned formatted values are specified separately by the
+[OpenKache value format](../clients/VALUE_FORMAT.md).
+
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
@@ -25,8 +28,9 @@ Version 3 specifies:
 - malformed-frame handling and retry ambiguity.
 
 Client-side key derivation, serialization, compression, application-level
-encryption, and value envelopes are outside this protocol. Storage layout and
-cache eviction policy are also outside this protocol.
+encryption, and value containers are outside this protocol and belong to the
+value-format specification. Storage layout and cache eviction policy are also
+outside this protocol.
 
 ## Terminology
 

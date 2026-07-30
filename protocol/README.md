@@ -1,19 +1,21 @@
-# OpenKache Protocol
+# OpenKache protocol
 
-`openkache-protocol` defines the shared binary wire format used by OpenKache
-QUIC clients and servers.
+`openkache-protocol` is the Rust implementation of the binary contract shared
+by OpenKache protocol v3 clients and servers.
 
 ## Purpose
 
-The crate keeps opcode, status, framing, and size validation in one place so
-clients and servers cannot silently drift onto incompatible formats.
+The crate provides validated request and response types so implementations do
+not duplicate framing, opcode, status, or size checks.
 
-The normative wire contract is [SPEC.md](./SPEC.md). Implementation status and
-follow-up work are recorded in [HANDOVER.md](./HANDOVER.md).
+The [wire protocol specification](SPEC.md) defines transport negotiation, frame
+bytes, operation semantics, limits, malformed input handling, and retry
+ambiguity. This README covers crate usage, implementation structure, and
+project status.
 
 ## Commands
 
-From this directory:
+From `protocol`:
 
 ```bash
 cargo build
@@ -21,37 +23,40 @@ cargo check
 cargo fmt --check
 ```
 
-## Wire format
+## Usage
 
-Protocol v3 uses the QUIC ALPN identifier `openkache/3`. The ALPN selects the
-wire version for the connection; frames do not repeat a version byte. Each
-bidirectional stream is a reusable sequential lane with one request in flight.
+Construct or decode complete frames through validated types:
 
-```text
-request  = opcode:u8 | flags:u8 | key_len:vu128 | value_len:vu128 |
-           item_key | [ttl_ms:vu128] | value
-response = status:u8 | payload_len:vu128 | payload
+```rust
+use openkache_protocol::{Opcode, Request, Response};
+
+let request = Request::new(Opcode::Ping, None, Vec::new())?;
+let request_bytes = request.encode()?;
+
+let response_bytes = [0x00, 0x04, b'P', b'O', b'N', b'G'];
+let response = Response::decode(&response_bytes)?;
 ```
 
-Lengths and TTLs use canonical shortest unsigned `vu128`. Item keys are exact
-32-byte identifiers, values are opaque, and values and response payloads have
-a 64 MiB wire ceiling. The TTL appears after the key and before the value so a
-server can validate server-owned metadata before reading a large body.
-
-See the [wire protocol specification](./SPEC.md) for the byte-level encoding,
-operation semantics, status registry, validation rules, error recovery, and
-conformance vectors.
+Incremental transports can use `Request::decode_header`,
+`Request::frame_len`, `Response::decode_header`, and `Response::frame_len` to
+determine how many bytes a complete frame requires without duplicating
+variable-integer parsing.
 
 ## Core components
 
-- `Opcode` and `Status` define stable wire identifiers.
-- `Request` and `Response` validate and encode complete stream frames.
-- Incremental request and response header decoders report when enough prefix
-  bytes are available to determine the complete frame length.
-- `ProtocolError` reports malformed, unsupported, and oversized frames.
-- `SPEC.md` defines the normative protocol independent of the Rust API.
+- `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
+- `Request` and `Response` validate and encode complete frames.
+- `RequestHeader` and `ResponseHeader` support bounded incremental reads.
+- `ProtocolError` classifies malformed, unsupported, and oversized frames.
+- `SPEC.md` defines the implementation-independent contract.
+
+## Implementation status
+
+The shared Rust client and server use protocol v3 through this crate.
+Production durability guarantees for `SYNC` remain deployment and storage
+policy; protocol v3 specifies only when a successful response may be sent.
 
 ## Configuration
 
-The v3 limits and ALPN identifier are compile-time constants. There are no
-environment variables or runtime configuration files.
+Protocol identifiers and wire ceilings are compile-time constants. The crate
+has no environment variables or runtime configuration files.

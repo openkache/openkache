@@ -4,8 +4,13 @@ This document specifies the complete client-owned representation of values store
 OpenKache's formatted APIs. It covers serialization, compression, authenticated encryption, key
 derivation, validation, and the boundary between the shared client core and language adapters.
 
-The format is a pre-release design. Implementations may replace earlier envelope and value
-protection code without a compatibility path. Format version `1` is the first supported version.
+The [client index](README.md) describes implementation and migration status.
+The [wire protocol specification](../protocol/SPEC.md) defines server-visible
+framing and operation semantics.
+
+The format is a pre-release design. Implementations may replace earlier
+envelope and value-protection code without a compatibility path. Format version
+`1` is the first specified version.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be
 interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
@@ -181,7 +186,7 @@ the format entirely.
 ### Canonical JSON
 
 JSON serialization follows the
-[JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785) in RFC 8785. The core owns
+[JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785) in RFC 8785. The core handles
 both encoding and decoding. Language adapters convert native values into the core's logical value
 model and MUST NOT call facilities such as `JSON.stringify` to produce stored bytes.
 
@@ -551,22 +556,20 @@ compressed contents were responsible. The public error MUST identify only a valu
 failure. Implementations MUST zeroize any unauthenticated plaintext produced internally before
 returning that error.
 
-## Protocol and server behavior
+## Protocol integration
 
-Protocol v3 treats the complete container as an opaque request value or response payload. It
-carries no compression or encryption metadata; the container format byte is the only source of
-value-transform metadata.
+The [wire protocol specification](../protocol/SPEC.md) defines value limits,
+server opacity, and `SET` flags. This format begins with the exact opaque value
+slice carried by a protocol request or response; it does not add protocol
+fields.
 
-Protocol request flags encode server-owned `SET` semantics only. They MUST NOT be interpreted as
-value compression, encryption, serialization, or container-version metadata.
-
-The low-level raw protocol API remains capable of sending exact item keys and value bytes without
-wrapping them in this container. It is an explicit escape hatch and does not claim compatibility
-with formatted APIs.
+The low-level raw API sends exact item keys and value bytes without this
+container. It is an explicit escape hatch and does not claim compatibility with
+formatted APIs.
 
 ## Core and language responsibilities
 
-`openkache-client-core` owns:
+`openkache-client-core` handles:
 
 - value-format parsing and production;
 - canonical VU128 handling;
@@ -577,7 +580,7 @@ with formatted APIs.
 - format validation and stable error categories;
 - the protected application-key and plaintext-value operations used by bindings.
 
-Language adapters own only:
+Language adapters handle only:
 
 - conversion between native values and core logical values;
 - transfer of raw byte buffers without reformatting them;
