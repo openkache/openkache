@@ -19,6 +19,7 @@ use compio::runtime::RuntimeBuilder;
 use openkache_protocol::{ClientKeyDigest, SetOptions};
 
 use crate::channel::{self, Sender};
+use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::types::EncodedValue;
 use crate::*;
 
@@ -400,7 +401,7 @@ impl ThreadedKvkache {
             cpu_ids,
             total_segment_count,
             total_table_capacity,
-            2,
+            DEFAULT_BUCKET_CHOICE_COUNT,
         )
     }
 

@@ -18,10 +18,10 @@ use std::sync::{
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use compio::BufResult;
-use compio::buf::{IoBuf, IoBufMut, SetLen};
+use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
 use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
-use compio::io::AsyncWriteAt;
+use compio::io::{AsyncReadAt, AsyncWriteAt};
 use openkache_protocol::{SetCondition, SetOptions};
 
 use crate::types::EncodedValue;
@@ -37,6 +37,14 @@ pub(crate) use self::bucket::*;
 pub(crate) use self::recovery::*;
 
 const CAPACITY_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+const FILE_RESERVATION_RETRY_DELAYS: [Duration; 6] = [
+    Duration::from_millis(1),
+    Duration::from_millis(2),
+    Duration::from_millis(4),
+    Duration::from_millis(8),
+    Duration::from_millis(16),
+    Duration::from_millis(32),
+];
 const STORAGE_RESERVE_PERCENT: u64 = 5;
 
 #[repr(C, align(4096))]
@@ -346,15 +354,35 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
     let file_descriptor =
         unsafe { std::os::fd::BorrowedFd::borrow_raw(file.as_raw_fd()) }.try_clone_to_owned()?;
     compio::runtime::spawn_blocking(move || {
-        let result = unsafe { libc::posix_fallocate(file_descriptor.as_raw_fd(), offset, len) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::from_raw_os_error(result))
-        }
+        reserve_with_transient_retry(
+            || unsafe { libc::posix_fallocate(file_descriptor.as_raw_fd(), offset, len) },
+            std::thread::sleep,
+        )
     })
     .await
     .map_err(std::io::Error::from)?
+}
+
+pub(crate) fn reserve_with_transient_retry(
+    mut reserve: impl FnMut() -> i32,
+    mut wait: impl FnMut(Duration),
+) -> std::io::Result<()> {
+    for delay in FILE_RESERVATION_RETRY_DELAYS {
+        let result = reserve();
+        if result == 0 {
+            return Ok(());
+        }
+        if result != libc::EAGAIN && result != libc::EINTR {
+            return Err(std::io::Error::from_raw_os_error(result));
+        }
+        wait(delay);
+    }
+    let result = reserve();
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(result))
+    }
 }
 
 fn storage_io_error(guard: &ResourceGuard, error: std::io::Error) -> KvError {
@@ -378,17 +406,107 @@ fn storage_operation_error(guard: &ResourceGuard, error: KvError) -> KvError {
     }
 }
 
-pub(crate) fn require_complete_direct_io(
-    operation: &str,
-    completed: usize,
-    expected: usize,
-) -> Result<()> {
-    if completed != expected {
+fn validate_direct_io_progress(operation: &str, completed: usize, remaining: usize) -> Result<()> {
+    if completed == 0 || completed > remaining {
         return Err(KvError::Worker(format!(
-            "short direct {operation}: completed {completed} of {expected} bytes"
+            "invalid direct {operation} progress: completed {completed} with {remaining} bytes remaining"
+        )));
+    }
+    if completed < remaining && !completed.is_multiple_of(BUCKET_BYTES) {
+        return Err(KvError::Worker(format!(
+            "unaligned short direct {operation}: completed {completed} with {remaining} bytes remaining"
         )));
     }
     Ok(())
+}
+
+fn is_transient_io_error(error: &std::io::Error) -> bool {
+    error
+        .raw_os_error()
+        .is_some_and(|code| code == libc::EAGAIN || code == libc::EINTR)
+}
+
+fn direct_io_timeout(
+    started: Instant,
+    timeout: Duration,
+    operation: &'static str,
+) -> Result<Duration> {
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        Err(KvError::Timeout(operation))
+    } else {
+        Ok(remaining)
+    }
+}
+
+pub(crate) async fn read_exact_direct(
+    file: &File,
+    mut buffer: DirectIoBuffer,
+    offset: u64,
+    len: usize,
+    timeout_us: u64,
+    operation: &'static str,
+) -> Result<DirectIoBuffer> {
+    let timeout = Duration::from_micros(timeout_us);
+    let started = Instant::now();
+    let mut completed = 0usize;
+    while completed < len {
+        let read_offset = offset
+            .checked_add(completed as u64)
+            .ok_or_else(|| KvError::Worker(format!("{operation} offset overflowed")))?;
+        let read = file.read_at(buffer.slice(completed..len), read_offset);
+        let BufResult(result, returned) =
+            compio::runtime::time::timeout(direct_io_timeout(started, timeout, operation)?, read)
+                .await
+                .map_err(|_| KvError::Timeout(operation))?;
+        let read_bytes = match result {
+            Ok(read_bytes) => read_bytes,
+            Err(error) if is_transient_io_error(&error) => {
+                buffer = returned.into_inner();
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        validate_direct_io_progress(operation, read_bytes, len - completed)?;
+        completed += read_bytes;
+        buffer = returned.into_inner();
+    }
+    Ok(buffer)
+}
+
+pub(crate) async fn write_all_direct(
+    mut file: &File,
+    mut buffer: DirectIoBuffer,
+    offset: u64,
+    len: usize,
+    timeout_us: u64,
+    operation: &'static str,
+) -> Result<DirectIoBuffer> {
+    let timeout = Duration::from_micros(timeout_us);
+    let started = Instant::now();
+    let mut completed = 0usize;
+    while completed < len {
+        let write_offset = offset
+            .checked_add(completed as u64)
+            .ok_or_else(|| KvError::Worker(format!("{operation} offset overflowed")))?;
+        let write = file.write_at(buffer.slice(completed..len), write_offset);
+        let BufResult(result, returned) =
+            compio::runtime::time::timeout(direct_io_timeout(started, timeout, operation)?, write)
+                .await
+                .map_err(|_| KvError::Timeout(operation))?;
+        let written = match result {
+            Ok(written) => written,
+            Err(error) if is_transient_io_error(&error) => {
+                buffer = returned.into_inner();
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        validate_direct_io_progress(operation, written, len - completed)?;
+        completed += written;
+        buffer = returned.into_inner();
+    }
+    Ok(buffer)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -611,21 +729,9 @@ impl Kvkache {
 
     async fn recover(&mut self, commits: Vec<SegmentCommit>) -> Result<()> {
         self.restore_commit_state(&commits)?;
+        let mut buffer = None;
         for commit in commits.into_iter().rev() {
-            for (item, table_location) in self.read_segment_items(commit.sg_index).await? {
-                if !item.is_tombstone
-                    && let StoredValue::Blob(blob_ref) = decode_stored_value(&item.value)?.value
-                {
-                    validate_recovered_blob_ref(blob_ref, commit.blob_logical_len)?;
-                }
-                if self.recovered_key_exists(&item.storage_key).await? {
-                    continue;
-                }
-                self.table.insert(&item.storage_key, table_location)?;
-                if !item.is_tombstone {
-                    self.stable_live_keys += 1;
-                }
-            }
+            buffer = Some(self.recover_segment(commit, buffer.take()).await?);
         }
         Ok(())
     }
@@ -842,22 +948,31 @@ impl Kvkache {
     }
 
     pub(crate) async fn sync(&mut self) -> Result<()> {
-        self.flush_pending(SegmentFlushReason::Sync).await?;
-        self.blob_segment
-            .sync()
-            .await
-            .map_err(|error| storage_operation_error(&self.resource_guard, error))?;
-        self.data
-            .sync_data()
-            .await
-            .map_err(|error| storage_io_error(&self.resource_guard, error))?;
-        Ok(())
+        // Every flushed generation persists its data before its commit page;
+        // an empty pending map therefore has no outstanding durable work.
+        self.flush_pending(SegmentFlushReason::Sync).await
     }
 
     async fn locate_stable_record(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
+        self.locate_stable_record_with_bucket(storage_key, None)
+            .await
+    }
+
+    async fn locate_stable_record_with_bucket(
+        &self,
+        storage_key: &StorageKey,
+        scanned: Option<(TableLocation, &[u8])>,
+    ) -> Result<Option<LocatedItem>> {
         let mut newest: Option<(usize, LocatedItem)> = None;
         for table_location in self.table.candidate_locations(storage_key) {
-            let Some(item) = self.read_location(storage_key, table_location).await? else {
+            let item = if let Some((scanned_location, bucket)) = scanned
+                && table_location == scanned_location
+            {
+                find_item_in_bucket(bucket, storage_key)
+            } else {
+                self.read_location(storage_key, table_location).await?
+            };
+            let Some(item) = item else {
                 continue;
             };
             let age = self.ssd_segment_age(table_location.sg_index as usize);
@@ -1121,6 +1236,9 @@ impl Kvkache {
                 return Err(error);
             }
             if self.occupied_segments[sg_index] {
+                let reclaimed_commit = self.segment_commits[sg_index].ok_or_else(|| {
+                    KvError::Worker("occupied Segment is missing its commit metadata".into())
+                })?;
                 let invalidated = match invalidate_segment(
                     &mut self.data,
                     &self.config,
@@ -1141,20 +1259,21 @@ impl Kvkache {
                 self.io
                     .data_written
                     .set(self.io.data_written.get() + invalidated);
+                if let Err(error) = self.prepare_segment_for_reuse(reclaimed_commit).await {
+                    self.restore_flush_records(planned.into_iter().chain(deferred));
+                    return Err(error);
+                }
                 self.segment_commits[sg_index] = None;
-                let evicted = match self.prepare_segment_for_reuse(sg_index).await {
-                    Ok(evicted) => evicted,
-                    Err(error) => {
-                        self.restore_flush_records(planned.into_iter().chain(deferred));
-                        return Err(error);
-                    }
-                };
-                if !evicted.is_empty() {
-                    for record in planned.iter_mut().chain(&mut deferred) {
-                        if evicted.contains(&record.storage_key) {
-                            record.previous = None;
-                            record.previous_live = false;
-                        }
+                for record in planned.iter_mut().chain(&mut deferred) {
+                    if record
+                        .previous
+                        .is_some_and(|location| location.sg_index as usize == sg_index)
+                    {
+                        // Reuse invalidates every previous location in this
+                        // Segment, regardless of whether the key is present in
+                        // the newly planned generation.
+                        record.previous = None;
+                        record.previous_live = false;
                     }
                 }
             }
@@ -1256,6 +1375,8 @@ impl Kvkache {
         let data_bytes = (self.config.segment_size as u64)
             .checked_add(BUCKET_BYTES as u64)
             .ok_or_else(|| KvError::InvalidConfig("Segment reservation size overflowed".into()))?;
+        // Reserve both sparse extents before an occupied control page is
+        // invalidated, so allocation failure cannot discard the old generation.
         reserve_file_range(&self.data, data_offset, data_bytes)
             .await
             .map_err(|error| storage_io_error(&self.resource_guard, error))?;
@@ -1277,23 +1398,27 @@ impl Kvkache {
         let sg_index = active.sg_index;
         let offset = self.config.segment_data_offset(sg_index);
         let expected = active.bytes.len();
-        let write = self.data.write_at(active.bytes, offset);
-        let BufResult(result, bytes) = compio::runtime::time::timeout(
-            Duration::from_micros(self.config.write_max_time_us),
-            write,
+        let bytes = write_all_direct(
+            &self.data,
+            active.bytes,
+            offset,
+            expected,
+            self.config.write_max_time_us,
+            "Segment write",
         )
-        .await
-        .map_err(|_| KvError::Timeout("Segment write"))?;
-        require_complete_direct_io("Segment write", result?, expected)?;
+        .await?;
         self.io
             .data_written
             .set(self.io.data_written.get() + bytes.len() as u64);
-        self.blob_segment.sync().await?;
+        if blob_logical_len != 0 {
+            self.blob_segment.sync().await?;
+        }
         self.data.sync_data().await?;
         let commit = SegmentCommit {
             sg_index,
             generation: self.next_generation,
             blob_logical_len,
+            bucket_choice_count: self.config.bucket_choice_count,
         };
         let (control_bytes, control_buffer) = commit_segment(
             &mut self.data,
