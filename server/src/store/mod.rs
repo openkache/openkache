@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use compio::BufResult;
 use compio::driver::AsRawFd;
 use compio::fs::{File, OpenOptions};
-use compio::io::AsyncWriteAt;
+use compio::io::AsyncWriteAtExt;
 use openkache_protocol::{SetCondition, SetOptions};
 
 use crate::BUCKET_BYTES;
@@ -1195,15 +1195,14 @@ impl Kvkache {
         let fill_used_bytes = active.used_bytes() as u64;
         let sg_index = active.sg_index;
         let offset = self.config.segment_data_offset(sg_index);
-        let expected = active.bytes.len();
-        let write = self.data.write_at(active.bytes, offset);
+        let write = self.data.write_all_at(active.bytes, offset);
         let BufResult(result, bytes) = compio::runtime::time::timeout(
             Duration::from_micros(self.config.write_max_time_us),
             write,
         )
         .await
         .map_err(|_| KvError::Timeout("Segment write"))?;
-        require_complete_direct_io("Segment write", result?, expected)?;
+        result?;
         self.io
             .data_written
             .set(self.io.data_written.get() + bytes.len() as u64);
