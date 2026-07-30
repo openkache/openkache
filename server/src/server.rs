@@ -29,17 +29,43 @@ use crate::{
     AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache, TlsConfig,
 };
 
-enum NetworkWorkerPhase {
-    Starting,
-    Running,
-    Finished,
+pub(crate) type NetworkWorkerCompletion = (usize, std::result::Result<(), String>);
+
+pub(crate) struct NetworkWorkerHandle {
+    stop: Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+pub(crate) struct NetworkRolePlacement {
+    cpu_id: usize,
+    thread_name: String,
+    entries: u32,
+    event_interval: usize,
+    stop: Sender<()>,
+}
+
+impl NetworkRolePlacement {
+    pub(crate) fn new(
+        cpu_id: usize,
+        thread_name: String,
+        entries: u32,
+        event_interval: usize,
+        stop: Sender<()>,
+    ) -> Self {
+        Self {
+            cpu_id,
+            thread_name,
+            entries,
+            event_interval,
+            stop,
+        }
+    }
 }
 
 pub(crate) struct NetworkWorkerReporter {
     worker_id: usize,
-    phase: NetworkWorkerPhase,
     started: Option<Sender<std::result::Result<(), String>>>,
-    finished: Option<Sender<(usize, std::result::Result<(), String>)>>,
+    finished: Option<Sender<NetworkWorkerCompletion>>,
 }
 
 impl NetworkWorkerReporter {
@@ -50,71 +76,148 @@ impl NetworkWorkerReporter {
     ) -> Self {
         Self {
             worker_id,
-            phase: NetworkWorkerPhase::Starting,
             started: Some(started),
             finished: Some(finished),
         }
     }
 
     pub(crate) fn startup_failed(mut self, message: String) {
-        self.phase = NetworkWorkerPhase::Finished;
-        self.finished.take();
         if let Some(started) = self.started.take() {
             let _ = started.send(Err(message));
         }
     }
 
     pub(crate) fn started(&mut self) -> bool {
-        let reported = self
-            .started
+        self.started
             .take()
-            .is_some_and(|started| started.send(Ok(())).is_ok());
-        if reported {
-            self.phase = NetworkWorkerPhase::Running;
-        } else {
-            self.phase = NetworkWorkerPhase::Finished;
-            self.finished.take();
-        }
-        reported
+            .is_some_and(|started| started.send(Ok(())).is_ok())
     }
 
-    pub(crate) fn finish(mut self, result: std::result::Result<(), String>) {
-        self.phase = NetworkWorkerPhase::Finished;
+    fn take_completion_sender(&mut self) -> Sender<NetworkWorkerCompletion> {
+        self.finished
+            .take()
+            .expect("network worker completion sender is available at launch")
+    }
+}
+
+impl Drop for NetworkWorkerReporter {
+    fn drop(&mut self) {
+        if let Some(started) = self.started.take() {
+            let failure = if std::thread::panicking() {
+                format!("network worker {} panicked during startup", self.worker_id)
+            } else {
+                format!(
+                    "network worker {} exited without reporting startup",
+                    self.worker_id
+                )
+            };
+            let _ = started.send(Err(failure));
+        }
+    }
+}
+
+pub(crate) struct NetworkTaskReporter {
+    worker_id: usize,
+    finished: Option<Sender<NetworkWorkerCompletion>>,
+}
+
+impl NetworkTaskReporter {
+    pub(crate) fn new(worker_id: usize, finished: Sender<NetworkWorkerCompletion>) -> Self {
+        Self {
+            worker_id,
+            finished: Some(finished),
+        }
+    }
+
+    fn finish(mut self, result: std::result::Result<(), String>) {
         if let Some(finished) = self.finished.take() {
             let _ = finished.send((self.worker_id, result));
         }
     }
 }
 
-impl Drop for NetworkWorkerReporter {
+impl Drop for NetworkTaskReporter {
     fn drop(&mut self) {
-        match self.phase {
-            NetworkWorkerPhase::Starting => {
-                if let Some(started) = self.started.take() {
-                    let failure = if std::thread::panicking() {
-                        format!("network worker {} panicked during startup", self.worker_id)
-                    } else {
-                        format!(
-                            "network worker {} exited without reporting startup",
-                            self.worker_id
-                        )
-                    };
-                    let _ = started.send(Err(failure));
-                }
-            }
-            NetworkWorkerPhase::Running => {
-                if let Some(finished) = self.finished.take() {
-                    let failure = if std::thread::panicking() {
-                        "panicked"
-                    } else {
-                        "exited without reporting completion"
-                    };
-                    let _ = finished.send((self.worker_id, Err(failure.into())));
-                }
-            }
-            NetworkWorkerPhase::Finished => {}
+        if let Some(finished) = self.finished.take() {
+            let failure = if std::thread::panicking() {
+                "panicked"
+            } else {
+                "exited without reporting completion"
+            };
+            let _ = finished.send((self.worker_id, Err(failure.into())));
         }
     }
+}
+
+async fn run_network_role_task<F, Fut>(
+    task_reporter: NetworkTaskReporter,
+    reporter: NetworkWorkerReporter,
+    role: F,
+) where
+    F: FnOnce(NetworkWorkerReporter) -> Fut,
+    Fut: Future<Output = Option<std::result::Result<(), String>>>,
+{
+    let result = role(reporter).await.unwrap_or(Ok(()));
+    task_reporter.finish(result);
+}
+
+pub(crate) fn launch_network_role<F, Fut>(
+    cache: &ThreadedKvkache,
+    placement: NetworkRolePlacement,
+    mut reporter: NetworkWorkerReporter,
+    role: F,
+) -> Result<NetworkWorkerHandle>
+where
+    F: FnOnce(NetworkWorkerReporter) -> Fut + Send + 'static,
+    Fut: Future<Output = Option<std::result::Result<(), String>>> + 'static,
+{
+    let NetworkRolePlacement {
+        cpu_id,
+        thread_name,
+        entries,
+        event_interval,
+        stop,
+    } = placement;
+    let worker_id = reporter.worker_id;
+    let finished = reporter.take_completion_sender();
+    if cache.can_run_on_storage_cpu(cpu_id) {
+        let attached = cache.run_on_storage_cpu(cpu_id, move || {
+            let task_reporter = NetworkTaskReporter::new(worker_id, finished);
+            compio::runtime::spawn(run_network_role_task(task_reporter, reporter, role)).detach();
+        })?;
+        if !attached {
+            return Err(ServerError::NetworkWorker(format!(
+                "storage runtime on CPU {cpu_id} rejected its prepared network role"
+            )));
+        }
+        return Ok(NetworkWorkerHandle { stop, thread: None });
+    }
+
+    let thread = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let task_reporter = NetworkTaskReporter::new(worker_id, finished);
+            let mut proactor = ProactorBuilder::new();
+            proactor.capacity(entries);
+            let mut builder = RuntimeBuilder::new();
+            builder
+                .with_proactor(proactor)
+                .thread_affinity(HashSet::from([cpu_id]))
+                .event_interval(event_interval);
+            let runtime = match builder.build() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    reporter.startup_failed(error.to_string());
+                    task_reporter.finish(Ok(()));
+                    return;
+                }
+            };
+            runtime.block_on(run_network_role_task(task_reporter, reporter, role));
+        })?;
+    Ok(NetworkWorkerHandle {
+        stop,
+        thread: Some(thread),
+    })
 }
 
 enum AccessPolicy {
@@ -311,7 +414,7 @@ impl KacheServer {
         let network = config.network.clone();
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
-        let mut cache = ThreadedKvkache::start_validated(config)?;
+        let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
         let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
             Ok(sockets) => sockets,
             Err(error) => {
@@ -387,11 +490,10 @@ impl KacheServer {
         } = self;
         let (started_tx, started_rx) =
             channel::bounded::<std::result::Result<(), String>>(network.worker_count);
-        let (finished_tx, finished_rx) = channel::bounded_sync_async::<(
-            usize,
-            std::result::Result<(), String>,
-        )>(network.worker_count);
+        let (finished_tx, finished_rx) =
+            channel::bounded_sync_async::<NetworkWorkerCompletion>(network.worker_count);
         let mut workers = Vec::with_capacity(network.worker_count);
+        let mut launch_error = None;
 
         for (worker_id, socket) in sockets.into_iter().enumerate() {
             let (stop_tx, stop_rx) = channel::bounded_sync_async(1);
@@ -409,95 +511,66 @@ impl KacheServer {
                 request_budget_bytes: network.max_inflight_value_mib_per_worker * 1024 * 1024,
                 max_item_bytes,
             };
-            let thread = match std::thread::Builder::new()
-                .name(format!("openkache-network-{worker_id}"))
-                .spawn(move || {
-                    let mut reporter =
-                        NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
-                    let mut proactor = ProactorBuilder::new();
-                    proactor.capacity(entries);
-                    let mut builder = RuntimeBuilder::new();
-                    builder
-                        .with_proactor(proactor)
-                        .thread_affinity(HashSet::from([cpu_id]))
-                        .event_interval(event_interval);
-                    let runtime = match builder.build() {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            reporter.startup_failed(error.to_string());
-                            return;
-                        }
-                    };
-                    runtime.block_on(async move {
-                        let endpoint = match ServerEndpoint::bind(
-                            quic_backend,
-                            socket,
-                            worker_tls,
-                            limits.max_stream_lanes,
-                        )
-                        .await
-                        {
-                            Ok(endpoint) => endpoint,
-                            Err(error) => {
-                                reporter.startup_failed(error.to_string());
-                                return;
-                            }
-                        };
-                        let actual_cpu = unsafe { libc::sched_getcpu() };
-                        if actual_cpu < 0 || actual_cpu as usize != cpu_id {
-                            reporter.startup_failed(format!(
-                                "network worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
-                            ));
-                            return;
-                        }
-                        if !reporter.started() {
-                            return;
-                        }
-                        let result = run_selected_endpoint(
-                            endpoint,
-                            &worker_cache,
-                            &worker_access_policy,
-                            limits,
-                            stop_rx,
-                        )
-                        .await
-                        .map_err(|error| error.to_string());
-                        reporter.finish(result);
-                    });
-                }) {
-                Ok(thread) => thread,
-                Err(error) => {
-                    shutdown_workers_and_cache(workers, cache)?;
-                    return Err(error.into());
-                }
+            let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
+            let role = QuicNetworkRole {
+                worker_id,
+                cpu_id,
+                socket,
+                quic_backend,
+                tls: worker_tls,
+                access_policy: worker_access_policy,
+                cache: worker_cache,
+                limits,
+                stop: stop_rx,
             };
-            workers.push((stop_tx, thread));
+            match launch_network_role(
+                &cache,
+                NetworkRolePlacement::new(
+                    cpu_id,
+                    format!("openkache-network-{worker_id}"),
+                    entries,
+                    event_interval,
+                    stop_tx,
+                ),
+                reporter,
+                move |reporter| run_quic_role(role, reporter),
+            ) {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    launch_error.get_or_insert_with(|| error.to_string());
+                }
+            }
         }
         drop(started_tx);
         drop(finished_tx);
 
+        let mut startup_error = launch_error;
         for _ in 0..network.worker_count {
             match started_rx.recv() {
                 Ok(Ok(())) => {}
                 Ok(Err(message)) => {
-                    shutdown_workers_and_cache(workers, cache)?;
-                    return Err(ServerError::NetworkWorker(message));
+                    startup_error.get_or_insert(message);
                 }
                 Err(_) => {
-                    shutdown_workers_and_cache(workers, cache)?;
-                    return Err(ServerError::NetworkWorker(
-                        "network worker startup channel closed".into(),
-                    ));
+                    startup_error
+                        .get_or_insert_with(|| "network worker startup channel closed".into());
+                    break;
                 }
             }
+        }
+        if let Some(message) = startup_error {
+            let remaining_completions = workers.len();
+            shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
+                .await?;
+            return Err(ServerError::NetworkWorker(message));
         }
 
         let shutdown = shutdown.fuse();
         let worker_finished = finished_rx.recv_async().fuse();
         pin_mut!(shutdown, worker_finished);
-        let worker_failure = select! {
-            () = shutdown => None,
-            result = worker_finished => Some(match result {
+        let (worker_failure, completed_workers) = select! {
+            () = shutdown => (None, 0),
+            result = worker_finished => (Some(match result {
                 Ok((worker_id, Ok(()))) => {
                     format!("network worker {worker_id} exited unexpectedly")
                 }
@@ -505,14 +578,68 @@ impl KacheServer {
                     format!("network worker {worker_id} failed: {message}")
                 }
                 Err(_) => "network worker completion channel closed".into(),
-            }),
+            }), 1),
         };
-        shutdown_workers_and_cache(workers, cache)?;
+        let remaining_completions = workers.len().saturating_sub(completed_workers);
+        shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
+            .await?;
         match worker_failure {
             Some(message) => Err(ServerError::NetworkWorker(message)),
             None => Ok(()),
         }
     }
+}
+
+struct QuicNetworkRole {
+    worker_id: usize,
+    cpu_id: usize,
+    socket: std::net::UdpSocket,
+    quic_backend: QuicBackend,
+    tls: Arc<ServerTlsConfig>,
+    access_policy: Arc<AccessPolicy>,
+    cache: Arc<ThreadedKvkache>,
+    limits: NetworkWorkerLimits,
+    stop: AsyncReceiver<()>,
+}
+
+async fn run_quic_role(
+    role: QuicNetworkRole,
+    mut reporter: NetworkWorkerReporter,
+) -> Option<std::result::Result<(), String>> {
+    let QuicNetworkRole {
+        worker_id,
+        cpu_id,
+        socket,
+        quic_backend,
+        tls,
+        access_policy,
+        cache,
+        limits,
+        stop,
+    } = role;
+    let endpoint =
+        match ServerEndpoint::bind(quic_backend, socket, tls, limits.max_stream_lanes).await {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                reporter.startup_failed(error.to_string());
+                return None;
+            }
+        };
+    let actual_cpu = unsafe { libc::sched_getcpu() };
+    if actual_cpu < 0 || actual_cpu as usize != cpu_id {
+        reporter.startup_failed(format!(
+            "network worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
+        ));
+        return None;
+    }
+    if !reporter.started() {
+        return None;
+    }
+    Some(
+        run_selected_endpoint(endpoint, &cache, &access_policy, limits, stop)
+            .await
+            .map_err(|error| error.to_string()),
+    )
 }
 
 fn bind_reuse_port_sockets(
@@ -539,24 +666,51 @@ fn bind_reuse_port_sockets(
     Ok(sockets)
 }
 
-pub(crate) fn shutdown_workers_and_cache(
-    workers: Vec<(Sender<()>, std::thread::JoinHandle<()>)>,
+pub(crate) async fn shutdown_network_workers_and_cache(
+    workers: Vec<NetworkWorkerHandle>,
+    finished: &AsyncReceiver<NetworkWorkerCompletion>,
+    remaining_completions: usize,
     cache: Arc<ThreadedKvkache>,
 ) -> Result<()> {
-    let network_result = stop_network_workers(workers);
+    for worker in &workers {
+        let _ = worker.stop.send(());
+    }
+    let mut network_failure = None;
+    for _ in 0..remaining_completions {
+        match finished.recv_async().await {
+            Ok((_worker_id, Ok(()))) => {}
+            Ok((worker_id, Err(message))) => {
+                network_failure.get_or_insert_with(|| {
+                    format!("network worker {worker_id} failed during shutdown: {message}")
+                });
+            }
+            Err(_) => {
+                network_failure
+                    .get_or_insert_with(|| "network worker completion channel closed".into());
+                break;
+            }
+        }
+    }
+    let join_result = join_network_workers(workers);
     let cache_result = shutdown_cache(cache);
-    network_result?;
+    if let Some(message) = network_failure {
+        return Err(ServerError::NetworkWorker(message));
+    }
+    join_result?;
     cache_result
 }
 
-pub(crate) fn stop_network_workers(
-    workers: Vec<(Sender<()>, std::thread::JoinHandle<()>)>,
-) -> Result<()> {
-    for (stop, _) in &workers {
-        let _ = stop.send(());
-    }
+fn join_network_workers(workers: Vec<NetworkWorkerHandle>) -> Result<()> {
+    let threads = workers
+        .into_iter()
+        .filter_map(|worker| worker.thread)
+        .collect();
+    join_network_threads(threads)
+}
+
+pub(crate) fn join_network_threads(threads: Vec<std::thread::JoinHandle<()>>) -> Result<()> {
     let mut panicked_worker = None;
-    for (_, thread) in workers {
+    for thread in threads {
         let worker = thread.thread().clone();
         if thread.join().is_err() && panicked_worker.is_none() {
             panicked_worker = Some(worker.name().unwrap_or("network worker").to_owned());

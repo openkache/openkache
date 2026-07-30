@@ -12,7 +12,14 @@ use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
 use crate::types::EncodedValue;
 use crate::*;
 
+use super::CoreTask;
 use super::completion::CompletionSender;
+
+pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
+    while let Ok(task) = receiver.recv_async().await {
+        task();
+    }
+}
 
 pub(super) enum WorkerResponseSender {
     Channel(Sender<Result<WorkerResponse>>),
