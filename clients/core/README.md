@@ -1,21 +1,22 @@
 # OpenKache client core
 
-`openkache-client-core` is the reusable low-level Rust implementation of the OpenKache QUIC
-transport and binary protocol client.
+`openkache-client-core` is the reusable Rust client engine behind OpenKache language bindings.
 
 ## Purpose
 
-The core gives language adapters and advanced Rust callers exact control over protocol item keys,
-item values, request options, connection lifecycle, retries, and stream concurrency. Its raw
-clients do not transform keys or values; shared protection types provide the canonical
-HMAC-SHA-256, compression, encryption, and envelope behavior for higher-level adapters.
+The core owns connection lifecycle, retries, stream concurrency, binary protocol operations,
+application-key hiding, compression, and encryption. Language adapters convert native types and
+delegate to this engine. Raw clients remain available for callers that already own exact protocol
+keys and values.
 
 - `RawClient` uses Tokio and Quinn and is `Clone + Send + Sync`.
 - `LocalRawClient` exposes the same contract on a caller-owned Compio runtime.
+- `ProtectedClient` and `LocalProtectedClient` compose raw operations with mandatory
+  application-key hiding and value encryption.
 - `ItemKey` is the exact 32-byte item identifier sent over the wire.
 - `ItemValue` carries exact bytes plus compression and encryption metadata.
-- `DataProtection`, `DataProtectionKey`, `ValueCodec`, and `value_envelope` let higher layers
-  compose the same HMAC-SHA-256 and value-encryption behavior across language adapters.
+- `DataProtection`, `DataProtectionKey`, `ValueCodec`, and `value_envelope` remain reusable
+  primitives for custom low-level integrations.
 
 The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native adapter depends on this
 core directly instead of depending on the Rust end-user layer.
@@ -66,5 +67,6 @@ from the network destination.
 - `src/config.rs` owns stable TLS-independent public configuration wrappers.
 - `src/key.rs` owns exact item keys and domain-separated data-protection derivation.
 - `src/protection.rs` composes mandatory keyed derivation and encrypted values for language layers.
+- `src/protected.rs` owns shared application-key and plaintext-value operations for bindings.
 - `src/value.rs` owns optional compression and authenticated encryption tools.
 - `src/value_envelope.rs` owns the cross-language self-describing value frame.

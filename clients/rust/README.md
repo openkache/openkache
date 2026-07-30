@@ -29,10 +29,10 @@ cargo fmt --check
 
 ## Core components
 
-- `src/lib.rs` exposes ergonomic Rust request builders over the shared core behavior.
+- `src/lib.rs` exposes ergonomic Rust request builders over core's shared protected client.
 - `src/ffi.rs` adapts the high-level Compio client to the versioned C ABI.
 - `../core` owns transport, TLS configuration, raw operations, key derivation, compression,
-  encryption, and the cross-language value envelope.
+  encryption, protected cache operations, and the cross-language value envelope.
 
 ## Configuration
 

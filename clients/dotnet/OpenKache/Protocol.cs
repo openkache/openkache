@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Buffers.Binary;
-using System.Security.Cryptography;
 
 namespace OpenKache;
 
@@ -93,6 +92,12 @@ internal static class Protocol
             throw ProtocolError($"{opcode} does not accept a key.");
         }
 
+        if (usesKey && userKey.Length != ItemKeyBytes)
+        {
+            throw ProtocolError(
+                $"{opcode} key must contain exactly {ItemKeyBytes} bytes.");
+        }
+
         if (opcode is not Opcode.Set
             && (setCondition is not SetCondition.None || ttlMilliseconds.HasValue))
         {
@@ -129,9 +134,7 @@ internal static class Protocol
             (uint)value.Length | optionBits);
         if (usesKey)
         {
-            SHA256.HashData(
-                userKey,
-                frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
+            userKey.CopyTo(frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
         }
 
         var valueOffset = RequestHeaderBytes + keyLength;

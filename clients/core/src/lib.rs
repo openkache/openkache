@@ -2,6 +2,7 @@
 
 mod config;
 mod key;
+mod protected;
 mod protection;
 mod transport;
 pub mod value;
@@ -22,6 +23,10 @@ pub use config::{
     SetCondition, SetOptions,
 };
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ITEM_KEY_BYTES, ItemKey};
+#[cfg(feature = "quic-compio")]
+pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
+#[cfg(feature = "quic-quinn")]
+pub use protected::{ProtectedClient, ProtectedClientBuilder};
 pub use protection::DataProtection;
 pub use value::ItemValue;
 

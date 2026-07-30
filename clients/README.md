@@ -1,17 +1,17 @@
 # OpenKache client SDKs
 
-OpenKache keeps transport, protocol framing, compression, and encryption tools in
-`core/`. Language packages should remain thin adapters over that low-level crate
-instead of implementing the wire or security protocols again.
+OpenKache keeps connection management, protocol operations, application-key derivation,
+compression, and encryption in `core/`. Language packages remain thin adapters over that shared
+implementation instead of composing transport and protection themselves.
 
 ## Status
 
 | Language | Path | Status |
 |---|---|---|
-| Shared core | `core/` | Implemented low-level QUIC and protocol client |
+| Shared core | `core/` | Implemented raw and protected client engine |
 | Rust | `rust/` | Implemented ergonomic end-user SDK |
 | TypeScript / JavaScript | `typescript/` | Node.js, Bun, and Deno Node-API SDK |
-| C# / .NET | `dotnet/` | Implemented managed client |
+| C# / .NET | `dotnet/` | Implemented raw managed client; protected core adapter deferred |
 | Python | `python/` | Package scaffold |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
@@ -34,9 +34,14 @@ Future bindings should own only language-native concerns:
 - deterministic client cleanup;
 - idiomatic errors and package-level API names.
 
-Do not duplicate QUIC, wire framing, keyed derivation, compression, encryption, or
-certificate behavior outside `core/`. Extend the shared core and add only the
-smallest runtime-specific adapter when a binding needs new behavior.
+Do not duplicate connection lifecycle, retries, cache-operation semantics, QUIC, wire framing,
+keyed derivation, compression, encryption, or certificate behavior outside `core/`. Extend the
+shared core and add only the smallest runtime- or ABI-specific adapter when a binding needs new
+behavior.
+
+The existing raw managed .NET client predates this boundary. Do not extend its duplicated
+transport or protocol implementation; replace it with a thin core-backed adapter when the
+protected .NET API is implemented.
 
 Object APIs use the shared [OpenKache value envelope](VALUE_FORMAT.md).
 Raw byte APIs remain available for application-owned cross-language formats.

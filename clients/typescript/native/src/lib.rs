@@ -9,9 +9,8 @@ use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::value::{Compression, ZstandardOptions};
 use openkache_client_core::{
-    Certificate, ClientIdentity, ClientTimeouts, DataProtection, DataProtectionKey, DeleteOutcome,
-    Endpoint, GetOutcome, PrivateKey, RawClient, SetCondition, SetOptions, SetOutcome,
-    value_envelope,
+    Certificate, ClientIdentity, ClientTimeouts, DataProtectionKey, DeleteOutcome, Endpoint,
+    GetOutcome, PrivateKey, ProtectedClient, SetCondition, SetOptions, SetOutcome, value_envelope,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -61,56 +60,7 @@ pub struct NativeValueEnvelope {
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
-    client: RwLock<Option<Arc<CoreClient>>>,
-}
-
-struct CoreClient {
-    raw: RawClient,
-    protection: DataProtection,
-}
-
-impl CoreClient {
-    async fn ping(&self) -> openkache_client_core::Result<Duration> {
-        self.raw.ping().await
-    }
-
-    async fn get(
-        &self,
-        application_key: &[u8],
-    ) -> openkache_client_core::Result<GetOutcome<Vec<u8>>> {
-        let key = self.protection.item_key(application_key);
-        match self.raw.get(key).await? {
-            GetOutcome::Found(value) => {
-                self.protection.open(key, value).map(GetOutcome::Found)
-            }
-            GetOutcome::NotFound => Ok(GetOutcome::NotFound),
-        }
-    }
-
-    async fn set(
-        &self,
-        application_key: &[u8],
-        value: Vec<u8>,
-        options: SetOptions,
-    ) -> openkache_client_core::Result<SetOutcome> {
-        let key = self.protection.item_key(application_key);
-        let value = self.protection.seal_owned(key, value)?;
-        self.raw.set(key, value, options).await
-    }
-
-    async fn delete(&self, application_key: &[u8]) -> openkache_client_core::Result<DeleteOutcome> {
-        self.raw
-            .delete(self.protection.item_key(application_key))
-            .await
-    }
-
-    async fn stats(&self) -> openkache_client_core::Result<String> {
-        self.raw.stats().await
-    }
-
-    async fn sync(&self) -> openkache_client_core::Result<()> {
-        self.raw.sync().await
-    }
+    client: RwLock<Option<Arc<ProtectedClient>>>,
 }
 
 #[napi]
@@ -280,7 +230,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    fn active_client(&self) -> Result<Arc<CoreClient>> {
+    fn active_client(&self) -> Result<Arc<ProtectedClient>> {
         self.client
             .read()
             .map_err(|_| state_error("native client state lock is poisoned"))?
@@ -327,8 +277,6 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     } else {
         Compression::Disabled
     };
-    let protection =
-        DataProtection::new(data_protection_key, compression).map_err(native_error)?;
     let identity = parse_identity(options.identity)?;
     let connect_timeout_ms = parse_u64(options.connect_timeout_ms, "connect_timeout_ms", false)?;
     let request_timeout_ms = parse_u64(options.request_timeout_ms, "request_timeout_ms", false)?;
@@ -336,8 +284,9 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let endpoint =
         Endpoint::from_socket_addr(address, options.server_name).map_err(native_error)?;
     let trusted_certificate = trusted_certificates.remove(0);
-    let mut builder = RawClient::builder(endpoint)
+    let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
         .trust_certificate(trusted_certificate)
+        .compression(compression)
         .timeouts(ClientTimeouts {
             connect: Duration::from_millis(connect_timeout_ms),
             request: Duration::from_millis(request_timeout_ms),
@@ -345,11 +294,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
-    let raw = builder.connect().await.map_err(native_error)?;
-    let client = CoreClient {
-        raw,
-        protection,
-    };
+    let client = builder.connect().await.map_err(native_error)?;
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
     })
