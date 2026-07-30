@@ -45,8 +45,11 @@ pub(crate) struct ServerSecret {
 struct WorkerHandle {
     sender: Sender<WorkerRequest>,
     completions: CompletionSlab<Result<WorkerResponse>>,
+    core_tasks: Option<Sender<CoreTask>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
+
+type CoreTask = Box<dyn FnOnce() + Send + 'static>;
 
 pub(crate) fn derive_storage_key(
     server_cipher: &Aes256,
@@ -94,6 +97,18 @@ impl ThreadedKvkache {
     }
 
     pub(crate) fn start_validated(config: crate::config::AppConfig) -> Result<Self> {
+        Self::start_validated_with_network_roles(config, false)
+    }
+
+    /// Starts storage workers whose overlapping CPUs can also host server network tasks.
+    pub(crate) fn start_validated_for_server(config: crate::config::AppConfig) -> Result<Self> {
+        Self::start_validated_with_network_roles(config, true)
+    }
+
+    fn start_validated_with_network_roles(
+        config: crate::config::AppConfig,
+        attach_network_roles: bool,
+    ) -> Result<Self> {
         fs::create_dir_all(&config.storage.directory)?;
         let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
             let worker = config.worker_config(thread_id);
@@ -102,7 +117,12 @@ impl ThreadedKvkache {
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
         let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
-        Self::start_with_server_secret(config, server_secret, allow_checkpoint)
+        Self::start_with_server_secret(
+            config,
+            server_secret,
+            allow_checkpoint,
+            attach_network_roles,
+        )
     }
 
     fn start_with_server_key(
@@ -121,6 +141,7 @@ impl ThreadedKvkache {
                 key: server_key,
             },
             allow_checkpoint,
+            false,
         )
     }
 
@@ -128,6 +149,7 @@ impl ThreadedKvkache {
         config: crate::config::AppConfig,
         server_secret: ServerSecret,
         allow_checkpoint: bool,
+        attach_network_roles: bool,
     ) -> Result<Self> {
         let server_cipher = Aes256::new(&server_secret.key.into());
         let (started_tx, started_rx) =
@@ -137,23 +159,61 @@ impl ThreadedKvkache {
             .batch_size
             .saturating_mul(config.io_uring.max_inflight_per_worker)
             .max(64);
+        let has_combined_worker = attach_network_roles
+            && config
+                .runtime
+                .cpu_ids
+                .iter()
+                .any(|cpu_id| config.network.cpu_ids.contains(cpu_id));
+        let combined_entries = has_combined_worker
+            .then(|| {
+                config
+                    .io_uring
+                    .entries_per_worker
+                    .checked_add(config.network.io_uring_entries_per_worker)
+                    .ok_or_else(|| {
+                        KvError::InvalidConfig(
+                            "combined worker io_uring entry count overflowed".into(),
+                        )
+                    })
+            })
+            .transpose()?;
         let mut workers = Vec::with_capacity(config.runtime.thread_count);
         let resource_guard = Arc::new(ResourceGuard::for_app_config(&config)?);
 
         for thread_id in 0..config.runtime.thread_count {
             let (sender, receiver) = channel::bounded_async(queue_capacity);
+            let cpu_id = config.runtime.cpu_ids[thread_id];
+            let combined = attach_network_roles && config.network.cpu_ids.contains(&cpu_id);
+            let (core_tasks, core_task_receiver) = if combined {
+                let (sender, receiver) = channel::bounded_async(1);
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
             let started_tx = started_tx.clone();
             let shard_config = config.worker_config(thread_id);
             let io_config = config.io_uring.clone();
-            let cpu_id = config.runtime.cpu_ids[thread_id];
-            let event_interval = config.runtime.event_interval;
+            let entries = if combined {
+                combined_entries.expect("combined ring capacity was validated")
+            } else {
+                io_config.entries_per_worker
+            };
+            let event_interval = if combined {
+                config
+                    .runtime
+                    .event_interval
+                    .min(config.network.event_interval)
+            } else {
+                config.runtime.event_interval
+            };
             let storage_key_id = server_secret.id;
             let resource_guard = resource_guard.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("kvkache-worker-{thread_id}"))
                 .spawn(move || {
                     let mut proactor = ProactorBuilder::new();
-                    proactor.capacity(io_config.entries_per_worker);
+                    proactor.capacity(entries);
                     let cpus = HashSet::from([cpu_id]);
                     let runtime = RuntimeBuilder::new()
                         .with_proactor(proactor)
@@ -189,6 +249,9 @@ impl ThreadedKvkache {
                                 return;
                             }
                         };
+                        if let Some(receiver) = core_task_receiver {
+                            compio::runtime::spawn(run_core_tasks(receiver)).detach();
+                        }
                         let _ = started_tx.send(Ok(()));
                         if let Err(error) = worker_loop(cache, receiver, io_config).await {
                             eprintln!("worker {thread_id} stopped: {error}");
@@ -200,6 +263,7 @@ impl ThreadedKvkache {
                 // Match idle completion retention to request-queue backpressure. Slots created
                 // for callers beyond this bound are released after their request completes.
                 completions: CompletionSlab::with_retained_capacity(queue_capacity),
+                core_tasks,
                 thread: Some(thread),
             });
         }
@@ -233,6 +297,44 @@ impl ThreadedKvkache {
             workers,
             server_cipher,
         })
+    }
+
+    /// Reports whether the storage runtime pinned to `cpu_id` accepts a server role.
+    ///
+    /// Returns `false` when the CPU has no prepared combined storage worker.
+    pub(crate) fn can_run_on_storage_cpu(&self, cpu_id: usize) -> bool {
+        self.config
+            .runtime
+            .cpu_ids
+            .iter()
+            .position(|candidate| *candidate == cpu_id)
+            .is_some_and(|worker_id| self.workers[worker_id].core_tasks.is_some())
+    }
+
+    /// Schedules one server role on the storage runtime pinned to `cpu_id`.
+    ///
+    /// Returns `Ok(false)` when the CPU has no prepared combined storage worker.
+    pub(crate) fn run_on_storage_cpu(
+        &self,
+        cpu_id: usize,
+        task: impl FnOnce() + Send + 'static,
+    ) -> Result<bool> {
+        let Some(worker_id) = self
+            .config
+            .runtime
+            .cpu_ids
+            .iter()
+            .position(|candidate| *candidate == cpu_id)
+        else {
+            return Ok(false);
+        };
+        let Some(sender) = self.workers[worker_id].core_tasks.as_ref() else {
+            return Ok(false);
+        };
+        sender
+            .send(Box::new(task))
+            .map_err(|_| KvError::Worker("combined core task queue disconnected".into()))?;
+        Ok(true)
     }
 
     pub fn owner(&self, storage_key: &StorageKey) -> usize {

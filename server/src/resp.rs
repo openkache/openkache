@@ -1,6 +1,5 @@
 //! Plaintext RESP2 compatibility server for local development and native benchmarks.
 
-use std::collections::HashSet;
 use std::future::Future;
 use std::io::Write as _;
 use std::net::SocketAddr;
@@ -9,10 +8,8 @@ use std::time::Duration;
 
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf};
-use compio::driver::ProactorBuilder;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use compio::runtime::RuntimeBuilder;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{ClientKeyDigest, SetOptions, ValueFlags};
@@ -20,7 +17,10 @@ use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver};
-use crate::server::{NetworkWorkerReporter, Result, ServerError, shutdown_workers_and_cache};
+use crate::server::{
+    NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
+    launch_network_role, shutdown_network_workers_and_cache,
+};
 use crate::types::EncodedValue;
 use crate::{AppConfig, SetOutcome, ThreadedKvkache};
 
@@ -65,7 +65,7 @@ impl RespServer {
         config.validate()?;
         let network = config.network.clone();
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
-        let mut cache = ThreadedKvkache::start_validated(config)?;
+        let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
         let sockets = match bind_reuse_port_tcp_listeners(address, network.worker_count) {
             Ok(sockets) => sockets,
             Err(error) => {
@@ -119,11 +119,10 @@ impl RespServer {
         } = self;
         let (started_tx, started_rx) =
             channel::bounded::<std::result::Result<(), String>>(network.worker_count);
-        let (finished_tx, finished_rx) = channel::bounded_sync_async::<(
-            usize,
-            std::result::Result<(), String>,
-        )>(network.worker_count);
+        let (finished_tx, finished_rx) =
+            channel::bounded_sync_async::<NetworkWorkerCompletion>(network.worker_count);
         let mut workers = Vec::with_capacity(network.worker_count);
+        let mut launch_error = None;
 
         for (worker_id, socket) in sockets.into_iter().enumerate() {
             let (stop_tx, stop_rx) = channel::bounded_sync_async(1);
@@ -133,96 +132,116 @@ impl RespServer {
             let cpu_id = network.cpu_ids[worker_id];
             let entries = network.io_uring_entries_per_worker;
             let event_interval = network.event_interval;
-            let thread = match std::thread::Builder::new()
-                .name(format!("openkache-resp-{worker_id}"))
-                .spawn(move || {
-                    let mut reporter =
-                        NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
-                    let mut proactor = ProactorBuilder::new();
-                    proactor.capacity(entries);
-                    let mut builder = RuntimeBuilder::new();
-                    builder
-                        .with_proactor(proactor)
-                        .thread_affinity(HashSet::from([cpu_id]))
-                        .event_interval(event_interval);
-                    let runtime = match builder.build() {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            reporter.startup_failed(error.to_string());
-                            return;
-                        }
-                    };
-                    runtime.block_on(async move {
-                        let listener = match TcpListener::from_std(socket) {
-                            Ok(listener) => listener,
-                            Err(error) => {
-                                reporter.startup_failed(error.to_string());
-                                return;
-                            }
-                        };
-                        let actual_cpu = unsafe { libc::sched_getcpu() };
-                        if actual_cpu < 0 || actual_cpu as usize != cpu_id {
-                            reporter.startup_failed(format!(
-                                "RESP worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
-                            ));
-                            return;
-                        }
-                        if !reporter.started() {
-                            return;
-                        }
-                        let result =
-                            run_resp_worker(listener, &worker_cache, request_timeout, stop_rx)
-                                .await
-                                .map_err(|error| error.to_string());
-                        reporter.finish(result);
-                    });
-                }) {
-                Ok(thread) => thread,
+            let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
+            match launch_network_role(
+                &cache,
+                NetworkRolePlacement::new(
+                    cpu_id,
+                    format!("openkache-resp-{worker_id}"),
+                    entries,
+                    event_interval,
+                    stop_tx,
+                ),
+                reporter,
+                move |reporter| {
+                    run_resp_role(
+                        worker_id,
+                        cpu_id,
+                        socket,
+                        worker_cache,
+                        request_timeout,
+                        stop_rx,
+                        reporter,
+                    )
+                },
+            ) {
+                Ok(worker) => workers.push(worker),
                 Err(error) => {
-                    shutdown_workers_and_cache(workers, cache)?;
-                    return Err(error.into());
+                    launch_error.get_or_insert_with(|| error.to_string());
                 }
-            };
-            workers.push((stop_tx, thread));
+            }
         }
         drop(started_tx);
         drop(finished_tx);
 
+        let mut started_workers = 0;
+        let mut startup_error = launch_error;
         for _ in 0..network.worker_count {
             match started_rx.recv() {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => started_workers += 1,
                 Ok(Err(message)) => {
-                    shutdown_workers_and_cache(workers, cache)?;
-                    return Err(ServerError::NetworkWorker(message));
+                    startup_error.get_or_insert(message);
                 }
                 Err(_) => {
-                    shutdown_workers_and_cache(workers, cache)?;
-                    return Err(ServerError::NetworkWorker(
-                        "RESP worker startup channel closed".into(),
-                    ));
+                    startup_error
+                        .get_or_insert_with(|| "RESP worker startup channel closed".into());
+                    break;
                 }
             }
+        }
+        if let Some(message) = startup_error {
+            shutdown_network_workers_and_cache(workers, &finished_rx, started_workers, cache)
+                .await?;
+            return Err(ServerError::NetworkWorker(message));
         }
 
         let shutdown = shutdown.fuse();
         let worker_finished = finished_rx.recv_async().fuse();
         pin_mut!(shutdown, worker_finished);
-        let worker_failure = select! {
-            () = shutdown => None,
-            result = worker_finished => Some(match result {
+        let (worker_failure, completed_workers) = select! {
+            () = shutdown => (None, 0),
+            result = worker_finished => (Some(match result {
                 Ok((worker_id, Ok(()))) => format!("RESP worker {worker_id} exited unexpectedly"),
                 Ok((worker_id, Err(message))) => {
                     format!("RESP worker {worker_id} failed: {message}")
                 }
                 Err(_) => "RESP worker completion channel closed".into(),
-            }),
+            }), 1),
         };
-        shutdown_workers_and_cache(workers, cache)?;
+        shutdown_network_workers_and_cache(
+            workers,
+            &finished_rx,
+            network.worker_count.saturating_sub(completed_workers),
+            cache,
+        )
+        .await?;
         match worker_failure {
             Some(message) => Err(ServerError::NetworkWorker(message)),
             None => Ok(()),
         }
     }
+}
+
+async fn run_resp_role(
+    worker_id: usize,
+    cpu_id: usize,
+    socket: std::net::TcpListener,
+    cache: Arc<ThreadedKvkache>,
+    request_timeout: Duration,
+    stop: AsyncReceiver<()>,
+    mut reporter: NetworkWorkerReporter,
+) {
+    let listener = match TcpListener::from_std(socket) {
+        Ok(listener) => listener,
+        Err(error) => {
+            reporter.startup_failed(error.to_string());
+            return;
+        }
+    };
+    let actual_cpu = unsafe { libc::sched_getcpu() };
+    if actual_cpu < 0 || actual_cpu as usize != cpu_id {
+        reporter.startup_failed(format!(
+            "RESP worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
+        ));
+        return;
+    }
+    if !reporter.started() {
+        return;
+    }
+    let result = run_resp_worker(listener, &cache, request_timeout, stop)
+        .await
+        .map_err(|error| error.to_string());
+    reporter.finish(result);
 }
 
 fn bind_reuse_port_tcp_listeners(
