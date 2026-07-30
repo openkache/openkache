@@ -72,6 +72,12 @@ macro_rules! builder_methods {
                 self.inner = self.inner.compression(compression);
                 self
             }
+
+            /// Selects the authenticated-encryption profile for stored values.
+            pub fn encryption(mut self, encryption: value::Encryption) -> Self {
+                self.inner = self.inner.encryption(encryption);
+                self
+            }
         }
     };
 }

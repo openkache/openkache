@@ -16,6 +16,8 @@ The main API layers are:
   opaque values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
+- `ValueCodec`, which owns Raw and RFC 8785 JSON serialization, optional
+  Zstandard compression, and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters.
 
@@ -62,7 +64,25 @@ let outcome = client
 ```
 
 `ItemKey::from_bytes` preserves a fixed array. `ItemKey::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes.
+and copies a dynamic buffer. Neither hashes the supplied bytes. Use
+`DataProtectionKey::derive_item_key` or `DataProtection::item_key` for the
+shared BLAKE3 derivation.
+
+`ValueCodec` stores its metadata inside the opaque value:
+
+```text
+version:vu128 | format:u8 | body
+
+format bits 0..3 = compression identifier
+format bits 4..7 = encryption identifier
+
+Compact body = AES-256-SIV-CMAC synthetic_iv[16] | ciphertext
+Robust body  = nonce[12] | AES-256-GCM-SIV ciphertext | tag[16]
+```
+
+The encrypted serialization identifier and body are authenticated with the
+exact item key and container header. Neither the wire protocol nor the server
+parses this format.
 
 Use `ProtectedClient` when the core should derive the item key and transform
 plaintext values:
@@ -74,7 +94,6 @@ let key = DataProtectionKey::from_base64(&configured_base64_secret)?;
 let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```
-
 ## Configuration
 
 `RawClient::connect("host:port")` and `ProtectedClient::connect` use system
@@ -95,6 +114,6 @@ does not provide one.
 - `src/key.rs` handles exact item keys and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
-- `src/value.rs` contains the current compression and encryption
-  implementation.
+- `src/value.rs` owns canonical serialization, compression, and authenticated
+  encryption.
 - `src/value_envelope.rs` contains the current TypeScript codec envelope.
