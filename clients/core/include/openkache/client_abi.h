@@ -58,7 +58,7 @@ typedef enum openkache_client_operation {
     OPENKACHE_CLIENT_OPERATION_STATS = OPENKACHE_SMITHY_OPCODE_STATS,
     OPENKACHE_CLIENT_OPERATION_SYNC = OPENKACHE_SMITHY_OPCODE_SYNC,
     /* Local lifecycle operation; it is not a wire opcode. */
-    OPENKACHE_CLIENT_OPERATION_RECONNECT = 0xffff_ff01u,
+    OPENKACHE_CLIENT_OPERATION_RECONNECT = 0xffffff01u,
 } openkache_client_operation_t;
 
 typedef enum openkache_client_connection_state {
