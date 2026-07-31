@@ -116,6 +116,5 @@ does not provide one.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
-- `src/value_envelope.rs` contains the TypeScript codec envelope used by the
-  Node-API adapter
-  pending replacement by a thin logical-value adapter.
+- `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
+  used by the Node-API adapter; a future thin logical-value adapter may replace it.
