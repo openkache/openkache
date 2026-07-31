@@ -12,7 +12,15 @@ let package = Package(
             name: "OpenKache",
             linkerSettings: [
                 .linkedLibrary("openkache_client_core"),
+            ],
+            plugins: [
+                .plugin(name: "GenerateSmithy"),
             ]
+        ),
+        .plugin(
+            name: "GenerateSmithy",
+            capability: .buildTool(),
+            path: "Plugins/GenerateSmithy"
         ),
     ]
 )

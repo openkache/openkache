@@ -128,8 +128,6 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
-- `src/ffi.rs` provides the optional C ABI without duplicating protocol logic
-  in each language adapter.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope

@@ -12,7 +12,7 @@ contract.
 
 The native library exports the versioned ABI declared in
 [`../core/include/openkache/client_abi.h`](../core/include/openkache/client_abi.h).
-Build or install the `openkache-client` Rust `cdylib` for the target platform
+Build or install the `openkache-client-core` Rust `cdylib` for the target platform
 and make it visible to the linker as `openkache_client_core`.
 
 ## Commands
@@ -26,15 +26,15 @@ swift build
 When the Rust library is in a non-standard directory, pass its search path:
 
 ```bash
-swift build -Xlinker -L/path/to/native-library
+swift build -Xlinker -L./path/to/native-library
 ```
 
-The Rust library can be built from the public workspace with the `ffi` feature:
+The Rust core library can be built from the public client workspace with the
+`ffi` feature:
 
 ```bash
 env -u CARGO_BUILD_TARGET cargo build \
-  --manifest-path ../../Cargo.toml \
-  -p openkache-client-core \
+  --manifest-path ../core/Cargo.toml \
   --no-default-features \
   --features ffi
 ```
@@ -67,8 +67,7 @@ try await client.sync()
 await client.close()
 ```
 
-For an exact protocol item ID, connect the raw adapter or derive one from a
-protected client:
+For an exact protocol item ID, connect the raw adapter:
 
 ```swift
 let raw = try await OpenKacheRawClient.connect(options: options)
@@ -91,12 +90,13 @@ roots. A numeric address may provide a separate `serverName` for certificate
 verification.
 
 The Smithy operation, value-format, connection-state, and native ABI
-declarations are generated into `Sources/OpenKache/Generated/SmithyAPI.swift`
-from [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
-The generated declarations and shared C ABI header are outputs only; the
-Smithy model is the single source of truth for operation, state, result,
-limit, and value-format identifiers.
-Regenerate them with:
+declarations are generated into SwiftPM's build directory from
+[`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
+They are not checked into source control: the `GenerateSmithy` SwiftPM build
+plugin regenerates them for every build. The Smithy model remains the single
+source of truth for operation, state, result, limit, and value-format
+identifiers. The shared C ABI header consumes the same generated contract.
+To regenerate the declarations explicitly:
 
 ```bash
 env OPENKACHE_GENERATION_TARGET=swift bun ../../protocol/generate.ts

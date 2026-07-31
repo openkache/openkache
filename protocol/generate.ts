@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 type Json_Object = Readonly<Record<string, unknown>>
@@ -193,45 +193,34 @@ const FFI_SET_CONDITION_FIELDS = [
   { name: "IfAbsent", field: "setConditionIfAbsent" },
   { name: "IfPresent", field: "setConditionIfPresent" },
 ] as const
+const GENERATED_OUTPUT_ROOT = resolve(
+  process.env.OPENKACHE_GENERATION_OUTPUT_ROOT ?? PUBLIC_ROOT,
+)
+function generated_path(...segments: string[]): string {
+  return join(GENERATED_OUTPUT_ROOT, ...segments)
+}
 const GENERATED_OUTPUTS = {
-  csharp_api: join(
-    PUBLIC_ROOT,
-    "clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs",
-  ),
-  csharp_wire: join(
-    PUBLIC_ROOT,
-    "clients/dotnet/OpenKache/generated_local/WireValues.g.cs",
-  ),
+  csharp_api: generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
+  csharp_wire: generated_path("clients/dotnet/OpenKache/generated_local/WireValues.g.cs"),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
-    join(PUBLIC_ROOT, "clients/rust/generated_local/smithy_api.rs"),
+    generated_path("clients/rust/generated_local/smithy_api.rs"),
   rust_wire: process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
-    join(PROTOCOL_DIRECTORY, "generated_local/wire_values.rs"),
-  typescript_api: join(
-    PUBLIC_ROOT,
-    "clients/typescript/src/generated_local/smithy-api.ts",
-  ),
-  typescript_value_format: join(
-    PUBLIC_ROOT,
+    generated_path("protocol/generated_local/wire_values.rs"),
+  typescript_api: generated_path("clients/typescript/src/generated_local/smithy-api.ts"),
+  typescript_value_format: generated_path(
     "clients/typescript/src/generated_local/smithy-value-format.ts",
   ),
-  typescript_value_envelope: join(
-    PUBLIC_ROOT,
+  typescript_value_envelope: generated_path(
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
-  python_api: join(
-    process.env.OPENKACHE_PYTHON_API_OUTPUT ??
-      join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_api.py"),
-  ),
-  python_contract: join(
-    process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
-      join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_contract.py"),
-  ),
-  swift_api: join(
-    PUBLIC_ROOT,
-    "clients/swift/Sources/OpenKache/Generated/SmithyAPI.swift",
-  ),
+  python_api: process.env.OPENKACHE_PYTHON_API_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
+  python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
+  swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
+    generated_path("clients/swift/Sources/OpenKache/Generated/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
-    join(PROTOCOL_DIRECTORY, "generated_local/smithy_contract.h"),
+    generated_path("protocol/generated_local/smithy_contract.h"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -1148,6 +1137,59 @@ ${variants}
 }`
 }
 
+function rust_ffi_enum(
+  name: string,
+  documentation: string,
+  member_documentation: string,
+  entries: readonly Wire_Entry[],
+): string {
+  const variants = entries
+    .map(
+      (entry) =>
+        `    /// ${member_documentation} identifier for ${entry.name}.
+    ${entry.name} = ${formatted_decimal(entry.value)},`,
+    )
+    .join("\n")
+  const try_from_arms = entries
+    .map(
+      (entry) =>
+        `            value if value == Self::${entry.name} as u32 => Ok(Self::${entry.name}),`,
+    )
+    .join("\n")
+  const display_arms = entries
+    .map(
+      (entry) =>
+        `            Self::${entry.name} => "${snake_case(entry.name)}",`,
+    )
+    .join("\n")
+  return `/// ${documentation}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[repr(u32)]
+pub enum ${name} {
+${variants}
+}
+
+impl core::convert::TryFrom<u32> for ${name} {
+    type Error = u32;
+
+    fn try_from(value: u32) -> core::result::Result<Self, u32> {
+        match value {
+${try_from_arms}
+            _ => Err(value),
+        }
+    }
+}
+
+impl core::fmt::Display for ${name} {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+${display_arms}
+        })
+    }
+}`
+}
+
 /** Renders protocol v3 Rust definitions.
  *
  * @param contract - Validated language-neutral wire contract.
@@ -1190,6 +1232,9 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_operation_entries = [...contract.opcodes, ...ffi.operations].sort(
+    (left, right) => left.value - right.value,
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 1.
@@ -1211,6 +1256,34 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+
+${rust_ffi_enum(
+  "FfiOperation",
+  "Native FFI operation identifiers shared by every language adapter.",
+  "Native FFI operation",
+  ffi_operation_entries,
+)}
+
+${rust_ffi_enum(
+  "FfiResultKind",
+  "Native FFI result-kind identifiers shared by every language adapter.",
+  "Native FFI result-kind",
+  ffi.result_kinds,
+)}
+
+${rust_ffi_enum(
+  "ConnectionState",
+  "Native FFI connection-state identifiers shared by every language adapter.",
+  "Native FFI connection-state",
+  ffi.connection_states,
+)}
+
+${rust_ffi_enum(
+  "FfiSetCondition",
+  "Native FFI SET-condition identifiers shared by every language adapter.",
+  "Native FFI SET-condition",
+  ffi.set_conditions,
+)}
 
 /// Current client-owned value-format version.
 pub const VALUE_FORMAT_VERSION: u128 = ${formatted_decimal(value.version)};

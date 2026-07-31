@@ -82,7 +82,7 @@ package structure only.
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
-| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift`, generated Smithy API |
+| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift`, SwiftPM-generated Smithy API |
 
 Native linkage for C, C++, Python, and Swift is supplied by the shared `ffi`
 native library built from `clients/core`; see each package README for the
