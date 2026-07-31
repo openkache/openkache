@@ -856,7 +856,7 @@ impl ValueCodec {
 #[non_exhaustive]
 pub enum Error {
     /// The configured Zstandard level is unsupported.
-    #[error("Zstandard level {0} is outside the supported range 1..=22")]
+    #[error("Zstandard level {0} is outside the configured compression-level range")]
     InvalidCompressionLevel(i32),
     /// An unprotected profile was passed to a protected constructor.
     #[error("protected value codecs require Compact or Robust encryption")]

@@ -1,7 +1,14 @@
 #!/usr/bin/env bun
 /** Generates language-specific wire values from the canonical Smithy contract. */
 
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
 import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -2441,7 +2448,39 @@ function expected_outputs(
   }
 }
 
-function write_outputs(outputs: Readonly<Record<string, string>>): void {
+/** Returns generated outputs that are missing or differ from the contract. */
+export function generated_output_issues(
+  outputs: Readonly<Record<string, string>>,
+): readonly string[] {
+  const mismatches: string[] = []
+  for (const [output_path, content] of Object.entries(outputs)) {
+    let existing: string
+    try {
+      existing = readFileSync(output_path, "utf8")
+    } catch {
+      mismatches.push(`${output_path} (missing)`)
+      continue
+    }
+    if (existing !== content) mismatches.push(output_path)
+  }
+  return mismatches
+}
+
+function write_outputs(
+  outputs: Readonly<Record<string, string>>,
+  check_only: boolean,
+): void {
+  if (check_only) {
+    const mismatches = generated_output_issues(outputs)
+    if (mismatches.length > 0) {
+      throw new Error(
+        "generated contract outputs are stale:\n" +
+          mismatches.map((output_path) => `  - ${output_path}`).join("\n") +
+          "\nRun `just generate-protocol-contract` to regenerate them.",
+      )
+    }
+    return
+  }
   for (const [output_path, content] of Object.entries(outputs)) {
     const output_directory = dirname(output_path)
     mkdirSync(output_directory, { recursive: true })
@@ -2469,7 +2508,7 @@ export function main(): number {
       extract_wire_contract(smithy_ast()),
       generation_target(process.env.OPENKACHE_GENERATION_TARGET),
     )
-    write_outputs(outputs)
+    write_outputs(outputs, process.env.OPENKACHE_GENERATION_CHECK === "1")
     return 0
   } catch (error) {
     console.error(
