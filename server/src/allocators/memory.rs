@@ -219,20 +219,28 @@ fn discover_supported_page_sizes() -> Vec<PageSizeInfo> {
 pub unsafe fn reserve(capacity: usize, flags: MemoryFlags) -> Result<NonNull<u8>> {
     #[cfg(unix)]
     {
-        let mut mmap_flags = MAP_PRIVATE | MAP_ANON;
-        #[cfg(target_os = "linux")]
-        {
-            if flags.huge_pages {
-                mmap_flags |= linux_flags::MAP_HUGETLB;
-                if flags.huge_page_size_log2 > 0 {
-                    mmap_flags |=
-                        (flags.huge_page_size_log2 as libc::c_int) << linux_flags::MAP_HUGE_SHIFT;
+        let mmap_flags = {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = flags;
+                MAP_PRIVATE | MAP_ANON
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let mut mmap_flags = MAP_PRIVATE | MAP_ANON;
+                if flags.huge_pages {
+                    mmap_flags |= linux_flags::MAP_HUGETLB;
+                    if flags.huge_page_size_log2 > 0 {
+                        mmap_flags |= (flags.huge_page_size_log2 as libc::c_int)
+                            << linux_flags::MAP_HUGE_SHIFT;
+                    }
                 }
+                if flags.no_reserve {
+                    mmap_flags |= linux_flags::MAP_NORESERVE;
+                }
+                mmap_flags
             }
-            if flags.no_reserve {
-                mmap_flags |= linux_flags::MAP_NORESERVE;
-            }
-        }
+        };
 
         let addr = unsafe { mmap(ptr::null_mut(), capacity, PROT_NONE, mmap_flags, -1, 0) };
         if addr == MAP_FAILED {
@@ -276,6 +284,8 @@ pub unsafe fn reserve(capacity: usize, flags: MemoryFlags) -> Result<NonNull<u8>
 pub unsafe fn commit(addr: *mut u8, size: usize, flags: MemoryFlags) -> Result<()> {
     #[cfg(unix)]
     {
+        #[cfg(not(target_os = "linux"))]
+        let _ = flags;
         if unsafe { mprotect(addr as *mut _, size, PROT_READ | PROT_WRITE) } != 0 {
             return Err(MemoryError::OperationFailed {
                 op: "commit",
@@ -364,14 +374,16 @@ pub unsafe fn decommit(addr: *mut u8, size: usize) -> Result<()> {
             });
         }
 
-        // MADV_DONTNEED immediately frees physical pages, ensuring that
-        // subsequent recommit + access provides zero-filled pages.
+        // MADV_DONTNEED releases physical pages, ensuring that subsequent
+        // recommit plus access provides zero-filled pages.
         // Without this, mprotect(PROT_NONE) only changes page permissions
-        // and does **not** release physical memory on Linux, breaking the
+        // and does **not** release physical memory, breaking the
         // zero-fill contract relied on by Slab.
-        #[cfg(target_os = "linux")]
-        unsafe {
-            madvise(addr as *mut libc::c_void, size, libc::MADV_DONTNEED);
+        if unsafe { madvise(addr as *mut libc::c_void, size, libc::MADV_DONTNEED) } != 0 {
+            return Err(MemoryError::DecommitFailed {
+                addr,
+                source: std::io::Error::last_os_error(),
+            });
         }
     }
     #[cfg(windows)]

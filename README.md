@@ -168,12 +168,13 @@ budget, and targets 75% of theoretical SG key capacity so updates and
 Tombstones have room.
 
 Sizing is a deterministic capacity estimate, not an adaptive benchmark. It
-detects the standard Linux cgroup limits and current usage plus filesystem
-availability, but does not detect filesystem quotas, SSD type, or NVMe
-performance. At runtime, workers reserve each Segment generation immediately
-before writing it instead of preallocating the whole sparse file. Memory or
-storage pressure temporarily rejects `SET` with an overloaded response while
-reads, deletes, and recovery remain available. `STATS` reports
+detects standard Linux cgroup limits and current usage or macOS host memory
+pressure plus filesystem availability, but does not detect filesystem quotas,
+SSD type, or NVMe performance. At runtime, workers reserve each Segment
+generation immediately before writing it instead of preallocating the whole
+sparse file. Memory or storage pressure temporarily rejects `SET` with an
+overloaded response while reads, deletes, and recovery remain available.
+`STATS` reports
 the memory and storage stop/resume thresholds, `memory_stop_writes`,
 `storage_stop_writes`, and `rejected_writes`.
 

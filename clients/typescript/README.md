@@ -135,8 +135,8 @@ unreachable.
 ## Runtime and lifecycle
 
 Published applications can use Node.js 20 or newer, Bun's Node-API support, or
-Deno's Node compatibility layer with `--allow-ffi`. Release packages contain
-Linux x64 and ARM64 adapters and require glibc 2.17 or newer.
+Deno's Node compatibility layer with `--allow-ffi`. Release packages support
+Linux x64 and ARM64 (glibc 2.17 or newer) plus Apple Silicon macOS.
 
 The browser cannot load the native adapter or open the UDP-based QUIC
 transport. The `value-codec` subpath is runtime-neutral, but the client
