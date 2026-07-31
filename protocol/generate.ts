@@ -172,8 +172,8 @@ const GENERATED_OUTPUTS = {
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
   c_contract: join(
-    PUBLIC_ROOT,
-    "clients/core/include/openkache/smithy_contract.h",
+    process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
+      join(PROTOCOL_DIRECTORY, "generated_local/smithy_contract.h"),
   ),
 } as const
 

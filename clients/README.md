@@ -92,10 +92,10 @@ The C and C++ packages use the native ABI exported by `clients/core` with a
 dedicated worker for synchronous foreign-function calls. Their headers expose
 only buffer conversion, result ownership, protected and exact-item-ID calls,
 and RAII; protocol, retry, TLS, value-format, and protection behavior remain
-in the core. Smithy-generated constants in
-`clients/core/include/openkache/smithy_contract.h` keep native operation
-numbers, limits, and value-format identifiers aligned with the other language
-packages.
+in the core. The CMake/package build generates Smithy-derived constants into
+the package output, keeping native operation numbers, limits, and value-format
+identifiers aligned with the other language packages without checking generated
+headers into source control.
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform

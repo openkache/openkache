@@ -1,24 +1,48 @@
 # OpenKache C++ client
 
-The C++ package is a C++20 RAII layer over the shared C ABI. `openkache::Client`
-is movable, releases its native worker automatically, and exposes byte-span
-and `std::string_view` overloads for protected cache operations.
+The C++ package targets C++20 and is a header-only RAII layer over the shared C
+ABI. `openkache::Client` is movable, releases its native worker automatically,
+and exposes byte-span and `std::string_view` overloads for protected cache
+operations. CMake propagates the C++20 requirement only through the imported
+target; it does not change the consuming project's global standard.
+Projects using C++23 or newer can consume the same target; C++17 is not a
+supported minimum because the public API uses `std::span`.
 
 ## Build
 
-Build the shared native ABI first, then configure this package:
+Build the native ABI first, then configure this package. CMake generates the
+Smithy C contract into the build tree; generated contract files are not
+checked into the source repository:
 
 ```bash
 cargo build --manifest-path ../../Cargo.toml \
   -p openkache-client-core --no-default-features --features ffi --release
 cmake -S . -B target/build \
-  -DOPENKACHE_CLIENT_NATIVE_LIBRARY=/path/to/libopenkache_client_core.a
+  -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC=/path/to/libopenkache_client_core.a
 cmake --build target/build
 ```
 
-The CMake target validates headers without a native library. Supplying
-`OPENKACHE_CLIENT_NATIVE_LIBRARY` propagates the core linkage through
-`OpenKache::ClientCpp`.
+For a shared build, use
+`-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
+The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
+single-library builds. If Bun or the Smithy CLI is not available, pass a
+previously generated header with
+`-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
+
+Install and consume the package with CMake:
+
+```bash
+cmake --install target/build --prefix /path/to/prefix
+```
+
+```cmake
+find_package(OpenKacheClient CONFIG REQUIRED)
+target_link_libraries(app PRIVATE OpenKache::ClientCpp)
+```
+
+Use `OpenKache::ClientCppShared` or `OpenKache::ClientCppStatic` when the
+linkage mode must be explicit. The C++ targets remain header-only; the shared
+Rust/C core is the native binary.
 
 ## API
 

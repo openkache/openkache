@@ -1,0 +1,61 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+set(_openkache_client_system_libs Threads::Threads)
+if(CMAKE_DL_LIBS)
+  list(APPEND _openkache_client_system_libs ${CMAKE_DL_LIBS})
+endif()
+
+if("@OPENKACHE_CLIENT_INSTALLED_SHARED_NAME@" STREQUAL "")
+else()
+  if(NOT TARGET OpenKache::ClientCoreShared)
+    add_library(OpenKache::ClientCoreShared UNKNOWN IMPORTED)
+    set_target_properties(
+      OpenKache::ClientCoreShared
+      PROPERTIES
+        IMPORTED_LOCATION
+          "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@OPENKACHE_CLIENT_INSTALLED_SHARED_NAME@"
+        INTERFACE_LINK_LIBRARIES "${_openkache_client_system_libs}"
+    )
+  endif()
+endif()
+
+if("@OPENKACHE_CLIENT_INSTALLED_STATIC_NAME@" STREQUAL "")
+else()
+  if(NOT TARGET OpenKache::ClientCoreStatic)
+    add_library(OpenKache::ClientCoreStatic UNKNOWN IMPORTED)
+    set_target_properties(
+      OpenKache::ClientCoreStatic
+      PROPERTIES
+        IMPORTED_LOCATION
+          "@PACKAGE_CMAKE_INSTALL_LIBDIR@/@OPENKACHE_CLIENT_INSTALLED_STATIC_NAME@"
+        INTERFACE_LINK_LIBRARIES "${_openkache_client_system_libs}"
+    )
+  endif()
+endif()
+
+if(NOT TARGET OpenKache::ClientCore)
+  add_library(OpenKache::ClientCore INTERFACE IMPORTED)
+  if(TARGET OpenKache::ClientCoreShared)
+    set_property(
+      TARGET OpenKache::ClientCore
+      APPEND
+      PROPERTY INTERFACE_LINK_LIBRARIES OpenKache::ClientCoreShared
+    )
+  elseif(TARGET OpenKache::ClientCoreStatic)
+    set_property(
+      TARGET OpenKache::ClientCore
+      APPEND
+      PROPERTY INTERFACE_LINK_LIBRARIES OpenKache::ClientCoreStatic
+    )
+  endif()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/OpenKacheClientCTargets.cmake")
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/OpenKacheClientCppTargets.cmake")
+  include("${CMAKE_CURRENT_LIST_DIR}/OpenKacheClientCppTargets.cmake")
+endif()
+
+check_required_components(OpenKacheClient)
