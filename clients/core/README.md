@@ -114,6 +114,9 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
+- `src/ffi.rs` exposes the shared versioned C ABI used by native language
+  adapters; [`include/openkache_client.h`](include/openkache_client.h) is its
+  language-neutral header.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope

@@ -171,6 +171,7 @@ const GENERATED_OUTPUTS = {
     PUBLIC_ROOT,
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
+  go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -1389,6 +1390,110 @@ function rust_api_type(type: Api_Type, required: boolean): string {
   return required ? rendered : `Option<${rendered}>`
 }
 
+function go_api_name(identifier: string): string {
+  return `Smithy${pascal_case(snake_case(identifier))}`
+}
+
+function go_exported_name(identifier: string): string {
+  return pascal_case(snake_case(identifier))
+    .replace(/Id$/, "ID")
+    .replace(/^Ttl/, "TTL")
+    .replace(/^Json$/, "JSON")
+}
+
+function go_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "[]byte"
+      break
+    case "boolean":
+      rendered = "bool"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = go_api_name(type.name)
+      break
+    case "long":
+      rendered = "int64"
+      break
+    case "string":
+      rendered = "string"
+      break
+  }
+  return required ? rendered : `*${rendered}`
+}
+
+/** Renders Smithy operation types and a context-aware Go service interface.
+ *
+ * @param contract - Validated language-neutral wire and API contract.
+ * @returns Deterministic Go source with a trailing newline.
+ */
+export function render_go_api(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const enums = contract.api.enums.map((enum_) => {
+    const members = enum_.members
+      .map(
+        (member) =>
+          `\t${go_api_name(enum_.name)}${member.name} ${go_api_name(enum_.name)} = ${JSON.stringify(member.value)}`,
+      )
+      .join("\n")
+    return `// ${go_api_name(enum_.name)} is the Smithy ${enum_.name} enum.
+type ${go_api_name(enum_.name)} string
+
+const (
+${members}
+)`
+  })
+  const structures = contract.api.structures.map((structure) => {
+    const members = structure.members
+      .map((member) => {
+        const field = go_exported_name(member.name)
+        const optional = member.required ? "" : ",omitempty"
+        return `\t${field} ${go_api_type(member.type, member.required)} \`json:"${snake_case(member.name)}${optional}"\``
+      })
+      .join("\n")
+    const body = members.length === 0 ? "" : `\n${members}\n`
+    return `// ${go_api_name(structure.name)} is the Smithy ${structure.name} structure.
+type ${go_api_name(structure.name)} struct {${body}}`
+  })
+  const operations = contract.api.operations.map(
+    (operation) =>
+      `\t${operation.name}(context.Context, ${go_api_name(operation.input)}) (${go_api_name(operation.output)}, error)`,
+  )
+  return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
+
+package openkache
+
+import "context"
+
+const (
+\t// SmithyProtocolALPN is the negotiated protocol identifier.
+\tSmithyProtocolALPN = ${JSON.stringify(contract.v3.alpn)}
+\t// SmithyItemIDBytes is the exact protocol item-ID width.
+\tSmithyItemIDBytes = ${contract.item_id_bytes}
+\t// SmithyMaxValueBytes is the protocol value and payload ceiling.
+\tSmithyMaxValueBytes = ${contract.max_value_bytes}
+\t// SmithyDataProtectionKeyBytes is the shared key width.
+\tSmithyDataProtectionKeyBytes = ${value.data_protection_key_bytes}
+)
+
+// Smithy operation values carried by the native ABI.
+const (
+${contract.opcodes
+  .map((entry) => `\tSmithyOpcode${entry.name} uint32 = ${entry.value}`)
+  .join("\n")}
+)
+
+${[...enums, ...structures].join("\n\n")}
+
+// SmithyOpenKacheAPI describes the operations defined by the OpenKache Smithy service.
+type SmithyOpenKacheAPI interface {
+${operations.join("\n")}
+}
+`
+}
+
 /** Renders Smithy operation types and an API trait for Rust.
  *
  * @param contract - Validated language-neutral wire and API contract.
@@ -1468,7 +1573,13 @@ function smithy_ast(): unknown {
   }
 }
 
-type Generation_Target = "all" | "dotnet" | "rust-api" | "rust-wire" | "typescript"
+type Generation_Target =
+  | "all"
+  | "dotnet"
+  | "go"
+  | "rust-api"
+  | "rust-wire"
+  | "typescript"
 
 function generation_target(value: string | undefined): Generation_Target {
   switch (value) {
@@ -1477,6 +1588,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "all"
     case "dotnet":
       return "dotnet"
+    case "go":
+      return "go"
     case "rust-api":
       return "rust-api"
     case "rust-wire":
@@ -1504,11 +1617,16 @@ function expected_outputs(
           render_typescript_value_format(contract),
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
+        [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
       }
     case "dotnet":
       return {
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
+      }
+    case "go":
+      return {
+        [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
       }
     case "rust-api":
       return {

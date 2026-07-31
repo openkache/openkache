@@ -169,6 +169,6 @@ follow the [wire protocol rules](../../protocol/SPEC.md#retry-and-outcome-rules)
 ## Core components
 
 - `src/lib.rs` exposes the ergonomic Rust client and request builders.
-- `src/ffi.rs` exposes the versioned C ABI.
+- `src/ffi.rs` re-exports the versioned C ABI implemented by the shared core.
 - [`../core`](../core) provides shared transport, protocol, protection, and
   binding behavior.

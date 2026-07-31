@@ -1,0 +1,89 @@
+# OpenKache Go client
+
+The Go package exposes context-aware cache operations while delegating QUIC,
+TLS, retries, key derivation, compression, encryption, and value limits to the
+shared `openkache-client-core` native ABI. The package contains no duplicate
+wire or cryptographic implementation.
+
+## Commands
+
+From `clients/go`:
+
+```bash
+go vet ./...
+go test ./...
+go build ./...
+```
+
+The package supports both CGO builds and `CGO_ENABLED=0` cross-compilation.
+Runtime connections require CGO and a native library built from the Rust
+client with the `ffi` feature. The current native runtime uses Compio's
+io_uring backend on Linux; `CGO_ENABLED=0` remains useful for packaging and
+cross-compilation but returns an explicit unsupported-runtime error at connect
+time:
+
+```bash
+cargo build --manifest-path ../rust/Cargo.toml \
+  --no-default-features --features ffi
+```
+
+Set `OPENKACHE_CLIENT_LIBRARY` to the resulting
+`libopenkache_client.so`/platform equivalent, or set
+`Options.NativeLibrary` explicitly.
+
+## Usage
+
+```go
+import (
+    "context"
+
+    openkache "github.com/openkache/openkache/clients/go"
+)
+
+ctx := context.Background()
+client, err := openkache.Connect(ctx, openkache.Options{
+    Address:           "cache.example.com:4433",
+    ServerName:        "cache.example.com",
+    Certificate:       caCertificateDER,
+    DataProtectionKey: dataProtectionKey, // exactly 32 bytes
+})
+if err != nil {
+    return err
+}
+defer client.Close()
+
+outcome, err := client.Set(ctx, []byte("profile"), []byte("value"), openkache.SetOptions{
+    Condition: openkache.IfAbsent,
+})
+if err != nil {
+    return err
+}
+_ = outcome
+
+value, found, err := client.Get(ctx, []byte("profile"))
+```
+
+`Get` returns `found` separately so an empty stored value is not confused with
+a cache miss. `Close` is idempotent and waits for in-flight native operations.
+`NewItemID`, `GetItem`, `SetItem`, and `DeleteItem` expose the exact wire
+item-ID/raw-value layer when an application already owns protocol IDs.
+Use `client.Smithy()` when an application needs the generated
+`SmithyOpenKacheAPI` operation structures shared with other bindings.
+
+## Configuration
+
+- `Certificate` accepts one DER certificate or a PEM trust chain.
+- `Identity` optionally supplies a DER/PEM client certificate chain and private
+  key for mutual TLS.
+- `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
+  settings; zero values select documented core defaults.
+- `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
+  artifact. The native artifact must have ABI version 1 and the extended
+  connect symbol when `Identity` is used.
+
+Protocol operations, Smithy models, and value-format identifiers are generated
+from [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
+
+When using a pre-ABI-extension native library, `Identity`, non-default
+`Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading the native
+library to one that exports `openkache_client_connect_ex`.

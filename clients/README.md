@@ -27,7 +27,7 @@ formats or protocol behavior.
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the existing envelope |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
 | Python | `python/` | Package scaffold |
-| Go | `go/` | Package scaffold |
+| Go | [`go/`](go/) | Protocol v1 context-aware CGO binding over the shared native ABI |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
 | C | `c/` | Package scaffold |
@@ -75,7 +75,7 @@ package structure only.
 | C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
 | C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
 | Dart | `dart analyze` | `lib/openkache.dart` |
-| Go | `go vet ./... && go build ./...` | `doc.go` |
+| Go | `go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |

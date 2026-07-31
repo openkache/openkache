@@ -87,6 +87,14 @@ impl Endpoint {
         })
     }
 
+    #[cfg(feature = "quic-compio")]
+    pub(crate) fn with_server_name(mut self, server_name: impl Into<String>) -> Result<Self> {
+        let server_name = server_name.into();
+        validate_server_name("endpoint.server_name", &server_name)?;
+        self.server_name = server_name;
+        Ok(self)
+    }
+
     pub(crate) fn host(&self) -> &str {
         &self.host
     }
