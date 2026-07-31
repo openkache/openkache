@@ -16,22 +16,21 @@ use crate::{
     SetCondition, SetOptions, SetOutcome,
 };
 
-const ABI_VERSION: u32 = 1;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Copy)]
 #[repr(u32)]
 enum FfiResultKind {
-    Error = 0,
-    Ok = 1,
-    Value = 2,
-    NotFound = 3,
-    Created = 4,
-    Replaced = 5,
-    Deleted = 6,
-    NotDeleted = 7,
-    Connected = 8,
-    NotStored = 9,
+    Error = openkache_protocol::FFI_RESULT_ERROR,
+    Ok = openkache_protocol::FFI_RESULT_OK,
+    Value = openkache_protocol::FFI_RESULT_VALUE,
+    NotFound = openkache_protocol::FFI_RESULT_NOT_FOUND,
+    Created = openkache_protocol::FFI_RESULT_CREATED,
+    Replaced = openkache_protocol::FFI_RESULT_REPLACED,
+    Deleted = openkache_protocol::FFI_RESULT_DELETED,
+    NotDeleted = openkache_protocol::FFI_RESULT_NOT_DELETED,
+    Connected = openkache_protocol::FFI_RESULT_CONNECTED,
+    NotStored = openkache_protocol::FFI_RESULT_NOT_STORED,
 }
 
 macro_rules! ffi_input_enum {
@@ -61,20 +60,20 @@ macro_rules! ffi_input_enum {
 
 ffi_input_enum! {
     enum FfiOperation {
-        Ping = 1,
-        Get = 2,
-        Set = 3,
-        Delete = 4,
-        Stats = 5,
-        Sync = 6,
+        Ping = openkache_protocol::Opcode::Ping as u32,
+        Get = openkache_protocol::Opcode::Get as u32,
+        Set = openkache_protocol::Opcode::Set as u32,
+        Delete = openkache_protocol::Opcode::Delete as u32,
+        Stats = openkache_protocol::Opcode::Stats as u32,
+        Sync = openkache_protocol::Opcode::Sync as u32,
     }
 }
 
 ffi_input_enum! {
     enum FfiSetCondition {
-        None = 0,
-        IfAbsent = 1,
-        IfPresent = 2,
+        None = openkache_protocol::FFI_SET_CONDITION_NONE,
+        IfAbsent = openkache_protocol::FFI_SET_CONDITION_IF_ABSENT,
+        IfPresent = openkache_protocol::FFI_SET_CONDITION_IF_PRESENT,
     }
 }
 
@@ -416,7 +415,7 @@ async fn execute_raw(
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    ABI_VERSION
+    openkache_protocol::FFI_ABI_VERSION
 }
 
 /// Connects a native client and returns an opaque result.

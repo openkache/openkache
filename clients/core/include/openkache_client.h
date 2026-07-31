@@ -1,4 +1,6 @@
 /*
+ * Code generated from the OpenKache Smithy contract. DO NOT EDIT.
+ *
  * Stable OpenKache native-client ABI.
  *
  * The implementation is owned by openkache-client-core. Language bindings

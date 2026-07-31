@@ -126,6 +126,7 @@ export interface Api_Contract {
 /** Language-neutral subset of the OpenKache Smithy model used by generators. */
 export interface Wire_Contract {
   readonly api: Api_Contract
+  readonly ffi: Ffi_Contract
   readonly item_id_bytes: number
   readonly max_value_bytes: number
   readonly opcodes: readonly Wire_Entry[]
@@ -134,6 +135,13 @@ export interface Wire_Contract {
   readonly value_format: Value_Format_Contract
   readonly v2: Wire_V2_Contract
   readonly v3: Wire_V3_Contract
+}
+
+/** Native binding ABI identifiers shared by language-neutral adapters. */
+export interface Ffi_Contract {
+  readonly abi_version: number
+  readonly result_kinds: readonly Wire_Entry[]
+  readonly set_conditions: readonly Wire_Entry[]
 }
 
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -146,6 +154,24 @@ const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
 const VALUE_FORMAT_TRAIT_ID = "openkache.protocol#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.protocol#valueEnvelope"
+const FFI_CONTRACT_TRAIT_ID = "openkache.protocol#ffiContract"
+const FFI_RESULT_FIELDS = [
+  { name: "Error", field: "resultError" },
+  { name: "Ok", field: "resultOk" },
+  { name: "Value", field: "resultValue" },
+  { name: "NotFound", field: "resultNotFound" },
+  { name: "Created", field: "resultCreated" },
+  { name: "Replaced", field: "resultReplaced" },
+  { name: "Deleted", field: "resultDeleted" },
+  { name: "NotDeleted", field: "resultNotDeleted" },
+  { name: "Connected", field: "resultConnected" },
+  { name: "NotStored", field: "resultNotStored" },
+] as const
+const FFI_SET_CONDITION_FIELDS = [
+  { name: "None", field: "setConditionNone" },
+  { name: "IfAbsent", field: "setConditionIfAbsent" },
+  { name: "IfPresent", field: "setConditionIfPresent" },
+] as const
 const GENERATED_OUTPUTS = {
   csharp_api: join(
     PUBLIC_ROOT,
@@ -172,6 +198,7 @@ const GENERATED_OUTPUTS = {
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
   go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
+  ffi_header: join(PUBLIC_ROOT, "clients/core/include/openkache_client.h"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -714,6 +741,31 @@ function value_envelope_contract(value: unknown): Value_Envelope_Contract {
   }
 }
 
+function ffi_contract(value: unknown): Ffi_Contract {
+  const contract = object_value(value, FFI_CONTRACT_TRAIT_ID)
+  const result_kinds = FFI_RESULT_FIELDS.map(({ name, field }): Wire_Entry => ({
+    name,
+    value: integer_member(contract, field, FFI_CONTRACT_TRAIT_ID, 0, 0xffff_ffff),
+  }))
+  const set_conditions = FFI_SET_CONDITION_FIELDS.map(({ name, field }): Wire_Entry => ({
+    name,
+    value: integer_member(contract, field, FFI_CONTRACT_TRAIT_ID, 0, 0xffff_ffff),
+  }))
+  unique_wire_values(result_kinds, "FFI result kind")
+  unique_wire_values(set_conditions, "FFI SET condition")
+  return {
+    abi_version: integer_member(
+      contract,
+      "abiVersion",
+      FFI_CONTRACT_TRAIT_ID,
+      1,
+      0xffff_ffff,
+    ),
+    result_kinds,
+    set_conditions,
+  }
+}
+
 function valid_encoding_identifier(encoding: string, maximum_bytes: number): boolean {
   const bytes = new TextEncoder().encode(encoding)
   return (
@@ -755,6 +807,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
   const value_envelope_trait = trait_value(
     service,
     VALUE_ENVELOPE_TRAIT_ID,
+    `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
+  )
+  const ffi_contract_trait = trait_value(
+    service,
+    FFI_CONTRACT_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
 
@@ -809,6 +866,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
   return {
     api: api_contract(shapes, service),
+    ffi: ffi_contract(ffi_contract_trait),
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
@@ -1057,6 +1115,23 @@ pub const VALUE_ENVELOPE_MAX_ENCODING_BYTES: usize = ${formatted_decimal(envelop
 pub const VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES: usize = ${formatted_decimal(envelope.max_type_name_bytes)};
 /// Built-in canonical JSON codec identifier used by the legacy envelope adapter.
 pub const VALUE_ENVELOPE_JSON_ENCODING: &str = ${rust_string_literal(envelope.json_encoding)};
+
+/// Version of the language-neutral native client ABI.
+pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(contract.ffi.abi_version)};
+${contract.ffi.result_kinds
+  .map(
+    (entry) =>
+      `/// Native ABI result kind ${entry.name}.
+pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+  )
+  .join("\n")}
+${contract.ffi.set_conditions
+  .map(
+    (entry) =>
+      `/// Native ABI SET condition ${entry.name}.
+pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+  )
+  .join("\n")}
 
 const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v3.set_ttl_flag)};
 const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_absent_flag)};
@@ -1401,6 +1476,11 @@ function go_exported_name(identifier: string): string {
     .replace(/^Json$/, "JSON")
 }
 
+function go_ffi_name(identifier: string): string {
+  const name = go_exported_name(identifier)
+  return name === "Ok" ? "OK" : name
+}
+
 function go_api_type(type: Api_Type, required: boolean): string {
   let rendered: string
   switch (type.kind) {
@@ -1485,12 +1565,162 @@ ${contract.opcodes
   .join("\n")}
 )
 
+// Smithy native ABI values shared by language adapters.
+const (
+\t// SmithyFFIABIVersion is the native ABI version implemented by the core.
+\tSmithyFFIABIVersion uint32 = ${contract.ffi.abi_version}
+${contract.ffi.result_kinds
+  .map(
+    (entry) =>
+      `\t// SmithyFFIResult${go_ffi_name(entry.name)} is the native ABI result kind for ${entry.name}.
+\tSmithyFFIResult${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.set_conditions
+  .map(
+    (entry) =>
+      `\t// SmithyFFISetCondition${go_ffi_name(entry.name)} is the native ABI SET condition for ${entry.name}.
+\tSmithyFFISetCondition${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+)
+
 ${[...enums, ...structures].join("\n\n")}
 
 // SmithyOpenKacheAPI describes the operations defined by the OpenKache Smithy service.
 type SmithyOpenKacheAPI interface {
 ${operations.join("\n")}
 }
+`
+}
+
+function c_ffi_enum(prefix: string, entries: readonly Wire_Entry[]): string {
+  return entries
+    .map(
+      (entry) =>
+        `    ${prefix}_${snake_case(entry.name).toUpperCase()} = ${entry.value}u,`,
+    )
+    .join("\n")
+}
+
+/** Renders the language-neutral C ABI header.
+ *
+ * @param contract - Validated language-neutral wire and API contract.
+ * @returns Deterministic C header source with a trailing newline.
+ */
+export function render_c_ffi_header(contract: Wire_Contract): string {
+  return `/*
+ * Code generated from the OpenKache Smithy contract. DO NOT EDIT.
+ *
+ * Stable OpenKache native-client ABI.
+ *
+ * The implementation is owned by openkache-client-core. Language bindings
+ * should include this header and treat every returned handle as opaque. The
+ * ABI uses an owned-result pattern so bindings never free Rust allocations
+ * directly.
+ */
+#ifndef OPENKACHE_CLIENT_H
+#define OPENKACHE_CLIENT_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define OPENKACHE_CLIENT_ABI_VERSION ${contract.ffi.abi_version}u
+
+enum openkache_client_result_kind {
+${c_ffi_enum("OPENKACHE_CLIENT_RESULT", contract.ffi.result_kinds)}
+};
+
+enum openkache_client_operation {
+${c_ffi_enum("OPENKACHE_CLIENT_OPERATION", contract.opcodes)}
+};
+
+enum openkache_client_set_condition {
+${c_ffi_enum("OPENKACHE_CLIENT_SET_CONDITION", contract.ffi.set_conditions)}
+};
+
+typedef struct openkache_client_result openkache_client_result;
+typedef struct openkache_client_handle openkache_client_handle;
+
+uint32_t openkache_client_abi_version(void);
+
+openkache_client_result *openkache_client_connect(
+    const uint8_t *address,
+    size_t address_length,
+    const uint8_t *server_name,
+    size_t server_name_length,
+    const uint8_t *certificate,
+    size_t certificate_length,
+    const uint8_t *data_protection_key,
+    size_t data_protection_key_length,
+    uint8_t compression_enabled,
+    int32_t compression_level,
+    size_t minimum_input_size,
+    size_t minimum_savings,
+    uint64_t connect_timeout_ms,
+    uint64_t request_timeout_ms);
+
+openkache_client_result *openkache_client_connect_ex(
+    const uint8_t *address,
+    size_t address_length,
+    const uint8_t *server_name,
+    size_t server_name_length,
+    const uint8_t *certificate,
+    size_t certificate_length,
+    const uint8_t *identity_certificate_chain,
+    size_t identity_certificate_chain_length,
+    const uint8_t *identity_private_key,
+    size_t identity_private_key_length,
+    const uint8_t *data_protection_key,
+    size_t data_protection_key_length,
+    uint8_t compression_enabled,
+    int32_t compression_level,
+    size_t minimum_input_size,
+    size_t minimum_savings,
+    uint64_t connect_timeout_ms,
+    uint64_t request_timeout_ms,
+    uint64_t retry_max_attempts,
+    size_t max_in_flight);
+
+openkache_client_result *openkache_client_execute(
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms);
+
+openkache_client_result *openkache_client_execute_raw(
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms);
+
+uint32_t openkache_client_result_kind(const openkache_client_result *result);
+const uint8_t *openkache_client_result_data(const openkache_client_result *result);
+size_t openkache_client_result_data_length(const openkache_client_result *result);
+openkache_client_handle *openkache_client_result_take_client(
+    openkache_client_result *result);
+void openkache_client_result_free(openkache_client_result *result);
+void openkache_client_free(openkache_client_handle *client);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* OPENKACHE_CLIENT_H */
 `
 }
 
@@ -1576,6 +1806,7 @@ function smithy_ast(): unknown {
 type Generation_Target =
   | "all"
   | "dotnet"
+  | "ffi"
   | "go"
   | "rust-api"
   | "rust-wire"
@@ -1588,6 +1819,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "all"
     case "dotnet":
       return "dotnet"
+    case "ffi":
+      return "ffi"
     case "go":
       return "go"
     case "rust-api":
@@ -1618,11 +1851,16 @@ function expected_outputs(
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
+        [GENERATED_OUTPUTS.ffi_header]: render_c_ffi_header(contract),
       }
     case "dotnet":
       return {
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
+      }
+    case "ffi":
+      return {
+        [GENERATED_OUTPUTS.ffi_header]: render_c_ffi_header(contract),
       }
     case "go":
       return {

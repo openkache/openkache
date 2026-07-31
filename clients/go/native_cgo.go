@@ -447,7 +447,7 @@ func decodeConnectResult(
 		return nil, &Error{Operation: "connect", Message: "native ABI returned a null result"}
 	}
 	kind := uint32(C.openkache_go_result_kind(library.ptr, result))
-	if kind != resultConnected {
+	if kind != SmithyFFIResultConnected {
 		length := C.openkache_go_result_data_length(library.ptr, result)
 		var data []byte
 		if length != 0 {
@@ -493,12 +493,12 @@ func (h *nativeHandle) execute(
 	keyMemory := C.CBytes(key)
 	valueMemory := C.CBytes(value)
 
-	condition := uint32(0)
+	condition := SmithyFFISetConditionNone
 	switch options.Condition {
 	case IfAbsent:
-		condition = 1
+		condition = SmithyFFISetConditionIfAbsent
 	case IfPresent:
-		condition = 2
+		condition = SmithyFFISetConditionIfPresent
 	}
 	ttlEnabled := uint8(0)
 	if options.TTLMillis != 0 {
@@ -522,7 +522,7 @@ func (h *nativeHandle) execute(
 
 	select {
 	case result := <-done:
-		if result.kind == resultError {
+		if result.kind == SmithyFFIResultError {
 			return nativeResult{}, &Error{Message: string(result.data)}
 		}
 		return result, nil
@@ -551,12 +551,12 @@ func (h *nativeHandle) executeRaw(
 	itemIDMemory := C.CBytes(itemID[:])
 	valueMemory := C.CBytes(value)
 
-	condition := uint32(0)
+	condition := SmithyFFISetConditionNone
 	switch options.Condition {
 	case IfAbsent:
-		condition = 1
+		condition = SmithyFFISetConditionIfAbsent
 	case IfPresent:
-		condition = 2
+		condition = SmithyFFISetConditionIfPresent
 	}
 	ttlEnabled := uint8(0)
 	if options.TTLMillis != 0 {
@@ -580,7 +580,7 @@ func (h *nativeHandle) executeRaw(
 
 	select {
 	case result := <-done:
-		if result.kind == resultError {
+		if result.kind == SmithyFFIResultError {
 			return nativeResult{}, &Error{Message: string(result.data)}
 		}
 		return result, nil
@@ -632,7 +632,7 @@ func decodeResult(
 	result *C.openkache_client_result,
 ) (uint32, []byte) {
 	if result == nil {
-		return resultError, []byte("native ABI returned a null result")
+		return SmithyFFIResultError, []byte("native ABI returned a null result")
 	}
 	kind := uint32(C.openkache_go_result_kind(library.ptr, result))
 	length := C.openkache_go_result_data_length(library.ptr, result)
@@ -640,14 +640,14 @@ func decodeResult(
 	if length != 0 {
 		pointer := C.openkache_go_result_data(library.ptr, result)
 		if pointer == nil {
-			kind = resultError
+			kind = SmithyFFIResultError
 			data = []byte("native ABI returned a null payload")
 		} else {
 			data = C.GoBytes(unsafe.Pointer(pointer), C.int(length))
 		}
 	}
 	C.openkache_go_result_free(library.ptr, result)
-	if kind == resultError && len(data) == 0 {
+	if kind == SmithyFFIResultError && len(data) == 0 {
 		data = []byte("native ABI returned an error without a payload")
 	}
 	return kind, data

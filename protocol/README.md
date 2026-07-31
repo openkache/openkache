@@ -52,8 +52,8 @@ variable-integer parsing.
   operation inputs and outputs, shared limits, version-specific layouts, the
   complete cross-language value-format contract, and the legacy TypeScript
   metadata-envelope limits.
-- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, and C#
-  definitions into ignored `generated_local` directories or Cargo output.
+- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, Go,
+  and native C ABI definitions into generated outputs or Cargo output.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.

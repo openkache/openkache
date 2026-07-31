@@ -116,7 +116,7 @@ does not provide one.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/ffi.rs` exposes the shared versioned C ABI used by native language
   adapters; [`include/openkache_client.h`](include/openkache_client.h) is its
-  language-neutral header.
+  Smithy-generated language-neutral header.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope

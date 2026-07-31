@@ -399,7 +399,7 @@ func (c *Client) Ping(ctx context.Context) error {
 	if err != nil {
 		return operationError("ping", err)
 	}
-	if result.kind != resultOK {
+	if result.kind != SmithyFFIResultOK {
 		return unexpectedResult("ping", result.kind)
 	}
 	return nil
@@ -416,9 +416,9 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 		return nil, false, operationError("get", err)
 	}
 	switch result.kind {
-	case resultValue:
+	case SmithyFFIResultValue:
 		return result.data, true, nil
-	case resultNotFound:
+	case SmithyFFIResultNotFound:
 		return nil, false, nil
 	default:
 		return nil, false, unexpectedResult("get", result.kind)
@@ -433,9 +433,9 @@ func (c *Client) GetItem(ctx context.Context, itemID ItemID) ([]byte, bool, erro
 		return nil, false, operationError("get item", err)
 	}
 	switch result.kind {
-	case resultValue:
+	case SmithyFFIResultValue:
 		return result.data, true, nil
-	case resultNotFound:
+	case SmithyFFIResultNotFound:
 		return nil, false, nil
 	default:
 		return nil, false, unexpectedResult("get item", result.kind)
@@ -458,11 +458,11 @@ func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions)
 		return "", operationError("set", err)
 	}
 	switch result.kind {
-	case resultCreated:
+	case SmithyFFIResultCreated:
 		return Created, nil
-	case resultReplaced:
+	case SmithyFFIResultReplaced:
 		return Replaced, nil
-	case resultNotStored:
+	case SmithyFFIResultNotStored:
 		return NotStored, nil
 	default:
 		return "", unexpectedResult("set", result.kind)
@@ -494,11 +494,11 @@ func (c *Client) SetItem(
 		return "", operationError("set item", err)
 	}
 	switch result.kind {
-	case resultCreated:
+	case SmithyFFIResultCreated:
 		return Created, nil
-	case resultReplaced:
+	case SmithyFFIResultReplaced:
 		return Replaced, nil
-	case resultNotStored:
+	case SmithyFFIResultNotStored:
 		return NotStored, nil
 	default:
 		return "", unexpectedResult("set item", result.kind)
@@ -515,9 +515,9 @@ func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
 		return false, operationError("delete", err)
 	}
 	switch result.kind {
-	case resultDeleted:
+	case SmithyFFIResultDeleted:
 		return true, nil
-	case resultNotDeleted:
+	case SmithyFFIResultNotDeleted:
 		return false, nil
 	default:
 		return false, unexpectedResult("delete", result.kind)
@@ -531,9 +531,9 @@ func (c *Client) DeleteItem(ctx context.Context, itemID ItemID) (bool, error) {
 		return false, operationError("delete item", err)
 	}
 	switch result.kind {
-	case resultDeleted:
+	case SmithyFFIResultDeleted:
 		return true, nil
-	case resultNotDeleted:
+	case SmithyFFIResultNotDeleted:
 		return false, nil
 	default:
 		return false, unexpectedResult("delete item", result.kind)
@@ -546,7 +546,7 @@ func (c *Client) Stats(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", operationError("stats", err)
 	}
-	if result.kind != resultValue {
+	if result.kind != SmithyFFIResultValue {
 		return "", unexpectedResult("stats", result.kind)
 	}
 	return string(result.data), nil
@@ -558,7 +558,7 @@ func (c *Client) Sync(ctx context.Context) error {
 	if err != nil {
 		return operationError("sync", err)
 	}
-	if result.kind != resultOK {
+	if result.kind != SmithyFFIResultOK {
 		return unexpectedResult("sync", result.kind)
 	}
 	return nil
@@ -605,16 +605,3 @@ func unexpectedResult(operation string, kind uint32) error {
 		Message:   fmt.Sprintf("native ABI returned unexpected result kind %d", kind),
 	}
 }
-
-const (
-	resultError      = 0
-	resultOK         = 1
-	resultValue      = 2
-	resultNotFound   = 3
-	resultCreated    = 4
-	resultReplaced   = 5
-	resultDeleted    = 6
-	resultNotDeleted = 7
-	resultConnected  = 8
-	resultNotStored  = 9
-)
