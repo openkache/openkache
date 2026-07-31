@@ -8,7 +8,7 @@ import "context"
 type SmithySetCondition string
 
 const (
-	SmithySetConditionIfAbsent SmithySetCondition = SmithySetConditionIfAbsentValue
+	SmithySetConditionIfAbsent  SmithySetCondition = SmithySetConditionIfAbsentValue
 	SmithySetConditionIfPresent SmithySetCondition = SmithySetConditionIfPresentValue
 )
 
@@ -16,8 +16,8 @@ const (
 type SmithySetOutcome string
 
 const (
-	SmithySetOutcomeCreated SmithySetOutcome = SmithySetOutcomeCreatedValue
-	SmithySetOutcomeReplaced SmithySetOutcome = SmithySetOutcomeReplacedValue
+	SmithySetOutcomeCreated   SmithySetOutcome = SmithySetOutcomeCreatedValue
+	SmithySetOutcomeReplaced  SmithySetOutcome = SmithySetOutcomeReplacedValue
 	SmithySetOutcomeNotStored SmithySetOutcome = SmithySetOutcomeNotStoredValue
 )
 
@@ -42,17 +42,17 @@ type SmithyGetOutput struct {
 }
 
 // SmithyPingInput is the Smithy PingInput structure.
-type SmithyPingInput struct {}
+type SmithyPingInput struct{}
 
 // SmithyPingOutput is the Smithy PingOutput structure.
-type SmithyPingOutput struct {}
+type SmithyPingOutput struct{}
 
 // SmithySetInput is the Smithy SetInput structure.
 type SmithySetInput struct {
-	ItemID []byte `json:"item_id"`
-	Value []byte `json:"value"`
-	Condition *SmithySetCondition `json:"condition,omitempty"`
-	TTLMilliseconds *int64 `json:"ttl_milliseconds,omitempty"`
+	ItemID          []byte              `json:"item_id"`
+	Value           []byte              `json:"value"`
+	Condition       *SmithySetCondition `json:"condition,omitempty"`
+	TTLMilliseconds *int64              `json:"ttl_milliseconds,omitempty"`
 }
 
 // SmithySetOutput is the Smithy SetOutput structure.
@@ -61,7 +61,7 @@ type SmithySetOutput struct {
 }
 
 // SmithyStatsInput is the Smithy StatsInput structure.
-type SmithyStatsInput struct {}
+type SmithyStatsInput struct{}
 
 // SmithyStatsOutput is the Smithy StatsOutput structure.
 type SmithyStatsOutput struct {
@@ -69,10 +69,10 @@ type SmithyStatsOutput struct {
 }
 
 // SmithySyncInput is the Smithy SyncInput structure.
-type SmithySyncInput struct {}
+type SmithySyncInput struct{}
 
 // SmithySyncOutput is the Smithy SyncOutput structure.
-type SmithySyncOutput struct {}
+type SmithySyncOutput struct{}
 
 // SmithyOpenKacheAPI describes the operations defined by the OpenKache Smithy service.
 type SmithyOpenKacheAPI interface {

@@ -62,6 +62,19 @@ type CompressionOptions struct {
 	MinimumSavings int
 }
 
+// Encryption selects the shared-core value-protection profile.
+//
+// Compact is deterministic for a given item ID. Robust is randomized and is
+// the default profile used by the protected client.
+type Encryption uint32
+
+const (
+	// EncryptionCompact selects AES-256-SIV-CMAC.
+	EncryptionCompact Encryption = Encryption(SmithyValueEncryptionCompact)
+	// EncryptionRobust selects AES-256-GCM-SIV.
+	EncryptionRobust Encryption = Encryption(SmithyValueEncryptionRobust)
+)
+
 // TimeoutOptions bounds connection setup and complete request exchanges.
 type TimeoutOptions struct {
 	Connect time.Duration
@@ -82,7 +95,7 @@ type Options struct {
 	// ServerName is the TLS certificate name. Empty selects the shared default.
 	ServerName string
 	// Certificate is one DER certificate or a PEM certificate chain trusted for
-	// the server connection.
+	// the server connection. Empty selects the platform/system trust roots.
 	Certificate []byte
 	// Identity is optional mutual-TLS client authentication material.
 	Identity *Identity
@@ -90,6 +103,9 @@ type Options struct {
 	DataProtectionKey []byte
 	// Compression is applied before the core's authenticated encryption.
 	Compression CompressionOptions
+	// Encryption selects the shared-core value-protection profile. The zero
+	// value selects EncryptionRobust.
+	Encryption Encryption
 	// Timeouts bounds native connection and operation work.
 	Timeouts TimeoutOptions
 	// Retry controls response-safe retry attempts.
@@ -110,6 +126,7 @@ type normalizedOptions struct {
 	identityPrivateKey  []byte
 	dataProtectionKey   []byte
 	compression         CompressionOptions
+	encryption          Encryption
 	timeouts            TimeoutOptions
 	retryAttempts       int
 	maxInFlight         int
@@ -119,9 +136,6 @@ type normalizedOptions struct {
 func (o Options) normalize() (normalizedOptions, error) {
 	if o.Address == "" {
 		return normalizedOptions{}, validationError("address", "must not be empty")
-	}
-	if len(o.Certificate) == 0 {
-		return normalizedOptions{}, validationError("certificate", "must not be empty")
 	}
 	if len(o.DataProtectionKey) != SmithyDataProtectionKeyBytes {
 		return normalizedOptions{}, validationError(
@@ -176,6 +190,14 @@ func (o Options) normalize() (normalizedOptions, error) {
 		if compression.MinimumSavings == 0 {
 			compression.MinimumSavings = SmithyClientDefaultCompressionMinimumSavings
 		}
+	}
+
+	encryption := o.Encryption
+	if encryption == 0 {
+		encryption = EncryptionRobust
+	}
+	if encryption != EncryptionCompact && encryption != EncryptionRobust {
+		return normalizedOptions{}, validationError("encryption", "must be EncryptionCompact or EncryptionRobust")
 	}
 
 	retryAttempts := o.Retry.MaxAttempts
@@ -238,6 +260,7 @@ func (o Options) normalize() (normalizedOptions, error) {
 		identityPrivateKey:  identityPrivateKey,
 		dataProtectionKey:   append([]byte(nil), o.DataProtectionKey...),
 		compression:         compression,
+		encryption:          encryption,
 		timeouts:            TimeoutOptions{Connect: connectTimeout, Request: requestTimeout},
 		retryAttempts:       retryAttempts,
 		maxInFlight:         maxInFlight,

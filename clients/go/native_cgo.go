@@ -3,7 +3,7 @@
 package openkache
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../core/include
+#cgo CFLAGS: -I${SRCDIR}/../core/include -I${SRCDIR}/../../protocol/generated_local
 #cgo linux LDFLAGS: -ldl
 
 #include <stdint.h>
@@ -424,7 +424,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 			(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
 			C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
 			C.size_t(minimumInputSize), C.size_t(minimumSavings),
-			C.uint32_t(SmithyValueEncryptionRobust),
+			C.uint32_t(options.encryption),
 			C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
 			C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
 			C.uint8_t(boolByte(useExtended)),

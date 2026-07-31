@@ -30,19 +30,7 @@ structure ffiContract {
     operationSetJson: Integer
 
     @required
-    operationReconnect: Integer
-
-    @required
-    operationState: Integer
-
-    @required
-    operationRawGet: Integer
-
-    @required
-    operationRawSet: Integer
-
-    @required
-    operationRawDelete: Integer
+    operationReconnect: Long
 
     @required
     resultError: Integer
@@ -75,9 +63,6 @@ structure ffiContract {
     resultNotStored: Integer
 
     @required
-    resultState: Integer
-
-    @required
     setConditionNone: Integer
 
     @required
@@ -85,9 +70,6 @@ structure ffiContract {
 
     @required
     setConditionIfPresent: Integer
-
-    @required
-    lifecycleReconnect: Long
 
     @required
     connectionStateConnected: Integer
@@ -324,14 +306,10 @@ structure wireStatus {
     }
 )
 @ffiContract(
-    abiVersion: 1,
+    abiVersion: 2,
     operationGetJson: 7,
     operationSetJson: 8,
-    operationReconnect: 9,
-    operationState: 10,
-    operationRawGet: 11,
-    operationRawSet: 12,
-    operationRawDelete: 13,
+    operationReconnect: 4294967041,
     resultError: 0,
     resultOk: 1,
     resultValue: 2,
@@ -342,11 +320,9 @@ structure wireStatus {
     resultNotDeleted: 7,
     resultConnected: 8,
     resultNotStored: 9,
-    resultState: 10,
     setConditionNone: 0,
     setConditionIfAbsent: 1,
     setConditionIfPresent: 2,
-    lifecycleReconnect: 4294967041,
     connectionStateConnected: 0,
     connectionStateReconnecting: 1,
     connectionStateDisconnected: 2,

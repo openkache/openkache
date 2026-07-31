@@ -28,17 +28,16 @@ formats or protocol behavior.
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
 | Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
-| Go | [`go/`](go/) | Protocol v1 context-aware CGO binding over the shared native ABI |
+| Go | [`go/`](go/) | Context-aware protected and raw CGO binding over the shared native ABI |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
 | C | [`c/`](c/) | Protocol v1 protected C17 ABI over the shared core |
 | C++ | [`cpp/`](cpp/) | Protocol v1 C++20 RAII adapter over the C ABI |
-| Swift | `swift/` | Package scaffold |
+| Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
 | Dart | `dart/` | Package scaffold |
 
-Go, Java, Kotlin, Swift, and Dart currently contain registry metadata and
-reserved source layouts only. Python and Go expose core-backed clients; the
-remaining packages do not connect to OpenKache or expose cache operations yet.
+Java, Kotlin, and Dart currently contain registry metadata and reserved source
+layouts only. They do not connect to OpenKache or expose cache operations yet.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
 format v1. The core owns Raw and canonical JSON serialization. TypeScript's
@@ -81,23 +80,23 @@ package structure only.
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
-| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
+| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift`, SwiftPM-generated Smithy API |
 
-Native linkage for C and C++ is supplied by the `ffi` native library built
-from `clients/core`; see each package README for the CMake option. Artifact
-distribution for the remaining scaffolds is intentionally undefined until
-those bindings are implemented.
+Native linkage for C, C++, Python, and Swift is supplied by the shared `ffi`
+native library built from `clients/core`; see each package README for the
+package-specific linker or packaging configuration. Artifact distribution for
+the remaining scaffolds is intentionally undefined until those bindings are
+implemented.
 
 ## Shared configuration
 
-The C and C++ packages use the native ABI exported by `clients/core` with a
-dedicated worker for synchronous foreign-function calls. Their headers expose
-only buffer conversion, result ownership, protected and exact-item-ID calls,
-and RAII; protocol, retry, TLS, value-format, and protection behavior remain
-in the core. The CMake/package build generates Smithy-derived constants into
-the package output, keeping native operation numbers, limits, and value-format
-identifiers aligned with the other language packages without checking generated
-headers into source control.
+The C, C++, Python, and Swift packages use the native ABI exported by
+`clients/core`. Their adapters only marshal native values, expose their
+language-appropriate lifecycle, and own result handles; protocol, retry, TLS,
+value-format, and protection behavior remain in the core. Every operation,
+result, state, limit, and value-format identifier is generated from the
+Smithy model for each package's build output, keeping all bindings aligned
+without hand-maintained constants.
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform

@@ -13,17 +13,10 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub use openkache_protocol::FFI_ABI_VERSION as ABI_VERSION;
+pub use openkache_protocol::{FfiOperation, FfiResultKind, FfiSetCondition};
 use openkache_protocol::{
-    FFI_ABI_VERSION, FFI_ADAPTER_OPERATION_GET_JSON, FFI_ADAPTER_OPERATION_RAW_DELETE,
-    FFI_ADAPTER_OPERATION_RAW_GET, FFI_ADAPTER_OPERATION_RAW_SET, FFI_ADAPTER_OPERATION_RECONNECT,
-    FFI_ADAPTER_OPERATION_SET_JSON, FFI_ADAPTER_OPERATION_STATE, FFI_CONNECTION_STATE_CLOSED,
-    FFI_CONNECTION_STATE_CONNECTED, FFI_CONNECTION_STATE_DISCONNECTED,
-    FFI_CONNECTION_STATE_RECONNECTING, FFI_CONNECTION_STATE_UNKNOWN, FFI_OPERATION_RECONNECT,
-    FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
-    FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK,
-    FFI_RESULT_REPLACED, FFI_RESULT_STATE, FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT,
-    FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode, VALUE_FORMAT_ENCRYPTION_COMPACT,
-    VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
+    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 use serde::Deserialize;
 
@@ -34,124 +27,7 @@ use crate::{
     ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 
-/// Version of the native ABI represented by these declarations.
-pub const ABI_VERSION: u32 = FFI_ABI_VERSION;
-
 const COMMAND_QUEUE_CAPACITY: usize = 64;
-
-/// Discriminator returned by an operation result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiResultKind {
-    /// The operation failed; the payload is UTF-8 diagnostic text.
-    Error = FFI_RESULT_ERROR,
-    /// The operation completed without a value.
-    Ok = FFI_RESULT_OK,
-    /// The payload contains an owned operation value.
-    Value = FFI_RESULT_VALUE,
-    /// A lookup found no value.
-    NotFound = FFI_RESULT_NOT_FOUND,
-    /// A conditional or unconditional set created a value.
-    Created = FFI_RESULT_CREATED,
-    /// An unconditional or conditional set replaced a value.
-    Replaced = FFI_RESULT_REPLACED,
-    /// A delete removed a value.
-    Deleted = FFI_RESULT_DELETED,
-    /// A delete found no value.
-    NotDeleted = FFI_RESULT_NOT_DELETED,
-    /// A connect operation returned a client handle in the result.
-    Connected = FFI_RESULT_CONNECTED,
-    /// A conditional set did not change a value.
-    NotStored = FFI_RESULT_NOT_STORED,
-    /// The payload contains a connection-state string.
-    State = FFI_RESULT_STATE,
-}
-
-/// Operation accepted by [`openkache_client_execute`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiOperation {
-    /// Verify the connection.
-    Ping = Opcode::Ping as u32,
-    /// Retrieve one protected value.
-    Get = Opcode::Get as u32,
-    /// Store one protected value.
-    Set = Opcode::Set as u32,
-    /// Remove one protected value.
-    Delete = Opcode::Delete as u32,
-    /// Return server statistics.
-    Stats = Opcode::Stats as u32,
-    /// Wait for the server durability barrier.
-    Sync = Opcode::Sync as u32,
-    /// Explicitly reconnect without replaying a request.
-    Reconnect = FFI_OPERATION_RECONNECT,
-    /// Retrieve a canonical JSON value.
-    GetJson = FFI_ADAPTER_OPERATION_GET_JSON,
-    /// Store a canonical JSON value.
-    SetJson = FFI_ADAPTER_OPERATION_SET_JSON,
-    /// Reconnect using the language-adapter operation range.
-    AdapterReconnect = FFI_ADAPTER_OPERATION_RECONNECT,
-    /// Return the current connection state.
-    State = FFI_ADAPTER_OPERATION_STATE,
-    /// Retrieve a raw value by exact item ID.
-    RawGet = FFI_ADAPTER_OPERATION_RAW_GET,
-    /// Store a raw value by exact item ID.
-    RawSet = FFI_ADAPTER_OPERATION_RAW_SET,
-    /// Delete a raw value by exact item ID.
-    RawDelete = FFI_ADAPTER_OPERATION_RAW_DELETE,
-}
-
-impl TryFrom<u32> for FfiOperation {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            value if value == Self::Ping as u32 => Ok(Self::Ping),
-            value if value == Self::Get as u32 => Ok(Self::Get),
-            value if value == Self::Set as u32 => Ok(Self::Set),
-            value if value == Self::Delete as u32 => Ok(Self::Delete),
-            value if value == Self::Stats as u32 => Ok(Self::Stats),
-            value if value == Self::Sync as u32 => Ok(Self::Sync),
-            value if value == Self::Reconnect as u32 => Ok(Self::Reconnect),
-            value if value == Self::GetJson as u32 => Ok(Self::GetJson),
-            value if value == Self::SetJson as u32 => Ok(Self::SetJson),
-            value if value == Self::AdapterReconnect as u32 => Ok(Self::AdapterReconnect),
-            value if value == Self::State as u32 => Ok(Self::State),
-            value if value == Self::RawGet as u32 => Ok(Self::RawGet),
-            value if value == Self::RawSet as u32 => Ok(Self::RawSet),
-            value if value == Self::RawDelete as u32 => Ok(Self::RawDelete),
-            value => Err(value),
-        }
-    }
-}
-
-/// Existence condition accepted by [`openkache_client_execute`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiSetCondition {
-    /// Always store the supplied value.
-    None = FFI_SET_CONDITION_NONE,
-    /// Store only when the key is absent.
-    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
-    /// Store only when the key is present.
-    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
-}
-
-impl TryFrom<u32> for FfiSetCondition {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            value if value == Self::None as u32 => Ok(Self::None),
-            value if value == Self::IfAbsent as u32 => Ok(Self::IfAbsent),
-            value if value == Self::IfPresent as u32 => Ok(Self::IfPresent),
-            value => Err(value),
-        }
-    }
-}
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
@@ -160,12 +36,7 @@ pub struct FfiResult {
     client: Option<Box<FfiClient>>,
 }
 
-/// Native connection options passed to [`openkache_client_connect_ex`].
-///
-/// Every pointer/length pair is copied before the function returns. A zero
-/// length selects the default for optional numeric settings. `encryption` is
-/// zero selects Robust for compatibility, while the generated value-format
-/// identifiers select Compact or Robust explicitly.
+/// Native connection options passed by C and C++ bindings.
 #[repr(C)]
 pub struct FfiConnectOptions {
     /// UTF-8 host and UDP port such as `127.0.0.1:4433` or `cache.example.com:4433`.
@@ -529,17 +400,6 @@ async fn execute(
 ) -> FfiResult {
     let result = if raw {
         execute_raw(client, operation, application_key, value, set_options).await
-    } else if matches!(
-        operation,
-        FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete
-    ) {
-        let raw_operation = match operation {
-            FfiOperation::RawGet => FfiOperation::Get,
-            FfiOperation::RawSet => FfiOperation::Set,
-            FfiOperation::RawDelete => FfiOperation::Delete,
-            _ => unreachable!(),
-        };
-        execute_raw(client, raw_operation, application_key, value, set_options).await
     } else {
         execute_protected(client, operation, application_key, value, set_options).await
     };
@@ -599,17 +459,10 @@ async fn execute_protected(
             .reconnect()
             .await
             .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::AdapterReconnect => client
-            .reconnect()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::State => Ok(FfiResult::success(
-            FfiResultKind::State,
-            format!("{:?}", client.connection_state()).into_bytes(),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "unsupported operation from the generated Smithy contract",
         )),
-        FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete => {
-            unreachable!("raw operations are dispatched by execute")
-        }
     }
 }
 
@@ -676,16 +529,19 @@ async fn execute_raw(
             .reconnect()
             .await
             .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::GetJson
-        | FfiOperation::SetJson
-        | FfiOperation::AdapterReconnect
-        | FfiOperation::State
-        | FfiOperation::RawGet
-        | FfiOperation::RawSet
-        | FfiOperation::RawDelete => {
-            unreachable!("formatted operations are not valid in raw mode")
-        }
+        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
+            "operation",
+            "exact item-ID calls do not support formatted JSON operations",
+        )),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "unsupported operation from the generated Smithy contract",
+        )),
     }
+}
+
+fn connection_state_value(state: ConnectionState) -> u32 {
+    state as u32
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
@@ -714,15 +570,6 @@ fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
     let value = JsonValue::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
     deserializer.end().map_err(|error| error.to_string())?;
     Ok(value)
-}
-
-fn connection_state_value(state: ConnectionState) -> u32 {
-    match state {
-        ConnectionState::Connected => FFI_CONNECTION_STATE_CONNECTED,
-        ConnectionState::Reconnecting => FFI_CONNECTION_STATE_RECONNECTING,
-        ConnectionState::Disconnected => FFI_CONNECTION_STATE_DISCONNECTED,
-        ConnectionState::Closed => FFI_CONNECTION_STATE_CLOSED,
-    }
 }
 
 /// Returns the native ABI version implemented by this library.
@@ -785,18 +632,15 @@ pub unsafe extern "C" fn openkache_client_connect(
     boxed_result(catch_result(|| connect_options(&options)))
 }
 
-/// Connects a protected native client using the complete shared-core configuration.
+/// Connects a native client with the complete shared-core configuration.
 ///
-/// This flat entry point is the canonical ABI used by C, C++, Swift, and
-/// other native adapters. It accepts PEM or DER trust material, optional
-/// mutual TLS identity, compression and encryption profiles, retries, and
-/// stream-lane limits. All referenced buffers are copied before this function
-/// returns.
+/// Zero retry and lane limits select shared-core defaults. The Smithy None and
+/// Robust encryption values select Robust; Compact selects Compact.
 ///
 /// # Safety
 ///
-/// Every non-empty pointer/length pair must identify readable memory for the
-/// duration of this call.
+/// Every non-empty pointer/length pair must identify readable memory for the duration of this
+/// call. `data_protection_key` must contain exactly 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_ex(
     address: *const u8,
@@ -849,14 +693,13 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
 
 /// Connects using a caller-owned options structure.
 ///
-/// This helper is equivalent to [`openkache_client_connect_ex`] and is
-/// separate so the flat function remains compatible with generated bindings.
+/// The structure is copied before this function returns.
 ///
 /// # Safety
 ///
-/// `options` must be null or point to a readable [`FfiConnectOptions`] whose
-/// non-empty pointer/length pairs identify readable memory for the duration
-/// of this call.
+/// `options` must be either null or a valid, properly aligned pointer to an initialized
+/// [`FfiConnectOptions`] for the duration of this call. Every non-empty pointer/length pair in a
+/// non-null options structure must identify readable memory for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_with_options(
     options: *const FfiConnectOptions,
@@ -1016,16 +859,13 @@ pub unsafe extern "C" fn openkache_client_execute(
 /// Executes one exact-item-ID operation without application-key derivation or
 /// value protection.
 ///
-/// `item_id` must contain exactly `OPENKACHE_SMITHY_ITEM_ID_BYTES` bytes for
-/// `GET`, `SET`, and `DELETE`. The payload is sent and returned exactly as
-/// supplied.
+/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
 ///
 /// # Safety
 ///
-/// `client` must be a live pointer returned by
-/// [`openkache_client_result_take_client`]. Every non-empty pointer/length
-/// pair must identify readable memory for the duration of this call, and the
-/// client must not be freed until this call returns.
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`].
+/// Every non-empty item-ID/value pointer pair must identify readable memory for this call, and
+/// the client must not be freed until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_execute_raw(
     client: *const FfiClient,
@@ -1077,19 +917,13 @@ fn execute_entry(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if (raw
-            || matches!(
-                operation,
-                FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete
-            ))
+        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
+            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
+        }
+        if raw
             && matches!(
                 operation,
-                FfiOperation::Get
-                    | FfiOperation::Set
-                    | FfiOperation::Delete
-                    | FfiOperation::RawGet
-                    | FfiOperation::RawSet
-                    | FfiOperation::RawDelete
+                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
             )
             && application_key.len() != crate::ITEM_ID_BYTES
         {
@@ -1105,6 +939,7 @@ fn execute_entry(
             FfiSetCondition::None => SetCondition::None,
             FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
             FfiSetCondition::IfPresent => SetCondition::IfPresent,
+            _ => return Err("unsupported SET condition from the generated Smithy contract".into()),
         };
         let mut set_options = match condition {
             SetCondition::None => SetOptions::new(),
@@ -1118,12 +953,19 @@ fn execute_entry(
             set_options = set_options.expires_after_millis(ttl_ms);
         }
         match operation {
+            FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::Delete
+                if !raw && application_key.is_empty() =>
+            {
+                Err("application key must not be empty".to_owned())
+            }
             FfiOperation::Ping
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
-            | FfiOperation::AdapterReconnect
-            | FfiOperation::State
                 if !application_key.is_empty() =>
             {
                 Err("operation does not accept an application key".to_owned())
@@ -1132,23 +974,17 @@ fn execute_entry(
             | FfiOperation::Get
             | FfiOperation::GetJson
             | FfiOperation::Delete
-            | FfiOperation::RawGet
-            | FfiOperation::RawDelete
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
-            | FfiOperation::AdapterReconnect
-            | FfiOperation::State
                 if !value.is_empty() =>
             {
                 Err("operation does not accept a value".to_owned())
             }
             operation
-                if !matches!(
-                    operation,
-                    FfiOperation::Set | FfiOperation::SetJson | FfiOperation::RawSet
-                ) && (set_options.condition() != SetCondition::None
-                    || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
+                    && (set_options.condition() != SetCondition::None
+                        || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())
             }
@@ -1158,16 +994,16 @@ fn execute_entry(
 }
 
 /// Returns a best-effort connection-state discriminator:
-/// The returned value uses the generated native connection-state identifiers;
-/// the unknown identifier is returned for a null or invalid handle.
+/// `0` connected, `1` reconnecting, `2` disconnected, `3` closed, and `4`
+/// for a null handle.
 ///
 /// # Safety
 ///
-/// `client` must be null or a live pointer returned by
-/// [`openkache_client_result_take_client`].
+/// If `client` is non-null, it must be a live pointer returned by
+/// [`openkache_client_result_take_client`] and remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
-    unsafe { client.as_ref() }.map_or(FFI_CONNECTION_STATE_UNKNOWN, FfiClient::connection_state)
+    unsafe { client.as_ref() }.map_or(ConnectionState::Unknown as u32, FfiClient::connection_state)
 }
 
 /// Returns an FFI result discriminator.

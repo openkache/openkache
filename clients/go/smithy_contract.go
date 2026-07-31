@@ -17,38 +17,28 @@ const (
 	SmithyValueEncryptionCompact uint32 = 1
 	// SmithyValueEncryptionRobust selects randomized AES-GCM-SIV protection.
 	SmithyValueEncryptionRobust uint32 = 2
-	// SmithyValueEnvelopeMagicAndVersion is the legacy envelope prefix.
-	SmithyValueEnvelopeMagicAndVersion = "\x4f\x4b\x56\x01"
 )
 
 // Smithy operation values carried by the native ABI.
 const (
-	SmithyOpcodePing uint32 = 1
-	SmithyOpcodeGet uint32 = 2
-	SmithyOpcodeSet uint32 = 3
+	SmithyOpcodePing   uint32 = 1
+	SmithyOpcodeGet    uint32 = 2
+	SmithyOpcodeSet    uint32 = 3
 	SmithyOpcodeDelete uint32 = 4
-	SmithyOpcodeStats uint32 = 5
-	SmithyOpcodeSync uint32 = 6
+	SmithyOpcodeStats  uint32 = 5
+	SmithyOpcodeSync   uint32 = 6
 )
 
 // Smithy native ABI values shared by language adapters.
 const (
 	// SmithyFFIABIVersion is the native ABI version implemented by the core.
-	SmithyFFIABIVersion uint32 = 1
-	// SmithyFFIAdapterOperationGetJson identifies the language-adapter operation GetJson.
-	SmithyFFIAdapterOperationGetJson uint32 = 7
-	// SmithyFFIAdapterOperationSetJson identifies the language-adapter operation SetJson.
-	SmithyFFIAdapterOperationSetJson uint32 = 8
-	// SmithyFFIAdapterOperationReconnect identifies the language-adapter operation Reconnect.
-	SmithyFFIAdapterOperationReconnect uint32 = 9
-	// SmithyFFIAdapterOperationState identifies the language-adapter operation State.
-	SmithyFFIAdapterOperationState uint32 = 10
-	// SmithyFFIAdapterOperationRawGet identifies the language-adapter operation RawGet.
-	SmithyFFIAdapterOperationRawGet uint32 = 11
-	// SmithyFFIAdapterOperationRawSet identifies the language-adapter operation RawSet.
-	SmithyFFIAdapterOperationRawSet uint32 = 12
-	// SmithyFFIAdapterOperationRawDelete identifies the language-adapter operation RawDelete.
-	SmithyFFIAdapterOperationRawDelete uint32 = 13
+	SmithyFFIABIVersion uint32 = 2
+	// SmithyFFIOperationGetJson identifies the native operation GetJson.
+	SmithyFFIOperationGetJson uint32 = 7
+	// SmithyFFIOperationSetJson identifies the native operation SetJson.
+	SmithyFFIOperationSetJson uint32 = 8
+	// SmithyFFIOperationReconnect identifies the native operation Reconnect.
+	SmithyFFIOperationReconnect uint32 = 4294967041
 	// SmithyFFIResultError is the native ABI result kind for Error.
 	SmithyFFIResultError uint32 = 0
 	// SmithyFFIResultOK is the native ABI result kind for Ok.
@@ -69,16 +59,12 @@ const (
 	SmithyFFIResultConnected uint32 = 8
 	// SmithyFFIResultNotStored is the native ABI result kind for NotStored.
 	SmithyFFIResultNotStored uint32 = 9
-	// SmithyFFIResultState is the native ABI result kind for State.
-	SmithyFFIResultState uint32 = 10
 	// SmithyFFISetConditionNone is the native ABI SET condition for None.
 	SmithyFFISetConditionNone uint32 = 0
 	// SmithyFFISetConditionIfAbsent is the native ABI SET condition for IfAbsent.
 	SmithyFFISetConditionIfAbsent uint32 = 1
 	// SmithyFFISetConditionIfPresent is the native ABI SET condition for IfPresent.
 	SmithyFFISetConditionIfPresent uint32 = 2
-	// SmithyFFIOperationReconnect requests an explicit connection replacement.
-	SmithyFFIOperationReconnect uint32 = 4294967041
 	// SmithyFFIConnectionStateConnected identifies a native connection state.
 	SmithyFFIConnectionStateConnected uint32 = 0
 	// SmithyFFIConnectionStateReconnecting identifies a native connection state.

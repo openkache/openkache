@@ -57,11 +57,12 @@ The `ffi` feature builds a dedicated Compio worker around
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,
-reconnect, state snapshots, and bounded request lanes. CMake and Python package
-builds regenerate the canonical Smithy-derived contract as needed. The
-checked-in header keeps source consumers self-contained. Reusable ABI
+reconnect, state snapshots, and bounded request lanes. CMake, Go, and Python
+package builds regenerate the canonical Smithy-derived contract as needed.
+Reusable ABI
 declarations are in `include/openkache/client_abi.h` (with the
-`include/openkache_client.h` compatibility include).
+`include/openkache_client.h` compatibility include); the generated Smithy
+contract header is supplied by each package build.
 
 ## Usage
 
@@ -128,13 +129,17 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
-- `src/ffi.rs` exposes the shared versioned C ABI used by native language
-  adapters; [`include/openkache/client_abi.h`](include/openkache/client_abi.h)
-  contains its declarations and includes the generated Smithy contract at
-  [`include/openkache/smithy_contract.h`](include/openkache/smithy_contract.h).
-  The root [`include/openkache_client.h`](include/openkache_client.h) remains
-  as a compatibility include for existing bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
+- `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
+  C++, Python, and other non-Rust bindings. It exposes both protected
+  application-key operations and exact-item-ID raw operations, while the
+  worker owns one Compio runtime per native handle. The canonical declarations
+  are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
+  with [`include/openkache_client.h`](include/openkache_client.h) retained as
+  a compatibility include. Generated ABI/protocol constants are emitted to
+  each package build directory from the single
+  [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy)
+  source; no header is a hand-maintained constants source.

@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 type Json_Object = Readonly<Record<string, unknown>>
@@ -167,7 +167,6 @@ export interface Ffi_Contract {
   readonly operations: readonly Wire_Entry[]
   readonly result_kinds: readonly Wire_Entry[]
   readonly set_conditions: readonly Wire_Entry[]
-  readonly lifecycle_operation_reconnect: number
   readonly connection_states: readonly Wire_Entry[]
 }
 
@@ -187,10 +186,6 @@ const FFI_OPERATION_FIELDS = [
   { name: "GetJson", field: "operationGetJson" },
   { name: "SetJson", field: "operationSetJson" },
   { name: "Reconnect", field: "operationReconnect" },
-  { name: "State", field: "operationState" },
-  { name: "RawGet", field: "operationRawGet" },
-  { name: "RawSet", field: "operationRawSet" },
-  { name: "RawDelete", field: "operationRawDelete" },
 ] as const
 const FFI_RESULT_FIELDS = [
   { name: "Error", field: "resultError" },
@@ -203,7 +198,6 @@ const FFI_RESULT_FIELDS = [
   { name: "NotDeleted", field: "resultNotDeleted" },
   { name: "Connected", field: "resultConnected" },
   { name: "NotStored", field: "resultNotStored" },
-  { name: "State", field: "resultState" },
 ] as const
 const FFI_SET_CONDITION_FIELDS = [
   { name: "None", field: "setConditionNone" },
@@ -217,43 +211,36 @@ const FFI_CONNECTION_STATE_FIELDS = [
   { name: "Closed", field: "connectionStateClosed" },
   { name: "Unknown", field: "connectionStateUnknown" },
 ] as const
+const GENERATED_OUTPUT_ROOT = resolve(
+  process.env.OPENKACHE_GENERATION_OUTPUT_ROOT ?? PUBLIC_ROOT,
+)
+function generated_path(...segments: string[]): string {
+  return join(GENERATED_OUTPUT_ROOT, ...segments)
+}
 const GENERATED_OUTPUTS = {
-  csharp_api: join(
-    PUBLIC_ROOT,
-    "clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs",
-  ),
-  csharp_wire: join(
-    PUBLIC_ROOT,
-    "clients/dotnet/OpenKache/generated_local/WireValues.g.cs",
-  ),
+  csharp_api: generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
+  csharp_wire: generated_path("clients/dotnet/OpenKache/generated_local/WireValues.g.cs"),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
-    join(PUBLIC_ROOT, "clients/rust/generated_local/smithy_api.rs"),
+    generated_path("clients/rust/generated_local/smithy_api.rs"),
   rust_wire: process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
-    join(PROTOCOL_DIRECTORY, "generated_local/wire_values.rs"),
-  typescript_api: join(
-    PUBLIC_ROOT,
-    "clients/typescript/src/generated_local/smithy-api.ts",
-  ),
-  typescript_value_format: join(
-    PUBLIC_ROOT,
+    generated_path("protocol/generated_local/wire_values.rs"),
+  typescript_api: generated_path("clients/typescript/src/generated_local/smithy-api.ts"),
+  typescript_value_format: generated_path(
     "clients/typescript/src/generated_local/smithy-value-format.ts",
   ),
-  typescript_value_envelope: join(
-    PUBLIC_ROOT,
+  typescript_value_envelope: generated_path(
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
-  go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
-  go_contract: join(PUBLIC_ROOT, "clients/go/smithy_contract.go"),
-  python_api:
-    process.env.OPENKACHE_PYTHON_API_OUTPUT ??
-    join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_api.py"),
-  python_contract:
-    process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
-    join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_contract.py"),
-  c_contract: join(
-    process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
-      join(PUBLIC_ROOT, "clients/core/include/openkache/smithy_contract.h"),
-  ),
+  go_api: generated_path("clients/go/smithy_api.go"),
+  go_contract: generated_path("clients/go/smithy_contract.go"),
+  python_api: process.env.OPENKACHE_PYTHON_API_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
+  python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
+  swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
+    generated_path("clients/swift/Sources/OpenKache/Generated/SmithyAPI.swift"),
+  c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
+    generated_path("protocol/generated_local/smithy_contract.h"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -834,13 +821,6 @@ function ffi_contract(value: unknown): Ffi_Contract {
       FFI_SET_CONDITION_FIELDS,
       "FFI SET condition",
     ),
-    lifecycle_operation_reconnect: integer_member(
-      contract,
-      "lifecycleReconnect",
-      `${FFI_CONTRACT_TRAIT_ID}.lifecycleReconnect`,
-      0,
-      0xffff_ffff,
-    ),
     connection_states: ffi_entries(
       contract,
       FFI_CONNECTION_STATE_FIELDS,
@@ -1196,14 +1176,6 @@ function c_string_literal(value: string): string {
   return `${literal}"`
 }
 
-function c_byte_string_literal(bytes: readonly number[]): string {
-  return `"${bytes.map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("")}"`
-}
-
-function go_byte_string_literal(bytes: readonly number[]): string {
-  return `"${bytes.map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("")}"`
-}
-
 function snake_case(identifier: string): string {
   return identifier
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -1221,6 +1193,37 @@ function typescript_name(identifier: string): string {
 
 function typescript_api_name(identifier: string): string {
   return `Smithy_${typescript_name(identifier)}`
+}
+
+function swift_name(identifier: string): string {
+  return identifier
+    .split(/[_-]/)
+    .filter((part) => part.length > 0)
+    .map((part) => {
+      const normalized =
+        part === part.toUpperCase()
+          ? part.toLowerCase()
+          : `${part[0]?.toLowerCase()}${part.slice(1)}`
+      return `${normalized[0]?.toUpperCase()}${normalized.slice(1)}`
+    })
+    .join("")
+}
+
+function swift_property_name(identifier: string): string {
+  const name = swift_name(identifier)
+  return name.length === 0 ? name : `${name[0]?.toLowerCase()}${name.slice(1)}`
+}
+
+function swift_ffi_value(
+  entries: readonly Wire_Entry[],
+  name: string,
+  kind: string,
+): number {
+  const entry = entries.find((candidate) => candidate.name === name)
+  if (entry === undefined) {
+    throw new Error(`Smithy FFI ${kind} is missing ${name}`)
+  }
+  return entry.value
 }
 
 function rust_wire_enum(
@@ -1241,6 +1244,59 @@ ${variants}
 }`
 }
 
+function rust_ffi_enum(
+  name: string,
+  documentation: string,
+  member_documentation: string,
+  entries: readonly Wire_Entry[],
+): string {
+  const variants = entries
+    .map(
+      (entry) =>
+        `    /// ${member_documentation} identifier for ${entry.name}.
+    ${entry.name} = ${formatted_decimal(entry.value)},`,
+    )
+    .join("\n")
+  const try_from_arms = entries
+    .map(
+      (entry) =>
+        `            value if value == Self::${entry.name} as u32 => Ok(Self::${entry.name}),`,
+    )
+    .join("\n")
+  const display_arms = entries
+    .map(
+      (entry) =>
+        `            Self::${entry.name} => "${snake_case(entry.name)}",`,
+    )
+    .join("\n")
+  return `/// ${documentation}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[repr(u32)]
+pub enum ${name} {
+${variants}
+}
+
+impl core::convert::TryFrom<u32> for ${name} {
+    type Error = u32;
+
+    fn try_from(value: u32) -> core::result::Result<Self, u32> {
+        match value {
+${try_from_arms}
+            _ => Err(value),
+        }
+    }
+}
+
+impl core::fmt::Display for ${name} {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+${display_arms}
+        })
+    }
+}`
+}
+
 /** Renders protocol v3 Rust definitions.
  *
  * @param contract - Validated language-neutral wire contract.
@@ -1256,6 +1312,37 @@ export function render_rust(contract: Wire_Contract): string {
     envelope.magic_and_version_hex,
     "value envelope magic",
   )
+  const ffi_operations = ffi.operations
+    .map(
+      (entry) =>
+        `/// Native FFI operation identifier for ${entry.name}.
+pub const FFI_OPERATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_result_kinds = ffi.result_kinds
+    .map(
+      (entry) =>
+        `/// Native FFI result-kind identifier for ${entry.name}.
+pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_connection_states = ffi.connection_states
+    .map(
+      (entry) =>
+        `/// Native FFI connection-state identifier for ${entry.name}.
+pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_set_conditions = ffi.set_conditions
+    .map(
+      (entry) =>
+        `/// Native FFI SET-condition identifier for ${entry.name}.
+pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_operation_entries = [...contract.opcodes, ...ffi.operations].sort(
+    (left, right) => left.value - right.value,
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 1.
@@ -1270,6 +1357,41 @@ pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v3.max_varuint
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
+
+/// Version of the native client FFI contract.
+pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
+${ffi_operations}
+${ffi_result_kinds}
+${ffi_connection_states}
+${ffi_set_conditions}
+
+${rust_ffi_enum(
+  "FfiOperation",
+  "Native FFI operation identifiers shared by every language adapter.",
+  "Native FFI operation",
+  ffi_operation_entries,
+)}
+
+${rust_ffi_enum(
+  "FfiResultKind",
+  "Native FFI result-kind identifiers shared by every language adapter.",
+  "Native FFI result-kind",
+  ffi.result_kinds,
+)}
+
+${rust_ffi_enum(
+  "ConnectionState",
+  "Native FFI connection-state identifiers shared by every language adapter.",
+  "Native FFI connection-state",
+  ffi.connection_states,
+)}
+
+${rust_ffi_enum(
+  "FfiSetCondition",
+  "Native FFI SET-condition identifiers shared by every language adapter.",
+  "Native FFI SET-condition",
+  ffi.set_conditions,
+)}
 
 /// Current client-owned value-format version.
 pub const VALUE_FORMAT_VERSION: u128 = ${formatted_decimal(value.version)};
@@ -1326,39 +1448,6 @@ pub const VALUE_ENVELOPE_MAX_ENCODING_BYTES: usize = ${formatted_decimal(envelop
 pub const VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES: usize = ${formatted_decimal(envelope.max_type_name_bytes)};
 /// Built-in canonical JSON codec identifier used by the legacy envelope adapter.
 pub const VALUE_ENVELOPE_JSON_ENCODING: &str = ${rust_string_literal(envelope.json_encoding)};
-
-/// Version of the language-neutral native client ABI.
-pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(contract.ffi.abi_version)};
-${ffi.operations
-  .map(
-    (entry) =>
-      `/// Native adapter operation identifier for ${entry.name}.
-pub const FFI_ADAPTER_OPERATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
-  )
-  .join("\n")}
-${contract.ffi.result_kinds
-  .map(
-    (entry) =>
-      `/// Native ABI result kind ${entry.name}.
-pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
-  )
-  .join("\n")}
-${contract.ffi.set_conditions
-  .map(
-    (entry) =>
-      `/// Native ABI SET condition ${entry.name}.
-pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
-  )
-  .join("\n")}
-/// Operation value used to request an explicit reconnect.
-pub const FFI_OPERATION_RECONNECT: u32 = ${formatted_decimal(contract.ffi.lifecycle_operation_reconnect)};
-${contract.ffi.connection_states
-  .map(
-    (entry) =>
-      `/// Native ABI connection state ${entry.name}.
-pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
-  )
-  .join("\n")}
 
 /// Default TLS server name used by client bindings.
 pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.server_name)};
@@ -1537,6 +1626,421 @@ ${[...enums, ...structures].join("\n\n")}
 /** Operations defined by the OpenKache Smithy service. */
 export interface Smithy_OpenKache_Api {
 ${operations.join("\n")}
+}
+`
+}
+
+function legacy_python_api_name(identifier: string): string {
+  return `Smithy${pascal_case(snake_case(identifier))}`
+}
+
+function python_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "bytes"
+      break
+    case "boolean":
+      rendered = "bool"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = legacy_python_api_name(type.name)
+      break
+    case "long":
+      rendered = "int"
+      break
+    case "string":
+      rendered = "str"
+      break
+  }
+  return required ? rendered : `${rendered} | None`
+}
+
+/** Renders Smithy operation types and a Python async protocol interface.
+ *
+ * @param contract - Validated language-neutral wire and API contract.
+ * @returns Deterministic Python source with a trailing newline.
+ */
+export function legacy_render_python_api(contract: Wire_Contract): string {
+  const enums = contract.api.enums.map((enum_) => {
+    const members = enum_.members
+      .map(
+        (member) =>
+          `    ${snake_case(member.name).toUpperCase()} = ${JSON.stringify(member.value)}`,
+      )
+      .join("\n")
+    return `class ${legacy_python_api_name(enum_.name)}(str, Enum):
+    """Values defined by the Smithy ${enum_.name} shape."""
+
+${members}`
+  })
+  const structures = contract.api.structures.map((structure) => {
+    // Dataclasses require non-default fields before default fields. Smithy
+    // member order is not a source-level guarantee, so keep required members
+    // first while preserving each group's model order.
+    const ordered_members = [...structure.members].sort(
+      (left, right) => Number(!left.required) - Number(!right.required),
+    )
+    const members = ordered_members.map((member) => {
+      const default_value = member.required ? "" : " = None"
+      return `    ${snake_case(member.name)}: ${python_api_type(member.type, member.required)}${default_value}`
+    })
+    const body = members.length === 0 ? "    pass" : members.join("\n")
+    return `@dataclass(frozen=True, slots=True)
+class ${legacy_python_api_name(structure.name)}:
+    """Smithy ${structure.name} structure."""
+
+${body}`
+  })
+  const operations = contract.api.operations
+    .map(
+      (operation) =>
+        `    async def ${snake_case(operation.name)}(
+        self, input: ${legacy_python_api_name(operation.input)}
+    ) -> ${legacy_python_api_name(operation.output)}: ...`,
+    )
+    .join("\n")
+  return `# Generated from the OpenKache Smithy contract. Do not edit.
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol
+
+${[...enums, ...structures].join("\n\n")}
+
+
+class SmithyOpenKacheApi(Protocol):
+    """Async operations defined by the OpenKache Smithy service."""
+
+${operations}
+`
+}
+
+/** Renders the Python constants shared with the core-backed adapter.
+ *
+ * @param contract - Validated language-neutral wire and value-format contract.
+ * @returns Deterministic Python source with a trailing newline.
+ */
+export function legacy_render_python_contract(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const envelope = contract.value_envelope
+  const version_bytes = encode_vu128(value.version)
+  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const ffi_operations = contract.ffi.operations
+    .map(
+      (entry) =>
+        `SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_result_kinds = contract.ffi.result_kinds
+    .map(
+      (entry) =>
+        `SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_connection_states = contract.ffi.connection_states
+    .map(
+      (entry) =>
+        `SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_set_conditions = contract.ffi.set_conditions
+    .map(
+      (entry) =>
+        `SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const opcodes = contract.opcodes
+    .map((entry) => `SMITHY_OPCODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
+    .join("\n")
+  const statuses = contract.statuses
+    .map((entry) => `SMITHY_STATUS_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
+    .join("\n")
+  return `# Generated from the OpenKache Smithy contract. Do not edit.
+
+SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v3.alpn)}
+SMITHY_REQUEST_FIXED_BYTES = ${contract.v3.request_fixed_bytes}
+SMITHY_RESPONSE_FIXED_BYTES = ${contract.v3.response_fixed_bytes}
+SMITHY_MAX_VARUINT_BYTES = ${contract.v3.max_varuint_bytes}
+SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+${ffi_operations}
+${ffi_result_kinds}
+${ffi_connection_states}
+${ffi_set_conditions}
+SMITHY_SET_TTL_FLAG = ${contract.v3.set_ttl_flag}
+SMITHY_SET_IF_ABSENT_FLAG = ${contract.v3.set_if_absent_flag}
+SMITHY_SET_IF_PRESENT_FLAG = ${contract.v3.set_if_present_flag}
+SMITHY_VALUE_FORMAT_VERSION = ${value.version}
+SMITHY_VALUE_FORMAT_VERSION_BYTES = bytes([${version_bytes.join(", ")}])
+SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
+SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES = ${value.format_byte_bytes}
+SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
+SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
+SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
+SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
+SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
+SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}
+SMITHY_VALUE_ENCRYPTION_COMPACT = ${value.encryption_compact}
+SMITHY_VALUE_ENCRYPTION_ROBUST = ${value.encryption_robust}
+SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES = ${value.compact_synthetic_iv_bytes}
+SMITHY_VALUE_ROBUST_NONCE_BYTES = ${value.robust_nonce_bytes}
+SMITHY_VALUE_ROBUST_TAG_BYTES = ${value.robust_tag_bytes}
+SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes}
+SMITHY_VALUE_ITEM_ID_ROOT_CONTEXT = ${JSON.stringify(value.item_id_root_context)}
+SMITHY_VALUE_AAD_DOMAIN = ${JSON.stringify(value.aad_domain)}
+SMITHY_VALUE_VALUE_ROOT_CONTEXT = ${JSON.stringify(value.value_root_context)}
+SMITHY_VALUE_COMPACT_MAC_CONTEXT = ${JSON.stringify(value.compact_mac_context)}
+SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT = ${JSON.stringify(value.compact_encryption_context)}
+SMITHY_VALUE_ROBUST_CONTEXT = ${JSON.stringify(value.robust_context)}
+SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION = bytes([${magic.join(", ")}])
+SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES = ${envelope.max_encoding_bytes}
+SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES = ${envelope.max_type_name_bytes}
+SMITHY_VALUE_ENVELOPE_JSON_ENCODING = ${JSON.stringify(envelope.json_encoding)}
+
+${opcodes}
+${statuses}
+`
+}
+
+function swift_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "Data"
+      break
+    case "boolean":
+      rendered = "Bool"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = `Smithy_${typescript_name(type.name)}`
+      break
+    case "long":
+      rendered = "Int64"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  return required ? rendered : `${rendered}?`
+}
+
+function swift_string_literal(value: string): string {
+  let literal = '"'
+  for (const character of value) {
+    const code_point = character.codePointAt(0)
+    if (code_point === undefined) continue
+    switch (character) {
+      case "\\":
+        literal += "\\\\"
+        break
+      case '"':
+        literal += '\\"'
+        break
+      case "\n":
+        literal += "\\n"
+        break
+      case "\r":
+        literal += "\\r"
+        break
+      case "\t":
+        literal += "\\t"
+        break
+      default:
+        if (code_point >= 0x20 && code_point <= 0x7e) {
+          literal += character
+        } else {
+          literal += `\\u{${code_point.toString(16)}}`
+        }
+    }
+  }
+  return `${literal}"`
+}
+
+/** Renders Smithy operation and shared contract declarations for Swift.
+ *
+ * @param contract - Validated language-neutral wire, value, and FFI contract.
+ * @returns Deterministic Swift source with a trailing newline.
+ */
+export function render_swift_api(contract: Wire_Contract): string {
+  const enums = contract.api.enums.map((enum_) => {
+    const members = enum_.members
+      .map(
+        (member) =>
+          `  case ${swift_property_name(member.name)} = ${swift_string_literal(member.value)}`,
+      )
+      .join("\n")
+    return `/// Values defined by the Smithy ${enum_.name} shape.
+public enum Smithy_${typescript_name(enum_.name)}: String, Equatable, Sendable {
+${members}
+}`
+  })
+  const structures = contract.api.structures.map((structure) => {
+    const name = `Smithy_${typescript_name(structure.name)}`
+    if (structure.members.length === 0) {
+      return `/// Smithy ${structure.name} structure.
+public struct ${name}: Equatable, Sendable {
+  public init() {}
+}`
+    }
+    const members = structure.members
+      .map(
+        (member) =>
+          `  /// Smithy ${member.name} member.
+  public let ${swift_property_name(member.name)}: ${swift_api_type(member.type, member.required)}`,
+      )
+      .join("\n")
+    const parameters = structure.members
+      .map((member) => {
+        const default_value = member.required ? "" : " = nil"
+        return `    ${swift_property_name(member.name)}: ${swift_api_type(member.type, member.required)}${default_value}`
+      })
+      .join(",\n")
+    const assignments = structure.members
+      .map(
+        (member) =>
+          `    self.${swift_property_name(member.name)} = ${swift_property_name(member.name)}`,
+      )
+      .join("\n")
+    return `/// Smithy ${structure.name} structure.
+public struct ${name}: Equatable, Sendable {
+${members}
+
+  public init(
+${parameters}
+  ) {
+${assignments}
+  }
+}`
+  })
+  const operations = contract.api.operations
+    .map(
+      (operation) =>
+        `  /// Invokes the Smithy ${operation.name} operation.
+  func ${swift_property_name(operation.name)}(
+    _ input: Smithy_${typescript_name(operation.input)}
+  ) async throws -> Smithy_${typescript_name(operation.output)}`,
+    )
+    .join("\n")
+  const opcodes = contract.opcodes
+    .map(
+      (opcode) =>
+        `  case ${swift_property_name(opcode.name)} = ${opcode.value}`,
+    )
+    .join("\n")
+  const value = contract.value_format
+  const ffi = contract.ffi
+  const version_bytes = encode_vu128(value.version)
+  const operation_get_json = swift_ffi_value(ffi.operations, "GetJson", "operation")
+  const operation_set_json = swift_ffi_value(ffi.operations, "SetJson", "operation")
+  const operation_reconnect = swift_ffi_value(ffi.operations, "Reconnect", "operation")
+  const result_error = swift_ffi_value(ffi.result_kinds, "Error", "result")
+  const result_ok = swift_ffi_value(ffi.result_kinds, "Ok", "result")
+  const result_value = swift_ffi_value(ffi.result_kinds, "Value", "result")
+  const result_not_found = swift_ffi_value(ffi.result_kinds, "NotFound", "result")
+  const result_created = swift_ffi_value(ffi.result_kinds, "Created", "result")
+  const result_replaced = swift_ffi_value(ffi.result_kinds, "Replaced", "result")
+  const result_deleted = swift_ffi_value(ffi.result_kinds, "Deleted", "result")
+  const result_not_deleted = swift_ffi_value(ffi.result_kinds, "NotDeleted", "result")
+  const result_connected = swift_ffi_value(ffi.result_kinds, "Connected", "result")
+  const result_not_stored = swift_ffi_value(ffi.result_kinds, "NotStored", "result")
+  const set_condition_none = swift_ffi_value(ffi.set_conditions, "None", "SET condition")
+  const set_condition_if_absent = swift_ffi_value(
+    ffi.set_conditions,
+    "IfAbsent",
+    "SET condition",
+  )
+  const set_condition_if_present = swift_ffi_value(
+    ffi.set_conditions,
+    "IfPresent",
+    "SET condition",
+  )
+  const connection_states = ffi.connection_states
+    .map(
+      (entry) =>
+        `  case ${swift_property_name(entry.name)} = ${entry.value}`,
+    )
+    .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+import Foundation
+
+${[...enums, ...structures].join("\n\n")}
+
+/// Operations defined by the OpenKache Smithy service.
+public protocol Smithy_OpenKache_Api: Sendable {
+${operations}
+}
+
+/// Operation identifiers assigned by the Smithy wire contract.
+public enum Smithy_Opcode: UInt8, Equatable, Sendable {
+${opcodes}
+}
+
+/// Wire and value-format identifiers shared by all language bindings.
+public enum Smithy_Value_Format: Sendable {
+  public static let protocolAlpn: String = ${swift_string_literal(contract.v3.alpn)}
+  public static let itemIdBytes: Int = ${contract.item_id_bytes}
+  public static let maxValueBytes: Int = ${contract.max_value_bytes}
+  public static let version: Int = ${value.version}
+  public static let versionBytes: [UInt8] = [${version_bytes.join(", ")}]
+  public static let maxVu128Bytes: Int = ${value.max_vu128_bytes}
+  public static let formatByteBytes: Int = ${value.format_byte_bytes}
+  public static let maxVaruintBytes: Int = ${contract.v3.max_varuint_bytes}
+  public static let setTtlFlag: UInt8 = ${contract.v3.set_ttl_flag}
+  public static let setIfAbsentFlag: UInt8 = ${contract.v3.set_if_absent_flag}
+  public static let setIfPresentFlag: UInt8 = ${contract.v3.set_if_present_flag}
+  public static let formatCompressionMask: UInt8 = ${value.format_compression_mask}
+  public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
+  public static let serializationRaw: UInt8 = ${value.serialization_raw}
+  public static let serializationJson: UInt8 = ${value.serialization_json}
+  public static let compressionNone: UInt8 = ${value.compression_none}
+  public static let compressionZstandard: UInt8 = ${value.compression_zstandard}
+  public static let encryptionNone: UInt8 = ${value.encryption_none}
+  public static let encryptionCompact: UInt8 = ${value.encryption_compact}
+  public static let encryptionRobust: UInt8 = ${value.encryption_robust}
+  public static let compactSyntheticIvBytes: Int = ${value.compact_synthetic_iv_bytes}
+  public static let robustNonceBytes: Int = ${value.robust_nonce_bytes}
+  public static let robustTagBytes: Int = ${value.robust_tag_bytes}
+  public static let dataProtectionKeyBytes: Int = ${value.data_protection_key_bytes}
+  public static let itemIdRootContext: String = ${swift_string_literal(value.item_id_root_context)}
+  public static let aadDomain: String = ${swift_string_literal(value.aad_domain)}
+  public static let valueRootContext: String = ${swift_string_literal(value.value_root_context)}
+  public static let compactMacContext: String = ${swift_string_literal(value.compact_mac_context)}
+  public static let compactEncryptionContext: String = ${swift_string_literal(value.compact_encryption_context)}
+  public static let robustContext: String = ${swift_string_literal(value.robust_context)}
+}
+
+/// Native ABI connection-state identifiers shared by every language adapter.
+public enum Smithy_Connection_State: UInt32, Equatable, Sendable {
+${connection_states}
+}
+
+/// Native ABI identifiers shared by every language adapter.
+public enum Smithy_Native_Contract: Sendable {
+  public static let abiVersion: UInt32 = ${ffi.abi_version}
+  public static let operationGetJson: UInt32 = ${operation_get_json}
+  public static let operationSetJson: UInt32 = ${operation_set_json}
+  public static let operationReconnect: UInt32 = ${operation_reconnect}
+  public static let resultError: UInt32 = ${result_error}
+  public static let resultOk: UInt32 = ${result_ok}
+  public static let resultValue: UInt32 = ${result_value}
+  public static let resultNotFound: UInt32 = ${result_not_found}
+  public static let resultCreated: UInt32 = ${result_created}
+  public static let resultReplaced: UInt32 = ${result_replaced}
+  public static let resultDeleted: UInt32 = ${result_deleted}
+  public static let resultNotDeleted: UInt32 = ${result_not_deleted}
+  public static let resultConnected: UInt32 = ${result_connected}
+  public static let resultNotStored: UInt32 = ${result_not_stored}
+  public static let setConditionNone: UInt32 = ${set_condition_none}
+  public static let setConditionIfAbsent: UInt32 = ${set_condition_if_absent}
+  public static let setConditionIfPresent: UInt32 = ${set_condition_if_present}
 }
 `
 }
@@ -1826,8 +2330,6 @@ ${operations.join("\n")}
 export function render_go_contract(contract: Wire_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
-  const envelope = contract.value_envelope
-  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
 
 package openkache
@@ -1847,8 +2349,6 @@ const (
 \tSmithyValueEncryptionCompact uint32 = ${value.encryption_compact}
 \t// SmithyValueEncryptionRobust selects randomized AES-GCM-SIV protection.
 \tSmithyValueEncryptionRobust uint32 = ${value.encryption_robust}
-\t// SmithyValueEnvelopeMagicAndVersion is the legacy envelope prefix.
-\tSmithyValueEnvelopeMagicAndVersion = ${go_byte_string_literal(magic)}
 )
 
 // Smithy operation values carried by the native ABI.
@@ -1865,8 +2365,8 @@ const (
 ${contract.ffi.operations
   .map(
     (entry) =>
-      `\t// SmithyFFIAdapterOperation${go_ffi_name(entry.name)} identifies the language-adapter operation ${entry.name}.
-\tSmithyFFIAdapterOperation${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+      `\t// SmithyFFIOperation${go_ffi_name(entry.name)} identifies the native operation ${entry.name}.
+\tSmithyFFIOperation${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
 ${contract.ffi.result_kinds
@@ -1883,8 +2383,6 @@ ${contract.ffi.set_conditions
 \tSmithyFFISetCondition${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
-\t// SmithyFFIOperationReconnect requests an explicit connection replacement.
-\tSmithyFFIOperationReconnect uint32 = ${contract.ffi.lifecycle_operation_reconnect}
 ${contract.ffi.connection_states
   .map(
     (entry) =>
@@ -1935,6 +2433,24 @@ ${contract.api.enums
   .join("\n")}
 )
 `
+}
+
+function format_go_source(source: string): string {
+  const result = Bun.spawnSync({
+    cmd: ["gofmt"],
+    stdin: Buffer.from(source),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  if (result.exitCode !== 0) {
+    const diagnostics = result.stderr.toString().trim()
+    throw new Error(
+      diagnostics.length === 0
+        ? "gofmt failed while formatting generated Go source"
+        : `gofmt failed while formatting generated Go source:\n${diagnostics}`,
+    )
+  }
+  return result.stdout.toString()
 }
 
 function python_api_name(identifier: string): string {
@@ -2169,8 +2685,6 @@ function c_contract_api_enum(
 export function render_c_contract(contract: Wire_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
-  const envelope = contract.value_envelope
-  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   const operation_enum = c_contract_enum(
     "openkache_smithy_opcode",
     contract.opcodes,
@@ -2194,7 +2708,7 @@ export function render_c_contract(contract: Wire_Contract): string {
 ${contract.ffi.operations
   .map(
     (entry) =>
-      `#define OPENKACHE_SMITHY_FFI_ADAPTER_OPERATION_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
+      `#define OPENKACHE_SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
   )
   .join("\n")}
 ${contract.ffi.result_kinds
@@ -2209,7 +2723,6 @@ ${contract.ffi.set_conditions
       `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
   )
   .join("\n")}
-#define OPENKACHE_SMITHY_FFI_OPERATION_RECONNECT ${contract.ffi.lifecycle_operation_reconnect}u
 ${contract.ffi.connection_states
   .map(
     (entry) =>
@@ -2252,10 +2765,6 @@ ${contract.ffi.connection_states
 #define OPENKACHE_SMITHY_VALUE_COMPACT_MAC_CONTEXT ${c_string_literal(value.compact_mac_context)}
 #define OPENKACHE_SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT ${c_string_literal(value.compact_encryption_context)}
 #define OPENKACHE_SMITHY_VALUE_ROBUST_CONTEXT ${c_string_literal(value.robust_context)}
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES ${envelope.max_encoding_bytes}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES ${envelope.max_type_name_bytes}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_JSON_ENCODING ${c_string_literal(envelope.json_encoding)}
-
 ${operation_enum}
 
 ${status_enum}
@@ -2263,8 +2772,6 @@ ${status_enum}
 /* Smithy string-enum values used by the language-neutral set API. */
 ${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION")}
 ${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
-
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION ${c_byte_string_literal(magic)}
 
 #endif /* OPENKACHE_SMITHY_CONTRACT_H */
 `
@@ -2361,6 +2868,7 @@ type Generation_Target =
   | "python"
   | "rust-api"
   | "rust-wire"
+  | "swift"
   | "typescript"
 
 function generation_target(value: string | undefined): Generation_Target {
@@ -2381,6 +2889,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "rust-api"
     case "rust-wire":
       return "rust-wire"
+    case "swift":
+      return "swift"
     case "typescript":
       return "typescript"
     default:
@@ -2404,10 +2914,11 @@ function expected_outputs(
           render_typescript_value_format(contract),
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
-        [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
-        [GENERATED_OUTPUTS.go_contract]: render_go_contract(contract),
+        [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
+        [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
+        [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
       }
     case "c-contract":
@@ -2421,8 +2932,8 @@ function expected_outputs(
       }
     case "go":
       return {
-        [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
-        [GENERATED_OUTPUTS.go_contract]: render_go_contract(contract),
+        [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
+        [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
       }
     case "python":
       return {
@@ -2444,6 +2955,10 @@ function expected_outputs(
           render_typescript_value_format(contract),
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
+      }
+    case "swift":
+      return {
+        [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
       }
   }
 }

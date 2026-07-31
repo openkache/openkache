@@ -7,7 +7,14 @@ wire or cryptographic implementation.
 
 ## Commands
 
-From `clients/go`:
+From the repository root, regenerate the native contract header before a CGO
+build. The header is a build artifact, not a hand-maintained Go constant file:
+
+```bash
+OPENKACHE_GENERATION_TARGET=c-contract ./openkache/protocol/generate.ts
+```
+
+Then from `clients/go`:
 
 ```bash
 go vet ./...
@@ -23,7 +30,7 @@ cross-compilation but returns an explicit unsupported-runtime error at connect
 time:
 
 ```bash
-cargo build --manifest-path ../rust/Cargo.toml \
+cargo build --manifest-path ../core/Cargo.toml \
   --no-default-features --features ffi
 ```
 
@@ -79,12 +86,17 @@ Use `client.Smithy()` when an application needs the generated
   key for mutual TLS.
 - `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
   settings; zero values select documented core defaults.
+- `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
+  `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 1 and the extended
+  artifact. The native artifact must have ABI version 2 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated
 from [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
+The generated Go files are checked in for module consumers; the C contract
+header is emitted into `protocol/generated_local/` and is supplied to CGO via
+the package include path.
 
 When using a pre-ABI-extension native library, `Identity`, non-default
 `Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading the native
