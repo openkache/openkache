@@ -26,7 +26,7 @@ formats or protocol behavior.
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the existing envelope |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
-| Python | `python/` | Package scaffold |
+| Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
@@ -39,10 +39,10 @@ A scaffold contains registry metadata and a reserved source layout. It does not
 connect to OpenKache or expose cache operations.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
-format v1. The core owns Raw and canonical JSON serialization, but
-language-native JSON adapters are not implemented yet. TypeScript's logical
-value envelope is a package-level adapter detail; byte-level v1 requirements
-belong only in the value-format specification.
+format v1. The core owns Raw and canonical JSON serialization; language
+adapters convert native values into that shared logical model. TypeScript's
+logical value envelope is a package-level adapter detail; byte-level v1
+requirements belong only in the value-format specification.
 
 ## Binding architecture
 
@@ -78,11 +78,12 @@ package structure only.
 | Go | `go vet ./... && go build ./...` | `doc.go` |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
-| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |
+| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
 
-Native linkage, artifact distribution, and runtime integration for scaffolds
-are intentionally undefined until each binding is implemented.
+Native linkage, artifact distribution, and runtime integration for the
+remaining scaffold bindings are intentionally undefined until each binding is
+implemented.
 
 ## Shared configuration
 

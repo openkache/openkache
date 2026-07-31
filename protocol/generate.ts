@@ -171,6 +171,14 @@ const GENERATED_OUTPUTS = {
     PUBLIC_ROOT,
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
+  python_api: join(
+    PUBLIC_ROOT,
+    "clients/python/src/openkache/_generated/smithy_api.py",
+  ),
+  python_contract: join(
+    PUBLIC_ROOT,
+    "clients/python/src/openkache/_generated/smithy_contract.py",
+  ),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -1206,6 +1214,155 @@ ${operations.join("\n")}
 `
 }
 
+function python_api_name(identifier: string): string {
+  return `Smithy${pascal_case(snake_case(identifier))}`
+}
+
+function python_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "bytes"
+      break
+    case "boolean":
+      rendered = "bool"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = python_api_name(type.name)
+      break
+    case "long":
+      rendered = "int"
+      break
+    case "string":
+      rendered = "str"
+      break
+  }
+  return required ? rendered : `${rendered} | None`
+}
+
+/** Renders Smithy operation types and a Python async protocol interface.
+ *
+ * @param contract - Validated language-neutral wire and API contract.
+ * @returns Deterministic Python source with a trailing newline.
+ */
+export function render_python_api(contract: Wire_Contract): string {
+  const enums = contract.api.enums.map((enum_) => {
+    const members = enum_.members
+      .map(
+        (member) =>
+          `    ${snake_case(member.name).toUpperCase()} = ${JSON.stringify(member.value)}`,
+      )
+      .join("\n")
+    return `class ${python_api_name(enum_.name)}(str, Enum):
+    """Values defined by the Smithy ${enum_.name} shape."""
+
+${members}`
+  })
+  const structures = contract.api.structures.map((structure) => {
+    // Dataclasses require non-default fields before default fields. Smithy
+    // member order is not a source-level guarantee, so keep required members
+    // first while preserving each group's model order.
+    const ordered_members = [...structure.members].sort(
+      (left, right) => Number(!left.required) - Number(!right.required),
+    )
+    const members = ordered_members.map((member) => {
+      const default_value = member.required ? "" : " = None"
+      return `    ${snake_case(member.name)}: ${python_api_type(member.type, member.required)}${default_value}`
+    })
+    const body = members.length === 0 ? "    pass" : members.join("\n")
+    return `@dataclass(frozen=True, slots=True)
+class ${python_api_name(structure.name)}:
+    """Smithy ${structure.name} structure."""
+
+${body}`
+  })
+  const operations = contract.api.operations
+    .map(
+      (operation) =>
+        `    async def ${snake_case(operation.name)}(
+        self, input: ${python_api_name(operation.input)}
+    ) -> ${python_api_name(operation.output)}: ...`,
+    )
+    .join("\n")
+  return `# Generated from the OpenKache Smithy contract. Do not edit.
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol
+
+${[...enums, ...structures].join("\n\n")}
+
+
+class SmithyOpenKacheApi(Protocol):
+    """Async operations defined by the OpenKache Smithy service."""
+
+${operations}
+`
+}
+
+/** Renders the Python constants shared with the core-backed adapter.
+ *
+ * @param contract - Validated language-neutral wire and value-format contract.
+ * @returns Deterministic Python source with a trailing newline.
+ */
+export function render_python_contract(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const envelope = contract.value_envelope
+  const version_bytes = encode_vu128(value.version)
+  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const opcodes = contract.opcodes
+    .map((entry) => `SMITHY_OPCODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
+    .join("\n")
+  const statuses = contract.statuses
+    .map((entry) => `SMITHY_STATUS_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
+    .join("\n")
+  return `# Generated from the OpenKache Smithy contract. Do not edit.
+
+SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v3.alpn)}
+SMITHY_REQUEST_FIXED_BYTES = ${contract.v3.request_fixed_bytes}
+SMITHY_RESPONSE_FIXED_BYTES = ${contract.v3.response_fixed_bytes}
+SMITHY_MAX_VARUINT_BYTES = ${contract.v3.max_varuint_bytes}
+SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+SMITHY_SET_TTL_FLAG = ${contract.v3.set_ttl_flag}
+SMITHY_SET_IF_ABSENT_FLAG = ${contract.v3.set_if_absent_flag}
+SMITHY_SET_IF_PRESENT_FLAG = ${contract.v3.set_if_present_flag}
+SMITHY_VALUE_FORMAT_VERSION = ${value.version}
+SMITHY_VALUE_FORMAT_VERSION_BYTES = bytes([${version_bytes.join(", ")}])
+SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
+SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES = ${value.format_byte_bytes}
+SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
+SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
+SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
+SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
+SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
+SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}
+SMITHY_VALUE_ENCRYPTION_COMPACT = ${value.encryption_compact}
+SMITHY_VALUE_ENCRYPTION_ROBUST = ${value.encryption_robust}
+SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES = ${value.compact_synthetic_iv_bytes}
+SMITHY_VALUE_ROBUST_NONCE_BYTES = ${value.robust_nonce_bytes}
+SMITHY_VALUE_ROBUST_TAG_BYTES = ${value.robust_tag_bytes}
+SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes}
+SMITHY_VALUE_ITEM_ID_ROOT_CONTEXT = ${JSON.stringify(value.item_id_root_context)}
+SMITHY_VALUE_AAD_DOMAIN = ${JSON.stringify(value.aad_domain)}
+SMITHY_VALUE_VALUE_ROOT_CONTEXT = ${JSON.stringify(value.value_root_context)}
+SMITHY_VALUE_COMPACT_MAC_CONTEXT = ${JSON.stringify(value.compact_mac_context)}
+SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT = ${JSON.stringify(value.compact_encryption_context)}
+SMITHY_VALUE_ROBUST_CONTEXT = ${JSON.stringify(value.robust_context)}
+SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION = bytes([${magic.join(", ")}])
+SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES = ${envelope.max_encoding_bytes}
+SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES = ${envelope.max_type_name_bytes}
+SMITHY_VALUE_ENVELOPE_JSON_ENCODING = ${JSON.stringify(envelope.json_encoding)}
+
+${opcodes}
+${statuses}
+`
+}
+
 /** Renders the cross-language value-format wire and cryptographic contract for TypeScript.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -1468,7 +1625,13 @@ function smithy_ast(): unknown {
   }
 }
 
-type Generation_Target = "all" | "dotnet" | "rust-api" | "rust-wire" | "typescript"
+type Generation_Target =
+  | "all"
+  | "dotnet"
+  | "python"
+  | "rust-api"
+  | "rust-wire"
+  | "typescript"
 
 function generation_target(value: string | undefined): Generation_Target {
   switch (value) {
@@ -1477,6 +1640,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "all"
     case "dotnet":
       return "dotnet"
+    case "python":
+      return "python"
     case "rust-api":
       return "rust-api"
     case "rust-wire":
@@ -1504,6 +1669,8 @@ function expected_outputs(
           render_typescript_value_format(contract),
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
+        [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
+        [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
       }
     case "dotnet":
       return {
@@ -1525,6 +1692,11 @@ function expected_outputs(
           render_typescript_value_format(contract),
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
+      }
+    case "python":
+      return {
+        [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
+        [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
       }
   }
 }

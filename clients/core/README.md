@@ -20,9 +20,11 @@ The main API layers are:
   Zstandard compression, and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters.
+- the optional `ffi` feature, which exposes the versioned C ABI used by
+  ctypes and other native language adapters.
 
-The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
-adapter depends on this core directly.
+The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's and
+Python's native adapters depend on this core directly.
 
 ## Related documentation
 
@@ -46,6 +48,7 @@ From `clients/core`:
 cargo build
 cargo check --no-default-features --features quic-compio
 cargo check --no-default-features --features quic-quinn
+cargo check --no-default-features --features ffi
 cargo fmt --check
 ```
 
@@ -114,6 +117,8 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
+- `src/ffi.rs` provides the optional C ABI without duplicating protocol logic
+  in each language adapter.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
