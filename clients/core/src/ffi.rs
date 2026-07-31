@@ -14,17 +14,20 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use openkache_protocol::{
-    FFI_ABI_VERSION, FFI_CONNECTION_STATE_CLOSED, FFI_CONNECTION_STATE_CONNECTED,
-    FFI_CONNECTION_STATE_DISCONNECTED, FFI_CONNECTION_STATE_RECONNECTING,
-    FFI_CONNECTION_STATE_UNKNOWN, FFI_OPERATION_RECONNECT, FFI_RESULT_CONNECTED,
-    FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR, FFI_RESULT_NOT_DELETED,
-    FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK, FFI_RESULT_REPLACED,
-    FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT, FFI_SET_CONDITION_IF_PRESENT,
-    FFI_SET_CONDITION_NONE, Opcode, VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE,
-    VALUE_FORMAT_ENCRYPTION_ROBUST,
+    FFI_ABI_VERSION, FFI_ADAPTER_OPERATION_GET_JSON, FFI_ADAPTER_OPERATION_RAW_DELETE,
+    FFI_ADAPTER_OPERATION_RAW_GET, FFI_ADAPTER_OPERATION_RAW_SET, FFI_ADAPTER_OPERATION_RECONNECT,
+    FFI_ADAPTER_OPERATION_SET_JSON, FFI_ADAPTER_OPERATION_STATE, FFI_CONNECTION_STATE_CLOSED,
+    FFI_CONNECTION_STATE_CONNECTED, FFI_CONNECTION_STATE_DISCONNECTED,
+    FFI_CONNECTION_STATE_RECONNECTING, FFI_CONNECTION_STATE_UNKNOWN, FFI_OPERATION_RECONNECT,
+    FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
+    FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK,
+    FFI_RESULT_REPLACED, FFI_RESULT_STATE, FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT,
+    FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode, VALUE_FORMAT_ENCRYPTION_COMPACT,
+    VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
+use serde::Deserialize;
 
-use crate::value::{Compression, Encryption, ZstandardOptions};
+use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
     Endpoint, GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, RetryPolicy,
@@ -61,6 +64,8 @@ pub enum FfiResultKind {
     Connected = FFI_RESULT_CONNECTED,
     /// A conditional set did not change a value.
     NotStored = FFI_RESULT_NOT_STORED,
+    /// The payload contains a connection-state string.
+    State = FFI_RESULT_STATE,
 }
 
 /// Operation accepted by [`openkache_client_execute`].
@@ -82,6 +87,20 @@ pub enum FfiOperation {
     Sync = Opcode::Sync as u32,
     /// Explicitly reconnect without replaying a request.
     Reconnect = FFI_OPERATION_RECONNECT,
+    /// Retrieve a canonical JSON value.
+    GetJson = FFI_ADAPTER_OPERATION_GET_JSON,
+    /// Store a canonical JSON value.
+    SetJson = FFI_ADAPTER_OPERATION_SET_JSON,
+    /// Reconnect using the language-adapter operation range.
+    AdapterReconnect = FFI_ADAPTER_OPERATION_RECONNECT,
+    /// Return the current connection state.
+    State = FFI_ADAPTER_OPERATION_STATE,
+    /// Retrieve a raw value by exact item ID.
+    RawGet = FFI_ADAPTER_OPERATION_RAW_GET,
+    /// Store a raw value by exact item ID.
+    RawSet = FFI_ADAPTER_OPERATION_RAW_SET,
+    /// Delete a raw value by exact item ID.
+    RawDelete = FFI_ADAPTER_OPERATION_RAW_DELETE,
 }
 
 impl TryFrom<u32> for FfiOperation {
@@ -96,6 +115,13 @@ impl TryFrom<u32> for FfiOperation {
             value if value == Self::Stats as u32 => Ok(Self::Stats),
             value if value == Self::Sync as u32 => Ok(Self::Sync),
             value if value == Self::Reconnect as u32 => Ok(Self::Reconnect),
+            value if value == Self::GetJson as u32 => Ok(Self::GetJson),
+            value if value == Self::SetJson as u32 => Ok(Self::SetJson),
+            value if value == Self::AdapterReconnect as u32 => Ok(Self::AdapterReconnect),
+            value if value == Self::State as u32 => Ok(Self::State),
+            value if value == Self::RawGet as u32 => Ok(Self::RawGet),
+            value if value == Self::RawSet as u32 => Ok(Self::RawSet),
+            value if value == Self::RawDelete as u32 => Ok(Self::RawDelete),
             value => Err(value),
         }
     }
@@ -503,6 +529,17 @@ async fn execute(
 ) -> FfiResult {
     let result = if raw {
         execute_raw(client, operation, application_key, value, set_options).await
+    } else if matches!(
+        operation,
+        FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete
+    ) {
+        let raw_operation = match operation {
+            FfiOperation::RawGet => FfiOperation::Get,
+            FfiOperation::RawSet => FfiOperation::Set,
+            FfiOperation::RawDelete => FfiOperation::Delete,
+            _ => unreachable!(),
+        };
+        execute_raw(client, raw_operation, application_key, value, set_options).await
     } else {
         execute_protected(client, operation, application_key, value, set_options).await
     };
@@ -525,18 +562,22 @@ async fn execute_protected(
             GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
             GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
         }),
-        FfiOperation::Set => {
-            client
-                .set(&application_key, value, set_options)
+        FfiOperation::GetJson => client
+            .get_value(&application_key)
+            .await
+            .map_err(crate::Error::from)
+            .and_then(json_result),
+        FfiOperation::Set => client
+            .set(&application_key, value, set_options)
+            .await
+            .map(set_result),
+        FfiOperation::SetJson => match parse_json(&value) {
+            Ok(json) => client
+                .set_value(&application_key, Value::Json(json), set_options)
                 .await
-                .map(|outcome| match outcome {
-                    SetOutcome::Created => FfiResult::success(FfiResultKind::Created, Vec::new()),
-                    SetOutcome::Replaced => FfiResult::success(FfiResultKind::Replaced, Vec::new()),
-                    SetOutcome::NotStored => {
-                        FfiResult::success(FfiResultKind::NotStored, Vec::new())
-                    }
-                })
-        }
+                .map(set_result),
+            Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
+        },
         FfiOperation::Delete => client.delete(&application_key).await.map(|deleted| {
             FfiResult::success(
                 match deleted {
@@ -558,6 +599,17 @@ async fn execute_protected(
             .reconnect()
             .await
             .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::AdapterReconnect => client
+            .reconnect()
+            .await
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::State => Ok(FfiResult::success(
+            FfiResultKind::State,
+            format!("{:?}", client.connection_state()).into_bytes(),
+        )),
+        FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete => {
+            unreachable!("raw operations are dispatched by execute")
+        }
     }
 }
 
@@ -624,7 +676,44 @@ async fn execute_raw(
             .reconnect()
             .await
             .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::GetJson
+        | FfiOperation::SetJson
+        | FfiOperation::AdapterReconnect
+        | FfiOperation::State
+        | FfiOperation::RawGet
+        | FfiOperation::RawSet
+        | FfiOperation::RawDelete => {
+            unreachable!("formatted operations are not valid in raw mode")
+        }
     }
+}
+
+fn set_result(outcome: SetOutcome) -> FfiResult {
+    FfiResult::success(
+        match outcome {
+            SetOutcome::Created => FfiResultKind::Created,
+            SetOutcome::Replaced => FfiResultKind::Replaced,
+            SetOutcome::NotStored => FfiResultKind::NotStored,
+        },
+        Vec::new(),
+    )
+}
+
+fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
+    match outcome {
+        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+            .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
+        GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
+        GetOutcome::NotFound => Ok(FfiResult::success(FfiResultKind::NotFound, Vec::new())),
+    }
+}
+
+fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = JsonValue::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())?;
+    Ok(value)
 }
 
 fn connection_state_value(state: ConnectionState) -> u32 {
@@ -988,10 +1077,19 @@ fn execute_entry(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw
+        if (raw
+            || matches!(
+                operation,
+                FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete
+            ))
             && matches!(
                 operation,
-                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                FfiOperation::Get
+                    | FfiOperation::Set
+                    | FfiOperation::Delete
+                    | FfiOperation::RawGet
+                    | FfiOperation::RawSet
+                    | FfiOperation::RawDelete
             )
             && application_key.len() != crate::ITEM_ID_BYTES
         {
@@ -1024,24 +1122,33 @@ fn execute_entry(
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
+            | FfiOperation::AdapterReconnect
+            | FfiOperation::State
                 if !application_key.is_empty() =>
             {
                 Err("operation does not accept an application key".to_owned())
             }
             FfiOperation::Ping
             | FfiOperation::Get
+            | FfiOperation::GetJson
             | FfiOperation::Delete
+            | FfiOperation::RawGet
+            | FfiOperation::RawDelete
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
+            | FfiOperation::AdapterReconnect
+            | FfiOperation::State
                 if !value.is_empty() =>
             {
                 Err("operation does not accept a value".to_owned())
             }
             operation
-                if !matches!(operation, FfiOperation::Set)
-                    && (set_options.condition() != SetCondition::None
-                        || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(
+                    operation,
+                    FfiOperation::Set | FfiOperation::SetJson | FfiOperation::RawSet
+                ) && (set_options.condition() != SetCondition::None
+                    || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())
             }

@@ -1,0 +1,17 @@
+[package]
+name = "openkache-client-python-native"
+version = "0.1.0"
+edition = "2024"
+description = "C ABI adapter for the OpenKache Python client"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = []
+
+[dependencies]
+openkache-client-core = { path = "../../core", default-features = false, features = ["ffi"] }
+
+[workspace]

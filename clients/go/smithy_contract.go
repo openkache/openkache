@@ -35,6 +35,20 @@ const (
 const (
 	// SmithyFFIABIVersion is the native ABI version implemented by the core.
 	SmithyFFIABIVersion uint32 = 1
+	// SmithyFFIAdapterOperationGetJson identifies the language-adapter operation GetJson.
+	SmithyFFIAdapterOperationGetJson uint32 = 7
+	// SmithyFFIAdapterOperationSetJson identifies the language-adapter operation SetJson.
+	SmithyFFIAdapterOperationSetJson uint32 = 8
+	// SmithyFFIAdapterOperationReconnect identifies the language-adapter operation Reconnect.
+	SmithyFFIAdapterOperationReconnect uint32 = 9
+	// SmithyFFIAdapterOperationState identifies the language-adapter operation State.
+	SmithyFFIAdapterOperationState uint32 = 10
+	// SmithyFFIAdapterOperationRawGet identifies the language-adapter operation RawGet.
+	SmithyFFIAdapterOperationRawGet uint32 = 11
+	// SmithyFFIAdapterOperationRawSet identifies the language-adapter operation RawSet.
+	SmithyFFIAdapterOperationRawSet uint32 = 12
+	// SmithyFFIAdapterOperationRawDelete identifies the language-adapter operation RawDelete.
+	SmithyFFIAdapterOperationRawDelete uint32 = 13
 	// SmithyFFIResultError is the native ABI result kind for Error.
 	SmithyFFIResultError uint32 = 0
 	// SmithyFFIResultOK is the native ABI result kind for Ok.
@@ -55,6 +69,8 @@ const (
 	SmithyFFIResultConnected uint32 = 8
 	// SmithyFFIResultNotStored is the native ABI result kind for NotStored.
 	SmithyFFIResultNotStored uint32 = 9
+	// SmithyFFIResultState is the native ABI result kind for State.
+	SmithyFFIResultState uint32 = 10
 	// SmithyFFISetConditionNone is the native ABI SET condition for None.
 	SmithyFFISetConditionNone uint32 = 0
 	// SmithyFFISetConditionIfAbsent is the native ABI SET condition for IfAbsent.
