@@ -707,7 +707,7 @@ async fn replace_checkpoint(
 }
 
 pub(crate) async fn commit_segment(
-    file: &mut File,
+    file: &File,
     config: &Config,
     storage_key_id: [u8; 16],
     commit: SegmentCommit,
@@ -727,7 +727,7 @@ pub(crate) async fn commit_segment(
 }
 
 pub(crate) async fn invalidate_segment(
-    file: &mut File,
+    file: &File,
     config: &Config,
     sg_index: usize,
     buffer: Option<DirectIoBuffer>,
@@ -920,7 +920,7 @@ async fn read_page_into(
 }
 
 async fn write_page(
-    file: &mut File,
+    file: &File,
     bytes: DirectIoBuffer,
     offset: u64,
     timeout_us: u64,

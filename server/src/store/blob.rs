@@ -6,6 +6,7 @@
 //! is padded for `O_DIRECT`.
 
 use compio::fs::File;
+use std::rc::Rc;
 
 use crate::types::STORAGE_KEY_BYTES;
 use crate::*;
@@ -98,7 +99,7 @@ pub(crate) fn remove_stored_value_tag(encoded: &mut Vec<u8>) {
 }
 
 pub(crate) struct BlobSegment {
-    file: File,
+    file: Rc<File>,
     segment_capacity_bytes: u64,
     segment_logical_bytes: Vec<u64>,
     segment_physical_bytes: Vec<u64>,
@@ -115,13 +116,26 @@ impl BlobSegment {
         let file = open_direct_file(&path).await?;
         file.set_len(config.blob_bytes()).await?;
         Ok(Self {
-            file,
+            file: Rc::new(file),
             segment_capacity_bytes: config.blob_segment_size as u64,
             segment_logical_bytes: vec![0; config.segment_count],
             segment_physical_bytes: vec![0; config.segment_count],
             read_max_time_us: config.read_max_time_us,
             write_max_time_us: config.write_max_time_us,
         })
+    }
+
+    pub(crate) fn read_context(&self) -> BlobReadContext {
+        BlobReadContext {
+            file: self.file.clone(),
+            segment_capacity_bytes: self.segment_capacity_bytes,
+            read_max_time_us: self.read_max_time_us,
+        }
+    }
+
+    pub(crate) fn segment_logical_bytes(&self, sg_index: usize) -> Result<u64> {
+        self.validate_segment_index(sg_index)?;
+        Ok(self.segment_logical_bytes[sg_index])
     }
 
     pub(crate) async fn reserve_segment(
@@ -227,27 +241,10 @@ impl BlobSegment {
     }
 
     pub(crate) async fn read(&self, sg_index: usize, blob_ref: BlobRef) -> Result<Vec<u8>> {
-        self.validate_ref(sg_index, blob_ref)?;
-        let value_start = blob_ref.value_offset as u64;
-        let value_end = value_start + blob_ref.value_len as u64;
-        let read_start = value_start / BUCKET_BYTES as u64 * BUCKET_BYTES as u64;
-        let read_end = value_end
-            .checked_next_multiple_of(BUCKET_BYTES as u64)
-            .ok_or_else(|| KvError::Worker("BlobRef read extent overflow".into()))?;
-        let read_len = (read_end - read_start) as usize;
-        let segment_base = sg_index as u64 * self.segment_capacity_bytes;
-        let bytes = read_exact_direct(
-            &self.file,
-            DirectIoBuffer::for_read(read_len),
-            segment_base + read_start,
-            read_len,
-            self.read_max_time_us,
-            "Blob Segment read",
-        )
-        .await?;
-        let relative_start = (value_start - read_start) as usize;
-        let relative_end = relative_start + blob_ref.value_len as usize;
-        Ok(bytes[relative_start..relative_end].to_vec())
+        let segment_logical_bytes = self.segment_logical_bytes(sg_index)?;
+        self.read_context()
+            .read(sg_index, segment_logical_bytes, blob_ref)
+            .await
     }
 
     pub(crate) async fn sync(&self) -> Result<()> {
@@ -316,21 +313,52 @@ impl BlobSegment {
         }
         Ok(())
     }
+}
 
-    fn validate_ref(&self, sg_index: usize, blob_ref: BlobRef) -> Result<()> {
-        self.validate_segment_index(sg_index)?;
-        let value_end = (blob_ref.value_offset as u64)
+#[derive(Clone)]
+pub(crate) struct BlobReadContext {
+    file: Rc<File>,
+    segment_capacity_bytes: u64,
+    read_max_time_us: u64,
+}
+
+impl BlobReadContext {
+    pub(crate) async fn read(
+        &self,
+        sg_index: usize,
+        segment_logical_bytes: u64,
+        blob_ref: BlobRef,
+    ) -> Result<Vec<u8>> {
+        let value_start = blob_ref.value_offset as u64;
+        let value_end = value_start
             .checked_add(blob_ref.value_len as u64)
             .ok_or_else(|| KvError::Worker("BlobRef range overflow".into()))?;
         if blob_ref.value_len == 0
             || value_end > self.segment_capacity_bytes
-            || value_end > self.segment_logical_bytes[sg_index]
+            || value_end > segment_logical_bytes
         {
             return Err(KvError::Worker(
                 "BlobRef points outside the written Blob Segment".into(),
             ));
         }
-        Ok(())
+        let read_start = value_start / BUCKET_BYTES as u64 * BUCKET_BYTES as u64;
+        let read_end = value_end
+            .checked_next_multiple_of(BUCKET_BYTES as u64)
+            .ok_or_else(|| KvError::Worker("BlobRef read extent overflow".into()))?;
+        let read_len = (read_end - read_start) as usize;
+        let segment_base = sg_index as u64 * self.segment_capacity_bytes;
+        let bytes = read_exact_direct(
+            &self.file,
+            DirectIoBuffer::for_read(read_len),
+            segment_base + read_start,
+            read_len,
+            self.read_max_time_us,
+            "Blob Segment read",
+        )
+        .await?;
+        let relative_start = (value_start - read_start) as usize;
+        let relative_end = relative_start + blob_ref.value_len as usize;
+        Ok(bytes[relative_start..relative_end].to_vec())
     }
 }
 

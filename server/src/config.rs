@@ -533,7 +533,7 @@ impl Default for IoUringConfig {
             sqpoll: false,
             iopoll: false,
             entries_per_worker: 256,
-            max_inflight_per_worker: 32,
+            max_inflight_per_worker: 64,
             batch_size: 64,
             batch_max_wait_us: 10,
         }

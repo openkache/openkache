@@ -11,6 +11,7 @@ use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -576,6 +577,239 @@ struct LocatedItemState {
     state: ItemState,
 }
 
+pub(crate) enum KeyedOperation {
+    Get,
+    Set {
+        value: StoredItemValue,
+        options: SetOptions,
+    },
+    Delete,
+}
+
+pub(crate) enum KeyedOutcome {
+    Value(Option<StoredItemValue>),
+    Set(SetOutcome),
+    Deleted(bool),
+}
+
+pub(crate) struct KeyedFinish {
+    pub(crate) outcome: Result<KeyedOutcome>,
+    pub(crate) flush_required: bool,
+}
+
+enum PreparedKeyedOperation {
+    Get,
+    Set {
+        value: StoredItemValue,
+        options: SetOptions,
+        evaluated_at_ms: u64,
+        expires_at_ms: u64,
+    },
+    Delete {
+        evaluated_at_ms: u64,
+    },
+}
+
+enum KeyedObservationPlan {
+    ImmediateValue(Option<StoredItemValue>),
+    Pending,
+    StableValue(StableReadPlan),
+    StableState(StableReadPlan),
+    Error(KvError),
+}
+
+enum KeyedObservation {
+    Value(Option<StoredItemValue>),
+    Pending,
+    StableState(Option<LocatedItemState>),
+}
+
+pub(crate) struct KeyedJob {
+    storage_key: StorageKey,
+    operation: PreparedKeyedOperation,
+    observation: KeyedObservationPlan,
+}
+
+pub(crate) struct CompletedKeyedJob {
+    storage_key: StorageKey,
+    operation: PreparedKeyedOperation,
+    observation: Result<KeyedObservation>,
+}
+
+impl KeyedJob {
+    pub(crate) async fn run(self) -> CompletedKeyedJob {
+        let observation = match self.observation {
+            KeyedObservationPlan::ImmediateValue(value) => Ok(KeyedObservation::Value(value)),
+            KeyedObservationPlan::Pending => Ok(KeyedObservation::Pending),
+            KeyedObservationPlan::StableValue(plan) => {
+                plan.read_value().await.map(KeyedObservation::Value)
+            }
+            KeyedObservationPlan::StableState(plan) => {
+                plan.read_state().await.map(KeyedObservation::StableState)
+            }
+            KeyedObservationPlan::Error(error) => Err(error),
+        };
+        CompletedKeyedJob {
+            storage_key: self.storage_key,
+            operation: self.operation,
+            observation,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StableReadContext {
+    data: Rc<File>,
+    blob: BlobReadContext,
+    bucket_read_pool: Rc<DirectIoBufferPool>,
+    io: Rc<IoCounters>,
+    read_max_time_us: u64,
+}
+
+#[derive(Clone, Copy)]
+struct StableReadCandidate {
+    table_location: TableLocation,
+    age: usize,
+    bucket_offset: u64,
+    blob_logical_bytes: u64,
+}
+
+struct StableReadPlan {
+    context: StableReadContext,
+    storage_key: StorageKey,
+    candidates: Vec<StableReadCandidate>,
+}
+
+impl StableReadPlan {
+    async fn read_value(self) -> Result<Option<StoredItemValue>> {
+        let context = self.context.clone();
+        let Some((candidate, item)) = self.read_newest().await? else {
+            return Ok(None);
+        };
+        if !item.is_live_at(unix_time_ms()) {
+            return Ok(None);
+        }
+        context
+            .read_stored_value(candidate, item.value)
+            .await
+            .map(Some)
+    }
+
+    async fn read_state(self) -> Result<Option<LocatedItemState>> {
+        Ok(self
+            .read_newest()
+            .await?
+            .map(|(candidate, item)| LocatedItemState {
+                table_location: candidate.table_location,
+                state: ItemState {
+                    is_tombstone: item.is_tombstone,
+                    expires_at_ms: item.expires_at_ms,
+                },
+            }))
+    }
+
+    async fn read_newest(self) -> Result<Option<(StableReadCandidate, Item)>> {
+        let reads = self.candidates.into_iter().map(|candidate| {
+            let context = self.context.clone();
+            async move {
+                context
+                    .read_candidate(self.storage_key, candidate)
+                    .await
+                    .map(|item| (candidate, item))
+            }
+        });
+        let mut newest = None;
+        for result in join_all(reads).await {
+            let (candidate, item) = result?;
+            let Some(item) = item else {
+                continue;
+            };
+            if newest
+                .as_ref()
+                .is_none_or(|(newest_candidate, _): &(StableReadCandidate, Item)| {
+                    candidate.age < newest_candidate.age
+                })
+            {
+                newest = Some((candidate, item));
+            }
+        }
+        Ok(newest)
+    }
+}
+
+impl StableReadContext {
+    async fn read_candidate(
+        &self,
+        storage_key: StorageKey,
+        candidate: StableReadCandidate,
+    ) -> Result<Option<Item>> {
+        let bytes = read_exact_direct(
+            &self.data,
+            self.bucket_read_pool.take_bucket(),
+            candidate.bucket_offset,
+            BUCKET_BYTES,
+            self.read_max_time_us,
+            "Bucket read",
+        )
+        .await?;
+        self.io
+            .data_read
+            .set(self.io.data_read.get() + bytes.len() as u64);
+        let item = find_item_in_bucket(&bytes, &storage_key);
+        self.bucket_read_pool.recycle_bucket(bytes);
+        Ok(item)
+    }
+
+    async fn read_stored_value(
+        &self,
+        candidate: StableReadCandidate,
+        mut encoded: Vec<u8>,
+    ) -> Result<StoredItemValue> {
+        let blob_ref = match decode_stored_value(&encoded)? {
+            StoredValue::Inline(value) => {
+                debug_assert_eq!(
+                    value.len() + STORED_VALUE_TAG_BYTES,
+                    encoded.len(),
+                    "decoded inline value excludes only its tag"
+                );
+                None
+            }
+            StoredValue::Blob(blob_ref) => Some(blob_ref),
+        };
+        let bytes = match blob_ref {
+            None => {
+                remove_stored_value_tag(&mut encoded);
+                encoded
+            }
+            Some(blob_ref) => {
+                let value = self
+                    .blob
+                    .read(
+                        candidate.table_location.sg_index as usize,
+                        candidate.blob_logical_bytes,
+                        blob_ref,
+                    )
+                    .await?;
+                let physical_bytes = {
+                    let start = blob_ref.value_offset as u64;
+                    let end = start + blob_ref.value_len as u64;
+                    let aligned_start = start / BUCKET_BYTES as u64 * BUCKET_BYTES as u64;
+                    let aligned_end = end.next_multiple_of(BUCKET_BYTES as u64);
+                    aligned_end - aligned_start
+                };
+                self.io
+                    .data_read
+                    .set(self.io.data_read.get() + physical_bytes);
+                self.io
+                    .blob_data_read
+                    .set(self.io.blob_data_read.get() + physical_bytes);
+                value
+            }
+        };
+        Ok(StoredItemValue::new(bytes))
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PendingItem {
     pub(crate) value: Option<StoredItemValue>,
@@ -596,7 +830,7 @@ struct FlushRecord {
 
 pub(crate) struct Kvkache {
     config: Config,
-    data: File,
+    data: Rc<File>,
     pub(crate) table: Table,
     pub(crate) blob_segment: BlobSegment,
     pub(crate) pending: HashMap<StorageKey, PendingItem>,
@@ -620,8 +854,8 @@ pub(crate) struct Kvkache {
     pub(crate) segment_reuses: u64,
     resource_guard: Arc<ResourceGuard>,
     next_memory_capacity_check: Instant,
-    io: IoCounters,
-    bucket_read_pool: DirectIoBufferPool,
+    io: Rc<IoCounters>,
+    bucket_read_pool: Rc<DirectIoBufferPool>,
 }
 
 impl Kvkache {
@@ -744,10 +978,10 @@ impl Kvkache {
             segment_reuses: 0,
             resource_guard,
             next_memory_capacity_check: Instant::now(),
-            io: IoCounters::default(),
-            bucket_read_pool: DirectIoBufferPool::default(),
+            io: Rc::new(IoCounters::default()),
+            bucket_read_pool: Rc::new(DirectIoBufferPool::default()),
             config,
-            data,
+            data: Rc::new(data),
         };
         if recovered_from_checkpoint {
             cache.restore_commit_state(&recovery_state.commits)?;
@@ -796,6 +1030,341 @@ impl Kvkache {
             self.next_generation,
         )
         .await
+    }
+
+    pub(crate) fn prepare_keyed(
+        &mut self,
+        storage_key: StorageKey,
+        operation: KeyedOperation,
+    ) -> KeyedJob {
+        let (operation, observation) = match operation {
+            KeyedOperation::Get => {
+                let observation = if let Some(pending) = self.pending.get(&storage_key) {
+                    KeyedObservationPlan::ImmediateValue(
+                        pending
+                            .is_live_at(unix_time_ms())
+                            .then(|| pending.value.clone())
+                            .flatten(),
+                    )
+                } else {
+                    match self.stable_read_plan(storage_key) {
+                        Ok(plan) => KeyedObservationPlan::StableValue(plan),
+                        Err(error) => KeyedObservationPlan::Error(error),
+                    }
+                };
+                (PreparedKeyedOperation::Get, observation)
+            }
+            KeyedOperation::Set { value, options } => {
+                let evaluated_at_ms = unix_time_ms();
+                let prepared = PreparedKeyedOperation::Set {
+                    value,
+                    options,
+                    evaluated_at_ms,
+                    expires_at_ms: options
+                        .ttl_ms
+                        .and_then(|ttl_ms| evaluated_at_ms.checked_add(ttl_ms))
+                        .unwrap_or(0),
+                };
+                let observation = self.prepare_set_observation(
+                    storage_key,
+                    match &prepared {
+                        PreparedKeyedOperation::Set { value, .. } => value,
+                        _ => unreachable!(),
+                    },
+                    options,
+                    evaluated_at_ms,
+                );
+                (prepared, observation)
+            }
+            KeyedOperation::Delete => {
+                let operation = PreparedKeyedOperation::Delete {
+                    evaluated_at_ms: unix_time_ms(),
+                };
+                let observation = if self.pending.contains_key(&storage_key) {
+                    KeyedObservationPlan::Pending
+                } else {
+                    match self.stable_read_plan(storage_key) {
+                        Ok(plan) => KeyedObservationPlan::StableState(plan),
+                        Err(error) => KeyedObservationPlan::Error(error),
+                    }
+                };
+                (operation, observation)
+            }
+        };
+        KeyedJob {
+            storage_key,
+            operation,
+            observation,
+        }
+    }
+
+    fn prepare_set_observation(
+        &mut self,
+        storage_key: StorageKey,
+        value: &StoredItemValue,
+        options: SetOptions,
+        evaluated_at_ms: u64,
+    ) -> KeyedObservationPlan {
+        if options.ttl_ms == Some(0) {
+            return KeyedObservationPlan::Error(KvError::InvalidRequest(
+                "SET TTL must be greater than zero milliseconds".into(),
+            ));
+        }
+        if options
+            .ttl_ms
+            .is_some_and(|ttl_ms| evaluated_at_ms.checked_add(ttl_ms).is_none())
+        {
+            return KeyedObservationPlan::Error(KvError::InvalidRequest(
+                "SET TTL exceeds the supported time range".into(),
+            ));
+        }
+        if let Err(error) = self.validate_value(&value.bytes, options.ttl_ms.is_some()) {
+            return KeyedObservationPlan::Error(error);
+        }
+        let now = Instant::now();
+        let refresh_memory = now >= self.next_memory_capacity_check;
+        if refresh_memory {
+            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
+        }
+        if let Err(error) = self.resource_guard.admit_set(refresh_memory) {
+            return KeyedObservationPlan::Error(error);
+        }
+        if self.pending.contains_key(&storage_key) {
+            KeyedObservationPlan::Pending
+        } else {
+            match self.stable_read_plan(storage_key) {
+                Ok(plan) => KeyedObservationPlan::StableState(plan),
+                Err(error) => KeyedObservationPlan::Error(error),
+            }
+        }
+    }
+
+    fn stable_read_plan(&self, storage_key: StorageKey) -> Result<StableReadPlan> {
+        let context = StableReadContext {
+            data: self.data.clone(),
+            blob: self.blob_segment.read_context(),
+            bucket_read_pool: self.bucket_read_pool.clone(),
+            io: self.io.clone(),
+            read_max_time_us: self.config.read_max_time_us,
+        };
+        let mut candidates = Vec::new();
+        for table_location in self.table.candidate_locations(&storage_key) {
+            let sg_index = table_location.sg_index as usize;
+            if !self
+                .occupied_segments
+                .get(sg_index)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let bucket_index = bucket_hash(
+                &storage_key,
+                table_location.bucket_hash_index,
+                self.config.bucket_count(),
+            );
+            candidates.push(StableReadCandidate {
+                table_location,
+                age: self.ssd_segment_age(sg_index),
+                bucket_offset: self.config.segment_data_offset(sg_index)
+                    + bucket_index as u64 * BUCKET_BYTES as u64,
+                blob_logical_bytes: self.blob_segment.segment_logical_bytes(sg_index)?,
+            });
+        }
+        Ok(StableReadPlan {
+            context,
+            storage_key,
+            candidates,
+        })
+    }
+
+    pub(crate) fn finish_keyed(&mut self, completed: CompletedKeyedJob) -> KeyedFinish {
+        let observation = match completed.observation {
+            Ok(observation) => observation,
+            Err(error) => {
+                return KeyedFinish {
+                    outcome: Err(error),
+                    flush_required: false,
+                };
+            }
+        };
+        let outcome = match (completed.operation, observation) {
+            (PreparedKeyedOperation::Get, KeyedObservation::Value(value)) => {
+                Ok(KeyedOutcome::Value(value))
+            }
+            (
+                PreparedKeyedOperation::Set {
+                    value,
+                    options,
+                    evaluated_at_ms,
+                    expires_at_ms,
+                },
+                observation @ (KeyedObservation::Pending | KeyedObservation::StableState(_)),
+            ) => self
+                .finish_set(
+                    completed.storage_key,
+                    value,
+                    options,
+                    evaluated_at_ms,
+                    expires_at_ms,
+                    observation,
+                )
+                .map(KeyedOutcome::Set),
+            (
+                PreparedKeyedOperation::Delete { evaluated_at_ms },
+                observation @ (KeyedObservation::Pending | KeyedObservation::StableState(_)),
+            ) => self
+                .finish_delete(completed.storage_key, evaluated_at_ms, observation)
+                .map(KeyedOutcome::Deleted),
+            _ => Err(KvError::Worker(
+                "keyed operation completed with an incompatible observation".into(),
+            )),
+        };
+        let mutation_completed =
+            matches!(outcome, Ok(KeyedOutcome::Set(_) | KeyedOutcome::Deleted(_)));
+        KeyedFinish {
+            flush_required: mutation_completed && self.pending_should_flush(),
+            outcome,
+        }
+    }
+
+    fn finish_set(
+        &mut self,
+        storage_key: StorageKey,
+        value: StoredItemValue,
+        options: SetOptions,
+        evaluated_at_ms: u64,
+        expires_at_ms: u64,
+        observation: KeyedObservation,
+    ) -> Result<SetOutcome> {
+        let (previous, previous_live, outcome) = match observation {
+            KeyedObservation::Pending => {
+                let current = self.pending.get(&storage_key).ok_or_else(|| {
+                    KvError::Worker("pending SET state changed before completion".into())
+                })?;
+                let current_live = current.is_live_at(evaluated_at_ms);
+                if !set_condition_allows(options.condition, current_live) {
+                    return Ok(SetOutcome::NotStored);
+                }
+                let pending = self
+                    .take_pending(&storage_key)
+                    .expect("validated pending SET remains present");
+                (
+                    pending.previous,
+                    pending.previous_live,
+                    if current_live {
+                        SetOutcome::Replaced
+                    } else {
+                        SetOutcome::Created
+                    },
+                )
+            }
+            KeyedObservation::StableState(previous) => {
+                if self.pending.contains_key(&storage_key) {
+                    return Err(KvError::Worker(
+                        "stable SET state changed before completion".into(),
+                    ));
+                }
+                let current_live = previous
+                    .as_ref()
+                    .is_some_and(|located| located.state.is_live_at(evaluated_at_ms));
+                if !set_condition_allows(options.condition, current_live) {
+                    return Ok(SetOutcome::NotStored);
+                }
+                let previous_stable_live = previous
+                    .as_ref()
+                    .is_some_and(|located| !located.state.is_tombstone());
+                (
+                    previous.as_ref().map(|located| located.table_location),
+                    previous_stable_live,
+                    if current_live {
+                        SetOutcome::Replaced
+                    } else {
+                        SetOutcome::Created
+                    },
+                )
+            }
+            _ => {
+                return Err(KvError::Worker(
+                    "SET completed without state observation".into(),
+                ));
+            }
+        };
+        self.insert_pending(
+            storage_key,
+            PendingItem {
+                value: Some(value),
+                expires_at_ms,
+                previous,
+                previous_live,
+            },
+        );
+        Ok(outcome)
+    }
+
+    fn finish_delete(
+        &mut self,
+        storage_key: StorageKey,
+        evaluated_at_ms: u64,
+        observation: KeyedObservation,
+    ) -> Result<bool> {
+        match observation {
+            KeyedObservation::Pending => {
+                let current = self.pending.get(&storage_key).ok_or_else(|| {
+                    KvError::Worker("pending DELETE state changed before completion".into())
+                })?;
+                if !current.is_live_at(evaluated_at_ms) {
+                    let mut pending = self
+                        .take_pending(&storage_key)
+                        .expect("validated pending DELETE remains present");
+                    if pending.previous.is_some() {
+                        pending.value = None;
+                        pending.expires_at_ms = 0;
+                        self.insert_pending(storage_key, pending);
+                    }
+                    return Ok(false);
+                }
+                let mut pending = self
+                    .take_pending(&storage_key)
+                    .expect("validated pending DELETE remains present");
+                if pending.value.is_none() {
+                    self.insert_pending(storage_key, pending);
+                    return Ok(false);
+                }
+                if pending.previous.is_some() {
+                    pending.value = None;
+                    pending.expires_at_ms = 0;
+                    self.insert_pending(storage_key, pending);
+                }
+                Ok(true)
+            }
+            KeyedObservation::StableState(previous) => {
+                if self.pending.contains_key(&storage_key) {
+                    return Err(KvError::Worker(
+                        "stable DELETE state changed before completion".into(),
+                    ));
+                }
+                let Some(previous) = previous else {
+                    return Ok(false);
+                };
+                if !previous.state.is_live_at(evaluated_at_ms) {
+                    return Ok(false);
+                }
+                self.insert_pending(
+                    storage_key,
+                    PendingItem {
+                        value: None,
+                        expires_at_ms: 0,
+                        previous: Some(previous.table_location),
+                        previous_live: true,
+                    },
+                );
+                Ok(true)
+            }
+            _ => Err(KvError::Worker(
+                "DELETE completed without state observation".into(),
+            )),
+        }
     }
 
     #[allow(dead_code)]
@@ -852,135 +1421,48 @@ impl Kvkache {
         value: StoredItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
-        if options.ttl_ms == Some(0) {
-            return Err(KvError::InvalidRequest(
-                "SET TTL must be greater than zero milliseconds".into(),
-            ));
-        }
-        self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
-        let now = Instant::now();
-        let refresh_memory = now >= self.next_memory_capacity_check;
-        if refresh_memory {
-            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
-        }
-        self.resource_guard.admit_set(refresh_memory)?;
-        let now_ms = unix_time_ms();
-        let expires_at_ms = match options.ttl_ms {
-            Some(ttl_ms) => now_ms.checked_add(ttl_ms).ok_or_else(|| {
-                KvError::InvalidRequest("SET TTL exceeds the supported time range".into())
-            })?,
-            None => 0,
-        };
-        let (previous, previous_live, outcome) =
-            if let Some(current) = self.pending.get(&storage_key) {
-                let current_live = current.is_live_at(now_ms);
-                if !set_condition_allows(options.condition, current_live) {
-                    return Ok(SetOutcome::NotStored);
-                }
-                let pending = self
-                    .take_pending(&storage_key)
-                    .expect("pending Item remains present");
-                (
-                    pending.previous,
-                    pending.previous_live,
-                    if current_live {
-                        SetOutcome::Replaced
-                    } else {
-                        SetOutcome::Created
-                    },
-                )
-            } else {
-                let previous = self.locate_stable_state(&storage_key).await?;
-                let current_live = previous
-                    .as_ref()
-                    .is_some_and(|located| located.state.is_live_at(now_ms));
-                let previous_stable_live = previous
-                    .as_ref()
-                    .is_some_and(|located| !located.state.is_tombstone());
-                if !set_condition_allows(options.condition, current_live) {
-                    return Ok(SetOutcome::NotStored);
-                }
-                let location = previous.as_ref().map(|located| located.table_location);
-                (
-                    location,
-                    previous_stable_live,
-                    if current_live {
-                        SetOutcome::Replaced
-                    } else {
-                        SetOutcome::Created
-                    },
-                )
-            };
-        self.insert_pending(
-            storage_key,
-            PendingItem {
-                value: Some(value),
-                expires_at_ms,
-                previous,
-                previous_live,
-            },
-        );
-        if self.pending_should_flush() {
+        let completed = self
+            .prepare_keyed(storage_key, KeyedOperation::Set { value, options })
+            .run()
+            .await;
+        let finished = self.finish_keyed(completed);
+        if finished.flush_required {
             self.flush_pending(SegmentFlushReason::Capacity).await?;
         }
-        Ok(outcome)
+        match finished.outcome? {
+            KeyedOutcome::Set(outcome) => Ok(outcome),
+            _ => Err(KvError::Worker(
+                "SET completed with an incompatible outcome".into(),
+            )),
+        }
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn delete(&mut self, storage_key: &StorageKey) -> Result<bool> {
-        let now_ms = unix_time_ms();
-        if let Some(current) = self.pending.get(storage_key)
-            && !current.is_live_at(now_ms)
-        {
-            let mut pending = self
-                .take_pending(storage_key)
-                .expect("pending Item remains present");
-            if pending.previous.is_some() {
-                pending.value = None;
-                pending.expires_at_ms = 0;
-                self.insert_pending(*storage_key, pending);
-            }
-            return Ok(false);
-        }
-        if let Some(mut pending) = self.take_pending(storage_key) {
-            if pending.value.is_none() {
-                self.insert_pending(*storage_key, pending);
-                return Ok(false);
-            }
-            if pending.previous.is_some() {
-                pending.value = None;
-                pending.expires_at_ms = 0;
-                self.insert_pending(*storage_key, pending);
-            }
-            if self.pending_should_flush() {
-                self.flush_pending(SegmentFlushReason::Capacity).await?;
-            }
-            return Ok(true);
-        }
-        let Some(previous) = self.locate_stable_state(storage_key).await? else {
-            return Ok(false);
-        };
-        if !previous.state.is_live_at(now_ms) {
-            return Ok(false);
-        }
-        self.insert_pending(
-            *storage_key,
-            PendingItem {
-                value: None,
-                expires_at_ms: 0,
-                previous: Some(previous.table_location),
-                previous_live: true,
-            },
-        );
-        if self.pending_should_flush() {
+        let completed = self
+            .prepare_keyed(*storage_key, KeyedOperation::Delete)
+            .run()
+            .await;
+        let finished = self.finish_keyed(completed);
+        if finished.flush_required {
             self.flush_pending(SegmentFlushReason::Capacity).await?;
         }
-        Ok(true)
+        match finished.outcome? {
+            KeyedOutcome::Deleted(deleted) => Ok(deleted),
+            _ => Err(KvError::Worker(
+                "DELETE completed with an incompatible outcome".into(),
+            )),
+        }
     }
 
     pub(crate) async fn sync(&mut self) -> Result<()> {
         // Every flushed generation persists its data before its commit page;
         // an empty pending map therefore has no outstanding durable work.
         self.flush_pending(SegmentFlushReason::Sync).await
+    }
+
+    pub(crate) async fn flush_capacity(&mut self) -> Result<()> {
+        self.flush_pending(SegmentFlushReason::Capacity).await
     }
 
     async fn locate_stable_record(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
@@ -1315,7 +1797,7 @@ impl Kvkache {
                     KvError::Worker("occupied Segment is missing its commit metadata".into())
                 })?;
                 let invalidated = match invalidate_segment(
-                    &mut self.data,
+                    &self.data,
                     &self.config,
                     sg_index,
                     control_buffer.take(),
@@ -1496,7 +1978,7 @@ impl Kvkache {
             bucket_choice_count: self.config.bucket_choice_count,
         };
         let (control_bytes, control_buffer) = commit_segment(
-            &mut self.data,
+            &self.data,
             &self.config,
             self.storage_key_id,
             commit,
