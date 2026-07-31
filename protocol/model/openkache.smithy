@@ -17,6 +17,42 @@ structure wireContract {
     v3: WireV3
 }
 
+@trait(selector: "service")
+structure valueFormat {
+    @required
+    version: Integer
+
+    @required
+    maxEncodingBytes: Integer
+
+    @required
+    maxTypeNameBytes: Integer
+
+    @required
+    jsonEncoding: String
+
+    @required
+    serializationRaw: Byte
+
+    @required
+    serializationJson: Byte
+
+    @required
+    compressionNone: Byte
+
+    @required
+    compressionZstandard: Byte
+
+    @required
+    encryptionNone: Byte
+
+    @required
+    encryptionCompact: Byte
+
+    @required
+    encryptionRobust: Byte
+}
+
 structure WireV2 {
     @required
     alpn: String
@@ -108,6 +144,19 @@ structure wireStatus {
         setIfAbsentFlag: 2,
         setIfPresentFlag: 4
     }
+)
+@valueFormat(
+    version: 1,
+    maxEncodingBytes: 64,
+    maxTypeNameBytes: 65535,
+    jsonEncoding: "json",
+    serializationRaw: 0,
+    serializationJson: 1,
+    compressionNone: 0,
+    compressionZstandard: 1,
+    encryptionNone: 0,
+    encryptionCompact: 1,
+    encryptionRobust: 2
 )
 service OpenKache {
     version: "3"

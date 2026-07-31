@@ -15,6 +15,7 @@ export type {
   Value_Envelope,
 } from "./value-codec.js"
 export * from "./generated_local/smithy-api.js"
+export * from "./generated_local/smithy-value-format.js"
 
 const TEXT_ENCODER = new TextEncoder()
 

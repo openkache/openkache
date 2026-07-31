@@ -42,6 +42,21 @@ export interface Wire_V3_Contract {
   readonly set_if_present_flag: number
 }
 
+/** Cross-language value-format identifiers and envelope limits. */
+export interface Value_Format_Contract {
+  readonly compression_none: number
+  readonly compression_zstandard: number
+  readonly encryption_compact: number
+  readonly encryption_none: number
+  readonly encryption_robust: number
+  readonly json_encoding: string
+  readonly max_encoding_bytes: number
+  readonly max_type_name_bytes: number
+  readonly serialization_json: number
+  readonly serialization_raw: number
+  readonly version: number
+}
+
 type Api_Type_Kind = "blob" | "boolean" | "enum" | "long" | "string"
 
 /** One resolved Smithy API field type. */
@@ -96,6 +111,7 @@ export interface Wire_Contract {
   readonly max_value_bytes: number
   readonly opcodes: readonly Wire_Entry[]
   readonly statuses: readonly Wire_Entry[]
+  readonly value_format: Value_Format_Contract
   readonly v2: Wire_V2_Contract
   readonly v3: Wire_V3_Contract
 }
@@ -108,6 +124,7 @@ const STATUS_SHAPE_ID = "openkache.protocol#Status"
 const WIRE_CONTRACT_TRAIT_ID = "openkache.protocol#wireContract"
 const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
+const VALUE_FORMAT_TRAIT_ID = "openkache.protocol#valueFormat"
 const GENERATED_OUTPUTS = {
   csharp_api: join(
     PUBLIC_ROOT,
@@ -124,6 +141,10 @@ const GENERATED_OUTPUTS = {
   typescript_api: join(
     PUBLIC_ROOT,
     "clients/typescript/src/generated_local/smithy-api.ts",
+  ),
+  typescript_value_format: join(
+    PUBLIC_ROOT,
+    "clients/typescript/src/generated_local/smithy-value-format.ts",
   ),
 } as const
 
@@ -434,6 +455,89 @@ function wire_v3_contract(value: unknown): Wire_V3_Contract {
   }
 }
 
+function value_format_contract(value: unknown): Value_Format_Contract {
+  const contract = object_value(value, VALUE_FORMAT_TRAIT_ID)
+  const values = {
+    compression_none: integer_member(contract, "compressionNone", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    compression_zstandard: integer_member(
+      contract,
+      "compressionZstandard",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    encryption_compact: integer_member(
+      contract,
+      "encryptionCompact",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    encryption_none: integer_member(contract, "encryptionNone", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    encryption_robust: integer_member(
+      contract,
+      "encryptionRobust",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    json_encoding: string_member(contract, "jsonEncoding", VALUE_FORMAT_TRAIT_ID),
+    max_encoding_bytes: integer_member(
+      contract,
+      "maxEncodingBytes",
+      VALUE_FORMAT_TRAIT_ID,
+      1,
+      0xffff,
+    ),
+    max_type_name_bytes: integer_member(
+      contract,
+      "maxTypeNameBytes",
+      VALUE_FORMAT_TRAIT_ID,
+      1,
+      0xffff,
+    ),
+    serialization_json: integer_member(
+      contract,
+      "serializationJson",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    serialization_raw: integer_member(
+      contract,
+      "serializationRaw",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    version: integer_member(contract, "version", VALUE_FORMAT_TRAIT_ID, 1, 0xffff),
+  } satisfies Value_Format_Contract
+
+  unique_wire_values(
+    [
+      { name: "Raw", value: values.serialization_raw },
+      { name: "Json", value: values.serialization_json },
+    ],
+    "serialization",
+  )
+  unique_wire_values(
+    [
+      { name: "None", value: values.compression_none },
+      { name: "Zstandard", value: values.compression_zstandard },
+    ],
+    "compression",
+  )
+  unique_wire_values(
+    [
+      { name: "None", value: values.encryption_none },
+      { name: "Compact", value: values.encryption_compact },
+      { name: "Robust", value: values.encryption_robust },
+    ],
+    "encryption",
+  )
+  return values
+}
+
 /** Extracts and validates the generator-facing contract from a Smithy JSON AST.
  *
  * @param ast - Unknown JSON value emitted by `smithy ast`.
@@ -447,6 +551,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
   const contract_trait = trait_value(
     service,
     WIRE_CONTRACT_TRAIT_ID,
+    `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
+  )
+  const value_format_trait = trait_value(
+    service,
+    VALUE_FORMAT_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
 
@@ -505,6 +614,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
+    value_format: value_format_contract(value_format_trait),
     v2: wire_v2_contract(contract_trait.v2),
     v3: wire_v3_contract(contract_trait.v3),
   }
@@ -690,6 +800,40 @@ ${[...enums, ...structures].join("\n\n")}
 export interface Smithy_OpenKache_Api {
 ${operations.join("\n")}
 }
+`
+}
+
+/** Renders cross-language value-format identifiers and limits for TypeScript adapters.
+ *
+ * @param contract - Validated language-neutral wire and value-format contract.
+ * @returns Deterministic TypeScript source with a trailing newline.
+ */
+export function render_typescript_value_format(contract: Wire_Contract): string {
+  const value = contract.value_format
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+/** Current client-owned value-format version. */
+export const SMITHY_VALUE_FORMAT_VERSION = ${value.version}
+/** Maximum UTF-8 byte length of a codec identifier. */
+export const SMITHY_VALUE_MAX_ENCODING_BYTES = ${value.max_encoding_bytes}
+/** Maximum UTF-8 byte length of a logical codec type name. */
+export const SMITHY_VALUE_MAX_TYPE_NAME_BYTES = ${value.max_type_name_bytes}
+/** Built-in canonical JSON codec identifier. */
+export const SMITHY_VALUE_JSON_ENCODING = ${JSON.stringify(value.json_encoding)}
+/** Raw serialized-value identifier. */
+export const SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
+/** Canonical JSON serialized-value identifier. */
+export const SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+/** Uncompressed value-format identifier. */
+export const SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
+/** Zstandard value-format identifier. */
+export const SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
+/** Unencrypted value-format identifier. */
+export const SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}
+/** Compact AES-SIV value-format identifier. */
+export const SMITHY_VALUE_ENCRYPTION_COMPACT = ${value.encryption_compact}
+/** Robust AES-GCM-SIV value-format identifier. */
+export const SMITHY_VALUE_ENCRYPTION_ROBUST = ${value.encryption_robust}
 `
 }
 
@@ -905,6 +1049,7 @@ function expected_outputs(
     [GENERATED_OUTPUTS.rust_api]: render_rust_api(contract),
     [GENERATED_OUTPUTS.rust_wire]: render_rust(contract),
     [GENERATED_OUTPUTS.typescript_api]: render_typescript_api(contract),
+    [GENERATED_OUTPUTS.typescript_value_format]: render_typescript_value_format(contract),
   }
   switch (target) {
     case "all":
@@ -925,6 +1070,8 @@ function expected_outputs(
     case "typescript":
       return {
         [GENERATED_OUTPUTS.typescript_api]: all_outputs[GENERATED_OUTPUTS.typescript_api],
+        [GENERATED_OUTPUTS.typescript_value_format]:
+          all_outputs[GENERATED_OUTPUTS.typescript_value_format],
       }
   }
 }

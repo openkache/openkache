@@ -49,7 +49,8 @@ variable-integer parsing.
 ## Core components
 
 - `model/openkache.smithy` is the canonical source for assigned wire values,
-  operation inputs and outputs, shared limits, and version-specific layouts.
+  operation inputs and outputs, shared limits, version-specific layouts, and
+  client-owned value-format identifiers.
 - `generate.ts` validates the Smithy AST and emits Rust, TypeScript, and C#
   definitions into ignored `generated_local` directories or Cargo output.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
