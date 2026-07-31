@@ -524,8 +524,9 @@ pub(crate) fn filesystem_available_bytes(path: &Path) -> Result<u64> {
     } else {
         stats.f_frsize
     };
-    u64::from(stats.f_bavail)
-        .checked_mul(u64::from(fragment_bytes))
+    stats
+        .f_bavail
+        .checked_mul(fragment_bytes)
         .ok_or_else(|| KvError::InvalidConfig("available filesystem size overflowed".into()))
 }
 
