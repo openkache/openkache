@@ -2402,22 +2402,30 @@ function expected_outputs(
   }
 }
 
+/** Returns generated outputs that are missing or differ from the contract. */
+export function generated_output_issues(
+  outputs: Readonly<Record<string, string>>,
+): readonly string[] {
+  const mismatches: string[] = []
+  for (const [output_path, content] of Object.entries(outputs)) {
+    let existing: string
+    try {
+      existing = readFileSync(output_path, "utf8")
+    } catch {
+      mismatches.push(`${output_path} (missing)`)
+      continue
+    }
+    if (existing !== content) mismatches.push(output_path)
+  }
+  return mismatches
+}
+
 function write_outputs(
   outputs: Readonly<Record<string, string>>,
   check_only: boolean,
 ): void {
   if (check_only) {
-    const mismatches: string[] = []
-    for (const [output_path, content] of Object.entries(outputs)) {
-      let existing: string
-      try {
-        existing = readFileSync(output_path, "utf8")
-      } catch {
-        mismatches.push(`${output_path} (missing)`)
-        continue
-      }
-      if (existing !== content) mismatches.push(output_path)
-    }
+    const mismatches = generated_output_issues(outputs)
     if (mismatches.length > 0) {
       throw new Error(
         "generated contract outputs are stale:\n" +
