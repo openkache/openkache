@@ -1,8 +1,6 @@
-//! Re-export of the shared native client ABI.
+//! Compatibility re-export for the shared native ABI.
 //!
-//! The ABI implementation lives in `openkache-client-core` so every native
-//! language adapter uses the same transport, protection, validation, and
-//! ownership contract. This module keeps the historical Rust crate path
-//! (`openkache_client::ffi`) source-compatible.
+//! The implementation lives in `openkache-client-core` so C, C++, and other native adapters use
+//! one connection and value-protection boundary.
 
 pub use openkache_client_core::ffi::*;

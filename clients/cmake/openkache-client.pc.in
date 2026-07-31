@@ -1,0 +1,11 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: OpenKache Client
+Description: C ABI and C++20 header-only adapter for OpenKache
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
+Libs: @OPENKACHE_CLIENT_PKGCONFIG_LINK_LIBRARIES@
+Libs.private: @OPENKACHE_CLIENT_PKGCONFIG_PRIVATE_LIBS@

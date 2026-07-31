@@ -1621,6 +1621,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -1835,8 +1837,6 @@ dependencies = [
 name = "openkache-client"
 version = "0.1.0"
 dependencies = [
- "compio",
- "crossfire",
  "futures-util",
  "openkache-client-core",
 ]
@@ -1880,6 +1880,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "openkache-client-core",
+ "serde_json",
 ]
 
 [[package]]

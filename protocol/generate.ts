@@ -199,8 +199,8 @@ const GENERATED_OUTPUTS = {
   ),
   go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
   c_contract: join(
-    PUBLIC_ROOT,
-    "clients/core/include/openkache/smithy_contract.h",
+    process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
+      join(PUBLIC_ROOT, "clients/core/include/openkache/smithy_contract.h"),
   ),
 } as const
 

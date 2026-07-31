@@ -78,10 +78,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sizing::print_plan(plan);
     }
     let runtime = compio::runtime::Runtime::new()?;
-    if !runtime.driver_type().is_iouring() {
-        return Err(std::io::Error::other("openkache-server requires the io_uring driver").into());
-    }
+    require_native_driver(runtime.driver_type())?;
     runtime.block_on(serve::run(arguments, config))
+}
+
+#[cfg(target_os = "linux")]
+fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<()> {
+    if driver.is_iouring() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "openkache-server requires the io_uring driver on Linux",
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<()> {
+    if driver.is_polling() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "openkache-server requires the polling driver on macOS",
+        ))
+    }
 }
 
 /// Loads the cache configuration from TOML or returns the default configuration.
