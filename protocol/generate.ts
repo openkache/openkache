@@ -198,7 +198,10 @@ const GENERATED_OUTPUTS = {
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
   go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
-  ffi_header: join(PUBLIC_ROOT, "clients/core/include/openkache_client.h"),
+  c_contract: join(
+    PUBLIC_ROOT,
+    "clients/core/include/openkache/smithy_contract.h",
+  ),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -995,6 +998,23 @@ function rust_byte_array_literal(bytes: readonly number[]): string {
   return `[${bytes.map(formatted_byte).join(", ")}]`
 }
 
+function c_string_literal(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let literal = '"'
+  for (const byte of bytes) {
+    if (byte >= 0x20 && byte <= 0x7e && byte !== 0x22 && byte !== 0x5c) {
+      literal += String.fromCharCode(byte)
+    } else if (byte === 0x22) {
+      literal += '\\"'
+    } else if (byte === 0x5c) {
+      literal += "\\\\"
+    } else {
+      literal += `\\${byte.toString(8).padStart(3, "0")}`
+    }
+  }
+  return `${literal}"`
+}
+
 function snake_case(identifier: string): string {
   return identifier
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -1594,133 +1614,121 @@ ${operations.join("\n")}
 `
 }
 
-function c_ffi_enum(prefix: string, entries: readonly Wire_Entry[]): string {
-  return entries
+function c_contract_enum(
+  name: string,
+  entries: readonly Wire_Entry[],
+  prefix: string,
+): string {
+  const variants = entries
     .map(
       (entry) =>
-        `    ${prefix}_${snake_case(entry.name).toUpperCase()} = ${entry.value}u,`,
+        `    ${prefix}_${snake_case(entry.name).toUpperCase()} = ${formatted_byte(entry.value)},`,
+    )
+    .join("\n")
+  return `typedef enum ${name} {
+${variants}
+} ${name};`
+}
+
+function c_contract_api_enum(
+  contract: Wire_Contract,
+  name: string,
+  prefix: string,
+): string {
+  const enum_ = contract.api.enums.find((candidate) => candidate.name === name)
+  if (enum_ === undefined) {
+    throw new Error(`Smithy API enum ${name} is required by the C contract`)
+  }
+  return enum_.members
+    .map(
+      (member) =>
+        `#define ${prefix}_${snake_case(member.name).toUpperCase()} ${c_string_literal(member.value)}`,
     )
     .join("\n")
 }
 
-/** Renders the language-neutral C ABI header.
+/** Renders the Smithy constants consumed by native C and C++ adapters.
  *
  * @param contract - Validated language-neutral wire and API contract.
- * @returns Deterministic C header source with a trailing newline.
+ * @returns Deterministic C contract source with a trailing newline.
  */
-export function render_c_ffi_header(contract: Wire_Contract): string {
-  return `/*
- * Code generated from the OpenKache Smithy contract. DO NOT EDIT.
- *
- * Stable OpenKache native-client ABI.
- *
- * The implementation is owned by openkache-client-core. Language bindings
- * should include this header and treat every returned handle as opaque. The
- * ABI uses an owned-result pattern so bindings never free Rust allocations
- * directly.
- */
-#ifndef OPENKACHE_CLIENT_H
-#define OPENKACHE_CLIENT_H
+export function render_c_contract(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const envelope = contract.value_envelope
+  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const operation_enum = c_contract_enum(
+    "openkache_smithy_opcode",
+    contract.opcodes,
+    "OPENKACHE_SMITHY_OPCODE",
+  )
+  const status_enum = c_contract_enum(
+    "openkache_smithy_status",
+    contract.statuses,
+    "OPENKACHE_SMITHY_STATUS",
+  )
+  return `/* Generated from the OpenKache Smithy contract. Do not edit. */
+#ifndef OPENKACHE_SMITHY_CONTRACT_H
+#define OPENKACHE_SMITHY_CONTRACT_H
 
-#include <stddef.h>
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
+#define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
+#define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v3.alpn)}
+#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${contract.ffi.abi_version}u
+${contract.ffi.result_kinds
+  .map(
+    (entry) =>
+      `#define OPENKACHE_SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
+  )
+  .join("\n")}
+${contract.ffi.set_conditions
+  .map(
+    (entry) =>
+      `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
+  )
+  .join("\n")}
 
-#define OPENKACHE_CLIENT_ABI_VERSION ${contract.ffi.abi_version}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES ${value.format_byte_bytes}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_COMPRESSION_MASK ${formatted_byte(value.format_compression_mask)}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT ${formatted_byte(value.format_encryption_shift)}u
+#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_RAW ${formatted_byte(value.serialization_raw)}u
+#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_JSON ${formatted_byte(value.serialization_json)}u
+#define OPENKACHE_SMITHY_VALUE_COMPRESSION_NONE ${formatted_byte(value.compression_none)}u
+#define OPENKACHE_SMITHY_VALUE_COMPRESSION_ZSTANDARD ${formatted_byte(value.compression_zstandard)}u
+#define OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE ${formatted_byte(value.encryption_none)}u
+#define OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT ${formatted_byte(value.encryption_compact)}u
+#define OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST ${formatted_byte(value.encryption_robust)}u
+#define OPENKACHE_SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES ${value.compact_synthetic_iv_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ROBUST_NONCE_BYTES ${value.robust_nonce_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ROBUST_TAG_BYTES ${value.robust_tag_bytes}u
+#define OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES ${value.data_protection_key_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ITEM_ID_ROOT_CONTEXT ${c_string_literal(value.item_id_root_context)}
+#define OPENKACHE_SMITHY_VALUE_AAD_DOMAIN ${c_string_literal(value.aad_domain)}
+#define OPENKACHE_SMITHY_VALUE_VALUE_ROOT_CONTEXT ${c_string_literal(value.value_root_context)}
+#define OPENKACHE_SMITHY_VALUE_COMPACT_MAC_CONTEXT ${c_string_literal(value.compact_mac_context)}
+#define OPENKACHE_SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT ${c_string_literal(value.compact_encryption_context)}
+#define OPENKACHE_SMITHY_VALUE_ROBUST_CONTEXT ${c_string_literal(value.robust_context)}
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES ${envelope.max_encoding_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES ${envelope.max_type_name_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_JSON_ENCODING ${c_string_literal(envelope.json_encoding)}
 
-enum openkache_client_result_kind {
-${c_ffi_enum("OPENKACHE_CLIENT_RESULT", contract.ffi.result_kinds)}
-};
+${operation_enum}
 
-enum openkache_client_operation {
-${c_ffi_enum("OPENKACHE_CLIENT_OPERATION", contract.opcodes)}
-};
+${status_enum}
 
-enum openkache_client_set_condition {
-${c_ffi_enum("OPENKACHE_CLIENT_SET_CONDITION", contract.ffi.set_conditions)}
-};
+/* Smithy string-enum values used by the language-neutral set API. */
+${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION")}
+${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
 
-typedef struct openkache_client_result openkache_client_result;
-typedef struct openkache_client_handle openkache_client_handle;
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_0 ${formatted_byte(magic[0] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_1 ${formatted_byte(magic[1] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_2 ${formatted_byte(magic[2] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_3 ${formatted_byte(magic[3] ?? 0)}u
 
-uint32_t openkache_client_abi_version(void);
-
-openkache_client_result *openkache_client_connect(
-    const uint8_t *address,
-    size_t address_length,
-    const uint8_t *server_name,
-    size_t server_name_length,
-    const uint8_t *certificate,
-    size_t certificate_length,
-    const uint8_t *data_protection_key,
-    size_t data_protection_key_length,
-    uint8_t compression_enabled,
-    int32_t compression_level,
-    size_t minimum_input_size,
-    size_t minimum_savings,
-    uint64_t connect_timeout_ms,
-    uint64_t request_timeout_ms);
-
-openkache_client_result *openkache_client_connect_ex(
-    const uint8_t *address,
-    size_t address_length,
-    const uint8_t *server_name,
-    size_t server_name_length,
-    const uint8_t *certificate,
-    size_t certificate_length,
-    const uint8_t *identity_certificate_chain,
-    size_t identity_certificate_chain_length,
-    const uint8_t *identity_private_key,
-    size_t identity_private_key_length,
-    const uint8_t *data_protection_key,
-    size_t data_protection_key_length,
-    uint8_t compression_enabled,
-    int32_t compression_level,
-    size_t minimum_input_size,
-    size_t minimum_savings,
-    uint64_t connect_timeout_ms,
-    uint64_t request_timeout_ms,
-    uint64_t retry_max_attempts,
-    size_t max_in_flight);
-
-openkache_client_result *openkache_client_execute(
-    const openkache_client_handle *client,
-    uint32_t operation,
-    const uint8_t *application_key,
-    size_t application_key_length,
-    const uint8_t *value,
-    size_t value_length,
-    uint32_t set_condition,
-    uint8_t ttl_enabled,
-    uint64_t ttl_ms);
-
-openkache_client_result *openkache_client_execute_raw(
-    const openkache_client_handle *client,
-    uint32_t operation,
-    const uint8_t *item_id,
-    size_t item_id_length,
-    const uint8_t *value,
-    size_t value_length,
-    uint32_t set_condition,
-    uint8_t ttl_enabled,
-    uint64_t ttl_ms);
-
-uint32_t openkache_client_result_kind(const openkache_client_result *result);
-const uint8_t *openkache_client_result_data(const openkache_client_result *result);
-size_t openkache_client_result_data_length(const openkache_client_result *result);
-openkache_client_handle *openkache_client_result_take_client(
-    openkache_client_result *result);
-void openkache_client_result_free(openkache_client_result *result);
-void openkache_client_free(openkache_client_handle *client);
-
-#ifdef __cplusplus
-}
-#endif
-
-#endif /* OPENKACHE_CLIENT_H */
+#endif /* OPENKACHE_SMITHY_CONTRACT_H */
 `
 }
 
@@ -1805,8 +1813,8 @@ function smithy_ast(): unknown {
 
 type Generation_Target =
   | "all"
+  | "c-contract"
   | "dotnet"
-  | "ffi"
   | "go"
   | "rust-api"
   | "rust-wire"
@@ -1817,10 +1825,11 @@ function generation_target(value: string | undefined): Generation_Target {
     case undefined:
     case "all":
       return "all"
+    case "c-contract":
+    case "ffi":
+      return "c-contract"
     case "dotnet":
       return "dotnet"
-    case "ffi":
-      return "ffi"
     case "go":
       return "go"
     case "rust-api":
@@ -1851,16 +1860,16 @@ function expected_outputs(
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
-        [GENERATED_OUTPUTS.ffi_header]: render_c_ffi_header(contract),
+        [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
+      }
+    case "c-contract":
+      return {
+        [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
       }
     case "dotnet":
       return {
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
-      }
-    case "ffi":
-      return {
-        [GENERATED_OUTPUTS.ffi_header]: render_c_ffi_header(contract),
       }
     case "go":
       return {

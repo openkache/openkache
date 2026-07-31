@@ -115,8 +115,11 @@ does not provide one.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/ffi.rs` exposes the shared versioned C ABI used by native language
-  adapters; [`include/openkache_client.h`](include/openkache_client.h) is its
-  Smithy-generated language-neutral header.
+  adapters; [`include/openkache/client_abi.h`](include/openkache/client_abi.h)
+  contains its declarations and includes the generated Smithy contract at
+  [`include/openkache/smithy_contract.h`](include/openkache/smithy_contract.h).
+  The root [`include/openkache_client.h`](include/openkache_client.h) remains
+  as a compatibility include for existing bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
