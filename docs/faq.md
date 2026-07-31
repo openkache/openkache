@@ -37,8 +37,8 @@ See [Getting Started](getting-started.md). Build from source with `cargo build -
 
 ### What client languages are available?
 
-Rust, TypeScript and JavaScript on Node.js, Bun, and Deno, and .NET SDKs are
-available.
+Rust, TypeScript and JavaScript on Node.js, Bun, and Deno, .NET, and the
+`openkache-cli` command-line client are available.
 
 ### Is end-to-end encryption mandatory?
 

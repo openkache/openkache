@@ -52,10 +52,11 @@ Large values are automatically compressed with zstd before storage and decompres
 ### 📚 Multi-language SDKs
 
 Implemented client libraries are available for Rust, TypeScript and JavaScript
-on Node.js, Bun, and Deno, and .NET. JavaScript runtimes share the TypeScript
-package, which calls the shared low-level client core through Node-API so transport,
-compression, and encryption behavior stay identical. Package scaffolds for
-Python, Go, Java, Kotlin, C, C++, Swift, and Dart are available under
+on Node.js, Bun, and Deno, .NET, and the Bash-friendly `openkache-cli` binary.
+JavaScript runtimes share the TypeScript package, which calls the shared
+low-level client core through Node-API so transport, compression, and
+encryption behavior stay identical. Package scaffolds for Python, Go, Java,
+Kotlin, C, C++, Swift, and Dart are available under
 [`clients/`](./clients/README.md) for future Rust-backed bindings.
 
 ### 📦 Single binary distribution
@@ -358,6 +359,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Memory allocators | ✅ Stable | VirtualPageStack + CompactingSlabAllocator in production shape |
 | Breadcrumb filter | ✅ Stable | BCF53 with SIMD dispatch, 32–39 M ops/s per core |
 | QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v1, secure value codec |
+| Command-line client | 🚧 Preview | `openkache-cli` for Bash scripts and interactive shell use |
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | Container image | ✅ Available | Non-root `linux/amd64` and `linux/arm64` image on GHCR |
@@ -411,6 +413,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `clients/` | Implemented SDKs and thin-binding package scaffolds |
 | `clients/core/` | Low-level QUIC client core shared by language adapters |
 | `clients/rust/` | Ergonomic Rust end-user SDK over the client core |
+| `clients/cli/` | Bash-friendly one-shot and interactive CLI binary |
 | `clients/typescript/` | Node.js, Bun, and Deno client backed by Rust through Node-API |
 | `clients/dotnet/` | Managed .NET client over QUIC |
 
