@@ -278,6 +278,40 @@ type SetOptions struct {
 	TTLMillis uint64
 }
 
+// ConnectionState is a best-effort snapshot of the native connection state.
+type ConnectionState uint32
+
+const (
+	// ConnectionStateConnected means the latest native connection is available.
+	ConnectionStateConnected ConnectionState = ConnectionState(SmithyFFIConnectionStateConnected)
+	// ConnectionStateReconnecting means a request is replacing a failed connection.
+	ConnectionStateReconnecting ConnectionState = ConnectionState(SmithyFFIConnectionStateReconnecting)
+	// ConnectionStateDisconnected means a later operation will reconnect.
+	ConnectionStateDisconnected ConnectionState = ConnectionState(SmithyFFIConnectionStateDisconnected)
+	// ConnectionStateClosed means the client was permanently closed.
+	ConnectionStateClosed ConnectionState = ConnectionState(SmithyFFIConnectionStateClosed)
+	// ConnectionStateUnknown means the native library cannot report a known state.
+	ConnectionStateUnknown ConnectionState = ConnectionState(SmithyFFIConnectionStateUnknown)
+)
+
+// String returns the stable textual connection-state name.
+func (state ConnectionState) String() string {
+	switch state {
+	case ConnectionStateConnected:
+		return "Connected"
+	case ConnectionStateReconnecting:
+		return "Reconnecting"
+	case ConnectionStateDisconnected:
+		return "Disconnected"
+	case ConnectionStateClosed:
+		return "Closed"
+	case ConnectionStateUnknown:
+		return "Unknown"
+	default:
+		return "Unknown"
+	}
+}
+
 // ItemID is the exact fixed-width identifier carried by the wire protocol.
 type ItemID [SmithyItemIDBytes]byte
 
@@ -321,6 +355,7 @@ type nativeResult struct {
 type nativeClient interface {
 	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
 	executeRaw(context.Context, uint32, ItemID, []byte, SetOptions) (nativeResult, error)
+	state() uint32
 	close() error
 }
 
@@ -574,6 +609,44 @@ func (c *Client) Sync(ctx context.Context) error {
 		return unexpectedResult("sync", result.kind)
 	}
 	return nil
+}
+
+// Reconnect explicitly replaces the native connection without replaying an
+// operation.
+func (c *Client) Reconnect(ctx context.Context) error {
+	result, err := c.invoke(ctx, SmithyFFIOperationReconnect, nil, nil, SetOptions{})
+	if err != nil {
+		return operationError("reconnect", err)
+	}
+	if result.kind != SmithyFFIResultOK {
+		return unexpectedResult("reconnect", result.kind)
+	}
+	return nil
+}
+
+// ConnectionState returns a best-effort snapshot of the native connection.
+func (c *Client) ConnectionState() ConnectionState {
+	if c == nil {
+		return ConnectionStateUnknown
+	}
+	c.mu.RLock()
+	native := c.native
+	if native == nil {
+		c.mu.RUnlock()
+		return ConnectionStateClosed
+	}
+	state := ConnectionState(native.state())
+	c.mu.RUnlock()
+	switch state {
+	case ConnectionStateConnected,
+		ConnectionStateReconnecting,
+		ConnectionStateDisconnected,
+		ConnectionStateClosed,
+		ConnectionStateUnknown:
+		return state
+	default:
+		return ConnectionStateUnknown
+	}
 }
 
 // Close permanently closes the client. Repeated calls are safe.

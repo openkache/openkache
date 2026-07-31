@@ -34,6 +34,8 @@ typedef openkache_client_result *(*openkache_go_execute_fn)(
 typedef openkache_client_result *(*openkache_go_execute_raw_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
+typedef uint32_t (*openkache_go_connection_state_fn)(
+    const openkache_client_handle *);
 typedef uint32_t (*openkache_go_result_kind_fn)(const openkache_client_result *);
 typedef const uint8_t *(*openkache_go_result_data_fn)(const openkache_client_result *);
 typedef size_t (*openkache_go_result_data_length_fn)(const openkache_client_result *);
@@ -49,6 +51,7 @@ typedef struct openkache_go_library {
     openkache_go_connect_ex_fn connect_ex;
     openkache_go_execute_fn execute;
     openkache_go_execute_raw_fn execute_raw;
+    openkache_go_connection_state_fn connection_state;
     openkache_go_result_kind_fn result_kind;
     openkache_go_result_data_fn result_data;
     openkache_go_result_data_length_fn result_data_length;
@@ -150,6 +153,7 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
     OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
     OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
+    OPENKACHE_GO_LOAD(connection_state, "openkache_client_connection_state");
     OPENKACHE_GO_LOAD(result_kind, "openkache_client_result_kind");
     OPENKACHE_GO_LOAD(result_data, "openkache_client_result_data");
     OPENKACHE_GO_LOAD(result_data_length, "openkache_client_result_data_length");
@@ -188,6 +192,16 @@ int openkache_go_has_connect_ex(const openkache_go_library *library) {
 
 int openkache_go_has_execute_raw(const openkache_go_library *library) {
     return library != NULL && library->execute_raw != NULL;
+}
+
+uint32_t openkache_go_connection_state(
+    const openkache_go_library *library,
+    const openkache_client_handle *client
+) {
+    if (library == NULL || library->connection_state == NULL || client == NULL) {
+        return OPENKACHE_SMITHY_FFI_CONNECTION_STATE_UNKNOWN;
+    }
+    return library->connection_state(client);
 }
 
 openkache_client_result *openkache_go_connect(
@@ -584,6 +598,15 @@ func (h *nativeHandle) executeRaw(
 	case <-ctx.Done():
 		return nativeResult{}, ctx.Err()
 	}
+}
+
+func (h *nativeHandle) state() uint32 {
+	client, err := h.begin()
+	if err != nil {
+		return SmithyFFIConnectionStateClosed
+	}
+	defer h.end()
+	return uint32(C.openkache_go_connection_state(h.library.ptr, client))
 }
 
 func (h *nativeHandle) begin() (*C.openkache_client_handle, error) {

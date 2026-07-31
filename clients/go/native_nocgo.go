@@ -33,6 +33,10 @@ func (unavailableNativeClient) executeRaw(
 	return nativeResult{}, &Error{Operation: "execute", Message: "native client unavailable"}
 }
 
+func (unavailableNativeClient) state() uint32 {
+	return SmithyFFIConnectionStateUnknown
+}
+
 func (unavailableNativeClient) close() error {
 	return nil
 }

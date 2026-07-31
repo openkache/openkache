@@ -65,6 +65,8 @@ value, found, err := client.Get(ctx, []byte("profile"))
 
 `Get` returns `found` separately so an empty stored value is not confused with
 a cache miss. `Close` is idempotent and waits for in-flight native operations.
+`Reconnect` explicitly replaces the connection without replaying an operation,
+and `ConnectionState` returns a best-effort lifecycle snapshot.
 `NewItemID`, `GetItem`, `SetItem`, and `DeleteItem` expose the exact wire
 item-ID/raw-value layer when an application already owns protocol IDs.
 Use `client.Smithy()` when an application needs the generated
