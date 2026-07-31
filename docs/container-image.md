@@ -260,9 +260,8 @@ reopening an existing storage volume.
 ## Pin maintenance
 
 The public repository pins base images and GitHub Actions to immutable
-digests/commits. Dependabot opens a weekly grouped update PR for
-`server/Dockerfile` and `.github/workflows`, so container and action pins stay
-current without silently changing a deployment.
+digests/commits. Review pin changes as part of routine maintenance so container
+and action pins stay current without silently changing a deployment.
 
 The Dockerfile is the canonical source for the image's static OCI product
 identity: title, description, documentation, license, source, and URL. The
