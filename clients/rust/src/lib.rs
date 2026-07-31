@@ -43,10 +43,16 @@ fn smithy_set_options(
         Some(smithy::SetCondition::IfPresent) => SetOptions::new().if_present(),
     };
     if let Some(ttl_milliseconds) = ttl_milliseconds {
+        if ttl_milliseconds <= 0 {
+            return Err(Error::Configuration {
+                field: "set.ttl_milliseconds",
+                message: "must be greater than zero milliseconds".into(),
+            });
+        }
         let ttl_milliseconds =
             u64::try_from(ttl_milliseconds).map_err(|_| Error::Configuration {
                 field: "set.ttl_milliseconds",
-                message: "must be a positive 64-bit millisecond count".into(),
+                message: "must fit in an unsigned 64-bit millisecond count".into(),
             })?;
         options = options.expires_after_millis(ttl_milliseconds);
     }
