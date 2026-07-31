@@ -1317,6 +1317,11 @@ ${members.join("\n")}
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
+/** Exact number of bytes in a protocol item identifier. */
+export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+/** Maximum opaque value bytes accepted by the protocol. */
+export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+
 ${[...enums, ...structures].join("\n\n")}
 
 /** Operations defined by the OpenKache Smithy service. */
@@ -1551,13 +1556,17 @@ ${members.join("\n")}
         input: ${operation.input},
     ) -> impl core::future::Future<
         Output = core::result::Result<${operation.output}, Self::Error>,
-    > + Send;`,
+    >;`,
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 ${[...enums, ...structures].join("\n\n")}
 
 /// Operations defined by the OpenKache Smithy service.
+///
+/// The trait does not require Send futures because the Rust client exposes
+/// both Tokio/Quinn and runtime-local Compio implementations. Callers that
+/// need cross-thread scheduling can add the bound to the concrete client.
 pub trait OpenKacheApi {
     /// Error returned by an operation.
     type Error;

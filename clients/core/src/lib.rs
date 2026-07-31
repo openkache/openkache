@@ -36,7 +36,7 @@ pub use value::ItemValue;
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
 compile_error!("enable at least one client QUIC backend feature");
 
-/// Default number of reusable QUIC request lanes for native and Rust clients.
+/// Default maximum number of concurrently active request lanes.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
 
 /// Client-owned identifier for an asynchronous runtime and QUIC backend.
@@ -336,6 +336,17 @@ pub enum ConnectionState {
     Disconnected,
     /// The client was explicitly closed and cannot reconnect.
     Closed,
+}
+
+impl std::fmt::Display for ConnectionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Disconnected => "disconnected",
+            Self::Closed => "closed",
+        })
+    }
 }
 
 struct Core<C: ClientConnection> {
