@@ -266,6 +266,19 @@ The root Cargo workspace owns the server, protocol, shared client core, Rust
 client, and Node-API adapter under one `Cargo.lock`. The default build omits
 only the Node-API adapter, which the TypeScript build stages separately.
 
+For the canonical locked release build of only the server binary, use the
+shared Cargo alias:
+
+```bash
+cargo server-build
+```
+
+The container builder invokes the same alias and adds its target triple:
+
+```bash
+cargo server-build --target x86_64-unknown-linux-musl
+```
+
 ### Server allocator
 
 The server uses jemalloc by default. Select the system allocator, mimalloc, or
@@ -273,8 +286,7 @@ snmalloc by disabling default features and enabling exactly one allocator
 feature:
 
 ```bash
-cargo build --release --manifest-path server/Cargo.toml \
-  --bin openkache-server \
+cargo server-build \
   --no-default-features \
   --features allocator-mimalloc,channel-crossfire,quic-noq
 ```
@@ -289,8 +301,7 @@ channels. Select exactly one of `channel-crossfire`, `channel-flume`, or
 `channel-kanal` at compile time:
 
 ```bash
-cargo build --release --manifest-path server/Cargo.toml \
-  --bin openkache-server \
+cargo server-build \
   --no-default-features \
   --features allocator-system,channel-flume,quic-noq
 ```
@@ -310,7 +321,13 @@ cargo release-all
 
 ### Container image
 
-Build the server image from the public repository root with Podman:
+Build the server image from the public repository root with Docker:
+
+```bash
+docker build --file server/Dockerfile --tag localhost/openkache:dev .
+```
+
+Podman is also supported with the same Dockerfile and build context:
 
 ```bash
 podman build --format docker --file server/Dockerfile --tag localhost/openkache:dev .

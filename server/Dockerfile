@@ -13,7 +13,7 @@ SHELL ["/bin/sh", "-euxo", "pipefail", "-c"]
 # `container.nix` pins nixpkgs, rust-overlay, Rust, Bun, and Smithy. Keep it in
 # its own layer so source changes do not invalidate the toolchain evaluation.
 WORKDIR /workspace
-COPY server/container.nix server/container.nix
+COPY server/container.nix server/flake.lock server/flake.nix server/
 
 RUN case "${TARGETARCH}" in \
       amd64) target="x86_64-unknown-linux-musl" ;; \
@@ -27,6 +27,7 @@ RUN case "${TARGETARCH}" in \
 # manifests are copied because Cargo resolves the complete workspace even
 # though only the server package is compiled.
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/config.toml .cargo/config.toml
 COPY protocol/Cargo.toml protocol/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
 COPY clients/core/Cargo.toml clients/core/Cargo.toml
@@ -70,7 +71,7 @@ RUN --mount=type=cache,id=openkache-cargo-registry,target=/root/.cargo/registry,
       *) echo "Unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     nix-shell --pure server/container.nix --argstr target "${target}" --run \
-      "cargo build --locked --release --target ${target} --package openkache --bin openkache-server"; \
+      "cargo server-build --target ${target}"; \
     install -D -m 0755 \
       "target/${target}/release/openkache-server" \
       /out/openkache-server; \

@@ -22,7 +22,16 @@ you. `latest` is useful for evaluation and follows ongoing development.
 ## Build locally
 
 The build context must be the repository root so Cargo can resolve the public
-workspace. Podman is the supported local container engine:
+workspace. Docker is shown first because it is the most common OCI workflow:
+
+```bash
+docker build \
+  --file server/Dockerfile \
+  --tag localhost/openkache:dev \
+  .
+```
+
+Podman is a compatible alternative:
 
 ```bash
 podman build \
@@ -32,19 +41,24 @@ podman build \
   .
 ```
 
-Nix runs only inside the pinned builder image; the host needs Podman or Docker,
+Nix runs only inside the pinned builder image; the host needs Docker or Podman,
 not a Nix installation.
 Cross-architecture local builds need an arm64-capable host or equivalent
 QEMU/binfmt setup; the publication workflow configures QEMU automatically.
 
 The Dockerfile builds the `openkache-server` binary with the matching musl
 target and runs the protocol Smithy/Bun generator inside the build stage.
+The release command is defined once as `cargo server-build` in
+`.cargo/config.toml`; the Dockerfile invokes that same alias with its target
+triple. To build the server without a container, install Rust, Bun, and Smithy
+CLI, then run `cargo server-build` from the repository root.
 BuildKit cache mounts keep the Cargo registry and target directory out of the
 image layers.
 
 The runtime image is intentionally shell-less and runs as UID/GID `65532`.
 There is no package manager or diagnostic shell in the final image. Use
-`podman image inspect localhost/openkache:dev` and server logs for basic
+`docker image inspect localhost/openkache:dev` (or
+`podman image inspect localhost/openkache:dev`) and server logs for basic
 verification.
 The server requires a Linux host and an OCI runtime that exposes `io_uring`.
 Some default seccomp profiles still deny `io_uring_setup`,
@@ -60,12 +74,29 @@ Mount `/var/lib/openkache` to durable local or block storage. The server stores
 Segment files, the generated storage key, and the running-process marker there.
 Do not use an ephemeral container layer for data that must survive a restart.
 The storage directory must be owned or writable by UID/GID `65532`; named
-Podman volumes satisfy this when first created.
+Docker and Podman volumes satisfy this when first created.
 
 ## Isolated local development
 
 The production command requires a mounted PKI bundle. For an isolated local
-test, explicitly replace the image command with insecure development mode:
+test, explicitly replace the image command with insecure development mode.
+Docker:
+
+```bash
+docker volume create openkache-data
+docker run --rm \
+  --name openkache \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/udp \
+  --volume openkache-data:/var/lib/openkache \
+  ghcr.io/openkache/openkache:latest \
+  --listen 0.0.0.0:4433 \
+  --insecure-development \
+  --directory /var/lib/openkache \
+  --certificate-out /var/lib/openkache/certificate.local.der
+```
+
+Podman:
 
 ```bash
 podman volume create openkache-data
@@ -89,10 +120,30 @@ server's local-development documentation.
 ## Production mTLS deployment
 
 Create the internal PKI on an operator workstation. The CA private key must
-remain offline:
+remain offline. Docker:
 
 ```bash
 mkdir -p pki
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume ./pki:/pki \
+  ghcr.io/openkache/openkache:latest \
+  pki --workspace /pki init
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume ./pki:/pki \
+  ghcr.io/openkache/openkache:latest \
+  pki --workspace /pki issue-server --dns cache.example.com
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --volume ./pki:/pki \
+  ghcr.io/openkache/openkache:latest \
+  pki --workspace /pki issue-admin operator-01
+```
+
+Podman:
+
+```bash
 podman run --rm \
   --userns=keep-id \
   --user "$(id -u):$(id -g)" \
@@ -113,10 +164,11 @@ podman run --rm \
   pki --workspace /pki issue-admin operator-01
 ```
 
-`--userns=keep-id` keeps generated private keys owned by the operator when
-`./pki` is a bind mount. The issuing commands temporarily mount this offline
-workspace into a short-lived PKI utility; never bake `pki/authority/ca.key`
-into an image or mount it into the long-running server.
+The Docker command uses the caller's numeric UID/GID. Podman's
+`--userns=keep-id` and `:Z` bind-mount label keep the same ownership behavior
+in rootless and SELinux-enabled environments. The issuing commands temporarily
+mount this offline workspace into a short-lived PKI utility; never bake
+`pki/authority/ca.key` into an image or mount it into the long-running server.
 
 Generate application client identities as needed with
 `pki --workspace /pki issue-client <name>`. Distribute only the client bundles
@@ -124,7 +176,24 @@ and the deployable `pki/server` directory.
 
 Run the server with the deployable server bundle mounted read-only. The
 bind-mounted data directory keeps the example writable when the PKI files are
-owned by the operator:
+owned by the operator. Docker:
+
+```bash
+mkdir -p openkache-data
+docker run --detach \
+  --name openkache \
+  --user "$(id -u):$(id -g)" \
+  --security-opt seccomp=unconfined \
+  --publish 4433:4433/udp \
+  --volume ./openkache-data:/var/lib/openkache \
+  --volume ./pki/server:/etc/openkache/pki:ro \
+  --read-only \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  ghcr.io/openkache/openkache:1.2.3
+```
+
+Podman:
 
 ```bash
 mkdir -p openkache-data
@@ -148,10 +217,27 @@ published port is UDP because the default protocol is QUIC. Publish TCP as
 well only when deliberately running the development RESP mode.
 
 For a TOML configuration, mount it read-only and replace the default command,
-for example:
+for example. Docker:
 
 ```bash
 mkdir -p openkache-data
+docker run --detach \
+  --user "$(id -u):$(id -g)" \
+  --security-opt seccomp=unconfined \
+  --volume ./openkache-data:/var/lib/openkache \
+  --volume ./pki/server:/etc/openkache/pki:ro \
+  --volume ./openkache.toml:/etc/openkache/openkache.toml:ro \
+  --publish 4433:4433/udp \
+  ghcr.io/openkache/openkache:1.2.3 \
+  --config /etc/openkache/openkache.toml \
+  --listen 0.0.0.0:4433 \
+  --pki-directory /etc/openkache/pki \
+  --directory /var/lib/openkache
+```
+
+Podman:
+
+```bash
 podman run --detach \
   --userns=keep-id \
   --user "$(id -u):$(id -g)" \
@@ -170,6 +256,20 @@ podman run --detach \
 The server still enforces its normal sizing, storage ownership, and mTLS
 validation inside the container. Use the same worker and Segment layout when
 reopening an existing storage volume.
+
+## Pin maintenance
+
+The public repository pins base images and GitHub Actions to immutable
+digests/commits. Dependabot opens a weekly grouped update PR for
+`server/Dockerfile` and `.github/workflows`, so container and action pins stay
+current without silently changing a deployment.
+
+The Nix inputs used by `server/container.nix` are locked in
+`server/flake.lock`. The scheduled `update-container-inputs` workflow runs
+`nix flake update` inside the same pinned Nix builder image and opens a reviewable
+PR, updating each revision and content hash as one atomic change. No Nix
+installation is needed on a developer or deployment host. Review the generated
+PR and let the container build validate the new toolchain before merging it.
 
 ## CI publication
 
