@@ -31,7 +31,7 @@ export interface Wire_V2_Contract {
   readonly set_if_present_bit: number
 }
 
-/** Protocol v3 constants consumed by the Rust protocol crate. */
+/** Protocol v1 constants consumed by the Rust protocol crate. */
 export interface Wire_V3_Contract {
   readonly alpn: string
   readonly request_fixed_bytes: number
@@ -988,7 +988,7 @@ export function render_rust(contract: Wire_Contract): string {
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
-/// QUIC application protocol identifier for wire protocol version 3.
+/// QUIC application protocol identifier for wire protocol version 1.
 pub const ALPN: &[u8] = ${rust_byte_string_literal(contract.v3.alpn)};
 /// Bytes before the variable-length request lengths.
 pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.request_fixed_bytes)};
@@ -998,7 +998,7 @@ pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.response
 pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v3.max_varuint_bytes)};
 /// Bytes in every canonical item ID carried by the protocol.
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
-/// Absolute value or response payload ceiling representable by protocol v3.
+/// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
 
 /// Current client-owned value-format version.
@@ -1061,7 +1061,7 @@ const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v3.set_ttl_flag)};
 const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_absent_flag)};
 const SET_IF_PRESENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_present_flag)};
 
-${rust_wire_enum("Opcode", "Operations supported by protocol v3.", contract.opcodes, "UnknownOpcode")}
+${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 
 ${rust_wire_enum("Status", "Status returned in every protocol response.", contract.statuses, "UnknownStatus")}
 `
@@ -1077,7 +1077,7 @@ ${variants}
     }`
 }
 
-/** Renders protocol v2 C# definitions.
+/** Renders protocol v1 C# definitions.
  *
  * @param contract - Validated language-neutral wire contract.
  * @returns Deterministic C# source with a trailing newline.
