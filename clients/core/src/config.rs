@@ -4,7 +4,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 
-use openkache_protocol::SetCondition;
+use openkache_protocol::{
+    CLIENT_DEFAULT_CONNECT_TIMEOUT_MS, CLIENT_DEFAULT_REQUEST_TIMEOUT_MS,
+    CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS, SetCondition,
+};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -402,8 +405,8 @@ pub struct ClientTimeouts {
 impl Default for ClientTimeouts {
     fn default() -> Self {
         Self {
-            connect: Duration::from_secs(5),
-            request: Duration::from_secs(2),
+            connect: Duration::from_millis(CLIENT_DEFAULT_CONNECT_TIMEOUT_MS),
+            request: Duration::from_millis(CLIENT_DEFAULT_REQUEST_TIMEOUT_MS),
         }
     }
 }
@@ -417,7 +420,9 @@ pub struct RetryPolicy {
 
 impl Default for RetryPolicy {
     fn default() -> Self {
-        Self { max_attempts: 2 }
+        Self {
+            max_attempts: CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS,
+        }
     }
 }
 

@@ -13,7 +13,16 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openkache_protocol::Opcode;
+use openkache_protocol::{
+    FFI_ABI_VERSION, FFI_CONNECTION_STATE_CLOSED, FFI_CONNECTION_STATE_CONNECTED,
+    FFI_CONNECTION_STATE_DISCONNECTED, FFI_CONNECTION_STATE_RECONNECTING,
+    FFI_CONNECTION_STATE_UNKNOWN, FFI_OPERATION_RECONNECT, FFI_RESULT_CONNECTED,
+    FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR, FFI_RESULT_NOT_DELETED,
+    FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK, FFI_RESULT_REPLACED,
+    FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT, FFI_SET_CONDITION_IF_PRESENT,
+    FFI_SET_CONDITION_NONE, Opcode, VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE,
+    VALUE_FORMAT_ENCRYPTION_ROBUST,
+};
 
 use crate::value::{Compression, Encryption, ZstandardOptions};
 use crate::{
@@ -23,7 +32,7 @@ use crate::{
 };
 
 /// Version of the native ABI represented by these declarations.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = FFI_ABI_VERSION;
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
@@ -33,25 +42,25 @@ const COMMAND_QUEUE_CAPACITY: usize = 64;
 #[non_exhaustive]
 pub enum FfiResultKind {
     /// The operation failed; the payload is UTF-8 diagnostic text.
-    Error = 0,
+    Error = FFI_RESULT_ERROR,
     /// The operation completed without a value.
-    Ok = 1,
+    Ok = FFI_RESULT_OK,
     /// The payload contains an owned operation value.
-    Value = 2,
+    Value = FFI_RESULT_VALUE,
     /// A lookup found no value.
-    NotFound = 3,
+    NotFound = FFI_RESULT_NOT_FOUND,
     /// A conditional or unconditional set created a value.
-    Created = 4,
+    Created = FFI_RESULT_CREATED,
     /// An unconditional or conditional set replaced a value.
-    Replaced = 5,
+    Replaced = FFI_RESULT_REPLACED,
     /// A delete removed a value.
-    Deleted = 6,
+    Deleted = FFI_RESULT_DELETED,
     /// A delete found no value.
-    NotDeleted = 7,
+    NotDeleted = FFI_RESULT_NOT_DELETED,
     /// A connect operation returned a client handle in the result.
-    Connected = 8,
+    Connected = FFI_RESULT_CONNECTED,
     /// A conditional set did not change a value.
-    NotStored = 9,
+    NotStored = FFI_RESULT_NOT_STORED,
 }
 
 /// Operation accepted by [`openkache_client_execute`].
@@ -72,7 +81,7 @@ pub enum FfiOperation {
     /// Wait for the server durability barrier.
     Sync = Opcode::Sync as u32,
     /// Explicitly reconnect without replaying a request.
-    Reconnect = 0xffff_ff01,
+    Reconnect = FFI_OPERATION_RECONNECT,
 }
 
 impl TryFrom<u32> for FfiOperation {
@@ -98,11 +107,11 @@ impl TryFrom<u32> for FfiOperation {
 #[non_exhaustive]
 pub enum FfiSetCondition {
     /// Always store the supplied value.
-    None = 0,
+    None = FFI_SET_CONDITION_NONE,
     /// Store only when the key is absent.
-    IfAbsent = 1,
+    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
     /// Store only when the key is present.
-    IfPresent = 2,
+    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
 }
 
 impl TryFrom<u32> for FfiSetCondition {
@@ -129,7 +138,8 @@ pub struct FfiResult {
 ///
 /// Every pointer/length pair is copied before the function returns. A zero
 /// length selects the default for optional numeric settings. `encryption` is
-/// zero for Robust, one for Compact, and two for Robust explicitly.
+/// zero selects Robust for compatibility, while the generated value-format
+/// identifiers select Compact or Robust explicitly.
 #[repr(C)]
 pub struct FfiConnectOptions {
     /// UTF-8 host and UDP port such as `127.0.0.1:4433` or `cache.example.com:4433`.
@@ -619,10 +629,10 @@ async fn execute_raw(
 
 fn connection_state_value(state: ConnectionState) -> u32 {
     match state {
-        ConnectionState::Connected => 0,
-        ConnectionState::Reconnecting => 1,
-        ConnectionState::Disconnected => 2,
-        ConnectionState::Closed => 3,
+        ConnectionState::Connected => FFI_CONNECTION_STATE_CONNECTED,
+        ConnectionState::Reconnecting => FFI_CONNECTION_STATE_RECONNECTING,
+        ConnectionState::Disconnected => FFI_CONNECTION_STATE_DISCONNECTED,
+        ConnectionState::Closed => FFI_CONNECTION_STATE_CLOSED,
     }
 }
 
@@ -677,7 +687,7 @@ pub unsafe extern "C" fn openkache_client_connect(
         compression_level,
         minimum_input_size,
         minimum_savings,
-        encryption: 0,
+        encryption: VALUE_FORMAT_ENCRYPTION_NONE as u32,
         connect_timeout_ms,
         request_timeout_ms,
         retry_max_attempts: 0,
@@ -834,8 +844,13 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         })
     };
     let encryption = match options.encryption {
-        0 | 2 => Encryption::Robust,
-        1 => Encryption::Compact,
+        encryption
+            if encryption == VALUE_FORMAT_ENCRYPTION_NONE as u32
+                || encryption == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 =>
+        {
+            Encryption::Robust
+        }
+        encryption if encryption == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Encryption::Compact,
         encryption => return Err(format!("unsupported encryption profile {encryption}")),
     };
     if options.connect_timeout_ms == 0 || options.request_timeout_ms == 0 {
@@ -1036,8 +1051,8 @@ fn execute_entry(
 }
 
 /// Returns a best-effort connection-state discriminator:
-/// `0` connected, `1` reconnecting, `2` disconnected, `3` closed, and `4`
-/// unknown for a null or invalid handle.
+/// The returned value uses the generated native connection-state identifiers;
+/// the unknown identifier is returned for a null or invalid handle.
 ///
 /// # Safety
 ///
@@ -1045,7 +1060,7 @@ fn execute_entry(
 /// [`openkache_client_result_take_client`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
-    unsafe { client.as_ref() }.map_or(4, FfiClient::connection_state)
+    unsafe { client.as_ref() }.map_or(FFI_CONNECTION_STATE_UNKNOWN, FfiClient::connection_state)
 }
 
 /// Returns an FFI result discriminator.

@@ -61,6 +61,58 @@ structure ffiContract {
 
     @required
     setConditionIfPresent: Integer
+
+    @required
+    operationReconnect: Long
+
+    @required
+    connectionStateConnected: Integer
+
+    @required
+    connectionStateReconnecting: Integer
+
+    @required
+    connectionStateDisconnected: Integer
+
+    @required
+    connectionStateClosed: Integer
+
+    @required
+    connectionStateUnknown: Integer
+}
+
+/// Defaults shared by all client bindings and the native core.
+@trait(selector: "service")
+structure clientDefaults {
+    @required
+    serverName: String
+
+    @required
+    connectTimeoutMs: Integer
+
+    @required
+    requestTimeoutMs: Integer
+
+    @required
+    retryMaxAttempts: Integer
+
+    @required
+    maxInFlight: Integer
+
+    @required
+    compressionLevel: Integer
+
+    @required
+    compressionMinimumInputSize: Integer
+
+    @required
+    compressionMinimumSavings: Integer
+
+    @required
+    compressionLevelMin: Integer
+
+    @required
+    compressionLevelMax: Integer
 }
 
 /// Cross-language v1 value container and protection contract.
@@ -255,7 +307,25 @@ structure wireStatus {
     resultNotStored: 9,
     setConditionNone: 0,
     setConditionIfAbsent: 1,
-    setConditionIfPresent: 2
+    setConditionIfPresent: 2,
+    operationReconnect: 4294967041,
+    connectionStateConnected: 0,
+    connectionStateReconnecting: 1,
+    connectionStateDisconnected: 2,
+    connectionStateClosed: 3,
+    connectionStateUnknown: 4
+)
+@clientDefaults(
+    serverName: "localhost",
+    connectTimeoutMs: 5000,
+    requestTimeoutMs: 2000,
+    retryMaxAttempts: 2,
+    maxInFlight: 256,
+    compressionLevel: 1,
+    compressionMinimumInputSize: 1024,
+    compressionMinimumSavings: 64,
+    compressionLevelMin: 1,
+    compressionLevelMax: 22
 )
 @valueFormat(
     version: 1,

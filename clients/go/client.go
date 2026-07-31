@@ -11,13 +11,6 @@ import (
 	"time"
 )
 
-const (
-	defaultConnectTimeout = 5 * time.Second
-	defaultRequestTimeout = 2 * time.Second
-	defaultRetryAttempts  = 2
-	defaultMaxInFlight    = 256
-)
-
 // ErrClosed is returned after a client has been permanently closed.
 var ErrClosed = errors.New("openkache: client is closed")
 
@@ -58,12 +51,14 @@ type Identity struct {
 type CompressionOptions struct {
 	// Enabled enables Zstandard when true.
 	Enabled bool
-	// Level is the Zstandard level from 1 through 22. Zero selects level 1.
+	// Level is the Zstandard level from the shared contract range. Zero selects
+	// the shared default level.
 	Level int32
-	// MinimumInputSize skips compression below this many bytes. Zero selects 1024.
+	// MinimumInputSize skips compression below this many bytes. Zero selects
+	// the shared default.
 	MinimumInputSize int
 	// MinimumSavings requires a compressed frame to save this many bytes. Zero
-	// selects 64.
+	// selects the shared default.
 	MinimumSavings int
 }
 
@@ -75,7 +70,7 @@ type TimeoutOptions struct {
 
 // RetryPolicy controls retries for response-safe operations.
 type RetryPolicy struct {
-	// MaxAttempts includes the initial attempt. Zero selects the default of two.
+	// MaxAttempts includes the initial attempt. Zero selects the shared default.
 	MaxAttempts int
 }
 
@@ -84,7 +79,7 @@ type Options struct {
 	// Address is the server host and UDP port, such as "127.0.0.1:4433" or
 	// "cache.example.com:4433".
 	Address string
-	// ServerName is the TLS certificate name. Empty selects "localhost".
+	// ServerName is the TLS certificate name. Empty selects the shared default.
 	ServerName string
 	// Certificate is one DER certificate or a PEM certificate chain trusted for
 	// the server connection.
@@ -99,7 +94,8 @@ type Options struct {
 	Timeouts TimeoutOptions
 	// Retry controls response-safe retry attempts.
 	Retry RetryPolicy
-	// MaxInFlight bounds reusable QUIC stream lanes. Zero selects 256.
+	// MaxInFlight bounds reusable QUIC stream lanes. Zero selects the shared
+	// default.
 	MaxInFlight int
 	// NativeLibrary overrides native library discovery. The default consults
 	// OPENKACHE_CLIENT_LIBRARY and then platform library names.
@@ -136,16 +132,16 @@ func (o Options) normalize() (normalizedOptions, error) {
 
 	serverName := o.ServerName
 	if serverName == "" {
-		serverName = "localhost"
+		serverName = SmithyClientDefaultServerName
 	}
 
 	connectTimeout := o.Timeouts.Connect
 	if connectTimeout == 0 {
-		connectTimeout = defaultConnectTimeout
+		connectTimeout = time.Duration(SmithyClientDefaultConnectTimeoutMS) * time.Millisecond
 	}
 	requestTimeout := o.Timeouts.Request
 	if requestTimeout == 0 {
-		requestTimeout = defaultRequestTimeout
+		requestTimeout = time.Duration(SmithyClientDefaultRequestTimeoutMS) * time.Millisecond
 	}
 	if connectTimeout < 0 || requestTimeout < 0 {
 		return normalizedOptions{}, validationError("timeouts", "must not be negative")
@@ -160,29 +156,37 @@ func (o Options) normalize() (normalizedOptions, error) {
 	}
 	if compression.Enabled {
 		if compression.Level == 0 {
-			compression.Level = 1
+			compression.Level = SmithyClientDefaultCompressionLevel
 		}
-		if compression.Level < 1 || compression.Level > 22 {
-			return normalizedOptions{}, validationError("compression.level", "must be from 1 through 22")
+		if compression.Level < SmithyClientCompressionLevelMin ||
+			compression.Level > SmithyClientCompressionLevelMax {
+			return normalizedOptions{}, validationError(
+				"compression.level",
+				fmt.Sprintf(
+					"must be from %d through %d",
+					SmithyClientCompressionLevelMin,
+					SmithyClientCompressionLevelMax,
+				),
+			)
 		}
 		if compression.MinimumInputSize == 0 {
-			compression.MinimumInputSize = 1_024
+			compression.MinimumInputSize = SmithyClientDefaultCompressionMinimumInputSize
 		}
 		if compression.MinimumSavings == 0 {
-			compression.MinimumSavings = 64
+			compression.MinimumSavings = SmithyClientDefaultCompressionMinimumSavings
 		}
 	}
 
 	retryAttempts := o.Retry.MaxAttempts
 	if retryAttempts == 0 {
-		retryAttempts = defaultRetryAttempts
+		retryAttempts = SmithyClientDefaultRetryMaxAttempts
 	}
 	if retryAttempts < 1 {
 		return normalizedOptions{}, validationError("retry.max_attempts", "must be greater than zero")
 	}
 	maxInFlight := o.MaxInFlight
 	if maxInFlight == 0 {
-		maxInFlight = defaultMaxInFlight
+		maxInFlight = SmithyClientDefaultMaxInFlight
 	}
 	if maxInFlight < 1 {
 		return normalizedOptions{}, validationError("max_in_flight", "must be greater than zero")

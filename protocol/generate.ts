@@ -76,6 +76,20 @@ export interface Value_Envelope_Contract {
   readonly max_type_name_bytes: number
 }
 
+/** Shared defaults for all OpenKache client bindings. */
+export interface Client_Defaults_Contract {
+  readonly server_name: string
+  readonly connect_timeout_ms: number
+  readonly request_timeout_ms: number
+  readonly retry_max_attempts: number
+  readonly max_in_flight: number
+  readonly compression_level: number
+  readonly compression_minimum_input_size: number
+  readonly compression_minimum_savings: number
+  readonly compression_level_min: number
+  readonly compression_level_max: number
+}
+
 type Api_Type_Kind = "blob" | "boolean" | "enum" | "long" | "string"
 
 /** One resolved Smithy API field type. */
@@ -126,6 +140,7 @@ export interface Api_Contract {
 /** Language-neutral subset of the OpenKache Smithy model used by generators. */
 export interface Wire_Contract {
   readonly api: Api_Contract
+  readonly client_defaults: Client_Defaults_Contract
   readonly ffi: Ffi_Contract
   readonly item_id_bytes: number
   readonly max_value_bytes: number
@@ -142,6 +157,8 @@ export interface Ffi_Contract {
   readonly abi_version: number
   readonly result_kinds: readonly Wire_Entry[]
   readonly set_conditions: readonly Wire_Entry[]
+  readonly operation_reconnect: number
+  readonly connection_states: readonly Wire_Entry[]
 }
 
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -155,6 +172,7 @@ const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
 const VALUE_FORMAT_TRAIT_ID = "openkache.protocol#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.protocol#valueEnvelope"
 const FFI_CONTRACT_TRAIT_ID = "openkache.protocol#ffiContract"
+const CLIENT_DEFAULTS_TRAIT_ID = "openkache.protocol#clientDefaults"
 const FFI_RESULT_FIELDS = [
   { name: "Error", field: "resultError" },
   { name: "Ok", field: "resultOk" },
@@ -171,6 +189,13 @@ const FFI_SET_CONDITION_FIELDS = [
   { name: "None", field: "setConditionNone" },
   { name: "IfAbsent", field: "setConditionIfAbsent" },
   { name: "IfPresent", field: "setConditionIfPresent" },
+] as const
+const FFI_CONNECTION_STATE_FIELDS = [
+  { name: "Connected", field: "connectionStateConnected" },
+  { name: "Reconnecting", field: "connectionStateReconnecting" },
+  { name: "Disconnected", field: "connectionStateDisconnected" },
+  { name: "Closed", field: "connectionStateClosed" },
+  { name: "Unknown", field: "connectionStateUnknown" },
 ] as const
 const GENERATED_OUTPUTS = {
   csharp_api: join(
@@ -198,6 +223,7 @@ const GENERATED_OUTPUTS = {
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
   go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
+  go_contract: join(PUBLIC_ROOT, "clients/go/smithy_contract.go"),
   c_contract: join(
     process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
       join(PUBLIC_ROOT, "clients/core/include/openkache/smithy_contract.h"),
@@ -754,8 +780,15 @@ function ffi_contract(value: unknown): Ffi_Contract {
     name,
     value: integer_member(contract, field, FFI_CONTRACT_TRAIT_ID, 0, 0xffff_ffff),
   }))
+  const connection_states = FFI_CONNECTION_STATE_FIELDS.map(
+    ({ name, field }): Wire_Entry => ({
+      name,
+      value: integer_member(contract, field, FFI_CONTRACT_TRAIT_ID, 0, 0xffff_ffff),
+    }),
+  )
   unique_wire_values(result_kinds, "FFI result kind")
   unique_wire_values(set_conditions, "FFI SET condition")
+  unique_wire_values(connection_states, "FFI connection state")
   return {
     abi_version: integer_member(
       contract,
@@ -766,7 +799,90 @@ function ffi_contract(value: unknown): Ffi_Contract {
     ),
     result_kinds,
     set_conditions,
+    operation_reconnect: integer_member(
+      contract,
+      "operationReconnect",
+      FFI_CONTRACT_TRAIT_ID,
+      0,
+      0xffff_ffff,
+    ),
+    connection_states,
   }
+}
+
+function client_defaults_contract(value: unknown): Client_Defaults_Contract {
+  const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
+  const defaults = {
+    server_name: string_member(contract, "serverName", CLIENT_DEFAULTS_TRAIT_ID),
+    connect_timeout_ms: integer_member(
+      contract,
+      "connectTimeoutMs",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    request_timeout_ms: integer_member(
+      contract,
+      "requestTimeoutMs",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    retry_max_attempts: integer_member(
+      contract,
+      "retryMaxAttempts",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    max_in_flight: integer_member(
+      contract,
+      "maxInFlight",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    compression_level: integer_member(
+      contract,
+      "compressionLevel",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    compression_minimum_input_size: integer_member(
+      contract,
+      "compressionMinimumInputSize",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    compression_minimum_savings: integer_member(
+      contract,
+      "compressionMinimumSavings",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    compression_level_min: integer_member(
+      contract,
+      "compressionLevelMin",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    compression_level_max: integer_member(
+      contract,
+      "compressionLevelMax",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+  } satisfies Client_Defaults_Contract
+  if (defaults.compression_level_min > defaults.compression_level_max) {
+    throw new Error(
+      `${CLIENT_DEFAULTS_TRAIT_ID}.compressionLevelMin must not exceed compressionLevelMax`,
+    )
+  }
+  if (
+    defaults.compression_level < defaults.compression_level_min ||
+    defaults.compression_level > defaults.compression_level_max
+  ) {
+    throw new Error(
+      `${CLIENT_DEFAULTS_TRAIT_ID}.compressionLevel must be within the configured compression level range`,
+    )
+  }
+  return defaults
 }
 
 function valid_encoding_identifier(encoding: string, maximum_bytes: number): boolean {
@@ -815,6 +931,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
   const ffi_contract_trait = trait_value(
     service,
     FFI_CONTRACT_TRAIT_ID,
+    `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
+  )
+  const client_defaults_trait = trait_value(
+    service,
+    CLIENT_DEFAULTS_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
 
@@ -869,6 +990,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
   return {
     api: api_contract(shapes, service),
+    client_defaults: client_defaults_contract(client_defaults_trait),
     ffi: ffi_contract(ffi_contract_trait),
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
@@ -1015,6 +1137,14 @@ function c_string_literal(value: string): string {
   return `${literal}"`
 }
 
+function c_byte_string_literal(bytes: readonly number[]): string {
+  return `"${bytes.map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("")}"`
+}
+
+function go_byte_string_literal(bytes: readonly number[]): string {
+  return `"${bytes.map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("")}"`
+}
+
 function snake_case(identifier: string): string {
   return identifier
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -1059,6 +1189,7 @@ ${variants}
  */
 export function render_rust(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const value_version_bytes = encode_vu128(value.version)
   const envelope = contract.value_envelope
   const envelope_magic = bytes_from_hex(
@@ -1152,6 +1283,36 @@ ${contract.ffi.set_conditions
 pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
   )
   .join("\n")}
+/// Operation value used to request an explicit reconnect.
+pub const FFI_OPERATION_RECONNECT: u32 = ${formatted_decimal(contract.ffi.operation_reconnect)};
+${contract.ffi.connection_states
+  .map(
+    (entry) =>
+      `/// Native ABI connection state ${entry.name}.
+pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+  )
+  .join("\n")}
+
+/// Default TLS server name used by client bindings.
+pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.server_name)};
+/// Default connection setup timeout in milliseconds.
+pub const CLIENT_DEFAULT_CONNECT_TIMEOUT_MS: u64 = ${formatted_decimal(defaults.connect_timeout_ms)};
+/// Default complete request timeout in milliseconds.
+pub const CLIENT_DEFAULT_REQUEST_TIMEOUT_MS: u64 = ${formatted_decimal(defaults.request_timeout_ms)};
+/// Default maximum total response-safe attempts.
+pub const CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS: usize = ${formatted_decimal(defaults.retry_max_attempts)};
+/// Default maximum number of in-flight request lanes.
+pub const CLIENT_DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
+/// Default Zstandard compression level.
+pub const CLIENT_DEFAULT_COMPRESSION_LEVEL: i32 = ${formatted_decimal(defaults.compression_level)};
+/// Default serialized input size eligible for compression.
+pub const CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE: usize = ${formatted_decimal(defaults.compression_minimum_input_size)};
+/// Default compressed-byte savings threshold.
+pub const CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS: usize = ${formatted_decimal(defaults.compression_minimum_savings)};
+/// Minimum supported Zstandard compression level.
+pub const CLIENT_COMPRESSION_LEVEL_MIN: i32 = ${formatted_decimal(defaults.compression_level_min)};
+/// Maximum supported Zstandard compression level.
+pub const CLIENT_COMPRESSION_LEVEL_MAX: i32 = ${formatted_decimal(defaults.compression_level_max)};
 
 const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v3.set_ttl_flag)};
 const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_absent_flag)};
@@ -1292,6 +1453,11 @@ ${members.join("\n")}
   ${snake_case(operation.name)}(input: ${typescript_api_name(operation.input)}): Promise<${typescript_api_name(operation.output)}>`,
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+/** Exact number of bytes in a protocol item identifier. */
+export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+/** Maximum opaque value bytes accepted by the protocol. */
+export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 
 ${[...enums, ...structures].join("\n\n")}
 
@@ -1530,7 +1696,6 @@ function go_api_type(type: Api_Type, required: boolean): string {
  * @returns Deterministic Go source with a trailing newline.
  */
 export function render_go_api(contract: Wire_Contract): string {
-  const value = contract.value_format
   const enums = contract.api.enums.map((enum_) => {
     const members = enum_.members
       .map(
@@ -1567,6 +1732,29 @@ package openkache
 
 import "context"
 
+${[...enums, ...structures].join("\n\n")}
+
+// SmithyOpenKacheAPI describes the operations defined by the OpenKache Smithy service.
+type SmithyOpenKacheAPI interface {
+${operations.join("\n")}
+}
+`
+}
+
+/** Renders generated wire, ABI, and client-default constants for Go.
+ *
+ * @param contract - Validated language-neutral wire and client contract.
+ * @returns Deterministic Go source with a trailing newline.
+ */
+export function render_go_contract(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const defaults = contract.client_defaults
+  const envelope = contract.value_envelope
+  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
+
+package openkache
+
 const (
 \t// SmithyProtocolALPN is the negotiated protocol identifier.
 \tSmithyProtocolALPN = ${JSON.stringify(contract.v3.alpn)}
@@ -1576,6 +1764,14 @@ const (
 \tSmithyMaxValueBytes = ${contract.max_value_bytes}
 \t// SmithyDataProtectionKeyBytes is the shared key width.
 \tSmithyDataProtectionKeyBytes = ${value.data_protection_key_bytes}
+\t// SmithyValueEncryptionNone selects unprotected values.
+\tSmithyValueEncryptionNone uint32 = ${value.encryption_none}
+\t// SmithyValueEncryptionCompact selects deterministic AES-SIV protection.
+\tSmithyValueEncryptionCompact uint32 = ${value.encryption_compact}
+\t// SmithyValueEncryptionRobust selects randomized AES-GCM-SIV protection.
+\tSmithyValueEncryptionRobust uint32 = ${value.encryption_robust}
+\t// SmithyValueEnvelopeMagicAndVersion is the legacy envelope prefix.
+\tSmithyValueEnvelopeMagicAndVersion = ${go_byte_string_literal(magic)}
 )
 
 // Smithy operation values carried by the native ABI.
@@ -1603,14 +1799,40 @@ ${contract.ffi.set_conditions
 \tSmithyFFISetCondition${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
+\t// SmithyFFIOperationReconnect requests an explicit connection replacement.
+\tSmithyFFIOperationReconnect uint32 = ${contract.ffi.operation_reconnect}
+${contract.ffi.connection_states
+  .map(
+    (entry) =>
+      `\t// SmithyFFIConnectionState${go_ffi_name(entry.name)} identifies a native connection state.
+\tSmithyFFIConnectionState${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
 )
 
-${[...enums, ...structures].join("\n\n")}
-
-// SmithyOpenKacheAPI describes the operations defined by the OpenKache Smithy service.
-type SmithyOpenKacheAPI interface {
-${operations.join("\n")}
-}
+// Shared client defaults extracted from the Smithy service contract.
+const (
+\t// SmithyClientDefaultServerName is used when no TLS server name is supplied.
+\tSmithyClientDefaultServerName = ${JSON.stringify(defaults.server_name)}
+\t// SmithyClientDefaultConnectTimeoutMS is the default connection timeout.
+\tSmithyClientDefaultConnectTimeoutMS uint64 = ${defaults.connect_timeout_ms}
+\t// SmithyClientDefaultRequestTimeoutMS is the default complete request timeout.
+\tSmithyClientDefaultRequestTimeoutMS uint64 = ${defaults.request_timeout_ms}
+\t// SmithyClientDefaultRetryMaxAttempts is the default total retry attempt count.
+\tSmithyClientDefaultRetryMaxAttempts = ${defaults.retry_max_attempts}
+\t// SmithyClientDefaultMaxInFlight is the default number of request lanes.
+\tSmithyClientDefaultMaxInFlight = ${defaults.max_in_flight}
+\t// SmithyClientDefaultCompressionLevel is the default Zstandard level.
+\tSmithyClientDefaultCompressionLevel int32 = ${defaults.compression_level}
+\t// SmithyClientDefaultCompressionMinimumInputSize is the compression input threshold.
+\tSmithyClientDefaultCompressionMinimumInputSize = ${defaults.compression_minimum_input_size}
+\t// SmithyClientDefaultCompressionMinimumSavings is the compression savings threshold.
+\tSmithyClientDefaultCompressionMinimumSavings = ${defaults.compression_minimum_savings}
+\t// SmithyClientCompressionLevelMin is the minimum supported Zstandard level.
+\tSmithyClientCompressionLevelMin int32 = ${defaults.compression_level_min}
+\t// SmithyClientCompressionLevelMax is the maximum supported Zstandard level.
+\tSmithyClientCompressionLevelMax int32 = ${defaults.compression_level_max}
+)
 `
 }
 
@@ -1654,6 +1876,7 @@ function c_contract_api_enum(
  */
 export function render_c_contract(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const envelope = contract.value_envelope
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   const operation_enum = c_contract_enum(
@@ -1688,6 +1911,24 @@ ${contract.ffi.set_conditions
       `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
   )
   .join("\n")}
+#define OPENKACHE_SMITHY_FFI_OPERATION_RECONNECT ${contract.ffi.operation_reconnect}u
+${contract.ffi.connection_states
+  .map(
+    (entry) =>
+      `#define OPENKACHE_SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} ${entry.value}u`,
+  )
+  .join("\n")}
+
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS ${defaults.connect_timeout_ms}u
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS ${defaults.request_timeout_ms}u
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS ${defaults.retry_max_attempts}u
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_MAX_IN_FLIGHT ${defaults.max_in_flight}u
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_COMPRESSION_LEVEL ${defaults.compression_level}
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE ${defaults.compression_minimum_input_size}u
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS ${defaults.compression_minimum_savings}u
+#define OPENKACHE_SMITHY_CLIENT_COMPRESSION_LEVEL_MIN ${defaults.compression_level_min}
+#define OPENKACHE_SMITHY_CLIENT_COMPRESSION_LEVEL_MAX ${defaults.compression_level_max}
 
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
@@ -1723,10 +1964,7 @@ ${status_enum}
 ${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION")}
 ${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
 
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_0 ${formatted_byte(magic[0] ?? 0)}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_1 ${formatted_byte(magic[1] ?? 0)}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_2 ${formatted_byte(magic[2] ?? 0)}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_3 ${formatted_byte(magic[3] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION ${c_byte_string_literal(magic)}
 
 #endif /* OPENKACHE_SMITHY_CONTRACT_H */
 `
@@ -1774,13 +2012,17 @@ ${members.join("\n")}
         input: ${operation.input},
     ) -> impl core::future::Future<
         Output = core::result::Result<${operation.output}, Self::Error>,
-    > + Send;`,
+    >;`,
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 ${[...enums, ...structures].join("\n\n")}
 
 /// Operations defined by the OpenKache Smithy service.
+///
+/// The trait does not require Send futures because the Rust client exposes
+/// both Tokio/Quinn and runtime-local Compio implementations. Callers that
+/// need cross-thread scheduling can add the bound to the concrete client.
 pub trait OpenKacheApi {
     /// Error returned by an operation.
     type Error;
@@ -1860,6 +2102,7 @@ function expected_outputs(
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
+        [GENERATED_OUTPUTS.go_contract]: render_go_contract(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
       }
     case "c-contract":
@@ -1874,6 +2117,7 @@ function expected_outputs(
     case "go":
       return {
         [GENERATED_OUTPUTS.go_api]: render_go_api(contract),
+        [GENERATED_OUTPUTS.go_contract]: render_go_contract(contract),
       }
     case "rust-api":
       return {

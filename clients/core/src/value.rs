@@ -7,6 +7,8 @@ use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
 use openkache_protocol::{
+    CLIENT_COMPRESSION_LEVEL_MAX, CLIENT_COMPRESSION_LEVEL_MIN, CLIENT_DEFAULT_COMPRESSION_LEVEL,
+    CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE, CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS,
     ITEM_ID_BYTES, MAX_VALUE_BYTES, VALUE_FORMAT_AAD_DOMAIN,
     VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT, VALUE_FORMAT_COMPACT_MAC_CONTEXT,
     VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES, VALUE_FORMAT_COMPRESSION_MASK,
@@ -321,9 +323,9 @@ pub struct ZstandardOptions {
 impl Default for ZstandardOptions {
     fn default() -> Self {
         Self {
-            level: 1,
-            minimum_input_size: 1_024,
-            minimum_savings: 64,
+            level: CLIENT_DEFAULT_COMPRESSION_LEVEL,
+            minimum_input_size: CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE,
+            minimum_savings: CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS,
         }
     }
 }
@@ -955,7 +957,7 @@ fn validate_compression(compression: Compression) -> Result<()> {
     let Compression::Zstandard(options) = compression else {
         return Ok(());
     };
-    if !(1..=22).contains(&options.level) {
+    if !(CLIENT_COMPRESSION_LEVEL_MIN..=CLIENT_COMPRESSION_LEVEL_MAX).contains(&options.level) {
         return Err(Error::InvalidCompressionLevel(options.level));
     }
     Ok(())

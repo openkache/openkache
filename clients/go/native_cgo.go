@@ -27,7 +27,7 @@ typedef openkache_client_result *(*openkache_go_connect_fn)(
 typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
     const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
     const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    uint8_t, int32_t, size_t, size_t, uint64_t, uint64_t, uint64_t, size_t);
+    uint8_t, int32_t, size_t, size_t, uint32_t, size_t, size_t, uint64_t, uint64_t);
 typedef openkache_client_result *(*openkache_go_execute_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
@@ -200,8 +200,9 @@ openkache_client_result *openkache_go_connect(
     const uint8_t *data_protection_key, size_t data_protection_key_length,
     uint8_t compression_enabled, int32_t compression_level,
     size_t minimum_input_size, size_t minimum_savings,
+    uint32_t encryption,
+    size_t retry_max_attempts, size_t max_in_flight,
     uint64_t connect_timeout_ms, uint64_t request_timeout_ms,
-    uint64_t retry_max_attempts, size_t max_in_flight,
     uint8_t use_extended
 ) {
     if (library == NULL) return NULL;
@@ -213,8 +214,9 @@ openkache_client_result *openkache_go_connect(
             identity_certificate_chain_length, identity_private_key,
             identity_private_key_length, data_protection_key,
             data_protection_key_length, compression_enabled, compression_level,
-            minimum_input_size, minimum_savings, connect_timeout_ms,
-            request_timeout_ms, retry_max_attempts, max_in_flight);
+            minimum_input_size, minimum_savings, encryption,
+            retry_max_attempts, max_in_flight, connect_timeout_ms,
+            request_timeout_ms);
     }
     return library->connect(
         address, address_length, server_name, server_name_length,
@@ -362,23 +364,23 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	}
 	compressionLevel := options.compression.Level
 	if compressionLevel == 0 {
-		compressionLevel = 1
+		compressionLevel = SmithyClientDefaultCompressionLevel
 	}
 	minimumInputSize := options.compression.MinimumInputSize
 	if minimumInputSize == 0 {
-		minimumInputSize = 1_024
+		minimumInputSize = SmithyClientDefaultCompressionMinimumInputSize
 	}
 	minimumSavings := options.compression.MinimumSavings
 	if minimumSavings == 0 {
-		minimumSavings = 64
+		minimumSavings = SmithyClientDefaultCompressionMinimumSavings
 	}
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
 	useExtended := hasExtended
 	if !hasExtended &&
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
-			options.retryAttempts != defaultRetryAttempts ||
-			options.maxInFlight != defaultMaxInFlight) {
+			options.retryAttempts != SmithyClientDefaultRetryMaxAttempts ||
+			options.maxInFlight != SmithyClientDefaultMaxInFlight) {
 		C.free(address)
 		C.free(serverName)
 		C.free(certificate)
@@ -408,8 +410,9 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 			(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
 			C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
 			C.size_t(minimumInputSize), C.size_t(minimumSavings),
+			C.uint32_t(SmithyValueEncryptionRobust),
+			C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
 			C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
-			C.uint64_t(options.retryAttempts), C.size_t(options.maxInFlight),
 			C.uint8_t(boolByte(useExtended)),
 		)
 		C.free(address)

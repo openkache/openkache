@@ -70,14 +70,19 @@ struct Connect_Options {
     std::vector<Byte> certificate;
     std::array<Byte, OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES> data_protection_key{};
     bool compression_enabled = false;
-    std::int32_t compression_level = 1;
-    std::size_t minimum_input_size = 1'024;
-    std::size_t minimum_savings = 64;
+    std::int32_t compression_level =
+        OPENKACHE_SMITHY_CLIENT_DEFAULT_COMPRESSION_LEVEL;
+    std::size_t minimum_input_size =
+        OPENKACHE_SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE;
+    std::size_t minimum_savings =
+        OPENKACHE_SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS;
     std::vector<Byte> client_certificate_chain;
     std::vector<Byte> client_private_key;
     Encryption encryption = Encryption::Robust;
-    std::uint64_t connect_timeout_ms = 5'000;
-    std::uint64_t request_timeout_ms = 2'000;
+    std::uint64_t connect_timeout_ms =
+        OPENKACHE_SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS;
+    std::uint64_t request_timeout_ms =
+        OPENKACHE_SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS;
     std::size_t retry_max_attempts = 0;
     std::size_t max_in_flight = 0;
 };
