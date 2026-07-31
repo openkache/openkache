@@ -5,6 +5,7 @@ members = [
     "server",
     "clients/core",
     "clients/rust",
+    "clients/cli",
     "clients/typescript/native",
 ]
 default-members = [
@@ -12,6 +13,7 @@ default-members = [
     "server",
     "clients/core",
     "clients/rust",
+    "clients/cli",
 ]
 
 [profile.dev.package.tikv-jemalloc-sys]

@@ -21,7 +21,7 @@ The main API layers are:
 - reusable configuration, key, protection, and value types for binding
   adapters;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
-  and other synchronous native adapters.
+  Python, ctypes, and other synchronous native adapters.
 
 The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
 adapter depends on this core directly.
@@ -57,9 +57,9 @@ The `ffi` feature builds a dedicated Compio worker around
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,
-reconnect, and bounded request lanes. The C/C++ package build generates the
-canonical Smithy-derived `openkache/smithy_contract.h` into its build or
-release output; it is not checked into the source tree. Reusable ABI
+reconnect, state snapshots, and bounded request lanes. CMake and Python package
+builds regenerate the canonical Smithy-derived contract as needed. The
+checked-in header keeps source consumers self-contained. Reusable ABI
 declarations are in `include/openkache/client_abi.h` (with the
 `include/openkache_client.h` compatibility include).
 

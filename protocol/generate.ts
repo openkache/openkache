@@ -237,14 +237,12 @@ const GENERATED_OUTPUTS = {
   ),
   go_api: join(PUBLIC_ROOT, "clients/go/smithy_api.go"),
   go_contract: join(PUBLIC_ROOT, "clients/go/smithy_contract.go"),
-  python_api: join(
-    PUBLIC_ROOT,
-    "clients/python/src/openkache/_generated/smithy_api.py",
-  ),
-  python_contract: join(
-    PUBLIC_ROOT,
-    "clients/python/src/openkache/_generated/smithy_contract.py",
-  ),
+  python_api:
+    process.env.OPENKACHE_PYTHON_API_OUTPUT ??
+    join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_api.py"),
+  python_contract:
+    process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
+    join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_contract.py"),
   c_contract: join(
     process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
       join(PUBLIC_ROOT, "clients/core/include/openkache/smithy_contract.h"),
@@ -2044,6 +2042,12 @@ export function render_python_contract(contract: Wire_Contract): string {
         `SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_connection_states = contract.ffi.connection_states
+    .map(
+      (entry) =>
+        `SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_set_conditions = contract.ffi.set_conditions
     .map(
       (entry) =>
@@ -2079,6 +2083,7 @@ SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}
+${ffi_connection_states}
 ${ffi_set_conditions}
 SMITHY_SET_TTL_FLAG = ${contract.v3.set_ttl_flag}
 SMITHY_SET_IF_ABSENT_FLAG = ${contract.v3.set_if_absent_flag}

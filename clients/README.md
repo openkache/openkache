@@ -24,6 +24,7 @@ formats or protocol behavior.
 |---|---|---|
 | Shared core | [`core/`](core/) | Protocol v1 raw and protected engine; value format v1 implementation |
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
+| CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
 | Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
@@ -78,6 +79,7 @@ package structure only.
 | Go | `go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
+| CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
 
