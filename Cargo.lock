@@ -1836,7 +1836,7 @@ name = "openkache-client"
 version = "0.1.0"
 dependencies = [
  "compio",
- "flume",
+ "crossfire",
  "futures-util",
  "openkache-client-core",
 ]
@@ -1853,7 +1853,7 @@ dependencies = [
  "cmac",
  "compio",
  "compio-quic",
- "flume",
+ "crossfire",
  "futures-util",
  "getrandom 0.4.3",
  "http",

@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{RESPONSE_FIXED_BYTES, Response};
 
@@ -148,7 +149,7 @@ async fn timeout_compio<F: Future>(duration: Duration, future: F) -> Result<Opti
 }
 
 trait BackendConnection {
-    type Stream: BackendStream;
+    type Stream: BackendStream + 'static;
 
     fn open_bi(
         &self,
@@ -172,12 +173,15 @@ trait BackendStream {
     ) -> impl Future<Output = std::result::Result<Vec<u8>, TransportError>>;
 }
 
+type LaneSender<T> = MAsyncTx<crossfire::mpmc::Array<T>>;
+type LaneReceiver<T> = MAsyncRx<crossfire::mpmc::Array<T>>;
+
 struct PooledConnection<B: BackendConnection> {
     inner: B,
-    idle_lanes_tx: flume::Sender<B::Stream>,
-    idle_lanes_rx: flume::Receiver<B::Stream>,
-    lane_capacity_tx: flume::Sender<()>,
-    lane_capacity_rx: flume::Receiver<()>,
+    idle_lanes_tx: LaneSender<B::Stream>,
+    idle_lanes_rx: LaneReceiver<B::Stream>,
+    lane_capacity_tx: LaneSender<()>,
+    lane_capacity_rx: LaneReceiver<()>,
     open_lanes: AtomicUsize,
     max_stream_lanes: usize,
 }
@@ -189,8 +193,8 @@ struct PooledLane<'a, B: BackendConnection> {
 
 impl<B: BackendConnection> PooledConnection<B> {
     fn new(inner: B, max_stream_lanes: usize) -> Self {
-        let (idle_lanes_tx, idle_lanes_rx) = flume::bounded(max_stream_lanes);
-        let (lane_capacity_tx, lane_capacity_rx) = flume::bounded(max_stream_lanes);
+        let (idle_lanes_tx, idle_lanes_rx) = crossfire::mpmc::bounded_async(max_stream_lanes);
+        let (lane_capacity_tx, lane_capacity_rx) = crossfire::mpmc::bounded_async(max_stream_lanes);
         Self {
             inner,
             idle_lanes_tx,
@@ -208,8 +212,8 @@ impl<B: BackendConnection> PooledConnection<B> {
                 return Ok(PooledLane::new(self, lane));
             }
             if !self.reserve_lane() {
-                let idle = self.idle_lanes_rx.recv_async().fuse();
-                let capacity = self.lane_capacity_rx.recv_async().fuse();
+                let idle = self.idle_lanes_rx.recv().fuse();
+                let capacity = self.lane_capacity_rx.recv().fuse();
                 pin_mut!(idle, capacity);
                 select! {
                     lane = idle => {
@@ -226,7 +230,7 @@ impl<B: BackendConnection> PooledConnection<B> {
                 .inner
                 .open_bi(deadline.remaining(Operation::StreamAcquisition)?)
                 .fuse();
-            let idle = self.idle_lanes_rx.recv_async().fuse();
+            let idle = self.idle_lanes_rx.recv().fuse();
             pin_mut!(opening, idle);
             select! {
                 opened = opening => {
