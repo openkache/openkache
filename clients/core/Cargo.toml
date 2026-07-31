@@ -5,6 +5,9 @@ edition = "2024"
 description = "Low-level client core for the OpenKache cache server"
 license = "Apache-2.0"
 
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
 [features]
 default = ["quic-quinn"]
 ffi = ["quic-compio"]

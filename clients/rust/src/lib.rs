@@ -8,9 +8,12 @@ pub mod smithy {
     include!(concat!(env!("OUT_DIR"), "/smithy_api.rs"));
 }
 
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::future::{Future, IntoFuture};
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::time::Duration;
 
 pub use openkache_client_core::{
@@ -196,6 +199,7 @@ macro_rules! builder_methods {
     };
 }
 
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 macro_rules! client_methods {
     ($client:ident) => {
         impl $client {

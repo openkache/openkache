@@ -1,0 +1,9 @@
+.git
+.gitmodules
+.github
+target
+**/target
+_local
+**/generated_local
+clients/typescript/node_modules
+clients/typescript/dist

@@ -5,10 +5,12 @@
 //! process RAM budget, and leaves five percent of the SSD budget unassigned.
 //! Automatic RAM discovery also leaves at least twenty percent of currently
 //! available memory outside the process budget. Budgets are advisory inputs.
-//! Discovery recognizes common Linux cgroup memory limits and usage plus
-//! filesystem availability, but not device performance or filesystem quotas.
+//! Discovery recognizes common Linux cgroup memory limits, macOS Mach VM
+//! statistics, and filesystem availability, but not device performance or
+//! filesystem quotas.
 
 use std::ffi::CString;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
@@ -113,7 +115,7 @@ impl SizingRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error when CPU affinity, `/proc/meminfo`, or target filesystem
+    /// Returns an error when CPU topology, host memory, or target filesystem
     /// capacity cannot be inspected.
     pub fn detect(directory: PathBuf, profile: SizingProfile) -> Result<Self> {
         Ok(Self {
@@ -254,6 +256,7 @@ pub(crate) struct MemoryCapacity {
     pub(crate) budget_bytes: u64,
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn detected_memory_snapshot() -> Result<MemorySnapshot> {
     let meminfo = fs::read_to_string("/proc/meminfo")?;
     let cgroup_v2_max = fs::read_to_string("/sys/fs/cgroup/memory.max").ok();
@@ -271,10 +274,111 @@ pub(crate) fn detected_memory_snapshot() -> Result<MemorySnapshot> {
     )
 }
 
+#[cfg(target_os = "macos")]
+#[allow(deprecated)]
+pub(crate) fn detected_memory_snapshot() -> Result<MemorySnapshot> {
+    let total_bytes = macos_sysctl_u64(c"hw.memsize")?;
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    let mut statistics = MaybeUninit::<libc::vm_statistics64>::zeroed();
+    let mut count = libc::HOST_VM_INFO64_COUNT;
+    let required_count = (std::mem::offset_of!(libc::vm_statistics64, speculative_count)
+        + std::mem::size_of::<libc::natural_t>())
+        / std::mem::size_of::<libc::integer_t>();
+    let required_count = libc::mach_msg_type_number_t::try_from(required_count)
+        .expect("vm_statistics64 field count fits mach_msg_type_number_t");
+    let result = unsafe {
+        libc::host_statistics64(
+            libc::mach_host_self(),
+            libc::HOST_VM_INFO64,
+            statistics.as_mut_ptr().cast(),
+            &mut count,
+        )
+    };
+    if result != libc::KERN_SUCCESS {
+        return Err(std::io::Error::other(format!(
+            "host_statistics64 failed with kern_return_t {result}"
+        ))
+        .into());
+    }
+    if count < required_count {
+        return Err(std::io::Error::other(format!(
+            "host_statistics64 returned {count} values, expected at least {required_count}"
+        ))
+        .into());
+    }
+    let statistics = unsafe { statistics.assume_init() };
+    memory_snapshot_from_macos_sources(
+        total_bytes,
+        page_size as u64,
+        statistics.free_count as u64,
+        statistics.inactive_count as u64,
+        statistics.speculative_count as u64,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn macos_sysctl_u64(name: &std::ffi::CStr) -> Result<u64> {
+    let mut value = 0u64;
+    let mut value_len = std::mem::size_of::<u64>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&mut value as *mut u64).cast(),
+            &mut value_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if value_len != std::mem::size_of::<u64>() {
+        return Err(std::io::Error::other(format!(
+            "{} returned {value_len} bytes, expected {}",
+            name.to_string_lossy(),
+            std::mem::size_of::<u64>()
+        ))
+        .into());
+    }
+    Ok(value)
+}
+
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+pub(crate) fn memory_snapshot_from_macos_sources(
+    total_bytes: u64,
+    page_size: u64,
+    free_pages: u64,
+    inactive_pages: u64,
+    speculative_pages: u64,
+) -> Result<MemorySnapshot> {
+    if total_bytes == 0 || page_size == 0 {
+        return Err(KvError::InvalidConfig(
+            "macOS memory totals and page size must be non-zero".into(),
+        ));
+    }
+    let available_pages = free_pages
+        .checked_add(inactive_pages)
+        .and_then(|pages| pages.checked_add(speculative_pages))
+        .ok_or_else(|| KvError::InvalidConfig("macOS available page count overflowed".into()))?;
+    let available_bytes = available_pages
+        .checked_mul(page_size)
+        .ok_or_else(|| KvError::InvalidConfig("macOS available memory size overflowed".into()))?
+        .min(total_bytes);
+    Ok(MemorySnapshot {
+        total_bytes,
+        available_bytes,
+    })
+}
+
 fn detected_memory_capacity() -> Result<MemoryCapacity> {
     automatic_memory_capacity(detected_memory_snapshot()?)
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn memory_snapshot_from_sources(
     cgroup_v2_max: Option<&str>,
     cgroup_v2_high: Option<&str>,
@@ -354,6 +458,7 @@ pub(crate) fn automatic_memory_capacity(snapshot: MemorySnapshot) -> Result<Memo
     })
 }
 
+#[cfg(target_os = "linux")]
 fn meminfo_bytes(meminfo: &str, field: &'static str) -> Result<u64> {
     meminfo
         .lines()
@@ -366,6 +471,7 @@ fn meminfo_bytes(meminfo: &str, field: &'static str) -> Result<u64> {
         .ok_or_else(|| KvError::InvalidConfig(format!("{field} byte size overflowed")))
 }
 
+#[cfg(target_os = "linux")]
 fn parse_memory_limit(value: &str) -> Result<Option<u64>> {
     let value = value.trim();
     if value == "max" {
@@ -382,6 +488,7 @@ fn parse_memory_limit(value: &str) -> Result<Option<u64>> {
     Ok(Some(limit))
 }
 
+#[cfg(target_os = "linux")]
 fn parse_required_memory_value(value: Option<&str>, name: &'static str) -> Result<u64> {
     value
         .ok_or_else(|| KvError::InvalidConfig(format!("{name} is unavailable")))?
@@ -417,9 +524,8 @@ pub(crate) fn filesystem_available_bytes(path: &Path) -> Result<u64> {
     } else {
         stats.f_frsize
     };
-    stats
-        .f_bavail
-        .checked_mul(fragment_bytes)
+    u64::from(stats.f_bavail)
+        .checked_mul(u64::from(fragment_bytes))
         .ok_or_else(|| KvError::InvalidConfig("available filesystem size overflowed".into()))
 }
 

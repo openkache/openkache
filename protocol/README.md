@@ -52,10 +52,12 @@ variable-integer parsing.
   operation inputs and outputs, shared limits, version-specific layouts, the
   native binding ABI identifiers, complete cross-language value-format
   contract, and the legacy TypeScript metadata-envelope limits.
-- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, and
-  Python definitions into ignored `generated_local` directories, the Python
-  package's ignored `_generated` directory, or Cargo output. Package/release
-  workflows must run the generator before building a Python artifact.
+- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, Python,
+  and native C definitions into ignored `generated_local` directories, the
+  Python package's ignored `_generated` directory, or Cargo output. The CMake
+  client build generates its native header into the CMake build tree and
+  installs it with the package. Package/release workflows must run the
+  generator before building a Python artifact.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.

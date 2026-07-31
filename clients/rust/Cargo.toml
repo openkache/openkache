@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["quic-quinn"]
-ffi = ["quic-compio", "openkache-client-core/ffi"]
+ffi = ["openkache-client-core/ffi"]
 quic-compio = ["openkache-client-core/quic-compio"]
 quic-quinn = ["openkache-client-core/quic-quinn"]
 

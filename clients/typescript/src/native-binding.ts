@@ -94,25 +94,21 @@ export function load_native_module(native_path?: string): Native_Module {
 }
 
 function default_native_path(): string {
-  if (process.platform !== "linux") {
-    throw new Error(
-      `packaged native adapter supports Linux, got ${process.platform} ${process.arch}; ` +
-        "provide native_path for a custom build",
-    )
-  }
-  let artifact_name: string
-  switch (process.arch) {
-    case "x64":
+  let artifact_name: string | undefined
+  if (process.platform === "linux") {
+    if (process.arch === "x64") {
       artifact_name = "openkache-client.linux-x64-gnu.node"
-      break
-    case "arm64":
+    } else if (process.arch === "arm64") {
       artifact_name = "openkache-client.linux-arm64-gnu.node"
-      break
-    default:
-      throw new Error(
-        `packaged native adapter supports Linux x64 and ARM64, got ${process.arch}; ` +
-          "provide native_path for a custom build",
-      )
+    }
+  } else if (process.platform === "darwin" && process.arch === "arm64") {
+    artifact_name = "openkache-client.darwin-arm64.node"
+  }
+  if (artifact_name === undefined) {
+    throw new Error(
+      `packaged native adapter supports Linux x64/ARM64 and Apple Silicon macOS, ` +
+        `got ${process.platform} ${process.arch}; provide native_path for a custom build`,
+    )
   }
   return fileURLToPath(
     new URL(`../target/native/${artifact_name}`, import.meta.url),

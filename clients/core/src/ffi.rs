@@ -5,7 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -20,11 +20,11 @@ use openkache_protocol::{
 };
 use serde::Deserialize;
 
-use crate::value::{Compression, JsonValue, Value, ZstandardOptions};
+use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, DataProtectionKey, DeleteOutcome, Endpoint,
-    GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, ServerTrust, SetCondition,
-    SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
+    Endpoint, GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, RetryPolicy,
+    ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;
@@ -43,6 +43,32 @@ enum FfiResultKind {
     Connected = FFI_RESULT_CONNECTED,
     NotStored = FFI_RESULT_NOT_STORED,
     State = FFI_RESULT_STATE,
+}
+
+/// Native connection options passed by C and C++ bindings.
+#[repr(C)]
+pub struct FfiConnectOptions {
+    pub address: *const u8,
+    pub address_length: usize,
+    pub server_name: *const u8,
+    pub server_name_length: usize,
+    pub certificate: *const u8,
+    pub certificate_length: usize,
+    pub client_certificate_chain: *const u8,
+    pub client_certificate_chain_length: usize,
+    pub client_private_key: *const u8,
+    pub client_private_key_length: usize,
+    pub data_protection_key: *const u8,
+    pub data_protection_key_length: usize,
+    pub compression_enabled: u8,
+    pub compression_level: i32,
+    pub minimum_input_size: usize,
+    pub minimum_savings: usize,
+    pub encryption: u32,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub retry_max_attempts: usize,
+    pub max_in_flight: usize,
 }
 
 macro_rules! ffi_input_enum {
@@ -108,6 +134,7 @@ pub struct FfiClient {
     commands: CommandSender,
     request_timeout: Duration,
     shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -132,6 +159,7 @@ struct WorkerOptions {
     identity: Option<ClientIdentity>,
     data_protection_key: DataProtectionKey,
     compression: Compression,
+    encryption: Encryption,
     timeouts: ClientTimeouts,
     max_in_flight: usize,
     retry_max_attempts: usize,
@@ -169,11 +197,21 @@ impl FfiClient {
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
+        let state = Arc::new(AtomicU32::new(connection_state_value(
+            ConnectionState::Reconnecting,
+        )));
+        let worker_state = Arc::clone(&state);
         let request_timeout = options.timeouts.request;
         let worker = thread::Builder::new()
             .name("openkache-client".to_string())
             .spawn(move || {
-                run_worker(receiver, ready_sender, options, worker_shutdown);
+                run_worker(
+                    receiver,
+                    ready_sender,
+                    options,
+                    worker_shutdown,
+                    worker_state,
+                );
             })
             .map_err(|error| format!("failed to start client worker: {error}"))?;
 
@@ -182,6 +220,7 @@ impl FfiClient {
                 commands,
                 request_timeout,
                 shutdown,
+                state,
                 worker: Mutex::new(Some(worker)),
             }),
             Ok(Err(error)) => {
@@ -228,6 +267,10 @@ impl FfiClient {
 
 impl Drop for FfiClient {
     fn drop(&mut self) {
+        self.state.store(
+            connection_state_value(ConnectionState::Closed),
+            Ordering::Release,
+        );
         self.shutdown.store(true, Ordering::Release);
         // A non-blocking send can lose the shutdown marker when the bounded
         // queue is full. In that case the worker would drain the queue and
@@ -247,6 +290,7 @@ fn run_worker(
     ready: SyncSender<std::result::Result<(), String>>,
     options: WorkerOptions,
     shutdown: Arc<AtomicBool>,
+    state: Arc<AtomicU32>,
 ) {
     let WorkerOptions {
         address,
@@ -255,6 +299,7 @@ fn run_worker(
         identity,
         data_protection_key,
         compression,
+        encryption,
         timeouts,
         max_in_flight,
         retry_max_attempts,
@@ -279,21 +324,24 @@ fn run_worker(
             return;
         }
     };
-    let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
-        Ok(certificates) => certificates,
-        Err(error) => {
-            let _ = ready.send(Err(error.to_string()));
-            return;
-        }
-    };
     let mut builder = LocalProtectedClient::builder(endpoint, data_protection_key)
-        .server_trust(ServerTrust::Custom(certificates))
         .compression(compression)
+        .encryption(encryption)
         .timeouts(timeouts)
         .max_in_flight(max_in_flight)
-        .retry_policy(crate::RetryPolicy {
+        .retry_policy(RetryPolicy {
             max_attempts: retry_max_attempts,
         });
+    if !certificate.is_empty() {
+        let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
+            Ok(certificates) => certificates,
+            Err(error) => {
+                let _ = ready.send(Err(error.to_string()));
+                return;
+            }
+        };
+        builder = builder.server_trust(ServerTrust::Custom(certificates));
+    }
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
@@ -304,6 +352,10 @@ fn run_worker(
             return;
         }
     };
+    state.store(
+        connection_state_value(client.connection_state()),
+        Ordering::Release,
+    );
     if ready.send(Ok(())).is_err() {
         return;
     }
@@ -320,7 +372,12 @@ fn run_worker(
                 set_options,
                 response,
             } => {
-                let result = runtime.block_on(execute(&client, operation, key, value, set_options));
+                let result =
+                    runtime.block_on(execute(&client, operation, key, value, set_options, false));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
                 let _ = response.send(result);
             }
             Command::Shutdown => break,
@@ -334,7 +391,18 @@ async fn execute(
     key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
+    raw: bool,
 ) -> FfiResult {
+    let operation = if raw {
+        match operation {
+            FfiOperation::Get => FfiOperation::RawGet,
+            FfiOperation::Set => FfiOperation::RawSet,
+            FfiOperation::Delete => FfiOperation::RawDelete,
+            operation => operation,
+        }
+    } else {
+        operation
+    };
     let result: std::result::Result<FfiResult, String> = match operation {
         FfiOperation::Ping => client
             .ping()
@@ -446,6 +514,15 @@ async fn execute(
     }
 }
 
+fn connection_state_value(state: ConnectionState) -> u32 {
+    match state {
+        ConnectionState::Connected => 0,
+        ConnectionState::Reconnecting => 1,
+        ConnectionState::Disconnected => 2,
+        ConnectionState::Closed => 3,
+    }
+}
+
 fn set_result(outcome: SetOutcome) -> FfiResult {
     FfiResult::success(
         match outcome {
@@ -521,6 +598,7 @@ pub unsafe extern "C" fn openkache_client_connect(
             compression_level,
             minimum_input_size,
             minimum_savings,
+            0,
             connect_timeout_ms,
             request_timeout_ms,
             256,
@@ -580,12 +658,107 @@ pub unsafe extern "C" fn openkache_client_connect_v2(
             compression_level,
             minimum_input_size,
             minimum_savings,
+            0,
             connect_timeout_ms,
             request_timeout_ms,
             usize::try_from(max_in_flight)
                 .map_err(|_| "max_in_flight exceeds the native platform limit".to_string())?,
             usize::try_from(retry_max_attempts)
                 .map_err(|_| "retry_max_attempts exceeds the native platform limit".to_string())?,
+        )
+    }))
+}
+
+/// Connects a native client with the complete shared-core configuration.
+///
+/// Zero retry and lane limits select the shared-core defaults. Encryption `0`
+/// and `2` select Robust; encryption `1` selects Compact.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_ex(
+    address: *const u8,
+    address_length: usize,
+    server_name: *const u8,
+    server_name_length: usize,
+    certificate: *const u8,
+    certificate_length: usize,
+    client_certificate_chain: *const u8,
+    client_certificate_chain_length: usize,
+    client_private_key: *const u8,
+    client_private_key_length: usize,
+    data_protection_key: *const u8,
+    data_protection_key_length: usize,
+    compression_enabled: u8,
+    compression_level: i32,
+    minimum_input_size: usize,
+    minimum_savings: usize,
+    encryption: u32,
+    retry_max_attempts: usize,
+    max_in_flight: usize,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        connect_impl(
+            address,
+            address_length,
+            server_name,
+            server_name_length,
+            certificate,
+            certificate_length,
+            client_certificate_chain,
+            client_certificate_chain_length,
+            client_private_key,
+            client_private_key_length,
+            data_protection_key,
+            data_protection_key_length,
+            compression_enabled,
+            compression_level,
+            minimum_input_size,
+            minimum_savings,
+            encryption,
+            connect_timeout_ms,
+            request_timeout_ms,
+            max_in_flight,
+            retry_max_attempts,
+        )
+    }))
+}
+
+/// Connects using a caller-owned options structure.
+///
+/// The structure is copied before this function returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_with_options(
+    options: *const FfiConnectOptions,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "connect options pointer must not be null".to_string())?
+        };
+        connect_impl(
+            options.address,
+            options.address_length,
+            options.server_name,
+            options.server_name_length,
+            options.certificate,
+            options.certificate_length,
+            options.client_certificate_chain,
+            options.client_certificate_chain_length,
+            options.client_private_key,
+            options.client_private_key_length,
+            options.data_protection_key,
+            options.data_protection_key_length,
+            options.compression_enabled,
+            options.compression_level,
+            options.minimum_input_size,
+            options.minimum_savings,
+            options.encryption,
+            options.connect_timeout_ms,
+            options.request_timeout_ms,
+            options.max_in_flight,
+            options.retry_max_attempts,
         )
     }))
 }
@@ -608,6 +781,7 @@ fn connect_impl(
     compression_level: i32,
     minimum_input_size: usize,
     minimum_savings: usize,
+    encryption: u32,
     connect_timeout_ms: u64,
     request_timeout_ms: u64,
     max_in_flight: usize,
@@ -619,9 +793,6 @@ fn connect_impl(
         .map_err(|error| format!("invalid server address: {error}"))?;
     let server_name = copy_utf8(server_name, server_name_length, "server name")?;
     let certificate = copy_bytes(certificate, certificate_length, "certificate")?;
-    if certificate.is_empty() {
-        return Err("certificate must not be empty".to_string());
-    }
     let identity = copy_identity(
         client_certificate_chain,
         client_certificate_chain_length,
@@ -639,15 +810,24 @@ fn connect_impl(
             minimum_savings,
         })
     };
+    let encryption = match encryption {
+        0 | 2 => Encryption::Robust,
+        1 => Encryption::Compact,
+        encryption => return Err(format!("unsupported encryption profile {encryption}")),
+    };
     if connect_timeout_ms == 0 || request_timeout_ms == 0 {
         return Err("client timeouts must be greater than zero milliseconds".to_string());
     }
-    if max_in_flight == 0 {
-        return Err("max_in_flight must be greater than zero".to_string());
-    }
-    if retry_max_attempts == 0 {
-        return Err("retry_max_attempts must be greater than zero".to_string());
-    }
+    let max_in_flight = if max_in_flight == 0 {
+        crate::DEFAULT_MAX_IN_FLIGHT
+    } else {
+        max_in_flight
+    };
+    let retry_max_attempts = if retry_max_attempts == 0 {
+        RetryPolicy::default().max_attempts
+    } else {
+        retry_max_attempts
+    };
     let timeouts = ClientTimeouts {
         connect: Duration::from_millis(connect_timeout_ms),
         request: Duration::from_millis(request_timeout_ms),
@@ -659,6 +839,7 @@ fn connect_impl(
         identity,
         data_protection_key,
         compression,
+        encryption,
         timeouts,
         max_in_flight,
         retry_max_attempts,
@@ -685,6 +866,62 @@ pub unsafe extern "C" fn openkache_client_execute(
     ttl_enabled: u8,
     ttl_ms: u64,
 ) -> *mut FfiResult {
+    execute_entry(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+        false,
+    )
+}
+
+/// Executes one exact-item-ID operation without application-key protection.
+///
+/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_raw(
+    client: *const FfiClient,
+    operation: u32,
+    item_id: *const u8,
+    item_id_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    execute_entry(
+        client,
+        operation,
+        item_id,
+        item_id_length,
+        value,
+        value_length,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_entry(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+    raw: bool,
+) -> *mut FfiResult {
     boxed_result(catch_result(|| {
         let client = unsafe {
             client
@@ -696,6 +933,16 @@ pub unsafe extern "C" fn openkache_client_execute(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
+        let operation = if raw {
+            match operation {
+                FfiOperation::Get => FfiOperation::RawGet,
+                FfiOperation::Set => FfiOperation::RawSet,
+                FfiOperation::Delete => FfiOperation::RawDelete,
+                operation => operation,
+            }
+        } else {
+            operation
+        };
         let condition = match FfiSetCondition::try_from(set_condition)
             .map_err(|condition| format!("unsupported SET condition {condition}"))?
         {
@@ -729,6 +976,15 @@ pub unsafe extern "C" fn openkache_client_execute(
             {
                 Err(format!(
                     "raw item ID must contain exactly {} bytes, got {}",
+                    crate::ITEM_ID_BYTES,
+                    application_key.len()
+                ))
+            }
+            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                if raw && application_key.len() != crate::ITEM_ID_BYTES =>
+            {
+                Err(format!(
+                    "item ID must contain exactly {} bytes, got {}",
                     crate::ITEM_ID_BYTES,
                     application_key.len()
                 ))
@@ -775,6 +1031,14 @@ pub unsafe extern "C" fn openkache_client_execute(
             _ => Ok(client.execute(operation, application_key, value, set_options)),
         }
     }))
+}
+
+/// Returns a best-effort connection-state discriminator:
+/// `0` connected, `1` reconnecting, `2` disconnected, `3` closed, and `4`
+/// for a null handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
+    unsafe { client.as_ref() }.map_or(4, |client| client.state.load(Ordering::Acquire))
 }
 
 /// Returns an FFI result discriminator.

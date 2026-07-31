@@ -8,7 +8,11 @@ use crate::error::{KvError, Result};
 
 #[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
 use std::arch::x86_64::*;
-#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "linux",
+    not(feature = "force-scalar")
+))]
 use std::arch::{aarch64::*, is_aarch64_feature_detected};
 
 /// Candidate storage location encoded in a Table Entry.
@@ -137,7 +141,11 @@ fn select_one(bits: u128, rank: usize) -> usize {
         return unsafe { select_one_bmi2(bits, rank) };
     }
 
-    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        not(feature = "force-scalar")
+    ))]
     if is_aarch64_feature_detected!("sve2-bitperm") {
         return unsafe { select_one_sve2_bitperm(bits, rank) };
     }
@@ -165,7 +173,11 @@ unsafe fn select_one_bmi2(bits: u128, rank: usize) -> usize {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "linux",
+    not(feature = "force-scalar")
+))]
 #[target_feature(enable = "sve,sve2,sve2-bitperm")]
 unsafe fn select_one_sve2_bitperm(bits: u128, rank: usize) -> usize {
     let low = bits as u64;
