@@ -26,7 +26,7 @@ formats or protocol behavior.
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
-| Python | `python/` | Package scaffold |
+| Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
@@ -40,7 +40,8 @@ and reserved source layouts only. They do not connect to OpenKache or expose
 cache operations yet.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
-format v1. The core owns Raw and canonical JSON serialization. TypeScript's
+format v1. The core owns Raw and canonical JSON serialization; language
+adapters convert native values into that shared logical model. TypeScript's
 legacy metadata envelope remains a package-level compatibility detail; new
 cross-language values should use its `set_json`/`get_json` API.
 
@@ -78,7 +79,7 @@ package structure only.
 | Go | `go vet ./... && go build ./...` | `doc.go` |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
-| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |
+| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
 
 Native linkage for C and C++ is supplied by the `ffi` native library built

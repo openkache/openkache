@@ -1,9 +1,6 @@
-//! Stable C ABI shared by native language bindings.
-//!
-//! The ABI owns one Compio runtime and one protected client per native handle.  C, C++, and
-//! other native bindings only marshal buffers and interpret result discriminators; connection
-//! management, retries, protocol framing, and value protection remain in this crate.
+//! Stable C ABI for native client integrations.
 
+use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
@@ -13,168 +10,123 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openkache_protocol::Opcode;
+use openkache_protocol::{
+    FFI_ABI_VERSION, FFI_OPERATION_GET_JSON, FFI_OPERATION_RAW_DELETE, FFI_OPERATION_RAW_GET,
+    FFI_OPERATION_RAW_SET, FFI_OPERATION_RECONNECT, FFI_OPERATION_SET_JSON, FFI_OPERATION_STATE,
+    FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
+    FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK,
+    FFI_RESULT_REPLACED, FFI_RESULT_STATE, FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT,
+    FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode,
+};
+use serde::Deserialize;
 
-use crate::value::{Compression, Encryption, ZstandardOptions};
+use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
     Endpoint, GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, RetryPolicy,
     ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 
-/// Version of the native ABI represented by these declarations.
-pub const ABI_VERSION: u32 = 1;
-
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
-/// Discriminator returned by an operation result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 #[repr(u32)]
-#[non_exhaustive]
-pub enum FfiResultKind {
-    /// The operation failed; the payload is UTF-8 diagnostic text.
-    Error = 0,
-    /// The operation completed without a value.
-    Ok = 1,
-    /// The payload contains an owned operation value.
-    Value = 2,
-    /// A lookup found no value.
-    NotFound = 3,
-    /// A conditional or unconditional set created a value.
-    Created = 4,
-    /// An unconditional or conditional set replaced a value.
-    Replaced = 5,
-    /// A delete removed a value.
-    Deleted = 6,
-    /// A delete found no value.
-    NotDeleted = 7,
-    /// A connect operation returned a client handle in the result.
-    Connected = 8,
-    /// A conditional set did not change a value.
-    NotStored = 9,
+enum FfiResultKind {
+    Error = FFI_RESULT_ERROR,
+    Ok = FFI_RESULT_OK,
+    Value = FFI_RESULT_VALUE,
+    NotFound = FFI_RESULT_NOT_FOUND,
+    Created = FFI_RESULT_CREATED,
+    Replaced = FFI_RESULT_REPLACED,
+    Deleted = FFI_RESULT_DELETED,
+    NotDeleted = FFI_RESULT_NOT_DELETED,
+    Connected = FFI_RESULT_CONNECTED,
+    NotStored = FFI_RESULT_NOT_STORED,
+    State = FFI_RESULT_STATE,
 }
 
-/// Operation accepted by [`openkache_client_execute`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiOperation {
-    /// Verify the connection.
-    Ping = Opcode::Ping as u32,
-    /// Retrieve one protected value.
-    Get = Opcode::Get as u32,
-    /// Store one protected value.
-    Set = Opcode::Set as u32,
-    /// Remove one protected value.
-    Delete = Opcode::Delete as u32,
-    /// Return server statistics.
-    Stats = Opcode::Stats as u32,
-    /// Wait for the server durability barrier.
-    Sync = Opcode::Sync as u32,
-    /// Explicitly reconnect without replaying a request.
-    Reconnect = 0xffff_ff01,
+/// Native connection options passed by C and C++ bindings.
+#[repr(C)]
+pub struct FfiConnectOptions {
+    pub address: *const u8,
+    pub address_length: usize,
+    pub server_name: *const u8,
+    pub server_name_length: usize,
+    pub certificate: *const u8,
+    pub certificate_length: usize,
+    pub client_certificate_chain: *const u8,
+    pub client_certificate_chain_length: usize,
+    pub client_private_key: *const u8,
+    pub client_private_key_length: usize,
+    pub data_protection_key: *const u8,
+    pub data_protection_key_length: usize,
+    pub compression_enabled: u8,
+    pub compression_level: i32,
+    pub minimum_input_size: usize,
+    pub minimum_savings: usize,
+    pub encryption: u32,
+    pub connect_timeout_ms: u64,
+    pub request_timeout_ms: u64,
+    pub retry_max_attempts: usize,
+    pub max_in_flight: usize,
 }
 
-impl TryFrom<u32> for FfiOperation {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            value if value == Self::Ping as u32 => Ok(Self::Ping),
-            value if value == Self::Get as u32 => Ok(Self::Get),
-            value if value == Self::Set as u32 => Ok(Self::Set),
-            value if value == Self::Delete as u32 => Ok(Self::Delete),
-            value if value == Self::Stats as u32 => Ok(Self::Stats),
-            value if value == Self::Sync as u32 => Ok(Self::Sync),
-            value if value == Self::Reconnect as u32 => Ok(Self::Reconnect),
-            value => Err(value),
+macro_rules! ffi_input_enum {
+    (
+        enum $name:ident {
+            $($variant:ident = $value:expr),+ $(,)?
         }
+    ) => {
+        #[derive(Clone, Copy)]
+        #[repr(u32)]
+        enum $name {
+            $($variant = $value),+
+        }
+
+        impl TryFrom<u32> for $name {
+            type Error = u32;
+
+            fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
+                match value {
+                    $(value if value == Self::$variant as u32 => Ok(Self::$variant),)+
+                    _ => Err(value),
+                }
+            }
+        }
+    };
+}
+
+ffi_input_enum! {
+    enum FfiOperation {
+        Ping = Opcode::Ping as u32,
+        Get = Opcode::Get as u32,
+        Set = Opcode::Set as u32,
+        Delete = Opcode::Delete as u32,
+        Stats = Opcode::Stats as u32,
+        Sync = Opcode::Sync as u32,
+        GetJson = FFI_OPERATION_GET_JSON,
+        SetJson = FFI_OPERATION_SET_JSON,
+        Reconnect = FFI_OPERATION_RECONNECT,
+        State = FFI_OPERATION_STATE,
+        RawGet = FFI_OPERATION_RAW_GET,
+        RawSet = FFI_OPERATION_RAW_SET,
+        RawDelete = FFI_OPERATION_RAW_DELETE,
     }
 }
 
-/// Existence condition accepted by [`openkache_client_execute`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiSetCondition {
-    /// Always store the supplied value.
-    None = 0,
-    /// Store only when the key is absent.
-    IfAbsent = 1,
-    /// Store only when the key is present.
-    IfPresent = 2,
-}
-
-impl TryFrom<u32> for FfiSetCondition {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            value if value == Self::None as u32 => Ok(Self::None),
-            value if value == Self::IfAbsent as u32 => Ok(Self::IfAbsent),
-            value if value == Self::IfPresent as u32 => Ok(Self::IfPresent),
-            value => Err(value),
-        }
+ffi_input_enum! {
+enum FfiSetCondition {
+    None = FFI_SET_CONDITION_NONE,
+    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
+    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
     }
 }
 
-/// Opaque result allocated by the native ABI.
+/// Opaque result allocated by the FFI boundary.
 pub struct FfiResult {
     kind: FfiResultKind,
     payload: Vec<u8>,
     client: Option<Box<FfiClient>>,
-}
-
-/// Native connection options passed to [`openkache_client_connect_ex`].
-///
-/// Every pointer/length pair is copied before the function returns. A zero
-/// length selects the default for optional numeric settings. `encryption` is
-/// zero for Robust, one for Compact, and two for Robust explicitly.
-#[repr(C)]
-pub struct FfiConnectOptions {
-    /// UTF-8 host and UDP port such as `127.0.0.1:4433` or `cache.example.com:4433`.
-    pub address: *const u8,
-    /// Byte length of [`Self::address`].
-    pub address_length: usize,
-    /// UTF-8 TLS server name.
-    pub server_name: *const u8,
-    /// Byte length of [`Self::server_name`].
-    pub server_name_length: usize,
-    /// One DER certificate or a PEM certificate chain used as server trust. An empty buffer uses
-    /// the platform/system trust roots.
-    pub certificate: *const u8,
-    /// Byte length of [`Self::certificate`].
-    pub certificate_length: usize,
-    /// Optional PEM/DER client certificate chain for mutual TLS.
-    pub client_certificate_chain: *const u8,
-    /// Byte length of [`Self::client_certificate_chain`].
-    pub client_certificate_chain_length: usize,
-    /// Optional DER/PEM client private key for mutual TLS.
-    pub client_private_key: *const u8,
-    /// Byte length of [`Self::client_private_key`].
-    pub client_private_key_length: usize,
-    /// Exact 32-byte application data-protection key.
-    pub data_protection_key: *const u8,
-    /// Byte length of [`Self::data_protection_key`].
-    pub data_protection_key_length: usize,
-    /// Non-zero to enable Zstandard compression.
-    pub compression_enabled: u8,
-    /// Zstandard level, validated by the shared value codec.
-    pub compression_level: i32,
-    /// Minimum serialized input size eligible for compression.
-    pub minimum_input_size: usize,
-    /// Minimum compressed-byte savings required.
-    pub minimum_savings: usize,
-    /// Value encryption profile: zero/default or two for Robust, one for Compact.
-    pub encryption: u32,
-    /// Connection establishment timeout in milliseconds.
-    pub connect_timeout_ms: u64,
-    /// Complete request timeout in milliseconds.
-    pub request_timeout_ms: u64,
-    /// Maximum response-safe retry attempts; zero selects the core default.
-    pub retry_max_attempts: usize,
-    /// Maximum in-flight lanes; zero selects the core default.
-    pub max_in_flight: usize,
 }
 
 /// Opaque native handle to a dedicated Rust client worker.
@@ -189,10 +141,9 @@ pub struct FfiClient {
 enum Command {
     Execute {
         operation: FfiOperation,
-        application_key: Vec<u8>,
+        key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
-        raw: bool,
         response: SyncSender<FfiResult>,
     },
     Shutdown,
@@ -202,16 +153,16 @@ type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
 type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 
 struct WorkerOptions {
-    endpoint: Endpoint,
+    address: SocketAddr,
+    server_name: String,
     certificate: Vec<u8>,
+    identity: Option<ClientIdentity>,
     data_protection_key: DataProtectionKey,
-    client_certificate_chain: Vec<u8>,
-    client_private_key: Vec<u8>,
     compression: Compression,
     encryption: Encryption,
     timeouts: ClientTimeouts,
-    retry: RetryPolicy,
     max_in_flight: usize,
+    retry_max_attempts: usize,
 }
 
 impl FfiResult {
@@ -241,20 +192,7 @@ impl FfiResult {
 }
 
 impl FfiClient {
-    // The argument list mirrors the stable native connection contract.
-    #[allow(clippy::too_many_arguments)]
-    fn connect(
-        endpoint: Endpoint,
-        certificate: Vec<u8>,
-        data_protection_key: DataProtectionKey,
-        client_certificate_chain: Vec<u8>,
-        client_private_key: Vec<u8>,
-        compression: Compression,
-        encryption: Encryption,
-        timeouts: ClientTimeouts,
-        retry: RetryPolicy,
-        max_in_flight: usize,
-    ) -> std::result::Result<Self, String> {
+    fn connect(options: WorkerOptions) -> std::result::Result<Self, String> {
         let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -263,20 +201,9 @@ impl FfiClient {
             ConnectionState::Reconnecting,
         )));
         let worker_state = Arc::clone(&state);
-        let options = WorkerOptions {
-            endpoint,
-            certificate,
-            data_protection_key,
-            client_certificate_chain,
-            client_private_key,
-            compression,
-            encryption,
-            timeouts,
-            retry,
-            max_in_flight,
-        };
+        let request_timeout = options.timeouts.request;
         let worker = thread::Builder::new()
-            .name("openkache-client".to_owned())
+            .name("openkache-client".to_string())
             .spawn(move || {
                 run_worker(
                     receiver,
@@ -284,14 +211,14 @@ impl FfiClient {
                     options,
                     worker_shutdown,
                     worker_state,
-                )
+                );
             })
             .map_err(|error| format!("failed to start client worker: {error}"))?;
 
         match ready_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 commands,
-                request_timeout: timeouts.request,
+                request_timeout,
                 shutdown,
                 state,
                 worker: Mutex::new(Some(worker)),
@@ -315,7 +242,6 @@ impl FfiClient {
         application_key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
-        raw: bool,
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
@@ -323,10 +249,9 @@ impl FfiClient {
         };
         let command = Command::Execute {
             operation,
-            application_key,
+            key: application_key,
             value,
             set_options,
-            raw,
             response,
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -338,10 +263,6 @@ impl FfiClient {
             FfiResult::error(format!("client operation timed out: {error}"))
         })
     }
-
-    fn connection_state(&self) -> u32 {
-        self.state.load(Ordering::Acquire)
-    }
 }
 
 impl Drop for FfiClient {
@@ -351,7 +272,11 @@ impl Drop for FfiClient {
             Ordering::Release,
         );
         self.shutdown.store(true, Ordering::Release);
-        let _ = self.commands.try_send(Command::Shutdown);
+        // A non-blocking send can lose the shutdown marker when the bounded
+        // queue is full. In that case the worker would drain the queue and
+        // wait for another command while this destructor joins it forever.
+        // Wait for one slot so the marker is guaranteed to reach the worker.
+        let _ = self.commands.send(Command::Shutdown);
         if let Ok(worker) = self.worker.get_mut()
             && let Some(worker) = worker.take()
         {
@@ -368,16 +293,16 @@ fn run_worker(
     state: Arc<AtomicU32>,
 ) {
     let WorkerOptions {
-        endpoint,
+        address,
+        server_name,
         certificate,
+        identity,
         data_protection_key,
-        client_certificate_chain,
-        client_private_key,
         compression,
         encryption,
         timeouts,
-        retry,
         max_in_flight,
+        retry_max_attempts,
     } = options;
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -388,16 +313,25 @@ fn run_worker(
     };
     if !runtime.driver_type().is_iouring() {
         let _ = ready.send(Err(
-            "OpenKache native client requires the Compio io_uring driver".to_owned(),
+            "OpenKache client requires the Compio io_uring driver".to_string()
         ));
         return;
     }
+    let endpoint = match Endpoint::from_socket_addr(address, server_name) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            return;
+        }
+    };
     let mut builder = LocalProtectedClient::builder(endpoint, data_protection_key)
         .compression(compression)
         .encryption(encryption)
         .timeouts(timeouts)
-        .retry_policy(retry)
-        .max_in_flight(max_in_flight);
+        .max_in_flight(max_in_flight)
+        .retry_policy(RetryPolicy {
+            max_attempts: retry_max_attempts,
+        });
     if !certificate.is_empty() {
         let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
             Ok(certificates) => certificates,
@@ -408,29 +342,7 @@ fn run_worker(
         };
         builder = builder.server_trust(ServerTrust::Custom(certificates));
     }
-    if !client_certificate_chain.is_empty() || !client_private_key.is_empty() {
-        let certificate_chain = match Certificate::from_der_or_pem_chain(&client_certificate_chain)
-        {
-            Ok(certificate_chain) => certificate_chain,
-            Err(error) => {
-                let _ = ready.send(Err(error.to_string()));
-                return;
-            }
-        };
-        let private_key = match PrivateKey::from_der_or_pem(&client_private_key) {
-            Ok(private_key) => private_key,
-            Err(error) => {
-                let _ = ready.send(Err(error.to_string()));
-                return;
-            }
-        };
-        let identity = match ClientIdentity::new(certificate_chain, private_key) {
-            Ok(identity) => identity,
-            Err(error) => {
-                let _ = ready.send(Err(error.to_string()));
-                return;
-            }
-        };
+    if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
     let client = match runtime.block_on(builder.connect()) {
@@ -455,23 +367,13 @@ fn run_worker(
         match command {
             Command::Execute {
                 operation,
-                application_key,
+                key,
                 value,
                 set_options,
-                raw,
                 response,
             } => {
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.block_on(execute(
-                        &client,
-                        operation,
-                        application_key,
-                        value,
-                        set_options,
-                        raw,
-                    ))
-                }))
-                .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
+                let result =
+                    runtime.block_on(execute(&client, operation, key, value, set_options, false));
                 state.store(
                     connection_state_value(client.connection_state()),
                     Ordering::Release,
@@ -486,134 +388,129 @@ fn run_worker(
 async fn execute(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    application_key: Vec<u8>,
+    key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
 ) -> FfiResult {
-    let result = if raw {
-        execute_raw(client, operation, application_key, value, set_options).await
-    } else {
-        execute_protected(client, operation, application_key, value, set_options).await
-    };
-    result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
-}
-
-async fn execute_protected(
-    client: &LocalProtectedClient,
-    operation: FfiOperation,
-    application_key: Vec<u8>,
-    value: Vec<u8>,
-    set_options: SetOptions,
-) -> std::result::Result<FfiResult, crate::Error> {
-    match operation {
-        FfiOperation::Ping => client
-            .ping()
-            .await
-            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Get => client.get(&application_key).await.map(|value| match value {
-            GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
-            GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
-        }),
-        FfiOperation::Set => {
-            client
-                .set(&application_key, value, set_options)
-                .await
-                .map(|outcome| match outcome {
-                    SetOutcome::Created => FfiResult::success(FfiResultKind::Created, Vec::new()),
-                    SetOutcome::Replaced => FfiResult::success(FfiResultKind::Replaced, Vec::new()),
-                    SetOutcome::NotStored => {
-                        FfiResult::success(FfiResultKind::NotStored, Vec::new())
-                    }
-                })
+    let operation = if raw {
+        match operation {
+            FfiOperation::Get => FfiOperation::RawGet,
+            FfiOperation::Set => FfiOperation::RawSet,
+            FfiOperation::Delete => FfiOperation::RawDelete,
+            operation => operation,
         }
-        FfiOperation::Delete => client.delete(&application_key).await.map(|deleted| {
-            FfiResult::success(
-                match deleted {
-                    DeleteOutcome::Deleted => FfiResultKind::Deleted,
-                    DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-                },
-                Vec::new(),
-            )
-        }),
-        FfiOperation::Stats => client
-            .stats()
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client
-            .sync()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Reconnect => client
-            .reconnect()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-    }
-}
-
-async fn execute_raw(
-    client: &LocalProtectedClient,
-    operation: FfiOperation,
-    item_id: Vec<u8>,
-    value: Vec<u8>,
-    set_options: SetOptions,
-) -> std::result::Result<FfiResult, crate::Error> {
-    match operation {
+    } else {
+        operation
+    };
+    let result: std::result::Result<FfiResult, String> = match operation {
         FfiOperation::Ping => client
-            .raw()
             .ping()
             .await
-            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Get => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client.raw().get(item_id).await.map(|value| match value {
-                GetOutcome::Found(value) => {
-                    FfiResult::success(FfiResultKind::Value, value.into_bytes())
-                }
+            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new()))
+            .map_err(|error| error.to_string()),
+        FfiOperation::Get => client
+            .get(&key)
+            .await
+            .map(|value| match value {
+                GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
                 GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
             })
-        }
-        FfiOperation::Set => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
+            .map_err(|error| error.to_string()),
+        FfiOperation::Set => client
+            .set(&key, value, set_options)
+            .await
+            .map(set_result)
+            .map_err(|error| error.to_string()),
+        FfiOperation::GetJson => client
+            .get_value(&key)
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(json_result),
+        FfiOperation::SetJson => match parse_json(&value) {
+            Ok(json) => client
+                .set_value(&key, Value::Json(json), set_options)
+                .await
+                .map(set_result)
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error),
+        },
+        FfiOperation::RawGet => match ItemId::from_slice(&key) {
+            Ok(item_id) => client
+                .raw()
+                .get(item_id)
+                .await
+                .map(|value| match value {
+                    GetOutcome::Found(value) => {
+                        FfiResult::success(FfiResultKind::Value, value.into_bytes())
+                    }
+                    GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
+                })
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        },
+        FfiOperation::RawSet => match ItemId::from_slice(&key) {
+            Ok(item_id) => client
                 .raw()
                 .set(item_id, ItemValue::new(value), set_options)
                 .await
-                .map(|outcome| match outcome {
-                    SetOutcome::Created => FfiResult::success(FfiResultKind::Created, Vec::new()),
-                    SetOutcome::Replaced => FfiResult::success(FfiResultKind::Replaced, Vec::new()),
-                    SetOutcome::NotStored => {
-                        FfiResult::success(FfiResultKind::NotStored, Vec::new())
-                    }
+                .map(set_result)
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        },
+        FfiOperation::RawDelete => match ItemId::from_slice(&key) {
+            Ok(item_id) => client
+                .raw()
+                .delete(item_id)
+                .await
+                .map(|outcome| {
+                    FfiResult::success(
+                        match outcome {
+                            DeleteOutcome::Deleted => FfiResultKind::Deleted,
+                            DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
+                        },
+                        Vec::new(),
+                    )
                 })
-        }
-        FfiOperation::Delete => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client.raw().delete(item_id).await.map(|deleted| {
+                .map_err(|error| error.to_string()),
+            Err(error) => Err(error.to_string()),
+        },
+        FfiOperation::Delete => client
+            .delete(&key)
+            .await
+            .map(|outcome| {
                 FfiResult::success(
-                    match deleted {
+                    match outcome {
                         DeleteOutcome::Deleted => FfiResultKind::Deleted,
                         DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
                     },
                     Vec::new(),
                 )
             })
-        }
+            .map_err(|error| error.to_string()),
         FfiOperation::Stats => client
-            .raw()
             .stats()
             .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
+            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes()))
+            .map_err(|error| error.to_string()),
         FfiOperation::Sync => client
-            .raw()
             .sync()
             .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new()))
+            .map_err(|error| error.to_string()),
         FfiOperation::Reconnect => client
-            .raw()
             .reconnect()
             .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new()))
+            .map_err(|error| error.to_string()),
+        FfiOperation::State => Ok(FfiResult::success(
+            FfiResultKind::State,
+            format!("{:?}", client.connection_state()).into_bytes(),
+        )),
+    };
+    match result {
+        Ok(result) => result,
+        Err(error) => FfiResult::error(error),
     }
 }
 
@@ -626,23 +523,46 @@ fn connection_state_value(state: ConnectionState) -> u32 {
     }
 }
 
+fn set_result(outcome: SetOutcome) -> FfiResult {
+    FfiResult::success(
+        match outcome {
+            SetOutcome::Created => FfiResultKind::Created,
+            SetOutcome::Replaced => FfiResultKind::Replaced,
+            SetOutcome::NotStored => FfiResultKind::NotStored,
+        },
+        Vec::new(),
+    )
+}
+
+fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, String> {
+    match outcome {
+        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+            .map_err(|error| error.to_string()),
+        GetOutcome::Found(Value::Raw(_)) => Err("formatted value is not JSON".to_string()),
+        GetOutcome::NotFound => Ok(FfiResult::success(FfiResultKind::NotFound, Vec::new())),
+    }
+}
+
+fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = JsonValue::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
+    deserializer.end().map_err(|error| error.to_string())?;
+    Ok(value)
+}
+
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    ABI_VERSION
+    FFI_ABI_VERSION
 }
 
-/// Connects a protected native client and returns an opaque result.
-///
-/// The address is a UTF-8 host/port authority such as `127.0.0.1:4433` or
-/// `cache.example.com:4433`. The certificate may be one DER certificate, a
-/// PEM chain, or empty to use system trust roots. The data-protection key is
-/// exactly 32 bytes. All input buffers are copied before this function returns.
+/// Connects a native client and returns an opaque result.
 ///
 /// # Safety
 ///
 /// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call.
+/// call. `data_protection_key` must contain exactly 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect(
     address: *const u8,
@@ -660,44 +580,99 @@ pub unsafe extern "C" fn openkache_client_connect(
     connect_timeout_ms: u64,
     request_timeout_ms: u64,
 ) -> *mut FfiResult {
-    let options = FfiConnectOptions {
-        address,
-        address_length,
-        server_name,
-        server_name_length,
-        certificate,
-        certificate_length,
-        data_protection_key,
-        data_protection_key_length,
-        client_certificate_chain: ptr::null(),
-        client_certificate_chain_length: 0,
-        client_private_key: ptr::null(),
-        client_private_key_length: 0,
-        compression_enabled,
-        compression_level,
-        minimum_input_size,
-        minimum_savings,
-        encryption: 0,
-        connect_timeout_ms,
-        request_timeout_ms,
-        retry_max_attempts: 0,
-        max_in_flight: 0,
-    };
-    boxed_result(catch_result(|| connect_options(&options)))
+    boxed_result(catch_result(|| {
+        connect_impl(
+            address,
+            address_length,
+            server_name,
+            server_name_length,
+            certificate,
+            certificate_length,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            data_protection_key,
+            data_protection_key_length,
+            compression_enabled,
+            compression_level,
+            minimum_input_size,
+            minimum_savings,
+            0,
+            connect_timeout_ms,
+            request_timeout_ms,
+            256,
+            2,
+        )
+    }))
 }
 
-/// Connects a protected native client using the complete shared-core configuration.
+/// Connects a native client with optional mutual-TLS identity and explicit core settings.
 ///
-/// This flat entry point is the canonical ABI used by C, C++, Swift, and
-/// other native adapters. It accepts PEM or DER trust material, optional
-/// mutual TLS identity, compression and encryption profiles, retries, and
-/// stream-lane limits. All referenced buffers are copied before this function
-/// returns.
+/// `client_certificate_chain` may contain one DER certificate or one or more PEM certificates.
+/// `client_private_key` accepts a DER or PEM PKCS#1, SEC1, or PKCS#8 private key.
 ///
 /// # Safety
 ///
-/// Every non-empty pointer/length pair must identify readable memory for the
-/// duration of this call.
+/// Every non-empty pointer/length pair must identify readable memory for the duration of this
+/// call. `data_protection_key` must contain exactly 32 bytes. `max_in_flight` and
+/// `retry_max_attempts` must be positive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_v2(
+    address: *const u8,
+    address_length: usize,
+    server_name: *const u8,
+    server_name_length: usize,
+    certificate: *const u8,
+    certificate_length: usize,
+    client_certificate_chain: *const u8,
+    client_certificate_chain_length: usize,
+    client_private_key: *const u8,
+    client_private_key_length: usize,
+    data_protection_key: *const u8,
+    data_protection_key_length: usize,
+    compression_enabled: u8,
+    compression_level: i32,
+    minimum_input_size: usize,
+    minimum_savings: usize,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
+    max_in_flight: u64,
+    retry_max_attempts: u64,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        connect_impl(
+            address,
+            address_length,
+            server_name,
+            server_name_length,
+            certificate,
+            certificate_length,
+            client_certificate_chain,
+            client_certificate_chain_length,
+            client_private_key,
+            client_private_key_length,
+            data_protection_key,
+            data_protection_key_length,
+            compression_enabled,
+            compression_level,
+            minimum_input_size,
+            minimum_savings,
+            0,
+            connect_timeout_ms,
+            request_timeout_ms,
+            usize::try_from(max_in_flight)
+                .map_err(|_| "max_in_flight exceeds the native platform limit".to_string())?,
+            usize::try_from(retry_max_attempts)
+                .map_err(|_| "retry_max_attempts exceeds the native platform limit".to_string())?,
+        )
+    }))
+}
+
+/// Connects a native client with the complete shared-core configuration.
+///
+/// Zero retry and lane limits select the shared-core defaults. Encryption `0`
+/// and `2` select Robust; encryption `1` selects Compact.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_ex(
     address: *const u8,
@@ -722,42 +697,36 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
     connect_timeout_ms: u64,
     request_timeout_ms: u64,
 ) -> *mut FfiResult {
-    let options = FfiConnectOptions {
-        address,
-        address_length,
-        server_name,
-        server_name_length,
-        certificate,
-        certificate_length,
-        data_protection_key,
-        data_protection_key_length,
-        client_certificate_chain,
-        client_certificate_chain_length,
-        client_private_key,
-        client_private_key_length,
-        compression_enabled,
-        compression_level,
-        minimum_input_size,
-        minimum_savings,
-        encryption,
-        retry_max_attempts,
-        max_in_flight,
-        connect_timeout_ms,
-        request_timeout_ms,
-    };
-    boxed_result(catch_result(|| connect_options(&options)))
+    boxed_result(catch_result(|| {
+        connect_impl(
+            address,
+            address_length,
+            server_name,
+            server_name_length,
+            certificate,
+            certificate_length,
+            client_certificate_chain,
+            client_certificate_chain_length,
+            client_private_key,
+            client_private_key_length,
+            data_protection_key,
+            data_protection_key_length,
+            compression_enabled,
+            compression_level,
+            minimum_input_size,
+            minimum_savings,
+            encryption,
+            connect_timeout_ms,
+            request_timeout_ms,
+            max_in_flight,
+            retry_max_attempts,
+        )
+    }))
 }
 
 /// Connects using a caller-owned options structure.
 ///
-/// This helper is equivalent to [`openkache_client_connect_ex`] and is
-/// separate so the flat function remains compatible with generated bindings.
-///
-/// # Safety
-///
-/// `options` must be null or point to a readable [`FfiConnectOptions`] whose
-/// non-empty pointer/length pairs identify readable memory for the duration
-/// of this call.
+/// The structure is copied before this function returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_with_options(
     options: *const FfiConnectOptions,
@@ -766,123 +735,125 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
         let options = unsafe {
             options
                 .as_ref()
-                .ok_or_else(|| "connect options pointer must not be null".to_owned())?
+                .ok_or_else(|| "connect options pointer must not be null".to_string())?
         };
-        connect_options(options)
+        connect_impl(
+            options.address,
+            options.address_length,
+            options.server_name,
+            options.server_name_length,
+            options.certificate,
+            options.certificate_length,
+            options.client_certificate_chain,
+            options.client_certificate_chain_length,
+            options.client_private_key,
+            options.client_private_key_length,
+            options.data_protection_key,
+            options.data_protection_key_length,
+            options.compression_enabled,
+            options.compression_level,
+            options.minimum_input_size,
+            options.minimum_savings,
+            options.encryption,
+            options.connect_timeout_ms,
+            options.request_timeout_ms,
+            options.max_in_flight,
+            options.retry_max_attempts,
+        )
     }))
 }
 
-fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult, String> {
-    let address = copy_utf8(options.address, options.address_length, "address")?;
-    let mut endpoint: Endpoint = address
+#[allow(clippy::too_many_arguments)]
+fn connect_impl(
+    address: *const u8,
+    address_length: usize,
+    server_name: *const u8,
+    server_name_length: usize,
+    certificate: *const u8,
+    certificate_length: usize,
+    client_certificate_chain: *const u8,
+    client_certificate_chain_length: usize,
+    client_private_key: *const u8,
+    client_private_key_length: usize,
+    data_protection_key: *const u8,
+    data_protection_key_length: usize,
+    compression_enabled: u8,
+    compression_level: i32,
+    minimum_input_size: usize,
+    minimum_savings: usize,
+    encryption: u32,
+    connect_timeout_ms: u64,
+    request_timeout_ms: u64,
+    max_in_flight: usize,
+    retry_max_attempts: usize,
+) -> std::result::Result<FfiResult, String> {
+    let address = copy_utf8(address, address_length, "address")?;
+    let address = address
         .parse()
         .map_err(|error| format!("invalid server address: {error}"))?;
-    let server_name = copy_utf8(
-        options.server_name,
-        options.server_name_length,
-        "server name",
+    let server_name = copy_utf8(server_name, server_name_length, "server name")?;
+    let certificate = copy_bytes(certificate, certificate_length, "certificate")?;
+    let identity = copy_identity(
+        client_certificate_chain,
+        client_certificate_chain_length,
+        client_private_key,
+        client_private_key_length,
     )?;
-    if !server_name.is_empty() {
-        endpoint = endpoint
-            .with_server_name(server_name)
-            .map_err(|error| error.to_string())?;
-    }
-    let certificate = copy_bytes(
-        options.certificate,
-        options.certificate_length,
-        "certificate",
-    )?;
-    let data_protection_key = copy_data_protection_key(
-        options.data_protection_key,
-        options.data_protection_key_length,
-    )?;
-    let client_certificate_chain = copy_bytes(
-        options.client_certificate_chain,
-        options.client_certificate_chain_length,
-        "client certificate chain",
-    )?;
-    let client_private_key = copy_bytes(
-        options.client_private_key,
-        options.client_private_key_length,
-        "client private key",
-    )?;
-    if client_certificate_chain.is_empty() != client_private_key.is_empty() {
-        return Err(
-            "client certificate chain and private key must be supplied together".to_owned(),
-        );
-    }
-    let compression = if options.compression_enabled == 0 {
+    let data_protection_key =
+        copy_data_protection_key(data_protection_key, data_protection_key_length)?;
+    let compression = if compression_enabled == 0 {
         Compression::Disabled
     } else {
-        let defaults = ZstandardOptions::default();
         Compression::Zstandard(ZstandardOptions {
-            level: if options.compression_level == 0 {
-                defaults.level
-            } else {
-                options.compression_level
-            },
-            minimum_input_size: if options.minimum_input_size == 0 {
-                defaults.minimum_input_size
-            } else {
-                options.minimum_input_size
-            },
-            minimum_savings: if options.minimum_savings == 0 {
-                defaults.minimum_savings
-            } else {
-                options.minimum_savings
-            },
+            level: compression_level,
+            minimum_input_size,
+            minimum_savings,
         })
     };
-    let encryption = match options.encryption {
+    let encryption = match encryption {
         0 | 2 => Encryption::Robust,
         1 => Encryption::Compact,
         encryption => return Err(format!("unsupported encryption profile {encryption}")),
     };
-    if options.connect_timeout_ms == 0 || options.request_timeout_ms == 0 {
-        return Err("client timeouts must be greater than zero milliseconds".to_owned());
+    if connect_timeout_ms == 0 || request_timeout_ms == 0 {
+        return Err("client timeouts must be greater than zero milliseconds".to_string());
     }
-    let timeouts = ClientTimeouts {
-        connect: Duration::from_millis(options.connect_timeout_ms),
-        request: Duration::from_millis(options.request_timeout_ms),
-    };
-    let retry = if options.retry_max_attempts == 0 {
-        RetryPolicy::default()
-    } else {
-        RetryPolicy {
-            max_attempts: options.retry_max_attempts,
-        }
-    };
-    let max_in_flight = if options.max_in_flight == 0 {
+    let max_in_flight = if max_in_flight == 0 {
         crate::DEFAULT_MAX_IN_FLIGHT
     } else {
-        options.max_in_flight
+        max_in_flight
     };
-    FfiClient::connect(
-        endpoint,
+    let retry_max_attempts = if retry_max_attempts == 0 {
+        RetryPolicy::default().max_attempts
+    } else {
+        retry_max_attempts
+    };
+    let timeouts = ClientTimeouts {
+        connect: Duration::from_millis(connect_timeout_ms),
+        request: Duration::from_millis(request_timeout_ms),
+    };
+    FfiClient::connect(WorkerOptions {
+        address,
+        server_name,
         certificate,
+        identity,
         data_protection_key,
-        client_certificate_chain,
-        client_private_key,
         compression,
         encryption,
         timeouts,
-        retry,
         max_in_flight,
-    )
+        retry_max_attempts,
+    })
     .map(FfiResult::connected)
 }
 
-/// Executes one protected operation through an opaque native client.
-///
-/// For `GET`, `SET`, and `DELETE`, `application_key` is the exact application key used by the
-/// shared data-protection layer. `SET` accepts an empty value and optional existence/TTL options.
-/// `PING`, `STATS`, and `SYNC` require empty key and value buffers.
+/// Executes one operation through an opaque native client.
 ///
 /// # Safety
 ///
-/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
-/// non-empty application-key/value pointer pair must identify readable memory for this call, and
-/// the client must not be freed until this call returns.
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`].
+/// Every non-empty application-key/value pointer pair must identify readable memory for this call,
+/// and the client must not be freed until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_execute(
     client: *const FfiClient,
@@ -909,19 +880,9 @@ pub unsafe extern "C" fn openkache_client_execute(
     )
 }
 
-/// Executes one exact-item-ID operation without application-key derivation or
-/// value protection.
+/// Executes one exact-item-ID operation without application-key protection.
 ///
-/// `item_id` must contain exactly `OPENKACHE_SMITHY_ITEM_ID_BYTES` bytes for
-/// `GET`, `SET`, and `DELETE`. The payload is sent and returned exactly as
-/// supplied.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by
-/// [`openkache_client_result_take_client`]. Every non-empty pointer/length
-/// pair must identify readable memory for the duration of this call, and the
-/// client must not be freed until this call returns.
+/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_execute_raw(
     client: *const FfiClient,
@@ -948,7 +909,6 @@ pub unsafe extern "C" fn openkache_client_execute_raw(
     )
 }
 
-// The argument list mirrors the stable native operation contract.
 #[allow(clippy::too_many_arguments)]
 fn execute_entry(
     client: *const FfiClient,
@@ -966,26 +926,23 @@ fn execute_entry(
         let client = unsafe {
             client
                 .as_ref()
-                .ok_or_else(|| "client pointer must not be null".to_owned())?
+                .ok_or_else(|| "client pointer must not be null".to_string())?
         };
         let application_key =
             copy_bytes(application_key, application_key_length, "application_key")?;
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw
-            && matches!(
-                operation,
-                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-            )
-            && application_key.len() != crate::ITEM_ID_BYTES
-        {
-            return Err(format!(
-                "item_id must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES,
-                application_key.len()
-            ));
-        }
+        let operation = if raw {
+            match operation {
+                FfiOperation::Get => FfiOperation::RawGet,
+                FfiOperation::Set => FfiOperation::RawSet,
+                FfiOperation::Delete => FfiOperation::RawDelete,
+                operation => operation,
+            }
+        } else {
+            operation
+        };
         let condition = match FfiSetCondition::try_from(set_condition)
             .map_err(|condition| format!("unsupported SET condition {condition}"))?
         {
@@ -1000,61 +957,95 @@ fn execute_entry(
         };
         if ttl_enabled != 0 {
             if ttl_ms == 0 {
-                return Err("SET TTL must be greater than zero milliseconds".to_owned());
+                return Err("SET TTL must be greater than zero milliseconds".to_string());
             }
             set_options = set_options.expires_after_millis(ttl_ms);
         }
         match operation {
+            FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::Delete
+                if application_key.is_empty() =>
+            {
+                Err("application key must not be empty".to_string())
+            }
+            FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete
+                if application_key.len() != crate::ITEM_ID_BYTES =>
+            {
+                Err(format!(
+                    "raw item ID must contain exactly {} bytes, got {}",
+                    crate::ITEM_ID_BYTES,
+                    application_key.len()
+                ))
+            }
+            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                if raw && application_key.len() != crate::ITEM_ID_BYTES =>
+            {
+                Err(format!(
+                    "item ID must contain exactly {} bytes, got {}",
+                    crate::ITEM_ID_BYTES,
+                    application_key.len()
+                ))
+            }
             FfiOperation::Ping
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
+            | FfiOperation::State
                 if !application_key.is_empty() =>
             {
-                Err("operation does not accept an application key".to_owned())
+                Err("operation does not accept an application key".to_string())
             }
             FfiOperation::Ping
             | FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::GetJson
+            | FfiOperation::SetJson
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
-                if !value.is_empty() =>
+            | FfiOperation::State
+            | FfiOperation::RawGet
+            | FfiOperation::RawSet
+            | FfiOperation::RawDelete
+                if !value.is_empty()
+                    && !matches!(
+                        operation,
+                        FfiOperation::Set | FfiOperation::SetJson | FfiOperation::RawSet
+                    ) =>
             {
-                Err("operation does not accept a value".to_owned())
+                Err("operation does not accept a value".to_string())
             }
             operation
-                if !matches!(operation, FfiOperation::Set)
-                    && (set_options.condition() != SetCondition::None
-                        || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(
+                    operation,
+                    FfiOperation::Set | FfiOperation::SetJson | FfiOperation::RawSet
+                ) && (set_options.condition() != SetCondition::None
+                    || set_options.time_to_live_millis().is_some()) =>
             {
-                Err("SET options require a SET operation".to_owned())
+                Err("SET options require a SET operation".to_string())
             }
-            _ => Ok(client.execute(operation, application_key, value, set_options, raw)),
+            _ => Ok(client.execute(operation, application_key, value, set_options)),
         }
     }))
 }
 
 /// Returns a best-effort connection-state discriminator:
 /// `0` connected, `1` reconnecting, `2` disconnected, `3` closed, and `4`
-/// unknown for a null or invalid handle.
-///
-/// # Safety
-///
-/// `client` must be null or a live pointer returned by
-/// [`openkache_client_result_take_client`].
+/// for a null handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
-    unsafe { client.as_ref() }.map_or(4, FfiClient::connection_state)
+    unsafe { client.as_ref() }.map_or(4, |client| client.state.load(Ordering::Acquire))
 }
 
 /// Returns an FFI result discriminator.
 ///
-/// A null result is treated as [`FfiResultKind::Error`].
-///
 /// # Safety
 ///
-/// `result` must be null or a live pointer returned by this library.
+/// `result` must be a live pointer returned by this library.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_kind(result: *const FfiResult) -> u32 {
     unsafe { result.as_ref() }.map_or(FfiResultKind::Error as u32, |result| result.kind as u32)
@@ -1062,11 +1053,9 @@ pub unsafe extern "C" fn openkache_client_result_kind(result: *const FfiResult) 
 
 /// Returns a borrowed pointer to an FFI result payload.
 ///
-/// The pointer remains valid until `result` is freed.
-///
 /// # Safety
 ///
-/// `result` must be null or a live pointer returned by this library.
+/// `result` must be live, and the returned pointer must not be used after freeing that result.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_data(result: *const FfiResult) -> *const u8 {
     let Some(result) = (unsafe { result.as_ref() }) else {
@@ -1083,7 +1072,7 @@ pub unsafe extern "C" fn openkache_client_result_data(result: *const FfiResult) 
 ///
 /// # Safety
 ///
-/// `result` must be null or a live pointer returned by this library.
+/// `result` must be a live pointer returned by this library.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_data_length(result: *const FfiResult) -> usize {
     unsafe { result.as_ref() }.map_or(0, |result| result.payload.len())
@@ -1091,12 +1080,10 @@ pub unsafe extern "C" fn openkache_client_result_data_length(result: *const FfiR
 
 /// Moves a connected client handle out of an FFI result.
 ///
-/// The result remains valid and may be freed after this function returns. Calling this function
-/// more than once returns null.
-///
 /// # Safety
 ///
-/// `result` must be null or a unique, live pointer returned by [`openkache_client_connect`].
+/// `result` must be a unique, live pointer returned by [`openkache_client_connect`]. This function
+/// may be called at most once for a connected result.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_take_client(
     result: *mut FfiResult,
@@ -1164,6 +1151,35 @@ fn copy_data_protection_key(
     }
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
     DataProtectionKey::from_slice(bytes).map_err(|error| error.to_string())
+}
+
+fn copy_identity(
+    certificate_chain: *const u8,
+    certificate_chain_length: usize,
+    private_key: *const u8,
+    private_key_length: usize,
+) -> std::result::Result<Option<ClientIdentity>, String> {
+    if certificate_chain_length == 0 && private_key_length == 0 {
+        return Ok(None);
+    }
+    if certificate_chain_length == 0 || private_key_length == 0 {
+        return Err(
+            "client certificate chain and private key must be supplied together".to_string(),
+        );
+    }
+    let certificate_bytes = copy_bytes(
+        certificate_chain,
+        certificate_chain_length,
+        "client certificate chain",
+    )?;
+    let certificates = Certificate::from_der_or_pem_chain(&certificate_bytes)
+        .map_err(|error| error.to_string())?;
+    let private_key_bytes = copy_bytes(private_key, private_key_length, "client private key")?;
+    let private_key =
+        PrivateKey::from_der_or_pem(&private_key_bytes).map_err(|error| error.to_string())?;
+    ClientIdentity::new(certificates, private_key)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn copy_bytes(

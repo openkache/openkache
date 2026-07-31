@@ -21,10 +21,10 @@ The main API layers are:
 - reusable configuration, key, protection, and value types for binding
   adapters;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
-  and other synchronous native adapters.
+  ctypes, and other synchronous native adapters.
 
-The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
-adapter depends on this core directly.
+The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's and
+Python's native adapters depend on this core directly.
 
 ## Related documentation
 
@@ -128,6 +128,8 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
+- `src/ffi.rs` provides the optional C ABI without duplicating protocol logic
+  in each language adapter.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
