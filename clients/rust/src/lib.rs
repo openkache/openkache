@@ -33,6 +33,101 @@ use openkache_client_core::{
 #[cfg(feature = "quic-quinn")]
 pub use openkache_client_core::{RawClient, RawClientBuilder};
 
+fn smithy_set_options(
+    condition: Option<smithy::SetCondition>,
+    ttl_milliseconds: Option<i64>,
+) -> Result<SetOptions> {
+    let mut options = match condition {
+        None => SetOptions::new(),
+        Some(smithy::SetCondition::IfAbsent) => SetOptions::new().if_absent(),
+        Some(smithy::SetCondition::IfPresent) => SetOptions::new().if_present(),
+    };
+    if let Some(ttl_milliseconds) = ttl_milliseconds {
+        let ttl_milliseconds =
+            u64::try_from(ttl_milliseconds).map_err(|_| Error::Configuration {
+                field: "set.ttl_milliseconds",
+                message: "must be a positive 64-bit millisecond count".into(),
+            })?;
+        options = options.expires_after_millis(ttl_milliseconds);
+    }
+    Ok(options)
+}
+
+macro_rules! impl_smithy_api {
+    ($client:ident) => {
+        impl smithy::OpenKacheApi for $client {
+            type Error = Error;
+
+            async fn ping(
+                &self,
+                _input: smithy::PingInput,
+            ) -> std::result::Result<smithy::PingOutput, Self::Error> {
+                $client::ping(self).await?;
+                Ok(smithy::PingOutput)
+            }
+
+            async fn get(
+                &self,
+                input: smithy::GetInput,
+            ) -> std::result::Result<smithy::GetOutput, Self::Error> {
+                let item_id = ItemId::from_slice(&input.item_id)?;
+                let value = match $client::get(self, item_id).await? {
+                    GetOutcome::Found(value) => Some(value.into_bytes()),
+                    GetOutcome::NotFound => None,
+                };
+                Ok(smithy::GetOutput { value })
+            }
+
+            async fn set(
+                &self,
+                input: smithy::SetInput,
+            ) -> std::result::Result<smithy::SetOutput, Self::Error> {
+                let item_id = ItemId::from_slice(&input.item_id)?;
+                let options = smithy_set_options(input.condition, input.ttl_milliseconds)?;
+                let outcome =
+                    $client::set(self, item_id, ItemValue::new(input.value), options).await?;
+                let outcome = match outcome {
+                    SetOutcome::Created => smithy::SetOutcome::Created,
+                    SetOutcome::Replaced => smithy::SetOutcome::Replaced,
+                    SetOutcome::NotStored => smithy::SetOutcome::NotStored,
+                };
+                Ok(smithy::SetOutput { outcome })
+            }
+
+            async fn delete(
+                &self,
+                input: smithy::DeleteInput,
+            ) -> std::result::Result<smithy::DeleteOutput, Self::Error> {
+                let item_id = ItemId::from_slice(&input.item_id)?;
+                let deleted = $client::delete(self, item_id).await? == DeleteOutcome::Deleted;
+                Ok(smithy::DeleteOutput { deleted })
+            }
+
+            async fn stats(
+                &self,
+                _input: smithy::StatsInput,
+            ) -> std::result::Result<smithy::StatsOutput, Self::Error> {
+                let json = $client::stats(self).await?;
+                Ok(smithy::StatsOutput { json })
+            }
+
+            async fn sync(
+                &self,
+                _input: smithy::SyncInput,
+            ) -> std::result::Result<smithy::SyncOutput, Self::Error> {
+                $client::sync(self).await?;
+                Ok(smithy::SyncOutput)
+            }
+        }
+    };
+}
+
+#[cfg(feature = "quic-quinn")]
+impl_smithy_api!(RawClient);
+
+#[cfg(feature = "quic-compio")]
+impl_smithy_api!(LocalRawClient);
+
 macro_rules! builder_methods {
     ($builder:ident) => {
         impl $builder {
@@ -111,9 +206,27 @@ macro_rules! client_methods {
                 self.inner.get(application_key).await
             }
 
+            /// Retrieves and decodes a value in the shared logical value model.
+            pub async fn get_value(
+                &self,
+                application_key: impl AsRef<[u8]>,
+            ) -> Result<GetOutcome<value::Value>> {
+                self.inner.get_value(application_key).await
+            }
+
             /// Deletes a value for arbitrary application key bytes.
             pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
                 self.inner.delete(application_key).await
+            }
+
+            /// Serializes, protects, and stores a value in the shared logical value model.
+            pub async fn set_value(
+                &self,
+                application_key: impl AsRef<[u8]>,
+                value: value::Value,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.inner.set_value(application_key, value, options).await
             }
 
             /// Returns server statistics as their JSON text.
@@ -195,11 +308,21 @@ impl Client {
         application_key: impl AsRef<[u8]>,
         value: impl IntoValue,
     ) -> SetRequest<'a> {
+        self.set_with_options(application_key, value, SetOptions::new())
+    }
+
+    /// Starts an awaitable set request with explicit wire-level options.
+    pub fn set_with_options<'a>(
+        &'a self,
+        application_key: impl AsRef<[u8]>,
+        value: impl IntoValue,
+        options: SetOptions,
+    ) -> SetRequest<'a> {
         SetRequest {
             client: self,
             application_key: application_key.as_ref().to_vec(),
             value: value.into_value(),
-            options: SetOptions::new(),
+            options,
         }
     }
 }
@@ -264,11 +387,21 @@ impl LocalClient {
         application_key: impl AsRef<[u8]>,
         value: impl IntoValue,
     ) -> LocalSetRequest<'a> {
+        self.set_with_options(application_key, value, SetOptions::new())
+    }
+
+    /// Starts an awaitable set request with explicit wire-level options.
+    pub fn set_with_options<'a>(
+        &'a self,
+        application_key: impl AsRef<[u8]>,
+        value: impl IntoValue,
+        options: SetOptions,
+    ) -> LocalSetRequest<'a> {
         LocalSetRequest {
             client: self,
             application_key: application_key.as_ref().to_vec(),
             value: value.into_value(),
-            options: SetOptions::new(),
+            options,
         }
     }
 }
@@ -288,7 +421,31 @@ impl IntoValue for Vec<u8> {
     }
 }
 
+impl IntoValue for Box<[u8]> {
+    fn into_value(self) -> Vec<u8> {
+        self.into_vec()
+    }
+}
+
+impl IntoValue for String {
+    fn into_value(self) -> Vec<u8> {
+        self.into_bytes()
+    }
+}
+
+impl IntoValue for &str {
+    fn into_value(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
+    }
+}
+
 impl IntoValue for &[u8] {
+    fn into_value(self) -> Vec<u8> {
+        self.to_vec()
+    }
+}
+
+impl<const N: usize> IntoValue for [u8; N] {
     fn into_value(self) -> Vec<u8> {
         self.to_vec()
     }
@@ -312,6 +469,12 @@ impl IntoValue for &Arc<Vec<u8>> {
     }
 }
 
+impl IntoValue for Arc<Vec<u8>> {
+    fn into_value(self) -> Vec<u8> {
+        self.as_ref().clone()
+    }
+}
+
 #[cfg(feature = "quic-quinn")]
 /// Awaitable Tokio set request with optional condition and TTL modifiers.
 pub struct SetRequest<'a> {
@@ -323,6 +486,12 @@ pub struct SetRequest<'a> {
 
 #[cfg(feature = "quic-quinn")]
 impl SetRequest<'_> {
+    /// Replaces all set options with an explicit value.
+    pub fn options(mut self, options: SetOptions) -> Self {
+        self.options = options;
+        self
+    }
+
     /// Stores only if the key does not exist.
     pub fn if_absent(mut self) -> Self {
         self.options = self.options.if_absent();
@@ -368,8 +537,8 @@ pub struct LocalSetRequest<'a> {
 
 #[cfg(feature = "quic-compio")]
 impl LocalSetRequest<'_> {
-    #[cfg(feature = "ffi")]
-    pub(crate) fn options(mut self, options: SetOptions) -> Self {
+    /// Replaces all set options with an explicit value.
+    pub fn options(mut self, options: SetOptions) -> Self {
         self.options = options;
         self
     }

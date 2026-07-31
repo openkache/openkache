@@ -1431,13 +1431,17 @@ ${members.join("\n")}
         input: ${operation.input},
     ) -> impl core::future::Future<
         Output = core::result::Result<${operation.output}, Self::Error>,
-    > + Send;`,
+    >;`,
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 ${[...enums, ...structures].join("\n\n")}
 
 /// Operations defined by the OpenKache Smithy service.
+///
+/// The trait does not require Send futures because the Rust client exposes
+/// both Tokio/Quinn and runtime-local Compio implementations. Callers that
+/// need cross-thread scheduling can add the bound to the concrete client.
 pub trait OpenKacheApi {
     /// Error returned by an operation.
     type Error;
