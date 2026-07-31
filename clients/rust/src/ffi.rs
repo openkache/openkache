@@ -87,7 +87,7 @@ pub struct FfiResult {
 
 /// Opaque native handle to a dedicated Rust client worker.
 pub struct FfiClient {
-    commands: flume::Sender<Command>,
+    commands: CommandSender,
     request_timeout: Duration,
     shutdown: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -103,6 +103,9 @@ enum Command {
     },
     Shutdown,
 }
+
+type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
+type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 
 struct WorkerOptions {
     address: SocketAddr,
@@ -148,7 +151,7 @@ impl FfiClient {
         compression: Compression,
         timeouts: ClientTimeouts,
     ) -> std::result::Result<Self, String> {
-        let (commands, receiver) = flume::bounded(COMMAND_QUEUE_CAPACITY);
+        let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
@@ -198,16 +201,15 @@ impl FfiClient {
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
             return FfiResult::error("client request timeout exceeds the platform clock range");
         };
-        if let Err(error) = self.commands.send_deadline(
-            Command::Execute {
-                operation,
-                key,
-                value,
-                set_options,
-                response,
-            },
-            deadline,
-        ) {
+        let command = Command::Execute {
+            operation,
+            key,
+            value,
+            set_options,
+            response,
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Err(error) = self.commands.send_timeout(command, remaining) {
             return FfiResult::error(format!("client worker queue deadline exceeded: {error}"));
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -230,7 +232,7 @@ impl Drop for FfiClient {
 }
 
 fn run_worker(
-    commands: flume::Receiver<Command>,
+    commands: CommandReceiver,
     ready: SyncSender<std::result::Result<(), String>>,
     options: WorkerOptions,
     shutdown: Arc<AtomicBool>,

@@ -20,7 +20,7 @@ blake3 = { version = "*", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
 compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
 compio-quic = { version = "*", features = ["ring"], optional = true }
-flume = "*"
+crossfire = "*"
 futures-util = "*"
 getrandom = "*"
 http = "*"
