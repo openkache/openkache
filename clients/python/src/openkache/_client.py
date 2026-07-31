@@ -30,6 +30,24 @@ from ._generated import (
     SmithySyncOutput,
 )
 from ._generated.smithy_contract import (
+    SMITHY_FFI_OPERATION_GET_JSON,
+    SMITHY_FFI_OPERATION_RAW_DELETE,
+    SMITHY_FFI_OPERATION_RAW_GET,
+    SMITHY_FFI_OPERATION_RAW_SET,
+    SMITHY_FFI_OPERATION_RECONNECT,
+    SMITHY_FFI_OPERATION_SET_JSON,
+    SMITHY_FFI_OPERATION_STATE,
+    SMITHY_FFI_RESULT_CREATED,
+    SMITHY_FFI_RESULT_DELETED,
+    SMITHY_FFI_RESULT_NOT_DELETED,
+    SMITHY_FFI_RESULT_NOT_FOUND,
+    SMITHY_FFI_RESULT_NOT_STORED,
+    SMITHY_FFI_RESULT_REPLACED,
+    SMITHY_FFI_RESULT_STATE,
+    SMITHY_FFI_RESULT_VALUE,
+    SMITHY_FFI_SET_CONDITION_IF_ABSENT,
+    SMITHY_FFI_SET_CONDITION_IF_PRESENT,
+    SMITHY_FFI_SET_CONDITION_NONE,
     SMITHY_ITEM_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
@@ -40,25 +58,7 @@ from ._generated.smithy_contract import (
     SMITHY_OPCODE_SYNC,
     SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES,
 )
-from ._native import (
-    NATIVE_OPERATION_GET_JSON,
-    NATIVE_OPERATION_RAW_DELETE,
-    NATIVE_OPERATION_RAW_GET,
-    NATIVE_OPERATION_RAW_SET,
-    NATIVE_OPERATION_RECONNECT,
-    NATIVE_OPERATION_SET_JSON,
-    NATIVE_OPERATION_STATE,
-    NATIVE_RESULT_CREATED,
-    NATIVE_RESULT_DELETED,
-    NATIVE_RESULT_NOT_DELETED,
-    NATIVE_RESULT_NOT_FOUND,
-    NATIVE_RESULT_NOT_STORED,
-    NATIVE_RESULT_REPLACED,
-    NATIVE_RESULT_STATE,
-    NATIVE_RESULT_VALUE,
-    NativeClient as _NativeClient,
-    NativeError,
-)
+from ._native import NativeClient as _NativeClient, NativeError
 
 
 _UINT64_MAX: Final = (1 << 64) - 1
@@ -186,8 +186,10 @@ class SetOptions:
     @property
     def _condition_code(self) -> int:
         if self.condition is None:
-            return 0
-        return 1 if self.condition is SmithySetCondition.IF_ABSENT else 2
+            return SMITHY_FFI_SET_CONDITION_NONE
+        if self.condition is SmithySetCondition.IF_ABSENT:
+            return SMITHY_FFI_SET_CONDITION_IF_ABSENT
+        return SMITHY_FFI_SET_CONDITION_IF_PRESENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +288,7 @@ class OpenKacheClient:
         """Gets a JSON value, or ``None`` when the key is absent."""
 
         self._assert_open()
-        payload = await self._value_operation(NATIVE_OPERATION_GET_JSON, key)
+        payload = await self._value_operation(SMITHY_FFI_OPERATION_GET_JSON, key)
         if payload is None:
             return None
         try:
@@ -304,7 +306,7 @@ class OpenKacheClient:
 
         self._assert_open()
         payload = _json_bytes(value)
-        return await self._set_operation(NATIVE_OPERATION_SET_JSON, key, payload, options)
+        return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
 
     async def get_raw(
         self, key: str | bytes | bytearray | memoryview
@@ -332,9 +334,9 @@ class OpenKacheClient:
     ) -> bool:
         self._assert_open()
         kind, _ = await self._execute(SMITHY_OPCODE_DELETE, key=_key_bytes(key))
-        if kind == NATIVE_RESULT_DELETED:
+        if kind == SMITHY_FFI_RESULT_DELETED:
             return True
-        if kind == NATIVE_RESULT_NOT_DELETED:
+        if kind == SMITHY_FFI_RESULT_NOT_DELETED:
             return False
         raise OpenKacheError(f"DELETE returned unexpected native result {kind}")
 
@@ -344,7 +346,7 @@ class OpenKacheClient:
     async def stats_json(self) -> str:
         self._assert_open()
         kind, payload = await self._execute(SMITHY_OPCODE_STATS)
-        if kind != NATIVE_RESULT_VALUE:
+        if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"STATS returned unexpected native result {kind}")
         try:
             return payload.decode("utf-8")
@@ -357,16 +359,16 @@ class OpenKacheClient:
 
     async def reconnect(self) -> None:
         self._assert_open()
-        await self._execute(NATIVE_OPERATION_RECONNECT)
+        await self._execute(SMITHY_FFI_OPERATION_RECONNECT)
 
     def connection_state(self) -> ConnectionState:
         if self._closed:
             return ConnectionState.CLOSED
         try:
-            kind, payload = self._native.execute(NATIVE_OPERATION_STATE)
+            kind, payload = self._native.execute(SMITHY_FFI_OPERATION_STATE)
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
-        if kind != NATIVE_RESULT_STATE:
+        if kind != SMITHY_FFI_RESULT_STATE:
             raise OpenKacheError(f"STATE returned unexpected native result {kind}")
         try:
             return ConnectionState(payload.decode("ascii"))
@@ -425,9 +427,9 @@ class OpenKacheClient:
         self, operation: int, key: str | bytes | bytearray | memoryview
     ) -> bytes | None:
         kind, payload = await self._execute(operation, key=_key_bytes(key))
-        if kind == NATIVE_RESULT_NOT_FOUND:
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return None
-        if kind != NATIVE_RESULT_VALUE:
+        if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
         return payload
 
@@ -446,9 +448,9 @@ class OpenKacheClient:
         )
         try:
             return {
-                NATIVE_RESULT_CREATED: SmithySetOutcome.CREATED,
-                NATIVE_RESULT_REPLACED: SmithySetOutcome.REPLACED,
-                NATIVE_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
+                SMITHY_FFI_RESULT_CREATED: SmithySetOutcome.CREATED,
+                SMITHY_FFI_RESULT_REPLACED: SmithySetOutcome.REPLACED,
+                SMITHY_FFI_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
             }[kind]
         except KeyError as error:
             raise OpenKacheError(f"SET returned unexpected native result {kind}") from error
@@ -468,27 +470,27 @@ class RawClient:
     async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)
         kind, payload = await self._owner._execute(
-            NATIVE_OPERATION_RAW_GET, key=item_id
+            SMITHY_FFI_OPERATION_RAW_GET, key=item_id
         )
-        if kind == NATIVE_RESULT_NOT_FOUND:
+        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return SmithyGetOutput()
-        if kind != NATIVE_RESULT_VALUE:
+        if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
         return SmithyGetOutput(value=payload)
 
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
         options = SetOptions(input.condition, input.ttl_milliseconds)
         kind, _ = await self._owner._execute(
-            NATIVE_OPERATION_RAW_SET,
+            SMITHY_FFI_OPERATION_RAW_SET,
             key=_item_id(input.item_id),
             value=_value_bytes(input.value),
             options=options,
         )
         try:
             outcome = {
-                NATIVE_RESULT_CREATED: SmithySetOutcome.CREATED,
-                NATIVE_RESULT_REPLACED: SmithySetOutcome.REPLACED,
-                NATIVE_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
+                SMITHY_FFI_RESULT_CREATED: SmithySetOutcome.CREATED,
+                SMITHY_FFI_RESULT_REPLACED: SmithySetOutcome.REPLACED,
+                SMITHY_FFI_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
             }[kind]
         except KeyError as error:
             raise OpenKacheError(f"SET returned unexpected native result {kind}") from error
@@ -496,11 +498,11 @@ class RawClient:
 
     async def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
         kind, _ = await self._owner._execute(
-            NATIVE_OPERATION_RAW_DELETE, key=_item_id(input.item_id)
+            SMITHY_FFI_OPERATION_RAW_DELETE, key=_item_id(input.item_id)
         )
-        if kind == NATIVE_RESULT_DELETED:
+        if kind == SMITHY_FFI_RESULT_DELETED:
             return SmithyDeleteOutput(deleted=True)
-        if kind == NATIVE_RESULT_NOT_DELETED:
+        if kind == SMITHY_FFI_RESULT_NOT_DELETED:
             return SmithyDeleteOutput(deleted=False)
         raise OpenKacheError(f"DELETE returned unexpected native result {kind}")
 

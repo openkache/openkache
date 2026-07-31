@@ -7,10 +7,10 @@ import { fileURLToPath } from "node:url"
 
 type Json_Object = Readonly<Record<string, unknown>>
 
-/** One numeric wire enum member.
+/** One numeric protocol or native-binding member.
  *
  * @property name - PascalCase language-neutral member name.
- * @property value - Unsigned byte value carried on the wire.
+ * @property value - Non-negative integer assigned by the contract.
  */
 export interface Wire_Entry {
   readonly name: string
@@ -123,9 +123,18 @@ export interface Api_Contract {
   readonly structures: readonly Api_Structure[]
 }
 
+/** Native binding ABI identifiers shared by language-neutral adapters. */
+export interface Ffi_Contract {
+  readonly abi_version: number
+  readonly operations: readonly Wire_Entry[]
+  readonly result_kinds: readonly Wire_Entry[]
+  readonly set_conditions: readonly Wire_Entry[]
+}
+
 /** Language-neutral subset of the OpenKache Smithy model used by generators. */
 export interface Wire_Contract {
   readonly api: Api_Contract
+  readonly ffi: Ffi_Contract
   readonly item_id_bytes: number
   readonly max_value_bytes: number
   readonly opcodes: readonly Wire_Entry[]
@@ -144,8 +153,36 @@ const STATUS_SHAPE_ID = "openkache.protocol#Status"
 const WIRE_CONTRACT_TRAIT_ID = "openkache.protocol#wireContract"
 const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
+const FFI_CONTRACT_TRAIT_ID = "openkache.protocol#ffiContract"
 const VALUE_FORMAT_TRAIT_ID = "openkache.protocol#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.protocol#valueEnvelope"
+const FFI_OPERATION_FIELDS = [
+  { name: "GetJson", field: "operationGetJson" },
+  { name: "SetJson", field: "operationSetJson" },
+  { name: "Reconnect", field: "operationReconnect" },
+  { name: "State", field: "operationState" },
+  { name: "RawGet", field: "operationRawGet" },
+  { name: "RawSet", field: "operationRawSet" },
+  { name: "RawDelete", field: "operationRawDelete" },
+] as const
+const FFI_RESULT_FIELDS = [
+  { name: "Error", field: "resultError" },
+  { name: "Ok", field: "resultOk" },
+  { name: "Value", field: "resultValue" },
+  { name: "NotFound", field: "resultNotFound" },
+  { name: "Created", field: "resultCreated" },
+  { name: "Replaced", field: "resultReplaced" },
+  { name: "Deleted", field: "resultDeleted" },
+  { name: "NotDeleted", field: "resultNotDeleted" },
+  { name: "Connected", field: "resultConnected" },
+  { name: "NotStored", field: "resultNotStored" },
+  { name: "State", field: "resultState" },
+] as const
+const FFI_SET_CONDITION_FIELDS = [
+  { name: "None", field: "setConditionNone" },
+  { name: "IfAbsent", field: "setConditionIfAbsent" },
+  { name: "IfPresent", field: "setConditionIfPresent" },
+] as const
 const GENERATED_OUTPUTS = {
   csharp_api: join(
     PUBLIC_ROOT,
@@ -488,6 +525,47 @@ function wire_v3_contract(value: unknown): Wire_V3_Contract {
   }
 }
 
+function ffi_entries(
+  contract: Json_Object,
+  fields: readonly { readonly name: string; readonly field: string }[],
+  kind: string,
+): readonly Wire_Entry[] {
+  const entries = fields.map(
+    ({ name, field }): Wire_Entry => ({
+      name,
+      value: integer_member(
+        contract,
+        field,
+        `${FFI_CONTRACT_TRAIT_ID}.${field}`,
+        0,
+        0xffff_ffff,
+      ),
+    }),
+  )
+  unique_wire_values(entries, kind)
+  return entries
+}
+
+function ffi_contract(value: unknown): Ffi_Contract {
+  const contract = object_value(value, FFI_CONTRACT_TRAIT_ID)
+  return {
+    abi_version: integer_member(
+      contract,
+      "abiVersion",
+      `${FFI_CONTRACT_TRAIT_ID}.abiVersion`,
+      1,
+      0xffff_ffff,
+    ),
+    operations: ffi_entries(contract, FFI_OPERATION_FIELDS, "FFI operation"),
+    result_kinds: ffi_entries(contract, FFI_RESULT_FIELDS, "FFI result kind"),
+    set_conditions: ffi_entries(
+      contract,
+      FFI_SET_CONDITION_FIELDS,
+      "FFI SET condition",
+    ),
+  }
+}
+
 function value_format_contract(value: unknown): Value_Format_Contract {
   const contract = object_value(value, VALUE_FORMAT_TRAIT_ID)
   const values = {
@@ -764,6 +842,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     VALUE_ENVELOPE_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
+  const ffi_trait = trait_value(
+    service,
+    FFI_CONTRACT_TRAIT_ID,
+    `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
+  )
 
   const opcodes = array_member(service, "operations", SERVICE_SHAPE_ID)
     .map((operation, index): Wire_Entry => {
@@ -813,9 +896,19 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
   unique_wire_values(statuses, "status")
   if (opcodes.length === 0) throw new Error("wire contract must define at least one opcode")
   if (statuses.length === 0) throw new Error("wire contract must define at least one status")
+  const ffi = ffi_contract(ffi_trait)
+  const opcode_values = new Set(opcodes.map((entry) => entry.value))
+  for (const entry of ffi.operations) {
+    if (opcode_values.has(entry.value)) {
+      throw new Error(
+        `FFI operation ${entry.name} wire value ${entry.value} overlaps a protocol opcode`,
+      )
+    }
+  }
 
   return {
     api: api_contract(shapes, service),
+    ffi,
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
@@ -994,6 +1087,28 @@ export function render_rust(contract: Wire_Contract): string {
     envelope.magic_and_version_hex,
     "value envelope magic",
   )
+  const ffi = contract.ffi
+  const ffi_operations = ffi.operations
+    .map(
+      (entry) =>
+        `/// Native FFI operation identifier for ${entry.name}.
+pub const FFI_OPERATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_result_kinds = ffi.result_kinds
+    .map(
+      (entry) =>
+        `/// Native FFI result-kind identifier for ${entry.name}.
+pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_set_conditions = ffi.set_conditions
+    .map(
+      (entry) =>
+        `/// Native FFI SET-condition identifier for ${entry.name}.
+pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 1.
@@ -1008,6 +1123,12 @@ pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v3.max_varuint
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
+
+/// Version of the native client FFI contract.
+pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
+${ffi_operations}
+${ffi_result_kinds}
+${ffi_set_conditions}
 
 /// Current client-owned value-format version.
 pub const VALUE_FORMAT_VERSION: u128 = ${formatted_decimal(value.version)};
@@ -1318,6 +1439,24 @@ export function render_python_contract(contract: Wire_Contract): string {
   const envelope = contract.value_envelope
   const version_bytes = encode_vu128(value.version)
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const ffi_operations = contract.ffi.operations
+    .map(
+      (entry) =>
+        `SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_result_kinds = contract.ffi.result_kinds
+    .map(
+      (entry) =>
+        `SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_set_conditions = contract.ffi.set_conditions
+    .map(
+      (entry) =>
+        `SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const opcodes = contract.opcodes
     .map((entry) => `SMITHY_OPCODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
     .join("\n")
@@ -1332,6 +1471,10 @@ SMITHY_RESPONSE_FIXED_BYTES = ${contract.v3.response_fixed_bytes}
 SMITHY_MAX_VARUINT_BYTES = ${contract.v3.max_varuint_bytes}
 SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+${ffi_operations}
+${ffi_result_kinds}
+${ffi_set_conditions}
 SMITHY_SET_TTL_FLAG = ${contract.v3.set_ttl_flag}
 SMITHY_SET_IF_ABSENT_FLAG = ${contract.v3.set_if_absent_flag}
 SMITHY_SET_IF_PRESENT_FLAG = ${contract.v3.set_if_present_flag}

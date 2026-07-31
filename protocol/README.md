@@ -50,8 +50,8 @@ variable-integer parsing.
 
 - `model/openkache.smithy` is the canonical source for assigned wire values,
   operation inputs and outputs, shared limits, version-specific layouts, the
-  complete cross-language value-format contract, and the legacy TypeScript
-  metadata-envelope limits.
+  native binding ABI identifiers, complete cross-language value-format
+  contract, and the legacy TypeScript metadata-envelope limits.
 - `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, and
   Python definitions into ignored `generated_local` directories, the Python
   package's ignored `_generated` directory, or Cargo output. Package/release

@@ -6,10 +6,10 @@ encryption, and the v1 value format stay in [`../core`](../core); Python only
 converts Python values and owns the async scheduling and resource lifecycle.
 
 The Smithy model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy)
-is the source of the generated operation types and wire/value constants in
-`src/openkache/_generated/`. The `RawClient` adapter implements those exact
-item-ID operations. `Client` adds protected application-key operations and
-JSON values.
+is the source of the generated operation types, wire/value constants, and
+native ABI identifiers in `src/openkache/_generated/`. The `RawClient` adapter
+implements those exact item-ID operations. `Client` adds protected
+application-key operations and JSON values.
 
 ## Commands
 

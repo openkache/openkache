@@ -10,7 +10,14 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use openkache_protocol::Opcode;
+use openkache_protocol::{
+    FFI_ABI_VERSION, FFI_OPERATION_GET_JSON, FFI_OPERATION_RAW_DELETE, FFI_OPERATION_RAW_GET,
+    FFI_OPERATION_RAW_SET, FFI_OPERATION_RECONNECT, FFI_OPERATION_SET_JSON, FFI_OPERATION_STATE,
+    FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
+    FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK,
+    FFI_RESULT_REPLACED, FFI_RESULT_STATE, FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT,
+    FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode,
+};
 use serde::Deserialize;
 
 use crate::value::{Compression, JsonValue, Value, ZstandardOptions};
@@ -20,23 +27,22 @@ use crate::{
     SetOptions, SetOutcome,
 };
 
-const ABI_VERSION: u32 = 1;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Copy)]
 #[repr(u32)]
 enum FfiResultKind {
-    Error = 0,
-    Ok = 1,
-    Value = 2,
-    NotFound = 3,
-    Created = 4,
-    Replaced = 5,
-    Deleted = 6,
-    NotDeleted = 7,
-    Connected = 8,
-    NotStored = 9,
-    State = 10,
+    Error = FFI_RESULT_ERROR,
+    Ok = FFI_RESULT_OK,
+    Value = FFI_RESULT_VALUE,
+    NotFound = FFI_RESULT_NOT_FOUND,
+    Created = FFI_RESULT_CREATED,
+    Replaced = FFI_RESULT_REPLACED,
+    Deleted = FFI_RESULT_DELETED,
+    NotDeleted = FFI_RESULT_NOT_DELETED,
+    Connected = FFI_RESULT_CONNECTED,
+    NotStored = FFI_RESULT_NOT_STORED,
+    State = FFI_RESULT_STATE,
 }
 
 macro_rules! ffi_input_enum {
@@ -72,21 +78,21 @@ ffi_input_enum! {
         Delete = Opcode::Delete as u32,
         Stats = Opcode::Stats as u32,
         Sync = Opcode::Sync as u32,
-        GetJson = 7,
-        SetJson = 8,
-        Reconnect = 9,
-        State = 10,
-        RawGet = 11,
-        RawSet = 12,
-        RawDelete = 13,
+        GetJson = FFI_OPERATION_GET_JSON,
+        SetJson = FFI_OPERATION_SET_JSON,
+        Reconnect = FFI_OPERATION_RECONNECT,
+        State = FFI_OPERATION_STATE,
+        RawGet = FFI_OPERATION_RAW_GET,
+        RawSet = FFI_OPERATION_RAW_SET,
+        RawDelete = FFI_OPERATION_RAW_DELETE,
     }
 }
 
 ffi_input_enum! {
-    enum FfiSetCondition {
-        None = 0,
-        IfAbsent = 1,
-        IfPresent = 2,
+enum FfiSetCondition {
+    None = FFI_SET_CONDITION_NONE,
+    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
+    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
     }
 }
 
@@ -471,7 +477,7 @@ fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    ABI_VERSION
+    FFI_ABI_VERSION
 }
 
 /// Connects a native client and returns an opaque result.
