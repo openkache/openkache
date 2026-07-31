@@ -266,10 +266,10 @@ current without silently changing a deployment.
 
 The Dockerfile is the canonical source for the image's static OCI product
 identity: title, description, documentation, license, source, and URL. The
-publication workflow deliberately removes those fields from the metadata
-action's repository-derived defaults, then adds only dynamic release labels
-such as creation time, revision, version, and tag. This keeps local and
-published images aligned even if the GitHub repository description changes.
+publication workflow passes only dynamic release labels such as creation time,
+revision, version, and tag, ignoring all repository-derived product fields.
+This keeps local and published images aligned even if the GitHub repository
+description changes or the metadata action gains another default label.
 
 The Nix inputs used by `server/container.nix` are locked in
 `server/flake.lock`. The scheduled `update-container-inputs` workflow runs

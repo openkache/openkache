@@ -65,7 +65,7 @@ jobs:
           {
             echo 'labels<<EOF'
             printf '%s\n' "${METADATA_LABELS}" |
-              awk '!/^org\.opencontainers\.image\.(title|description|documentation|licenses|source|url)=/'
+              awk '/^org\.opencontainers\.image\.(created|revision|version|ref\.name)=/'
             echo EOF
           } >> "${GITHUB_OUTPUT}"
 
