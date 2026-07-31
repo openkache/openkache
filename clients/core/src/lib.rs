@@ -22,8 +22,8 @@ pub use config::{
     Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy, ServerTrust,
     SetOptions,
 };
-pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemKey};
-pub use openkache_protocol::{ITEM_KEY_BYTES, SetCondition};
+pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+pub use openkache_protocol::{ITEM_ID_BYTES, SetCondition};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -431,10 +431,10 @@ impl<C: ClientConnection> Core<C> {
         Ok(started.elapsed())
     }
 
-    async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>> {
+    async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
         let response = self
             .request(
-                Request::new(Opcode::Get, Some(key.into_protocol()), Vec::new())
+                Request::new(Opcode::Get, Some(item_id.into_protocol()), Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -445,10 +445,15 @@ impl<C: ClientConnection> Core<C> {
         }
     }
 
-    async fn set(&self, key: ItemKey, value: ItemValue, options: SetOptions) -> Result<SetOutcome> {
+    async fn set(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
         let request = Request::new_set(
             Opcode::Set,
-            Some(key.into_protocol()),
+            Some(item_id.into_protocol()),
             options.into_protocol()?,
             value.into_bytes(),
         )
@@ -461,10 +466,10 @@ impl<C: ClientConnection> Core<C> {
         }
     }
 
-    async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome> {
+    async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
         let response = self
             .request(
-                Request::new(Opcode::Delete, Some(key.into_protocol()), Vec::new())
+                Request::new(Opcode::Delete, Some(item_id.into_protocol()), Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -827,24 +832,24 @@ macro_rules! raw_client_methods {
                 self.0.ping().await
             }
 
-            /// Retrieves exact encoded bytes for a fixed-size item key.
-            pub async fn get(&self, key: ItemKey) -> Result<GetOutcome<ItemValue>> {
-                self.0.get(key).await
+            /// Retrieves exact encoded bytes for a fixed-size item ID.
+            pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
+                self.0.get(item_id).await
             }
 
             /// Stores exact encoded bytes with explicit wire-level set options.
             pub async fn set(
                 &self,
-                key: ItemKey,
+                item_id: ItemId,
                 value: ItemValue,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
-                self.0.set(key, value, options).await
+                self.0.set(item_id, value, options).await
             }
 
-            /// Deletes a fixed-size item key.
-            pub async fn delete(&self, key: ItemKey) -> Result<DeleteOutcome> {
-                self.0.delete(key).await
+            /// Deletes a fixed-size item ID.
+            pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
+                self.0.delete(item_id).await
             }
 
             /// Returns server statistics as their JSON text.
@@ -876,7 +881,7 @@ macro_rules! raw_client_methods {
 }
 
 #[cfg(feature = "quic-quinn")]
-/// Exact-key, exact-value protocol client running on Tokio and Quinn.
+/// Exact-item-ID, exact-value protocol client running on Tokio and Quinn.
 #[derive(Clone)]
 pub struct RawClient(Arc<Core<transport::QuinnConnection>>);
 
@@ -916,7 +921,7 @@ impl RawClient {
 raw_client_methods!(RawClient);
 
 #[cfg(feature = "quic-compio")]
-/// Exact-key, exact-value protocol client confined to a Compio runtime.
+/// Exact-item-ID, exact-value protocol client confined to a Compio runtime.
 #[derive(Clone)]
 pub struct LocalRawClient(Arc<Core<transport::CompioConnection>>);
 

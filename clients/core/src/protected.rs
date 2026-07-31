@@ -98,7 +98,7 @@ macro_rules! protected_builder_methods {
 
 macro_rules! protected_client_methods {
     ($raw:ty) => {
-        /// Borrows the exact-key protocol client owned by this protected client.
+        /// Borrows the exact-item-ID protocol client owned by this protected client.
         pub fn raw(&self) -> &$raw {
             &self.raw
         }
@@ -123,7 +123,7 @@ macro_rules! protected_client_methods {
         ///
         /// # Arguments
         ///
-        /// * `application_key` - Exact application key bytes used for item-key derivation.
+        /// * `application_key` - Exact application key bytes used for item ID derivation.
         ///
         /// # Returns
         ///
@@ -137,11 +137,12 @@ macro_rules! protected_client_methods {
             &self,
             application_key: impl AsRef<[u8]>,
         ) -> Result<GetOutcome<Value>> {
-            let key = self.protection.item_key(application_key);
-            match self.raw.get(key).await? {
-                GetOutcome::Found(value) => {
-                    self.protection.decode(key, value).map(GetOutcome::Found)
-                }
+            let item_id = self.protection.item_id(application_key);
+            match self.raw.get(item_id).await? {
+                GetOutcome::Found(value) => self
+                    .protection
+                    .decode(item_id, value)
+                    .map(GetOutcome::Found),
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
             }
         }
@@ -161,7 +162,7 @@ macro_rules! protected_client_methods {
         ///
         /// # Arguments
         ///
-        /// * `application_key` - Exact application key bytes used for item-key derivation.
+        /// * `application_key` - Exact application key bytes used for item ID derivation.
         /// * `value` - Raw or logical JSON value to encode.
         /// * `options` - Existence condition and optional expiration.
         ///
@@ -179,15 +180,15 @@ macro_rules! protected_client_methods {
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            let key = self.protection.item_key(application_key);
-            let value = self.protection.encode(key, value)?;
-            self.raw.set(key, value, options).await
+            let item_id = self.protection.item_id(application_key);
+            let value = self.protection.encode(item_id, value)?;
+            self.raw.set(item_id, value, options).await
         }
 
         /// Deletes a value for arbitrary application key bytes.
         pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
             self.raw
-                .delete(self.protection.item_key(application_key))
+                .delete(self.protection.item_id(application_key))
                 .await
         }
 

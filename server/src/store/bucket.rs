@@ -10,7 +10,7 @@ use crate::types::STORAGE_KEY_BYTES;
 use crate::*;
 
 pub(crate) const ITEM_OFFSET_BITS: usize = 20;
-pub(crate) const ITEM_KEY_PREFIX_BITS: usize = 8;
+pub(crate) const STORAGE_KEY_PREFIX_BITS: usize = 8;
 pub(crate) const ITEM_BYTE_OFFSET_BITS: usize = 12;
 pub(crate) const ITEM_STORAGE_KEY_SUFFIX_BYTES: usize = STORAGE_KEY_BYTES - 1;
 pub(crate) const ITEM_KIND_BYTES: usize = 1;
@@ -248,7 +248,7 @@ pub(crate) fn item_offset(bucket: &[u8], item_slot: usize) -> Option<ItemOffset>
     ]) >> shift;
     Some(ItemOffset {
         key_prefix: packed as u8,
-        item_byte_offset: ((packed >> ITEM_KEY_PREFIX_BITS) & ((1 << ITEM_BYTE_OFFSET_BITS) - 1))
+        item_byte_offset: ((packed >> STORAGE_KEY_PREFIX_BITS) & ((1 << ITEM_BYTE_OFFSET_BITS) - 1))
             as usize,
     })
 }
@@ -258,7 +258,7 @@ fn write_item_offset(bucket: &mut [u8], item_slot: usize, entry: ItemOffset) {
     let byte = bit / 8;
     let shift = bit % 8;
     let packed =
-        u32::from(entry.key_prefix) | ((entry.item_byte_offset as u32) << ITEM_KEY_PREFIX_BITS);
+        u32::from(entry.key_prefix) | ((entry.item_byte_offset as u32) << STORAGE_KEY_PREFIX_BITS);
     let current = u32::from_le_bytes([bucket[byte], bucket[byte + 1], bucket[byte + 2], 0]);
     let mask = ((1u32 << ITEM_OFFSET_BITS) - 1) << shift;
     let updated = (current & !mask) | ((packed << shift) & mask);

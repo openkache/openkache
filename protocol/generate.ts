@@ -31,7 +31,7 @@ export interface Wire_V2_Contract {
   readonly set_if_present_bit: number
 }
 
-/** Protocol v3 constants consumed by the Rust protocol crate. */
+/** Protocol v1 constants consumed by the Rust protocol crate. */
 export interface Wire_V3_Contract {
   readonly alpn: string
   readonly request_fixed_bytes: number
@@ -57,7 +57,7 @@ export interface Value_Format_Contract {
   readonly format_byte_bytes: number
   readonly format_compression_mask: number
   readonly format_encryption_shift: number
-  readonly item_key_root_context: string
+  readonly item_id_root_context: string
   readonly robust_context: string
   readonly robust_nonce_bytes: number
   readonly robust_tag_bytes: number
@@ -126,7 +126,7 @@ export interface Api_Contract {
 /** Language-neutral subset of the OpenKache Smithy model used by generators. */
 export interface Wire_Contract {
   readonly api: Api_Contract
-  readonly item_key_bytes: number
+  readonly item_id_bytes: number
   readonly max_value_bytes: number
   readonly opcodes: readonly Wire_Entry[]
   readonly statuses: readonly Wire_Entry[]
@@ -550,9 +550,9 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       7,
     ),
-    item_key_root_context: string_member(
+    item_id_root_context: string_member(
       contract,
-      "itemKeyRootContext",
+      "itemIdRootContext",
       VALUE_FORMAT_TRAIT_ID,
     ),
     robust_context: string_member(contract, "robustContext", VALUE_FORMAT_TRAIT_ID),
@@ -808,7 +808,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
   return {
     api: api_contract(shapes, service),
-    item_key_bytes: integer_member(contract_trait, "itemKeyBytes", "wireContract", 1),
+    item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
@@ -988,7 +988,7 @@ export function render_rust(contract: Wire_Contract): string {
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
-/// QUIC application protocol identifier for wire protocol version 3.
+/// QUIC application protocol identifier for wire protocol version 1.
 pub const ALPN: &[u8] = ${rust_byte_string_literal(contract.v3.alpn)};
 /// Bytes before the variable-length request lengths.
 pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.request_fixed_bytes)};
@@ -996,9 +996,9 @@ pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.request_f
 pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.response_fixed_bytes)};
 /// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
 pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v3.max_varuint_bytes)};
-/// Bytes in every canonical item key carried by the protocol.
-pub const ITEM_KEY_BYTES: usize = ${formatted_decimal(contract.item_key_bytes)};
-/// Absolute value or response payload ceiling representable by protocol v3.
+/// Bytes in every canonical item ID carried by the protocol.
+pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
+/// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
 
 /// Current client-owned value-format version.
@@ -1035,8 +1035,8 @@ pub const VALUE_FORMAT_ROBUST_NONCE_BYTES: usize = ${formatted_decimal(value.rob
 pub const VALUE_FORMAT_ROBUST_TAG_BYTES: usize = ${formatted_decimal(value.robust_tag_bytes)};
 /// Application-managed data-protection key size.
 pub const VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES: usize = ${formatted_decimal(value.data_protection_key_bytes)};
-/// BLAKE3 protected-item-key root derivation context.
-pub const VALUE_FORMAT_ITEM_KEY_ROOT_CONTEXT: &str = ${rust_string_literal(value.item_key_root_context)};
+/// BLAKE3 protected-item-ID root derivation context.
+pub const VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT: &str = ${rust_string_literal(value.item_id_root_context)};
 /// Associated-data domain separator.
 pub const VALUE_FORMAT_AAD_DOMAIN: &[u8] = ${rust_byte_string_literal(value.aad_domain)};
 /// BLAKE3 value-root derivation context.
@@ -1061,7 +1061,7 @@ const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v3.set_ttl_flag)};
 const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_absent_flag)};
 const SET_IF_PRESENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_present_flag)};
 
-${rust_wire_enum("Opcode", "Operations supported by protocol v3.", contract.opcodes, "UnknownOpcode")}
+${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 
 ${rust_wire_enum("Status", "Status returned in every protocol response.", contract.statuses, "UnknownStatus")}
 `
@@ -1077,7 +1077,7 @@ ${variants}
     }`
 }
 
-/** Renders protocol v2 C# definitions.
+/** Renders protocol v1 C# definitions.
  *
  * @param contract - Validated language-neutral wire contract.
  * @returns Deterministic C# source with a trailing newline.
@@ -1099,19 +1099,14 @@ namespace OpenKache;
 
 internal static partial class Protocol
 {
-    internal const string ApplicationProtocol = ${JSON.stringify(contract.v2.alpn)};
-    internal const int ResponseHeaderBytes = ${formatted_decimal(contract.v2.response_header_bytes)};
+    internal const string ApplicationProtocol = ${JSON.stringify(contract.v3.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
 
-    private const int RequestHeaderBytes = ${formatted_decimal(contract.v2.request_header_bytes)};
-    private const int ItemKeyBytes = ${formatted_decimal(contract.item_key_bytes)};
-    private const int SetTtlBytes = ${formatted_decimal(contract.v2.set_ttl_bytes)};
-    private const uint ResponseValueLengthMask = ${formatted_decimal(contract.v2.response_value_length_mask)}u;
-    private const uint ValueCompressedBit = ${formatted_decimal(contract.v2.value_compressed_bit)}u;
-    private const uint ValueEncryptedBit = ${formatted_decimal(contract.v2.value_encrypted_bit)}u;
-    private const uint SetTtlBit = ${formatted_decimal(contract.v2.set_ttl_bit)}u;
-    private const uint SetIfAbsentBit = ${formatted_decimal(contract.v2.set_if_absent_bit)}u;
-    private const uint SetIfPresentBit = ${formatted_decimal(contract.v2.set_if_present_bit)}u;
+    private const int MaximumVarUIntBytes = ${formatted_decimal(contract.v3.max_varuint_bytes)};
+    private const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
+    private const byte SetTtlBit = ${formatted_byte(contract.v3.set_ttl_flag)};
+    private const byte SetIfAbsentBit = ${formatted_byte(contract.v3.set_if_absent_flag)};
+    private const byte SetIfPresentBit = ${formatted_byte(contract.v3.set_if_present_flag)};
 
     internal const uint ValueFormatVersion = ${formatted_decimal(value.version)}u;
     internal const int ValueFormatMaxVu128Bytes = ${formatted_decimal(value.max_vu128_bytes)};
@@ -1129,7 +1124,7 @@ internal static partial class Protocol
     internal const int ValueFormatRobustNonceBytes = ${formatted_decimal(value.robust_nonce_bytes)};
     internal const int ValueFormatRobustTagBytes = ${formatted_decimal(value.robust_tag_bytes)};
     internal const int ValueFormatDataProtectionKeyBytes = ${formatted_decimal(value.data_protection_key_bytes)};
-    internal const string ValueFormatItemKeyRootContext = ${JSON.stringify(value.item_key_root_context)};
+    internal const string ValueFormatItemIdRootContext = ${JSON.stringify(value.item_id_root_context)};
     internal const string ValueFormatAadDomain = ${JSON.stringify(value.aad_domain)};
     internal const string ValueFormatValueRootContext = ${JSON.stringify(value.value_root_context)};
     internal const string ValueFormatCompactMacContext = ${JSON.stringify(value.compact_mac_context)};
@@ -1255,8 +1250,8 @@ export const SMITHY_VALUE_ROBUST_NONCE_BYTES = ${value.robust_nonce_bytes}
 export const SMITHY_VALUE_ROBUST_TAG_BYTES = ${value.robust_tag_bytes}
 /** Application-managed data-protection key size. */
 export const SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes}
-/** BLAKE3 protected-item-key root derivation context. */
-export const SMITHY_VALUE_ITEM_KEY_ROOT_CONTEXT = ${JSON.stringify(value.item_key_root_context)}
+/** BLAKE3 protected-item-ID root derivation context. */
+export const SMITHY_VALUE_ITEM_ID_ROOT_CONTEXT = ${JSON.stringify(value.item_id_root_context)}
 /** Associated-data domain separator. */
 export const SMITHY_VALUE_AAD_DOMAIN = ${JSON.stringify(value.aad_domain)}
 /** BLAKE3 value-root derivation context. */

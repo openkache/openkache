@@ -9,10 +9,10 @@ use crate::*;
 
 const FILE_MAGIC: &[u8; 8] = b"OKSGFILE";
 const CONTROL_MAGIC: &[u8; 8] = b"OKSGCTL\0";
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 1;
 const CHECKPOINT_MAGIC: &[u8; 8] = b"OKTABLE\0";
 const CHECKPOINT_FOOTER_MAGIC: &[u8; 8] = b"OKTBLEND";
-const CHECKPOINT_VERSION: u32 = 2;
+const CHECKPOINT_VERSION: u32 = 1;
 const CHECKPOINT_COMMIT_BYTES: usize = 24;
 const CHECKPOINT_IO_BYTES: usize = 1024 * 1024;
 

@@ -672,7 +672,7 @@ impl Kvkache {
             let expected = config.segment_file_bytes()?;
             if actual != expected {
                 return Err(KvError::Worker(format!(
-                    "Segment file has length {actual}, expected {expected}; legacy files require repopulation"
+                    "Segment file has length {actual}, expected {expected}; existing files require repopulation"
                 )));
             }
         }

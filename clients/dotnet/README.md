@@ -6,7 +6,7 @@ directly.
 ## Purpose
 
 The package provides binary-safe cache operations over one authenticated QUIC
-connection. It accepts exact 32-byte item keys and plaintext values and uses a
+connection. It accepts exact 32-byte item IDs and plaintext values and uses a
 bounded pool of reusable bidirectional streams.
 
 The [client status table](../README.md#sdk-status) describes this package's
@@ -44,32 +44,31 @@ await using var client = await Client.ConnectAsync(
     certificate);
 
 await client.PingAsync();
-var itemKey = new byte[32];
-itemKey[^1] = 1;
+var itemId = new byte[32];
+itemId[^1] = 1;
 var outcome = await client.SetAsync(
-    itemKey,
+    itemId,
     "hello"u8.ToArray(),
     new SetOptions
     {
         Condition = SetCondition.IfAbsent,
         TimeToLive = TimeSpan.FromMinutes(5),
     });
-var value = await client.GetAsync(itemKey);
+var value = await client.GetAsync(itemId);
 var statisticsJson = await client.StatsAsync();
 await client.SyncAsync();
-var deleted = await client.DeleteAsync(itemKey);
+var deleted = await client.DeleteAsync(itemId);
 ```
 
 `SetAsync` returns `NotStored` when a condition fails and `Created` or
-`Replaced` after a write. `GetAsync` returns `null` for a missing key.
-`DeleteAsync` reports whether the key existed. Every key-taking operation
+`Replaced` after a write. `GetAsync` returns `null` for a missing item ID.
+`DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation
 requires exactly 32 bytes and sends them unchanged.
 
 ## Protocol and configuration
 
-This package requires TLS 1.3 and ALPN `openkache/2`. It is not compatible with
-the current protocol v3 server contract in
-[`protocol/SPEC.md`](../../protocol/SPEC.md).
+This package requires TLS 1.3 and ALPN `openkache/1`. The complete wire
+contract is defined by [`protocol/SPEC.md`](../../protocol/SPEC.md).
 
 `ClientOptions` controls the request timeout and maximum reusable stream lanes.
 The defaults are 10 seconds and 256 lanes.
@@ -77,6 +76,5 @@ The defaults are 10 seconds and 256 lanes.
 The package reads and writes plaintext values. It does not implement the
 [shared formatted value contract](../VALUE_FORMAT.md).
 
-Do not extend the duplicated v2 protocol implementation. The migration path is
-a thin protocol v3 adapter over `clients/core`, as specified by the
-[client architecture](../README.md#binding-architecture).
+The client currently owns a small raw protocol adapter. Protected value
+handling remains in the shared Rust core and is not part of this package.

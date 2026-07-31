@@ -1,7 +1,7 @@
 //! Shared application-key hiding and value-protection composition.
 
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
-use crate::{DataProtectionKey, ItemKey, Result};
+use crate::{DataProtectionKey, ItemId, Result};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -53,16 +53,16 @@ impl DataProtection {
         Ok(Self { key, codec })
     }
 
-    /// Derives the deterministic BLAKE3 item key for application key bytes.
-    pub fn item_key(&self, application_key: impl AsRef<[u8]>) -> ItemKey {
-        self.key.derive_item_key(application_key)
+    /// Derives the deterministic BLAKE3 item ID for application key bytes.
+    pub fn item_id(&self, application_key: impl AsRef<[u8]>) -> ItemId {
+        self.key.derive_item_id(application_key)
     }
 
     /// Serializes and protects one core logical value.
     ///
     /// # Arguments
     ///
-    /// * `key` - Exact item key bound into authenticated encryption.
+    /// * `item_id` - Exact item ID bound into authenticated encryption.
     /// * `value` - Raw or logical JSON value to encode.
     ///
     /// # Returns
@@ -73,15 +73,15 @@ impl DataProtection {
     ///
     /// Returns an error for invalid logical values, size-limit violations, compression failures,
     /// entropy failures, or encryption failures.
-    pub fn encode(&self, key: ItemKey, value: Value) -> Result<ItemValue> {
-        self.codec.encode(key, value).map_err(Into::into)
+    pub fn encode(&self, item_id: ItemId, value: Value) -> Result<ItemValue> {
+        self.codec.encode(item_id, value).map_err(Into::into)
     }
 
     /// Authenticates and decodes one stored value into the core logical model.
     ///
     /// # Arguments
     ///
-    /// * `key` - Exact item key expected by authenticated encryption.
+    /// * `item_id` - Exact item ID expected by authenticated encryption.
     /// * `encoded` - Complete value-format container returned by the raw client.
     ///
     /// # Returns
@@ -92,15 +92,15 @@ impl DataProtection {
     ///
     /// Returns an error when the value is malformed, unsupported, oversized, unauthenticated, or
     /// cannot be decompressed or deserialized.
-    pub fn decode(&self, key: ItemKey, encoded: ItemValue) -> Result<Value> {
-        self.codec.decode(key, encoded).map_err(Into::into)
+    pub fn decode(&self, item_id: ItemId, encoded: ItemValue) -> Result<Value> {
+        self.codec.decode(item_id, encoded).map_err(Into::into)
     }
 
-    /// Encrypts a borrowed plaintext value and binds it to its item key.
+    /// Encrypts a borrowed plaintext value and binds it to its item ID.
     ///
     /// # Arguments
     ///
-    /// * `key` - Item key derived for the value's application key.
+    /// * `item_id` - Item ID derived for the value's application key.
     /// * `plaintext` - Exact application value bytes.
     ///
     /// # Returns
@@ -111,15 +111,15 @@ impl DataProtection {
     ///
     /// Returns an error for oversized values, entropy failures, compression failures, or
     /// encryption failures.
-    pub fn seal(&self, key: ItemKey, plaintext: &[u8]) -> Result<ItemValue> {
-        self.encode(key, Value::Raw(plaintext.to_vec()))
+    pub fn seal(&self, item_id: ItemId, plaintext: &[u8]) -> Result<ItemValue> {
+        self.encode(item_id, Value::Raw(plaintext.to_vec()))
     }
 
     /// Encrypts an owned plaintext value while reusing its allocation when practical.
     ///
     /// # Arguments
     ///
-    /// * `key` - Item key derived for the value's application key.
+    /// * `item_id` - Item ID derived for the value's application key.
     /// * `plaintext` - Owned application value bytes.
     ///
     /// # Returns
@@ -130,15 +130,15 @@ impl DataProtection {
     ///
     /// Returns an error for oversized values, entropy failures, compression failures, or
     /// encryption failures.
-    pub fn seal_owned(&self, key: ItemKey, plaintext: Vec<u8>) -> Result<ItemValue> {
-        self.encode(key, Value::Raw(plaintext))
+    pub fn seal_owned(&self, item_id: ItemId, plaintext: Vec<u8>) -> Result<ItemValue> {
+        self.encode(item_id, Value::Raw(plaintext))
     }
 
     /// Authenticates, decrypts, and optionally decompresses a stored value.
     ///
     /// # Arguments
     ///
-    /// * `key` - Item key used as authenticated data.
+    /// * `item_id` - Item ID used as authenticated data.
     /// * `encoded` - Exact encrypted value returned by the raw client.
     ///
     /// # Returns
@@ -149,8 +149,8 @@ impl DataProtection {
     ///
     /// Returns an error when the value is malformed, oversized, cannot be authenticated, or
     /// cannot be decompressed.
-    pub fn open(&self, key: ItemKey, encoded: ItemValue) -> Result<Vec<u8>> {
-        match self.decode(key, encoded)? {
+    pub fn open(&self, item_id: ItemId, encoded: ItemValue) -> Result<Vec<u8>> {
+        match self.decode(item_id, encoded)? {
             Value::Raw(bytes) => Ok(bytes),
             Value::Json(_) => Err(crate::value::Error::ExpectedRawValue.into()),
         }

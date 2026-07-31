@@ -1,33 +1,21 @@
 // SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Buffers.Binary;
-
 namespace OpenKache;
 
 internal static partial class Protocol
 {
-    [Flags]
-    internal enum ValueFlags : byte
-    {
-        None = 0,
-        Compressed = 1,
-        Encrypted = 2,
-    }
-
     internal readonly record struct Response(
         Status Status,
-        ValueFlags ValueFlags,
         byte[] Payload);
 
     internal readonly record struct ResponseHeader(
         Status Status,
-        ValueFlags ValueFlags,
         int PayloadLength);
 
     internal static byte[] EncodeRequest(
         Opcode opcode,
-        ReadOnlySpan<byte> itemKey,
+        ReadOnlySpan<byte> itemId,
         ReadOnlySpan<byte> value,
         SetCondition setCondition = SetCondition.None,
         ulong? ttlMilliseconds = null)
@@ -39,22 +27,22 @@ internal static partial class Protocol
                 $"Value size {value.Length} exceeds {MaximumValueBytes} bytes.");
         }
 
-        var usesKey = opcode is Opcode.Get or Opcode.Set or Opcode.Delete;
+        var usesItemId = opcode is Opcode.Get or Opcode.Set or Opcode.Delete;
         var acceptsValue = opcode is Opcode.Set;
         if (!acceptsValue && !value.IsEmpty)
         {
             throw ProtocolError($"{opcode} does not accept a value.");
         }
 
-        if (!usesKey && !itemKey.IsEmpty)
+        if (!usesItemId && !itemId.IsEmpty)
         {
-            throw ProtocolError($"{opcode} does not accept a key.");
+            throw ProtocolError($"{opcode} does not accept an item ID.");
         }
 
-        if (usesKey && itemKey.Length != ItemKeyBytes)
+        if (usesItemId && itemId.Length != ItemIdBytes)
         {
             throw ProtocolError(
-                $"{opcode} key must contain exactly {ItemKeyBytes} bytes.");
+                $"{opcode} item ID must contain exactly {ItemIdBytes} bytes.");
         }
 
         if (opcode is not Opcode.Set
@@ -68,7 +56,7 @@ internal static partial class Protocol
             throw ProtocolError("SET TTL must be greater than zero milliseconds.");
         }
 
-        var optionBits = setCondition switch
+        var flags = setCondition switch
         {
             SetCondition.None => 0u,
             SetCondition.IfAbsent => SetIfAbsentBit,
@@ -77,74 +65,88 @@ internal static partial class Protocol
         };
         if (ttlMilliseconds.HasValue)
         {
-            optionBits |= SetTtlBit;
+            flags |= SetTtlBit;
         }
 
-        var keyLength = usesKey ? ItemKeyBytes : 0;
-        var ttlLength = ttlMilliseconds.HasValue ? SetTtlBytes : 0;
+        var itemIdLength = usesItemId ? ItemIdBytes : 0;
+        var itemIdLengthBytes = EncodeVarUInt((ulong)itemIdLength);
+        var valueLengthBytes = EncodeVarUInt((ulong)value.Length);
+        var ttlBytes = ttlMilliseconds.HasValue
+            ? EncodeVarUInt(ttlMilliseconds.Value)
+            : [];
+        var requestHeaderBytes =
+            2 + itemIdLengthBytes.Length + valueLengthBytes.Length;
         var frame = GC.AllocateUninitializedArray<byte>(
-            checked(RequestHeaderBytes + keyLength + ttlLength + value.Length));
+            checked(requestHeaderBytes + itemIdLength + ttlBytes.Length + value.Length));
         frame[0] = (byte)opcode;
-        BinaryPrimitives.WriteUInt32BigEndian(
-            frame.AsSpan(1, sizeof(uint)),
-            (uint)keyLength);
-        BinaryPrimitives.WriteUInt32BigEndian(
-            frame.AsSpan(5, sizeof(uint)),
-            (uint)value.Length | optionBits);
-        if (usesKey)
+        frame[1] = (byte)flags;
+        var offset = 2;
+        itemIdLengthBytes.CopyTo(frame.AsSpan(offset));
+        offset += itemIdLengthBytes.Length;
+        valueLengthBytes.CopyTo(frame.AsSpan(offset));
+        offset += valueLengthBytes.Length;
+        if (usesItemId)
         {
-            itemKey.CopyTo(frame.AsSpan(RequestHeaderBytes, ItemKeyBytes));
+            itemId.CopyTo(frame.AsSpan(offset, ItemIdBytes));
+            offset += ItemIdBytes;
         }
 
-        var valueOffset = RequestHeaderBytes + keyLength;
-        if (ttlMilliseconds is { } ttl)
+        if (ttlBytes.Length > 0)
         {
-            BinaryPrimitives.WriteUInt64BigEndian(
-                frame.AsSpan(valueOffset, SetTtlBytes),
-                ttl);
-            valueOffset += SetTtlBytes;
+            ttlBytes.CopyTo(frame.AsSpan(offset));
+            offset += ttlBytes.Length;
         }
 
-        value.CopyTo(frame.AsSpan(valueOffset));
+        value.CopyTo(frame.AsSpan(offset));
         return frame;
     }
 
     internal static ResponseHeader DecodeResponseHeader(ReadOnlySpan<byte> header)
     {
-        if (header.Length != ResponseHeaderBytes)
+        if (header.Length < 2)
         {
-            throw ProtocolError(
-                $"Response header must contain {ResponseHeaderBytes} bytes.");
+            throw ProtocolError("Response header is truncated.");
         }
 
         var status = DecodeStatus(header[0]);
-        var encodedLength = BinaryPrimitives.ReadUInt32BigEndian(header[1..]);
-        var payloadLength = checked((int)(encodedLength & ResponseValueLengthMask));
-        if (payloadLength > MaximumValueBytes)
+        var payloadLength = DecodeVarUInt(header[1..]);
+        if (payloadLength > (ulong)MaximumValueBytes)
         {
             throw ProtocolError(
                 $"Response payload exceeds {MaximumValueBytes} bytes.");
         }
 
-        var flags = ValueFlags.None;
-        if ((encodedLength & ValueCompressedBit) != 0)
+        return new ResponseHeader(status, checked((int)payloadLength));
+    }
+
+    internal static int EncodedVarUIntLength(byte first)
+    {
+        if (first <= 0x7f)
         {
-            flags |= ValueFlags.Compressed;
+            return 1;
         }
 
-        if ((encodedLength & ValueEncryptedBit) != 0)
+        if (first <= 0xbf)
         {
-            flags |= ValueFlags.Encrypted;
+            return 2;
         }
 
-        if (flags != ValueFlags.None
-            && (status != Status.Ok || payloadLength == 0))
+        if (first <= 0xdf)
         {
-            throw ProtocolError(
-                "Value transformation flags require a non-empty OK response.");
+            return 3;
         }
 
-        return new ResponseHeader(status, flags, payloadLength);
+        if (first <= 0xef)
+        {
+            return 4;
+        }
+
+        if (first is >= 0xf3 and <= 0xf7)
+        {
+            return first - 0xf3 + 5;
+        }
+
+        throw ProtocolError($"Invalid variable integer prefix 0x{first:x2}.");
     }
 
     internal static bool IsError(Status status)
@@ -173,6 +175,96 @@ internal static partial class Protocol
         return Enum.IsDefined(status)
             ? status
             : throw ProtocolError($"Unknown response status 0x{value:x2}.");
+    }
+
+    private static byte[] EncodeVarUInt(ulong value)
+    {
+        var bytes = new byte[MaximumVarUIntBytes];
+        var length = value switch
+        {
+            <= 0x7f => 1,
+            <= 0x3fff => 2,
+            <= 0x1f_ffff => 3,
+            <= 0x0fff_ffff => 4,
+            <= uint.MaxValue => 5,
+            <= 0xff_ffff_ffff => 6,
+            <= 0xffff_ffff_ffff => 7,
+            <= 0xff_ffff_ffff_ffff => 8,
+            _ => 9,
+        };
+
+        switch (length)
+        {
+            case 1:
+                bytes[0] = (byte)value;
+                break;
+            case 2:
+                bytes[0] = (byte)(0x80 | (value & 0x3f));
+                bytes[1] = (byte)(value >> 6);
+                break;
+            case 3:
+                bytes[0] = (byte)(0xc0 | (value & 0x1f));
+                bytes[1] = (byte)(value >> 5);
+                bytes[2] = (byte)(value >> 13);
+                break;
+            case 4:
+                bytes[0] = (byte)(0xe0 | (value & 0x0f));
+                bytes[1] = (byte)(value >> 4);
+                bytes[2] = (byte)(value >> 12);
+                bytes[3] = (byte)(value >> 20);
+                break;
+            default:
+                bytes[0] = (byte)(0xf3 + length - 5);
+                for (var index = 1; index < length; index++)
+                {
+                    bytes[index] = (byte)(value >> (8 * (index - 1)));
+                }
+                break;
+        }
+
+        Array.Resize(ref bytes, length);
+        return bytes;
+    }
+
+    private static ulong DecodeVarUInt(ReadOnlySpan<byte> encoded)
+    {
+        var length = EncodedVarUIntLength(encoded[0]);
+        if (encoded.Length != length)
+        {
+            throw ProtocolError(
+                $"Variable integer requires {length} bytes, got {encoded.Length}.");
+        }
+
+        var value = length switch
+        {
+            1 => encoded[0],
+            2 => ((ulong)encoded[0] & 0x3fUL) | ((ulong)encoded[1] << 6),
+            3 => ((ulong)encoded[0] & 0x1fUL)
+                | ((ulong)encoded[1] << 5)
+                | ((ulong)encoded[2] << 13),
+            4 => ((ulong)encoded[0] & 0x0fUL)
+                | ((ulong)encoded[1] << 4)
+                | ((ulong)encoded[2] << 12)
+                | ((ulong)encoded[3] << 20),
+            _ => DecodeWideVarUInt(encoded),
+        };
+        if (!EncodeVarUInt(value).AsSpan().SequenceEqual(encoded))
+        {
+            throw ProtocolError("Variable integer is not in canonical form.");
+        }
+
+        return value;
+    }
+
+    private static ulong DecodeWideVarUInt(ReadOnlySpan<byte> encoded)
+    {
+        var value = 0UL;
+        for (var index = 1; index < encoded.Length; index++)
+        {
+            value |= (ulong)encoded[index] << (8 * (index - 1));
+        }
+
+        return value;
     }
 
     private static OpenKacheException ProtocolError(string message)

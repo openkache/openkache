@@ -1010,14 +1010,14 @@ async fn execute_request(
 ) -> Response {
     let Request {
         opcode,
-        key,
+        item_id,
         set_options,
         value,
     } = request;
     let result = match opcode {
         Opcode::Ping => return response_bytes(Status::Ok, b"PONG"),
         Opcode::Get => cache
-            .get_async(key.expect("GET requests have a validated item key"))
+            .get_async(item_id.expect("GET requests have a validated item ID"))
             .await
             .map(|value| match value {
                 Some(value) => response(Status::Ok, value.bytes),
@@ -1025,7 +1025,7 @@ async fn execute_request(
             }),
         Opcode::Set => cache
             .set_async_with_options(
-                key.expect("SET requests have a validated item key"),
+                item_id.expect("SET requests have a validated item ID"),
                 crate::types::StoredItemValue::new(value),
                 set_options,
             )
@@ -1036,7 +1036,7 @@ async fn execute_request(
                 SetOutcome::NotStored => response(Status::NotStored, Vec::new()),
             }),
         Opcode::Delete => cache
-            .delete_async(key.expect("DELETE requests have a validated item key"))
+            .delete_async(item_id.expect("DELETE requests have a validated item ID"))
             .await
             .map(|deleted| {
                 response(

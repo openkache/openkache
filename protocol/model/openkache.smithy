@@ -5,7 +5,7 @@ namespace openkache.protocol
 @trait(selector: "service")
 structure wireContract {
     @required
-    itemKeyBytes: Integer
+    itemIdBytes: Integer
 
     @required
     maxValueBytes: Integer
@@ -69,7 +69,7 @@ structure valueFormat {
     dataProtectionKeyBytes: Integer
 
     @required
-    itemKeyRootContext: String
+    itemIdRootContext: String
 
     @required
     aadDomain: String
@@ -171,7 +171,7 @@ structure wireStatus {
 }
 
 @wireContract(
-    itemKeyBytes: 32,
+    itemIdBytes: 32,
     maxValueBytes: 67108864,
     v2: {
         alpn: "openkache/2",
@@ -186,7 +186,7 @@ structure wireStatus {
         setIfPresentBit: 134217728
     },
     v3: {
-        alpn: "openkache/3",
+        alpn: "openkache/1",
         requestFixedBytes: 2,
         responseFixedBytes: 1,
         maxVaruintBytes: 9,
@@ -212,7 +212,7 @@ structure wireStatus {
     robustNonceBytes: 12,
     robustTagBytes: 16,
     dataProtectionKeyBytes: 32,
-    itemKeyRootContext: "OpenKache client item key root v1",
+    itemIdRootContext: "OpenKache client item key root v1",
     aadDomain: "openkache/value-format/aad/v1",
     valueRootContext: "OpenKache value format v1 root key",
     compactMacContext: "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
@@ -226,7 +226,7 @@ structure wireStatus {
     jsonEncoding: "json"
 )
 service OpenKache {
-    version: "3"
+    version: "1"
     operations: [Ping, Get, Set, Delete, Stats, Sync]
 }
 
@@ -266,7 +266,7 @@ operation Sync {
     output: SyncOutput
 }
 
-blob Key
+blob ItemId
 
 blob Value
 
@@ -276,7 +276,7 @@ structure PingOutput {}
 
 structure GetInput {
     @required
-    key: Key
+    itemId: ItemId
 }
 
 structure GetOutput {
@@ -285,7 +285,7 @@ structure GetOutput {
 
 structure SetInput {
     @required
-    key: Key
+    itemId: ItemId
 
     @required
     value: Value
@@ -302,7 +302,7 @@ structure SetOutput {
 
 structure DeleteInput {
     @required
-    key: Key
+    itemId: ItemId
 }
 
 structure DeleteOutput {

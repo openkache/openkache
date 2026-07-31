@@ -96,10 +96,14 @@ internal sealed class QuicTransport : IAsyncDisposable
         try
         {
             await stream.WriteAsync(frame, cancellationToken).ConfigureAwait(false);
-            var headerBytes = new byte[Protocol.ResponseHeaderBytes];
-            await stream.ReadExactlyAsync(
-                headerBytes,
-                cancellationToken).ConfigureAwait(false);
+            var firstHeaderByte = new byte[1];
+            await stream.ReadExactlyAsync(firstHeaderByte, cancellationToken)
+                .ConfigureAwait(false);
+            var payloadLengthBytes = await ReadVarUIntAsync(stream, cancellationToken)
+                .ConfigureAwait(false);
+            var headerBytes = new byte[1 + payloadLengthBytes.Length];
+            firstHeaderByte.CopyTo(headerBytes, 0);
+            payloadLengthBytes.CopyTo(headerBytes, 1);
             var header = Protocol.DecodeResponseHeader(headerBytes);
             var payload = GC.AllocateUninitializedArray<byte>(header.PayloadLength);
             if (payload.Length > 0)
@@ -110,10 +114,7 @@ internal sealed class QuicTransport : IAsyncDisposable
             }
 
             reusable = !Protocol.IsError(header.Status);
-            return new Protocol.Response(
-                header.Status,
-                header.ValueFlags,
-                payload);
+            return new Protocol.Response(header.Status, payload);
         }
         finally
         {
@@ -176,6 +177,25 @@ internal sealed class QuicTransport : IAsyncDisposable
         return CryptographicOperations.FixedTimeEquals(
             certificate.GetRawCertData(),
             trustedCertificateDer);
+    }
+
+    private static async ValueTask<byte[]> ReadVarUIntAsync(
+        QuicStream stream,
+        CancellationToken cancellationToken)
+    {
+        var first = new byte[1];
+        await stream.ReadExactlyAsync(first, cancellationToken).ConfigureAwait(false);
+        var length = Protocol.EncodedVarUIntLength(first[0]);
+        var encoded = new byte[length];
+        encoded[0] = first[0];
+        if (length > 1)
+        {
+            await stream.ReadExactlyAsync(
+                encoded.AsMemory(1),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return encoded;
     }
 
     private async ValueTask<QuicStream> AcquireLaneAsync(

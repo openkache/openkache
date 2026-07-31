@@ -2,11 +2,11 @@
 
 /// Number of bytes in every server-derived storage key.
 ///
-/// The storage key is the server-side representation of the protocol item key,
+/// The storage key is the server-side representation of the protocol item ID,
 /// so its size comes from the Smithy-generated protocol contract.
-pub use openkache_protocol::ITEM_KEY_BYTES as STORAGE_KEY_BYTES;
+pub use openkache_protocol::ITEM_ID_BYTES as STORAGE_KEY_BYTES;
 
-/// Variable-length application value associated with an item key.
+/// Variable-length application value associated with an item ID.
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemValue(Vec<u8>);

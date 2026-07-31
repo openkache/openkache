@@ -12,7 +12,7 @@ use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{ItemKey, SetOptions};
+use openkache_protocol::{ItemId, SetOptions};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -31,8 +31,8 @@ const MAX_BUFFER_BYTES: usize = 32 * 1024 * 1024;
 const READ_BUFFER_BYTES: usize = 64 * 1024;
 type Command<'a> = SmallVec<[&'a [u8]; 4]>;
 
-fn resp_item_key(key: &[u8]) -> ItemKey {
-    ItemKey::new(Sha256::digest(key).into())
+fn resp_item_id(application_key: &[u8]) -> ItemId {
+    ItemId::new(Sha256::digest(application_key).into())
 }
 
 /// Plaintext RESP2 endpoint that dispatches directly to OpenKache storage workers.
@@ -402,7 +402,7 @@ async fn execute_command(
     match command.first() {
         Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
-            [_, key] => match cache.get_async(resp_item_key(key)).await {
+            [_, application_key] => match cache.get_async(resp_item_id(application_key)).await {
                 Ok(Some(value)) => bulk(response, Some(&value.bytes)),
                 Ok(None) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
@@ -410,9 +410,9 @@ async fn execute_command(
             _ => error(response, "wrong number of arguments for GET"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
-            [_, key, value] => match cache
+            [_, application_key, value] => match cache
                 .set_async_with_options(
-                    resp_item_key(key),
+                    resp_item_id(application_key),
                     StoredItemValue::new(value.to_vec()),
                     SetOptions::NONE,
                 )
@@ -429,8 +429,8 @@ async fn execute_command(
                 error(response, "wrong number of arguments for DEL");
             } else {
                 let mut deleted = 0;
-                for key in &command[1..] {
-                    match cache.delete_async(resp_item_key(key)).await {
+                for application_key in &command[1..] {
+                    match cache.delete_async(resp_item_id(application_key)).await {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
                         Err(cache_error) => {

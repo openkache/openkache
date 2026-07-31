@@ -8,10 +8,10 @@ namespace OpenKache;
 /// </summary>
 public enum SetOutcome
 {
-    /// <summary>The key did not previously exist.</summary>
+    /// <summary>The item ID did not previously exist.</summary>
     Created,
 
-    /// <summary>The key previously existed and was replaced.</summary>
+    /// <summary>The item ID previously existed and was replaced.</summary>
     Replaced,
 
     /// <summary>The value was not stored because its existence condition failed.</summary>

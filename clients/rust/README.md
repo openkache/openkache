@@ -9,7 +9,7 @@ Rust applications get high-level request builders while advanced callers can
 use the re-exported raw core types over the same connection.
 
 - `Client` accepts application keys and plaintext values.
-- `RawClient` accepts exact 32-byte item keys and opaque values.
+- `RawClient` accepts exact 32-byte item IDs and opaque values.
 - `LocalClient` and `LocalRawClient` provide equivalent Compio-local layers.
 - `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
 
@@ -86,7 +86,7 @@ secret storage. Do not hash, truncate, or pad a human-readable password into a
 key.
 
 Clients must use the same data-protection key to share protected entries.
-Rotating it changes derived item keys, so old entries become unreachable and
+Rotating it changes derived item IDs, so old entries become unreachable and
 must be repopulated.
 
 The [client status table](../README.md#sdk-status) identifies the format
@@ -136,12 +136,12 @@ client
 Use the raw layer when the application supplies exact protocol values:
 
 ```rust
-use openkache_client::{ItemKey, ItemValue, SetOptions};
+use openkache_client::{ItemId, ItemValue, SetOptions};
 
-let key = ItemKey::from_bytes([0x42; 32]);
+let item_id = ItemId::from_bytes([0x42; 32]);
 let result = client
     .raw()
-    .set(key, ItemValue::new(b"value".to_vec()), SetOptions::new())
+    .set(item_id, ItemValue::new(b"value".to_vec()), SetOptions::new())
     .await?;
 ```
 
