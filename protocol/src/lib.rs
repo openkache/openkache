@@ -33,8 +33,7 @@ include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 const MIN_VARUINT_BYTES: usize = 1;
 const MIN_REQUEST_FRAME_BYTES: usize = REQUEST_FIXED_BYTES + MIN_VARUINT_BYTES * 2;
 const MIN_RESPONSE_FRAME_BYTES: usize = RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES;
-const MAX_REQUEST_PREFIX_BYTES: usize =
-    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_ID_BYTES;
+const MAX_REQUEST_PREFIX_BYTES: usize = REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_ID_BYTES;
 const MAX_RESPONSE_PREFIX_BYTES: usize = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
 const KNOWN_SET_FLAGS: u8 = SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG;
 
@@ -246,7 +245,8 @@ impl Request {
         else {
             return Ok(None);
         };
-        let item_id_len = usize::try_from(item_id_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+        let item_id_len =
+            usize::try_from(item_id_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
         let value_len =
             usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
         validate_item_id_length(opcode, item_id_len)?;
