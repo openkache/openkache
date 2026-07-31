@@ -1,6 +1,8 @@
 //! Low-level QUIC client core for the OpenKache binary protocol.
 
 mod config;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 mod key;
 mod protected;
 mod protection;
@@ -34,7 +36,8 @@ pub use value::ItemValue;
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
 compile_error!("enable at least one client QUIC backend feature");
 
-const DEFAULT_MAX_IN_FLIGHT: usize = 256;
+/// Default number of reusable QUIC request lanes for native and Rust clients.
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
 
 /// Client-owned identifier for an asynchronous runtime and QUIC backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

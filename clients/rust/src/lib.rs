@@ -8,9 +8,12 @@ pub mod smithy {
     include!(concat!(env!("OUT_DIR"), "/smithy_api.rs"));
 }
 
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::future::{Future, IntoFuture};
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::time::Duration;
 
 pub use openkache_client_core::{
@@ -33,6 +36,7 @@ use openkache_client_core::{
 #[cfg(feature = "quic-quinn")]
 pub use openkache_client_core::{RawClient, RawClientBuilder};
 
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 macro_rules! builder_methods {
     ($builder:ident) => {
         impl $builder {
@@ -95,6 +99,7 @@ macro_rules! builder_methods {
     };
 }
 
+#[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 macro_rules! client_methods {
     ($client:ident) => {
         impl $client {
@@ -368,12 +373,6 @@ pub struct LocalSetRequest<'a> {
 
 #[cfg(feature = "quic-compio")]
 impl LocalSetRequest<'_> {
-    #[cfg(feature = "ffi")]
-    pub(crate) fn options(mut self, options: SetOptions) -> Self {
-        self.options = options;
-        self
-    }
-
     /// Stores only if the key does not exist.
     pub fn if_absent(mut self) -> Self {
         self.options = self.options.if_absent();
