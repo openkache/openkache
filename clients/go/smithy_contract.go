@@ -95,6 +95,8 @@ const (
 const (
 	// SmithyClientDefaultServerName is used when no TLS server name is supplied.
 	SmithyClientDefaultServerName = "localhost"
+	// SmithyClientCertificatePEMType is the PEM block type used for certificate chains.
+	SmithyClientCertificatePEMType = "CERTIFICATE"
 	// SmithyClientMinimumPositiveValue is the minimum accepted positive setting.
 	SmithyClientMinimumPositiveValue = 1
 	// SmithyClientDefaultConnectTimeoutMS is the default connection timeout.
@@ -115,4 +117,18 @@ const (
 	SmithyClientCompressionLevelMin int32 = 1
 	// SmithyClientCompressionLevelMax is the maximum supported Zstandard level.
 	SmithyClientCompressionLevelMax int32 = 22
+)
+
+// Smithy API enum string values extracted from the Smithy service contract.
+const (
+	// SmithySetConditionIfAbsentValue is the Smithy SetCondition value for if_absent.
+	SmithySetConditionIfAbsentValue = "if_absent"
+	// SmithySetConditionIfPresentValue is the Smithy SetCondition value for if_present.
+	SmithySetConditionIfPresentValue = "if_present"
+	// SmithySetOutcomeCreatedValue is the Smithy SetOutcome value for created.
+	SmithySetOutcomeCreatedValue = "created"
+	// SmithySetOutcomeReplacedValue is the Smithy SetOutcome value for replaced.
+	SmithySetOutcomeReplacedValue = "replaced"
+	// SmithySetOutcomeNotStoredValue is the Smithy SetOutcome value for not_stored.
+	SmithySetOutcomeNotStoredValue = "not_stored"
 )

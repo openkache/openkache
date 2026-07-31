@@ -112,6 +112,9 @@ structure clientDefaults {
     serverName: String
 
     @required
+    certificatePemType: String
+
+    @required
     minimumPositiveValue: Integer
 
     @required
@@ -352,6 +355,7 @@ structure wireStatus {
 )
 @clientDefaults(
     serverName: "localhost",
+    certificatePemType: "CERTIFICATE",
     minimumPositiveValue: 1,
     connectTimeoutMs: 5000,
     requestTimeoutMs: 2000,

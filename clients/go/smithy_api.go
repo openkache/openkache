@@ -8,17 +8,17 @@ import "context"
 type SmithySetCondition string
 
 const (
-	SmithySetConditionIfAbsent SmithySetCondition = "if_absent"
-	SmithySetConditionIfPresent SmithySetCondition = "if_present"
+	SmithySetConditionIfAbsent SmithySetCondition = SmithySetConditionIfAbsentValue
+	SmithySetConditionIfPresent SmithySetCondition = SmithySetConditionIfPresentValue
 )
 
 // SmithySetOutcome is the Smithy SetOutcome enum.
 type SmithySetOutcome string
 
 const (
-	SmithySetOutcomeCreated SmithySetOutcome = "created"
-	SmithySetOutcomeReplaced SmithySetOutcome = "replaced"
-	SmithySetOutcomeNotStored SmithySetOutcome = "not_stored"
+	SmithySetOutcomeCreated SmithySetOutcome = SmithySetOutcomeCreatedValue
+	SmithySetOutcomeReplaced SmithySetOutcome = SmithySetOutcomeReplacedValue
+	SmithySetOutcomeNotStored SmithySetOutcome = SmithySetOutcomeNotStoredValue
 )
 
 // SmithyDeleteInput is the Smithy DeleteInput structure.

@@ -50,6 +50,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_NONE,
     SMITHY_CLIENT_COMPRESSION_LEVEL_MAX,
     SMITHY_CLIENT_COMPRESSION_LEVEL_MIN,
+    SMITHY_CLIENT_CERTIFICATE_PEM_TYPE,
     SMITHY_CLIENT_DEFAULT_COMPRESSION_LEVEL,
     SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE,
     SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS,
@@ -692,9 +693,10 @@ def _certificate_chain_bytes(chain: Iterable[bytes]) -> bytes:
         raise OpenKacheValueError("certificate_chain must not be empty")
     if len(certificates) == 1:
         return certificates[0]
+    pem_begin = f"-----BEGIN {SMITHY_CLIENT_CERTIFICATE_PEM_TYPE}-----".encode("ascii")
     pem_entries = []
     for certificate in certificates:
-        if certificate.startswith(b"-----BEGIN"):
+        if certificate.startswith(pem_begin):
             pem_entries.append(certificate)
             continue
         encoded = base64.b64encode(certificate)
@@ -702,9 +704,9 @@ def _certificate_chain_bytes(chain: Iterable[bytes]) -> bytes:
             encoded[offset : offset + 64] for offset in range(0, len(encoded), 64)
         )
         pem_entries.append(
-            b"-----BEGIN CERTIFICATE-----\n"
+            f"-----BEGIN {SMITHY_CLIENT_CERTIFICATE_PEM_TYPE}-----\n".encode("ascii")
             + body
-            + b"\n-----END CERTIFICATE-----\n"
+            + f"\n-----END {SMITHY_CLIENT_CERTIFICATE_PEM_TYPE}-----\n".encode("ascii")
         )
     return b"\n".join(pem_entries)
 

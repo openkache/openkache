@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-const pemCertificateType = "CERTIFICATE"
-
 // ErrClosed is returned after a client has been permanently closed.
 var ErrClosed = errors.New("openkache: client is closed")
 
@@ -223,7 +221,9 @@ func (o Options) normalize() (normalizedOptions, error) {
 			} else {
 				identityCertificate = append(
 					identityCertificate,
-					pem.EncodeToMemory(&pem.Block{Type: pemCertificateType, Bytes: certificate})...,
+					pem.EncodeToMemory(
+						&pem.Block{Type: SmithyClientCertificatePEMType, Bytes: certificate},
+					)...,
 				)
 			}
 		}

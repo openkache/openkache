@@ -79,6 +79,7 @@ export interface Value_Envelope_Contract {
 /** Shared defaults for all OpenKache client bindings. */
 export interface Client_Defaults_Contract {
   readonly server_name: string
+  readonly certificate_pem_type: string
   readonly minimum_positive_value: number
   readonly connect_timeout_ms: number
   readonly request_timeout_ms: number
@@ -847,6 +848,11 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
   const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
   const defaults = {
     server_name: string_member(contract, "serverName", CLIENT_DEFAULTS_TRAIT_ID),
+    certificate_pem_type: string_member(
+      contract,
+      "certificatePemType",
+      CLIENT_DEFAULTS_TRAIT_ID,
+    ),
     minimum_positive_value: integer_member(
       contract,
       "minimumPositiveValue",
@@ -1351,6 +1357,8 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 
 /// Default TLS server name used by client bindings.
 pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.server_name)};
+/// PEM block type used when serializing client certificate chains.
+pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = ${rust_string_literal(defaults.certificate_pem_type)};
 /// Minimum value accepted by settings whose zero value selects a default.
 pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
 /// Default connection setup timeout in milliseconds.
@@ -1399,6 +1407,7 @@ ${variants}
  */
 export function render_csharp(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const version_bytes = encode_vu128(value.version)
   const envelope = contract.value_envelope
   const envelope_magic = bytes_from_hex(
@@ -1416,6 +1425,7 @@ internal static partial class Protocol
 {
     internal const string ApplicationProtocol = ${JSON.stringify(contract.v3.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
+    internal const string CertificatePemType = ${JSON.stringify(defaults.certificate_pem_type)};
 
     private const int MaximumVarUIntBytes = ${formatted_decimal(contract.v3.max_varuint_bytes)};
     private const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
@@ -1725,6 +1735,10 @@ function go_ffi_name(identifier: string): string {
   return name === "Ok" ? "OK" : name
 }
 
+function go_api_value_name(enum_name: string, member_name: string): string {
+  return `${go_api_name(enum_name)}${member_name}Value`
+}
+
 function go_api_type(type: Api_Type, required: boolean): string {
   let rendered: string
   switch (type.kind) {
@@ -1758,7 +1772,7 @@ export function render_go_api(contract: Wire_Contract): string {
     const members = enum_.members
       .map(
         (member) =>
-          `\t${go_api_name(enum_.name)}${member.name} ${go_api_name(enum_.name)} = ${JSON.stringify(member.value)}`,
+          `\t${go_api_name(enum_.name)}${member.name} ${go_api_name(enum_.name)} = ${go_api_value_name(enum_.name, member.name)}`,
       )
       .join("\n")
     return `// ${go_api_name(enum_.name)} is the Smithy ${enum_.name} enum.
@@ -1879,6 +1893,8 @@ ${contract.ffi.connection_states
 const (
 \t// SmithyClientDefaultServerName is used when no TLS server name is supplied.
 \tSmithyClientDefaultServerName = ${JSON.stringify(defaults.server_name)}
+\t// SmithyClientCertificatePEMType is the PEM block type used for certificate chains.
+\tSmithyClientCertificatePEMType = ${JSON.stringify(defaults.certificate_pem_type)}
 \t// SmithyClientMinimumPositiveValue is the minimum accepted positive setting.
 \tSmithyClientMinimumPositiveValue = ${defaults.minimum_positive_value}
 \t// SmithyClientDefaultConnectTimeoutMS is the default connection timeout.
@@ -1899,6 +1915,19 @@ const (
 \tSmithyClientCompressionLevelMin int32 = ${defaults.compression_level_min}
 \t// SmithyClientCompressionLevelMax is the maximum supported Zstandard level.
 \tSmithyClientCompressionLevelMax int32 = ${defaults.compression_level_max}
+)
+
+// Smithy API enum string values extracted from the Smithy service contract.
+const (
+${contract.api.enums
+  .flatMap((enum_) =>
+    enum_.members.map(
+      (member) =>
+        `\t// ${go_api_value_name(enum_.name, member.name)} is the Smithy ${enum_.name} value for ${member.value}.
+\t${go_api_value_name(enum_.name, member.name)} = ${JSON.stringify(member.value)}`,
+    ),
+  )
+  .join("\n")}
 )
 `
 }
@@ -2031,6 +2060,7 @@ export function render_python_contract(contract: Wire_Contract): string {
 
 SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v3.alpn)}
 SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)}
+SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(defaults.certificate_pem_type)}
 SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value}
 SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS = ${defaults.connect_timeout_ms}
 SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS = ${defaults.request_timeout_ms}
@@ -2176,6 +2206,7 @@ ${contract.ffi.connection_states
   .join("\n")}
 
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
+#define OPENKACHE_SMITHY_CLIENT_CERTIFICATE_PEM_TYPE ${c_string_literal(defaults.certificate_pem_type)}
 #define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS ${defaults.connect_timeout_ms}u
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS ${defaults.request_timeout_ms}u
