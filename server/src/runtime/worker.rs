@@ -142,6 +142,7 @@ pub(super) async fn worker_loop(
     mut cache: Kvkache,
     receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
+    affinity_id: usize,
 ) -> Result<()> {
     let mut batch = VecDeque::with_capacity(io_config.batch_size);
     loop {
@@ -169,7 +170,14 @@ pub(super) async fn worker_loop(
             }
         }
 
-        if process_worker_batch(&mut cache, &mut batch, io_config.max_inflight_per_worker).await? {
+        if process_worker_batch(
+            &mut cache,
+            &mut batch,
+            io_config.max_inflight_per_worker,
+            affinity_id,
+        )
+        .await?
+        {
             return Ok(());
         }
     }
@@ -179,6 +187,7 @@ async fn process_worker_batch(
     cache: &mut Kvkache,
     batch: &mut VecDeque<WorkerRequest>,
     max_inflight: usize,
+    affinity_id: usize,
 ) -> Result<bool> {
     let mut shutdown_response = None;
 
@@ -239,9 +248,9 @@ async fn process_worker_batch(
                 }
             },
             WorkerRequest::Stats { response } => {
-                let cpu = unsafe { libc::sched_getcpu() };
                 response.send(Ok(WorkerResponse::Stats(format!(
-                    "cpu_id={cpu} {}",
+                    "{} {}",
+                    crate::platform::cpu_diagnostic(affinity_id),
                     cache.stats()
                 ))));
             }
