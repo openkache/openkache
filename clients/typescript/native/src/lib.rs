@@ -1,16 +1,16 @@
 //! Node-API adapter for the OpenKache client on Node.js, Bun, and Deno.
 
-use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client_core::value::{Compression, ZstandardOptions};
+use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use openkache_client_core::{
-    Certificate, ClientIdentity, ClientTimeouts, DataProtectionKey, DeleteOutcome, Endpoint,
-    GetOutcome, PrivateKey, ProtectedClient, SetCondition, SetOptions, SetOutcome, value_envelope,
+    Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
+    DeleteOutcome, Endpoint, GetOutcome, ItemId, ItemValue, PrivateKey, ProtectedClient,
+    RetryPolicy, SetCondition, SetOptions, SetOutcome, value_envelope,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -46,6 +46,11 @@ pub struct NativeClientOptions {
     pub connect_timeout_ms: Option<f64>,
     #[napi(js_name = "request_timeout_ms")]
     pub request_timeout_ms: Option<f64>,
+    #[napi(js_name = "retry_max_attempts")]
+    pub retry_max_attempts: Option<f64>,
+    #[napi(js_name = "max_in_flight")]
+    pub max_in_flight: Option<f64>,
+    pub encryption: Option<String>,
 }
 
 /// Decoded components of a canonical OpenKache value envelope.
@@ -117,6 +122,27 @@ impl NativeClient {
         }))
     }
 
+    /// Retrieves a core-owned canonical JSON value.
+    ///
+    /// Raw-formatted values are rejected instead of being silently coerced.
+    #[napi(js_name = "get_json")]
+    pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
+        let outcome = self
+            .active_client()?
+            .get_value(key.as_ref())
+            .await
+            .map_err(native_error)?;
+        match outcome {
+            GetOutcome::NotFound => Ok(None),
+            GetOutcome::Found(Value::Json(value)) => serde_json::to_string(&value)
+                .map(Some)
+                .map_err(native_error),
+            GetOutcome::Found(Value::Raw(_)) => Err(native_error(
+                "stored value uses raw serialization, expected canonical JSON",
+            )),
+        }
+    }
+
     /// Stores exact bytes with an optional existence condition and TTL.
     #[napi]
     pub async fn set(
@@ -164,6 +190,24 @@ impl NativeClient {
         self.store(key.as_ref(), value, condition, ttl_ms).await
     }
 
+    /// Serializes and stores a core-owned canonical JSON value.
+    #[napi(js_name = "set_json")]
+    pub async fn set_json(
+        &self,
+        key: Uint8Array,
+        value: serde_json::Value,
+        condition: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let value = parse_json_value(value)?;
+        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
+        self.active_client()?
+            .set_value(key.as_ref(), Value::Json(value), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_error)
+    }
+
     /// Deletes a key and reports whether it existed.
     #[napi]
     pub async fn delete(&self, key: Uint8Array) -> Result<bool> {
@@ -186,14 +230,92 @@ impl NativeClient {
         self.active_client()?.sync().await.map_err(native_error)
     }
 
-    /// Releases the native client. Repeated calls are safe.
+    /// Closes the shared core client. Repeated calls are safe.
     #[napi]
-    pub fn close(&self) -> Result<()> {
-        self.client
-            .write()
-            .map_err(|_| state_error("native client state lock is poisoned"))?
-            .take();
+    pub async fn close(&self) -> Result<()> {
+        let client = self.take_client()?;
+        if let Some(client) = client {
+            client.close().await.map_err(native_error)?;
+        }
         Ok(())
+    }
+
+    /// Drops the native handle without awaiting the core shutdown future.
+    ///
+    /// This is reserved for a JavaScript finalizer, where no promise can be observed.
+    #[napi(js_name = "close_now")]
+    pub fn close_now(&self) -> Result<()> {
+        self.take_client()?;
+        Ok(())
+    }
+
+    /// Returns the shared core's best-effort connection state.
+    #[napi(js_name = "connection_state")]
+    pub fn connection_state(&self) -> Result<String> {
+        let client = self
+            .client
+            .read()
+            .map_err(|_| state_error("native client state lock is poisoned"))?;
+        Ok(client
+            .as_ref()
+            .map(|client| client.connection_state().to_string())
+            .unwrap_or_else(|| "closed".to_string()))
+    }
+
+    /// Reconnects the shared core without replaying a request.
+    #[napi]
+    pub async fn reconnect(&self) -> Result<()> {
+        self.active_client()?
+            .reconnect()
+            .await
+            .map_err(native_error)
+    }
+
+    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    #[napi(js_name = "raw_get")]
+    pub async fn raw_get(&self, item_id: Uint8Array) -> Result<Option<Uint8Array>> {
+        let item_id = parse_item_id(item_id.as_ref())?;
+        self.active_client()?
+            .raw()
+            .get(item_id)
+            .await
+            .map(|value| {
+                value
+                    .into_option()
+                    .map(|value| Uint8Array::new(value.into_bytes()))
+            })
+            .map_err(native_error)
+    }
+
+    /// Stores exact bytes for a fixed-size protocol item ID.
+    #[napi(js_name = "raw_set")]
+    pub async fn raw_set(
+        &self,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        ttl_ms: Option<f64>,
+    ) -> Result<String> {
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
+        self.active_client()?
+            .raw()
+            .set(item_id, ItemValue::new(value.as_ref().to_vec()), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_error)
+    }
+
+    /// Deletes a fixed-size protocol item ID.
+    #[napi(js_name = "raw_delete")]
+    pub async fn raw_delete(&self, item_id: Uint8Array) -> Result<bool> {
+        let item_id = parse_item_id(item_id.as_ref())?;
+        self.active_client()?
+            .raw()
+            .delete(item_id)
+            .await
+            .map(|outcome| outcome == DeleteOutcome::Deleted)
+            .map_err(native_error)
     }
 }
 
@@ -205,28 +327,21 @@ impl NativeClient {
         condition: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        let condition = parse_condition(condition.as_deref())?;
-        let ttl_ms = ttl_ms
-            .map(|value| parse_u64(value, "ttl_ms", false))
-            .transpose()?;
+        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
         let client = self.active_client()?;
-        let mut options = match condition {
-            SetCondition::None => SetOptions::new(),
-            SetCondition::IfAbsent => SetOptions::new().if_absent(),
-            SetCondition::IfPresent => SetOptions::new().if_present(),
-        };
-        if let Some(ttl_ms) = ttl_ms {
-            options = options.expires_after_millis(ttl_ms);
-        }
         client
             .set(key, value, options)
             .await
-            .map(|outcome| match outcome {
-                SetOutcome::Created => "created".to_string(),
-                SetOutcome::Replaced => "replaced".to_string(),
-                SetOutcome::NotStored => "not_stored".to_string(),
-            })
+            .map(map_set_outcome)
             .map_err(native_error)
+    }
+
+    fn take_client(&self) -> Result<Option<Arc<ProtectedClient>>> {
+        Ok(self
+            .client
+            .write()
+            .map_err(|_| state_error("native client state lock is poisoned"))?
+            .take())
     }
 
     fn active_client(&self) -> Result<Arc<ProtectedClient>> {
@@ -247,10 +362,6 @@ impl NativeClient {
 /// failures.
 #[napi]
 pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
-    let address: SocketAddr = options
-        .address
-        .parse()
-        .map_err(|error| invalid_argument(format!("invalid server address: {error}")))?;
     let mut trusted_certificates =
         Certificate::from_der_or_pem_chain(options.certificate.as_ref()).map_err(native_error)?;
     if trusted_certificates.len() != 1 {
@@ -291,13 +402,28 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
             Duration::from_millis(parse_u64(request_timeout_ms, "request_timeout_ms", false)?);
     }
 
-    let endpoint =
-        Endpoint::from_socket_addr(address, options.server_name).map_err(native_error)?;
+    let retry = RetryPolicy {
+        max_attempts: options
+            .retry_max_attempts
+            .map(|value| parse_usize(value, "retry_max_attempts", false))
+            .transpose()?
+            .unwrap_or(RetryPolicy::default().max_attempts),
+    };
+    let max_in_flight = options
+        .max_in_flight
+        .map(|value| parse_usize(value, "max_in_flight", false))
+        .transpose()?
+        .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
+    let encryption = parse_encryption(options.encryption.as_deref())?;
+    let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
         .trust_certificate(trusted_certificate)
         .compression(compression)
-        .timeouts(timeouts);
+        .timeouts(timeouts)
+        .retry_policy(retry)
+        .max_in_flight(max_in_flight)
+        .encryption(encryption);
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
@@ -343,6 +469,67 @@ fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     }
 }
 
+fn parse_set_options(condition: Option<&str>, ttl_ms: Option<f64>) -> Result<SetOptions> {
+    let condition = parse_condition(condition)?;
+    let ttl_ms = ttl_ms
+        .map(|value| parse_u64(value, "ttl_ms", false))
+        .transpose()?;
+    let mut options = match condition {
+        SetCondition::None => SetOptions::new(),
+        SetCondition::IfAbsent => SetOptions::new().if_absent(),
+        SetCondition::IfPresent => SetOptions::new().if_present(),
+    };
+    if let Some(ttl_ms) = ttl_ms {
+        options = options.expires_after_millis(ttl_ms);
+    }
+    Ok(options)
+}
+
+fn parse_item_id(bytes: &[u8]) -> Result<ItemId> {
+    ItemId::from_slice(bytes).map_err(native_error)
+}
+
+fn parse_json_value(value: serde_json::Value) -> Result<JsonValue> {
+    match value {
+        serde_json::Value::Null => Ok(JsonValue::Null),
+        serde_json::Value::Bool(value) => Ok(JsonValue::Boolean(value)),
+        serde_json::Value::Number(value) => {
+            let value = value
+                .as_f64()
+                .ok_or_else(|| invalid_argument("JSON number must fit in finite f64"))?;
+            JsonValue::number(value).map_err(native_error)
+        }
+        serde_json::Value::String(value) => Ok(JsonValue::String(value)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(parse_json_value)
+            .collect::<Result<Vec<_>>>()
+            .map(JsonValue::Array),
+        serde_json::Value::Object(values) => values
+            .into_iter()
+            .map(|(key, value)| parse_json_value(value).map(|value| (key, value)))
+            .collect::<Result<Vec<_>>>()
+            .map(JsonValue::Object),
+    }
+}
+
+fn parse_endpoint(address: &str, server_name: &str) -> Result<Endpoint> {
+    let address = address.parse().map_err(|error| {
+        invalid_argument(format!("invalid server address {address:?}: {error}"))
+    })?;
+    Endpoint::from_socket_addr(address, server_name).map_err(native_error)
+}
+
+fn parse_encryption(encryption: Option<&str>) -> Result<Encryption> {
+    match encryption {
+        None | Some("robust") => Ok(Encryption::Robust),
+        Some("compact") => Ok(Encryption::Compact),
+        Some(value) => Err(invalid_argument(format!(
+            "encryption must be compact or robust, got {value}"
+        ))),
+    }
+}
+
 fn parse_usize(value: f64, name: &str, allow_zero: bool) -> Result<usize> {
     let value = parse_u64(value, name, allow_zero)?;
     usize::try_from(value)
@@ -363,6 +550,14 @@ fn parse_u64(value: f64, name: &str, allow_zero: bool) -> Result<u64> {
         return Err(invalid_argument(format!("{name} must be {requirement}")));
     }
     Ok(value as u64)
+}
+
+fn map_set_outcome(outcome: SetOutcome) -> String {
+    match outcome {
+        SetOutcome::Created => "created".to_string(),
+        SetOutcome::Replaced => "replaced".to_string(),
+        SetOutcome::NotStored => "not_stored".to_string(),
+    }
 }
 
 fn native_error(error: impl std::fmt::Display) -> Error {

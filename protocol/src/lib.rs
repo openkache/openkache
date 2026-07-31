@@ -55,17 +55,17 @@ impl Status {
 pub struct ItemId([u8; ITEM_ID_BYTES]);
 
 impl ItemId {
-    /// Wraps an exact 32-byte item item_id.
+    /// Wraps an exact 32-byte item ID.
     pub const fn new(bytes: [u8; ITEM_ID_BYTES]) -> Self {
         Self(bytes)
     }
 
-    /// Returns the complete item_id bytes.
+    /// Returns the complete item ID bytes.
     pub const fn as_bytes(&self) -> &[u8; ITEM_ID_BYTES] {
         &self.0
     }
 
-    /// Consumes the item_id and returns its bytes.
+    /// Consumes the item ID and returns its bytes.
     pub const fn into_bytes(self) -> [u8; ITEM_ID_BYTES] {
         self.0
     }
@@ -80,12 +80,12 @@ impl AsRef<[u8]> for ItemId {
 /// Condition applied atomically by a `SET` request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SetCondition {
-    /// Store regardless of whether the item_id exists.
+    /// Store regardless of whether the item ID exists.
     #[default]
     None,
-    /// Store only when the item_id does not exist.
+    /// Store only when the item ID does not exist.
     IfAbsent,
-    /// Store only when the item_id already exists.
+    /// Store only when the item ID already exists.
     IfPresent,
 }
 
@@ -142,12 +142,12 @@ impl RequestHeader {
         self.opcode
     }
 
-    /// Returns the number of encoded header bytes before the item_id.
+    /// Returns the number of encoded header bytes before the item ID.
     pub const fn encoded_len(self) -> usize {
         self.encoded_len
     }
 
-    /// Returns the encoded item_id length.
+    /// Returns the encoded item ID length.
     pub const fn item_id_len(self) -> usize {
         self.item_id_len
     }
@@ -157,12 +157,12 @@ impl RequestHeader {
         self.value_len
     }
 
-    /// Returns whether a TTL varuint follows the item_id.
+    /// Returns whether a TTL varuint follows the item ID.
     pub const fn has_ttl(self) -> bool {
         self.has_ttl
     }
 
-    /// Reports the complete frame length once enough item_id and TTL prefix bytes are present.
+    /// Reports the complete frame length once enough item ID and TTL prefix bytes are present.
     ///
     /// # Arguments
     ///
@@ -177,15 +177,16 @@ impl RequestHeader {
     ///
     /// Returns an error for a malformed, non-canonical, zero, or overflowing TTL.
     pub fn frame_len(self, prefix: &[u8]) -> Result<Option<usize>> {
-        let key_end = self
+        let item_id_end = self
             .encoded_len
             .checked_add(self.item_id_len)
             .ok_or(ProtocolError::FrameLengthOverflow)?;
-        if prefix.len() < key_end {
+        if prefix.len() < item_id_end {
             return Ok(None);
         }
         let ttl_len = if self.has_ttl {
-            let Some((ttl_ms, encoded_len)) = decode_varuint(&prefix[key_end..], "SET TTL")? else {
+            let Some((ttl_ms, encoded_len)) = decode_varuint(&prefix[item_id_end..], "SET TTL")?
+            else {
                 return Ok(None);
             };
             if ttl_ms == 0 {
@@ -195,7 +196,7 @@ impl RequestHeader {
         } else {
             0
         };
-        key_end
+        item_id_end
             .checked_add(ttl_len)
             .and_then(|size| size.checked_add(self.value_len))
             .map(Some)
@@ -227,19 +228,19 @@ impl Request {
     /// # Errors
     ///
     /// Returns an error for an unknown opcode, invalid flags, malformed lengths, an unsupported
-    /// item_id length, or an oversized value.
+    /// item ID length, or an oversized value.
     pub fn decode_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
         if prefix.len() < REQUEST_FIXED_BYTES {
             return Ok(None);
         }
         let opcode = Opcode::try_from(prefix[0])?;
         let (condition, has_ttl) = decode_request_flags(opcode, prefix[1])?;
-        let Some((item_id_len, key_len_bytes)) =
-            decode_varuint(&prefix[REQUEST_FIXED_BYTES..], "request item_id length")?
+        let Some((item_id_len, item_id_len_bytes)) =
+            decode_varuint(&prefix[REQUEST_FIXED_BYTES..], "request item ID length")?
         else {
             return Ok(None);
         };
-        let value_len_start = REQUEST_FIXED_BYTES + key_len_bytes;
+        let value_len_start = REQUEST_FIXED_BYTES + item_id_len_bytes;
         let Some((value_len, value_len_bytes)) =
             decode_varuint(&prefix[value_len_start..], "request value length")?
         else {
@@ -275,12 +276,12 @@ impl Request {
     ///
     /// # Returns
     ///
-    /// `Ok(Some(length))` when the item_id and optional TTL prefix are complete, or `Ok(None)` when
+    /// `Ok(Some(length))` when the item ID and optional TTL prefix are complete, or `Ok(None)` when
     /// more prefix bytes are required.
     ///
     /// # Errors
     ///
-    /// Returns an error when the header, item_id length, value length, flags, or TTL is invalid.
+    /// Returns an error when the header, item ID length, value length, flags, or TTL is invalid.
     pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
         let Some(header) = Self::decode_header(prefix)? else {
             return Ok(None);
@@ -340,8 +341,8 @@ impl Request {
             self.value.len(),
         )?;
         let item_id_len = self.item_id.map_or(0, |_| ITEM_ID_BYTES);
-        let mut key_len_encoded = [0; MAX_VARUINT_BYTES];
-        let key_len_bytes = vu128::encode_u64(&mut key_len_encoded, item_id_len as u64);
+        let mut item_id_len_encoded = [0; MAX_VARUINT_BYTES];
+        let item_id_len_bytes = vu128::encode_u64(&mut item_id_len_encoded, item_id_len as u64);
         let mut value_len_encoded = [0; MAX_VARUINT_BYTES];
         let value_len_bytes = vu128::encode_u64(&mut value_len_encoded, self.value.len() as u64);
         let mut ttl_encoded = [0; MAX_VARUINT_BYTES];
@@ -349,13 +350,15 @@ impl Request {
             .set_options
             .ttl_ms
             .map_or(0, |ttl_ms| vu128::encode_u64(&mut ttl_encoded, ttl_ms));
-        let len = REQUEST_FIXED_BYTES + key_len_bytes + value_len_bytes + item_id_len + ttl_bytes;
+        let len =
+            REQUEST_FIXED_BYTES + item_id_len_bytes + value_len_bytes + item_id_len + ttl_bytes;
         let mut bytes = [0; MAX_REQUEST_PREFIX_BYTES];
         bytes[0] = self.opcode as u8;
         bytes[1] = self.set_options.flags();
         let mut offset = REQUEST_FIXED_BYTES;
-        bytes[offset..offset + key_len_bytes].copy_from_slice(&key_len_encoded[..key_len_bytes]);
-        offset += key_len_bytes;
+        bytes[offset..offset + item_id_len_bytes]
+            .copy_from_slice(&item_id_len_encoded[..item_id_len_bytes]);
+        offset += item_id_len_bytes;
         bytes[offset..offset + value_len_bytes]
             .copy_from_slice(&value_len_encoded[..value_len_bytes]);
         offset += value_len_bytes;
@@ -428,24 +431,24 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
             actual: frame.len(),
         });
     }
-    let key_end = header.encoded_len + header.item_id_len;
+    let item_id_end = header.encoded_len + header.item_id_len;
     let item_id = if header.item_id_len == 0 {
         None
     } else {
         Some(ItemId::new(
-            frame[header.encoded_len..key_end]
+            frame[header.encoded_len..item_id_end]
                 .try_into()
-                .expect("validated item item_id length"),
+                .expect("validated item ID length"),
         ))
     };
     let mut set_options = SetOptions::new(header.condition, None);
     let value_start = if header.has_ttl {
-        let (ttl_ms, ttl_len) = decode_varuint(&frame[key_end..], "SET TTL")?
+        let (ttl_ms, ttl_len) = decode_varuint(&frame[item_id_end..], "SET TTL")?
             .expect("frame length requires a complete TTL");
         set_options.ttl_ms = Some(ttl_ms);
-        key_end + ttl_len
+        item_id_end + ttl_len
     } else {
-        key_end
+        item_id_end
     };
     validate_request_shape(
         header.opcode,
@@ -682,7 +685,7 @@ pub enum ProtocolError {
     NonCanonicalVaruint { context: &'static str },
     #[error("{context} exceeds the supported 64-bit vu128 range")]
     VaruintOverflow { context: &'static str },
-    #[error("{opcode:?} requires a {expected}-byte item item_id, received {actual} item_id bytes")]
+    #[error("{opcode:?} requires a {expected}-byte item ID, received {actual} item ID bytes")]
     InvalidItemIdLength {
         opcode: Opcode,
         expected: usize,
@@ -690,10 +693,10 @@ pub enum ProtocolError {
     },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
-    #[error("{opcode:?} requires item_id_len={expected_key} and value_len={expected_value}")]
+    #[error("{opcode:?} requires item_id_len={expected_item_id} and value_len={expected_value}")]
     InvalidRequestShape {
         opcode: Opcode,
-        expected_key: usize,
+        expected_item_id: usize,
         expected_value: &'static str,
     },
     #[error("if-absent and if-present conditions cannot be combined")]
@@ -778,7 +781,7 @@ fn validate_item_id_length(opcode: Opcode, item_id_len: usize) -> Result<()> {
 
 fn validate_request_shape(
     opcode: Opcode,
-    has_client_key: bool,
+    has_item_id: bool,
     set_options: SetOptions,
     value_len: usize,
 ) -> Result<()> {
@@ -789,21 +792,21 @@ fn validate_request_shape(
         return Err(ProtocolError::InvalidSetOptions { opcode });
     }
     let valid = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_client_key && value_len == 0,
-        Opcode::Get | Opcode::Delete => has_client_key && value_len == 0,
-        Opcode::Set => has_client_key,
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_item_id && value_len == 0,
+        Opcode::Get | Opcode::Delete => has_item_id && value_len == 0,
+        Opcode::Set => has_item_id,
     };
     if valid {
         return Ok(());
     }
-    let (expected_key, expected_value) = match opcode {
+    let (expected_item_id, expected_value) = match opcode {
         Opcode::Ping | Opcode::Stats | Opcode::Sync => (0, "0"),
         Opcode::Get | Opcode::Delete => (ITEM_ID_BYTES, "0"),
         Opcode::Set => (ITEM_ID_BYTES, "any"),
     };
     Err(ProtocolError::InvalidRequestShape {
         opcode,
-        expected_key,
+        expected_item_id,
         expected_value,
     })
 }

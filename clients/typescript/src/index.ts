@@ -4,25 +4,56 @@ import {
   type Native_Client_Options,
 } from "./native-binding.js"
 import {
+  assert_json_value,
   Value_Codec_Registry,
+  type Json_Value,
   type Value_Codec,
   type Value_Envelope,
 } from "./value-codec.js"
 
 export type {
   Encoded_Value,
+  Json_Object,
+  Json_Value,
   Value_Codec,
   Value_Envelope,
 } from "./value-codec.js"
 export * from "./generated_local/smithy-api.js"
 export * from "./generated_local/smithy-value-format.js"
 export * from "./generated_local/smithy-value-envelope.js"
+import {
+  SMITHY_ITEM_ID_BYTES,
+  SMITHY_MAX_VALUE_BYTES,
+  type Smithy_Delete_Input,
+  type Smithy_Delete_Output,
+  type Smithy_Get_Input,
+  type Smithy_Get_Output,
+  type Smithy_OpenKache_Api,
+  type Smithy_Ping_Input,
+  type Smithy_Ping_Output,
+  type Smithy_Set_Input,
+  type Smithy_Set_Output,
+  type Smithy_Stats_Input,
+  type Smithy_Stats_Output,
+  type Smithy_Sync_Input,
+  type Smithy_Sync_Output,
+} from "./generated_local/smithy-api.js"
+import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
 const TEXT_ENCODER = new TextEncoder()
 
+interface Client_Lifecycle {
+  closed: boolean
+  close_promise?: Promise<void>
+}
+
 const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
   (native_client): void => {
-    native_client.close()
+    try {
+      native_client.close_now()
+    } catch {
+      // Finalization is best effort and has no caller that can observe errors.
+    }
   },
 )
 
@@ -61,6 +92,14 @@ export interface Client_Timeouts {
 }
 
 /**
+ * Retry settings for response-safe operations.
+ */
+export interface Retry_Options {
+  /** Maximum total attempts, including the initial request. */
+  readonly max_attempts?: number
+}
+
+/**
  * Connection settings for the Rust-backed Node.js, Bun, and Deno client.
  */
 export interface Client_Options {
@@ -78,6 +117,12 @@ export interface Client_Options {
   readonly compression?: Zstandard_Options
   /** Bounded connection and operation durations. */
   readonly timeouts?: Client_Timeouts
+  /** Automatic retry policy for response-safe operations. */
+  readonly retry?: Retry_Options
+  /** Maximum concurrent request lanes on one connection. */
+  readonly max_in_flight?: number
+  /** Authenticated value-encryption profile. Defaults to `robust`. */
+  readonly encryption?: "compact" | "robust"
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
@@ -110,6 +155,15 @@ export interface Server_Stats {
 }
 
 /**
+ * Best-effort lifecycle state reported by the shared Rust core.
+ */
+export type Connection_State =
+  | "connected"
+  | "reconnecting"
+  | "disconnected"
+  | "closed"
+
+/**
  * Error returned by client validation, value codecs, native transport, or server failures.
  */
 export class OpenKache_Error extends Error {
@@ -133,15 +187,18 @@ export class OpenKache_Error extends Error {
 export class OpenKache_Client {
   readonly #native_client: Native_Client
   readonly #value_codecs: Value_Codec_Registry
-  #close_promise: Promise<void> | undefined
-  #closed = false
+  readonly #raw_client: OpenKache_Raw_Client
+  readonly #lifecycle: Client_Lifecycle
 
   private constructor(
     native_client: Native_Client,
     value_codecs: Value_Codec_Registry,
+    lifecycle: Client_Lifecycle,
   ) {
     this.#native_client = native_client
     this.#value_codecs = value_codecs
+    this.#lifecycle = lifecycle
+    this.#raw_client = new Raw_Client(native_client, lifecycle)
   }
 
   /**
@@ -164,6 +221,7 @@ export class OpenKache_Client {
     }
     const compression = options.compression ?? {}
     const timeouts = options.timeouts ?? {}
+    const retry = options.retry ?? {}
     const native_options: Native_Client_Options = {
       address: options.address,
       server_name: options.server_name ?? "localhost",
@@ -176,11 +234,16 @@ export class OpenKache_Client {
       minimum_savings: compression.minimum_savings,
       connect_timeout_ms: timeouts.connect_ms,
       request_timeout_ms: timeouts.request_ms,
+      retry_max_attempts: retry.max_attempts,
+      max_in_flight: options.max_in_flight,
+      encryption: options.encryption,
     }
     try {
       const native_module = load_native_module(options.native_path)
       const native_client = await native_module.connect(native_options)
-      const client = new OpenKache_Client(native_client, value_codecs)
+      const client = new OpenKache_Client(native_client, value_codecs, {
+        closed: false,
+      })
       CLIENT_FINALIZER.register(client, native_client, client)
       return client
     } catch (error) {
@@ -204,14 +267,55 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves and codec-decodes a regular JavaScript object.
+   * Returns the raw Smithy operation client sharing this connection.
+   *
+   * The returned client accepts exact protocol item IDs and opaque bytes. It
+   * does not derive IDs or apply the JavaScript value-codec registry.
+   *
+   * @returns A raw client view over this connection.
+   */
+  raw(): OpenKache_Raw_Client {
+    return this.#raw_client
+  }
+
+  /**
+   * Returns the shared core's best-effort lifecycle state.
+   *
+   * @returns The latest connection state snapshot.
+   * @throws {OpenKache_Error} When the native state cannot be read.
+   */
+  connection_state(): Connection_State {
+    try {
+      return parse_connection_state(this.#native_client.connection_state())
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Reconnects without replaying an operation.
+   *
+   * @returns A promise resolved after a replacement connection is ready.
+   * @throws {OpenKache_Error} When the client is closed or reconnection fails.
+   */
+  async reconnect(): Promise<void> {
+    this.#assert_open()
+    try {
+      await this.#native_client.reconnect()
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Retrieves and codec-decodes a JSON value or custom codec object.
    *
    * @typeParam Value - Expected object shape selected by the caller.
    * @param key - Exact non-empty string or binary cache key.
-   * @returns The decoded object, or `undefined` when the key does not exist.
+   * @returns The decoded value, or `undefined` when the key does not exist.
    * @throws {OpenKache_Error} When transport, decryption, or decoding fails.
    */
-  async get<Value extends object = Record<string, unknown>>(
+  async get<Value = Json_Value>(
     key: string | Uint8Array,
   ): Promise<Value | undefined> {
     this.#assert_open()
@@ -230,27 +334,29 @@ export class OpenKache_Client {
   }
 
   /**
-   * Codec-encodes and stores a regular JavaScript object.
+   * Codec-encodes and stores a JSON value.
    *
-   * @typeParam Value - Object shape to store.
+   * @typeParam Value - JSON value shape to store.
    * @param key - Exact non-empty string or binary cache key.
-   * @param value - Plain object accepted by a registered codec or built-in JSON.
+   * @param value - JSON value accepted by the built-in envelope or a registered
+   * custom object codec.
    * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
    * @throws {OpenKache_Error} When validation, encoding, transport, or storage fails.
    */
-  async set<Value extends object>(
+  async set<Value>(
     key: string | Uint8Array,
     value: Value,
     options: Set_Options = {},
   ): Promise<Set_Outcome> {
+    this.#assert_open()
+    validate_set_options(options)
     let envelope: Value_Envelope
     try {
       envelope = this.#value_codecs.encode(value)
     } catch (error) {
       throw new OpenKache_Error(`value encoding failed: ${error_message(error)}`, error)
     }
-    this.#assert_open()
     try {
       const outcome = await this.#native_client.set_value(
         owned_key_bytes(key),
@@ -297,7 +403,68 @@ export class OpenKache_Client {
     value: Uint8Array,
     options: Set_Options = {},
   ): Promise<Set_Outcome> {
-    return this.#set_owned_bytes(key, value.slice(), options)
+    this.#assert_open()
+    validate_set_options(options)
+    if (!(value instanceof Uint8Array)) {
+      throw new OpenKache_Error("value must be a Uint8Array")
+    }
+    return this.#set_owned_bytes(key, owned_raw_value(value), options)
+  }
+
+  /**
+   * Retrieves a value encoded by the shared core's canonical JSON format.
+   *
+   * This method is the cross-language value API. Use `get` when reading the
+   * backwards-compatible TypeScript metadata envelope or a custom codec.
+   *
+   * @param key - Exact non-empty string or binary cache key.
+   * @returns The canonical JSON value, or `undefined` when absent.
+   * @throws {OpenKache_Error} When transport, value validation, or decoding fails.
+   */
+  async get_json(key: string | Uint8Array): Promise<Json_Value | undefined> {
+    this.#assert_open()
+    let result: string | null
+    try {
+      result = await this.#native_client.get_json(owned_key_bytes(key))
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+    if (result === null) return undefined
+    try {
+      return parse_json_value(JSON.parse(result) as unknown)
+    } catch (error) {
+      throw new OpenKache_Error(`canonical JSON decoding failed: ${error_message(error)}`, error)
+    }
+  }
+
+  /**
+   * Stores a value through the shared core's canonical JSON format.
+   *
+   * @param key - Exact non-empty string or binary cache key.
+   * @param value - Dense, finite JSON value.
+   * @param options - Optional TTL and atomic existence condition.
+   * @returns Whether the operation created, replaced, or did not store the key.
+   * @throws {OpenKache_Error} When validation, canonicalization, transport, or storage fails.
+   */
+  async set_json(
+    key: string | Uint8Array,
+    value: Json_Value,
+    options: Set_Options = {},
+  ): Promise<Set_Outcome> {
+    this.#assert_open()
+    validate_set_options(options)
+    try {
+      assert_json_value(value)
+      const outcome = await this.#native_client.set_json(
+        owned_key_bytes(key),
+        value,
+        options.condition,
+        options.ttl_ms,
+      )
+      return parse_set_outcome(outcome)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
   }
 
   /**
@@ -358,8 +525,7 @@ export class OpenKache_Client {
    * @returns A shared promise for native resource release.
    */
   close(): Promise<void> {
-    this.#close_promise ??= this.#close_once()
-    return this.#close_promise
+    return this.#close_once()
   }
 
   async #set_owned_bytes(
@@ -382,29 +548,307 @@ export class OpenKache_Client {
   }
 
   #assert_open(): void {
-    if (this.#closed || this.#close_promise !== undefined) {
-      throw new OpenKache_Error("client is closed")
-    }
+    assert_lifecycle_open(this.#lifecycle)
   }
 
   async #close_once(): Promise<void> {
     try {
-      this.#native_client.close()
+      await close_native_client(this.#native_client, this.#lifecycle)
     } catch (error) {
       throw as_openkache_error(error)
     } finally {
-      this.#closed = true
       CLIENT_FINALIZER.unregister(this)
     }
   }
 }
 
+function assert_lifecycle_open(lifecycle: Client_Lifecycle): void {
+  if (lifecycle.closed || lifecycle.close_promise !== undefined) {
+    throw new OpenKache_Error("client is closed")
+  }
+}
+
+function close_native_client(
+  native_client: Native_Client,
+  lifecycle: Client_Lifecycle,
+): Promise<void> {
+  lifecycle.close_promise ??= (async (): Promise<void> => {
+    try {
+      await native_client.close()
+    } finally {
+      lifecycle.closed = true
+    }
+  })()
+  return lifecycle.close_promise
+}
+
+function parse_json_value(value: unknown): Json_Value {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return value
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value
+  }
+  if (Array.isArray(value)) {
+    return value.map((child, index): Json_Value => {
+      try {
+        return parse_json_value(child)
+      } catch (error) {
+        throw new Error(`$[${index}] is invalid: ${error_message(error)}`)
+      }
+    })
+  }
+  if (is_regular_object(value)) {
+    const result: Record<string, Json_Value> = {}
+    for (const [key, child] of Object.entries(value)) {
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value: parse_json_value(child),
+        writable: true,
+      })
+    }
+    return result
+  }
+  throw new Error("response is not a finite JSON value")
+}
+
+/**
+ * Exact-item-ID client implementing the Smithy-generated service contract.
+ *
+ * This view shares the protected connection owned by `OpenKache_Client`; it
+ * does not open a second QUIC connection. Use it when an application already
+ * owns protocol item IDs and formatted value bytes.
+ */
+export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
+  /**
+   * Reconnects the shared core client without replaying an operation.
+   *
+   * @returns A promise resolved after reconnection.
+   * @throws {OpenKache_Error} When reconnection fails.
+   */
+  reconnect(): Promise<void>
+
+  /**
+   * Closes the shared native connection.
+   *
+   * @returns A promise resolved after native resource release.
+   * @throws {OpenKache_Error} When native shutdown fails.
+   */
+  close(): Promise<void>
+
+  /**
+   * Returns the shared core's best-effort lifecycle state.
+   *
+   * @returns The latest connection state snapshot, including `closed`.
+   * @throws {OpenKache_Error} When native state cannot be read.
+   */
+  connection_state(): Connection_State
+}
+
+class Raw_Client implements OpenKache_Raw_Client {
+  readonly #native_client: Native_Client
+  readonly #lifecycle: Client_Lifecycle
+
+  constructor(
+    native_client: Native_Client,
+    lifecycle: Client_Lifecycle = { closed: false },
+  ) {
+    this.#native_client = native_client
+    this.#lifecycle = lifecycle
+  }
+
+  /**
+   * Invokes the Smithy PING operation.
+   *
+   * @param _input - Empty Smithy operation input.
+   * @returns An empty Smithy operation output.
+   * @throws {OpenKache_Error} When the operation fails.
+   */
+  async ping(_input: Smithy_Ping_Input): Promise<Smithy_Ping_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      await this.#native_client.ping()
+      return {}
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy GET operation for an exact item ID.
+   *
+   * @param input - Exact protocol item ID.
+   * @returns Opaque stored bytes, or an absent value.
+   * @throws {OpenKache_Error} When the operation fails.
+   */
+  async get(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.raw_get(owned_item_id(input.item_id))
+      return value === null ? {} : { value }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy SET operation for an exact item ID.
+   *
+   * @param input - Exact item ID, opaque bytes, and optional set behavior.
+   * @returns The Smithy set outcome.
+   * @throws {OpenKache_Error} When validation or the operation fails.
+   */
+  async set(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      validate_set_options({
+        condition: input.condition,
+        ttl_ms: input.ttl_milliseconds,
+      })
+      const outcome = await this.#native_client.raw_set(
+        owned_item_id(input.item_id),
+        owned_raw_value(input.value),
+        input.condition,
+        input.ttl_milliseconds,
+      )
+      return { outcome: parse_set_outcome(outcome) }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy DELETE operation for an exact item ID.
+   *
+   * @param input - Exact protocol item ID.
+   * @returns Whether the item was deleted.
+   * @throws {OpenKache_Error} When the operation fails.
+   */
+  async delete(input: Smithy_Delete_Input): Promise<Smithy_Delete_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      return {
+        deleted: await this.#native_client.raw_delete(
+          owned_item_id(input.item_id),
+        ),
+      }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy STATS operation.
+   *
+   * @param _input - Empty Smithy operation input.
+   * @returns The server's JSON statistics string.
+   * @throws {OpenKache_Error} When authorization or transport fails.
+   */
+  async stats(_input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      return { json: await this.#native_client.stats() }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy SYNC operation.
+   *
+   * @param _input - Empty Smithy operation input.
+   * @returns An empty Smithy operation output.
+   * @throws {OpenKache_Error} When authorization or synchronization fails.
+   */
+  async sync(_input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      await this.#native_client.sync()
+      return {}
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Reconnects the shared core client without replaying an operation.
+   *
+   * @returns A promise resolved after reconnection.
+   * @throws {OpenKache_Error} When reconnection fails.
+   */
+  async reconnect(): Promise<void> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      await this.#native_client.reconnect()
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Closes the shared native connection.
+   *
+   * @returns A promise resolved after native resource release.
+   * @throws {OpenKache_Error} When native shutdown fails.
+   */
+  async close(): Promise<void> {
+    try {
+      await close_native_client(this.#native_client, this.#lifecycle)
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Returns the shared core's best-effort lifecycle state.
+   *
+   * @returns The latest connection state snapshot, including `closed`.
+   * @throws {OpenKache_Error} When native state cannot be read.
+   */
+  connection_state(): Connection_State {
+    try {
+      return parse_connection_state(this.#native_client.connection_state())
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+}
+
 function owned_key_bytes(key: string | Uint8Array): Uint8Array {
+  if (typeof key !== "string" && !(key instanceof Uint8Array)) {
+    throw new OpenKache_Error("key must be a string or Uint8Array")
+  }
   const bytes = typeof key === "string" ? TEXT_ENCODER.encode(key) : key.slice()
   if (bytes.byteLength === 0) {
     throw new OpenKache_Error("key must not be empty")
   }
   return bytes
+}
+
+function owned_item_id(item_id: Uint8Array): Uint8Array {
+  if (!(item_id instanceof Uint8Array)) {
+    throw new OpenKache_Error("item_id must be a Uint8Array")
+  }
+  const bytes = item_id.slice()
+  if (bytes.byteLength !== SMITHY_ITEM_ID_BYTES) {
+    throw new OpenKache_Error(
+      `item_id must contain exactly ${SMITHY_ITEM_ID_BYTES} bytes, got ${bytes.byteLength}`,
+    )
+  }
+  return bytes
+}
+
+function owned_raw_value(value: Uint8Array): Uint8Array {
+  if (!(value instanceof Uint8Array)) {
+    throw new OpenKache_Error("value must be a Uint8Array")
+  }
+  if (value.byteLength > SMITHY_MAX_VALUE_BYTES) {
+    throw new OpenKache_Error(
+      `value exceeds the protocol maximum of ${SMITHY_MAX_VALUE_BYTES} bytes`,
+    )
+  }
+  return value.slice()
 }
 
 function owned_identity(identity: Client_Identity | undefined): Client_Identity | undefined {
@@ -418,9 +862,136 @@ function owned_identity(identity: Client_Identity | undefined): Client_Identity 
 }
 
 function validate_options(options: Client_Options): void {
-  if (options.native_path !== undefined && options.native_path.length === 0) {
-    throw new OpenKache_Error("native_path must not be empty")
+  if (!is_regular_object(options)) {
+    throw new OpenKache_Error("client options must be a regular object")
   }
+  if (typeof options.address !== "string" || options.address.length === 0) {
+    throw new OpenKache_Error("address must be a non-empty string")
+  }
+  if (!(options.certificate instanceof Uint8Array) || options.certificate.byteLength === 0) {
+    throw new OpenKache_Error("certificate must be a non-empty Uint8Array")
+  }
+  if (
+    !(options.data_protection_key instanceof Uint8Array) ||
+    options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
+  ) {
+    throw new OpenKache_Error(
+      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
+    )
+  }
+  if (
+    options.server_name !== undefined &&
+    (typeof options.server_name !== "string" || options.server_name.length === 0)
+  ) {
+    throw new OpenKache_Error("server_name must be a non-empty string")
+  }
+  if (
+    options.native_path !== undefined &&
+    (typeof options.native_path !== "string" || options.native_path.length === 0)
+  ) {
+    throw new OpenKache_Error("native_path must be a non-empty string")
+  }
+  if (options.identity !== undefined && !is_regular_object(options.identity)) {
+    throw new OpenKache_Error("identity must be a regular object")
+  }
+  if (options.compression !== undefined && !is_regular_object(options.compression)) {
+    throw new OpenKache_Error("compression must be a regular object")
+  }
+  if (options.timeouts !== undefined && !is_regular_object(options.timeouts)) {
+    throw new OpenKache_Error("timeouts must be a regular object")
+  }
+  if (options.retry !== undefined && !is_regular_object(options.retry)) {
+    throw new OpenKache_Error("retry must be a regular object")
+  }
+  if (options.value_codecs !== undefined && !Array.isArray(options.value_codecs)) {
+    throw new OpenKache_Error("value_codecs must be an array")
+  }
+  validate_compression(options.compression)
+  validate_timeout(options.timeouts?.connect_ms, "timeouts.connect_ms")
+  validate_timeout(options.timeouts?.request_ms, "timeouts.request_ms")
+  validate_positive_integer(options.retry?.max_attempts, "retry.max_attempts")
+  validate_positive_integer(options.max_in_flight, "max_in_flight")
+  if (
+    options.encryption !== undefined &&
+    options.encryption !== "compact" &&
+    options.encryption !== "robust"
+  ) {
+    throw new OpenKache_Error(
+      `encryption must be compact or robust, got ${String(options.encryption)}`,
+    )
+  }
+  if (options.identity !== undefined) {
+    if (
+      !Array.isArray(options.identity.certificate_chain) ||
+      options.identity.certificate_chain.length === 0
+    ) {
+      throw new OpenKache_Error("identity.certificate_chain must not be empty")
+    }
+    for (const certificate of options.identity.certificate_chain) {
+      if (!(certificate instanceof Uint8Array) || certificate.byteLength === 0) {
+        throw new OpenKache_Error(
+          "identity.certificate_chain entries must be non-empty Uint8Arrays",
+        )
+      }
+    }
+    if (
+      !(options.identity.private_key instanceof Uint8Array) ||
+      options.identity.private_key.byteLength === 0
+    ) {
+      throw new OpenKache_Error("identity.private_key must be a non-empty Uint8Array")
+    }
+  }
+}
+
+function validate_compression(options: Zstandard_Options | undefined): void {
+  if (options === undefined) return
+  if (options.enabled !== undefined && typeof options.enabled !== "boolean") {
+    throw new OpenKache_Error("compression.enabled must be a boolean")
+  }
+  if (
+    options.level !== undefined &&
+    (!Number.isSafeInteger(options.level) ||
+      options.level < 1 ||
+      options.level > 22)
+  ) {
+    throw new OpenKache_Error("compression.level must be an integer from 1 through 22")
+  }
+  validate_non_negative_integer(options.minimum_input_size, "compression.minimum_input_size")
+  validate_non_negative_integer(options.minimum_savings, "compression.minimum_savings")
+}
+
+function validate_timeout(timeout_ms: number | undefined, name: string): void {
+  if (timeout_ms !== undefined && (!Number.isSafeInteger(timeout_ms) || timeout_ms <= 0)) {
+    throw new OpenKache_Error(`${name} must be a positive safe integer`)
+  }
+}
+
+function validate_positive_integer(value: number | undefined, name: string): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+    throw new OpenKache_Error(`${name} must be a positive safe integer`)
+  }
+}
+
+function validate_non_negative_integer(value: number | undefined, name: string): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new OpenKache_Error(`${name} must be a non-negative safe integer`)
+  }
+}
+
+function validate_set_options(options: Set_Options): void {
+  if (!is_regular_object(options)) {
+    throw new OpenKache_Error("set options must be a regular object")
+  }
+  if (
+    options.condition !== undefined &&
+    options.condition !== "if_absent" &&
+    options.condition !== "if_present"
+  ) {
+    throw new OpenKache_Error(
+      `condition must be if_absent or if_present, got ${String(options.condition)}`,
+    )
+  }
+  validate_positive_integer(options.ttl_ms, "ttl_ms")
 }
 
 function is_regular_object(value: unknown): value is object {
@@ -459,6 +1030,20 @@ function parse_set_outcome(value: string): Set_Outcome {
       return value
     default:
       throw new OpenKache_Error(`SET returned unexpected native outcome ${value}`)
+  }
+}
+
+function parse_connection_state(value: string): Connection_State {
+  switch (value) {
+    case "connected":
+    case "reconnecting":
+    case "disconnected":
+    case "closed":
+      return value
+    default:
+      throw new OpenKache_Error(
+        `native client returned unexpected connection state ${value}`,
+      )
   }
 }
 

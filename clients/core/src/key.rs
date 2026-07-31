@@ -6,7 +6,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, ITEM_ID_BYTES, Result};
 
-pub(crate) const PROTECTION_KEY_BYTES: usize = 32;
+pub(crate) const PROTECTION_KEY_BYTES: usize =
+    openkache_protocol::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
 /// Bytes in an application-managed data protection key.
 pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
@@ -66,6 +67,20 @@ impl ItemId {
 impl AsRef<[u8]> for ItemId {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
+    }
+}
+
+impl From<[u8; ITEM_ID_BYTES]> for ItemId {
+    fn from(bytes: [u8; ITEM_ID_BYTES]) -> Self {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl TryFrom<&[u8]> for ItemId {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        Self::from_slice(bytes)
     }
 }
 
@@ -181,5 +196,13 @@ impl DataProtectionKey {
 
     pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
         Zeroizing::new(self.value_root_key)
+    }
+}
+
+impl TryFrom<&[u8]> for DataProtectionKey {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        Self::from_slice(bytes)
     }
 }
