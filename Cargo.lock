@@ -1837,8 +1837,6 @@ dependencies = [
 name = "openkache-client"
 version = "0.1.0"
 dependencies = [
- "compio",
- "crossfire",
  "futures-util",
  "openkache-client-core",
 ]

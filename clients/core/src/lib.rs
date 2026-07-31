@@ -1,6 +1,8 @@
 //! Low-level QUIC client core for the OpenKache binary protocol.
 
 mod config;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 mod key;
 mod protected;
 mod protection;

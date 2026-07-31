@@ -171,6 +171,10 @@ const GENERATED_OUTPUTS = {
     PUBLIC_ROOT,
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
+  c_contract: join(
+    process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
+      join(PROTOCOL_DIRECTORY, "generated_local/smithy_contract.h"),
+  ),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -936,6 +940,23 @@ function rust_byte_array_literal(bytes: readonly number[]): string {
   return `[${bytes.map(formatted_byte).join(", ")}]`
 }
 
+function c_string_literal(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let literal = '"'
+  for (const byte of bytes) {
+    if (byte >= 0x20 && byte <= 0x7e && byte !== 0x22 && byte !== 0x5c) {
+      literal += String.fromCharCode(byte)
+    } else if (byte === 0x22) {
+      literal += '\\"'
+    } else if (byte === 0x5c) {
+      literal += "\\\\"
+    } else {
+      literal += `\\${byte.toString(8).padStart(3, "0")}`
+    }
+  }
+  return `${literal}"`
+}
+
 function snake_case(identifier: string): string {
   return identifier
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -1075,6 +1096,105 @@ function csharp_wire_enum(name: string, entries: readonly Wire_Entry[]): string 
     {
 ${variants}
     }`
+}
+
+function c_contract_enum(
+  name: string,
+  entries: readonly Wire_Entry[],
+  prefix: string,
+): string {
+  const variants = entries
+    .map(
+      (entry) =>
+        `    ${prefix}_${snake_case(entry.name).toUpperCase()} = ${formatted_byte(entry.value)},`,
+    )
+    .join("\n")
+  return `typedef enum ${name} {
+${variants}
+} ${name};`
+}
+
+function c_contract_api_enum(
+  contract: Wire_Contract,
+  name: string,
+  prefix: string,
+): string {
+  const enum_ = contract.api.enums.find((candidate) => candidate.name === name)
+  if (enum_ === undefined) {
+    throw new Error(`Smithy API enum ${name} is required by the C contract`)
+  }
+  const values = enum_.members
+    .map(
+      (member) =>
+        `#define ${prefix}_${snake_case(member.name).toUpperCase()} ${c_string_literal(member.value)}`,
+    )
+    .join("\n")
+  return values
+}
+
+/** Renders the Smithy constants consumed by native C and C++ adapters.
+ *
+ * @param contract - Validated language-neutral wire and value-format contract.
+ * @returns Deterministic C declarations with a trailing newline.
+ */
+export function render_c_contract(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const envelope = contract.value_envelope
+  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const operation_enum = c_contract_enum(
+    "openkache_smithy_opcode",
+    contract.opcodes,
+    "OPENKACHE_SMITHY_OPCODE",
+  )
+  const status_enum = c_contract_enum(
+    "openkache_smithy_status",
+    contract.statuses,
+    "OPENKACHE_SMITHY_STATUS",
+  )
+  return `/* Generated from the OpenKache Smithy contract. Do not edit. */
+#ifndef OPENKACHE_SMITHY_CONTRACT_H
+#define OPENKACHE_SMITHY_CONTRACT_H
+
+#include <stdint.h>
+
+#define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
+#define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
+#define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v3.alpn)}
+#define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES ${value.format_byte_bytes}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_COMPRESSION_MASK ${formatted_byte(value.format_compression_mask)}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT ${formatted_byte(value.format_encryption_shift)}u
+#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_RAW ${formatted_byte(value.serialization_raw)}u
+#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_JSON ${formatted_byte(value.serialization_json)}u
+#define OPENKACHE_SMITHY_VALUE_COMPRESSION_NONE ${formatted_byte(value.compression_none)}u
+#define OPENKACHE_SMITHY_VALUE_COMPRESSION_ZSTANDARD ${formatted_byte(value.compression_zstandard)}u
+#define OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE ${formatted_byte(value.encryption_none)}u
+#define OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT ${formatted_byte(value.encryption_compact)}u
+#define OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST ${formatted_byte(value.encryption_robust)}u
+#define OPENKACHE_SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES ${value.compact_synthetic_iv_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ROBUST_NONCE_BYTES ${value.robust_nonce_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ROBUST_TAG_BYTES ${value.robust_tag_bytes}u
+#define OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES ${value.data_protection_key_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES ${envelope.max_encoding_bytes}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES ${envelope.max_type_name_bytes}u
+
+${operation_enum}
+
+${status_enum}
+
+/* Smithy string-enum values used by the language-neutral set API. */
+${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION")}
+${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
+
+/* Four-byte legacy value-envelope magic, in wire order. */
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_0 ${formatted_byte(magic[0] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_1 ${formatted_byte(magic[1] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_2 ${formatted_byte(magic[2] ?? 0)}u
+#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_3 ${formatted_byte(magic[3] ?? 0)}u
+
+#endif
+`
 }
 
 /** Renders protocol v1 C# definitions.
@@ -1477,13 +1597,21 @@ function smithy_ast(): unknown {
   }
 }
 
-type Generation_Target = "all" | "dotnet" | "rust-api" | "rust-wire" | "typescript"
+type Generation_Target =
+  | "all"
+  | "c-contract"
+  | "dotnet"
+  | "rust-api"
+  | "rust-wire"
+  | "typescript"
 
 function generation_target(value: string | undefined): Generation_Target {
   switch (value) {
     case undefined:
     case "all":
       return "all"
+    case "c-contract":
+      return "c-contract"
     case "dotnet":
       return "dotnet"
     case "rust-api":
@@ -1513,6 +1641,11 @@ function expected_outputs(
           render_typescript_value_format(contract),
         [GENERATED_OUTPUTS.typescript_value_envelope]:
           render_typescript_value_envelope(contract),
+        [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
+      }
+    case "c-contract":
+      return {
+        [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
       }
     case "dotnet":
       return {
