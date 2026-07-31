@@ -1621,6 +1621,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -1880,6 +1882,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "openkache-client-core",
+ "serde_json",
 ]
 
 [[package]]

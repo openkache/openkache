@@ -1197,6 +1197,11 @@ ${members.join("\n")}
   )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
+/** Exact number of bytes in a protocol item identifier. */
+export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+/** Maximum opaque value bytes accepted by the protocol. */
+export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+
 ${[...enums, ...structures].join("\n\n")}
 
 /** Operations defined by the OpenKache Smithy service. */
