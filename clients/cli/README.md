@@ -14,11 +14,11 @@ core-backed clients.
 
 ## Commands
 
-From the repository root:
+From the public repository root:
 
 ```bash
-cargo build --release --manifest-path openkache/Cargo.toml -p openkache-cli
-cargo run --manifest-path openkache/Cargo.toml -p openkache-cli -- --help
+cargo build --release -p openkache-cli
+cargo run -p openkache-cli -- --help
 ```
 
 The default `quic-compio` feature matches the server's default `noq` backend
@@ -26,7 +26,7 @@ and is intended for Linux deployments with io_uring. Build the optional
 Tokio/Quinn variant for platforms where io_uring is unavailable:
 
 ```bash
-cargo build --release --manifest-path openkache/Cargo.toml -p openkache-cli \
+cargo build --release -p openkache-cli \
   --no-default-features --features quic-quinn
 ```
 
@@ -37,7 +37,7 @@ The resulting binary is `openkache-cli`. Install it into Cargo's binary
 directory with:
 
 ```bash
-cargo install --path openkache/clients/cli
+cargo install --path clients/cli
 ```
 
 ## Usage
@@ -102,7 +102,7 @@ openkache-cli \
 
 ## Components
 
-- `src/main.rs` starts the Tokio runtime and reports process-level errors.
+- `src/main.rs` starts the selected async runtime and reports process-level errors.
 - `src/lib.rs` owns argument parsing, connection configuration, one-shot
   operations, value output, and the interactive command loop.
 - `openkache-client` supplies the shared QUIC and value-protection behavior.
