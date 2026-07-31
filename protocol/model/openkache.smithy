@@ -103,6 +103,76 @@ structure valueEnvelope {
     jsonEncoding: String
 }
 
+/// Native client ABI discriminators shared by every language adapter.
+@trait(selector: "service")
+structure nativeContract {
+    @required
+    abiVersion: Integer
+
+    @required
+    operationReconnect: Long
+
+    @required
+    operationConnectionState: Long
+
+    @required
+    resultError: Byte
+
+    @required
+    resultOk: Byte
+
+    @required
+    resultValue: Byte
+
+    @required
+    resultNotFound: Byte
+
+    @required
+    resultCreated: Byte
+
+    @required
+    resultReplaced: Byte
+
+    @required
+    resultDeleted: Byte
+
+    @required
+    resultNotDeleted: Byte
+
+    @required
+    resultConnected: Byte
+
+    @required
+    resultNotStored: Byte
+
+    @required
+    resultConnectionState: Byte
+
+    @required
+    setConditionNone: Byte
+
+    @required
+    setConditionIfAbsent: Byte
+
+    @required
+    setConditionIfPresent: Byte
+
+    @required
+    connectionStateConnected: Byte
+
+    @required
+    connectionStateReconnecting: Byte
+
+    @required
+    connectionStateDisconnected: Byte
+
+    @required
+    connectionStateClosed: Byte
+
+    @required
+    connectionStateUnknown: Byte
+}
+
 structure WireV2 {
     @required
     alpn: String
@@ -224,6 +294,30 @@ structure wireStatus {
     maxEncodingBytes: 64,
     maxTypeNameBytes: 65535,
     jsonEncoding: "json"
+)
+@nativeContract(
+    abiVersion: 1,
+    operationReconnect: 4294967041,
+    operationConnectionState: 4294967042,
+    resultError: 0,
+    resultOk: 1,
+    resultValue: 2,
+    resultNotFound: 3,
+    resultCreated: 4,
+    resultReplaced: 5,
+    resultDeleted: 6,
+    resultNotDeleted: 7,
+    resultConnected: 8,
+    resultNotStored: 9,
+    resultConnectionState: 10,
+    setConditionNone: 0,
+    setConditionIfAbsent: 1,
+    setConditionIfPresent: 2,
+    connectionStateConnected: 0,
+    connectionStateReconnecting: 1,
+    connectionStateDisconnected: 2,
+    connectionStateClosed: 3,
+    connectionStateUnknown: 4
 )
 service OpenKache {
     version: "1"

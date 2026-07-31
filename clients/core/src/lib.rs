@@ -1,6 +1,8 @@
 //! Low-level QUIC client core for the OpenKache binary protocol.
 
 mod config;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 mod key;
 mod protected;
 mod protection;
@@ -15,7 +17,10 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status};
+use openkache_protocol::{
+    FFI_CONNECTION_STATE_CLOSED, FFI_CONNECTION_STATE_CONNECTED, FFI_CONNECTION_STATE_DISCONNECTED,
+    FFI_CONNECTION_STATE_RECONNECTING, MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status,
+};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -326,13 +331,13 @@ pub enum DeleteOutcome {
 #[repr(u8)]
 pub enum ConnectionState {
     /// The latest connection is available.
-    Connected,
+    Connected = FFI_CONNECTION_STATE_CONNECTED,
     /// A request is replacing a failed connection.
-    Reconnecting,
+    Reconnecting = FFI_CONNECTION_STATE_RECONNECTING,
     /// The latest connection failed and a later operation will reconnect.
-    Disconnected,
+    Disconnected = FFI_CONNECTION_STATE_DISCONNECTED,
     /// The client was explicitly closed and cannot reconnect.
-    Closed,
+    Closed = FFI_CONNECTION_STATE_CLOSED,
 }
 
 struct Core<C: ClientConnection> {

@@ -368,12 +368,6 @@ pub struct LocalSetRequest<'a> {
 
 #[cfg(feature = "quic-compio")]
 impl LocalSetRequest<'_> {
-    #[cfg(feature = "ffi")]
-    pub(crate) fn options(mut self, options: SetOptions) -> Self {
-        self.options = options;
-        self
-    }
-
     /// Stores only if the key does not exist.
     pub fn if_absent(mut self) -> Self {
         self.options = self.options.if_absent();

@@ -32,7 +32,7 @@ formats or protocol behavior.
 | Kotlin | `kotlin/` | Package scaffold |
 | C | `c/` | Package scaffold |
 | C++ | `cpp/` | Package scaffold |
-| Swift | `swift/` | Package scaffold |
+| Swift | [`swift/`](swift/) | Protocol v1 async actor client over the shared Rust ABI; protected and exact-item-ID Smithy APIs |
 | Dart | `dart/` | Package scaffold |
 
 A scaffold contains registry metadata and a reserved source layout. It does not
@@ -50,7 +50,8 @@ The shared layers have these responsibilities:
 
 - `protocol/` defines and validates server-visible wire frames.
 - `core/` handles transport, TLS, retries, raw operations, key derivation,
-  compression, encryption, and formatted-value processing.
+  compression, encryption, formatted-value processing, and the worker-backed
+  native ABI.
 - implemented language packages convert native values and configuration into
   core types, expose runtime-appropriate asynchronous APIs, and clean up native
   resources.
@@ -81,8 +82,9 @@ package structure only.
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
 
-Native linkage, artifact distribution, and runtime integration for scaffolds
-are intentionally undefined until each binding is implemented.
+Native linkage and artifact distribution are package-specific. Implemented
+bindings document their native library and runtime requirements in their own
+README.
 
 ## Shared configuration
 

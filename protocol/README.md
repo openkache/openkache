@@ -52,8 +52,10 @@ variable-integer parsing.
   operation inputs and outputs, shared limits, version-specific layouts, the
   complete cross-language value-format contract, and the legacy TypeScript
   metadata-envelope limits.
-- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, and C#
-  definitions into ignored `generated_local` directories or Cargo output.
+- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, Swift,
+  and the native C ABI contract. Every generated output is derived from
+  `model/openkache.smithy`; generated files are never an independent source of
+  truth.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.

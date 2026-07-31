@@ -46,6 +46,7 @@ From `clients/core`:
 cargo build
 cargo check --no-default-features --features quic-compio
 cargo check --no-default-features --features quic-quinn
+cargo check --no-default-features --features ffi
 cargo fmt --check
 ```
 
@@ -118,3 +119,13 @@ does not provide one.
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
+- `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
+  and other non-Rust bindings. It exposes both protected application-key
+  operations and exact-item-ID raw operations, while the worker owns one
+  Tokio/Quinn runtime per native handle. The C declarations are in
+  [`include/openkache_client.h`](include/openkache_client.h), and the generated
+  ABI/protocol constants are in
+  [`include/openkache/smithy_contract.h`](include/openkache/smithy_contract.h).
+  Both headers are generated or documented adapters over the canonical
+  [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy)
+  model; neither is a hand-maintained constants source.

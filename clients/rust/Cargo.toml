@@ -10,12 +10,10 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["quic-quinn"]
-ffi = ["quic-compio", "dep:compio", "dep:crossfire"]
+ffi = ["quic-quinn", "openkache-client-core/ffi"]
 quic-compio = ["openkache-client-core/quic-compio"]
 quic-quinn = ["openkache-client-core/quic-quinn"]
 
 [dependencies]
-compio = { version = "*", default-features = false, features = ["runtime"], optional = true }
-crossfire = { version = "*", optional = true }
 futures-util = "*"
 openkache-client-core = { path = "../core", default-features = false }
