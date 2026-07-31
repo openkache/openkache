@@ -264,6 +264,13 @@ digests/commits. Dependabot opens a weekly grouped update PR for
 `server/Dockerfile` and `.github/workflows`, so container and action pins stay
 current without silently changing a deployment.
 
+The Dockerfile is the canonical source for the image's static OCI product
+identity: title, description, documentation, license, source, and URL. The
+publication workflow deliberately removes those fields from the metadata
+action's repository-derived defaults, then adds only dynamic release labels
+such as creation time, revision, version, and tag. This keeps local and
+published images aligned even if the GitHub repository description changes.
+
 The Nix inputs used by `server/container.nix` are locked in
 `server/flake.lock`. The scheduled `update-container-inputs` workflow runs
 `nix flake update` inside the same pinned Nix builder image and opens a reviewable

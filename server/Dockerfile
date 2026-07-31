@@ -35,8 +35,10 @@ COPY clients/rust/Cargo.toml clients/rust/Cargo.toml
 COPY clients/typescript/native/Cargo.toml clients/typescript/native/Cargo.toml
 
 # Cargo validates that every workspace member has a target before it can fetch
-# dependencies. These throwaway files are replaced by the real source copy
-# below and never reach the runtime image.
+# dependencies, even when `-p openkache` selects only the server package.
+# These metadata-only placeholders avoid copying or compiling client sources;
+# the protocol and server placeholders are replaced by real sources below, and
+# none of these files reaches the runtime image.
 RUN mkdir -p \
       protocol/src \
       server/src/bin \
@@ -84,11 +86,14 @@ FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a
 ARG VERSION=dev
 ARG VCS_REF=unknown
 
+# Canonical OCI product identity. The publication workflow preserves these
+# values and adds only release-specific labels such as revision and version.
 LABEL org.opencontainers.image.title="OpenKache server" \
       org.opencontainers.image.description="SSD-first QUIC cache server" \
       org.opencontainers.image.documentation="https://github.com/openkache/openkache/blob/main/docs/container-image.md" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/openkache/openkache" \
+      org.opencontainers.image.url="https://github.com/openkache/openkache" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${VERSION}"
 

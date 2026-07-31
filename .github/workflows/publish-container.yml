@@ -57,6 +57,18 @@ jobs:
           flavor: |
             latest=auto
 
+      - name: Preserve canonical OCI product labels
+        id: release-labels
+        env:
+          METADATA_LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          {
+            echo 'labels<<EOF'
+            printf '%s\n' "${METADATA_LABELS}" |
+              awk '!/^org\.opencontainers\.image\.(title|description|documentation|licenses|source|url)=/'
+            echo EOF
+          } >> "${GITHUB_OUTPUT}"
+
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
@@ -73,7 +85,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: ${{ steps.release-labels.outputs.labels }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             VCS_REF=${{ github.sha }}
