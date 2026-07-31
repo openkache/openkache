@@ -5,7 +5,7 @@
 # Keep this stage on the target platform (the default): `container.nix` uses
 # that platform's native static musl compiler. The CI workflow registers QEMU
 # so the arm64 target can evaluate and build on its amd64 runner.
-FROM nixos/nix:2.30.2@sha256:7894650fb65234b35c80010e6ca44149b70a4a216118a6b7e5c6f6ae377c8d21 AS builder
+FROM nixos/nix:2.35.1@sha256:377d4887aca98f0dfa12971c1ea6d6a625a435d8b610d4c95a436843da6fbfd1 AS builder
 
 ARG TARGETARCH
 SHELL ["/bin/sh", "-euxo", "pipefail", "-c"]
