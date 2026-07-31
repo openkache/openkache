@@ -19,7 +19,7 @@ classifiers = [
 ]
 
 [tool.setuptools.package-data]
-openkache = ["py.typed", "_native.so", "_generated/*.py"]
+openkache = ["py.typed", "*.dll", "*.dylib", "*.so", "_generated/*.py"]
 
 [tool.setuptools]
 include-package-data = true

@@ -22,7 +22,9 @@ python -m build
 
 The package build first regenerates the Smithy modules in
 `src/openkache/_generated/`, then runs Cargo for `native/` and places the
-resulting portable ctypes library in the wheel. A C compiler or Python
+resulting target-native ctypes library in the wheel. Source distributions bundle
+the shared core and protocol source so a wheel is compiled for the target
+platform; they never carry a host native binary. A C compiler or Python
 extension ABI is not required. Package builds require Bun and the Smithy CLI;
 the reproducible development shell supplies all of these tools.
 
@@ -78,8 +80,10 @@ result = await client.raw.get(SmithyGetInput(item_id=item_id))
   verification after DNS resolution.
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private
   key for mutual TLS.
-- `compression`, `timeouts`, `max_in_flight`, and `retry_max_attempts` map
-  directly to shared-core settings.
+- `compression`, `encryption`, `timeouts`, `max_in_flight`, and
+  `retry_max_attempts` map directly to shared-core settings. `Encryption.ROBUST`
+  is the default; select `Encryption.COMPACT` only when every client sharing
+  the protected entries uses that profile.
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 
 Call `close()` when finished; it is idempotent. The client also supports

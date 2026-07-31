@@ -126,6 +126,7 @@ export interface Api_Contract {
 /** Native binding ABI identifiers shared by language-neutral adapters. */
 export interface Ffi_Contract {
   readonly abi_version: number
+  readonly connection_states: readonly Wire_Entry[]
   readonly operations: readonly Wire_Entry[]
   readonly result_kinds: readonly Wire_Entry[]
   readonly set_conditions: readonly Wire_Entry[]
@@ -160,10 +161,6 @@ const FFI_OPERATION_FIELDS = [
   { name: "GetJson", field: "operationGetJson" },
   { name: "SetJson", field: "operationSetJson" },
   { name: "Reconnect", field: "operationReconnect" },
-  { name: "State", field: "operationState" },
-  { name: "RawGet", field: "operationRawGet" },
-  { name: "RawSet", field: "operationRawSet" },
-  { name: "RawDelete", field: "operationRawDelete" },
 ] as const
 const FFI_RESULT_FIELDS = [
   { name: "Error", field: "resultError" },
@@ -176,7 +173,13 @@ const FFI_RESULT_FIELDS = [
   { name: "NotDeleted", field: "resultNotDeleted" },
   { name: "Connected", field: "resultConnected" },
   { name: "NotStored", field: "resultNotStored" },
-  { name: "State", field: "resultState" },
+] as const
+const FFI_CONNECTION_STATE_FIELDS = [
+  { name: "Connected", field: "connectionStateConnected" },
+  { name: "Reconnecting", field: "connectionStateReconnecting" },
+  { name: "Disconnected", field: "connectionStateDisconnected" },
+  { name: "Closed", field: "connectionStateClosed" },
+  { name: "Unknown", field: "connectionStateUnknown" },
 ] as const
 const FFI_SET_CONDITION_FIELDS = [
   { name: "None", field: "setConditionNone" },
@@ -209,12 +212,12 @@ const GENERATED_OUTPUTS = {
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
   python_api: join(
-    PUBLIC_ROOT,
-    "clients/python/src/openkache/_generated/smithy_api.py",
+    process.env.OPENKACHE_PYTHON_API_OUTPUT ??
+      join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_api.py"),
   ),
   python_contract: join(
-    PUBLIC_ROOT,
-    "clients/python/src/openkache/_generated/smithy_contract.py",
+    process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
+      join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_contract.py"),
   ),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
     join(PROTOCOL_DIRECTORY, "generated_local/smithy_contract.h"),
@@ -557,6 +560,11 @@ function ffi_contract(value: unknown): Ffi_Contract {
       `${FFI_CONTRACT_TRAIT_ID}.abiVersion`,
       1,
       0xffff_ffff,
+    ),
+    connection_states: ffi_entries(
+      contract,
+      FFI_CONNECTION_STATE_FIELDS,
+      "FFI connection state",
     ),
     operations: ffi_entries(contract, FFI_OPERATION_FIELDS, "FFI operation"),
     result_kinds: ffi_entries(contract, FFI_RESULT_FIELDS, "FFI result kind"),
@@ -930,6 +938,11 @@ function formatted_byte(value: number): string {
   return `0x${value.toString(16).padStart(2, "0")}`
 }
 
+function c_unsigned_literal(value: number): string {
+  if (value <= 9) return `${value}u`
+  return `0x${value.toString(16)}u`
+}
+
 function encode_vu128(value: number): readonly number[] {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(`cannot VU128-encode invalid integer ${value}`)
@@ -1121,6 +1134,13 @@ pub const FFI_OPERATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatt
 pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_connection_states = ffi.connection_states
+    .map(
+      (entry) =>
+        `/// Native FFI connection-state identifier for ${entry.name}.
+pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_set_conditions = ffi.set_conditions
     .map(
       (entry) =>
@@ -1147,6 +1167,7 @@ pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
 ${ffi_operations}
 ${ffi_result_kinds}
+${ffi_connection_states}
 ${ffi_set_conditions}
 
 /// Current client-owned value-format version.
@@ -1257,6 +1278,26 @@ export function render_c_contract(contract: Wire_Contract): string {
   const value = contract.value_format
   const envelope = contract.value_envelope
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  const ffi = contract.ffi
+  const ffi_defines = [
+    `#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${c_unsigned_literal(ffi.abi_version)}`,
+    ...ffi.operations.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.result_kinds.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.connection_states.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.set_conditions.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+  ].join("\n")
   const operation_enum = c_contract_enum(
     "openkache_smithy_opcode",
     contract.opcodes,
@@ -1276,6 +1317,7 @@ export function render_c_contract(contract: Wire_Contract): string {
 #define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v3.alpn)}
+${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES ${value.format_byte_bytes}u
@@ -1568,6 +1610,12 @@ export function render_python_contract(contract: Wire_Contract): string {
         `SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_connection_states = contract.ffi.connection_states
+    .map(
+      (entry) =>
+        `SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_set_conditions = contract.ffi.set_conditions
     .map(
       (entry) =>
@@ -1591,6 +1639,7 @@ SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}
+${ffi_connection_states}
 ${ffi_set_conditions}
 SMITHY_SET_TTL_FLAG = ${contract.v3.set_ttl_flag}
 SMITHY_SET_IF_ABSENT_FLAG = ${contract.v3.set_if_absent_flag}

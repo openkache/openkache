@@ -1,22 +1,27 @@
-//! Stable C ABI for native client integrations.
+//! Stable C ABI shared by native language bindings.
+//!
+//! The ABI owns one Compio runtime and one protected client per native handle. C, C++, and
+//! other native bindings only marshal buffers and interpret result discriminators; connection
+//! management, retries, protocol framing, and value protection remain in this crate.
 
-use std::net::SocketAddr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub use openkache_protocol::FFI_ABI_VERSION as ABI_VERSION;
 use openkache_protocol::{
-    FFI_ABI_VERSION, FFI_OPERATION_GET_JSON, FFI_OPERATION_RAW_DELETE, FFI_OPERATION_RAW_GET,
-    FFI_OPERATION_RAW_SET, FFI_OPERATION_RECONNECT, FFI_OPERATION_SET_JSON, FFI_OPERATION_STATE,
-    FFI_RESULT_CONNECTED, FFI_RESULT_CREATED, FFI_RESULT_DELETED, FFI_RESULT_ERROR,
-    FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND, FFI_RESULT_NOT_STORED, FFI_RESULT_OK,
-    FFI_RESULT_REPLACED, FFI_RESULT_STATE, FFI_RESULT_VALUE, FFI_SET_CONDITION_IF_ABSENT,
-    FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode,
+    FFI_CONNECTION_STATE_CLOSED, FFI_CONNECTION_STATE_CONNECTED, FFI_CONNECTION_STATE_DISCONNECTED,
+    FFI_CONNECTION_STATE_RECONNECTING, FFI_CONNECTION_STATE_UNKNOWN, FFI_OPERATION_GET_JSON,
+    FFI_OPERATION_RECONNECT, FFI_OPERATION_SET_JSON, FFI_RESULT_CONNECTED, FFI_RESULT_CREATED,
+    FFI_RESULT_DELETED, FFI_RESULT_ERROR, FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND,
+    FFI_RESULT_NOT_STORED, FFI_RESULT_OK, FFI_RESULT_REPLACED, FFI_RESULT_VALUE,
+    FFI_SET_CONDITION_IF_ABSENT, FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode,
+    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 use serde::Deserialize;
 
@@ -29,9 +34,11 @@ use crate::{
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
-#[derive(Clone, Copy)]
+/// Discriminator returned by an operation result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
-enum FfiResultKind {
+#[non_exhaustive]
+pub enum FfiResultKind {
     Error = FFI_RESULT_ERROR,
     Ok = FFI_RESULT_OK,
     Value = FFI_RESULT_VALUE,
@@ -42,7 +49,76 @@ enum FfiResultKind {
     NotDeleted = FFI_RESULT_NOT_DELETED,
     Connected = FFI_RESULT_CONNECTED,
     NotStored = FFI_RESULT_NOT_STORED,
-    State = FFI_RESULT_STATE,
+}
+
+/// Operation accepted by [`openkache_client_execute`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum FfiOperation {
+    /// Verify the connection.
+    Ping = Opcode::Ping as u32,
+    /// Retrieve one protected value.
+    Get = Opcode::Get as u32,
+    /// Store one protected value.
+    Set = Opcode::Set as u32,
+    /// Retrieve one protected canonical JSON value.
+    GetJson = FFI_OPERATION_GET_JSON,
+    /// Store one protected canonical JSON value.
+    SetJson = FFI_OPERATION_SET_JSON,
+    /// Remove one protected value.
+    Delete = Opcode::Delete as u32,
+    /// Return server statistics.
+    Stats = Opcode::Stats as u32,
+    /// Wait for the server durability barrier.
+    Sync = Opcode::Sync as u32,
+    /// Explicitly reconnect without replaying a request.
+    Reconnect = FFI_OPERATION_RECONNECT,
+}
+
+impl TryFrom<u32> for FfiOperation {
+    type Error = u32;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Self::Ping as u32 => Ok(Self::Ping),
+            value if value == Self::Get as u32 => Ok(Self::Get),
+            value if value == Self::Set as u32 => Ok(Self::Set),
+            value if value == Self::GetJson as u32 => Ok(Self::GetJson),
+            value if value == Self::SetJson as u32 => Ok(Self::SetJson),
+            value if value == Self::Delete as u32 => Ok(Self::Delete),
+            value if value == Self::Stats as u32 => Ok(Self::Stats),
+            value if value == Self::Sync as u32 => Ok(Self::Sync),
+            value if value == Self::Reconnect as u32 => Ok(Self::Reconnect),
+            value => Err(value),
+        }
+    }
+}
+
+/// Existence condition accepted by [`openkache_client_execute`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+#[non_exhaustive]
+pub enum FfiSetCondition {
+    /// Always store the supplied value.
+    None = FFI_SET_CONDITION_NONE,
+    /// Store only when the key is absent.
+    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
+    /// Store only when the key is present.
+    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
+}
+
+impl TryFrom<u32> for FfiSetCondition {
+    type Error = u32;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            value if value == Self::None as u32 => Ok(Self::None),
+            value if value == Self::IfAbsent as u32 => Ok(Self::IfAbsent),
+            value if value == Self::IfPresent as u32 => Ok(Self::IfPresent),
+            value => Err(value),
+        }
+    }
 }
 
 /// Native connection options passed by C and C++ bindings.
@@ -71,57 +147,6 @@ pub struct FfiConnectOptions {
     pub max_in_flight: usize,
 }
 
-macro_rules! ffi_input_enum {
-    (
-        enum $name:ident {
-            $($variant:ident = $value:expr),+ $(,)?
-        }
-    ) => {
-        #[derive(Clone, Copy)]
-        #[repr(u32)]
-        enum $name {
-            $($variant = $value),+
-        }
-
-        impl TryFrom<u32> for $name {
-            type Error = u32;
-
-            fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
-                match value {
-                    $(value if value == Self::$variant as u32 => Ok(Self::$variant),)+
-                    _ => Err(value),
-                }
-            }
-        }
-    };
-}
-
-ffi_input_enum! {
-    enum FfiOperation {
-        Ping = Opcode::Ping as u32,
-        Get = Opcode::Get as u32,
-        Set = Opcode::Set as u32,
-        Delete = Opcode::Delete as u32,
-        Stats = Opcode::Stats as u32,
-        Sync = Opcode::Sync as u32,
-        GetJson = FFI_OPERATION_GET_JSON,
-        SetJson = FFI_OPERATION_SET_JSON,
-        Reconnect = FFI_OPERATION_RECONNECT,
-        State = FFI_OPERATION_STATE,
-        RawGet = FFI_OPERATION_RAW_GET,
-        RawSet = FFI_OPERATION_RAW_SET,
-        RawDelete = FFI_OPERATION_RAW_DELETE,
-    }
-}
-
-ffi_input_enum! {
-enum FfiSetCondition {
-    None = FFI_SET_CONDITION_NONE,
-    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
-    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
-    }
-}
-
 /// Opaque result allocated by the FFI boundary.
 pub struct FfiResult {
     kind: FfiResultKind,
@@ -133,7 +158,6 @@ pub struct FfiResult {
 pub struct FfiClient {
     commands: CommandSender,
     request_timeout: Duration,
-    shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -141,9 +165,10 @@ pub struct FfiClient {
 enum Command {
     Execute {
         operation: FfiOperation,
-        key: Vec<u8>,
+        application_key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
+        raw: bool,
         response: SyncSender<FfiResult>,
     },
     Shutdown,
@@ -153,8 +178,7 @@ type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
 type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 
 struct WorkerOptions {
-    address: SocketAddr,
-    server_name: String,
+    endpoint: Endpoint,
     certificate: Vec<u8>,
     identity: Option<ClientIdentity>,
     data_protection_key: DataProtectionKey,
@@ -195,31 +219,20 @@ impl FfiClient {
     fn connect(options: WorkerOptions) -> std::result::Result<Self, String> {
         let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = Arc::clone(&shutdown);
         let state = Arc::new(AtomicU32::new(connection_state_value(
             ConnectionState::Reconnecting,
         )));
         let worker_state = Arc::clone(&state);
         let request_timeout = options.timeouts.request;
         let worker = thread::Builder::new()
-            .name("openkache-client".to_string())
-            .spawn(move || {
-                run_worker(
-                    receiver,
-                    ready_sender,
-                    options,
-                    worker_shutdown,
-                    worker_state,
-                );
-            })
+            .name("openkache-client".to_owned())
+            .spawn(move || run_worker(receiver, ready_sender, options, worker_state))
             .map_err(|error| format!("failed to start client worker: {error}"))?;
 
         match ready_receiver.recv() {
             Ok(Ok(())) => Ok(Self {
                 commands,
                 request_timeout,
-                shutdown,
                 state,
                 worker: Mutex::new(Some(worker)),
             }),
@@ -242,6 +255,7 @@ impl FfiClient {
         application_key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
+        raw: bool,
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
@@ -249,9 +263,10 @@ impl FfiClient {
         };
         let command = Command::Execute {
             operation,
-            key: application_key,
+            application_key,
             value,
             set_options,
+            raw,
             response,
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -263,6 +278,10 @@ impl FfiClient {
             FfiResult::error(format!("client operation timed out: {error}"))
         })
     }
+
+    fn connection_state(&self) -> u32 {
+        self.state.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for FfiClient {
@@ -271,11 +290,10 @@ impl Drop for FfiClient {
             connection_state_value(ConnectionState::Closed),
             Ordering::Release,
         );
-        self.shutdown.store(true, Ordering::Release);
-        // A non-blocking send can lose the shutdown marker when the bounded
-        // queue is full. In that case the worker would drain the queue and
-        // wait for another command while this destructor joins it forever.
-        // Wait for one slot so the marker is guaranteed to reach the worker.
+        // Preserve the worker's queue ordering: a blocking send waits until
+        // the worker drains enough requests to accept this terminal marker.
+        // Setting an out-of-band flag first would let the worker exit without
+        // consuming the marker while this sender is blocked on a full queue.
         let _ = self.commands.send(Command::Shutdown);
         if let Ok(worker) = self.worker.get_mut()
             && let Some(worker) = worker.take()
@@ -289,12 +307,10 @@ fn run_worker(
     commands: CommandReceiver,
     ready: SyncSender<std::result::Result<(), String>>,
     options: WorkerOptions,
-    shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
 ) {
     let WorkerOptions {
-        address,
-        server_name,
+        endpoint,
         certificate,
         identity,
         data_protection_key,
@@ -317,13 +333,6 @@ fn run_worker(
         ));
         return;
     }
-    let endpoint = match Endpoint::from_socket_addr(address, server_name) {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            let _ = ready.send(Err(error.to_string()));
-            return;
-        }
-    };
     let mut builder = LocalProtectedClient::builder(endpoint, data_protection_key)
         .compression(compression)
         .encryption(encryption)
@@ -360,20 +369,30 @@ fn run_worker(
         return;
     }
 
-    while !shutdown.load(Ordering::Acquire) {
+    loop {
         let Ok(command) = commands.recv() else {
             break;
         };
         match command {
             Command::Execute {
                 operation,
-                key,
+                application_key,
                 value,
                 set_options,
+                raw,
                 response,
             } => {
-                let result =
-                    runtime.block_on(execute(&client, operation, key, value, set_options, false));
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(execute(
+                        &client,
+                        operation,
+                        application_key,
+                        value,
+                        set_options,
+                        raw,
+                    ))
+                }))
+                .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
                 state.store(
                     connection_state_value(client.connection_state()),
                     Ordering::Release,
@@ -388,97 +407,104 @@ fn run_worker(
 async fn execute(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    key: Vec<u8>,
+    application_key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
 ) -> FfiResult {
-    let operation = if raw {
-        match operation {
-            FfiOperation::Get => FfiOperation::RawGet,
-            FfiOperation::Set => FfiOperation::RawSet,
-            FfiOperation::Delete => FfiOperation::RawDelete,
-            operation => operation,
-        }
+    let result = if raw {
+        execute_raw(client, operation, application_key, value, set_options).await
     } else {
-        operation
+        execute_protected(client, operation, application_key, value, set_options).await
     };
-    let result: std::result::Result<FfiResult, String> = match operation {
+    result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
+}
+
+async fn execute_protected(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    application_key: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match operation {
         FfiOperation::Ping => client
             .ping()
             .await
-            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new()))
-            .map_err(|error| error.to_string()),
-        FfiOperation::Get => client
-            .get(&key)
-            .await
-            .map(|value| match value {
-                GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
-                GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
-            })
-            .map_err(|error| error.to_string()),
+            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Get => client.get(&application_key).await.map(|value| match value {
+            GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
+            GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
+        }),
         FfiOperation::Set => client
-            .set(&key, value, set_options)
+            .set(&application_key, value, set_options)
             .await
-            .map(set_result)
-            .map_err(|error| error.to_string()),
-        FfiOperation::GetJson => client
-            .get_value(&key)
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(json_result),
-        FfiOperation::SetJson => match parse_json(&value) {
-            Ok(json) => client
-                .set_value(&key, Value::Json(json), set_options)
+            .map(set_result),
+        FfiOperation::GetJson => client.get_value(&application_key).await.map(json_result),
+        FfiOperation::SetJson => {
+            let json = parse_json(&value)?;
+            client
+                .set_value(&application_key, Value::Json(json), set_options)
                 .await
                 .map(set_result)
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error),
-        },
-        FfiOperation::RawGet => match ItemId::from_slice(&key) {
-            Ok(item_id) => client
-                .raw()
-                .get(item_id)
-                .await
-                .map(|value| match value {
-                    GetOutcome::Found(value) => {
-                        FfiResult::success(FfiResultKind::Value, value.into_bytes())
-                    }
-                    GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
-                })
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        },
-        FfiOperation::RawSet => match ItemId::from_slice(&key) {
-            Ok(item_id) => client
+        }
+        FfiOperation::Delete => client.delete(&application_key).await.map(|outcome| {
+            FfiResult::success(
+                match outcome {
+                    DeleteOutcome::Deleted => FfiResultKind::Deleted,
+                    DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
+                },
+                Vec::new(),
+            )
+        }),
+        FfiOperation::Stats => client
+            .stats()
+            .await
+            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
+        FfiOperation::Sync => client
+            .sync()
+            .await
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Reconnect => client
+            .reconnect()
+            .await
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+    }
+}
+
+async fn execute_raw(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    item_id: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match operation {
+        FfiOperation::Ping => client
+            .raw()
+            .ping()
+            .await
+            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Get => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client.raw().get(item_id).await.map(|value| match value {
+                GetOutcome::Found(value) => {
+                    FfiResult::success(FfiResultKind::Value, value.into_bytes())
+                }
+                GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
+            })
+        }
+        FfiOperation::Set => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
                 .raw()
                 .set(item_id, ItemValue::new(value), set_options)
                 .await
                 .map(set_result)
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        },
-        FfiOperation::RawDelete => match ItemId::from_slice(&key) {
-            Ok(item_id) => client
-                .raw()
-                .delete(item_id)
-                .await
-                .map(|outcome| {
-                    FfiResult::success(
-                        match outcome {
-                            DeleteOutcome::Deleted => FfiResultKind::Deleted,
-                            DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-                        },
-                        Vec::new(),
-                    )
-                })
-                .map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        },
-        FfiOperation::Delete => client
-            .delete(&key)
-            .await
-            .map(|outcome| {
+        }
+        FfiOperation::Delete => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client.raw().delete(item_id).await.map(|outcome| {
                 FfiResult::success(
                     match outcome {
                         DeleteOutcome::Deleted => FfiResultKind::Deleted,
@@ -487,39 +513,35 @@ async fn execute(
                     Vec::new(),
                 )
             })
-            .map_err(|error| error.to_string()),
+        }
         FfiOperation::Stats => client
+            .raw()
             .stats()
             .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes()))
-            .map_err(|error| error.to_string()),
+            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client
+            .raw()
             .sync()
             .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new()))
-            .map_err(|error| error.to_string()),
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
         FfiOperation::Reconnect => client
+            .raw()
             .reconnect()
             .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new()))
-            .map_err(|error| error.to_string()),
-        FfiOperation::State => Ok(FfiResult::success(
-            FfiResultKind::State,
-            format!("{:?}", client.connection_state()).into_bytes(),
+            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
+            "operation",
+            "exact item-ID calls do not support formatted JSON operations",
         )),
-    };
-    match result {
-        Ok(result) => result,
-        Err(error) => FfiResult::error(error),
     }
 }
 
 fn connection_state_value(state: ConnectionState) -> u32 {
     match state {
-        ConnectionState::Connected => 0,
-        ConnectionState::Reconnecting => 1,
-        ConnectionState::Disconnected => 2,
-        ConnectionState::Closed => 3,
+        ConnectionState::Connected => FFI_CONNECTION_STATE_CONNECTED,
+        ConnectionState::Reconnecting => FFI_CONNECTION_STATE_RECONNECTING,
+        ConnectionState::Disconnected => FFI_CONNECTION_STATE_DISCONNECTED,
+        ConnectionState::Closed => FFI_CONNECTION_STATE_CLOSED,
     }
 }
 
@@ -534,27 +556,30 @@ fn set_result(outcome: SetOutcome) -> FfiResult {
     )
 }
 
-fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, String> {
+fn json_result(outcome: GetOutcome<Value>) -> FfiResult {
     match outcome {
         GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
             .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| error.to_string()),
-        GetOutcome::Found(Value::Raw(_)) => Err("formatted value is not JSON".to_string()),
-        GetOutcome::NotFound => Ok(FfiResult::success(FfiResultKind::NotFound, Vec::new())),
+            .unwrap_or_else(|error| FfiResult::error(error.to_string())),
+        GetOutcome::Found(Value::Raw(_)) => FfiResult::error("formatted value is not JSON"),
+        GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
     }
 }
 
-fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
+fn parse_json(bytes: &[u8]) -> crate::value::Result<JsonValue> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = JsonValue::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
-    deserializer.end().map_err(|error| error.to_string())?;
+    let value = JsonValue::deserialize(&mut deserializer)
+        .map_err(|error| crate::value::Error::InvalidJson(error.to_string()))?;
+    deserializer
+        .end()
+        .map_err(|error| crate::value::Error::InvalidJson(error.to_string()))?;
     Ok(value)
 }
 
 /// Returns the native ABI version implemented by this library.
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
-    FFI_ABI_VERSION
+    ABI_VERSION
 }
 
 /// Connects a native client and returns an opaque result.
@@ -601,8 +626,8 @@ pub unsafe extern "C" fn openkache_client_connect(
             0,
             connect_timeout_ms,
             request_timeout_ms,
-            256,
-            2,
+            0,
+            0,
         )
     }))
 }
@@ -615,8 +640,8 @@ pub unsafe extern "C" fn openkache_client_connect(
 /// # Safety
 ///
 /// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call. `data_protection_key` must contain exactly 32 bytes. `max_in_flight` and
-/// `retry_max_attempts` must be positive.
+/// call. `data_protection_key` must contain exactly 32 bytes. Zero `max_in_flight` and
+/// `retry_max_attempts` values select shared-core defaults.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_v2(
     address: *const u8,
@@ -671,8 +696,8 @@ pub unsafe extern "C" fn openkache_client_connect_v2(
 
 /// Connects a native client with the complete shared-core configuration.
 ///
-/// Zero retry and lane limits select the shared-core defaults. Encryption `0`
-/// and `2` select Robust; encryption `1` selects Compact.
+/// Zero retry and lane limits select shared-core defaults. The Smithy None and
+/// Robust encryption values select Robust; Compact selects Compact.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_ex(
     address: *const u8,
@@ -788,10 +813,15 @@ fn connect_impl(
     retry_max_attempts: usize,
 ) -> std::result::Result<FfiResult, String> {
     let address = copy_utf8(address, address_length, "address")?;
-    let address = address
+    let mut endpoint: Endpoint = address
         .parse()
         .map_err(|error| format!("invalid server address: {error}"))?;
     let server_name = copy_utf8(server_name, server_name_length, "server name")?;
+    if !server_name.is_empty() {
+        endpoint = endpoint
+            .with_server_name(server_name)
+            .map_err(|error| error.to_string())?;
+    }
     let certificate = copy_bytes(certificate, certificate_length, "certificate")?;
     let identity = copy_identity(
         client_certificate_chain,
@@ -804,15 +834,29 @@ fn connect_impl(
     let compression = if compression_enabled == 0 {
         Compression::Disabled
     } else {
+        let defaults = ZstandardOptions::default();
         Compression::Zstandard(ZstandardOptions {
-            level: compression_level,
-            minimum_input_size,
-            minimum_savings,
+            level: if compression_level == 0 {
+                defaults.level
+            } else {
+                compression_level
+            },
+            minimum_input_size: if minimum_input_size == 0 {
+                defaults.minimum_input_size
+            } else {
+                minimum_input_size
+            },
+            minimum_savings: if minimum_savings == 0 {
+                defaults.minimum_savings
+            } else {
+                minimum_savings
+            },
         })
     };
     let encryption = match encryption {
-        0 | 2 => Encryption::Robust,
-        1 => Encryption::Compact,
+        value if value == u32::from(VALUE_FORMAT_ENCRYPTION_NONE) => Encryption::Robust,
+        value if value == u32::from(VALUE_FORMAT_ENCRYPTION_ROBUST) => Encryption::Robust,
+        value if value == u32::from(VALUE_FORMAT_ENCRYPTION_COMPACT) => Encryption::Compact,
         encryption => return Err(format!("unsupported encryption profile {encryption}")),
     };
     if connect_timeout_ms == 0 || request_timeout_ms == 0 {
@@ -833,8 +877,7 @@ fn connect_impl(
         request: Duration::from_millis(request_timeout_ms),
     };
     FfiClient::connect(WorkerOptions {
-        address,
-        server_name,
+        endpoint,
         certificate,
         identity,
         data_protection_key,
@@ -933,16 +976,22 @@ fn execute_entry(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        let operation = if raw {
-            match operation {
-                FfiOperation::Get => FfiOperation::RawGet,
-                FfiOperation::Set => FfiOperation::RawSet,
-                FfiOperation::Delete => FfiOperation::RawDelete,
-                operation => operation,
-            }
-        } else {
-            operation
-        };
+        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
+            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
+        }
+        if raw
+            && matches!(
+                operation,
+                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+            )
+            && application_key.len() != crate::ITEM_ID_BYTES
+        {
+            return Err(format!(
+                "item_id must contain exactly {} bytes, got {}",
+                crate::ITEM_ID_BYTES,
+                application_key.len()
+            ));
+        }
         let condition = match FfiSetCondition::try_from(set_condition)
             .map_err(|condition| format!("unsupported SET condition {condition}"))?
         {
@@ -967,68 +1016,37 @@ fn execute_entry(
             | FfiOperation::GetJson
             | FfiOperation::SetJson
             | FfiOperation::Delete
-                if application_key.is_empty() =>
+                if !raw && application_key.is_empty() =>
             {
                 Err("application key must not be empty".to_string())
-            }
-            FfiOperation::RawGet | FfiOperation::RawSet | FfiOperation::RawDelete
-                if application_key.len() != crate::ITEM_ID_BYTES =>
-            {
-                Err(format!(
-                    "raw item ID must contain exactly {} bytes, got {}",
-                    crate::ITEM_ID_BYTES,
-                    application_key.len()
-                ))
-            }
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-                if raw && application_key.len() != crate::ITEM_ID_BYTES =>
-            {
-                Err(format!(
-                    "item ID must contain exactly {} bytes, got {}",
-                    crate::ITEM_ID_BYTES,
-                    application_key.len()
-                ))
             }
             FfiOperation::Ping
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
-            | FfiOperation::State
                 if !application_key.is_empty() =>
             {
                 Err("operation does not accept an application key".to_string())
             }
             FfiOperation::Ping
             | FfiOperation::Get
-            | FfiOperation::Set
             | FfiOperation::GetJson
-            | FfiOperation::SetJson
             | FfiOperation::Delete
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect
-            | FfiOperation::State
-            | FfiOperation::RawGet
-            | FfiOperation::RawSet
-            | FfiOperation::RawDelete
-                if !value.is_empty()
-                    && !matches!(
-                        operation,
-                        FfiOperation::Set | FfiOperation::SetJson | FfiOperation::RawSet
-                    ) =>
+                if !value.is_empty() =>
             {
                 Err("operation does not accept a value".to_string())
             }
             operation
-                if !matches!(
-                    operation,
-                    FfiOperation::Set | FfiOperation::SetJson | FfiOperation::RawSet
-                ) && (set_options.condition() != SetCondition::None
-                    || set_options.time_to_live_millis().is_some()) =>
+                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
+                    && (set_options.condition() != SetCondition::None
+                        || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_string())
             }
-            _ => Ok(client.execute(operation, application_key, value, set_options)),
+            _ => Ok(client.execute(operation, application_key, value, set_options, raw)),
         }
     }))
 }
@@ -1038,7 +1056,7 @@ fn execute_entry(
 /// for a null handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
-    unsafe { client.as_ref() }.map_or(4, |client| client.state.load(Ordering::Acquire))
+    unsafe { client.as_ref() }.map_or(FFI_CONNECTION_STATE_UNKNOWN, FfiClient::connection_state)
 }
 
 /// Returns an FFI result discriminator.

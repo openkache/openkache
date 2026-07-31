@@ -15,6 +15,7 @@ from threading import Condition
 
 from ._generated.smithy_contract import (
     SMITHY_FFI_ABI_VERSION,
+    SMITHY_FFI_CONNECTION_STATE_CLOSED,
     SMITHY_FFI_RESULT_CONNECTED,
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_SET_CONDITION_NONE,
@@ -48,7 +49,6 @@ def _library_candidates() -> tuple[Path, ...]:
     if native_name is None:
         return ()
     return (
-        package_directory / "_native.so",
         package_directory / native_name,
         package_directory.parent.parent / "native" / "target" / "release" / native_name,
         package_directory.parent.parent.parent.parent
@@ -95,7 +95,7 @@ class _NativeApi:
                 f"unsupported OpenKache native ABI version {self.abi_version()}"
             )
         self.connect = self._function(
-            "openkache_client_connect_v2",
+            "openkache_client_connect_ex",
             (
                 _U8_POINTER,
                 ctypes.c_size_t,
@@ -113,8 +113,9 @@ class _NativeApi:
                 ctypes.c_int32,
                 ctypes.c_size_t,
                 ctypes.c_size_t,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
+                ctypes.c_uint32,
+                ctypes.c_size_t,
+                ctypes.c_size_t,
                 ctypes.c_uint64,
                 ctypes.c_uint64,
             ),
@@ -134,6 +135,24 @@ class _NativeApi:
                 ctypes.c_uint64,
             ),
             _RESULT_POINTER,
+        )
+        self.execute_raw = self._function(
+            "openkache_client_execute_raw",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                ctypes.c_uint32,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.connection_state = self._function(
+            "openkache_client_connection_state", (_CLIENT_POINTER,), ctypes.c_uint32
         )
         self.result_kind = self._function(
             "openkache_client_result_kind", (_RESULT_POINTER,), ctypes.c_uint32
@@ -220,6 +239,7 @@ class NativeClient:
         compression_level: int,
         minimum_input_size: int,
         minimum_savings: int,
+        encryption: int,
         connect_timeout_ms: int,
         request_timeout_ms: int,
         max_in_flight: int,
@@ -252,10 +272,11 @@ class NativeClient:
             compression_level,
             minimum_input_size,
             minimum_savings,
+            encryption,
+            retry_max_attempts,
+            max_in_flight,
             connect_timeout_ms,
             request_timeout_ms,
-            max_in_flight,
-            retry_max_attempts,
         )
         kind, _, handle = api.read_result(result, take_client=True)
         if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
@@ -271,6 +292,57 @@ class NativeClient:
         condition: int = SMITHY_FFI_SET_CONDITION_NONE,
         ttl_ms: int | None = None,
     ) -> tuple[int, bytes]:
+        return self._execute(
+            self._api.execute,
+            operation,
+            key=key,
+            value=value,
+            condition=condition,
+            ttl_ms=ttl_ms,
+        )
+
+    def execute_raw(
+        self,
+        operation: int,
+        *,
+        item_id: bytes,
+        value: bytes = b"",
+        condition: int = SMITHY_FFI_SET_CONDITION_NONE,
+        ttl_ms: int | None = None,
+    ) -> tuple[int, bytes]:
+        return self._execute(
+            self._api.execute_raw,
+            operation,
+            key=item_id,
+            value=value,
+            condition=condition,
+            ttl_ms=ttl_ms,
+        )
+
+    def connection_state(self) -> int:
+        with self._lifecycle:
+            if not self._handle:
+                return SMITHY_FFI_CONNECTION_STATE_CLOSED
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            return int(self._api.connection_state(handle))
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute(
+        self,
+        function: object,
+        operation: int,
+        *,
+        key: bytes,
+        value: bytes,
+        condition: int,
+        ttl_ms: int | None,
+    ) -> tuple[int, bytes]:
         key_buffer, key_pointer = _as_native_buffer(key)
         value_buffer, value_pointer = _as_native_buffer(value)
         # Keep ctypes buffers alive until the native call returns, while
@@ -282,7 +354,7 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
         try:
-            result = self._api.execute(
+            result = function(
                 handle,
                 operation,
                 key_pointer,
