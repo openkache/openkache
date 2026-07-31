@@ -65,6 +65,17 @@ whether the change solves the problem it set out to solve. Review comments are
 part of the design process; respond to the substance and update the
 description when the direction changes.
 
+## Contributor License Agreement
+
+An automated Contributor License Agreement (CLA) check runs on pull requests.
+If it asks you to sign, follow its link before the contribution is merged. The
+agreement uses the Apache Contributor License Agreement template.
+
+Sign only for work you have the right to submit. If you are contributing on
+behalf of an organization, confirm that you are authorized to do so. The CLA
+works alongside the license that applies to the files you change; it does not
+replace that license.
+
 ## Licensing
 
 Contributions are accepted under the license that applies to the files they
