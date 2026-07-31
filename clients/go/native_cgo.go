@@ -503,10 +503,7 @@ func (h *nativeHandle) execute(
 	case IfPresent:
 		condition = SmithyFFISetConditionIfPresent
 	}
-	ttlEnabled := uint8(0)
-	if options.TTLMillis != 0 {
-		ttlEnabled = 1
-	}
+	ttlEnabled := boolByte(options.TTLMillis != 0)
 
 	done := make(chan nativeResult, 1)
 	go func() {
@@ -561,10 +558,7 @@ func (h *nativeHandle) executeRaw(
 	case IfPresent:
 		condition = SmithyFFISetConditionIfPresent
 	}
-	ttlEnabled := uint8(0)
-	if options.TTLMillis != 0 {
-		ttlEnabled = 1
-	}
+	ttlEnabled := boolByte(options.TTLMillis != 0)
 
 	done := make(chan nativeResult, 1)
 	go func() {
@@ -659,7 +653,8 @@ func decodeResult(
 func durationMilliseconds(timeouts TimeoutOptions) (uint64, uint64, error) {
 	connect := uint64(timeouts.Connect / time.Millisecond)
 	request := uint64(timeouts.Request / time.Millisecond)
-	if connect == 0 || request == 0 {
+	minimum := uint64(SmithyClientMinimumPositiveValue)
+	if connect < minimum || request < minimum {
 		return 0, 0, validationError("timeouts", "must be at least one millisecond")
 	}
 	return connect, request, nil
@@ -667,7 +662,7 @@ func durationMilliseconds(timeouts TimeoutOptions) (uint64, uint64, error) {
 
 func boolByte(value bool) uint8 {
 	if value {
-		return 1
+		return uint8(SmithyClientMinimumPositiveValue)
 	}
 	return 0
 }

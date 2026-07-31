@@ -54,7 +54,7 @@ func (s smithyClient) Set(
 		}
 	}
 	if input.TTLMilliseconds != nil {
-		if *input.TTLMilliseconds <= 0 {
+		if *input.TTLMilliseconds < int64(SmithyClientMinimumPositiveValue) {
 			return SmithySetOutput{}, validationError(
 				"set.ttl_milliseconds",
 				"must be greater than zero",

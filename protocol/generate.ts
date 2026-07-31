@@ -79,6 +79,7 @@ export interface Value_Envelope_Contract {
 /** Shared defaults for all OpenKache client bindings. */
 export interface Client_Defaults_Contract {
   readonly server_name: string
+  readonly minimum_positive_value: number
   readonly connect_timeout_ms: number
   readonly request_timeout_ms: number
   readonly retry_max_attempts: number
@@ -846,6 +847,12 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
   const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
   const defaults = {
     server_name: string_member(contract, "serverName", CLIENT_DEFAULTS_TRAIT_ID),
+    minimum_positive_value: integer_member(
+      contract,
+      "minimumPositiveValue",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
     connect_timeout_ms: integer_member(
       contract,
       "connectTimeoutMs",
@@ -1344,6 +1351,8 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 
 /// Default TLS server name used by client bindings.
 pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.server_name)};
+/// Minimum value accepted by settings whose zero value selects a default.
+pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
 /// Default connection setup timeout in milliseconds.
 pub const CLIENT_DEFAULT_CONNECT_TIMEOUT_MS: u64 = ${formatted_decimal(defaults.connect_timeout_ms)};
 /// Default complete request timeout in milliseconds.
@@ -1870,6 +1879,8 @@ ${contract.ffi.connection_states
 const (
 \t// SmithyClientDefaultServerName is used when no TLS server name is supplied.
 \tSmithyClientDefaultServerName = ${JSON.stringify(defaults.server_name)}
+\t// SmithyClientMinimumPositiveValue is the minimum accepted positive setting.
+\tSmithyClientMinimumPositiveValue = ${defaults.minimum_positive_value}
 \t// SmithyClientDefaultConnectTimeoutMS is the default connection timeout.
 \tSmithyClientDefaultConnectTimeoutMS uint64 = ${defaults.connect_timeout_ms}
 \t// SmithyClientDefaultRequestTimeoutMS is the default complete request timeout.
@@ -1988,6 +1999,7 @@ ${operations}
  */
 export function render_python_contract(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const envelope = contract.value_envelope
   const version_bytes = encode_vu128(value.version)
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
@@ -2018,6 +2030,17 @@ export function render_python_contract(contract: Wire_Contract): string {
   return `# Generated from the OpenKache Smithy contract. Do not edit.
 
 SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v3.alpn)}
+SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)}
+SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value}
+SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS = ${defaults.connect_timeout_ms}
+SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS = ${defaults.request_timeout_ms}
+SMITHY_CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts}
+SMITHY_CLIENT_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
+SMITHY_CLIENT_DEFAULT_COMPRESSION_LEVEL = ${defaults.compression_level}
+SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE = ${defaults.compression_minimum_input_size}
+SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS = ${defaults.compression_minimum_savings}
+SMITHY_CLIENT_COMPRESSION_LEVEL_MIN = ${defaults.compression_level_min}
+SMITHY_CLIENT_COMPRESSION_LEVEL_MAX = ${defaults.compression_level_max}
 SMITHY_REQUEST_FIXED_BYTES = ${contract.v3.request_fixed_bytes}
 SMITHY_RESPONSE_FIXED_BYTES = ${contract.v3.response_fixed_bytes}
 SMITHY_MAX_VARUINT_BYTES = ${contract.v3.max_varuint_bytes}
@@ -2153,6 +2176,7 @@ ${contract.ffi.connection_states
   .join("\n")}
 
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
+#define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS ${defaults.connect_timeout_ms}u
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS ${defaults.request_timeout_ms}u
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS ${defaults.retry_max_attempts}u

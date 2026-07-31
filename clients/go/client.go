@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const pemCertificateType = "CERTIFICATE"
+
 // ErrClosed is returned after a client has been permanently closed.
 var ErrClosed = errors.New("openkache: client is closed")
 
@@ -86,7 +88,7 @@ type Options struct {
 	Certificate []byte
 	// Identity is optional mutual-TLS client authentication material.
 	Identity *Identity
-	// DataProtectionKey is the persistent 32-byte application secret.
+	// DataProtectionKey is the persistent application data-protection secret.
 	DataProtectionKey []byte
 	// Compression is applied before the core's authenticated encryption.
 	Compression CompressionOptions
@@ -143,10 +145,11 @@ func (o Options) normalize() (normalizedOptions, error) {
 	if requestTimeout == 0 {
 		requestTimeout = time.Duration(SmithyClientDefaultRequestTimeoutMS) * time.Millisecond
 	}
+	minimumTimeout := time.Duration(SmithyClientMinimumPositiveValue) * time.Millisecond
 	if connectTimeout < 0 || requestTimeout < 0 {
 		return normalizedOptions{}, validationError("timeouts", "must not be negative")
 	}
-	if connectTimeout < time.Millisecond || requestTimeout < time.Millisecond {
+	if connectTimeout < minimumTimeout || requestTimeout < minimumTimeout {
 		return normalizedOptions{}, validationError("timeouts", "must be at least one millisecond")
 	}
 
@@ -181,14 +184,14 @@ func (o Options) normalize() (normalizedOptions, error) {
 	if retryAttempts == 0 {
 		retryAttempts = SmithyClientDefaultRetryMaxAttempts
 	}
-	if retryAttempts < 1 {
+	if retryAttempts < SmithyClientMinimumPositiveValue {
 		return normalizedOptions{}, validationError("retry.max_attempts", "must be greater than zero")
 	}
 	maxInFlight := o.MaxInFlight
 	if maxInFlight == 0 {
 		maxInFlight = SmithyClientDefaultMaxInFlight
 	}
-	if maxInFlight < 1 {
+	if maxInFlight < SmithyClientMinimumPositiveValue {
 		return normalizedOptions{}, validationError("max_in_flight", "must be greater than zero")
 	}
 
@@ -212,7 +215,7 @@ func (o Options) normalize() (normalizedOptions, error) {
 				)
 			}
 			trimmed := bytes.TrimSpace(certificate)
-			if bytes.HasPrefix(trimmed, []byte("-----BEGIN")) {
+			if isPEM(trimmed) {
 				identityCertificate = append(identityCertificate, trimmed...)
 				identityCertificate = append(identityCertificate, '\n')
 			} else if len(o.Identity.CertificateChain) == 1 {
@@ -220,7 +223,7 @@ func (o Options) normalize() (normalizedOptions, error) {
 			} else {
 				identityCertificate = append(
 					identityCertificate,
-					pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate})...,
+					pem.EncodeToMemory(&pem.Block{Type: pemCertificateType, Bytes: certificate})...,
 				)
 			}
 		}
@@ -244,10 +247,15 @@ func (o Options) normalize() (normalizedOptions, error) {
 
 func normalizedPEM(value []byte) []byte {
 	trimmed := bytes.TrimSpace(value)
-	if bytes.HasPrefix(trimmed, []byte("-----BEGIN")) {
+	if isPEM(trimmed) {
 		return append([]byte(nil), trimmed...)
 	}
 	return append([]byte(nil), value...)
+}
+
+func isPEM(value []byte) bool {
+	block, _ := pem.Decode(value)
+	return block != nil
 }
 
 func validationError(field, message string) error {
@@ -273,7 +281,7 @@ type SetOptions struct {
 // ItemID is the exact fixed-width identifier carried by the wire protocol.
 type ItemID [SmithyItemIDBytes]byte
 
-// NewItemID copies an exact 32-byte wire item ID.
+// NewItemID copies an exact protocol-width wire item ID.
 func NewItemID(value []byte) (ItemID, error) {
 	var itemID ItemID
 	if len(value) != SmithyItemIDBytes {

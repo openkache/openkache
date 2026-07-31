@@ -48,6 +48,16 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
     SMITHY_FFI_SET_CONDITION_NONE,
+    SMITHY_CLIENT_COMPRESSION_LEVEL_MAX,
+    SMITHY_CLIENT_COMPRESSION_LEVEL_MIN,
+    SMITHY_CLIENT_DEFAULT_COMPRESSION_LEVEL,
+    SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE,
+    SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS,
+    SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS,
+    SMITHY_CLIENT_DEFAULT_MAX_IN_FLIGHT,
+    SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS,
+    SMITHY_CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS,
+    SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE,
     SMITHY_ITEM_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
@@ -110,16 +120,20 @@ class CompressionOptions:
     """Zstandard policy applied before core encryption."""
 
     enabled: bool = True
-    level: int = 1
-    minimum_input_size: int = 1_024
-    minimum_savings: int = 64
+    level: int = SMITHY_CLIENT_DEFAULT_COMPRESSION_LEVEL
+    minimum_input_size: int = SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_INPUT_SIZE
+    minimum_savings: int = SMITHY_CLIENT_DEFAULT_COMPRESSION_MINIMUM_SAVINGS
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise OpenKacheValueError("compression.enabled must be a bool")
         _positive_or_zero(self.level, "compression.level", allow_zero=False)
-        if self.level > 22:
-            raise OpenKacheValueError("compression.level must be between 1 and 22")
+        if self.level > SMITHY_CLIENT_COMPRESSION_LEVEL_MAX:
+            raise OpenKacheValueError(
+                "compression.level must be between "
+                f"{SMITHY_CLIENT_COMPRESSION_LEVEL_MIN} and "
+                f"{SMITHY_CLIENT_COMPRESSION_LEVEL_MAX}"
+            )
         _positive_or_zero(
             self.minimum_input_size,
             "compression.minimum_input_size",
@@ -136,8 +150,8 @@ class CompressionOptions:
 class ClientTimeouts:
     """Connection and complete-request deadlines in milliseconds."""
 
-    connect_ms: int = 5_000
-    request_ms: int = 2_000
+    connect_ms: int = SMITHY_CLIENT_DEFAULT_CONNECT_TIMEOUT_MS
+    request_ms: int = SMITHY_CLIENT_DEFAULT_REQUEST_TIMEOUT_MS
 
     def __post_init__(self) -> None:
         _positive_or_zero(
@@ -247,8 +261,8 @@ class OpenKacheClient:
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
         timeouts: ClientTimeouts | None = None,
-        max_in_flight: int = 256,
-        retry_max_attempts: int = 2,
+        max_in_flight: int = SMITHY_CLIENT_DEFAULT_MAX_IN_FLIGHT,
+        retry_max_attempts: int = SMITHY_CLIENT_DEFAULT_RETRY_MAX_ATTEMPTS,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         try:
@@ -761,7 +775,7 @@ def _positive_or_zero(
 ) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(f"{name} must be an integer")
-    minimum = 0 if allow_zero else 1
+    minimum = 0 if allow_zero else SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE
     if value < minimum:
         requirement = "non-negative" if allow_zero else "positive"
         raise OpenKacheValueError(f"{name} must be {requirement}")

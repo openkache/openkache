@@ -95,6 +95,8 @@ const (
 const (
 	// SmithyClientDefaultServerName is used when no TLS server name is supplied.
 	SmithyClientDefaultServerName = "localhost"
+	// SmithyClientMinimumPositiveValue is the minimum accepted positive setting.
+	SmithyClientMinimumPositiveValue = 1
 	// SmithyClientDefaultConnectTimeoutMS is the default connection timeout.
 	SmithyClientDefaultConnectTimeoutMS uint64 = 5000
 	// SmithyClientDefaultRequestTimeoutMS is the default complete request timeout.

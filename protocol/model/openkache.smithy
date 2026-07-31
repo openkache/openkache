@@ -112,6 +112,9 @@ structure clientDefaults {
     serverName: String
 
     @required
+    minimumPositiveValue: Integer
+
+    @required
     connectTimeoutMs: Integer
 
     @required
@@ -349,6 +352,7 @@ structure wireStatus {
 )
 @clientDefaults(
     serverName: "localhost",
+    minimumPositiveValue: 1,
     connectTimeoutMs: 5000,
     requestTimeoutMs: 2000,
     retryMaxAttempts: 2,
