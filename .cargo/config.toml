@@ -1,0 +1,10 @@
+[alias]
+server-build = [
+  "build",
+  "--locked",
+  "--release",
+  "--package",
+  "openkache",
+  "--bin",
+  "openkache-server",
+]

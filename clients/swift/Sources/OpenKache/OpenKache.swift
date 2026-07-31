@@ -302,12 +302,12 @@ private enum NativeBridge {
         let clientPrivateKey = Array(options.identity?.privateKey ?? Data())
         let dataProtectionKey = Array(options.dataProtectionKey)
 
-        let result = try withBytes(address) { addressPointer, addressLength in
-            try withBytes(serverName) { serverNamePointer, serverNameLength in
-                try withBytes(certificate) { certificatePointer, certificateLength in
-                    try withBytes(clientCertificate) { clientCertificatePointer, clientCertificateLength in
-                        try withBytes(clientPrivateKey) { clientPrivateKeyPointer, clientPrivateKeyLength in
-                            try withBytes(dataProtectionKey) { keyPointer, keyLength in
+        let result = withBytes(address) { addressPointer, addressLength in
+            withBytes(serverName) { serverNamePointer, serverNameLength in
+                withBytes(certificate) { certificatePointer, certificateLength in
+                    withBytes(clientCertificate) { clientCertificatePointer, clientCertificateLength in
+                        withBytes(clientPrivateKey) { clientPrivateKeyPointer, clientPrivateKeyLength in
+                            withBytes(dataProtectionKey) { keyPointer, keyLength in
                                 nativeConnect(
                                     addressPointer,
                                     addressLength,

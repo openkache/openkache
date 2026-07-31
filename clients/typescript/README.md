@@ -1,9 +1,9 @@
 # OpenKache TypeScript client
 
 `@openkache/client` is the TypeScript and JavaScript SDK for Node.js, Bun, and
-Deno. A packaged Node-API adapter delegates network and protection behavior to
-`openkache-client-core`; applications need no helper process or runtime npm
-dependencies.
+Deno. A packaged Node-API adapter delegates network, retries, value protection,
+and canonical JSON behavior to `openkache-client-core`; applications need no
+helper process or runtime npm dependencies.
 
 ## Purpose
 
@@ -74,9 +74,23 @@ await client.close()
 ```
 
 `set` accepts nested objects, dense arrays, strings, finite numbers, booleans,
-and null through the built-in JSON codec. Its optional generic parameter
-documents the expected result shape. Object properties whose value is
-`undefined` are omitted.
+and null through the backwards-compatible TypeScript metadata envelope. Its
+optional generic parameter documents the expected result shape. Object
+properties whose value is `undefined` are omitted.
+
+Use `set_json` and `get_json` for the cross-language value API. These methods
+delegate JSON conversion, canonical RFC 8785 serialization, compression, and
+authenticated encryption to the shared Rust core, so values written by the
+Rust client can be read without a TypeScript-specific envelope:
+
+```typescript
+await client.set_json("shared", { z: 1, a: ["core", true] })
+const shared = await client.get_json("shared")
+```
+
+Canonical JSON accepts only null, booleans, finite numbers, strings, dense
+arrays, and regular objects with string keys. Cycles, sparse arrays, binary
+objects, `undefined`, `bigint`, and non-finite numbers are rejected.
 
 Use `{ condition: "if_absent" }` to create without overwriting or
 `{ condition: "if_present" }` to update only an existing item. Use `set_raw`
@@ -107,6 +121,10 @@ The runtime-neutral codec layer is available from
   savings.
 - `timeouts.connect_ms` and `timeouts.request_ms` bound connection and complete
   request operations.
+- `retry.max_attempts` controls retries for response-safe operations.
+- `max_in_flight` bounds concurrent request lanes on one connection.
+- `encryption` selects the shared core's `compact` or recommended `robust`
+  authenticated-encryption profile.
 - `value_codecs` registers current package codecs.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
 
@@ -117,8 +135,8 @@ unreachable.
 ## Runtime and lifecycle
 
 Published applications can use Node.js 20 or newer, Bun's Node-API support, or
-Deno's Node compatibility layer with `--allow-ffi`. Release packages contain
-Linux x64 and ARM64 adapters and require glibc 2.17 or newer.
+Deno's Node compatibility layer with `--allow-ffi`. Release packages support
+Linux x64 and ARM64 (glibc 2.17 or newer) plus Apple Silicon macOS.
 
 The browser cannot load the native adapter or open the UDP-based QUIC
 transport. The `value-codec` subpath is runtime-neutral, but the client
@@ -126,7 +144,11 @@ connection API is not a browser transport.
 
 Every connection and cache method returns a Promise. The adapter runs native
 networking outside the JavaScript event loop and maintains one reusable
-connection. Call and await `close()` when finished.
+connection. `connection_state()` reports `connected`, `reconnecting`,
+`disconnected`, or `closed`; `reconnect()` replaces a failed connection without
+replaying an operation. Call and await `close()` when finished. The
+`client.raw()` view implements the Smithy-generated `Smithy_OpenKache_Api`
+contract for exact 32-byte item IDs and opaque protocol values.
 
 Protocol limits, operation outcomes, and retry safety follow the
 [wire protocol specification](../../protocol/SPEC.md).

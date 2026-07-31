@@ -5,14 +5,14 @@ edition = "2024"
 description = "Low-level client core for the OpenKache cache server"
 license = "Apache-2.0"
 
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+
 [features]
 default = ["quic-quinn"]
+ffi = ["quic-compio"]
 quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
-# Versioned native ABI used by Swift, C, and other bindings.  The ABI runs the
-# portable Tokio/Quinn backend on its own worker so callers do not need to
-# embed a Rust async runtime.
-ffi = ["quic-quinn"]
 
 [dependencies]
 # Exact direct feature dependencies clear the AEAD key schedules and MAC state.

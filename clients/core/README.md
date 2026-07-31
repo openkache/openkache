@@ -19,7 +19,9 @@ The main API layers are:
 - `ValueCodec`, which owns Raw and RFC 8785 JSON serialization, optional
   Zstandard compression, and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
-  adapters.
+  adapters;
+- the optional `ffi` feature, which exports the stable C ABI used by C, C++,
+  Python, ctypes, and other synchronous native adapters.
 
 The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
 adapter depends on this core directly.
@@ -49,6 +51,17 @@ cargo check --no-default-features --features quic-quinn
 cargo check --no-default-features --features ffi
 cargo fmt --check
 ```
+
+The `ffi` feature builds a dedicated Compio worker around
+`LocalProtectedClient`. It requires the platform's io_uring driver and exports
+`openkache_client_*` symbols from the native library crate outputs. The ABI
+supports protected application-key calls, exact-item-ID calls, mutual TLS,
+PEM/DER or system trust, compression, both value-encryption profiles, retries,
+reconnect, state snapshots, and bounded request lanes. CMake and Python package
+builds generate canonical Smithy-derived contracts into their build or release
+output; generated files are not checked into the source tree. Reusable ABI
+declarations are in `include/openkache/client_abi.h` (with the
+`include/openkache_client.h` compatibility include).
 
 ## Usage
 
@@ -115,17 +128,19 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
+- `src/ffi.rs` provides the optional C ABI without duplicating protocol logic
+  in each language adapter.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
-  and other non-Rust bindings. It exposes both protected application-key
-  operations and exact-item-ID raw operations, while the worker owns one
-  Tokio/Quinn runtime per native handle. The C declarations are in
-  [`include/openkache_client.h`](include/openkache_client.h), and the generated
-  ABI/protocol constants are in
-  [`include/openkache/smithy_contract.h`](include/openkache/smithy_contract.h).
-  Both headers are generated or documented adapters over the canonical
+  C++, Python, and other non-Rust bindings. It exposes both protected
+  application-key operations and exact-item-ID raw operations, while the
+  worker owns one Compio runtime per native handle. The canonical declarations
+  are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
+  with [`include/openkache_client.h`](include/openkache_client.h) retained as
+  a compatibility include. Generated ABI/protocol constants are emitted to
+  each package build directory from the single
   [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy)
-  model; neither is a hand-maintained constants source.
+  source; no header is a hand-maintained constants source.

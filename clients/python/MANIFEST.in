@@ -1,0 +1,6 @@
+include README.md
+include pyproject.toml
+include setup.py
+recursive-include src/openkache *.py py.typed
+recursive-include native Cargo.toml Cargo.lock *.rs
+prune native/target

@@ -24,25 +24,27 @@ formats or protocol behavior.
 |---|---|---|
 | Shared core | [`core/`](core/) | Protocol v1 raw and protected engine; value format v1 implementation |
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
-| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the existing envelope |
+| CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
-| Python | `python/` | Package scaffold |
+| Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
-| C | `c/` | Package scaffold |
-| C++ | `cpp/` | Package scaffold |
-| Swift | [`swift/`](swift/) | Protocol v1 async actor client over the shared Rust ABI; protected and exact-item-ID Smithy APIs |
+| C | [`c/`](c/) | Protocol v1 protected C17 ABI over the shared core |
+| C++ | [`cpp/`](cpp/) | Protocol v1 C++20 RAII adapter over the C ABI |
+| Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
 | Dart | `dart/` | Package scaffold |
 
-A scaffold contains registry metadata and a reserved source layout. It does not
-connect to OpenKache or expose cache operations.
+Go, Java, Kotlin, and Dart currently contain registry metadata and reserved
+source layouts only. They do not connect to OpenKache or expose cache
+operations yet.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
-format v1. The core owns Raw and canonical JSON serialization, but
-language-native JSON adapters are not implemented yet. TypeScript's logical
-value envelope is a package-level adapter detail; byte-level v1 requirements
-belong only in the value-format specification.
+format v1. The core owns Raw and canonical JSON serialization; language
+adapters convert native values into that shared logical model. TypeScript's
+legacy metadata envelope remains a package-level compatibility detail; new
+cross-language values should use its `set_json`/`get_json` API.
 
 ## Binding architecture
 
@@ -50,8 +52,7 @@ The shared layers have these responsibilities:
 
 - `protocol/` defines and validates server-visible wire frames.
 - `core/` handles transport, TLS, retries, raw operations, key derivation,
-  compression, encryption, formatted-value processing, and the worker-backed
-  native ABI.
+  compression, encryption, and formatted-value processing.
 - implemented language packages convert native values and configuration into
   core types, expose runtime-appropriate asynchronous APIs, and clean up native
   resources.
@@ -79,14 +80,25 @@ package structure only.
 | Go | `go vet ./... && go build ./...` | `doc.go` |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
-| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |
-| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
+| CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
+| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
+| Swift | `swift build` | `Sources/OpenKache/OpenKache.swift`, generated Smithy API |
 
-Native linkage and artifact distribution are package-specific. Implemented
-bindings document their native library and runtime requirements in their own
-README.
+Native linkage for C, C++, Python, and Swift is supplied by the shared `ffi`
+native library built from `clients/core`; see each package README for the
+package-specific linker or packaging configuration. Artifact distribution for
+the remaining scaffolds is intentionally undefined until those bindings are
+implemented.
 
 ## Shared configuration
+
+The C, C++, Python, and Swift packages use the native ABI exported by
+`clients/core`. Their adapters only marshal native values, expose their
+language-appropriate lifecycle, and own result handles; protocol, retry, TLS,
+value-format, and protection behavior remain in the core. Every operation,
+result, state, limit, and value-format identifier is generated from the
+Smithy model for each package's build output, keeping all bindings aligned
+without hand-maintained constants.
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform

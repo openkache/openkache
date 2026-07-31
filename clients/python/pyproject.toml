@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,7 +19,10 @@ classifiers = [
 ]
 
 [tool.setuptools.package-data]
-openkache = ["py.typed"]
+openkache = ["py.typed", "*.dll", "*.dylib", "*.so", "_generated/*.py"]
+
+[tool.setuptools]
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["src"]

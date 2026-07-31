@@ -39,7 +39,8 @@ pub use value::ItemValue;
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
 compile_error!("enable at least one client QUIC backend feature");
 
-const DEFAULT_MAX_IN_FLIGHT: usize = 256;
+/// Default maximum number of concurrently active request lanes.
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
 
 /// Client-owned identifier for an asynchronous runtime and QUIC backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -331,13 +332,24 @@ pub enum DeleteOutcome {
 #[repr(u8)]
 pub enum ConnectionState {
     /// The latest connection is available.
-    Connected = FFI_CONNECTION_STATE_CONNECTED,
+    Connected = FFI_CONNECTION_STATE_CONNECTED as u8,
     /// A request is replacing a failed connection.
-    Reconnecting = FFI_CONNECTION_STATE_RECONNECTING,
+    Reconnecting = FFI_CONNECTION_STATE_RECONNECTING as u8,
     /// The latest connection failed and a later operation will reconnect.
-    Disconnected = FFI_CONNECTION_STATE_DISCONNECTED,
+    Disconnected = FFI_CONNECTION_STATE_DISCONNECTED as u8,
     /// The client was explicitly closed and cannot reconnect.
-    Closed = FFI_CONNECTION_STATE_CLOSED,
+    Closed = FFI_CONNECTION_STATE_CLOSED as u8,
+}
+
+impl std::fmt::Display for ConnectionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Connected => "connected",
+            Self::Reconnecting => "reconnecting",
+            Self::Disconnected => "disconnected",
+            Self::Closed => "closed",
+        })
+    }
 }
 
 struct Core<C: ClientConnection> {

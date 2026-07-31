@@ -208,8 +208,8 @@ public enum Smithy_Value_Format: Sendable {
   public static let robustContext: String = "OpenKache value format v1 AES-256-GCM-SIV key"
 }
 
-/// Native ABI discriminators shared by every language adapter.
-public enum Smithy_Connection_State: UInt32, Sendable {
+/// Native ABI connection-state identifiers shared by every language adapter.
+public enum Smithy_Connection_State: UInt32, Equatable, Sendable {
   case connected = 0
   case reconnecting = 1
   case disconnected = 2
@@ -217,11 +217,12 @@ public enum Smithy_Connection_State: UInt32, Sendable {
   case unknown = 4
 }
 
-/// Native ABI discriminators shared by every language adapter.
+/// Native ABI identifiers shared by every language adapter.
 public enum Smithy_Native_Contract: Sendable {
-  public static let abiVersion: UInt32 = 1
+  public static let abiVersion: UInt32 = 2
+  public static let operationGetJson: UInt32 = 7
+  public static let operationSetJson: UInt32 = 8
   public static let operationReconnect: UInt32 = 4294967041
-  public static let operationConnectionState: UInt32 = 4294967042
   public static let resultError: UInt32 = 0
   public static let resultOk: UInt32 = 1
   public static let resultValue: UInt32 = 2
@@ -232,13 +233,7 @@ public enum Smithy_Native_Contract: Sendable {
   public static let resultNotDeleted: UInt32 = 7
   public static let resultConnected: UInt32 = 8
   public static let resultNotStored: UInt32 = 9
-  public static let resultConnectionState: UInt32 = 10
   public static let setConditionNone: UInt32 = 0
   public static let setConditionIfAbsent: UInt32 = 1
   public static let setConditionIfPresent: UInt32 = 2
-  public static let connectionStateConnected: UInt32 = 0
-  public static let connectionStateReconnecting: UInt32 = 1
-  public static let connectionStateDisconnected: UInt32 = 2
-  public static let connectionStateClosed: UInt32 = 3
-  public static let connectionStateUnknown: UInt32 = 4
 }

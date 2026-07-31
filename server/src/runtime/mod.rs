@@ -220,11 +220,11 @@ impl ThreadedKvkache {
                         }
                     };
                     runtime.block_on(async move {
-                        let actual_cpu = unsafe { libc::sched_getcpu() };
-                        if actual_cpu < 0 || actual_cpu as usize != cpu_id {
-                            let _ = started_tx.send(Err(format!(
-                                "thread {thread_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
-                            )));
+                        if let Some(error) = crate::platform::cpu_assignment_error(
+                            &format!("thread {thread_id}"),
+                            cpu_id,
+                        ) {
+                            let _ = started_tx.send(Err(error));
                             return;
                         }
                         let cache = match Kvkache::open_with_validated_config(
@@ -245,7 +245,7 @@ impl ThreadedKvkache {
                             compio::runtime::spawn(run_core_tasks(receiver)).detach();
                         }
                         let _ = started_tx.send(Ok(()));
-                        if let Err(error) = worker_loop(cache, receiver, io_config).await {
+                        if let Err(error) = worker_loop(cache, receiver, io_config, cpu_id).await {
                             eprintln!("worker {thread_id} stopped: {error}");
                         }
                     });

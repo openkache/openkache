@@ -11,9 +11,9 @@ opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
 
 The native library exports the versioned ABI declared in
-[`../core/include/openkache_client.h`](../core/include/openkache_client.h).
+[`../core/include/openkache/client_abi.h`](../core/include/openkache/client_abi.h).
 Build or install the `openkache-client` Rust `cdylib` for the target platform
-and make it visible to the linker as `openkache_client`.
+and make it visible to the linker as `openkache_client_core`.
 
 ## Commands
 
@@ -34,7 +34,7 @@ The Rust library can be built from the public workspace with the `ffi` feature:
 ```bash
 env -u CARGO_BUILD_TARGET cargo build \
   --manifest-path ../../Cargo.toml \
-  -p openkache-client \
+  -p openkache-client-core \
   --no-default-features \
   --features ffi
 ```
@@ -93,8 +93,9 @@ verification.
 The Smithy operation, value-format, connection-state, and native ABI
 declarations are generated into `Sources/OpenKache/Generated/SmithyAPI.swift`
 from [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
-The generated declarations and the shared C ABI header are outputs only; the
-Smithy model is the single source of truth.
+The generated declarations and shared C ABI header are outputs only; the
+Smithy model is the single source of truth for operation, state, result,
+limit, and value-format identifiers.
 Regenerate them with:
 
 ```bash

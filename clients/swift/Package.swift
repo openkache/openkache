@@ -11,7 +11,7 @@ let package = Package(
         .target(
             name: "OpenKache",
             linkerSettings: [
-                .linkedLibrary("openkache_client"),
+                .linkedLibrary("openkache_client_core"),
             ]
         ),
     ]

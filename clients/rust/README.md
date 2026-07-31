@@ -12,6 +12,9 @@ use the re-exported raw core types over the same connection.
 - `RawClient` accepts exact 32-byte item IDs and opaque values.
 - `LocalClient` and `LocalRawClient` provide equivalent Compio-local layers.
 - `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
+- `RawClient` and `LocalRawClient` implement the Smithy-generated
+  `smithy::OpenKacheApi` interface, so generated operation inputs and outputs
+  use the same service contract as the other language adapters.
 
 Shared SDK status and layering live in the [client index](../README.md).
 Formatted value bytes belong to the
@@ -123,6 +126,21 @@ pub enum SetOutcome { Created, Replaced, NotStored }
 pub enum DeleteOutcome { Deleted, NotFound }
 ```
 
+`Client::get_value` and `Client::set_value` expose the shared logical value
+model for canonical JSON in addition to the byte-oriented API:
+
+```rust
+use openkache_client::value::{JsonValue, Value};
+use openkache_client::SetOptions;
+
+let value = Value::Json(JsonValue::object(vec![
+    ("answer".to_owned(), JsonValue::number(42.0)?),
+])?);
+client
+    .set_value(b"document", value, SetOptions::new())
+    .await?;
+```
+
 Set options are methods on the awaitable request:
 
 ```rust
@@ -147,6 +165,18 @@ let result = client
 
 The raw layer bypasses key derivation and formatted-value processing.
 
+For generated service integrations, use the raw client with the Smithy
+operation types. The generated interface follows protocol item-ID semantics;
+it does not reinterpret `item_id` as an application key:
+
+```rust
+use openkache_client::smithy::{GetInput, OpenKacheApi};
+
+let result = <_ as OpenKacheApi>::get(client.raw(), GetInput {
+    item_id: item_id.as_bytes().to_vec(),
+}).await?;
+```
+
 ## Configuration and lifecycle
 
 The builder configures explicit trust, mutual TLS, request deadlines, retries
@@ -169,7 +199,7 @@ follow the [wire protocol rules](../../protocol/SPEC.md#retry-and-outcome-rules)
 ## Core components
 
 - `src/lib.rs` exposes the ergonomic Rust client and request builders.
-- `src/ffi.rs` exposes the versioned C ABI symbols implemented by the shared
-  core at [`../core/src/ffi.rs`](../core/src/ffi.rs).
+- `src/ffi.rs` re-exports the versioned C ABI implemented by the shared core
+  for native language adapters.
 - [`../core`](../core) provides shared transport, protocol, protection, and
   binding behavior.
