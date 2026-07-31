@@ -62,12 +62,6 @@ pub struct NativeValueEnvelope {
     pub payload: Uint8Array,
 }
 
-/// Present canonical JSON value, including a stored JSON `null`.
-#[napi(object)]
-pub struct NativeJsonValue {
-    pub value: serde_json::Value,
-}
-
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
@@ -132,7 +126,7 @@ impl NativeClient {
     ///
     /// Raw-formatted values are rejected instead of being silently coerced.
     #[napi(js_name = "get_json")]
-    pub async fn get_json(&self, key: Uint8Array) -> Result<Option<NativeJsonValue>> {
+    pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
         let outcome = self
             .active_client()?
             .get_value(key.as_ref())
@@ -140,8 +134,8 @@ impl NativeClient {
             .map_err(native_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Json(value)) => serde_json::to_value(value)
-                .map(|value| Some(NativeJsonValue { value }))
+            GetOutcome::Found(Value::Json(value)) => serde_json::to_string(&value)
+                .map(Some)
                 .map_err(native_error),
             GetOutcome::Found(Value::Raw(_)) => Err(native_error(
                 "stored value uses raw serialization, expected canonical JSON",

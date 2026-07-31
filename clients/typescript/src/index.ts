@@ -49,7 +49,11 @@ interface Client_Lifecycle {
 
 const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
   (native_client): void => {
-    native_client.close_now()
+    try {
+      native_client.close_now()
+    } catch {
+      // Finalization is best effort and has no caller that can observe errors.
+    }
   },
 )
 
@@ -194,7 +198,7 @@ export class OpenKache_Client {
     this.#native_client = native_client
     this.#value_codecs = value_codecs
     this.#lifecycle = lifecycle
-    this.#raw_client = new OpenKache_Raw_Client(native_client, lifecycle)
+    this.#raw_client = new Raw_Client(native_client, lifecycle)
   }
 
   /**
@@ -419,7 +423,7 @@ export class OpenKache_Client {
    */
   async get_json(key: string | Uint8Array): Promise<Json_Value | undefined> {
     this.#assert_open()
-    let result: { readonly value: unknown } | null
+    let result: string | null
     try {
       result = await this.#native_client.get_json(owned_key_bytes(key))
     } catch (error) {
@@ -427,7 +431,7 @@ export class OpenKache_Client {
     }
     if (result === null) return undefined
     try {
-      return parse_json_value(result.value)
+      return parse_json_value(JSON.parse(result) as unknown)
     } catch (error) {
       throw new OpenKache_Error(`canonical JSON decoding failed: ${error_message(error)}`, error)
     }
@@ -597,7 +601,12 @@ function parse_json_value(value: unknown): Json_Value {
   if (is_regular_object(value)) {
     const result: Record<string, Json_Value> = {}
     for (const [key, child] of Object.entries(value)) {
-      result[key] = parse_json_value(child)
+      Object.defineProperty(result, key, {
+        configurable: true,
+        enumerable: true,
+        value: parse_json_value(child),
+        writable: true,
+      })
     }
     return result
   }
@@ -611,11 +620,36 @@ function parse_json_value(value: unknown): Json_Value {
  * does not open a second QUIC connection. Use it when an application already
  * owns protocol item IDs and formatted value bytes.
  */
-export class OpenKache_Raw_Client implements Smithy_OpenKache_Api {
+export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
+  /**
+   * Reconnects the shared core client without replaying an operation.
+   *
+   * @returns A promise resolved after reconnection.
+   * @throws {OpenKache_Error} When reconnection fails.
+   */
+  reconnect(): Promise<void>
+
+  /**
+   * Closes the shared native connection.
+   *
+   * @returns A promise resolved after native resource release.
+   * @throws {OpenKache_Error} When native shutdown fails.
+   */
+  close(): Promise<void>
+
+  /**
+   * Returns the shared core's best-effort lifecycle state.
+   *
+   * @returns The latest connection state snapshot, including `closed`.
+   * @throws {OpenKache_Error} When native state cannot be read.
+   */
+  connection_state(): Connection_State
+}
+
+class Raw_Client implements OpenKache_Raw_Client {
   readonly #native_client: Native_Client
   readonly #lifecycle: Client_Lifecycle
 
-  /** @internal Constructed by `OpenKache_Client.raw()`. */
   constructor(
     native_client: Native_Client,
     lifecycle: Client_Lifecycle = { closed: false },

@@ -284,6 +284,19 @@ function validate_json_value(
         }
         validate_json_value(value[index], `${path}[${index}]`, ancestors)
       }
+      for (const key of Object.keys(value)) {
+        if (
+          !/^(?:0|[1-9][0-9]*)$/.test(key) ||
+          Number(key) >= value.length
+        ) {
+          throw new Error(`${path} must not contain enumerable property ${JSON.stringify(key)}`)
+        }
+      }
+      for (const symbol of Object.getOwnPropertySymbols(value)) {
+        if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
+          throw new Error(`${path} must not contain enumerable symbol properties`)
+        }
+      }
     })
     return
   }
