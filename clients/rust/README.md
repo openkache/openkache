@@ -28,6 +28,10 @@ cargo check --no-default-features --features quic-compio
 cargo fmt --check
 ```
 
+Builds require Bun and Smithy CLI on `PATH`. Cargo generates the
+`openkache_client::smithy` operation types and API trait from the canonical
+protocol model before compiling the crate.
+
 ## Connect
 
 The shortest connection path uses system trust and derives the TLS server name

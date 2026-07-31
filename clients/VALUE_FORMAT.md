@@ -31,6 +31,11 @@ The format contains no magic bytes and no encoded body length. An OpenKache prot
 provides the exact container boundary. Callers that need to store arbitrary unformatted protocol
 bytes use the low-level raw client rather than the formatted API.
 
+The interoperable v1 version bytes, layout sizes, algorithm identifiers, key sizes, and derivation
+context strings are declared in the [Smithy protocol model](../protocol/model/openkache.smithy)
+and generated into each language build. The shared core still owns the algorithms and Rust-only
+policies, such as compression thresholds and cryptographic operation flow.
+
 ## Processing model
 
 A formatted write applies these stages in order:

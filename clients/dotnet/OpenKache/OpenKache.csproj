@@ -17,6 +17,16 @@
     <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="generated_local/**/*.cs" />
     <None Include="../README.md" Pack="true" PackagePath="/" />
   </ItemGroup>
+  <Target Name="GenerateSmithyContract" BeforeTargets="CoreCompile">
+    <Exec
+      Command="bun &quot;$(MSBuildThisFileDirectory)../../../protocol/generate.ts&quot;"
+      EnvironmentVariables="OPENKACHE_GENERATION_TARGET=dotnet"
+    />
+    <ItemGroup>
+      <Compile Include="generated_local/**/*.cs" />
+    </ItemGroup>
+  </Target>
 </Project>

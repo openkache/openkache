@@ -23,7 +23,9 @@ dotnet pack clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 
 The package targets .NET 8 and opts into its preview QUIC APIs. Windows ships
 MsQuic with .NET. Linux must make a compatible `libmsquic` available to the
-runtime.
+runtime. Building from source also requires Bun and Smithy CLI on `PATH`; the
+project generates ignored wire values and Smithy API contracts before
+compilation.
 
 ## Connect and use
 

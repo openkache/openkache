@@ -17,5 +17,7 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/setup-smithy-codegen
+
       - name: Check Rust build
         run: cargo check --locked
