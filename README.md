@@ -8,7 +8,7 @@
 
 Open-source · Rust · QUIC · SIMD-accelerated · SSD-first
 
-<!-- TODO: add more badges — GitHub Stars, crates.io version/downloads, Docker pulls, real CI status, OpenSSF scorecard, code coverage, PRs welcome --> 
+<!-- TODO: add more badges — GitHub Stars, crates.io version/downloads, Docker pulls, real CI status, OpenSSF scorecard, code coverage, PRs welcome -->
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/openkache/openkache/actions)
 [![Rust](https://img.shields.io/badge/rust-nightly-orange.svg)](https://www.rust-lang.org/)
 [![SIMD](https://img.shields.io/badge/simd-AVX2%20|%20AVX--512%20|%20NEON%20|%20SVE2-blueviolet)](#index-simd-accelerated-bcf53-breadcrumb-filter)
@@ -91,6 +91,14 @@ required to extend that behavior to an explicitly selected non-loopback
 address. Production non-loopback startup requires a stable server certificate
 and private key, a client CA for mTLS, and an administrator certificate
 allowlist. See the [production TLS guide](#production-tls).
+
+### Container image
+
+The server is published for Linux `amd64` and `arm64` as
+`ghcr.io/openkache/openkache`. The image runs as a non-root user, keeps cache
+data in `/var/lib/openkache`, and requires a mounted PKI bundle for its
+production default command. See the [container image guide](./docs/container-image.md)
+for secure mTLS deployment and the explicit isolated-development command.
 
 ### Production TLS
 
@@ -258,6 +266,19 @@ The root Cargo workspace owns the server, protocol, shared client core, Rust
 client, and Node-API adapter under one `Cargo.lock`. The default build omits
 only the Node-API adapter, which the TypeScript build stages separately.
 
+For the canonical locked release build of only the server binary, use the
+shared Cargo alias:
+
+```bash
+cargo server-build
+```
+
+The container builder invokes the same alias and adds its target triple:
+
+```bash
+cargo server-build --target x86_64-unknown-linux-musl
+```
+
 ### Server allocator
 
 The server uses jemalloc by default. Select the system allocator, mimalloc, or
@@ -265,8 +286,7 @@ snmalloc by disabling default features and enabling exactly one allocator
 feature:
 
 ```bash
-cargo build --release --manifest-path server/Cargo.toml \
-  --bin openkache-server \
+cargo server-build \
   --no-default-features \
   --features allocator-mimalloc,channel-crossfire,quic-noq
 ```
@@ -281,8 +301,7 @@ channels. Select exactly one of `channel-crossfire`, `channel-flume`, or
 `channel-kanal` at compile time:
 
 ```bash
-cargo build --release --manifest-path server/Cargo.toml \
-  --bin openkache-server \
+cargo server-build \
   --no-default-features \
   --features allocator-system,channel-flume,quic-noq
 ```
@@ -299,6 +318,25 @@ cargo zigbuild --target aarch64-unknown-linux-musl
 ```bash
 cargo release-all
 ```
+
+### Container image
+
+Build the server image from the public repository root with Docker:
+
+```bash
+docker build --file server/Dockerfile --tag localhost/openkache:dev .
+```
+
+Podman is also supported with the same Dockerfile and build context:
+
+```bash
+podman build --format docker --file server/Dockerfile --tag localhost/openkache:dev .
+```
+
+The CI workflow builds and publishes the multi-architecture image to GHCR.
+Container builds run the same locked Smithy/Bun protocol generation as source
+builds; see the [container image guide](./docs/container-image.md) for image
+tags, storage, and deployment commands.
 
 ---
 
@@ -321,6 +359,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | QUIC client (Rust) | 🚧 Preview | Shared Rust core, binary protocol v1, secure value codec |
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
+| Container image | ✅ Available | Non-root `linux/amd64` and `linux/arm64` image on GHCR |
 | QUIC client (.NET) | 🚧 Preview | Managed `System.Net.Quic`, binary protocol v1 |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
 
@@ -332,7 +371,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 |---|---|---|
 | Core engine | ✅ Done | Allocators, BCF53 filter, types, and client foundations |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
-| Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl releases, Docker images |
+| Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl release artifacts, and capacity guidance |
 | E2E encryption | ✅ Done | Zstandard then compact XChaCha20-Poly1305 values |
 | Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
 | General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
