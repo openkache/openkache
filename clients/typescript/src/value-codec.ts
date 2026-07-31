@@ -2,8 +2,17 @@
  * Runtime-neutral codec registry for cross-language values.
  */
 
-const ENCODING_PATTERN = /^[a-z][a-z0-9.-]{0,63}$/
-const JSON_ENCODING = "json"
+import {
+  SMITHY_VALUE_ENVELOPE_JSON_ENCODING,
+  SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES,
+  SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES,
+} from "./generated_local/smithy-value-envelope.js"
+
+// Local early validation for the legacy metadata envelope; the Rust core remains authoritative.
+const VALUE_ENVELOPE_ENCODING_PATTERN = new RegExp(
+  `^[a-z][a-z0-9.-]{0,${SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES - 1}}$`,
+)
+const JSON_ENCODING = SMITHY_VALUE_ENVELOPE_JSON_ENCODING
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
@@ -131,6 +140,7 @@ export class Value_Codec_Registry {
     if (typeof encoded.type_name !== "string") {
       throw new Error(`codec ${codec.encoding} returned a non-string type name`)
     }
+    validate_type_name(encoded.type_name)
     if (!(encoded.payload instanceof Uint8Array)) {
       throw new Error(`codec ${codec.encoding} returned a non-binary payload`)
     }
@@ -179,6 +189,7 @@ function validate_envelope(envelope: Value_Envelope): void {
   if (typeof envelope.type_name !== "string") {
     throw new Error("decoded value envelope has a non-string type name")
   }
+  validate_type_name(envelope.type_name)
   if (!(envelope.payload instanceof Uint8Array)) {
     throw new Error("decoded value envelope has a non-binary payload")
   }
@@ -265,8 +276,17 @@ function validate_json_container(
 }
 
 function validate_encoding(encoding: string): void {
-  if (!ENCODING_PATTERN.test(encoding)) {
+  if (!VALUE_ENVELOPE_ENCODING_PATTERN.test(encoding)) {
     throw new Error(`invalid value encoding ${JSON.stringify(encoding)}`)
+  }
+}
+
+function validate_type_name(type_name: string): void {
+  const byte_length = TEXT_ENCODER.encode(type_name).byteLength
+  if (byte_length > SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES) {
+    throw new Error(
+      `value type name contains ${byte_length} bytes, maximum is ${SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES}`,
+    )
   }
 }
 

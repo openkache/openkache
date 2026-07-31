@@ -1,7 +1,10 @@
 //! Shared byte-oriented types used across the KV cache.
 
 /// Number of bytes in every server-derived storage key.
-pub const STORAGE_KEY_BYTES: usize = 32;
+///
+/// The storage key is the server-side representation of the protocol item ID,
+/// so its size comes from the Smithy-generated protocol contract.
+pub use openkache_protocol::ITEM_ID_BYTES as STORAGE_KEY_BYTES;
 
 /// Variable-length application value associated with an item ID.
 #[repr(transparent)]

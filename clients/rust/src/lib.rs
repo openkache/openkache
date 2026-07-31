@@ -3,6 +3,11 @@
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
+/// Smithy-generated service operation inputs, outputs, enums, and client trait.
+pub mod smithy {
+    include!(concat!(env!("OUT_DIR"), "/smithy_api.rs"));
+}
+
 use std::future::{Future, IntoFuture};
 use std::pin::Pin;
 use std::sync::Arc;

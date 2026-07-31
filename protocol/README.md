@@ -18,10 +18,14 @@ project status.
 From `protocol`:
 
 ```bash
+./generate.ts
 cargo build
 cargo check
 cargo fmt --check
 ```
+
+Generation and Rust builds require Bun and Smithy CLI on `PATH`. Cargo invokes
+the generator automatically before compiling the protocol crate.
 
 ## Usage
 
@@ -44,6 +48,12 @@ variable-integer parsing.
 
 ## Core components
 
+- `model/openkache.smithy` is the canonical source for assigned wire values,
+  operation inputs and outputs, shared limits, version-specific layouts, the
+  complete cross-language value-format contract, and the legacy TypeScript
+  metadata-envelope limits.
+- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, and C#
+  definitions into ignored `generated_local` directories or Cargo output.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.
@@ -58,5 +68,6 @@ policy; protocol v1 specifies only when a successful response may be sent.
 
 ## Configuration
 
-Protocol identifiers and wire ceilings are compile-time constants. The crate
-has no environment variables or runtime configuration files.
+Protocol identifiers, operation shapes, and wire ceilings are compile-time
+definitions sourced from the Smithy model. The crate has no runtime
+configuration files.

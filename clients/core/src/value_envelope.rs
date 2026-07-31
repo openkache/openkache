@@ -1,13 +1,14 @@
 //! Canonical framing for self-describing, cross-language values.
 
-/// Magic bytes and version written at the start of every value envelope.
-pub const MAGIC_AND_VERSION: [u8; 4] = *b"OKV\x01";
+/// Legacy metadata-envelope magic and version.
+pub const MAGIC_AND_VERSION: [u8; openkache_protocol::VALUE_ENVELOPE_MAGIC_AND_VERSION.len()] =
+    openkache_protocol::VALUE_ENVELOPE_MAGIC_AND_VERSION;
 
 /// Maximum UTF-8 byte length of an encoding identifier.
-pub const MAX_ENCODING_BYTES: usize = 64;
+pub const MAX_ENCODING_BYTES: usize = openkache_protocol::VALUE_ENVELOPE_MAX_ENCODING_BYTES;
 
 /// Maximum UTF-8 byte length of a logical type name.
-pub const MAX_TYPE_NAME_BYTES: usize = u16::MAX as usize;
+pub const MAX_TYPE_NAME_BYTES: usize = openkache_protocol::VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES;
 
 const LENGTH_FIELD_BYTES: usize = std::mem::size_of::<u16>();
 const ENCODING_LENGTH_OFFSET: usize = MAGIC_AND_VERSION.len();
@@ -63,8 +64,8 @@ pub enum Error {
     /// The input uses a different magic value or envelope version.
     #[error("unsupported value envelope magic or version {found:02x?}")]
     UnsupportedMagicOrVersion {
-        /// Four-byte prefix found in the input.
-        found: [u8; 4],
+        /// Magic/version prefix found in the input.
+        found: [u8; MAGIC_AND_VERSION.len()],
     },
     /// The declared encoding and type-name bytes are not present.
     #[error("value envelope metadata requires {required} bytes, input contains {actual}")]
@@ -103,6 +104,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// longer than 65,535 bytes, the total length overflows, or allocation fails.
 pub fn encode(encoding: &str, type_name: &str, payload: &[u8]) -> Result<Vec<u8>> {
     validate_encoding(encoding)?;
+    if type_name.len() > MAX_TYPE_NAME_BYTES {
+        return Err(Error::TypeNameTooLong {
+            size: type_name.len(),
+            maximum: MAX_TYPE_NAME_BYTES,
+        });
+    }
     let type_name_length = u16::try_from(type_name.len()).map_err(|_| Error::TypeNameTooLong {
         size: type_name.len(),
         maximum: MAX_TYPE_NAME_BYTES,
@@ -152,7 +159,7 @@ pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
         });
     }
 
-    let found = <[u8; 4]>::try_from(&bytes[..MAGIC_AND_VERSION.len()])
+    let found = <[u8; MAGIC_AND_VERSION.len()]>::try_from(&bytes[..MAGIC_AND_VERSION.len()])
         .expect("validated envelope header contains magic bytes");
     if found != MAGIC_AND_VERSION {
         return Err(Error::UnsupportedMagicOrVersion { found });
@@ -177,6 +184,12 @@ pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
     validate_encoding(encoding)?;
     let type_name =
         std::str::from_utf8(&bytes[encoding_end..payload_offset]).map_err(Error::TypeNameUtf8)?;
+    if type_name.len() > MAX_TYPE_NAME_BYTES {
+        return Err(Error::TypeNameTooLong {
+            size: type_name.len(),
+            maximum: MAX_TYPE_NAME_BYTES,
+        });
+    }
 
     Ok(ValueEnvelope {
         encoding,
