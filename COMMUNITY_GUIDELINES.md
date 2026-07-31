@@ -21,8 +21,8 @@ to reproduce it and say what is still uncertain. When proposing a change,
 explain the tradeoffs and keep the scope small enough to review.
 
 Make room for newcomers. A basic question can expose a confusing API or a
-missing piece of documentation. A clear answer, a careful review, a useful
-benchmark, and an honest limitation are all valuable contributions.
+missing piece of documentation. A clear answer, a careful review, a
+reproducible result, and an honest limitation are all valuable contributions.
 
 Protect private information, credentials, and data. Give credit for ideas and
 work. If new evidence changes your conclusion, update the discussion rather

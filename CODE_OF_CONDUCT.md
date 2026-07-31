@@ -1,7 +1,12 @@
 # Code of Conduct
 
-OpenKache’s community standards, reporting guidance, moderation policy, and
-scope are documented in the
-[Community Guidelines](./COMMUNITY_GUIDELINES.md). Those guidelines apply to
-issues, pull requests, reviews, documentation, and other channels used for
-OpenKache work.
+The [Community Guidelines](./COMMUNITY_GUIDELINES.md) are OpenKache’s code of
+conduct. They explain:
+
+- how we work together;
+- behavior that is not acceptable;
+- how to raise conduct or security concerns; and
+- how maintainers may respond.
+
+They apply to issues, pull requests, reviews, documentation, and other spaces
+used for OpenKache work. Please read them before participating.
