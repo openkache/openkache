@@ -22,6 +22,9 @@ export interface Native_Client_Options {
   readonly minimum_savings?: number
   readonly connect_timeout_ms?: number
   readonly request_timeout_ms?: number
+  readonly retry_max_attempts?: number
+  readonly max_in_flight?: number
+  readonly encryption?: "compact" | "robust"
 }
 
 interface Native_Value_Envelope {
@@ -34,6 +37,7 @@ export interface Native_Client {
   ping(): Promise<void>
   get(key: Uint8Array): Promise<Uint8Array | null>
   get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
+  get_json(key: Uint8Array): Promise<{ readonly value: unknown } | null>
   set(
     key: Uint8Array,
     value: Uint8Array,
@@ -48,10 +52,27 @@ export interface Native_Client {
     condition?: "if_absent" | "if_present",
     ttl_ms?: number,
   ): Promise<string>
+  set_json(
+    key: Uint8Array,
+    value: unknown,
+    condition?: "if_absent" | "if_present",
+    ttl_ms?: number,
+  ): Promise<string>
   delete(key: Uint8Array): Promise<boolean>
   stats(): Promise<string>
   sync(): Promise<void>
-  close(): void
+  close(): Promise<void>
+  close_now(): void
+  connection_state(): string
+  reconnect(): Promise<void>
+  raw_get(item_id: Uint8Array): Promise<Uint8Array | null>
+  raw_set(
+    item_id: Uint8Array,
+    value: Uint8Array,
+    condition?: "if_absent" | "if_present",
+    ttl_ms?: number,
+  ): Promise<string>
+  raw_delete(item_id: Uint8Array): Promise<boolean>
 }
 
 interface Native_Module {

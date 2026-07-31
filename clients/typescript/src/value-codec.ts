@@ -17,6 +17,37 @@ const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
 /**
+ * JSON value accepted by the legacy envelope adapter and by the core-owned
+ * canonical JSON API.
+ */
+export type Json_Value =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly Json_Value[]
+  | Json_Object
+
+/**
+ * JSON object with string keys. `undefined` properties are omitted for
+ * backwards compatibility with the original TypeScript envelope API.
+ */
+export interface Json_Object {
+  readonly [key: string]: Json_Value | undefined
+}
+
+/**
+ * Validates a value against the shared JSON value model.
+ *
+ * @param value - Candidate native value.
+ * @throws {Error} When the value contains unsupported, cyclic, sparse, or
+ * non-finite data.
+ */
+export function assert_json_value(value: unknown): asserts value is Json_Value {
+  validate_json_value(value, "$", new WeakSet())
+}
+
+/**
  * Encoded payload and logical type returned by a custom value codec.
  */
 export interface Encoded_Value {
@@ -71,7 +102,7 @@ export interface Value_Codec {
    *
    * @param type_name - Cross-language logical type stored with the payload.
    * @param payload - Exact codec-specific payload bytes.
-   * @returns A regular JavaScript object.
+   * @returns A regular JavaScript object returned by a custom codec.
    * @throws {Error} When the type is unknown or the payload is invalid.
    */
   decode(type_name: string, payload: Uint8Array): object
@@ -91,35 +122,51 @@ export class Value_Codec_Registry {
    * @throws {Error} When encoding identifiers are invalid or duplicated.
    */
   constructor(codecs: readonly Value_Codec[] = []) {
+    if (!Array.isArray(codecs)) {
+      throw new Error("value codecs must be an array")
+    }
     const codecs_by_encoding = new Map<string, Value_Codec>()
     for (const codec of codecs) {
-      validate_encoding(codec.encoding)
-      if (codec.encoding === JSON_ENCODING) {
+      if (!is_regular_object(codec)) {
+        throw new Error("value codec must be a regular object")
+      }
+      const valid_codec = codec as unknown as Value_Codec
+      if (
+        typeof valid_codec.encoding !== "string" ||
+        typeof valid_codec.can_encode !== "function" ||
+        typeof valid_codec.encode !== "function" ||
+        typeof valid_codec.decode !== "function"
+      ) {
+        throw new Error(
+          "value codec must define an encoding, can_encode, encode, and decode",
+        )
+      }
+      validate_encoding(valid_codec.encoding)
+      if (valid_codec.encoding === JSON_ENCODING) {
         throw new Error(`encoding ${JSON_ENCODING} is reserved for the built-in codec`)
       }
-      if (codecs_by_encoding.has(codec.encoding)) {
-        throw new Error(`duplicate value codec encoding ${codec.encoding}`)
+      if (codecs_by_encoding.has(valid_codec.encoding)) {
+        throw new Error(`duplicate value codec encoding ${valid_codec.encoding}`)
       }
-      codecs_by_encoding.set(codec.encoding, codec)
+      codecs_by_encoding.set(valid_codec.encoding, valid_codec)
     }
     this.#codecs = codecs.slice()
     this.#codecs_by_encoding = codecs_by_encoding
   }
 
   /**
-   * Encodes a regular object using one custom codec or JSON fallback.
+   * Encodes a JSON value using one custom object codec or the legacy JSON
+   * envelope fallback.
    *
-   * @param value - Regular JavaScript object supplied to `set`.
+   * @param value - JSON value supplied to `set`.
    * @returns Codec metadata and payload for the Rust value-envelope encoder.
    * @throws {Error} When codec selection is ambiguous or encoding fails.
    */
-  encode(value: object): Value_Envelope {
-    if (!is_regular_object(value)) {
-      throw new Error("value must be a regular JavaScript object")
-    }
-    const matching_codecs = this.#codecs.filter((codec): boolean =>
-      codec.can_encode(value),
-    )
+  encode(value: unknown): Value_Envelope {
+    assert_legacy_json_value(value)
+    const matching_codecs = is_regular_object(value)
+      ? this.#codecs.filter((codec): boolean => codec.can_encode(value))
+      : []
     if (matching_codecs.length > 1) {
       throw new Error(
         `value matches multiple codecs: ${matching_codecs.map((codec): string => codec.encoding).join(", ")}`,
@@ -130,10 +177,10 @@ export class Value_Codec_Registry {
       return {
         encoding: JSON_ENCODING,
         type_name: "",
-        payload: encode_json_object(value),
+        payload: encode_json_value(value),
       }
     }
-    const encoded = codec.encode(value)
+    const encoded = codec.encode(value as object)
     if (!is_regular_object(encoded)) {
       throw new Error(`codec ${codec.encoding} returned an invalid encoded value`)
     }
@@ -155,16 +202,16 @@ export class Value_Codec_Registry {
    * Decodes value-envelope components through the registered codec.
    *
    * @param envelope - Metadata and payload decoded by the Rust value-envelope implementation.
-   * @returns A regular JavaScript object.
+   * @returns A JSON value or a regular object returned by a custom codec.
    * @throws {Error} When the metadata, selected codec, or payload is invalid.
    */
-  decode(envelope: Value_Envelope): object {
+  decode(envelope: Value_Envelope): Json_Value {
     validate_envelope(envelope)
     if (envelope.encoding === JSON_ENCODING) {
       if (envelope.type_name.length !== 0) {
         throw new Error("JSON value envelope must not contain a type name")
       }
-      return decode_json_object(envelope.payload)
+      return decode_json_value(envelope.payload)
     }
     const codec = this.#codecs_by_encoding.get(envelope.encoding)
     if (codec === undefined) {
@@ -174,7 +221,7 @@ export class Value_Codec_Registry {
     if (!is_regular_object(value)) {
       throw new Error(`codec ${codec.encoding} decoded a non-object value`)
     }
-    return value
+    return value as Json_Object
   }
 }
 
@@ -195,8 +242,8 @@ function validate_envelope(envelope: Value_Envelope): void {
   }
 }
 
-function encode_json_object(value: object): Uint8Array {
-  validate_json_value(value, "$", new WeakSet())
+function encode_json_value(value: Json_Value): Uint8Array {
+  validate_json_value(value, "$", new WeakSet(), true)
   const text = JSON.stringify(value)
   if (text === undefined) {
     throw new Error("value cannot be represented as JSON")
@@ -204,18 +251,17 @@ function encode_json_object(value: object): Uint8Array {
   return TEXT_ENCODER.encode(text)
 }
 
-function decode_json_object(bytes: Uint8Array): object {
+function decode_json_value(bytes: Uint8Array): Json_Value {
   const value: unknown = JSON.parse(TEXT_DECODER.decode(bytes))
-  if (!is_regular_object(value)) {
-    throw new Error("decoded JSON value is not a regular JavaScript object")
-  }
-  return value
+  validate_json_value(value, "$", new WeakSet())
+  return value as Json_Value
 }
 
 function validate_json_value(
   value: unknown,
   path: string,
   ancestors: WeakSet<object>,
+  omit_undefined_properties = false,
 ): void {
   if (
     value === null ||
@@ -244,8 +290,16 @@ function validate_json_value(
   if (is_regular_object(value)) {
     validate_json_container(value, path, ancestors, (): void => {
       for (const [key, property_value] of Object.entries(value)) {
-        if (property_value === undefined) continue
-        validate_json_value(property_value, property_path(path, key), ancestors)
+        if (property_value === undefined) {
+          if (omit_undefined_properties) continue
+          throw new Error(`${property_path(path, key)} contains unsupported JSON value undefined`)
+        }
+        validate_json_value(
+          property_value,
+          property_path(path, key),
+          ancestors,
+          omit_undefined_properties,
+        )
       }
       for (const symbol of Object.getOwnPropertySymbols(value)) {
         if (Object.prototype.propertyIsEnumerable.call(value, symbol)) {
@@ -255,7 +309,14 @@ function validate_json_value(
     })
     return
   }
+  if (typeof value === "undefined") {
+    throw new Error(`${path} contains unsupported JSON value undefined`)
+  }
   throw new Error(`${path} contains unsupported JSON value ${describe_value(value)}`)
+}
+
+function assert_legacy_json_value(value: unknown): asserts value is Json_Value {
+  validate_json_value(value, "$", new WeakSet(), true)
 }
 
 function validate_json_container(
