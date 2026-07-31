@@ -6,7 +6,18 @@ use std::fmt;
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
-use openkache_protocol::MAX_VALUE_BYTES;
+use openkache_protocol::{
+    ITEM_ID_BYTES, MAX_VALUE_BYTES, VALUE_FORMAT_AAD_DOMAIN,
+    VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT, VALUE_FORMAT_COMPACT_MAC_CONTEXT,
+    VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES, VALUE_FORMAT_COMPRESSION_MASK,
+    VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_COMPRESSION_ZSTANDARD,
+    VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES, VALUE_FORMAT_ENCRYPTION_COMPACT,
+    VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST, VALUE_FORMAT_ENCRYPTION_SHIFT,
+    VALUE_FORMAT_FORMAT_BYTE_BYTES, VALUE_FORMAT_MAX_VU128_BYTES, VALUE_FORMAT_ROBUST_CONTEXT,
+    VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES,
+    VALUE_FORMAT_SERIALIZATION_JSON, VALUE_FORMAT_SERIALIZATION_RAW, VALUE_FORMAT_VERSION,
+    VALUE_FORMAT_VERSION_BYTES,
+};
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use zeroize::{Zeroize, Zeroizing};
@@ -19,30 +30,17 @@ use zstd_pure_rs::prelude::{
 use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 
 /// Current value-format version.
-pub const VERSION: u128 = 1;
+pub const VERSION: u128 = VALUE_FORMAT_VERSION;
 
 /// Bytes required for an application data protection key.
-pub const ENCRYPTION_KEY_BYTES: usize = DATA_PROTECTION_KEY_BYTES;
+pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
-const VERSION_BYTES: [u8; 1] = [VERSION as u8];
-const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + 1;
-const SERIALIZATION_RAW: u128 = 0;
-const SERIALIZATION_JSON: u128 = 1;
-const COMPRESSION_NONE: u8 = 0;
-const COMPRESSION_ZSTANDARD: u8 = 1;
-const ENCRYPTION_NONE: u8 = 0;
-const ENCRYPTION_COMPACT: u8 = 1;
-const ENCRYPTION_ROBUST: u8 = 2;
-const COMPACT_TAG_BYTES: usize = 16;
-const ROBUST_NONCE_BYTES: usize = 12;
-const ROBUST_TAG_BYTES: usize = 16;
-const AAD_DOMAIN: &[u8] = b"openkache/value-format/aad/v1";
-const AAD_BYTES: usize = AAD_DOMAIN.len() + openkache_protocol::ITEM_ID_BYTES + 2;
-
-const COMPACT_MAC_CONTEXT: &str = "OpenKache value format v1 AES-256-SIV-CMAC MAC key";
-const COMPACT_ENCRYPTION_CONTEXT: &str =
-    "OpenKache value format v1 AES-256-SIV-CMAC encryption key";
-const ROBUST_CONTEXT: &str = "OpenKache value format v1 AES-256-GCM-SIV key";
+const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
+const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
+const AAD_BYTES: usize = VALUE_FORMAT_AAD_DOMAIN.len()
+    + ITEM_ID_BYTES
+    + VERSION_BYTES.len()
+    + VALUE_FORMAT_FORMAT_BYTE_BYTES;
 
 /// Client-owned encoded bytes stored opaquely by the server.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -93,6 +91,34 @@ impl ItemValue {
     /// The complete owned item-value allocation.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
+    }
+
+    /// Returns whether the opaque value contains no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Returns the number of opaque bytes.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl AsRef<[u8]> for ItemValue {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl From<Vec<u8>> for ItemValue {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::new(bytes)
+    }
+}
+
+impl From<ItemValue> for Vec<u8> {
+    fn from(value: ItemValue) -> Self {
+        value.into_bytes()
     }
 }
 
@@ -326,9 +352,9 @@ pub enum Encryption {
 impl Encryption {
     const fn identifier(self) -> u8 {
         match self {
-            Self::Unprotected => ENCRYPTION_NONE,
-            Self::Compact => ENCRYPTION_COMPACT,
-            Self::Robust => ENCRYPTION_ROBUST,
+            Self::Unprotected => VALUE_FORMAT_ENCRYPTION_NONE,
+            Self::Compact => VALUE_FORMAT_ENCRYPTION_COMPACT,
+            Self::Robust => VALUE_FORMAT_ENCRYPTION_ROBUST,
         }
     }
 }
@@ -505,12 +531,13 @@ impl ValueCodec {
 
         let (transformed, compressed) = compress_if_beneficial(serialized, self.compression)?;
         let compression_id = if compressed {
-            COMPRESSION_ZSTANDARD
+            VALUE_FORMAT_COMPRESSION_ZSTANDARD
         } else {
-            COMPRESSION_NONE
+            VALUE_FORMAT_COMPRESSION_NONE
         };
-        let format = compression_id | (self.encryption.identifier() << 4);
-        let aad = make_aad(item_id, &VERSION_BYTES, format);
+        let format =
+            compression_id | (self.encryption.identifier() << VALUE_FORMAT_ENCRYPTION_SHIFT);
+        let aad = make_aad(item_id, VERSION_BYTES, format);
         let body = match self.encryption {
             Encryption::Unprotected => transformed,
             Encryption::Compact => self.encrypt_compact(item_id, &aad, transformed)?,
@@ -531,7 +558,7 @@ impl ValueCodec {
             });
         }
         let mut encoded = Vec::with_capacity(encoded_length);
-        encoded.extend_from_slice(&VERSION_BYTES);
+        encoded.extend_from_slice(VERSION_BYTES);
         encoded.push(format);
         encoded.extend_from_slice(&body);
         Ok(ItemValue::new(encoded))
@@ -606,17 +633,17 @@ impl ValueCodec {
         let Some(&format) = encoded.get(version_length) else {
             return Err(Error::InvalidEncodedValue("format byte is truncated"));
         };
-        let compression_id = format & 0x0f;
-        let encryption_id = format >> 4;
+        let compression_id = format & VALUE_FORMAT_COMPRESSION_MASK;
+        let encryption_id = format >> VALUE_FORMAT_ENCRYPTION_SHIFT;
         let compressed = match compression_id {
-            COMPRESSION_NONE => false,
-            COMPRESSION_ZSTANDARD => true,
+            VALUE_FORMAT_COMPRESSION_NONE => false,
+            VALUE_FORMAT_COMPRESSION_ZSTANDARD => true,
             identifier => return Err(Error::UnsupportedCompression(identifier)),
         };
         let encryption = match encryption_id {
-            ENCRYPTION_NONE => Encryption::Unprotected,
-            ENCRYPTION_COMPACT => Encryption::Compact,
-            ENCRYPTION_ROBUST => Encryption::Robust,
+            VALUE_FORMAT_ENCRYPTION_NONE => Encryption::Unprotected,
+            VALUE_FORMAT_ENCRYPTION_COMPACT => Encryption::Compact,
+            VALUE_FORMAT_ENCRYPTION_ROBUST => Encryption::Robust,
             identifier => return Err(Error::UnsupportedEncryption(identifier)),
         };
         if encryption != self.encryption {
@@ -630,11 +657,11 @@ impl ValueCodec {
             });
         }
 
-        let body_offset = version_length + 1;
+        let body_offset = version_length + VALUE_FORMAT_FORMAT_BYTE_BYTES;
         let body_length = encoded.len() - body_offset;
         encoded.copy_within(body_offset.., 0);
         encoded.truncate(body_length);
-        let aad = make_aad(item_id, &VERSION_BYTES, format);
+        let aad = make_aad(item_id, VERSION_BYTES, format);
         let transformed = match encryption {
             Encryption::Unprotected => {
                 if encoded.is_empty() {
@@ -643,13 +670,15 @@ impl ValueCodec {
                 encoded
             }
             Encryption::Compact => {
-                if encoded.len() < COMPACT_TAG_BYTES + 1 {
+                if encoded.len() < VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES + 1 {
                     return Err(Error::InvalidEncodedValue("Compact body is truncated"));
                 }
                 self.decrypt_compact(item_id, &aad, encoded)?
             }
             Encryption::Robust => {
-                if encoded.len() < ROBUST_NONCE_BYTES + ROBUST_TAG_BYTES + 1 {
+                if encoded.len()
+                    < VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES + 1
+                {
                     return Err(Error::InvalidEncodedValue("Robust body is truncated"));
                 }
                 self.decrypt_robust(item_id, &aad, encoded)?
@@ -704,14 +733,17 @@ impl ValueCodec {
         mut plaintext: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let material = item_id_material(self.value_root_key()?, item_id);
-        let mac_key = Zeroizing::new(blake3::derive_key(COMPACT_MAC_CONTEXT, material.as_slice()));
-        let encryption_key = Zeroizing::new(blake3::derive_key(
-            COMPACT_ENCRYPTION_CONTEXT,
+        let mac_key = Zeroizing::new(blake3::derive_key(
+            VALUE_FORMAT_COMPACT_MAC_CONTEXT,
             material.as_slice(),
         ));
-        let mut combined_key = Zeroizing::new([0_u8; 64]);
-        combined_key[..32].copy_from_slice(mac_key.as_slice());
-        combined_key[32..].copy_from_slice(encryption_key.as_slice());
+        let encryption_key = Zeroizing::new(blake3::derive_key(
+            VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
+            material.as_slice(),
+        ));
+        let mut combined_key = Zeroizing::new([0_u8; ENCRYPTION_KEY_BYTES * 2]);
+        combined_key[..ENCRYPTION_KEY_BYTES].copy_from_slice(mac_key.as_slice());
+        combined_key[ENCRYPTION_KEY_BYTES..].copy_from_slice(encryption_key.as_slice());
         Aes256Siv::new((&*combined_key).into())
             .encrypt_in_place([aad], &mut plaintext)
             .map_err(|_| Error::Encryption)?;
@@ -725,14 +757,17 @@ impl ValueCodec {
         mut ciphertext: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let material = item_id_material(self.value_root_key()?, item_id);
-        let mac_key = Zeroizing::new(blake3::derive_key(COMPACT_MAC_CONTEXT, material.as_slice()));
-        let encryption_key = Zeroizing::new(blake3::derive_key(
-            COMPACT_ENCRYPTION_CONTEXT,
+        let mac_key = Zeroizing::new(blake3::derive_key(
+            VALUE_FORMAT_COMPACT_MAC_CONTEXT,
             material.as_slice(),
         ));
-        let mut combined_key = Zeroizing::new([0_u8; 64]);
-        combined_key[..32].copy_from_slice(mac_key.as_slice());
-        combined_key[32..].copy_from_slice(encryption_key.as_slice());
+        let encryption_key = Zeroizing::new(blake3::derive_key(
+            VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
+            material.as_slice(),
+        ));
+        let mut combined_key = Zeroizing::new([0_u8; ENCRYPTION_KEY_BYTES * 2]);
+        combined_key[..ENCRYPTION_KEY_BYTES].copy_from_slice(mac_key.as_slice());
+        combined_key[ENCRYPTION_KEY_BYTES..].copy_from_slice(encryption_key.as_slice());
         if Aes256Siv::new((&*combined_key).into())
             .decrypt_in_place([aad], &mut ciphertext)
             .is_err()
@@ -750,48 +785,56 @@ impl ValueCodec {
         mut plaintext: Vec<u8>,
     ) -> Result<Vec<u8>> {
         let material = item_id_material(self.value_root_key()?, item_id);
-        let robust_key = Zeroizing::new(blake3::derive_key(ROBUST_CONTEXT, material.as_slice()));
+        let robust_key = Zeroizing::new(blake3::derive_key(
+            VALUE_FORMAT_ROBUST_CONTEXT,
+            material.as_slice(),
+        ));
         let cipher = Aes256GcmSiv::new((&*robust_key).into());
-        let mut nonce_bytes = [0_u8; ROBUST_NONCE_BYTES];
+        let mut nonce_bytes = [0_u8; VALUE_FORMAT_ROBUST_NONCE_BYTES];
         getrandom::fill(&mut nonce_bytes).map_err(|error| Error::Entropy(error.to_string()))?;
         let nonce = Nonce::from(nonce_bytes);
         let plaintext_length = plaintext.len();
-        let body_length = ROBUST_NONCE_BYTES
+        let body_length = VALUE_FORMAT_ROBUST_NONCE_BYTES
             .checked_add(plaintext_length)
-            .and_then(|length| length.checked_add(ROBUST_TAG_BYTES))
+            .and_then(|length| length.checked_add(VALUE_FORMAT_ROBUST_TAG_BYTES))
             .ok_or(Error::EncodedValueTooLarge {
                 size: usize::MAX,
                 maximum: MAX_VALUE_BYTES,
             })?;
         plaintext.resize(body_length, 0);
-        plaintext.copy_within(0..plaintext_length, ROBUST_NONCE_BYTES);
+        plaintext.copy_within(0..plaintext_length, VALUE_FORMAT_ROBUST_NONCE_BYTES);
         let tag = cipher
             .encrypt_inout_detached(
                 &nonce,
                 aad,
-                plaintext[ROBUST_NONCE_BYTES..ROBUST_NONCE_BYTES + plaintext_length]
+                plaintext[VALUE_FORMAT_ROBUST_NONCE_BYTES
+                    ..VALUE_FORMAT_ROBUST_NONCE_BYTES + plaintext_length]
                     .as_mut()
                     .into(),
             )
             .map_err(|_| Error::Encryption)?;
-        plaintext[..ROBUST_NONCE_BYTES].copy_from_slice(&nonce_bytes);
-        plaintext[ROBUST_NONCE_BYTES + plaintext_length..].copy_from_slice(&tag);
+        plaintext[..VALUE_FORMAT_ROBUST_NONCE_BYTES].copy_from_slice(&nonce_bytes);
+        plaintext[VALUE_FORMAT_ROBUST_NONCE_BYTES + plaintext_length..].copy_from_slice(&tag);
         Ok(plaintext)
     }
 
     fn decrypt_robust(&self, item_id: ItemId, aad: &[u8], mut encoded: Vec<u8>) -> Result<Vec<u8>> {
-        let tag_offset = encoded.len() - ROBUST_TAG_BYTES;
-        let nonce_bytes: [u8; ROBUST_NONCE_BYTES] = encoded[..ROBUST_NONCE_BYTES]
+        let tag_offset = encoded.len() - VALUE_FORMAT_ROBUST_TAG_BYTES;
+        let nonce_bytes: [u8; VALUE_FORMAT_ROBUST_NONCE_BYTES] = encoded
+            [..VALUE_FORMAT_ROBUST_NONCE_BYTES]
             .try_into()
             .expect("validated Robust nonce length");
-        let tag_bytes: [u8; ROBUST_TAG_BYTES] = encoded[tag_offset..]
+        let tag_bytes: [u8; VALUE_FORMAT_ROBUST_TAG_BYTES] = encoded[tag_offset..]
             .try_into()
             .expect("validated Robust authentication tag");
-        let ciphertext_length = tag_offset - ROBUST_NONCE_BYTES;
-        encoded.copy_within(ROBUST_NONCE_BYTES..tag_offset, 0);
+        let ciphertext_length = tag_offset - VALUE_FORMAT_ROBUST_NONCE_BYTES;
+        encoded.copy_within(VALUE_FORMAT_ROBUST_NONCE_BYTES..tag_offset, 0);
         encoded.truncate(ciphertext_length);
         let material = item_id_material(self.value_root_key()?, item_id);
-        let robust_key = Zeroizing::new(blake3::derive_key(ROBUST_CONTEXT, material.as_slice()));
+        let robust_key = Zeroizing::new(blake3::derive_key(
+            VALUE_FORMAT_ROBUST_CONTEXT,
+            material.as_slice(),
+        ));
         let cipher = Aes256GcmSiv::new((&*robust_key).into());
         let nonce = Nonce::from(nonce_bytes);
         let tag = Tag::from(tag_bytes);
@@ -920,12 +963,12 @@ fn validate_compression(compression: Compression) -> Result<()> {
 
 fn serialize_value(value: Value) -> Result<Vec<u8>> {
     match value {
-        Value::Raw(bytes) => prefix_vu128(SERIALIZATION_RAW, bytes),
+        Value::Raw(bytes) => prefix_vu128(VALUE_FORMAT_SERIALIZATION_RAW as u128, bytes),
         Value::Json(value) => {
             validate_json_value(&value)?;
             let payload = serde_json_canonicalizer::to_vec(&value)
                 .map_err(|error| Error::InvalidJson(error.to_string()))?;
-            prefix_vu128(SERIALIZATION_JSON, payload)
+            prefix_vu128(VALUE_FORMAT_SERIALIZATION_JSON as u128, payload)
         }
     }
 }
@@ -934,14 +977,18 @@ fn deserialize_value(serialized: &[u8]) -> Result<Value> {
     let (identifier, identifier_length) = decode_vu128(serialized, "serialization identifier")?;
     let payload = &serialized[identifier_length..];
     match identifier {
-        SERIALIZATION_RAW => Ok(Value::Raw(payload.to_vec())),
-        SERIALIZATION_JSON => decode_json(payload).map(Value::Json),
+        value if value == VALUE_FORMAT_SERIALIZATION_RAW as u128 => {
+            Ok(Value::Raw(payload.to_vec()))
+        }
+        value if value == VALUE_FORMAT_SERIALIZATION_JSON as u128 => {
+            decode_json(payload).map(Value::Json)
+        }
         identifier => Err(Error::UnsupportedSerialization(identifier)),
     }
 }
 
 fn prefix_vu128(identifier: u128, payload: Vec<u8>) -> Result<Vec<u8>> {
-    let mut encoded_identifier = [0_u8; 17];
+    let mut encoded_identifier = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
     let identifier_length = vu128::encode_u128(&mut encoded_identifier, identifier);
     let total_length =
         identifier_length
@@ -964,7 +1011,7 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
         });
     };
     let encoded_length = vu128::encoded_len(first);
-    if encoded_length > 17 {
+    if encoded_length > VALUE_FORMAT_MAX_VU128_BYTES {
         return Err(Error::InvalidVu128 {
             field,
             reason: "field overflows u128",
@@ -976,12 +1023,12 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
             reason: "field is truncated",
         });
     }
-    let mut encoded = [0_u8; 17];
+    let mut encoded = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
     encoded[..encoded_length].copy_from_slice(&input[..encoded_length]);
     let (value, decoded_length) = vu128::decode_u128(&encoded);
     debug_assert_eq!(decoded_length, encoded_length);
 
-    let mut canonical = [0_u8; 17];
+    let mut canonical = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
     let canonical_length = vu128::encode_u128(&mut canonical, value);
     if canonical_length != encoded_length
         || canonical[..canonical_length] != input[..encoded_length]
@@ -1142,21 +1189,23 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
 fn make_aad(item_id: ItemId, encoded_version: &[u8], format: u8) -> [u8; AAD_BYTES] {
     debug_assert_eq!(encoded_version, VERSION_BYTES);
     let mut aad = [0_u8; AAD_BYTES];
-    let item_id_offset = AAD_DOMAIN.len();
-    let version_offset = item_id_offset + openkache_protocol::ITEM_ID_BYTES;
-    aad[..item_id_offset].copy_from_slice(AAD_DOMAIN);
+    let item_id_offset = VALUE_FORMAT_AAD_DOMAIN.len();
+    let version_offset = item_id_offset + ITEM_ID_BYTES;
+    let version_end = version_offset + encoded_version.len();
+    aad[..item_id_offset].copy_from_slice(VALUE_FORMAT_AAD_DOMAIN);
     aad[item_id_offset..version_offset].copy_from_slice(item_id.as_bytes());
-    aad[version_offset] = encoded_version[0];
-    aad[version_offset + 1] = format;
+    aad[version_offset..version_end].copy_from_slice(encoded_version);
+    aad[version_end..version_end + VALUE_FORMAT_FORMAT_BYTE_BYTES]
+        .copy_from_slice(std::slice::from_ref(&format));
     aad
 }
 
 fn item_id_material(
     value_root_key: &[u8; DATA_PROTECTION_KEY_BYTES],
     item_id: ItemId,
-) -> Zeroizing<[u8; 64]> {
-    let mut material = Zeroizing::new([0_u8; 64]);
-    material[..32].copy_from_slice(value_root_key);
-    material[32..].copy_from_slice(item_id.as_bytes());
+) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]> {
+    let mut material = Zeroizing::new([0_u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]);
+    material[..DATA_PROTECTION_KEY_BYTES].copy_from_slice(value_root_key);
+    material[DATA_PROTECTION_KEY_BYTES..].copy_from_slice(item_id.as_bytes());
     material
 }

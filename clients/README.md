@@ -24,7 +24,7 @@ formats or protocol behavior.
 |---|---|---|
 | Shared core | [`core/`](core/) | Protocol v1 raw and protected engine; value format v1 implementation |
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
-| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the existing envelope |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
 | Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | `go/` | Package scaffold |
@@ -41,8 +41,8 @@ connect to OpenKache or expose cache operations.
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
 format v1. The core owns Raw and canonical JSON serialization; language
 adapters convert native values into that shared logical model. TypeScript's
-logical value envelope is a package-level adapter detail; byte-level v1
-requirements belong only in the value-format specification.
+legacy metadata envelope remains a package-level compatibility detail; new
+cross-language values should use its `set_json`/`get_json` API.
 
 ## Binding architecture
 
