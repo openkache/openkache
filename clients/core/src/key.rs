@@ -6,7 +6,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, ITEM_ID_BYTES, Result};
 
-pub(crate) const PROTECTION_KEY_BYTES: usize = 32;
+pub(crate) const PROTECTION_KEY_BYTES: usize =
+    openkache_protocol::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
 /// Bytes in an application-managed data protection key.
 pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
