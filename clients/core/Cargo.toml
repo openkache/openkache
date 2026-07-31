@@ -7,7 +7,7 @@ license = "Apache-2.0"
 
 [features]
 default = ["quic-quinn"]
-ffi = ["quic-compio", "dep:crossfire"]
+ffi = ["quic-compio"]
 quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 
@@ -21,7 +21,7 @@ blake3 = { version = "*", features = ["zeroize"] }
 cmac = { version = "=0.8.0", features = ["zeroize"] }
 compio = { version = "*", default-features = false, features = ["io-uring", "net", "runtime", "time"], optional = true }
 compio-quic = { version = "*", features = ["ring"], optional = true }
-crossfire = { version = "*", optional = true }
+crossfire = "*"
 futures-util = "*"
 getrandom = "*"
 http = "*"

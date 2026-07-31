@@ -20,9 +20,11 @@ python -m compileall src
 python -m build
 ```
 
-The package build runs Cargo for `native/` and places the resulting portable
-ctypes library in the wheel. A C compiler or Python extension ABI is not
-required. The reproducible development shell supplies Cargo and Python.
+The package build first regenerates the Smithy modules in
+`src/openkache/_generated/`, then runs Cargo for `native/` and places the
+resulting portable ctypes library in the wheel. A C compiler or Python
+extension ABI is not required. Package builds require Bun and the Smithy CLI;
+the reproducible development shell supplies all of these tools.
 
 ## Usage
 
@@ -89,4 +91,5 @@ Call `close()` when finished; it is idempotent. The client also supports
 - `src/openkache/_client.py` contains the small Python API and validation.
 - `src/openkache/_native.py` contains only ctypes ownership and ABI conversion.
 - `native/` re-exports the core C ABI without protocol logic.
-- `src/openkache/_generated/` is regenerated from Smithy.
+- `src/openkache/_generated/` is regenerated from Smithy during every package
+  build and is intentionally not checked into source control.

@@ -16,6 +16,12 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 NATIVE_ROOT = PACKAGE_ROOT / "native"
+PROTOCOL_ROOT = PACKAGE_ROOT.parent.parent / "protocol"
+PROTOCOL_GENERATOR = PROTOCOL_ROOT / "generate.ts"
+GENERATED_PYTHON_FILES = (
+    PACKAGE_ROOT / "src" / "openkache" / "_generated" / "smithy_api.py",
+    PACKAGE_ROOT / "src" / "openkache" / "_generated" / "smithy_contract.py",
+)
 
 
 def native_library_name() -> str:
@@ -24,6 +30,54 @@ def native_library_name() -> str:
     if sys.platform == "darwin":
         return "libopenkache_client_python_native.dylib"
     return "libopenkache_client_python_native.so"
+
+
+def generate_smithy_contract() -> None:
+    """Generate Python contracts from the canonical Smithy model."""
+
+    if not PROTOCOL_GENERATOR.is_file():
+        if all(path.is_file() for path in GENERATED_PYTHON_FILES):
+            # Source distributions carry the already generated contract but
+            # intentionally do not carry the private protocol generator tree.
+            return
+        raise RuntimeError(
+            "Python package builds require protocol/generate.ts and its Smithy "
+            "model, or generated _generated/smithy_*.py files from a source "
+            "distribution."
+        )
+    environment = os.environ.copy()
+    environment["OPENKACHE_GENERATION_TARGET"] = "python"
+    try:
+        subprocess.run(
+            [
+                os.environ.get("BUN", "bun"),
+                str(PROTOCOL_GENERATOR),
+            ],
+            cwd=PROTOCOL_ROOT,
+            env=environment,
+            check=True,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "Python package builds require Bun and the Smithy CLI; "
+            "install both before running `python -m build`."
+        ) from error
+
+
+class generate_smithy(Command):
+    """Generate the Python Smithy API and contract modules."""
+
+    description = "generate Python Smithy contract modules"
+    user_options: list[tuple[str, str | None, str]] = []
+
+    def initialize_options(self) -> None:
+        pass
+
+    def finalize_options(self) -> None:
+        pass
+
+    def run(self) -> None:
+        generate_smithy_contract()
 
 
 class build_native(Command):
@@ -75,6 +129,7 @@ class build_py(_build_py):
     """Run the native build after Python sources have been staged."""
 
     def run(self) -> None:
+        self.run_command("generate_smithy")
         super().run()
         self.run_command("build_native")
 
@@ -83,6 +138,7 @@ class sdist(_sdist):
     """Include the host native artifact so wheel builds from sdist stay hermetic."""
 
     def run(self) -> None:
+        self.run_command("generate_smithy")
         self.run_command("build_native")
         super().run()
 
@@ -110,6 +166,7 @@ class bdist_wheel(_bdist_wheel):
 
 setup(
     cmdclass={
+        "generate_smithy": generate_smithy,
         "build_native": build_native,
         "build_py": build_py,
         "bdist_wheel": bdist_wheel,

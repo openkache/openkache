@@ -19,21 +19,29 @@ class NativeError(RuntimeError):
     """Failure reported by the Rust client-core ABI."""
 
 
+NATIVE_ABI_VERSION: Final = 1
+NATIVE_OPERATION_GET_JSON: Final = 7
+NATIVE_OPERATION_SET_JSON: Final = 8
+NATIVE_OPERATION_RECONNECT: Final = 9
+NATIVE_OPERATION_STATE: Final = 10
+NATIVE_OPERATION_RAW_GET: Final = 11
+NATIVE_OPERATION_RAW_SET: Final = 12
+NATIVE_OPERATION_RAW_DELETE: Final = 13
 _U8 = ctypes.c_uint8
 _U8_POINTER = ctypes.POINTER(_U8)
 _RESULT_POINTER = ctypes.c_void_p
 _CLIENT_POINTER = ctypes.c_void_p
-_RESULT_ERROR: Final = 0
-_RESULT_OK: Final = 1
-_RESULT_VALUE: Final = 2
-_RESULT_NOT_FOUND: Final = 3
-_RESULT_CREATED: Final = 4
-_RESULT_REPLACED: Final = 5
-_RESULT_DELETED: Final = 6
-_RESULT_NOT_DELETED: Final = 7
-_RESULT_CONNECTED: Final = 8
-_RESULT_NOT_STORED: Final = 9
-_RESULT_STATE: Final = 10
+NATIVE_RESULT_ERROR: Final = 0
+NATIVE_RESULT_OK: Final = 1
+NATIVE_RESULT_VALUE: Final = 2
+NATIVE_RESULT_NOT_FOUND: Final = 3
+NATIVE_RESULT_CREATED: Final = 4
+NATIVE_RESULT_REPLACED: Final = 5
+NATIVE_RESULT_DELETED: Final = 6
+NATIVE_RESULT_NOT_DELETED: Final = 7
+NATIVE_RESULT_CONNECTED: Final = 8
+NATIVE_RESULT_NOT_STORED: Final = 9
+NATIVE_RESULT_STATE: Final = 10
 
 
 def _as_native_buffer(data: bytes) -> tuple[object | None, _U8_POINTER | None]:
@@ -95,7 +103,7 @@ class _NativeApi:
         self.abi_version = self._function(
             "openkache_client_abi_version", (), ctypes.c_uint32
         )
-        if self.abi_version() != 1:
+        if self.abi_version() != NATIVE_ABI_VERSION:
             raise NativeError(
                 f"unsupported OpenKache native ABI version {self.abi_version()}"
             )
@@ -192,7 +200,7 @@ class _NativeApi:
             client = self.result_take_client(result) if take_client else None
         finally:
             self.result_free(result)
-        if kind == _RESULT_ERROR:
+        if kind == NATIVE_RESULT_ERROR:
             message = payload.decode("utf-8", errors="replace")
             raise NativeError(message or "native client operation failed")
         return kind, payload, client
@@ -263,7 +271,7 @@ class NativeClient:
             retry_max_attempts,
         )
         kind, _, handle = api.read_result(result, take_client=True)
-        if kind != _RESULT_CONNECTED or not handle:
+        if kind != NATIVE_RESULT_CONNECTED or not handle:
             raise NativeError("native client did not return a connected handle")
         return cls(api, handle)
 

@@ -54,7 +54,8 @@ variable-integer parsing.
   metadata-envelope limits.
 - `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, and
   Python definitions into ignored `generated_local` directories, the Python
-  package's `_generated` directory, or Cargo output.
+  package's ignored `_generated` directory, or Cargo output. Package/release
+  workflows must run the generator before building a Python artifact.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.
