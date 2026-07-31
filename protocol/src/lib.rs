@@ -829,7 +829,7 @@ fn validate_item_id_length(opcode: Opcode, item_id_len: usize) -> Result<()> {
 
 fn validate_request_shape(
     opcode: Opcode,
-    has_client_key: bool,
+    has_item_id: bool,
     set_options: SetOptions,
     value_len: usize,
 ) -> Result<()> {
@@ -840,9 +840,9 @@ fn validate_request_shape(
         return Err(ProtocolError::InvalidSetOptions { opcode });
     }
     let valid = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_client_key && value_len == 0,
-        Opcode::Get | Opcode::Delete => has_client_key && value_len == 0,
-        Opcode::Set => has_client_key,
+        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_item_id && value_len == 0,
+        Opcode::Get | Opcode::Delete => has_item_id && value_len == 0,
+        Opcode::Set => has_item_id,
     };
     if valid {
         return Ok(());
