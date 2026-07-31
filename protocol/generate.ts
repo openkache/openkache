@@ -1,8 +1,15 @@
 #!/usr/bin/env bun
 /** Generates language-specific wire values from the canonical Smithy contract. */
 
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { basename, dirname, join } from "node:path"
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs"
+import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 type Json_Object = Readonly<Record<string, unknown>>
@@ -186,41 +193,34 @@ const FFI_SET_CONDITION_FIELDS = [
   { name: "IfAbsent", field: "setConditionIfAbsent" },
   { name: "IfPresent", field: "setConditionIfPresent" },
 ] as const
+const GENERATED_OUTPUT_ROOT = resolve(
+  process.env.OPENKACHE_GENERATION_OUTPUT_ROOT ?? PUBLIC_ROOT,
+)
+function generated_path(...segments: string[]): string {
+  return join(GENERATED_OUTPUT_ROOT, ...segments)
+}
 const GENERATED_OUTPUTS = {
-  csharp_api: join(
-    PUBLIC_ROOT,
-    "clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs",
-  ),
-  csharp_wire: join(
-    PUBLIC_ROOT,
-    "clients/dotnet/OpenKache/generated_local/WireValues.g.cs",
-  ),
+  csharp_api: generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
+  csharp_wire: generated_path("clients/dotnet/OpenKache/generated_local/WireValues.g.cs"),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
-    join(PUBLIC_ROOT, "clients/rust/generated_local/smithy_api.rs"),
+    generated_path("clients/rust/generated_local/smithy_api.rs"),
   rust_wire: process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
-    join(PROTOCOL_DIRECTORY, "generated_local/wire_values.rs"),
-  typescript_api: join(
-    PUBLIC_ROOT,
-    "clients/typescript/src/generated_local/smithy-api.ts",
-  ),
-  typescript_value_format: join(
-    PUBLIC_ROOT,
+    generated_path("protocol/generated_local/wire_values.rs"),
+  typescript_api: generated_path("clients/typescript/src/generated_local/smithy-api.ts"),
+  typescript_value_format: generated_path(
     "clients/typescript/src/generated_local/smithy-value-format.ts",
   ),
-  typescript_value_envelope: join(
-    PUBLIC_ROOT,
+  typescript_value_envelope: generated_path(
     "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
-  python_api: join(
-    process.env.OPENKACHE_PYTHON_API_OUTPUT ??
-      join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_api.py"),
-  ),
-  python_contract: join(
-    process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
-      join(PUBLIC_ROOT, "clients/python/src/openkache/_generated/smithy_contract.py"),
-  ),
+  python_api: process.env.OPENKACHE_PYTHON_API_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
+  python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
+  swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
+    generated_path("clients/swift/Sources/OpenKache/Generated/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
-    join(PROTOCOL_DIRECTORY, "generated_local/smithy_contract.h"),
+    generated_path("protocol/generated_local/smithy_contract.h"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -1088,6 +1088,37 @@ function typescript_api_name(identifier: string): string {
   return `Smithy_${typescript_name(identifier)}`
 }
 
+function swift_name(identifier: string): string {
+  return identifier
+    .split(/[_-]/)
+    .filter((part) => part.length > 0)
+    .map((part) => {
+      const normalized =
+        part === part.toUpperCase()
+          ? part.toLowerCase()
+          : `${part[0]?.toLowerCase()}${part.slice(1)}`
+      return `${normalized[0]?.toUpperCase()}${normalized.slice(1)}`
+    })
+    .join("")
+}
+
+function swift_property_name(identifier: string): string {
+  const name = swift_name(identifier)
+  return name.length === 0 ? name : `${name[0]?.toLowerCase()}${name.slice(1)}`
+}
+
+function swift_ffi_value(
+  entries: readonly Wire_Entry[],
+  name: string,
+  kind: string,
+): number {
+  const entry = entries.find((candidate) => candidate.name === name)
+  if (entry === undefined) {
+    throw new Error(`Smithy FFI ${kind} is missing ${name}`)
+  }
+  return entry.value
+}
+
 function rust_wire_enum(
   name: string,
   documentation: string,
@@ -1103,6 +1134,59 @@ function rust_wire_enum(
 ${variants}
     }
     unknown => ${unknown_variant}
+}`
+}
+
+function rust_ffi_enum(
+  name: string,
+  documentation: string,
+  member_documentation: string,
+  entries: readonly Wire_Entry[],
+): string {
+  const variants = entries
+    .map(
+      (entry) =>
+        `    /// ${member_documentation} identifier for ${entry.name}.
+    ${entry.name} = ${formatted_decimal(entry.value)},`,
+    )
+    .join("\n")
+  const try_from_arms = entries
+    .map(
+      (entry) =>
+        `            value if value == Self::${entry.name} as u32 => Ok(Self::${entry.name}),`,
+    )
+    .join("\n")
+  const display_arms = entries
+    .map(
+      (entry) =>
+        `            Self::${entry.name} => "${snake_case(entry.name)}",`,
+    )
+    .join("\n")
+  return `/// ${documentation}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[repr(u32)]
+pub enum ${name} {
+${variants}
+}
+
+impl core::convert::TryFrom<u32> for ${name} {
+    type Error = u32;
+
+    fn try_from(value: u32) -> core::result::Result<Self, u32> {
+        match value {
+${try_from_arms}
+            _ => Err(value),
+        }
+    }
+}
+
+impl core::fmt::Display for ${name} {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(match self {
+${display_arms}
+        })
+    }
 }`
 }
 
@@ -1148,6 +1232,9 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_operation_entries = [...contract.opcodes, ...ffi.operations].sort(
+    (left, right) => left.value - right.value,
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 1.
@@ -1169,6 +1256,34 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+
+${rust_ffi_enum(
+  "FfiOperation",
+  "Native FFI operation identifiers shared by every language adapter.",
+  "Native FFI operation",
+  ffi_operation_entries,
+)}
+
+${rust_ffi_enum(
+  "FfiResultKind",
+  "Native FFI result-kind identifiers shared by every language adapter.",
+  "Native FFI result-kind",
+  ffi.result_kinds,
+)}
+
+${rust_ffi_enum(
+  "ConnectionState",
+  "Native FFI connection-state identifiers shared by every language adapter.",
+  "Native FFI connection-state",
+  ffi.connection_states,
+)}
+
+${rust_ffi_enum(
+  "FfiSetCondition",
+  "Native FFI SET-condition identifiers shared by every language adapter.",
+  "Native FFI SET-condition",
+  ffi.set_conditions,
+)}
 
 /// Current client-owned value-format version.
 pub const VALUE_FORMAT_VERSION: u128 = ${formatted_decimal(value.version)};
@@ -1677,6 +1792,243 @@ ${statuses}
 `
 }
 
+function swift_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "Data"
+      break
+    case "boolean":
+      rendered = "Bool"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = `Smithy_${typescript_name(type.name)}`
+      break
+    case "long":
+      rendered = "Int64"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  return required ? rendered : `${rendered}?`
+}
+
+function swift_string_literal(value: string): string {
+  let literal = '"'
+  for (const character of value) {
+    const code_point = character.codePointAt(0)
+    if (code_point === undefined) continue
+    switch (character) {
+      case "\\":
+        literal += "\\\\"
+        break
+      case '"':
+        literal += '\\"'
+        break
+      case "\n":
+        literal += "\\n"
+        break
+      case "\r":
+        literal += "\\r"
+        break
+      case "\t":
+        literal += "\\t"
+        break
+      default:
+        if (code_point >= 0x20 && code_point <= 0x7e) {
+          literal += character
+        } else {
+          literal += `\\u{${code_point.toString(16)}}`
+        }
+    }
+  }
+  return `${literal}"`
+}
+
+/** Renders Smithy operation and shared contract declarations for Swift.
+ *
+ * @param contract - Validated language-neutral wire, value, and FFI contract.
+ * @returns Deterministic Swift source with a trailing newline.
+ */
+export function render_swift_api(contract: Wire_Contract): string {
+  const enums = contract.api.enums.map((enum_) => {
+    const members = enum_.members
+      .map(
+        (member) =>
+          `  case ${swift_property_name(member.name)} = ${swift_string_literal(member.value)}`,
+      )
+      .join("\n")
+    return `/// Values defined by the Smithy ${enum_.name} shape.
+public enum Smithy_${typescript_name(enum_.name)}: String, Equatable, Sendable {
+${members}
+}`
+  })
+  const structures = contract.api.structures.map((structure) => {
+    const name = `Smithy_${typescript_name(structure.name)}`
+    if (structure.members.length === 0) {
+      return `/// Smithy ${structure.name} structure.
+public struct ${name}: Equatable, Sendable {
+  public init() {}
+}`
+    }
+    const members = structure.members
+      .map(
+        (member) =>
+          `  /// Smithy ${member.name} member.
+  public let ${swift_property_name(member.name)}: ${swift_api_type(member.type, member.required)}`,
+      )
+      .join("\n")
+    const parameters = structure.members
+      .map((member) => {
+        const default_value = member.required ? "" : " = nil"
+        return `    ${swift_property_name(member.name)}: ${swift_api_type(member.type, member.required)}${default_value}`
+      })
+      .join(",\n")
+    const assignments = structure.members
+      .map(
+        (member) =>
+          `    self.${swift_property_name(member.name)} = ${swift_property_name(member.name)}`,
+      )
+      .join("\n")
+    return `/// Smithy ${structure.name} structure.
+public struct ${name}: Equatable, Sendable {
+${members}
+
+  public init(
+${parameters}
+  ) {
+${assignments}
+  }
+}`
+  })
+  const operations = contract.api.operations
+    .map(
+      (operation) =>
+        `  /// Invokes the Smithy ${operation.name} operation.
+  func ${swift_property_name(operation.name)}(
+    _ input: Smithy_${typescript_name(operation.input)}
+  ) async throws -> Smithy_${typescript_name(operation.output)}`,
+    )
+    .join("\n")
+  const opcodes = contract.opcodes
+    .map(
+      (opcode) =>
+        `  case ${swift_property_name(opcode.name)} = ${opcode.value}`,
+    )
+    .join("\n")
+  const value = contract.value_format
+  const ffi = contract.ffi
+  const version_bytes = encode_vu128(value.version)
+  const operation_get_json = swift_ffi_value(ffi.operations, "GetJson", "operation")
+  const operation_set_json = swift_ffi_value(ffi.operations, "SetJson", "operation")
+  const operation_reconnect = swift_ffi_value(ffi.operations, "Reconnect", "operation")
+  const result_error = swift_ffi_value(ffi.result_kinds, "Error", "result")
+  const result_ok = swift_ffi_value(ffi.result_kinds, "Ok", "result")
+  const result_value = swift_ffi_value(ffi.result_kinds, "Value", "result")
+  const result_not_found = swift_ffi_value(ffi.result_kinds, "NotFound", "result")
+  const result_created = swift_ffi_value(ffi.result_kinds, "Created", "result")
+  const result_replaced = swift_ffi_value(ffi.result_kinds, "Replaced", "result")
+  const result_deleted = swift_ffi_value(ffi.result_kinds, "Deleted", "result")
+  const result_not_deleted = swift_ffi_value(ffi.result_kinds, "NotDeleted", "result")
+  const result_connected = swift_ffi_value(ffi.result_kinds, "Connected", "result")
+  const result_not_stored = swift_ffi_value(ffi.result_kinds, "NotStored", "result")
+  const set_condition_none = swift_ffi_value(ffi.set_conditions, "None", "SET condition")
+  const set_condition_if_absent = swift_ffi_value(
+    ffi.set_conditions,
+    "IfAbsent",
+    "SET condition",
+  )
+  const set_condition_if_present = swift_ffi_value(
+    ffi.set_conditions,
+    "IfPresent",
+    "SET condition",
+  )
+  const connection_states = ffi.connection_states
+    .map(
+      (entry) =>
+        `  case ${swift_property_name(entry.name)} = ${entry.value}`,
+    )
+    .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+import Foundation
+
+${[...enums, ...structures].join("\n\n")}
+
+/// Operations defined by the OpenKache Smithy service.
+public protocol Smithy_OpenKache_Api: Sendable {
+${operations}
+}
+
+/// Operation identifiers assigned by the Smithy wire contract.
+public enum Smithy_Opcode: UInt8, Equatable, Sendable {
+${opcodes}
+}
+
+/// Wire and value-format identifiers shared by all language bindings.
+public enum Smithy_Value_Format: Sendable {
+  public static let protocolAlpn: String = ${swift_string_literal(contract.v3.alpn)}
+  public static let itemIdBytes: Int = ${contract.item_id_bytes}
+  public static let maxValueBytes: Int = ${contract.max_value_bytes}
+  public static let version: Int = ${value.version}
+  public static let versionBytes: [UInt8] = [${version_bytes.join(", ")}]
+  public static let maxVu128Bytes: Int = ${value.max_vu128_bytes}
+  public static let formatByteBytes: Int = ${value.format_byte_bytes}
+  public static let maxVaruintBytes: Int = ${contract.v3.max_varuint_bytes}
+  public static let setTtlFlag: UInt8 = ${contract.v3.set_ttl_flag}
+  public static let setIfAbsentFlag: UInt8 = ${contract.v3.set_if_absent_flag}
+  public static let setIfPresentFlag: UInt8 = ${contract.v3.set_if_present_flag}
+  public static let formatCompressionMask: UInt8 = ${value.format_compression_mask}
+  public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
+  public static let serializationRaw: UInt8 = ${value.serialization_raw}
+  public static let serializationJson: UInt8 = ${value.serialization_json}
+  public static let compressionNone: UInt8 = ${value.compression_none}
+  public static let compressionZstandard: UInt8 = ${value.compression_zstandard}
+  public static let encryptionNone: UInt8 = ${value.encryption_none}
+  public static let encryptionCompact: UInt8 = ${value.encryption_compact}
+  public static let encryptionRobust: UInt8 = ${value.encryption_robust}
+  public static let compactSyntheticIvBytes: Int = ${value.compact_synthetic_iv_bytes}
+  public static let robustNonceBytes: Int = ${value.robust_nonce_bytes}
+  public static let robustTagBytes: Int = ${value.robust_tag_bytes}
+  public static let dataProtectionKeyBytes: Int = ${value.data_protection_key_bytes}
+  public static let itemIdRootContext: String = ${swift_string_literal(value.item_id_root_context)}
+  public static let aadDomain: String = ${swift_string_literal(value.aad_domain)}
+  public static let valueRootContext: String = ${swift_string_literal(value.value_root_context)}
+  public static let compactMacContext: String = ${swift_string_literal(value.compact_mac_context)}
+  public static let compactEncryptionContext: String = ${swift_string_literal(value.compact_encryption_context)}
+  public static let robustContext: String = ${swift_string_literal(value.robust_context)}
+}
+
+/// Native ABI connection-state identifiers shared by every language adapter.
+public enum Smithy_Connection_State: UInt32, Equatable, Sendable {
+${connection_states}
+}
+
+/// Native ABI identifiers shared by every language adapter.
+public enum Smithy_Native_Contract: Sendable {
+  public static let abiVersion: UInt32 = ${ffi.abi_version}
+  public static let operationGetJson: UInt32 = ${operation_get_json}
+  public static let operationSetJson: UInt32 = ${operation_set_json}
+  public static let operationReconnect: UInt32 = ${operation_reconnect}
+  public static let resultError: UInt32 = ${result_error}
+  public static let resultOk: UInt32 = ${result_ok}
+  public static let resultValue: UInt32 = ${result_value}
+  public static let resultNotFound: UInt32 = ${result_not_found}
+  public static let resultCreated: UInt32 = ${result_created}
+  public static let resultReplaced: UInt32 = ${result_replaced}
+  public static let resultDeleted: UInt32 = ${result_deleted}
+  public static let resultNotDeleted: UInt32 = ${result_not_deleted}
+  public static let resultConnected: UInt32 = ${result_connected}
+  public static let resultNotStored: UInt32 = ${result_not_stored}
+  public static let setConditionNone: UInt32 = ${set_condition_none}
+  public static let setConditionIfAbsent: UInt32 = ${set_condition_if_absent}
+  public static let setConditionIfPresent: UInt32 = ${set_condition_if_present}
+}
+`
+}
+
 /** Renders the cross-language value-format wire and cryptographic contract for TypeScript.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -1950,6 +2302,7 @@ type Generation_Target =
   | "python"
   | "rust-api"
   | "rust-wire"
+  | "swift"
   | "typescript"
 
 function generation_target(value: string | undefined): Generation_Target {
@@ -1967,6 +2320,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "rust-api"
     case "rust-wire":
       return "rust-wire"
+    case "swift":
+      return "swift"
     case "typescript":
       return "typescript"
     default:
@@ -1992,6 +2347,7 @@ function expected_outputs(
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
+        [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
       }
     case "c-contract":
@@ -2024,10 +2380,46 @@ function expected_outputs(
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
       }
+    case "swift":
+      return {
+        [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
+      }
   }
 }
 
-function write_outputs(outputs: Readonly<Record<string, string>>): void {
+/** Returns generated outputs that are missing or differ from the contract. */
+export function generated_output_issues(
+  outputs: Readonly<Record<string, string>>,
+): readonly string[] {
+  const mismatches: string[] = []
+  for (const [output_path, content] of Object.entries(outputs)) {
+    let existing: string
+    try {
+      existing = readFileSync(output_path, "utf8")
+    } catch {
+      mismatches.push(`${output_path} (missing)`)
+      continue
+    }
+    if (existing !== content) mismatches.push(output_path)
+  }
+  return mismatches
+}
+
+function write_outputs(
+  outputs: Readonly<Record<string, string>>,
+  check_only: boolean,
+): void {
+  if (check_only) {
+    const mismatches = generated_output_issues(outputs)
+    if (mismatches.length > 0) {
+      throw new Error(
+        "generated contract outputs are stale:\n" +
+          mismatches.map((output_path) => `  - ${output_path}`).join("\n") +
+          "\nRun `just generate-protocol-contract` to regenerate them.",
+      )
+    }
+    return
+  }
   for (const [output_path, content] of Object.entries(outputs)) {
     const output_directory = dirname(output_path)
     mkdirSync(output_directory, { recursive: true })
@@ -2055,7 +2447,7 @@ export function main(): number {
       extract_wire_contract(smithy_ast()),
       generation_target(process.env.OPENKACHE_GENERATION_TARGET),
     )
-    write_outputs(outputs)
+    write_outputs(outputs, process.env.OPENKACHE_GENERATION_CHECK === "1")
     return 0
   } catch (error) {
     console.error(

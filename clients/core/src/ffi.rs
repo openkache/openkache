@@ -14,13 +14,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub use openkache_protocol::FFI_ABI_VERSION as ABI_VERSION;
+pub use openkache_protocol::{FfiOperation, FfiResultKind, FfiSetCondition};
 use openkache_protocol::{
-    FFI_CONNECTION_STATE_CLOSED, FFI_CONNECTION_STATE_CONNECTED, FFI_CONNECTION_STATE_DISCONNECTED,
-    FFI_CONNECTION_STATE_RECONNECTING, FFI_CONNECTION_STATE_UNKNOWN, FFI_OPERATION_GET_JSON,
-    FFI_OPERATION_RECONNECT, FFI_OPERATION_SET_JSON, FFI_RESULT_CONNECTED, FFI_RESULT_CREATED,
-    FFI_RESULT_DELETED, FFI_RESULT_ERROR, FFI_RESULT_NOT_DELETED, FFI_RESULT_NOT_FOUND,
-    FFI_RESULT_NOT_STORED, FFI_RESULT_OK, FFI_RESULT_REPLACED, FFI_RESULT_VALUE,
-    FFI_SET_CONDITION_IF_ABSENT, FFI_SET_CONDITION_IF_PRESENT, FFI_SET_CONDITION_NONE, Opcode,
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 use serde::Deserialize;
@@ -33,93 +28,6 @@ use crate::{
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;
-
-/// Discriminator returned by an operation result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiResultKind {
-    Error = FFI_RESULT_ERROR,
-    Ok = FFI_RESULT_OK,
-    Value = FFI_RESULT_VALUE,
-    NotFound = FFI_RESULT_NOT_FOUND,
-    Created = FFI_RESULT_CREATED,
-    Replaced = FFI_RESULT_REPLACED,
-    Deleted = FFI_RESULT_DELETED,
-    NotDeleted = FFI_RESULT_NOT_DELETED,
-    Connected = FFI_RESULT_CONNECTED,
-    NotStored = FFI_RESULT_NOT_STORED,
-}
-
-/// Operation accepted by [`openkache_client_execute`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiOperation {
-    /// Verify the connection.
-    Ping = Opcode::Ping as u32,
-    /// Retrieve one protected value.
-    Get = Opcode::Get as u32,
-    /// Store one protected value.
-    Set = Opcode::Set as u32,
-    /// Retrieve one protected canonical JSON value.
-    GetJson = FFI_OPERATION_GET_JSON,
-    /// Store one protected canonical JSON value.
-    SetJson = FFI_OPERATION_SET_JSON,
-    /// Remove one protected value.
-    Delete = Opcode::Delete as u32,
-    /// Return server statistics.
-    Stats = Opcode::Stats as u32,
-    /// Wait for the server durability barrier.
-    Sync = Opcode::Sync as u32,
-    /// Explicitly reconnect without replaying a request.
-    Reconnect = FFI_OPERATION_RECONNECT,
-}
-
-impl TryFrom<u32> for FfiOperation {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            value if value == Self::Ping as u32 => Ok(Self::Ping),
-            value if value == Self::Get as u32 => Ok(Self::Get),
-            value if value == Self::Set as u32 => Ok(Self::Set),
-            value if value == Self::GetJson as u32 => Ok(Self::GetJson),
-            value if value == Self::SetJson as u32 => Ok(Self::SetJson),
-            value if value == Self::Delete as u32 => Ok(Self::Delete),
-            value if value == Self::Stats as u32 => Ok(Self::Stats),
-            value if value == Self::Sync as u32 => Ok(Self::Sync),
-            value if value == Self::Reconnect as u32 => Ok(Self::Reconnect),
-            value => Err(value),
-        }
-    }
-}
-
-/// Existence condition accepted by [`openkache_client_execute`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-#[non_exhaustive]
-pub enum FfiSetCondition {
-    /// Always store the supplied value.
-    None = FFI_SET_CONDITION_NONE,
-    /// Store only when the key is absent.
-    IfAbsent = FFI_SET_CONDITION_IF_ABSENT,
-    /// Store only when the key is present.
-    IfPresent = FFI_SET_CONDITION_IF_PRESENT,
-}
-
-impl TryFrom<u32> for FfiSetCondition {
-    type Error = u32;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            value if value == Self::None as u32 => Ok(Self::None),
-            value if value == Self::IfAbsent as u32 => Ok(Self::IfAbsent),
-            value if value == Self::IfPresent as u32 => Ok(Self::IfPresent),
-            value => Err(value),
-        }
-    }
-}
 
 /// Native connection options passed by C and C++ bindings.
 #[repr(C)]
@@ -469,6 +377,10 @@ async fn execute_protected(
             .reconnect()
             .await
             .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "unsupported operation from the generated Smithy contract",
+        )),
     }
 }
 
@@ -533,16 +445,15 @@ async fn execute_raw(
             "operation",
             "exact item-ID calls do not support formatted JSON operations",
         )),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "unsupported operation from the generated Smithy contract",
+        )),
     }
 }
 
 fn connection_state_value(state: ConnectionState) -> u32 {
-    match state {
-        ConnectionState::Connected => FFI_CONNECTION_STATE_CONNECTED,
-        ConnectionState::Reconnecting => FFI_CONNECTION_STATE_RECONNECTING,
-        ConnectionState::Disconnected => FFI_CONNECTION_STATE_DISCONNECTED,
-        ConnectionState::Closed => FFI_CONNECTION_STATE_CLOSED,
-    }
+    state as u32
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
@@ -698,6 +609,11 @@ pub unsafe extern "C" fn openkache_client_connect_v2(
 ///
 /// Zero retry and lane limits select shared-core defaults. The Smithy None and
 /// Robust encryption values select Robust; Compact selects Compact.
+///
+/// # Safety
+///
+/// Every non-empty pointer/length pair must identify readable memory for the duration of this
+/// call. `data_protection_key` must contain exactly 32 bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_ex(
     address: *const u8,
@@ -752,6 +668,12 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
 /// Connects using a caller-owned options structure.
 ///
 /// The structure is copied before this function returns.
+///
+/// # Safety
+///
+/// `options` must be either null or a valid, properly aligned pointer to an initialized
+/// [`FfiConnectOptions`] for the duration of this call. Every non-empty pointer/length pair in a
+/// non-null options structure must identify readable memory for the duration of this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connect_with_options(
     options: *const FfiConnectOptions,
@@ -926,6 +848,12 @@ pub unsafe extern "C" fn openkache_client_execute(
 /// Executes one exact-item-ID operation without application-key protection.
 ///
 /// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`].
+/// Every non-empty item-ID/value pointer pair must identify readable memory for this call, and
+/// the client must not be freed until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_execute_raw(
     client: *const FfiClient,
@@ -998,6 +926,7 @@ fn execute_entry(
             FfiSetCondition::None => SetCondition::None,
             FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
             FfiSetCondition::IfPresent => SetCondition::IfPresent,
+            _ => return Err("unsupported SET condition from the generated Smithy contract".into()),
         };
         let mut set_options = match condition {
             SetCondition::None => SetOptions::new(),
@@ -1054,9 +983,14 @@ fn execute_entry(
 /// Returns a best-effort connection-state discriminator:
 /// `0` connected, `1` reconnecting, `2` disconnected, `3` closed, and `4`
 /// for a null handle.
+///
+/// # Safety
+///
+/// If `client` is non-null, it must be a live pointer returned by
+/// [`openkache_client_result_take_client`] and remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
-    unsafe { client.as_ref() }.map_or(FFI_CONNECTION_STATE_UNKNOWN, FfiClient::connection_state)
+    unsafe { client.as_ref() }.map_or(ConnectionState::Unknown as u32, FfiClient::connection_state)
 }
 
 /// Returns an FFI result discriminator.

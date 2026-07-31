@@ -25,7 +25,8 @@ pub use config::{
     SetOptions,
 };
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
-pub use openkache_protocol::{ITEM_ID_BYTES, SetCondition};
+/// Best-effort connection state generated from the Smithy native ABI contract.
+pub use openkache_protocol::{ConnectionState, ITEM_ID_BYTES, SetCondition};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -321,32 +322,6 @@ pub enum DeleteOutcome {
     Deleted,
     /// The key did not exist.
     NotFound,
-}
-
-/// Current best-effort connection state snapshot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-#[repr(u8)]
-pub enum ConnectionState {
-    /// The latest connection is available.
-    Connected,
-    /// A request is replacing a failed connection.
-    Reconnecting,
-    /// The latest connection failed and a later operation will reconnect.
-    Disconnected,
-    /// The client was explicitly closed and cannot reconnect.
-    Closed,
-}
-
-impl std::fmt::Display for ConnectionState {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::Connected => "connected",
-            Self::Reconnecting => "reconnecting",
-            Self::Disconnected => "disconnected",
-            Self::Closed => "closed",
-        })
-    }
 }
 
 struct Core<C: ClientConnection> {

@@ -128,9 +128,17 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
-- `src/ffi.rs` provides the optional C ABI without duplicating protocol logic
-  in each language adapter.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
   used by the Node-API adapter; a future thin logical-value adapter may replace it.
+- `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
+  C++, Python, and other non-Rust bindings. It exposes both protected
+  application-key operations and exact-item-ID raw operations, while the
+  worker owns one Compio runtime per native handle. The canonical declarations
+  are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
+  with [`include/openkache_client.h`](include/openkache_client.h) retained as
+  a compatibility include. Generated ABI/protocol constants are emitted to
+  each package build directory from the single
+  [`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy)
+  source; no header is a hand-maintained constants source.
