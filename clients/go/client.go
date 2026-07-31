@@ -495,6 +495,28 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	}
 }
 
+// GetJSON retrieves the canonical JSON document stored for key.
+//
+// The returned bytes are canonical RFC 8785 JSON produced by the shared core.
+// The Go adapter does not parse or re-serialize the document.
+func (c *Client) GetJSON(ctx context.Context, key []byte) ([]byte, bool, error) {
+	if len(key) == 0 {
+		return nil, false, validationError("key", "must not be empty")
+	}
+	result, err := c.invoke(ctx, SmithyFFIOperationGetJson, key, nil, SetOptions{})
+	if err != nil {
+		return nil, false, operationError("get json", err)
+	}
+	switch result.kind {
+	case SmithyFFIResultValue:
+		return result.data, true, nil
+	case SmithyFFIResultNotFound:
+		return nil, false, nil
+	default:
+		return nil, false, unexpectedResult("get json", result.kind)
+	}
+}
+
 // GetItem retrieves an exact wire item ID without application-key derivation or
 // value protection.
 func (c *Client) GetItem(ctx context.Context, itemID ItemID) ([]byte, bool, error) {
@@ -536,6 +558,44 @@ func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions)
 		return NotStored, nil
 	default:
 		return "", unexpectedResult("set", result.kind)
+	}
+}
+
+// SetJSON stores one complete JSON document for key.
+//
+// The shared core parses and canonicalizes the document before serialization;
+// callers must not pre-serialize native Go values with encoding/json when
+// cross-language canonical bytes matter.
+func (c *Client) SetJSON(
+	ctx context.Context,
+	key, jsonBytes []byte,
+	options SetOptions,
+) (SetOutcome, error) {
+	if len(key) == 0 {
+		return "", validationError("key", "must not be empty")
+	}
+	if len(jsonBytes) > SmithyMaxValueBytes {
+		return "", validationError(
+			"json",
+			fmt.Sprintf("exceeds %d bytes", SmithyMaxValueBytes),
+		)
+	}
+	if err := validateSetOptions(options); err != nil {
+		return "", err
+	}
+	result, err := c.invoke(ctx, SmithyFFIOperationSetJson, key, jsonBytes, options)
+	if err != nil {
+		return "", operationError("set json", err)
+	}
+	switch result.kind {
+	case SmithyFFIResultCreated:
+		return Created, nil
+	case SmithyFFIResultReplaced:
+		return Replaced, nil
+	case SmithyFFIResultNotStored:
+		return NotStored, nil
+	default:
+		return "", unexpectedResult("set json", result.kind)
 	}
 }
 

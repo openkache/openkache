@@ -1634,7 +1634,7 @@ function legacy_python_api_name(identifier: string): string {
   return `Smithy${pascal_case(snake_case(identifier))}`
 }
 
-function python_api_type(type: Api_Type, required: boolean): string {
+function legacy_python_api_type(type: Api_Type, required: boolean): string {
   let rendered: string
   switch (type.kind) {
     case "blob":
@@ -1684,7 +1684,7 @@ ${members}`
     )
     const members = ordered_members.map((member) => {
       const default_value = member.required ? "" : " = None"
-      return `    ${snake_case(member.name)}: ${python_api_type(member.type, member.required)}${default_value}`
+      return `    ${snake_case(member.name)}: ${legacy_python_api_type(member.type, member.required)}${default_value}`
     })
     const body = members.length === 0 ? "    pass" : members.join("\n")
     return `@dataclass(frozen=True, slots=True)

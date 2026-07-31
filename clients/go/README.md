@@ -74,6 +74,8 @@ value, found, err := client.Get(ctx, []byte("profile"))
 a cache miss. `Close` is idempotent and waits for in-flight native operations.
 `Reconnect` explicitly replaces the connection without replaying an operation,
 and `ConnectionState` returns a best-effort lifecycle snapshot.
+`GetJSON` and `SetJSON` delegate JSON parsing and RFC 8785 canonicalization to
+the shared core; they accept and return complete JSON documents as bytes.
 `NewItemID`, `GetItem`, `SetItem`, and `DeleteItem` expose the exact wire
 item-ID/raw-value layer when an application already owns protocol IDs.
 Use `client.Smithy()` when an application needs the generated
@@ -98,6 +100,6 @@ The generated Go files are checked in for module consumers; the C contract
 header is emitted into `protocol/generated_local/` and is supplied to CGO via
 the package include path.
 
-When using a pre-ABI-extension native library, `Identity`, non-default
-`Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading the native
-library to one that exports `openkache_client_connect_ex`.
+When using a pre-ABI-extension native library, `Identity`, `EncryptionCompact`,
+non-default `Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading
+the native library to one that exports `openkache_client_connect_ex`.

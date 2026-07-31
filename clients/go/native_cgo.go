@@ -393,6 +393,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	if !hasExtended &&
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
+			options.encryption != EncryptionRobust ||
 			options.retryAttempts != SmithyClientDefaultRetryMaxAttempts ||
 			options.maxInFlight != SmithyClientDefaultMaxInFlight) {
 		C.free(address)
