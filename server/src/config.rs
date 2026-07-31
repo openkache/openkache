@@ -139,8 +139,13 @@ pub fn bits_for_count(count: usize) -> usize {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub data_path: PathBuf,
+    pub large_value_path: PathBuf,
     pub segment_size: usize,
     pub blob_segment_size: usize,
+    pub large_value_capacity: usize,
+    pub mutable_segment_count: usize,
+    pub max_flushes_in_flight: usize,
+    pub large_value_threshold: usize,
     pub max_item_bytes: usize,
     pub segment_count: usize,
     pub table_capacity: usize,
@@ -160,8 +165,13 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             data_path: PathBuf::from("target/kvkache-v1/kvkache.data"),
+            large_value_path: PathBuf::from("target/kvkache-v1/kvkache.large"),
             segment_size: 16 * 1024 * 1024,
             blob_segment_size: 64 * 1024 * 1024,
+            large_value_capacity: 64 * 1024 * 1024,
+            mutable_segment_count: 3,
+            max_flushes_in_flight: 2,
+            large_value_threshold: 20 * 1024,
             max_item_bytes: DEFAULT_MAX_ITEM_BYTES,
             segment_count: 64,
             table_capacity: 10_000_000,
@@ -171,7 +181,7 @@ impl Default for Config {
             front_back_ratio: 8,
             bucket_choice_count: DEFAULT_BUCKET_CHOICE_COUNT,
             bucket_selection_policy: BucketSelectionPolicy::LeastUsed,
-            sg_index_bits: 6,
+            sg_index_bits: 9,
             fingerprint_hash_offset_bits: 64,
             read_max_time_us: 1_000,
             write_max_time_us: 5_000,
@@ -180,37 +190,22 @@ impl Default for Config {
 }
 
 impl Config {
-    pub(crate) fn blob_path(&self) -> PathBuf {
-        self.data_path.with_extension("blob")
-    }
-
-    pub(crate) fn checkpoint_path(&self) -> PathBuf {
-        self.data_path.with_extension("checkpoint")
-    }
-
-    pub(crate) fn next_checkpoint_path(&self) -> PathBuf {
-        self.data_path.with_extension("checkpoint.next")
-    }
-
     pub fn validate(&self) -> Result<()> {
-        let blob_path = self.blob_path();
-        let checkpoint_path = self.checkpoint_path();
-        let next_checkpoint_path = self.next_checkpoint_path();
-        if blob_path == self.data_path
-            || checkpoint_path == self.data_path
-            || next_checkpoint_path == self.data_path
-            || checkpoint_path == blob_path
-            || next_checkpoint_path == blob_path
-            || next_checkpoint_path == checkpoint_path
+        if !(1..=32).contains(&self.bucket_choice_count)
+            || !self.bucket_choice_count.is_power_of_two()
         {
             return Err(KvError::InvalidConfig(
-                "derived Blob path and checkpoint paths must be distinct from Segment storage"
-                    .into(),
+                "bucket-choice-count must be a power of two between 1 and 32".into(),
             ));
         }
-        if self.sg_index_bits == 0 || self.sg_index_bits > 16 {
+        if self.sg_index_bits == 0
+            || self
+                .sg_index_bits
+                .checked_add(self.bucket_choice_bits())
+                .is_none_or(|bits| bits > u32::BITS as usize)
+        {
             return Err(KvError::InvalidConfig(
-                "sg-index-bits must be between 1 and 16".into(),
+                "SG index and Bucket-choice fields must fit in 32 bits".into(),
             ));
         }
         if self.segment_count == 0 || self.segment_count > (1usize << self.sg_index_bits) {
@@ -225,12 +220,36 @@ impl Config {
                 "Segment size must be a non-zero multiple of 4096 bytes".into(),
             ));
         }
+        if self.mutable_segment_count != 3 {
+            return Err(KvError::InvalidConfig(
+                "mutable Segment count must be 3".into(),
+            ));
+        }
+        if self.max_flushes_in_flight != 2 {
+            return Err(KvError::InvalidConfig(
+                "maximum flushes in flight must be 2".into(),
+            ));
+        }
+        if self.large_value_threshold == 0 {
+            return Err(KvError::InvalidConfig(
+                "large-value threshold must be non-zero".into(),
+            ));
+        }
+        if self.large_value_capacity == 0
+            || !self.large_value_capacity.is_multiple_of(BUCKET_BYTES)
+            || self.large_value_capacity < self.max_item_bytes
+        {
+            return Err(KvError::InvalidConfig(
+                "large-value capacity must be a 4096-byte multiple at least as large as one maximum Item"
+                    .into(),
+            ));
+        }
         if self.segment_size.checked_mul(self.segment_count).is_none() {
             return Err(KvError::InvalidConfig(
                 "total Segment data size is too large".into(),
             ));
         }
-        self.segment_file_bytes()?;
+        self.generation_file_bytes()?;
         if self.blob_segment_size == 0
             || !self.blob_segment_size.is_multiple_of(BUCKET_BYTES)
             || self.blob_segment_size > u32::MAX as usize
@@ -240,12 +259,12 @@ impl Config {
             ));
         }
         if self.max_item_bytes == 0
-            || self.max_item_bytes > self.blob_segment_size
+            || self.max_item_bytes > self.large_value_capacity
             || self.max_item_bytes > openkache_protocol::MAX_VALUE_BYTES
         {
             return Err(KvError::InvalidConfig(format!(
                 "maximum item size must be between 1 byte and {} bytes",
-                self.blob_segment_size
+                self.large_value_capacity
                     .min(openkache_protocol::MAX_VALUE_BYTES)
             )));
         }
@@ -257,6 +276,13 @@ impl Config {
             return Err(KvError::InvalidConfig(
                 "total Blob Segment data size is too large".into(),
             ));
+        }
+        let logical_sg_capacity = self.logical_sg_capacity()?;
+        if logical_sg_capacity > (1usize << self.sg_index_bits) {
+            return Err(KvError::InvalidConfig(format!(
+                "logical SG capacity {logical_sg_capacity} exceeds {} configured SG-index bits",
+                self.sg_index_bits
+            )));
         }
         if self.table_capacity == 0 {
             return Err(KvError::InvalidConfig(
@@ -286,13 +312,6 @@ impl Config {
                 "front-back-ratio must be a power of two between 2 and 16".into(),
             ));
         }
-        if !(1..=32).contains(&self.bucket_choice_count)
-            || !self.bucket_choice_count.is_power_of_two()
-        {
-            return Err(KvError::InvalidConfig(
-                "bucket-choice-count must be a power of two between 1 and 32".into(),
-            ));
-        }
         if self.fingerprint_hash_offset_bits == 0 || self.fingerprint_hash_offset_bits > 64 {
             return Err(KvError::InvalidConfig(
                 "fingerprint hash offset must be between 1 and 64 bits".into(),
@@ -314,32 +333,22 @@ impl Config {
         self.bucket_choice_count.ilog2() as usize
     }
 
-    pub fn data_bytes(&self) -> u64 {
-        (self.segment_size * self.segment_count) as u64
+    pub fn generation_file_bytes(&self) -> Result<u64> {
+        self.segment_size
+            .checked_add(self.blob_segment_size)
+            .and_then(|bytes| bytes.checked_mul(self.segment_count))
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or_else(|| KvError::InvalidConfig("generation file size is too large".into()))
     }
 
-    pub fn segment_file_bytes(&self) -> Result<u64> {
-        let stride = self
-            .segment_size
-            .checked_add(BUCKET_BYTES)
-            .ok_or_else(|| KvError::InvalidConfig("Segment file stride is too large".into()))?;
-        let bytes = stride
-            .checked_mul(self.segment_count)
-            .and_then(|bytes| bytes.checked_add(BUCKET_BYTES))
-            .ok_or_else(|| KvError::InvalidConfig("Segment file size is too large".into()))?;
-        Ok(bytes as u64)
-    }
-
-    pub(crate) fn segment_control_offset(&self, sg_index: usize) -> u64 {
-        (BUCKET_BYTES + sg_index * (BUCKET_BYTES + self.segment_size)) as u64
-    }
-
-    pub(crate) fn segment_data_offset(&self, sg_index: usize) -> u64 {
-        self.segment_control_offset(sg_index) + BUCKET_BYTES as u64
-    }
-
-    pub fn blob_bytes(&self) -> u64 {
-        (self.blob_segment_size * self.segment_count) as u64
+    pub fn logical_sg_capacity(&self) -> Result<usize> {
+        let physical = usize::try_from(self.generation_file_bytes()?)
+            .map_err(|_| KvError::InvalidConfig("generation file does not fit usize".into()))?
+            / self.segment_size;
+        physical
+            .checked_add(self.mutable_segment_count)
+            .and_then(|count| count.checked_add(self.max_flushes_in_flight))
+            .ok_or_else(|| KvError::InvalidConfig("logical SG capacity overflowed".into()))
     }
 }
 
@@ -567,9 +576,18 @@ impl Default for TimeoutConfig {
 pub struct StorageConfig {
     pub directory: PathBuf,
     pub data_file_pattern: String,
+    pub large_value_file_pattern: String,
     pub segments_per_thread: usize,
     pub segment_size_mib: usize,
     pub blob_segment_size_mib: usize,
+    /// Directly writable RAM SGs retained by each storage worker.
+    pub mutable_segments_per_thread: usize,
+    /// Concurrent generation flushes admitted by each storage worker.
+    pub max_flushes_in_flight_per_thread: usize,
+    /// Values larger than this threshold use the large-value tier.
+    pub large_value_threshold_kib: usize,
+    /// Preallocated worker-local large-value circular file capacity.
+    pub large_value_capacity_mib_per_thread: usize,
     /// Maximum encoded cache-item size accepted by the server.
     pub max_item_size_mib: usize,
 }
@@ -578,10 +596,15 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             directory: PathBuf::from("target/kvkache-v1"),
-            data_file_pattern: "data-{thread_id:02}.sg".into(),
+            data_file_pattern: "worker-{thread_id:02}.data".into(),
+            large_value_file_pattern: "worker-{thread_id:02}.large".into(),
             segments_per_thread: 4,
             segment_size_mib: 16,
             blob_segment_size_mib: 64,
+            mutable_segments_per_thread: 3,
+            max_flushes_in_flight_per_thread: 2,
+            large_value_threshold_kib: 20,
+            large_value_capacity_mib_per_thread: 64,
             max_item_size_mib: DEFAULT_MAX_ITEM_BYTES / (1024 * 1024),
         }
     }
@@ -761,8 +784,18 @@ impl AppConfig {
                 "storage.blob_segment_size_mib is invalid".into(),
             ));
         }
+        if self.storage.mutable_segments_per_thread != 3
+            || self.storage.max_flushes_in_flight_per_thread != 2
+            || self.storage.large_value_threshold_kib == 0
+            || self.storage.large_value_capacity_mib_per_thread == 0
+        {
+            return Err(KvError::InvalidConfig(
+                "storage requires 3 mutable SGs, 2 flushes in flight, and non-zero large-value threshold and capacity"
+                    .into(),
+            ));
+        }
         if self.storage.max_item_size_mib == 0
-            || self.storage.max_item_size_mib > self.storage.blob_segment_size_mib
+            || self.storage.max_item_size_mib > self.storage.large_value_capacity_mib_per_thread
             || self
                 .storage
                 .max_item_size_mib
@@ -772,7 +805,7 @@ impl AppConfig {
             return Err(KvError::InvalidConfig(format!(
                 "storage.max_item_size_mib must be between 1 and {}",
                 self.storage
-                    .blob_segment_size_mib
+                    .large_value_capacity_mib_per_thread
                     .min(openkache_protocol::MAX_VALUE_BYTES / (1024 * 1024))
             )));
         }
@@ -787,6 +820,16 @@ impl AppConfig {
         if data_names.len() != self.runtime.thread_count {
             return Err(KvError::InvalidConfig(
                 "storage.data_file_pattern must expand uniquely for every thread".into(),
+            ));
+        }
+        let large_value_names = (0..self.runtime.thread_count)
+            .map(|thread_id| {
+                expand_thread_pattern(&self.storage.large_value_file_pattern, thread_id)
+            })
+            .collect::<HashSet<_>>();
+        if large_value_names.len() != self.runtime.thread_count {
+            return Err(KvError::InvalidConfig(
+                "storage.large_value_file_pattern must expand uniquely for every thread".into(),
             ));
         }
         self.worker_config(0).validate()
@@ -831,10 +874,15 @@ impl AppConfig {
             },
             storage: StorageConfig {
                 directory,
-                data_file_pattern: "data-{thread_id:02}.sg".into(),
+                data_file_pattern: "worker-{thread_id:02}.data".into(),
+                large_value_file_pattern: "worker-{thread_id:02}.large".into(),
                 segments_per_thread,
                 segment_size_mib: 16,
                 blob_segment_size_mib: 64,
+                mutable_segments_per_thread: 3,
+                max_flushes_in_flight_per_thread: 2,
+                large_value_threshold_kib: 20,
+                large_value_capacity_mib_per_thread: 64,
                 max_item_size_mib: 16,
             },
             table: TableConfig {
@@ -848,10 +896,27 @@ impl AppConfig {
 
     pub fn worker_config(&self, thread_id: usize) -> Config {
         let data_name = expand_thread_pattern(&self.storage.data_file_pattern, thread_id);
+        let large_value_name =
+            expand_thread_pattern(&self.storage.large_value_file_pattern, thread_id);
+        let segment_size = self.storage.segment_size_mib * 1024 * 1024;
+        let blob_segment_size = self.storage.blob_segment_size_mib * 1024 * 1024;
+        let logical_sg_capacity = self
+            .storage
+            .segments_per_thread
+            .saturating_mul(segment_size.saturating_add(blob_segment_size))
+            .checked_div(segment_size)
+            .unwrap_or_default()
+            .saturating_add(self.storage.mutable_segments_per_thread)
+            .saturating_add(self.storage.max_flushes_in_flight_per_thread);
         Config {
             data_path: self.storage.directory.join(data_name),
-            segment_size: self.storage.segment_size_mib * 1024 * 1024,
-            blob_segment_size: self.storage.blob_segment_size_mib * 1024 * 1024,
+            large_value_path: self.storage.directory.join(large_value_name),
+            segment_size,
+            blob_segment_size,
+            large_value_capacity: self.storage.large_value_capacity_mib_per_thread * 1024 * 1024,
+            mutable_segment_count: self.storage.mutable_segments_per_thread,
+            max_flushes_in_flight: self.storage.max_flushes_in_flight_per_thread,
+            large_value_threshold: self.storage.large_value_threshold_kib * 1024,
             max_item_bytes: self.storage.max_item_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,
             table_capacity: self.table.capacity_per_thread,
@@ -861,7 +926,7 @@ impl AppConfig {
             front_back_ratio: self.table.front_back_ratio,
             bucket_choice_count: self.table.bucket_choice_count,
             bucket_selection_policy: self.table.bucket_selection_policy,
-            sg_index_bits: bits_for_count(self.storage.segments_per_thread),
+            sg_index_bits: bits_for_count(logical_sg_capacity),
             fingerprint_hash_offset_bits: self.table.fingerprint_hash_offset_bits,
             read_max_time_us: self.timeouts.read_max_time_us,
             write_max_time_us: self.timeouts.write_max_time_us,

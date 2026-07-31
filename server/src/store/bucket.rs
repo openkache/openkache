@@ -86,16 +86,6 @@ pub(crate) struct ItemState {
     expires_at_ms: u64,
 }
 
-impl ItemState {
-    pub(crate) fn is_tombstone(self) -> bool {
-        self.is_tombstone
-    }
-
-    pub(crate) fn is_live_at(self, now_ms: u64) -> bool {
-        !self.is_tombstone && (self.expires_at_ms == 0 || self.expires_at_ms > now_ms)
-    }
-}
-
 pub(crate) struct MutableSegment {
     pub(crate) bytes: DirectIoBuffer,
     pub(crate) sg_index: usize,
@@ -115,6 +105,7 @@ impl MutableSegment {
         )
     }
 
+    #[allow(dead_code)]
     pub(crate) fn reuse(config: &Config, sg_index: usize, mut bytes: DirectIoBuffer) -> Self {
         debug_assert_eq!(bytes.len(), config.segment_size);
         bytes.fill(0);
@@ -188,7 +179,7 @@ impl MutableSegment {
             self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
         }
         Some(TableLocation {
-            sg_index: self.sg_index as u16,
+            sg_index: self.sg_index as u32,
             bucket_hash_index,
         })
     }
@@ -348,6 +339,36 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
     Some((state, value_start))
 }
 
+pub(crate) fn rewrite_segment_values(
+    segment: &mut [u8],
+    mut rewrite: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>>,
+) -> Result<()> {
+    for bucket in segment.chunks_exact_mut(BUCKET_BYTES) {
+        let count = bucket_item_count(bucket);
+        for item_slot in 0..count {
+            let span = item_span(bucket, item_slot)
+                .ok_or_else(|| KvError::Worker("mutable SG contains a malformed Item".into()))?;
+            let (state, value_start) = item_state_at(bucket, span).ok_or_else(|| {
+                KvError::Worker("mutable SG contains an invalid Item state".into())
+            })?;
+            if state.is_tombstone {
+                continue;
+            }
+            let encoded = bucket[value_start..span.end].to_vec();
+            let Some(replacement) = rewrite(&encoded)? else {
+                continue;
+            };
+            if replacement.len() != encoded.len() {
+                return Err(KvError::Worker(
+                    "seal-time value rewrite changed the encoded Item length".into(),
+                ));
+            }
+            bucket[value_start..span.end].copy_from_slice(&replacement);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
     if bucket.len() != BUCKET_BYTES || !bucket_can_fit(bucket, item.encoded_len()) {
         return false;
@@ -405,14 +426,6 @@ pub(crate) fn items(bucket: &[u8]) -> impl Iterator<Item = Item> + '_ {
 pub(crate) fn find_item_in_bucket(bucket: &[u8], storage_key: &StorageKey) -> Option<Item> {
     let span = find_item_span_in_bucket(bucket, storage_key)?;
     item_at(bucket, span.item_slot)
-}
-
-pub(crate) fn find_item_state_in_bucket(
-    bucket: &[u8],
-    storage_key: &StorageKey,
-) -> Option<ItemState> {
-    let span = find_item_span_in_bucket(bucket, storage_key)?;
-    item_state_at(bucket, span).map(|(state, _)| state)
 }
 
 fn matching_item_span(

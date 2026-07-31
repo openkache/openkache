@@ -442,6 +442,23 @@ async fn execute_command(
                 integer(response, deleted);
             }
         }
+        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") => match command {
+            [_] => match cache.stats_async().await {
+                Ok(stats) => {
+                    let stats = stats.join("\n");
+                    bulk(response, Some(stats.as_bytes()));
+                }
+                Err(cache_error) => resp_cache_error(response, cache_error),
+            },
+            _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
+        },
+        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") => match command {
+            [_] => match cache.sync_async().await {
+                Ok(()) => simple(response, "OK"),
+                Err(cache_error) => resp_cache_error(response, cache_error),
+            },
+            _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),
+        },
         Some(name)
             if name.eq_ignore_ascii_case(b"SELECT") || name.eq_ignore_ascii_case(b"CLIENT") =>
         {

@@ -128,7 +128,7 @@ impl ThreadedKvkache {
         fs::create_dir_all(&config.storage.directory)?;
         let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
             let worker = config.worker_config(thread_id);
-            worker.data_path.exists() || worker.blob_path().exists()
+            worker.data_path.exists()
         });
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
