@@ -339,6 +339,23 @@ OpenKache is in **active development**. Core components are stable, the server p
 
 ---
 
+## 🤝 Community and contributing
+
+OpenKache is a systems project focused on making caching less expensive and
+easier to operate. There is useful work at every level, from clear bug reports
+and documentation to changes that improve reliability and ease of operation.
+If you like systems work where a small change can matter, start with the
+[roadmap](./README.md#roadmap) or
+[open issues](https://github.com/openkache/openkache/issues).
+
+- [Contributing](./CONTRIBUTING.md) — how to propose, check, and review changes.
+- [Community Guidelines](./COMMUNITY_GUIDELINES.md) — how we work together and
+  raise concerns.
+- [Code of Conduct](./CODE_OF_CONDUCT.md) — the project’s conduct and reporting
+  policy.
+
+---
+
 ## 🤖 AI coding agents
 
 OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.txt) for LLM-friendly documentation.
