@@ -12,7 +12,7 @@ delegate to this crate.
 
 The main API layers are:
 
-- `RawClient` and `LocalRawClient`, which accept exact protocol item keys and
+- `RawClient` and `LocalRawClient`, which accept exact protocol item IDs and
   opaque values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
@@ -51,21 +51,21 @@ cargo fmt --check
 
 ## Usage
 
-Use the raw layer when the caller supplies the exact protocol key and value:
+Use the raw layer when the caller supplies the exact protocol item ID and value:
 
 ```rust
-use openkache_client_core::{ItemKey, ItemValue, RawClient, SetOptions};
+use openkache_client_core::{ItemId, ItemValue, RawClient, SetOptions};
 
 let client = RawClient::connect("cache.example.com:4433").await?;
-let key = ItemKey::from_bytes([0x42; 32]);
+let item_id = ItemId::from_bytes([0x42; 32]);
 let outcome = client
-    .set(key, ItemValue::new(b"value".to_vec()), SetOptions::new())
+    .set(item_id, ItemValue::new(b"value".to_vec()), SetOptions::new())
     .await?;
 ```
 
-`ItemKey::from_bytes` preserves a fixed array. `ItemKey::from_slice` validates
+`ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
 and copies a dynamic buffer. Neither hashes the supplied bytes. Use
-`DataProtectionKey::derive_item_key` or `DataProtection::item_key` for the
+`DataProtectionKey::derive_item_id` or `DataProtection::item_id` for the
 shared BLAKE3 derivation.
 
 `ValueCodec` stores its metadata inside the opaque value:
@@ -81,10 +81,10 @@ Robust body  = nonce[12] | AES-256-GCM-SIV ciphertext | tag[16]
 ```
 
 The encrypted serialization identifier and body are authenticated with the
-exact item key and container header. Neither the wire protocol nor the server
+exact item ID and container header. Neither the wire protocol nor the server
 parses this format.
 
-Use `ProtectedClient` when the core should derive the item key and transform
+Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
 
 ```rust
@@ -111,10 +111,11 @@ does not provide one.
 - `src/transport.rs` manages reusable stream lanes and backend-neutral
   deadlines.
 - `src/config.rs` provides public transport and TLS configuration wrappers.
-- `src/key.rs` handles exact item keys and data-protection keys.
+- `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
-- `src/value_envelope.rs` contains the legacy pre-v1 TypeScript codec envelope
+- `src/value_envelope.rs` contains the TypeScript codec envelope used by the
+  Node-API adapter
   pending replacement by a thin logical-value adapter.

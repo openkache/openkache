@@ -11,7 +11,7 @@ use std::time::Duration;
 pub use openkache_client_core::{
     Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
     DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
-    GetOutcome, ITEM_KEY_BYTES, ItemKey, ItemValue, Operation, PrivateKey, Result, RetryPolicy,
+    GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, Operation, PrivateKey, Result, RetryPolicy,
     ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]

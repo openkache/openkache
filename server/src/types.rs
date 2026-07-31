@@ -3,7 +3,7 @@
 /// Number of bytes in every server-derived storage key.
 pub const STORAGE_KEY_BYTES: usize = 32;
 
-/// Variable-length application value associated with an item key.
+/// Variable-length application value associated with an item ID.
 #[repr(transparent)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ItemValue(Vec<u8>);

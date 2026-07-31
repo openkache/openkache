@@ -43,10 +43,10 @@ available.
 ### Is end-to-end encryption mandatory?
 
 High-level Rust and TypeScript clients require a random 32-byte data protection
-master key. The shared client core derives HMAC-SHA-256 item keys and an
+master key. The shared client core derives HMAC-SHA-256 item IDs and an
 independent XChaCha20-Poly1305 value key. The server sees deterministic 32-byte
-item keys and encoded value sizes, but not application keys or value plaintext.
-The low-level raw API accepts exact item keys and encoded values for callers
+item IDs and encoded value sizes, but not application keys or value plaintext.
+The low-level raw API accepts exact item IDs and encoded values for callers
 that intentionally own those transformations.
 
 ### Can I use my own QUIC implementation?

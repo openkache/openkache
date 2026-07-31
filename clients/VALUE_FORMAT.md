@@ -180,8 +180,8 @@ Raw serialization has this form:
 ```
 
 An empty application byte string is valid and serializes as the single byte `00`. The formatted raw
-API still adds the value-format container. Only the exact-key, exact-value protocol client bypasses
-the format entirely.
+API still adds the value-format container. Only the exact-item-ID, exact-value protocol client
+bypasses the format entirely.
 
 ### Canonical JSON
 
@@ -283,8 +283,8 @@ The key SHOULD be unique to one application security domain. Clients that intent
 entries use the same key, but unrelated applications or environments SHOULD use different keys.
 Reusing a key across trust domains permits same-item ciphertext replay between those domains.
 
-The data protection key never leaves the client. Encrypted values use per-item keys so that nonce
-reuse and deterministic equality are scoped to one exact 32-byte item key.
+The data protection key never leaves the client. Encrypted values use per-item encryption keys so
+that nonce reuse and deterministic equality are scoped to one exact 32-byte item ID.
 
 All subkeys use the BLAKE3
 [derive-key mode](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf). Context
@@ -292,20 +292,20 @@ strings below are exact, case-sensitive UTF-8 bytes. Implementations MUST NOT ad
 lengths, or implementation-specific prefixes. Every `BLAKE3-DERIVE-KEY` and
 `BLAKE3-KEYED-HASH` operation below returns the first 32 bytes of BLAKE3's extendable output.
 
-### Protected item key
+### Protected item ID
 
-Formatted protected clients derive the exact 32-byte wire item key in the core:
+Formatted protected clients derive the exact 32-byte wire item ID in the core:
 
 ```text
-item_key_root =
+item_id_root =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache client item key root v1",
     material = data_protection_key[32]
   )
 
-item_key =
+item_id =
   BLAKE3-KEYED-HASH(
-    key   = item_key_root[32],
+    key   = item_id_root[32],
     input = application_key
   )
 ```
@@ -317,11 +317,11 @@ its bytes unchanged.
 
 The keyed hash accepts the exact application-key bytes without a length prefix because it receives
 one complete input byte string. Enabling, disabling, or rotating the data protection key changes
-the item key and makes entries written under the previous setting unreachable without an explicit
+the item ID and makes entries written under the previous setting unreachable without an explicit
 migration strategy.
 
-The low-level raw client accepts an exact caller-supplied item key and does not perform this
-derivation. An unprotected formatted primitive likewise accepts an exact 32-byte wire item key; it
+The low-level raw client accepts an exact caller-supplied item ID and does not perform this
+derivation. An unprotected formatted primitive likewise accepts an exact 32-byte wire item ID; it
 MUST NOT invent a separate unkeyed mapping from arbitrary application keys.
 
 ### Value root key
@@ -339,15 +339,15 @@ value_root_key =
 Per-item derivations use this fixed 64-byte material:
 
 ```text
-item_key_material = value_root_key[32] | item_key[32]
+item_id_material = value_root_key[32] | item_id[32]
 ```
 
-The item key is the exact wire item key, not the original application key. Because both components
+The item ID is the exact wire item ID, not the original application key. Because both components
 have fixed lengths, their concatenation is unambiguous.
 
 Derived secrets MUST be zeroized when their owning object is destroyed or the operation completes.
-Implementations SHOULD derive per-item keys on demand rather than retaining a high-cardinality key
-cache.
+Implementations SHOULD derive per-item encryption keys on demand rather than retaining a
+high-cardinality key cache.
 
 ## Associated data
 
@@ -356,7 +356,7 @@ Both encryption profiles authenticate the same canonical associated data:
 ```text
 aad =
   ascii("openkache/value-format/aad/v1")
-  | item_key[32]
+  | item_id[32]
   | encoded_version
   | format
 ```
@@ -364,12 +364,12 @@ aad =
 `encoded_version` is the exact canonical VU128 byte sequence stored in the container. For version
 `1`, it is `01`. `format` is the exact one-byte field stored after the version.
 
-The domain string is not stored and consumes no capacity. Authenticating the item key prevents a
+The domain string is not stored and consumes no capacity. Authenticating the item ID prevents a
 server or intermediary from moving a valid ciphertext to another cache item. Authenticating the
 header prevents changing the version or transform algorithms without detection.
 
 The associated data does not provide freshness. A server can replay an older valid container for
-the same item key. Applications that require rollback detection must serialize and validate their
+the same item ID. Applications that require rollback detection must serialize and validate their
 own monotonic version or other freshness data.
 
 ## Compact encryption
@@ -384,13 +384,13 @@ Derive the keys independently:
 compact_mac_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
-    material = item_key_material[64]
+    material = item_id_material[64]
   )
 
 compact_encryption_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
-    material = item_key_material[64]
+    material = item_id_material[64]
   )
 ```
 
@@ -401,7 +401,7 @@ compact_key = compact_mac_key[32] | compact_encryption_key[32]
 ```
 
 Pass the complete canonical `aad` byte string as exactly one RFC 5297 associated-data component.
-Do not split its domain, item-key, version, or format fields into separate S2V components, because
+Do not split its domain, item ID, version, or format fields into separate S2V components, because
 component boundaries affect the synthetic IV. Do not supply an optional nonce component. An empty,
 fixed, or all-zero nonce component is not equivalent to omitting that component; implementations
 MUST NOT use a nonce-requiring AEAD wrapper that cannot express RFC 5297 deterministic mode.
@@ -422,9 +422,10 @@ There is no random nonce. The synthetic IV is also the 16-byte authentication ta
 `1`, the complete fixed container overhead is exactly 18 bytes: one version byte, one format byte,
 and the synthetic IV. The encrypted serialization identifier remains part of the ciphertext.
 
-Compact encryption is deterministic. Under one per-item key, identical transformed plaintext and
-associated data produce identical stored bytes. Because every item has a different derived key,
-the server cannot compare value equality across different item keys, but it can observe whether
+Compact encryption is deterministic. Under one per-item encryption key, identical transformed
+plaintext and associated data produce identical stored bytes. Because every item has a different
+derived key,
+the server cannot compare value equality across different item IDs, but it can observe whether
 the complete value of one item repeats across writes.
 
 Compact encryption is appropriate only when that per-item equality leakage is acceptable.
@@ -434,13 +435,13 @@ Compact encryption is appropriate only when that per-item equality leakage is ac
 Encryption ID `2` is AES-256-GCM-SIV as specified by
 [RFC 8452](https://www.rfc-editor.org/rfc/rfc8452).
 
-Derive its per-item key:
+Derive its per-item encryption key:
 
 ```text
 robust_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-GCM-SIV key",
-    material = item_key_material[64]
+    material = item_id_material[64]
   )
 ```
 
@@ -464,8 +465,8 @@ container =
 For version `1`, the complete fixed container overhead is exactly 30 bytes: one version byte, one
 format byte, a 12-byte nonce, and a 16-byte tag.
 
-The nonce is public and MUST NOT be derived from only the item key, a timestamp, plaintext, or a
-process-local counter. Per-item key derivation limits the random-nonce collision domain to repeated
+The nonce is public and MUST NOT be derived from only the item ID, a timestamp, plaintext, or a
+process-local counter. Per-item ID derivation limits the random-nonce collision domain to repeated
 writes of one item. AES-GCM-SIV additionally prevents an accidental nonce repeat from causing the
 catastrophic failure associated with AES-GCM or ChaCha20-Poly1305. A repeated nonce under one key
 reveals whether the corresponding plaintext and associated data also repeat, and repetition
@@ -520,7 +521,7 @@ An encoder implements these steps:
 4. Apply Zstandard only when configured and beneficial; update the compression nibble to match the
    bytes actually selected.
 5. Encode version `1` canonically and construct the format byte.
-6. Construct the canonical associated data from the exact item key and header bytes.
+6. Construct the canonical associated data from the exact item ID and header bytes.
 7. Apply the selected encryption profile:
    - none: copy the transformed body;
    - Compact: derive both per-item AES-SIV keys and prepend the 16-byte synthetic IV;
@@ -540,11 +541,11 @@ A decoder implements these steps in order:
 2. Reject a version other than `1`.
 3. Read one format byte and reject unassigned compression or encryption identifiers.
 4. Reject an encryption identifier that violates the client's configured protection policy.
-5. Construct the canonical associated data from the item key and exact header bytes.
+5. Construct the canonical associated data from the item ID and exact header bytes.
 6. Validate the minimum encrypted body size before slicing:
    - Compact requires at least a 16-byte synthetic IV and one encrypted serialization-ID byte;
    - Robust requires a 12-byte nonce, a 16-byte tag, and one encrypted serialization-ID byte.
-7. Derive the selected per-item key or keys.
+7. Derive the selected per-item encryption key or keys.
 8. Authenticate and decrypt before decompression or serialization parsing.
 9. If compressed, validate one bounded Zstandard frame and decompress it.
 10. Parse one canonical serialization identifier from the transformed plaintext.
@@ -563,7 +564,7 @@ server opacity, and `SET` flags. This format begins with the exact opaque value
 slice carried by a protocol request or response; it does not add protocol
 fields.
 
-The low-level raw API sends exact item keys and value bytes without this
+The low-level raw API sends exact item IDs and value bytes without this
 container. It is an explicit escape hatch and does not claim compatibility with
 formatted APIs.
 

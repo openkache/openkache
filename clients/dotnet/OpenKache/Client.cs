@@ -114,16 +114,16 @@ public sealed class Client : IAsyncDisposable
     }
 
     /// <summary>
-    /// Retrieves the bytes stored for an exact binary key.
+    /// Retrieves the bytes stored for an exact binary item ID.
     /// </summary>
-    /// <returns>The stored bytes, or <see langword="null"/> when the key is absent.</returns>
+    /// <returns>The stored bytes, or <see langword="null"/> when the item ID is absent.</returns>
     public async ValueTask<byte[]?> GetAsync(
-        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> itemId,
         CancellationToken cancellationToken = default)
     {
         var response = await RequestAsync(
             Protocol.Opcode.Get,
-            key,
+            itemId,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken).ConfigureAwait(false);
         return response.Status switch
@@ -135,31 +135,31 @@ public sealed class Client : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stores exact bytes under an exact binary key.
+    /// Stores exact bytes under an exact binary item ID.
     /// </summary>
-    /// <returns>Whether the operation created or replaced the key.</returns>
+    /// <returns>Whether the operation created or replaced the item ID.</returns>
     public async ValueTask<SetOutcome> SetAsync(
-        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         CancellationToken cancellationToken = default)
     {
         return await SetAsync(
-            key,
+            itemId,
             value,
             DefaultSetOptions,
             cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Stores exact bytes under an exact binary key with optional expiration and an atomic
+    /// Stores exact bytes under an exact binary item ID with optional expiration and an atomic
     /// existence condition.
     /// </summary>
     /// <returns>
-    /// Whether the operation created, replaced, or did not store the key because its condition
+    /// Whether the operation created, replaced, or did not store the item ID because its condition
     /// failed.
     /// </returns>
     public async ValueTask<SetOutcome> SetAsync(
-        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         SetOptions options,
         CancellationToken cancellationToken = default)
@@ -168,7 +168,7 @@ public sealed class Client : IAsyncDisposable
         var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
         var response = await RequestAsync(
             Protocol.Opcode.Set,
-            key,
+            itemId,
             value,
             cancellationToken,
             options.Condition,
@@ -183,16 +183,16 @@ public sealed class Client : IAsyncDisposable
     }
 
     /// <summary>
-    /// Deletes an exact binary key.
+    /// Deletes an exact binary item ID.
     /// </summary>
-    /// <returns><see langword="true"/> when the key existed.</returns>
+    /// <returns><see langword="true"/> when the item ID existed.</returns>
     public async ValueTask<bool> DeleteAsync(
-        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> itemId,
         CancellationToken cancellationToken = default)
     {
         var response = await RequestAsync(
             Protocol.Opcode.Delete,
-            key,
+            itemId,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken).ConfigureAwait(false);
         return response.Status switch
@@ -265,7 +265,7 @@ public sealed class Client : IAsyncDisposable
 
     private async ValueTask<Protocol.Response> RequestAsync(
         Protocol.Opcode opcode,
-        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         CancellationToken cancellationToken,
         SetCondition setCondition = SetCondition.None,
@@ -276,7 +276,7 @@ public sealed class Client : IAsyncDisposable
             this);
         var frame = Protocol.EncodeRequest(
             opcode,
-            key.Span,
+            itemId.Span,
             value.Span,
             setCondition,
             ttlMilliseconds);
@@ -316,13 +316,6 @@ public sealed class Client : IAsyncDisposable
 
     private static byte[] DecodePlaintextValue(Protocol.Response response)
     {
-        if (response.ValueFlags != Protocol.ValueFlags.None)
-        {
-            throw new OpenKacheException(
-                "UNSUPPORTED_VALUE_ENCODING",
-                "The value is compressed or encrypted. This .NET client currently accepts plaintext values only.");
-        }
-
         return response.Payload;
     }
 

@@ -22,10 +22,10 @@ formats or protocol behavior.
 
 | Package | Path | Implementation |
 |---|---|---|
-| Shared core | [`core/`](core/) | Protocol v3 raw and protected engine; value format v1 implementation |
-| Rust | [`rust/`](rust/) | Protocol v3 end-user SDK; byte APIs use v1 Raw serialization |
-| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v3 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the legacy envelope |
-| C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v2 client |
+| Shared core | [`core/`](core/) | Protocol v1 raw and protected engine; value format v1 implementation |
+| Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the existing envelope |
+| C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
 | Python | `python/` | Package scaffold |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
@@ -40,9 +40,8 @@ connect to OpenKache or expose cache operations.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
 format v1. The core owns Raw and canonical JSON serialization, but
-language-native JSON adapters are not implemented yet. TypeScript's legacy
-logical-value envelope predates v1 and has no compatibility guarantee;
-migration status belongs in this table, while byte-level v1 requirements
+language-native JSON adapters are not implemented yet. TypeScript's logical
+value envelope is a package-level adapter detail; byte-level v1 requirements
 belong only in the value-format specification.
 
 ## Binding architecture
@@ -55,7 +54,7 @@ The shared layers have these responsibilities:
 - implemented language packages convert native values and configuration into
   core types, expose runtime-appropriate asynchronous APIs, and clean up native
   resources.
-- raw APIs accept exact protocol item keys and values and bypass formatted-value
+- raw APIs accept exact protocol item IDs and values and bypass formatted-value
   processing.
 
 Language adapters must not implement their own wire framing, retry semantics,
@@ -63,8 +62,8 @@ key derivation, compression, encryption, or value containers. Extend the shared
 core when a binding needs shared behavior.
 
 The managed .NET client predates this boundary. Do not extend its duplicated
-protocol v2 transport; replace it with a core-backed protocol v3 adapter when
-the protected .NET API is implemented.
+protocol v1 transport; replace it with a core-backed adapter when the protected
+.NET API is implemented.
 
 ## Scaffold commands and entry points
 

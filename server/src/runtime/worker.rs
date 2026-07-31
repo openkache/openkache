@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{ItemKey, SetOptions};
+use openkache_protocol::{ItemId, SetOptions};
 
 use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
 use crate::types::StoredItemValue;
@@ -85,15 +85,15 @@ pub(super) enum WorkerResponse {
 
 #[derive(Debug)]
 pub enum BenchmarkOperation {
-    Get(ItemKey),
-    Set(ItemKey, Vec<u8>),
-    Delete(ItemKey),
+    Get(ItemId),
+    Set(ItemId, Vec<u8>),
+    Delete(ItemId),
 }
 
 impl BenchmarkOperation {
-    pub(crate) fn key(&self) -> ItemKey {
+    pub(crate) fn item_id(&self) -> ItemId {
         match self {
-            Self::Get(key) | Self::Delete(key) | Self::Set(key, _) => *key,
+            Self::Get(item_id) | Self::Delete(item_id) | Self::Set(item_id, _) => *item_id,
         }
     }
 }

@@ -16,7 +16,7 @@ use crate::{
     LocalClient, SetCondition, SetOptions, SetOutcome,
 };
 
-const ABI_VERSION: u32 = 4;
+const ABI_VERSION: u32 = 1;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Clone, Copy)]
@@ -96,7 +96,7 @@ pub struct FfiClient {
 enum Command {
     Execute {
         operation: FfiOperation,
-        key: Vec<u8>,
+        application_key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
         response: SyncSender<FfiResult>,
@@ -190,7 +190,7 @@ impl FfiClient {
     fn execute(
         &self,
         operation: FfiOperation,
-        key: Vec<u8>,
+        application_key: Vec<u8>,
         value: Vec<u8>,
         set_options: SetOptions,
     ) -> FfiResult {
@@ -201,7 +201,7 @@ impl FfiClient {
         if let Err(error) = self.commands.send_deadline(
             Command::Execute {
                 operation,
-                key,
+                application_key,
                 value,
                 set_options,
                 response,
@@ -292,12 +292,18 @@ fn run_worker(
         match command {
             Command::Execute {
                 operation,
-                key,
+                application_key,
                 value,
                 set_options,
                 response,
             } => {
-                let result = runtime.block_on(execute(&client, operation, key, value, set_options));
+                let result = runtime.block_on(execute(
+                    &client,
+                    operation,
+                    application_key,
+                    value,
+                    set_options,
+                ));
                 let _ = response.send(result);
             }
             Command::Shutdown => break,
@@ -308,7 +314,7 @@ fn run_worker(
 async fn execute(
     client: &LocalClient,
     operation: FfiOperation,
-    key: Vec<u8>,
+    application_key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> FfiResult {
@@ -317,12 +323,12 @@ async fn execute(
             .ping()
             .await
             .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Get => client.get(&key).await.map(|value| match value {
+        FfiOperation::Get => client.get(&application_key).await.map(|value| match value {
             GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
             GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
         }),
         FfiOperation::Set => client
-            .set(&key, value)
+            .set(&application_key, value)
             .options(set_options)
             .await
             .map(|outcome| match outcome {
@@ -330,7 +336,7 @@ async fn execute(
                 SetOutcome::Replaced => FfiResult::success(FfiResultKind::Replaced, Vec::new()),
                 SetOutcome::NotStored => FfiResult::success(FfiResultKind::NotStored, Vec::new()),
             }),
-        FfiOperation::Delete => client.delete(&key).await.map(|deleted| {
+        FfiOperation::Delete => client.delete(&application_key).await.map(|deleted| {
             FfiResult::success(
                 match deleted {
                     DeleteOutcome::Deleted => FfiResultKind::Deleted,
@@ -425,14 +431,14 @@ pub unsafe extern "C" fn openkache_client_connect(
 /// # Safety
 ///
 /// `client` must be a live pointer returned by [`openkache_client_result_take_client`].
-/// Every non-empty key/value pointer pair must identify readable memory for this call. The client
-/// must not be freed until this call returns.
+/// Every non-empty application-key/value pointer pair must identify readable memory for this call,
+/// and the client must not be freed until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_execute(
     client: *const FfiClient,
     operation: u32,
-    key: *const u8,
-    key_length: usize,
+    application_key: *const u8,
+    application_key_length: usize,
     value: *const u8,
     value_length: usize,
     set_condition: u32,
@@ -445,7 +451,8 @@ pub unsafe extern "C" fn openkache_client_execute(
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_string())?
         };
-        let key = copy_bytes(key, key_length, "key")?;
+        let application_key =
+            copy_bytes(application_key, application_key_length, "application_key")?;
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
@@ -468,11 +475,15 @@ pub unsafe extern "C" fn openkache_client_execute(
             set_options = set_options.expires_after_millis(ttl_ms);
         }
         match operation {
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete if key.is_empty() => {
-                Err("key must not be empty".to_string())
+            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                if application_key.is_empty() =>
+            {
+                Err("application key must not be empty".to_string())
             }
-            FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync if !key.is_empty() => {
-                Err("operation does not accept a key".to_string())
+            FfiOperation::Ping | FfiOperation::Stats | FfiOperation::Sync
+                if !application_key.is_empty() =>
+            {
+                Err("operation does not accept an application key".to_string())
             }
             FfiOperation::Set if value.is_empty() => Err("SET value must not be empty".to_string()),
             FfiOperation::Ping
@@ -491,7 +502,7 @@ pub unsafe extern "C" fn openkache_client_execute(
             {
                 Err("SET options require a SET operation".to_string())
             }
-            _ => Ok(client.execute(operation, key, value, set_options)),
+            _ => Ok(client.execute(operation, application_key, value, set_options)),
         }
     }))
 }

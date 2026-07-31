@@ -1,7 +1,7 @@
 # OpenKache protocol
 
 `openkache-protocol` is the Rust implementation of the binary contract shared
-by OpenKache protocol v3 clients and servers.
+by OpenKache protocol v1 clients and servers.
 
 ## Purpose
 
@@ -52,9 +52,9 @@ variable-integer parsing.
 
 ## Implementation status
 
-The shared Rust client and server use protocol v3 through this crate.
+The shared Rust client and server use protocol v1 through this crate.
 Production durability guarantees for `SYNC` remain deployment and storage
-policy; protocol v3 specifies only when a successful response may be sent.
+policy; protocol v1 specifies only when a successful response may be sent.
 
 ## Configuration
 
