@@ -8,6 +8,7 @@ compile_error!("enable one CLI QUIC backend feature");
 fn main() {
     use clap::Parser;
 
+    let arguments = openkache_cli::Arguments::parse();
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -19,7 +20,7 @@ fn main() {
         eprintln!("ERR openkache-cli requires the io_uring runtime driver");
         std::process::exit(1);
     }
-    if let Err(error) = runtime.block_on(openkache_cli::run(openkache_cli::Arguments::parse())) {
+    if let Err(error) = runtime.block_on(openkache_cli::run(arguments)) {
         eprintln!("ERR {error}");
         std::process::exit(1);
     }
