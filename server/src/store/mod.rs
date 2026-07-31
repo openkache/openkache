@@ -155,14 +155,49 @@ impl DirectIoBufferPool {
 }
 
 pub(crate) async fn open_direct_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .create(true)
+    open_direct_file_with_flags(path, true, true, 0).await
+}
+
+async fn open_direct_file_with_flags(
+    path: &Path,
+    create: bool,
+    write: bool,
+    flags: i32,
+) -> std::io::Result<File> {
+    let file = OpenOptions::new()
+        .create(create)
         .truncate(false)
         .read(true)
-        .write(true)
-        .custom_flags(libc::O_DIRECT)
+        .write(write)
+        .custom_flags(flags | direct_io_open_flag())
         .open(path)
-        .await
+        .await?;
+    configure_direct_io(file.as_raw_fd())?;
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) const fn direct_io_open_flag() -> i32 {
+    libc::O_DIRECT
+}
+
+#[cfg(target_os = "macos")]
+pub(super) const fn direct_io_open_flag() -> i32 {
+    0
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn configure_direct_io(_file_descriptor: i32) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn configure_direct_io(file_descriptor: i32) -> std::io::Result<()> {
+    if unsafe { libc::fcntl(file_descriptor, libc::F_NOCACHE, 1) } == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) struct ResourceGuard {
@@ -381,12 +416,41 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
         unsafe { std::os::fd::BorrowedFd::borrow_raw(file.as_raw_fd()) }.try_clone_to_owned()?;
     compio::runtime::spawn_blocking(move || {
         reserve_with_transient_retry(
-            || unsafe { libc::posix_fallocate(file_descriptor.as_raw_fd(), offset, len) },
+            || reserve_file_range_once(file_descriptor.as_raw_fd(), offset, len),
             std::thread::sleep,
         )
     })
     .await
     .map_err(std::io::Error::from)?
+}
+
+#[cfg(target_os = "linux")]
+fn reserve_file_range_once(file_descriptor: i32, offset: i64, len: i64) -> i32 {
+    unsafe { libc::posix_fallocate(file_descriptor, offset, len) }
+}
+
+#[cfg(target_os = "macos")]
+fn reserve_file_range_once(file_descriptor: i32, _offset: i64, len: i64) -> i32 {
+    let mut reservation = libc::fstore_t {
+        fst_flags: libc::F_ALLOCATECONTIG,
+        fst_posmode: libc::F_PEOFPOSMODE,
+        fst_offset: 0,
+        fst_length: len,
+        fst_bytesalloc: 0,
+    };
+    let contiguous = unsafe { libc::fcntl(file_descriptor, libc::F_PREALLOCATE, &mut reservation) };
+    if contiguous == 0 {
+        return 0;
+    }
+
+    reservation.fst_flags = libc::F_ALLOCATEALL;
+    if unsafe { libc::fcntl(file_descriptor, libc::F_PREALLOCATE, &mut reservation) } == 0 {
+        0
+    } else {
+        std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO)
+    }
 }
 
 pub(crate) fn reserve_with_transient_retry(

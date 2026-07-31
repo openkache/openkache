@@ -1,0 +1,64 @@
+# OpenKache C client
+
+The C package is a small C17 ABI over the shared Rust client core. It provides
+protected `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC` operations while
+the core owns QUIC, TLS, retries, framing, compression, encryption, and the
+worker lifecycle.
+
+## Build
+
+Build the native ABI from the workspace with the `ffi` feature, then point
+CMake at the resulting library. CMake generates the Smithy C contract into
+the build tree; it is intentionally not checked into the source repository:
+
+```bash
+cargo build --manifest-path ../../Cargo.toml \
+  -p openkache-client-core --no-default-features --features ffi --release
+cmake -S . -B target/build \
+  -DOPENKACHE_CLIENT_NATIVE_LIBRARY_STATIC=/path/to/libopenkache_client_core.a
+cmake --build target/build
+```
+
+For a shared build, use
+`-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
+The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
+single-library builds. If Bun or the Smithy CLI is not available, pass a
+previously generated header with
+`-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
+
+Installable CMake and `pkg-config` metadata are produced when a native library
+is supplied:
+
+```bash
+cmake --install target/build --prefix /path/to/prefix
+pkg-config --cflags --libs openkache-client
+pkg-config --static --cflags --libs openkache-client-static
+```
+
+Downstream CMake projects can use the installed package with
+`find_package(OpenKacheClient CONFIG REQUIRED)` and
+`target_link_libraries(app PRIVATE OpenKache::ClientC)`. Select
+`OpenKache::ClientCShared` or `OpenKache::ClientCStatic` when the linkage mode
+must be explicit.
+
+## API
+
+`include/openkache/client.h` includes the canonical
+`clients/core/include/openkache/client_abi.h`, which defines an opaque client
+handle, result ownership rules, operation and outcome discriminators, and
+buffer-based protected and exact-item-ID calls. Result payloads are borrowed until
+`openkache_client_result_free`; copy them before freeing the result. A
+connected handle is transferred with `openkache_client_result_take_client` and
+released with `openkache_client_free`.
+
+`openkache_client_connect_ex` is the flat generated-binding entry point;
+`openkache_client_connect_with_options` is a named-field convenience wrapper.
+An empty trust buffer selects system roots. `openkache_client_execute` derives
+protected item IDs from application keys, while `openkache_client_execute_raw`
+requires a 32-byte item ID and sends opaque values unchanged.
+
+Operation and value-format constants in the generated
+`openkache/smithy_contract.h` are sourced from the canonical Smithy model at
+build/package time. C and C++ adapters therefore share the same operation
+numbers, limits, and value-format identifiers without checking generated files
+into the repository.

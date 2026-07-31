@@ -19,10 +19,12 @@ The main API layers are:
 - `ValueCodec`, which owns Raw and RFC 8785 JSON serialization, optional
   Zstandard compression, and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
-  adapters.
+  adapters;
+- the optional `ffi` feature, which exports the stable C ABI used by C, C++,
+  ctypes, and other synchronous native adapters.
 
-The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's native
-adapter depends on this core directly.
+The ergonomic Rust SDK lives in [`../rust`](../rust). TypeScript's and
+Python's native adapters depend on this core directly.
 
 ## Related documentation
 
@@ -46,8 +48,20 @@ From `clients/core`:
 cargo build
 cargo check --no-default-features --features quic-compio
 cargo check --no-default-features --features quic-quinn
+cargo check --no-default-features --features ffi
 cargo fmt --check
 ```
+
+The `ffi` feature builds a dedicated Compio worker around
+`LocalProtectedClient`. It requires the platform's io_uring driver and exports
+`openkache_client_*` symbols from the native library crate outputs. The ABI
+supports protected application-key calls, exact-item-ID calls, mutual TLS,
+PEM/DER or system trust, compression, both value-encryption profiles, retries,
+reconnect, and bounded request lanes. The C/C++ package build generates the
+canonical Smithy-derived `openkache/smithy_contract.h` into its build or
+release output; it is not checked into the source tree. Reusable ABI
+declarations are in `include/openkache/client_abi.h` (with the
+`include/openkache_client.h` compatibility include).
 
 ## Usage
 
@@ -114,6 +128,8 @@ does not provide one.
 - `src/key.rs` handles exact item IDs and data-protection keys.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
+- `src/ffi.rs` provides the optional C ABI without duplicating protocol logic
+  in each language adapter.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
 - `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope

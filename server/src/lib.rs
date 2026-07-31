@@ -3,7 +3,11 @@
 //! [`Result`], config types, [`Command`], and runtime items.
 
 #![cfg_attr(
-    all(target_arch = "aarch64", not(feature = "force-scalar")),
+    all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        not(feature = "force-scalar")
+    ),
     feature(stdarch_aarch64_sve)
 )]
 
@@ -32,6 +36,7 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+pub mod platform;
 pub mod resp;
 pub mod server;
 mod transport;
@@ -48,8 +53,9 @@ mod config;
 pub use config::{
     AppConfig, BucketSelectionPolicy, Config, IoUringConfig, NetworkConfig, QuicBackend,
     QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, TlsConfig,
-    allowed_cpu_ids, bits_for_count, expand_thread_pattern,
+    bits_for_count, expand_thread_pattern,
 };
+pub use platform::allowed_cpu_ids;
 
 pub(crate) mod sizing;
 pub use sizing::{SizingPlan, SizingProfile, SizingRequest};

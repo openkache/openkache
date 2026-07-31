@@ -20,6 +20,7 @@
   },
   "files": [
     "dist",
+    "target/native/openkache-client.darwin-arm64.node",
     "target/native/openkache-client.linux-arm64-gnu.node",
     "target/native/openkache-client.linux-x64-gnu.node",
     "README.md"

@@ -19,5 +19,12 @@ jobs:
 
       - uses: ./.github/actions/setup-smithy-codegen
 
+      - name: Generate Python Smithy contract
+        working-directory: clients/python
+        run: OPENKACHE_GENERATION_TARGET=python ../../protocol/generate.ts
+
+      - name: Check Python package sources
+        run: python -m compileall clients/python/src
+
       - name: Check Rust build
         run: cargo check --locked

@@ -1,0 +1,19 @@
+[package]
+name = "openkache-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Command-line client for the OpenKache cache server"
+license = "Apache-2.0"
+
+[features]
+default = ["quic-compio"]
+quic-compio = ["dep:compio", "openkache-client/quic-compio"]
+quic-quinn = ["dep:tokio", "openkache-client/quic-quinn"]
+
+[dependencies]
+base64 = "*"
+clap = { version = "*", features = ["derive", "env"] }
+compio = { version = "*", default-features = false, features = ["io-uring", "runtime", "time"], optional = true }
+openkache-client = { path = "../rust", default-features = false }
+thiserror = "*"
+tokio = { version = "*", features = ["macros", "rt-multi-thread"], optional = true }
