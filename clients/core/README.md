@@ -115,6 +115,8 @@ does not provide one.
 - `src/protection.rs` handles application-key and value transformations.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
-  encryption.
+  encryption; its wire identifiers, layout, key sizes, and KDF/AAD contexts
+  come from the Smithy-generated protocol contract.
 - `src/value_envelope.rs` contains the legacy pre-v1 TypeScript codec envelope
-  pending replacement by a thin logical-value adapter.
+  and consumes its Smithy-generated magic and metadata limits pending
+  replacement by a thin logical-value adapter.

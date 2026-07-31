@@ -6,7 +6,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::{Error, ITEM_KEY_BYTES, Result};
 
-pub(crate) const PROTECTION_KEY_BYTES: usize = 32;
+pub(crate) const PROTECTION_KEY_BYTES: usize =
+    openkache_protocol::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
 /// Bytes in an application-managed data protection key.
 pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
@@ -80,10 +81,14 @@ pub struct DataProtectionKey {
 impl DataProtectionKey {
     /// Creates a data protection key from exact random bytes.
     pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
-        let item_key_root =
-            blake3::derive_key("OpenKache client item key root v1", bytes.as_slice());
-        let value_root_key =
-            blake3::derive_key("OpenKache value format v1 root key", bytes.as_slice());
+        let item_key_root = blake3::derive_key(
+            openkache_protocol::VALUE_FORMAT_ITEM_KEY_ROOT_CONTEXT,
+            bytes.as_slice(),
+        );
+        let value_root_key = blake3::derive_key(
+            openkache_protocol::VALUE_FORMAT_VALUE_ROOT_CONTEXT,
+            bytes.as_slice(),
+        );
         Self {
             master_key: bytes,
             item_key_root,

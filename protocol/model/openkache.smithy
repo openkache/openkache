@@ -17,19 +17,23 @@ structure wireContract {
     v3: WireV3
 }
 
+/// Cross-language v1 value container and protection contract.
 @trait(selector: "service")
 structure valueFormat {
     @required
     version: Integer
 
     @required
-    maxEncodingBytes: Integer
+    maxVu128Bytes: Integer
 
     @required
-    maxTypeNameBytes: Integer
+    formatByteBytes: Integer
 
     @required
-    jsonEncoding: String
+    formatCompressionMask: Byte
+
+    @required
+    formatEncryptionShift: Byte
 
     @required
     serializationRaw: Byte
@@ -51,6 +55,52 @@ structure valueFormat {
 
     @required
     encryptionRobust: Byte
+
+    @required
+    compactSyntheticIvBytes: Integer
+
+    @required
+    robustNonceBytes: Integer
+
+    @required
+    robustTagBytes: Integer
+
+    @required
+    dataProtectionKeyBytes: Integer
+
+    @required
+    itemKeyRootContext: String
+
+    @required
+    aadDomain: String
+
+    @required
+    valueRootContext: String
+
+    @required
+    compactMacContext: String
+
+    @required
+    compactEncryptionContext: String
+
+    @required
+    robustContext: String
+}
+
+/// Legacy pre-v1 metadata envelope retained for the TypeScript adapter migration.
+@trait(selector: "service")
+structure valueEnvelope {
+    @required
+    magicAndVersionHex: String
+
+    @required
+    maxEncodingBytes: Integer
+
+    @required
+    maxTypeNameBytes: Integer
+
+    @required
+    jsonEncoding: String
 }
 
 structure WireV2 {
@@ -147,16 +197,33 @@ structure wireStatus {
 )
 @valueFormat(
     version: 1,
-    maxEncodingBytes: 64,
-    maxTypeNameBytes: 65535,
-    jsonEncoding: "json",
+    maxVu128Bytes: 17,
+    formatByteBytes: 1,
+    formatCompressionMask: 15,
+    formatEncryptionShift: 4,
     serializationRaw: 0,
     serializationJson: 1,
     compressionNone: 0,
     compressionZstandard: 1,
     encryptionNone: 0,
     encryptionCompact: 1,
-    encryptionRobust: 2
+    encryptionRobust: 2,
+    compactSyntheticIvBytes: 16,
+    robustNonceBytes: 12,
+    robustTagBytes: 16,
+    dataProtectionKeyBytes: 32,
+    itemKeyRootContext: "OpenKache client item key root v1",
+    aadDomain: "openkache/value-format/aad/v1",
+    valueRootContext: "OpenKache value format v1 root key",
+    compactMacContext: "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
+    compactEncryptionContext: "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
+    robustContext: "OpenKache value format v1 AES-256-GCM-SIV key"
+)
+@valueEnvelope(
+    magicAndVersionHex: "4f4b5601",
+    maxEncodingBytes: 64,
+    maxTypeNameBytes: 65535,
+    jsonEncoding: "json"
 )
 service OpenKache {
     version: "3"

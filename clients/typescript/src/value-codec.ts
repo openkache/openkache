@@ -3,15 +3,16 @@
  */
 
 import {
-  SMITHY_VALUE_JSON_ENCODING,
-  SMITHY_VALUE_MAX_ENCODING_BYTES,
-  SMITHY_VALUE_MAX_TYPE_NAME_BYTES,
-} from "./generated_local/smithy-value-format.js"
+  SMITHY_VALUE_ENVELOPE_JSON_ENCODING,
+  SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES,
+  SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES,
+} from "./generated_local/smithy-value-envelope.js"
 
-const ENCODING_PATTERN = new RegExp(
-  `^[a-z][a-z0-9.-]{0,${SMITHY_VALUE_MAX_ENCODING_BYTES - 1}}$`,
+// Local early validation for the legacy metadata envelope; the Rust core remains authoritative.
+const VALUE_ENVELOPE_ENCODING_PATTERN = new RegExp(
+  `^[a-z][a-z0-9.-]{0,${SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES - 1}}$`,
 )
-const JSON_ENCODING = SMITHY_VALUE_JSON_ENCODING
+const JSON_ENCODING = SMITHY_VALUE_ENVELOPE_JSON_ENCODING
 const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
@@ -275,16 +276,16 @@ function validate_json_container(
 }
 
 function validate_encoding(encoding: string): void {
-  if (!ENCODING_PATTERN.test(encoding)) {
+  if (!VALUE_ENVELOPE_ENCODING_PATTERN.test(encoding)) {
     throw new Error(`invalid value encoding ${JSON.stringify(encoding)}`)
   }
 }
 
 function validate_type_name(type_name: string): void {
   const byte_length = TEXT_ENCODER.encode(type_name).byteLength
-  if (byte_length > SMITHY_VALUE_MAX_TYPE_NAME_BYTES) {
+  if (byte_length > SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES) {
     throw new Error(
-      `value type name contains ${byte_length} bytes, maximum is ${SMITHY_VALUE_MAX_TYPE_NAME_BYTES}`,
+      `value type name contains ${byte_length} bytes, maximum is ${SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES}`,
     )
   }
 }

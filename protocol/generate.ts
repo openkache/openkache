@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 /** Generates language-specific wire values from the canonical Smithy contract. */
 
-import { mkdirSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
+import { basename, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 
 type Json_Object = Readonly<Record<string, unknown>>
@@ -42,19 +42,38 @@ export interface Wire_V3_Contract {
   readonly set_if_present_flag: number
 }
 
-/** Cross-language value-format identifiers and envelope limits. */
+/** Cross-language value-format wire layout, identifiers, and cryptographic metadata. */
 export interface Value_Format_Contract {
+  readonly aad_domain: string
+  readonly compact_encryption_context: string
+  readonly compact_mac_context: string
+  readonly compact_synthetic_iv_bytes: number
   readonly compression_none: number
   readonly compression_zstandard: number
+  readonly data_protection_key_bytes: number
   readonly encryption_compact: number
   readonly encryption_none: number
   readonly encryption_robust: number
-  readonly json_encoding: string
-  readonly max_encoding_bytes: number
-  readonly max_type_name_bytes: number
+  readonly format_byte_bytes: number
+  readonly format_compression_mask: number
+  readonly format_encryption_shift: number
+  readonly item_key_root_context: string
+  readonly robust_context: string
+  readonly robust_nonce_bytes: number
+  readonly robust_tag_bytes: number
   readonly serialization_json: number
   readonly serialization_raw: number
+  readonly value_root_context: string
+  readonly max_vu128_bytes: number
   readonly version: number
+}
+
+/** Legacy metadata envelope retained for the TypeScript adapter migration. */
+export interface Value_Envelope_Contract {
+  readonly json_encoding: string
+  readonly magic_and_version_hex: string
+  readonly max_encoding_bytes: number
+  readonly max_type_name_bytes: number
 }
 
 type Api_Type_Kind = "blob" | "boolean" | "enum" | "long" | "string"
@@ -111,6 +130,7 @@ export interface Wire_Contract {
   readonly max_value_bytes: number
   readonly opcodes: readonly Wire_Entry[]
   readonly statuses: readonly Wire_Entry[]
+  readonly value_envelope: Value_Envelope_Contract
   readonly value_format: Value_Format_Contract
   readonly v2: Wire_V2_Contract
   readonly v3: Wire_V3_Contract
@@ -125,6 +145,7 @@ const WIRE_CONTRACT_TRAIT_ID = "openkache.protocol#wireContract"
 const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
 const VALUE_FORMAT_TRAIT_ID = "openkache.protocol#valueFormat"
+const VALUE_ENVELOPE_TRAIT_ID = "openkache.protocol#valueEnvelope"
 const GENERATED_OUTPUTS = {
   csharp_api: join(
     PUBLIC_ROOT,
@@ -145,6 +166,10 @@ const GENERATED_OUTPUTS = {
   typescript_value_format: join(
     PUBLIC_ROOT,
     "clients/typescript/src/generated_local/smithy-value-format.ts",
+  ),
+  typescript_value_envelope: join(
+    PUBLIC_ROOT,
+    "clients/typescript/src/generated_local/smithy-value-envelope.ts",
   ),
 } as const
 
@@ -458,6 +483,23 @@ function wire_v3_contract(value: unknown): Wire_V3_Contract {
 function value_format_contract(value: unknown): Value_Format_Contract {
   const contract = object_value(value, VALUE_FORMAT_TRAIT_ID)
   const values = {
+    aad_domain: string_member(contract, "aadDomain", VALUE_FORMAT_TRAIT_ID),
+    compact_encryption_context: string_member(
+      contract,
+      "compactEncryptionContext",
+      VALUE_FORMAT_TRAIT_ID,
+    ),
+    compact_mac_context: string_member(
+      contract,
+      "compactMacContext",
+      VALUE_FORMAT_TRAIT_ID,
+    ),
+    compact_synthetic_iv_bytes: integer_member(
+      contract,
+      "compactSyntheticIvBytes",
+      VALUE_FORMAT_TRAIT_ID,
+      1,
+    ),
     compression_none: integer_member(contract, "compressionNone", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
     compression_zstandard: integer_member(
       contract,
@@ -465,6 +507,12 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       VALUE_FORMAT_TRAIT_ID,
       0,
       0xff,
+    ),
+    data_protection_key_bytes: integer_member(
+      contract,
+      "dataProtectionKeyBytes",
+      VALUE_FORMAT_TRAIT_ID,
+      1,
     ),
     encryption_compact: integer_member(
       contract,
@@ -481,20 +529,44 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       0xff,
     ),
-    json_encoding: string_member(contract, "jsonEncoding", VALUE_FORMAT_TRAIT_ID),
-    max_encoding_bytes: integer_member(
+    format_byte_bytes: integer_member(
       contract,
-      "maxEncodingBytes",
+      "formatByteBytes",
       VALUE_FORMAT_TRAIT_ID,
       1,
-      0xffff,
+      1,
     ),
-    max_type_name_bytes: integer_member(
+    format_compression_mask: integer_member(
       contract,
-      "maxTypeNameBytes",
+      "formatCompressionMask",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    format_encryption_shift: integer_member(
+      contract,
+      "formatEncryptionShift",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      7,
+    ),
+    item_key_root_context: string_member(
+      contract,
+      "itemKeyRootContext",
+      VALUE_FORMAT_TRAIT_ID,
+    ),
+    robust_context: string_member(contract, "robustContext", VALUE_FORMAT_TRAIT_ID),
+    robust_nonce_bytes: integer_member(
+      contract,
+      "robustNonceBytes",
       VALUE_FORMAT_TRAIT_ID,
       1,
-      0xffff,
+    ),
+    robust_tag_bytes: integer_member(
+      contract,
+      "robustTagBytes",
+      VALUE_FORMAT_TRAIT_ID,
+      1,
     ),
     serialization_json: integer_member(
       contract,
@@ -510,8 +582,63 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       0xff,
     ),
-    version: integer_member(contract, "version", VALUE_FORMAT_TRAIT_ID, 1, 0xffff),
+    value_root_context: string_member(
+      contract,
+      "valueRootContext",
+      VALUE_FORMAT_TRAIT_ID,
+    ),
+    version: integer_member(contract, "version", VALUE_FORMAT_TRAIT_ID, 1),
+    max_vu128_bytes: integer_member(
+      contract,
+      "maxVu128Bytes",
+      VALUE_FORMAT_TRAIT_ID,
+      17,
+      17,
+    ),
   } satisfies Value_Format_Contract
+
+  for (const [member, actual, expected] of [
+    ["compactSyntheticIvBytes", values.compact_synthetic_iv_bytes, 16],
+    ["robustNonceBytes", values.robust_nonce_bytes, 12],
+    ["robustTagBytes", values.robust_tag_bytes, 16],
+    ["dataProtectionKeyBytes", values.data_protection_key_bytes, 32],
+  ] as const) {
+    if (actual !== expected) {
+      throw new Error(
+        `${VALUE_FORMAT_TRAIT_ID}.${member} must be ${expected} for the current core implementation, got ${actual}`,
+      )
+    }
+  }
+  if (values.format_compression_mask !== 0x0f) {
+    throw new Error(
+      "value format compression mask must cover exactly the low four format bits",
+    )
+  }
+  if (values.format_encryption_shift !== 4) {
+    throw new Error("value format encryption shift must be exactly four bits")
+  }
+  const format_encryption_mask =
+    values.format_compression_mask << values.format_encryption_shift
+  if (format_encryption_mask !== 0xf0) {
+    throw new Error("value format encryption mask must cover exactly the high four format bits")
+  }
+  const version_bytes = encode_vu128(values.version)
+  if (version_bytes.length > values.max_vu128_bytes) {
+    throw new Error(
+      `value format version encodes to ${version_bytes.length} bytes, exceeding maxVu128Bytes ${values.max_vu128_bytes}`,
+    )
+  }
+  for (const [kind, value] of [
+    ["compression", values.compression_none],
+    ["compression", values.compression_zstandard],
+    ["encryption", values.encryption_none],
+    ["encryption", values.encryption_compact],
+    ["encryption", values.encryption_robust],
+  ] as const) {
+    if (value > values.format_compression_mask) {
+      throw new Error(`${kind} identifier ${value} does not fit in a format nibble`)
+    }
+  }
 
   unique_wire_values(
     [
@@ -538,6 +665,72 @@ function value_format_contract(value: unknown): Value_Format_Contract {
   return values
 }
 
+function value_envelope_contract(value: unknown): Value_Envelope_Contract {
+  const contract = object_value(value, VALUE_ENVELOPE_TRAIT_ID)
+  const magic_and_version_hex = string_member(
+    contract,
+    "magicAndVersionHex",
+    VALUE_ENVELOPE_TRAIT_ID,
+  ).toLowerCase()
+  if (
+    magic_and_version_hex.length === 0 ||
+    magic_and_version_hex.length % 2 !== 0 ||
+    magic_and_version_hex.length !== 8 ||
+    !/^[0-9a-f]+$/.test(magic_and_version_hex)
+  ) {
+    throw new Error(
+      "openkache.protocol#valueEnvelope.magicAndVersionHex must contain exactly four bytes of hexadecimal digits",
+    )
+  }
+  const max_encoding_bytes = integer_member(
+    contract,
+    "maxEncodingBytes",
+    VALUE_ENVELOPE_TRAIT_ID,
+    1,
+    0xffff,
+  )
+  const json_encoding = string_member(
+    contract,
+    "jsonEncoding",
+    VALUE_ENVELOPE_TRAIT_ID,
+  )
+  if (!valid_encoding_identifier(json_encoding, max_encoding_bytes)) {
+    throw new Error(
+      `${VALUE_ENVELOPE_TRAIT_ID}.jsonEncoding must match the portable lowercase encoding identifier grammar and fit maxEncodingBytes`,
+    )
+  }
+  return {
+    json_encoding,
+    magic_and_version_hex,
+    max_encoding_bytes,
+    max_type_name_bytes: integer_member(
+      contract,
+      "maxTypeNameBytes",
+      VALUE_ENVELOPE_TRAIT_ID,
+      1,
+      0xffff,
+    ),
+  }
+}
+
+function valid_encoding_identifier(encoding: string, maximum_bytes: number): boolean {
+  const bytes = new TextEncoder().encode(encoding)
+  return (
+    bytes.length >= 1 &&
+    bytes.length <= maximum_bytes &&
+    bytes[0] !== undefined &&
+    bytes[0] >= 0x61 &&
+    bytes[0] <= 0x7a &&
+    bytes.slice(1).every(
+      (byte) =>
+        (byte >= 0x61 && byte <= 0x7a) ||
+        (byte >= 0x30 && byte <= 0x39) ||
+        byte === 0x2e ||
+        byte === 0x2d,
+    )
+  )
+}
+
 /** Extracts and validates the generator-facing contract from a Smithy JSON AST.
  *
  * @param ast - Unknown JSON value emitted by `smithy ast`.
@@ -556,6 +749,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
   const value_format_trait = trait_value(
     service,
     VALUE_FORMAT_TRAIT_ID,
+    `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
+  )
+  const value_envelope_trait = trait_value(
+    service,
+    VALUE_ENVELOPE_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
 
@@ -614,6 +812,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
+    value_envelope: value_envelope_contract(value_envelope_trait),
     value_format: value_format_contract(value_format_trait),
     v2: wire_v2_contract(contract_trait.v2),
     v3: wire_v3_contract(contract_trait.v3),
@@ -626,6 +825,115 @@ function formatted_decimal(value: number): string {
 
 function formatted_byte(value: number): string {
   return `0x${value.toString(16).padStart(2, "0")}`
+}
+
+function encode_vu128(value: number): readonly number[] {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`cannot VU128-encode invalid integer ${value}`)
+  }
+  let encoded = BigInt(value)
+  if (encoded < 0x80n) return [Number(encoded)]
+  if (encoded < 0x1000_0000n) {
+    if (encoded < 0x4000n) {
+      encoded <<= 2n
+      return [
+        0x80 | ((Number(encoded) & 0xff) >> 2),
+        Number(encoded >> 8n) & 0xff,
+      ]
+    }
+    if (encoded < 0x20_0000n) {
+      encoded <<= 3n
+      return [
+        0xc0 | ((Number(encoded) & 0xff) >> 3),
+        Number(encoded >> 8n) & 0xff,
+        Number(encoded >> 16n) & 0xff,
+      ]
+    }
+    encoded <<= 4n
+    return [
+      0xe0 | ((Number(encoded) & 0xff) >> 4),
+      Number(encoded >> 8n) & 0xff,
+      Number(encoded >> 16n) & 0xff,
+      Number(encoded >> 24n) & 0xff,
+    ]
+  }
+
+  const bytes: number[] = []
+  let remaining = encoded
+  while (remaining > 0n) {
+    bytes.push(Number(remaining & 0xffn))
+    remaining >>= 8n
+  }
+  const length = bytes.length
+  if (length < 4 || length > 16) {
+    throw new Error(`cannot VU128-encode integer ${value}`)
+  }
+  return [
+    0xf0 | (length - 1),
+    ...bytes,
+  ]
+}
+
+function bytes_from_hex(value: string, location: string): readonly number[] {
+  const bytes: number[] = []
+  for (let index = 0; index < value.length; index += 2) {
+    const pair = value.slice(index, index + 2)
+    if (!/^[0-9a-f]{2}$/i.test(pair)) {
+      throw new Error(`${location} contains invalid hexadecimal`)
+    }
+    const byte = Number.parseInt(pair, 16)
+    bytes.push(byte)
+  }
+  return bytes
+}
+
+function rust_string_literal(value: string): string {
+  let literal = '"'
+  for (const character of value) {
+    const code_point = character.codePointAt(0)
+    if (code_point === undefined) continue
+    switch (character) {
+      case "\\":
+        literal += "\\\\"
+        break
+      case '"':
+        literal += '\\"'
+        break
+      case "\n":
+        literal += "\\n"
+        break
+      case "\r":
+        literal += "\\r"
+        break
+      case "\t":
+        literal += "\\t"
+        break
+      default:
+        if (code_point >= 0x20 && code_point <= 0x7e) {
+          literal += character
+        } else {
+          literal += `\\u{${code_point.toString(16)}}`
+        }
+    }
+  }
+  return `${literal}"`
+}
+
+function rust_byte_string_literal(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let literal = 'b"'
+  for (const byte of bytes) {
+    if (byte >= 0x20 && byte <= 0x7e && byte !== 0x22 && byte !== 0x5c) {
+      literal += String.fromCharCode(byte)
+    } else {
+      literal += `\\x${byte.toString(16).padStart(2, "0")}`
+    }
+  }
+  return `${literal}"`
+}
+
+function rust_byte_array_literal(bytes: readonly number[]): string {
+  return `[${bytes.map(formatted_byte).join(", ")}]`
 }
 
 function snake_case(identifier: string): string {
@@ -671,10 +979,17 @@ ${variants}
  * @returns Deterministic Rust source with a trailing newline.
  */
 export function render_rust(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const value_version_bytes = encode_vu128(value.version)
+  const envelope = contract.value_envelope
+  const envelope_magic = bytes_from_hex(
+    envelope.magic_and_version_hex,
+    "value envelope magic",
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 3.
-pub const ALPN: &[u8] = b"${contract.v3.alpn}";
+pub const ALPN: &[u8] = ${rust_byte_string_literal(contract.v3.alpn)};
 /// Bytes before the variable-length request lengths.
 pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.request_fixed_bytes)};
 /// Bytes before the variable-length response payload length.
@@ -685,6 +1000,62 @@ pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v3.max_varuint
 pub const ITEM_KEY_BYTES: usize = ${formatted_decimal(contract.item_key_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v3.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
+
+/// Current client-owned value-format version.
+pub const VALUE_FORMAT_VERSION: u128 = ${formatted_decimal(value.version)};
+/// Canonical VU128 bytes for the current value-format version.
+pub const VALUE_FORMAT_VERSION_BYTES: &[u8] = &[${value_version_bytes.map(formatted_byte).join(", ")}];
+/// Maximum bytes accepted for a canonical value-format VU128.
+pub const VALUE_FORMAT_MAX_VU128_BYTES: usize = ${formatted_decimal(value.max_vu128_bytes)};
+/// Bytes occupied by the value-format transform byte.
+pub const VALUE_FORMAT_FORMAT_BYTE_BYTES: usize = ${formatted_decimal(value.format_byte_bytes)};
+/// Low-nibble mask for the value-format compression identifier.
+pub const VALUE_FORMAT_COMPRESSION_MASK: u8 = ${formatted_byte(value.format_compression_mask)};
+/// Number of bits to shift the value-format encryption identifier.
+pub const VALUE_FORMAT_ENCRYPTION_SHIFT: u8 = ${formatted_byte(value.format_encryption_shift)};
+/// Raw serialized-value identifier.
+pub const VALUE_FORMAT_SERIALIZATION_RAW: u8 = ${formatted_byte(value.serialization_raw)};
+/// Canonical JSON serialized-value identifier.
+pub const VALUE_FORMAT_SERIALIZATION_JSON: u8 = ${formatted_byte(value.serialization_json)};
+/// Uncompressed value-format identifier.
+pub const VALUE_FORMAT_COMPRESSION_NONE: u8 = ${formatted_byte(value.compression_none)};
+/// Zstandard value-format identifier.
+pub const VALUE_FORMAT_COMPRESSION_ZSTANDARD: u8 = ${formatted_byte(value.compression_zstandard)};
+/// Unencrypted value-format identifier.
+pub const VALUE_FORMAT_ENCRYPTION_NONE: u8 = ${formatted_byte(value.encryption_none)};
+/// Compact AES-SIV value-format identifier.
+pub const VALUE_FORMAT_ENCRYPTION_COMPACT: u8 = ${formatted_byte(value.encryption_compact)};
+/// Robust AES-GCM-SIV value-format identifier.
+pub const VALUE_FORMAT_ENCRYPTION_ROBUST: u8 = ${formatted_byte(value.encryption_robust)};
+/// Compact AES-SIV synthetic-IV and authentication-tag size.
+pub const VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES: usize = ${formatted_decimal(value.compact_synthetic_iv_bytes)};
+/// Robust AES-GCM-SIV nonce size.
+pub const VALUE_FORMAT_ROBUST_NONCE_BYTES: usize = ${formatted_decimal(value.robust_nonce_bytes)};
+/// Robust AES-GCM-SIV authentication-tag size.
+pub const VALUE_FORMAT_ROBUST_TAG_BYTES: usize = ${formatted_decimal(value.robust_tag_bytes)};
+/// Application-managed data-protection key size.
+pub const VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES: usize = ${formatted_decimal(value.data_protection_key_bytes)};
+/// BLAKE3 protected-item-key root derivation context.
+pub const VALUE_FORMAT_ITEM_KEY_ROOT_CONTEXT: &str = ${rust_string_literal(value.item_key_root_context)};
+/// Associated-data domain separator.
+pub const VALUE_FORMAT_AAD_DOMAIN: &[u8] = ${rust_byte_string_literal(value.aad_domain)};
+/// BLAKE3 value-root derivation context.
+pub const VALUE_FORMAT_VALUE_ROOT_CONTEXT: &str = ${rust_string_literal(value.value_root_context)};
+/// BLAKE3 Compact AES-SIV MAC-key derivation context.
+pub const VALUE_FORMAT_COMPACT_MAC_CONTEXT: &str = ${rust_string_literal(value.compact_mac_context)};
+/// BLAKE3 Compact AES-SIV encryption-key derivation context.
+pub const VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT: &str = ${rust_string_literal(value.compact_encryption_context)};
+/// BLAKE3 Robust AES-GCM-SIV key derivation context.
+pub const VALUE_FORMAT_ROBUST_CONTEXT: &str = ${rust_string_literal(value.robust_context)};
+
+/// Legacy metadata-envelope magic and version.
+pub const VALUE_ENVELOPE_MAGIC_AND_VERSION: [u8; ${envelope_magic.length}] = ${rust_byte_array_literal(envelope_magic)};
+/// Maximum UTF-8 byte length of a legacy metadata-envelope encoding identifier.
+pub const VALUE_ENVELOPE_MAX_ENCODING_BYTES: usize = ${formatted_decimal(envelope.max_encoding_bytes)};
+/// Maximum UTF-8 byte length of a legacy metadata-envelope logical type name.
+pub const VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES: usize = ${formatted_decimal(envelope.max_type_name_bytes)};
+/// Built-in canonical JSON codec identifier used by the legacy envelope adapter.
+pub const VALUE_ENVELOPE_JSON_ENCODING: &str = ${rust_string_literal(envelope.json_encoding)};
 
 const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v3.set_ttl_flag)};
 const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_absent_flag)};
@@ -712,6 +1083,13 @@ ${variants}
  * @returns Deterministic C# source with a trailing newline.
  */
 export function render_csharp(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const version_bytes = encode_vu128(value.version)
+  const envelope = contract.value_envelope
+  const envelope_magic = bytes_from_hex(
+    envelope.magic_and_version_hex,
+    "value envelope magic",
+  )
   return `// SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -721,7 +1099,7 @@ namespace OpenKache;
 
 internal static partial class Protocol
 {
-    internal const string ApplicationProtocol = "${contract.v2.alpn}";
+    internal const string ApplicationProtocol = ${JSON.stringify(contract.v2.alpn)};
     internal const int ResponseHeaderBytes = ${formatted_decimal(contract.v2.response_header_bytes)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
 
@@ -734,6 +1112,36 @@ internal static partial class Protocol
     private const uint SetTtlBit = ${formatted_decimal(contract.v2.set_ttl_bit)}u;
     private const uint SetIfAbsentBit = ${formatted_decimal(contract.v2.set_if_absent_bit)}u;
     private const uint SetIfPresentBit = ${formatted_decimal(contract.v2.set_if_present_bit)}u;
+
+    internal const uint ValueFormatVersion = ${formatted_decimal(value.version)}u;
+    internal const int ValueFormatMaxVu128Bytes = ${formatted_decimal(value.max_vu128_bytes)};
+    internal const int ValueFormatFormatByteBytes = ${formatted_decimal(value.format_byte_bytes)};
+    internal const byte ValueFormatCompressionMask = ${formatted_byte(value.format_compression_mask)};
+    internal const byte ValueFormatEncryptionShift = ${formatted_byte(value.format_encryption_shift)};
+    internal const byte ValueFormatSerializationRaw = ${formatted_byte(value.serialization_raw)};
+    internal const byte ValueFormatSerializationJson = ${formatted_byte(value.serialization_json)};
+    internal const byte ValueFormatCompressionNone = ${formatted_byte(value.compression_none)};
+    internal const byte ValueFormatCompressionZstandard = ${formatted_byte(value.compression_zstandard)};
+    internal const byte ValueFormatEncryptionNone = ${formatted_byte(value.encryption_none)};
+    internal const byte ValueFormatEncryptionCompact = ${formatted_byte(value.encryption_compact)};
+    internal const byte ValueFormatEncryptionRobust = ${formatted_byte(value.encryption_robust)};
+    internal const int ValueFormatCompactSyntheticIvBytes = ${formatted_decimal(value.compact_synthetic_iv_bytes)};
+    internal const int ValueFormatRobustNonceBytes = ${formatted_decimal(value.robust_nonce_bytes)};
+    internal const int ValueFormatRobustTagBytes = ${formatted_decimal(value.robust_tag_bytes)};
+    internal const int ValueFormatDataProtectionKeyBytes = ${formatted_decimal(value.data_protection_key_bytes)};
+    internal const string ValueFormatItemKeyRootContext = ${JSON.stringify(value.item_key_root_context)};
+    internal const string ValueFormatAadDomain = ${JSON.stringify(value.aad_domain)};
+    internal const string ValueFormatValueRootContext = ${JSON.stringify(value.value_root_context)};
+    internal const string ValueFormatCompactMacContext = ${JSON.stringify(value.compact_mac_context)};
+    internal const string ValueFormatCompactEncryptionContext = ${JSON.stringify(value.compact_encryption_context)};
+    internal const string ValueFormatRobustContext = ${JSON.stringify(value.robust_context)};
+    internal const int ValueEnvelopeMaxEncodingBytes = ${formatted_decimal(envelope.max_encoding_bytes)};
+    internal const int ValueEnvelopeMaxTypeNameBytes = ${formatted_decimal(envelope.max_type_name_bytes)};
+    internal const string ValueEnvelopeJsonEncoding = ${JSON.stringify(envelope.json_encoding)};
+    internal static ReadOnlySpan<byte> ValueFormatVersionBytes =>
+        [${version_bytes.map(formatted_byte).join(", ")}];
+    internal static ReadOnlySpan<byte> ValueEnvelopeMagicAndVersion =>
+        [${envelope_magic.map(formatted_byte).join(", ")}];
 
 ${csharp_wire_enum("Opcode", contract.opcodes)}
 
@@ -803,23 +1211,28 @@ ${operations.join("\n")}
 `
 }
 
-/** Renders cross-language value-format identifiers and limits for TypeScript adapters.
+/** Renders the cross-language value-format wire and cryptographic contract for TypeScript.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
  * @returns Deterministic TypeScript source with a trailing newline.
  */
 export function render_typescript_value_format(contract: Wire_Contract): string {
   const value = contract.value_format
+  const version_bytes = encode_vu128(value.version)
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /** Current client-owned value-format version. */
 export const SMITHY_VALUE_FORMAT_VERSION = ${value.version}
-/** Maximum UTF-8 byte length of a codec identifier. */
-export const SMITHY_VALUE_MAX_ENCODING_BYTES = ${value.max_encoding_bytes}
-/** Maximum UTF-8 byte length of a logical codec type name. */
-export const SMITHY_VALUE_MAX_TYPE_NAME_BYTES = ${value.max_type_name_bytes}
-/** Built-in canonical JSON codec identifier. */
-export const SMITHY_VALUE_JSON_ENCODING = ${JSON.stringify(value.json_encoding)}
+/** Canonical VU128 bytes for the current value-format version. */
+export const SMITHY_VALUE_FORMAT_VERSION_BYTES = [${version_bytes.join(", ")}] as const
+/** Maximum bytes accepted for a canonical value-format VU128. */
+export const SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
+/** Bytes occupied by the value-format transform byte. */
+export const SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES = ${value.format_byte_bytes}
+/** Low-nibble mask for the value-format compression identifier. */
+export const SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
+/** Number of bits to shift the value-format encryption identifier. */
+export const SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 /** Raw serialized-value identifier. */
 export const SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
 /** Canonical JSON serialized-value identifier. */
@@ -834,6 +1247,47 @@ export const SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}
 export const SMITHY_VALUE_ENCRYPTION_COMPACT = ${value.encryption_compact}
 /** Robust AES-GCM-SIV value-format identifier. */
 export const SMITHY_VALUE_ENCRYPTION_ROBUST = ${value.encryption_robust}
+/** Compact AES-SIV synthetic-IV and authentication-tag size. */
+export const SMITHY_VALUE_COMPACT_SYNTHETIC_IV_BYTES = ${value.compact_synthetic_iv_bytes}
+/** Robust AES-GCM-SIV nonce size. */
+export const SMITHY_VALUE_ROBUST_NONCE_BYTES = ${value.robust_nonce_bytes}
+/** Robust AES-GCM-SIV authentication-tag size. */
+export const SMITHY_VALUE_ROBUST_TAG_BYTES = ${value.robust_tag_bytes}
+/** Application-managed data-protection key size. */
+export const SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes}
+/** BLAKE3 protected-item-key root derivation context. */
+export const SMITHY_VALUE_ITEM_KEY_ROOT_CONTEXT = ${JSON.stringify(value.item_key_root_context)}
+/** Associated-data domain separator. */
+export const SMITHY_VALUE_AAD_DOMAIN = ${JSON.stringify(value.aad_domain)}
+/** BLAKE3 value-root derivation context. */
+export const SMITHY_VALUE_VALUE_ROOT_CONTEXT = ${JSON.stringify(value.value_root_context)}
+/** BLAKE3 Compact AES-SIV MAC-key derivation context. */
+export const SMITHY_VALUE_COMPACT_MAC_CONTEXT = ${JSON.stringify(value.compact_mac_context)}
+/** BLAKE3 Compact AES-SIV encryption-key derivation context. */
+export const SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT = ${JSON.stringify(value.compact_encryption_context)}
+/** BLAKE3 Robust AES-GCM-SIV key derivation context. */
+export const SMITHY_VALUE_ROBUST_CONTEXT = ${JSON.stringify(value.robust_context)}
+`
+}
+
+/** Renders constants for the legacy TypeScript metadata envelope.
+ *
+ * @param contract - Validated language-neutral value-envelope contract.
+ * @returns Deterministic TypeScript source with a trailing newline.
+ */
+export function render_typescript_value_envelope(contract: Wire_Contract): string {
+  const envelope = contract.value_envelope
+  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+/** Legacy metadata-envelope magic and version. */
+export const SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION = [${magic.join(", ")}] as const
+/** Maximum UTF-8 byte length of a legacy metadata-envelope encoding identifier. */
+export const SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES = ${envelope.max_encoding_bytes}
+/** Maximum UTF-8 byte length of a legacy metadata-envelope logical type name. */
+export const SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES = ${envelope.max_type_name_bytes}
+/** Built-in canonical JSON codec identifier used by the legacy envelope adapter. */
+export const SMITHY_VALUE_ENVELOPE_JSON_ENCODING = ${JSON.stringify(envelope.json_encoding)}
 `
 }
 
@@ -1043,44 +1497,58 @@ function expected_outputs(
   contract: Wire_Contract,
   target: Generation_Target,
 ): Readonly<Record<string, string>> {
-  const all_outputs = {
-    [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
-    [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
-    [GENERATED_OUTPUTS.rust_api]: render_rust_api(contract),
-    [GENERATED_OUTPUTS.rust_wire]: render_rust(contract),
-    [GENERATED_OUTPUTS.typescript_api]: render_typescript_api(contract),
-    [GENERATED_OUTPUTS.typescript_value_format]: render_typescript_value_format(contract),
-  }
   switch (target) {
     case "all":
-      return all_outputs
+      return {
+        [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
+        [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
+        [GENERATED_OUTPUTS.rust_api]: render_rust_api(contract),
+        [GENERATED_OUTPUTS.rust_wire]: render_rust(contract),
+        [GENERATED_OUTPUTS.typescript_api]: render_typescript_api(contract),
+        [GENERATED_OUTPUTS.typescript_value_format]:
+          render_typescript_value_format(contract),
+        [GENERATED_OUTPUTS.typescript_value_envelope]:
+          render_typescript_value_envelope(contract),
+      }
     case "dotnet":
       return {
-        [GENERATED_OUTPUTS.csharp_api]: all_outputs[GENERATED_OUTPUTS.csharp_api],
-        [GENERATED_OUTPUTS.csharp_wire]: all_outputs[GENERATED_OUTPUTS.csharp_wire],
+        [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
+        [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
       }
     case "rust-api":
       return {
-        [GENERATED_OUTPUTS.rust_api]: all_outputs[GENERATED_OUTPUTS.rust_api],
+        [GENERATED_OUTPUTS.rust_api]: render_rust_api(contract),
       }
     case "rust-wire":
       return {
-        [GENERATED_OUTPUTS.rust_wire]: all_outputs[GENERATED_OUTPUTS.rust_wire],
+        [GENERATED_OUTPUTS.rust_wire]: render_rust(contract),
       }
     case "typescript":
       return {
-        [GENERATED_OUTPUTS.typescript_api]: all_outputs[GENERATED_OUTPUTS.typescript_api],
+        [GENERATED_OUTPUTS.typescript_api]: render_typescript_api(contract),
         [GENERATED_OUTPUTS.typescript_value_format]:
-          all_outputs[GENERATED_OUTPUTS.typescript_value_format],
+          render_typescript_value_format(contract),
+        [GENERATED_OUTPUTS.typescript_value_envelope]:
+          render_typescript_value_envelope(contract),
       }
   }
 }
 
 function write_outputs(outputs: Readonly<Record<string, string>>): void {
-  for (const [path, content] of Object.entries(outputs)) {
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, content)
-    console.log(`Generated ${path}`)
+  for (const [output_path, content] of Object.entries(outputs)) {
+    const output_directory = dirname(output_path)
+    mkdirSync(output_directory, { recursive: true })
+    // Parallel build recipes may generate overlapping targets; rename a complete
+    // temporary file so readers never observe a partially written contract.
+    const temporary_directory = mkdtempSync(join(output_directory, "generate.local."))
+    const temporary_path = join(temporary_directory, basename(output_path))
+    try {
+      writeFileSync(temporary_path, content)
+      renameSync(temporary_path, output_path)
+      console.log(`Generated ${output_path}`)
+    } finally {
+      rmSync(temporary_directory, { force: true, recursive: true })
+    }
   }
 }
 
