@@ -747,6 +747,12 @@ impl BuilderSettings {
                 "must be greater than zero",
             ));
         }
+        if self.max_in_flight > u32::MAX as usize {
+            return Err(Error::configuration(
+                "max_in_flight",
+                "must not exceed u32::MAX",
+            ));
+        }
         Ok(())
     }
 
