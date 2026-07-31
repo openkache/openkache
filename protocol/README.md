@@ -49,15 +49,14 @@ variable-integer parsing.
 ## Core components
 
 - `model/openkache.smithy` is the canonical source for assigned wire values,
-  operation inputs and outputs, shared limits, version-specific layouts, the
-  native binding ABI identifiers, complete cross-language value-format
+  operation inputs and outputs, shared limits, version-specific layouts,
+  native-binding ABI identifiers, the complete cross-language value-format
   contract, and the legacy TypeScript metadata-envelope limits.
-- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, Python,
-  and native C definitions into ignored `generated_local` directories, the
-  Python package's ignored `_generated` directory, or Cargo output. The CMake
+- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, and
+  native C definitions into ignored `generated_local` directories or Cargo
+  output, plus Python API and contract modules during package builds. The CMake
   client build generates its native header into the CMake build tree and
-  installs it with the package. Package/release workflows must run the
-  generator before building a Python artifact.
+  installs it with the package.
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.

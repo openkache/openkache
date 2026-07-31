@@ -8,7 +8,7 @@ import json
 import socket
 import sys
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from os import PathLike
 from pathlib import Path
 from typing import Any, Final, Iterable, Sequence
@@ -30,20 +30,20 @@ from ._generated import (
     SmithySyncOutput,
 )
 from ._generated.smithy_contract import (
+    SMITHY_FFI_CONNECTION_STATE_CLOSED,
+    SMITHY_FFI_CONNECTION_STATE_CONNECTED,
+    SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
+    SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
+    SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
     SMITHY_FFI_OPERATION_GET_JSON,
-    SMITHY_FFI_OPERATION_RAW_DELETE,
-    SMITHY_FFI_OPERATION_RAW_GET,
-    SMITHY_FFI_OPERATION_RAW_SET,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
-    SMITHY_FFI_OPERATION_STATE,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
     SMITHY_FFI_RESULT_NOT_FOUND,
     SMITHY_FFI_RESULT_NOT_STORED,
     SMITHY_FFI_RESULT_REPLACED,
-    SMITHY_FFI_RESULT_STATE,
     SMITHY_FFI_RESULT_VALUE,
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
@@ -57,6 +57,8 @@ from ._generated.smithy_contract import (
     SMITHY_OPCODE_STATS,
     SMITHY_OPCODE_SYNC,
     SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES,
+    SMITHY_VALUE_ENCRYPTION_COMPACT,
+    SMITHY_VALUE_ENCRYPTION_ROBUST,
 )
 from ._native import NativeClient as _NativeClient, NativeError
 
@@ -80,6 +82,14 @@ class ConnectionState(StrEnum):
     RECONNECTING = "Reconnecting"
     DISCONNECTED = "Disconnected"
     CLOSED = "Closed"
+    UNKNOWN = "Unknown"
+
+
+class Encryption(IntEnum):
+    """Authenticated value-encryption profile implemented by the shared core."""
+
+    COMPACT = SMITHY_VALUE_ENCRYPTION_COMPACT
+    ROBUST = SMITHY_VALUE_ENCRYPTION_ROBUST
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +256,7 @@ class OpenKacheClient:
         server_name: str | None = None,
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
+        encryption: Encryption = Encryption.ROBUST,
         timeouts: ClientTimeouts | None = None,
         max_in_flight: int = 256,
         retry_max_attempts: int = 2,
@@ -260,6 +271,7 @@ class OpenKacheClient:
                 server_name=server_name,
                 identity=identity,
                 compression=compression,
+                encryption=encryption,
                 timeouts=timeouts,
                 max_in_flight=max_in_flight,
                 retry_max_attempts=retry_max_attempts,
@@ -365,15 +377,15 @@ class OpenKacheClient:
         if self._closed:
             return ConnectionState.CLOSED
         try:
-            kind, payload = self._native.execute(SMITHY_FFI_OPERATION_STATE)
-        except NativeError as error:
-            raise OpenKacheError(str(error)) from error
-        if kind != SMITHY_FFI_RESULT_STATE:
-            raise OpenKacheError(f"STATE returned unexpected native result {kind}")
-        try:
-            return ConnectionState(payload.decode("ascii"))
-        except (UnicodeDecodeError, ValueError) as error:
-            raise OpenKacheError(f"unknown native connection state {payload!r}") from error
+            return {
+                SMITHY_FFI_CONNECTION_STATE_CONNECTED: ConnectionState.CONNECTED,
+                SMITHY_FFI_CONNECTION_STATE_RECONNECTING: ConnectionState.RECONNECTING,
+                SMITHY_FFI_CONNECTION_STATE_DISCONNECTED: ConnectionState.DISCONNECTED,
+                SMITHY_FFI_CONNECTION_STATE_CLOSED: ConnectionState.CLOSED,
+                SMITHY_FFI_CONNECTION_STATE_UNKNOWN: ConnectionState.UNKNOWN,
+            }[self._native.connection_state()]
+        except KeyError as error:
+            raise OpenKacheError("native client returned an unknown connection state") from error
 
     @property
     def raw(self) -> RawClient:
@@ -433,6 +445,28 @@ class OpenKacheClient:
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
         return payload
 
+    async def _execute_raw(
+        self,
+        operation: int,
+        *,
+        item_id: bytes,
+        value: bytes = b"",
+        options: SetOptions | None = None,
+    ) -> tuple[int, bytes]:
+        self._assert_open()
+        selected = options or SetOptions()
+        try:
+            return await asyncio.to_thread(
+                self._native.execute_raw,
+                operation,
+                item_id=item_id,
+                value=value,
+                condition=selected._condition_code,
+                ttl_ms=selected.ttl_ms,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+
     async def _set_operation(
         self,
         operation: int,
@@ -469,8 +503,8 @@ class RawClient:
 
     async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)
-        kind, payload = await self._owner._execute(
-            SMITHY_FFI_OPERATION_RAW_GET, key=item_id
+        kind, payload = await self._owner._execute_raw(
+            SMITHY_OPCODE_GET, item_id=item_id
         )
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return SmithyGetOutput()
@@ -480,9 +514,9 @@ class RawClient:
 
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
         options = SetOptions(input.condition, input.ttl_milliseconds)
-        kind, _ = await self._owner._execute(
-            SMITHY_FFI_OPERATION_RAW_SET,
-            key=_item_id(input.item_id),
+        kind, _ = await self._owner._execute_raw(
+            SMITHY_OPCODE_SET,
+            item_id=_item_id(input.item_id),
             value=_value_bytes(input.value),
             options=options,
         )
@@ -497,8 +531,8 @@ class RawClient:
         return SmithySetOutput(outcome=outcome)
 
     async def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
-        kind, _ = await self._owner._execute(
-            SMITHY_FFI_OPERATION_RAW_DELETE, key=_item_id(input.item_id)
+        kind, _ = await self._owner._execute_raw(
+            SMITHY_OPCODE_DELETE, item_id=_item_id(input.item_id)
         )
         if kind == SMITHY_FFI_RESULT_DELETED:
             return SmithyDeleteOutput(deleted=True)
@@ -530,6 +564,7 @@ def _connection_settings(
     server_name: str | None,
     identity: ClientIdentity | None,
     compression: CompressionOptions | None,
+    encryption: Encryption,
     timeouts: ClientTimeouts | None,
     max_in_flight: int,
     retry_max_attempts: int,
@@ -545,17 +580,19 @@ def _connection_settings(
         )
     compression = compression or CompressionOptions()
     timeouts = timeouts or ClientTimeouts()
+    if not isinstance(encryption, Encryption):
+        raise OpenKacheValueError("encryption must be an Encryption value")
     _positive_or_zero(
         max_in_flight,
         "max_in_flight",
         allow_zero=False,
-        maximum=_UINT64_MAX,
+        maximum=_SIZE_T_MAX,
     )
     _positive_or_zero(
         retry_max_attempts,
         "retry_max_attempts",
         allow_zero=False,
-        maximum=_UINT64_MAX,
+        maximum=_SIZE_T_MAX,
     )
     if not isinstance(native_path, (str, PathLike)) and native_path is not None:
         raise OpenKacheValueError("native_path must be a path or None")
@@ -584,6 +621,7 @@ def _connection_settings(
         "compression_level": compression.level,
         "minimum_input_size": compression.minimum_input_size,
         "minimum_savings": compression.minimum_savings,
+        "encryption": int(encryption),
         "connect_timeout_ms": timeouts.connect_ms,
         "request_timeout_ms": timeouts.request_ms,
         "max_in_flight": max_in_flight,

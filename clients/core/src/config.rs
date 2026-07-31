@@ -87,6 +87,18 @@ impl Endpoint {
         })
     }
 
+    /// Replaces the TLS server name while preserving this endpoint's network destination.
+    ///
+    /// Native adapters receive a destination and a separate certificate identity. Keeping this
+    /// operation on the shared endpoint type avoids duplicating validation in each binding.
+    #[cfg(feature = "ffi")]
+    pub(crate) fn with_server_name(mut self, server_name: impl Into<String>) -> Result<Self> {
+        let server_name = server_name.into();
+        validate_server_name("endpoint.server_name", &server_name)?;
+        self.server_name = server_name;
+        Ok(self)
+    }
+
     pub(crate) fn host(&self) -> &str {
         &self.host
     }

@@ -16,12 +16,14 @@ from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 NATIVE_ROOT = PACKAGE_ROOT / "native"
-PROTOCOL_ROOT = PACKAGE_ROOT.parent.parent / "protocol"
+PUBLIC_ROOT = PACKAGE_ROOT.parent.parent
+PROTOCOL_ROOT = PUBLIC_ROOT / "protocol"
+if not PROTOCOL_ROOT.is_dir():
+    PROTOCOL_ROOT = PACKAGE_ROOT / "protocol"
+CORE_ROOT = PUBLIC_ROOT / "clients" / "core"
+if not CORE_ROOT.is_dir():
+    CORE_ROOT = PACKAGE_ROOT / "core"
 PROTOCOL_GENERATOR = PROTOCOL_ROOT / "generate.ts"
-GENERATED_PYTHON_FILES = (
-    PACKAGE_ROOT / "src" / "openkache" / "_generated" / "smithy_api.py",
-    PACKAGE_ROOT / "src" / "openkache" / "_generated" / "smithy_contract.py",
-)
 
 
 def native_library_name() -> str:
@@ -36,17 +38,17 @@ def generate_smithy_contract() -> None:
     """Generate Python contracts from the canonical Smithy model."""
 
     if not PROTOCOL_GENERATOR.is_file():
-        if all(path.is_file() for path in GENERATED_PYTHON_FILES):
-            # Source distributions carry the already generated contract but
-            # intentionally do not carry the private protocol generator tree.
-            return
         raise RuntimeError(
-            "Python package builds require protocol/generate.ts and its Smithy "
-            "model, or generated _generated/smithy_*.py files from a source "
-            "distribution."
+            "Python package builds require the bundled protocol/generate.ts "
+            "and Smithy model."
         )
     environment = os.environ.copy()
     environment["OPENKACHE_GENERATION_TARGET"] = "python"
+    generated_root = PACKAGE_ROOT / "src" / "openkache" / "_generated"
+    environment["OPENKACHE_PYTHON_API_OUTPUT"] = str(generated_root / "smithy_api.py")
+    environment["OPENKACHE_PYTHON_CONTRACT_OUTPUT"] = str(
+        generated_root / "smithy_contract.py"
+    )
     try:
         subprocess.run(
             [
@@ -96,12 +98,11 @@ class build_native(Command):
     def run(self) -> None:
         if self.build_lib is None:
             raise RuntimeError("setuptools did not initialize build_lib")
-        bundled = PACKAGE_ROOT / "src" / "openkache" / "_native.so"
-        destination = Path(self.build_lib) / "openkache" / "_native.so"
+        destination = Path(self.build_lib) / "openkache" / native_library_name()
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if bundled.is_file():
-            shutil.copy2(bundled, destination)
-            return
+        legacy_destination = destination.with_name("_native.so")
+        if legacy_destination.is_file():
+            legacy_destination.unlink()
         environment = os.environ.copy()
         environment.pop("CARGO_BUILD_TARGET", None)
         environment["CARGO_TARGET_DIR"] = str(NATIVE_ROOT / "target")
@@ -135,21 +136,42 @@ class build_py(_build_py):
 
 
 class sdist(_sdist):
-    """Include the host native artifact so wheel builds from sdist stay hermetic."""
+    """Bundle shared Rust sources so source builds compile native code per platform."""
 
     def run(self) -> None:
         self.run_command("generate_smithy")
-        self.run_command("build_native")
         super().run()
 
     def make_release_tree(self, base_dir: str, files: list[str]) -> None:
         super().make_release_tree(base_dir, files)
-        source = NATIVE_ROOT / "target" / "release" / native_library_name()
-        if not source.is_file():
-            raise RuntimeError(f"Cargo did not produce {source}")
-        destination = Path(base_dir) / "src" / "openkache" / "_native.so"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        release_root = Path(base_dir)
+        source_ignore = shutil.ignore_patterns(
+            "__pycache__",
+            "*.pyc",
+            "generated_local",
+            "target",
+        )
+        shutil.copytree(CORE_ROOT, release_root / "core", ignore=source_ignore)
+        shutil.copytree(PROTOCOL_ROOT, release_root / "protocol", ignore=source_ignore)
+        _replace_path_dependency(
+            release_root / "native" / "Cargo.toml",
+            'path = "../../core"',
+            'path = "../core"',
+        )
+        _replace_path_dependency(
+            release_root / "core" / "Cargo.toml",
+            'path = "../../protocol"',
+            'path = "../protocol"',
+        )
+
+
+def _replace_path_dependency(path: Path, source: str, destination: str) -> None:
+    content = path.read_text(encoding="utf-8")
+    if content.count(source) != 1:
+        raise RuntimeError(
+            f"expected exactly one {source!r} dependency path in {path}"
+        )
+    path.write_text(content.replace(source, destination), encoding="utf-8")
 
 
 class bdist_wheel(_bdist_wheel):
