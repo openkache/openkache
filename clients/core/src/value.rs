@@ -92,6 +92,34 @@ impl ItemValue {
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
+
+    /// Returns whether the opaque value contains no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Returns the number of opaque bytes.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl AsRef<[u8]> for ItemValue {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl From<Vec<u8>> for ItemValue {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self::new(bytes)
+    }
+}
+
+impl From<ItemValue> for Vec<u8> {
+    fn from(value: ItemValue) -> Self {
+        value.into_bytes()
+    }
 }
 
 /// Common logical JSON value shared by language adapters.
