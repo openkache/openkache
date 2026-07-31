@@ -1,0 +1,54 @@
+name: Update container toolchain pins
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-container-inputs
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: Update Nix flake lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Update locked Nix inputs
+        run: |
+          builder_image="$(sed -n 's/^FROM \(nixos\/nix:[^ ]*\) AS builder$/\1/p' server/Dockerfile)"
+          if ! printf '%s\n' "${builder_image}" | grep -Eq '^nixos/nix:[^@[:space:]]+@sha256:[0-9a-f]{64}$'; then
+            printf 'Invalid pinned builder image: %s\n' "${builder_image}" >&2
+            exit 1
+          fi
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace/server \
+            "${builder_image}" \
+            sh -euxc \
+            'git config --global --add safe.directory /workspace && nix --extra-experimental-features "nix-command flakes" flake update nixpkgs rust-overlay'
+
+      - name: Open update pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7769d076bb2fc7f1 # v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(container): 🔧 update Nix container inputs"
+          branch: automation/update-container-inputs
+          delete-branch: true
+          title: "chore(container): 🔧 update Nix container inputs"
+          body: |
+            Updates the locked nixpkgs and rust-overlay revisions and content hashes used by `server/container.nix`.
+
+            The container publication workflow will build this change for both supported image architectures.

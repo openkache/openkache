@@ -3,7 +3,7 @@
 use std::io::ErrorKind;
 use std::path::Path;
 
-use compio::fs::{File, OpenOptions};
+use compio::fs::File;
 
 use crate::*;
 
@@ -645,14 +645,7 @@ fn get_usize(bytes: &[u8], offset: usize) -> Option<usize> {
 }
 
 async fn open_checkpoint_file(path: &Path, create: bool) -> std::io::Result<File> {
-    OpenOptions::new()
-        .create(create)
-        .truncate(false)
-        .read(true)
-        .write(create)
-        .custom_flags(libc::O_DIRECT | libc::O_NOFOLLOW)
-        .open(path)
-        .await
+    super::open_direct_file_with_flags(path, create, create, libc::O_NOFOLLOW).await
 }
 
 async fn read_checkpoint_extent(

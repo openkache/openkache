@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Linux x86_64 or aarch64
+- Linux x86_64/aarch64 or Apple Silicon macOS
 - Rust toolchain (if building from source)
 - NVMe SSD recommended for production
 
@@ -27,9 +27,9 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server
 The server listens on `127.0.0.1:4433`, stores shard files under
 `target/kvkache-v1`, and writes its generated certificate to
 `target/openkache-local/certificate.local.der`. It automatically sizes itself
-from process CPU affinity, available or cgroup-limited RAM, and available
-filesystem space. Use `--port <port>` only to override the default port, or
-`--config <path>` to load an explicit TOML cache configuration.
+from the CPUs available to the process, host-available or cgroup-limited RAM,
+and available filesystem space. Use `--port <port>` only to override the
+default port, or `--config <path>` to load an explicit TOML cache configuration.
 
 To inspect the automatic result and optionally override individual inputs, run:
 
@@ -49,12 +49,13 @@ argument is optional. Remove `--plan` to open the storage files and start
 serving with the calculated configuration.
 
 The calculated limits are advisory. The planner detects standard Linux cgroup
-memory limits and filesystem availability but not filesystem quotas, SSD type,
-or device throughput. Its memory estimate covers the packed Table rather than
-whole-process peak RSS. `--cpus` selects worker threads but does not impose a
-process CPU quota. `light` and `balanced` accept individual values up to their
-1 MiB Blob Segment size; `heavy` accepts up to 64 MiB. Existing storage must be
-reopened with the same worker count and Segment layout.
+memory limits or macOS host memory pressure plus filesystem availability, but
+not filesystem quotas, SSD type, or device throughput. Its memory estimate
+covers the packed Table rather than whole-process peak RSS. `--cpus` selects
+worker threads but does not impose a process CPU quota. `light` and `balanced`
+accept individual values up to their 1 MiB Blob Segment size; `heavy` accepts
+up to 64 MiB. Existing storage must be reopened with the same worker count and
+Segment layout.
 
 To calculate a configuration from resource budgets instead, run:
 
@@ -114,5 +115,6 @@ let value = client.get(b"mykey").await?;
 - See the client status and binding architecture in `clients/README.md`
 - See the low-level shared client core under `clients/core/`
 - See the Rust client SDK under `clients/rust/`
+- See the Bash-friendly CLI under `clients/cli/`
 - See the TypeScript client SDK under `clients/typescript/`
 - See the .NET client SDK under `clients/dotnet/`

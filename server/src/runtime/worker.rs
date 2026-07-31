@@ -387,6 +387,7 @@ pub(super) async fn worker_loop(
     mut cache: Kvkache,
     receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
+    affinity_id: usize,
 ) -> Result<()> {
     let waiting_capacity = io_config.max_inflight_per_worker;
     let mut scheduler = KeyScheduler::with_waiting_capacity(waiting_capacity);
@@ -427,7 +428,7 @@ pub(super) async fn worker_loop(
 
         if inflight.is_empty() && scheduler.is_idle() {
             if let Some(request) = barrier.take() {
-                if process_worker_barrier(&mut cache, request).await? {
+                if process_worker_barrier(&mut cache, request, affinity_id).await? {
                     return Ok(());
                 }
                 continue;
@@ -572,12 +573,16 @@ fn admit_worker_request(
     }
 }
 
-async fn process_worker_barrier(cache: &mut Kvkache, request: WorkerRequest) -> Result<bool> {
+async fn process_worker_barrier(
+    cache: &mut Kvkache,
+    request: WorkerRequest,
+    affinity_id: usize,
+) -> Result<bool> {
     match request {
         WorkerRequest::Stats { response } => {
-            let cpu = unsafe { libc::sched_getcpu() };
             response.send(Ok(WorkerResponse::Stats(format!(
-                "cpu_id={cpu} {}",
+                "{} {}",
+                crate::platform::cpu_diagnostic(affinity_id),
                 cache.stats()
             ))));
             Ok(false)

@@ -70,6 +70,20 @@ impl AsRef<[u8]> for ItemId {
     }
 }
 
+impl From<[u8; ITEM_ID_BYTES]> for ItemId {
+    fn from(bytes: [u8; ITEM_ID_BYTES]) -> Self {
+        Self::from_bytes(bytes)
+    }
+}
+
+impl TryFrom<&[u8]> for ItemId {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        Self::from_slice(bytes)
+    }
+}
+
 /// Application-managed master secret used to hide keys and encrypt values.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct DataProtectionKey {
@@ -182,5 +196,13 @@ impl DataProtectionKey {
 
     pub(crate) fn value_root_key(&self) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES]> {
         Zeroizing::new(self.value_root_key)
+    }
+}
+
+impl TryFrom<&[u8]> for DataProtectionKey {
+    type Error = Error;
+
+    fn try_from(bytes: &[u8]) -> Result<Self> {
+        Self::from_slice(bytes)
     }
 }

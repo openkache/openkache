@@ -3,7 +3,7 @@
 //! A flushed Segment stores complete keys and either inline values or compact
 //! [`BlobRef`] descriptors. External values are concatenated without per-value
 //! padding in the paired Blob Segment. Only the end of the complete Blob write
-//! is padded for `O_DIRECT`.
+//! is padded for the host's uncached direct-I/O path.
 
 use compio::fs::File;
 use std::rc::Rc;

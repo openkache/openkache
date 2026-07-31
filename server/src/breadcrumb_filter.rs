@@ -50,10 +50,18 @@ enum SimdBackend {
     #[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
     Avx2,
     /// Scalable comparison plus SVE2 bit-permutation metadata selection.
-    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        not(feature = "force-scalar")
+    ))]
     Sve2,
     /// Vector-length-agnostic comparison on SVE-capable AArch64 processors.
-    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        not(feature = "force-scalar")
+    ))]
     Sve,
     /// Four fixed-width 128-bit comparisons cover the complete bucket.
     #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
@@ -74,7 +82,11 @@ impl SimdBackend {
                 return Self::Avx2;
             }
         }
-        #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_os = "linux",
+            not(feature = "force-scalar")
+        ))]
         {
             if is_aarch64_feature_detected!("sve2") {
                 return Self::Sve2;
@@ -82,6 +94,9 @@ impl SimdBackend {
             if is_aarch64_feature_detected!("sve") {
                 return Self::Sve;
             }
+        }
+        #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+        {
             if is_aarch64_feature_detected!("neon") {
                 return Self::Neon;
             }
@@ -96,9 +111,17 @@ impl SimdBackend {
             Self::Avx512 => "AVX-512BW",
             #[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
             Self::Avx2 => "AVX2",
-            #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                target_os = "linux",
+                not(feature = "force-scalar")
+            ))]
             Self::Sve2 => "SVE2",
-            #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+            #[cfg(all(
+                target_arch = "aarch64",
+                target_os = "linux",
+                not(feature = "force-scalar")
+            ))]
             Self::Sve => "SVE",
             #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
             Self::Neon => "NEON",
@@ -755,7 +778,11 @@ fn select_one(bits: u128, rank: usize) -> usize {
         return unsafe { select_one_bmi2(bits, rank) };
     }
 
-    #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+    #[cfg(all(
+        target_arch = "aarch64",
+        target_os = "linux",
+        not(feature = "force-scalar")
+    ))]
     if is_aarch64_feature_detected!("sve2-bitperm") {
         return unsafe { select_one_sve2_bitperm(bits, rank) };
     }
@@ -789,7 +816,11 @@ unsafe fn select_one_bmi2(bits: u128, rank: usize) -> usize {
     }
 }
 
-#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "linux",
+    not(feature = "force-scalar")
+))]
 #[target_feature(enable = "sve,sve2,sve2-bitperm")]
 /// Selects a set bit with SVE2 BitPerm `BDEP` on duplicated 64-bit lanes.
 ///
@@ -827,7 +858,11 @@ fn byte_matches<T>(bucket: &T, needle: u8, backend: SimdBackend) -> u64 {
         SimdBackend::Avx512 => unsafe { byte_matches_avx512(pointer, needle) },
         #[cfg(all(target_arch = "x86_64", not(feature = "force-scalar")))]
         SimdBackend::Avx2 => unsafe { byte_matches_avx2(pointer, needle) },
-        #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+        #[cfg(all(
+            target_arch = "aarch64",
+            target_os = "linux",
+            not(feature = "force-scalar")
+        ))]
         SimdBackend::Sve2 | SimdBackend::Sve => unsafe { byte_matches_sve(pointer, needle) },
         #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
         SimdBackend::Neon => unsafe { byte_matches_neon(pointer, needle) },
@@ -875,7 +910,11 @@ unsafe fn byte_matches_neon(pointer: *const u8, needle: u8) -> u64 {
     mask
 }
 
-#[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]
+#[cfg(all(
+    target_arch = "aarch64",
+    target_os = "linux",
+    not(feature = "force-scalar")
+))]
 #[target_feature(enable = "sve")]
 /// Produces a 64-bit byte-match mask with vector-length-agnostic SVE predicates.
 ///

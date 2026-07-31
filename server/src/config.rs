@@ -5,7 +5,6 @@
 //! embeds recovery control pages used to rebuild committed state at startup.
 
 use std::collections::HashSet;
-use std::io;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
@@ -13,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
+use crate::platform::allowed_cpu_ids;
 
 pub(crate) const DEFAULT_BUCKET_CHOICE_COUNT: usize = 4;
 
@@ -101,23 +101,6 @@ impl BucketSelectionPolicy {
             Self::MostUsed => "most_used",
         }
     }
-}
-
-pub fn allowed_cpu_ids() -> Result<HashSet<usize>> {
-    let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
-    let result = unsafe {
-        libc::sched_getaffinity(
-            0,
-            std::mem::size_of::<libc::cpu_set_t>(),
-            &mut set as *mut _,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    Ok((0..libc::CPU_SETSIZE as usize)
-        .filter(|cpu| unsafe { libc::CPU_ISSET(*cpu, &set) })
-        .collect())
 }
 
 pub fn expand_thread_pattern(pattern: &str, thread_id: usize) -> String {

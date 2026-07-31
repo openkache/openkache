@@ -17,6 +17,76 @@ structure wireContract {
     v3: WireV3
 }
 
+/// Native binding ABI identifiers generated alongside the wire contract.
+@trait(selector: "service")
+structure ffiContract {
+    @required
+    abiVersion: Integer
+
+    @required
+    operationGetJson: Integer
+
+    @required
+    operationSetJson: Integer
+
+    @required
+    operationReconnect: Integer
+
+    @required
+    operationState: Integer
+
+    @required
+    operationRawGet: Integer
+
+    @required
+    operationRawSet: Integer
+
+    @required
+    operationRawDelete: Integer
+
+    @required
+    resultError: Integer
+
+    @required
+    resultOk: Integer
+
+    @required
+    resultValue: Integer
+
+    @required
+    resultNotFound: Integer
+
+    @required
+    resultCreated: Integer
+
+    @required
+    resultReplaced: Integer
+
+    @required
+    resultDeleted: Integer
+
+    @required
+    resultNotDeleted: Integer
+
+    @required
+    resultConnected: Integer
+
+    @required
+    resultNotStored: Integer
+
+    @required
+    resultState: Integer
+
+    @required
+    setConditionNone: Integer
+
+    @required
+    setConditionIfAbsent: Integer
+
+    @required
+    setConditionIfPresent: Integer
+}
+
 /// Cross-language v1 value container and protection contract.
 @trait(selector: "service")
 structure valueFormat {
@@ -194,6 +264,30 @@ structure wireStatus {
         setIfAbsentFlag: 2,
         setIfPresentFlag: 4
     }
+)
+@ffiContract(
+    abiVersion: 1,
+    operationGetJson: 7,
+    operationSetJson: 8,
+    operationReconnect: 9,
+    operationState: 10,
+    operationRawGet: 11,
+    operationRawSet: 12,
+    operationRawDelete: 13,
+    resultError: 0,
+    resultOk: 1,
+    resultValue: 2,
+    resultNotFound: 3,
+    resultCreated: 4,
+    resultReplaced: 5,
+    resultDeleted: 6,
+    resultNotDeleted: 7,
+    resultConnected: 8,
+    resultNotStored: 9,
+    resultState: 10,
+    setConditionNone: 0,
+    setConditionIfAbsent: 1,
+    setConditionIfPresent: 2
 )
 @valueFormat(
     version: 1,

@@ -1621,6 +1621,8 @@ dependencies = [
  "napi-sys",
  "nohash-hasher",
  "rustc-hash",
+ "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -1832,11 +1834,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "openkache-cli"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "clap",
+ "compio",
+ "openkache-client",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "openkache-client"
 version = "0.1.0"
 dependencies = [
- "compio",
- "crossfire",
  "futures-util",
  "openkache-client-core",
 ]
@@ -1880,6 +1892,7 @@ dependencies = [
  "napi-build",
  "napi-derive",
  "openkache-client-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -2693,7 +2706,19 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6328af13490e73a9b4694030fafd93f8c8c6a9dede33e821c3fc63eddf8042ba"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

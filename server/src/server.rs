@@ -626,11 +626,10 @@ async fn run_quic_role(
                 return None;
             }
         };
-    let actual_cpu = unsafe { libc::sched_getcpu() };
-    if actual_cpu < 0 || actual_cpu as usize != cpu_id {
-        reporter.startup_failed(format!(
-            "network worker {worker_id} expected CPU {cpu_id}, running on CPU {actual_cpu}"
-        ));
+    if let Some(error) =
+        crate::platform::cpu_assignment_error(&format!("network worker {worker_id}"), cpu_id)
+    {
+        reporter.startup_failed(error);
         return None;
     }
     if !reporter.started() {

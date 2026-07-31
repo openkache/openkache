@@ -24,25 +24,27 @@ formats or protocol behavior.
 |---|---|---|
 | Shared core | [`core/`](core/) | Protocol v1 raw and protected engine; value format v1 implementation |
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
-| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; byte APIs use v1 Raw serialization, while logical values retain the existing envelope |
+| CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
-| Python | `python/` | Package scaffold |
+| Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
-| C | `c/` | Package scaffold |
-| C++ | `cpp/` | Package scaffold |
+| C | [`c/`](c/) | Protocol v1 protected C17 ABI over the shared core |
+| C++ | [`cpp/`](cpp/) | Protocol v1 C++20 RAII adapter over the C ABI |
 | Swift | `swift/` | Package scaffold |
 | Dart | `dart/` | Package scaffold |
 
-A scaffold contains registry metadata and a reserved source layout. It does not
-connect to OpenKache or expose cache operations.
+Python, Go, Java, Kotlin, Swift, and Dart currently contain registry metadata
+and reserved source layouts only. They do not connect to OpenKache or expose
+cache operations yet.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
-format v1. The core owns Raw and canonical JSON serialization, but
-language-native JSON adapters are not implemented yet. TypeScript's logical
-value envelope is a package-level adapter detail; byte-level v1 requirements
-belong only in the value-format specification.
+format v1. The core owns Raw and canonical JSON serialization; language
+adapters convert native values into that shared logical model. TypeScript's
+legacy metadata envelope remains a package-level compatibility detail; new
+cross-language values should use its `set_json`/`get_json` API.
 
 ## Binding architecture
 
@@ -78,13 +80,25 @@ package structure only.
 | Go | `go vet ./... && go build ./...` | `doc.go` |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
-| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py` |
+| CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
+| Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift` |
 
-Native linkage, artifact distribution, and runtime integration for scaffolds
-are intentionally undefined until each binding is implemented.
+Native linkage for C and C++ is supplied by the `ffi` native library built
+from `clients/core`; see each package README for the CMake option. Artifact
+distribution for the remaining scaffolds is intentionally undefined until
+those bindings are implemented.
 
 ## Shared configuration
+
+The C and C++ packages use the native ABI exported by `clients/core` with a
+dedicated worker for synchronous foreign-function calls. Their headers expose
+only buffer conversion, result ownership, protected and exact-item-ID calls,
+and RAII; protocol, retry, TLS, value-format, and protection behavior remain
+in the core. The CMake/package build generates Smithy-derived constants into
+the package output, keeping native operation numbers, limits, and value-format
+identifiers aligned with the other language packages without checking generated
+headers into source control.
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform
