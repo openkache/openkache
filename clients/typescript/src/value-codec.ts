@@ -163,8 +163,7 @@ export class Value_Codec_Registry {
    * @throws {Error} When codec selection is ambiguous or encoding fails.
    */
   encode(value: unknown): Value_Envelope {
-    assert_legacy_json_value(value)
-    const matching_codecs = is_regular_object(value)
+    const matching_codecs = is_object_value(value)
       ? this.#codecs.filter((codec): boolean => codec.can_encode(value))
       : []
     if (matching_codecs.length > 1) {
@@ -174,6 +173,7 @@ export class Value_Codec_Registry {
     }
     const codec = matching_codecs[0]
     if (codec === undefined) {
+      assert_legacy_json_value(value)
       return {
         encoding: JSON_ENCODING,
         type_name: "",
@@ -368,6 +368,10 @@ function is_regular_object(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false
   const prototype = Object.getPrototypeOf(value)
   return prototype === Object.prototype || prototype === null
+}
+
+function is_object_value(value: unknown): value is object {
+  return value !== null && typeof value === "object"
 }
 
 function property_path(path: string, key: string): string {

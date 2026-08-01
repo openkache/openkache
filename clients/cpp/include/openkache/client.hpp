@@ -221,15 +221,9 @@ public:
 
     /// Retrieves an application-key value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
-        const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_GET, key, {}, Set_Options{});
-        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_FOUND) {
-            return std::nullopt;
-        }
-        if (result.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
-            throw Error("OpenKache returned an invalid GET outcome");
-        }
-        return result.payload;
+        return get_outcome(
+            execute(OPENKACHE_CLIENT_OPERATION_GET, key, {}, Set_Options{}),
+            "GET");
     }
 
     /// Convenience overload for textual application keys.
@@ -242,18 +236,9 @@ public:
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options = {}) const {
-        const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_SET, key, value, options);
-        switch (result.kind) {
-        case OPENKACHE_CLIENT_RESULT_CREATED:
-            return Set_Outcome::Created;
-        case OPENKACHE_CLIENT_RESULT_REPLACED:
-            return Set_Outcome::Replaced;
-        case OPENKACHE_CLIENT_RESULT_NOT_STORED:
-            return Set_Outcome::Not_Stored;
-        default:
-            throw Error("OpenKache returned an invalid SET outcome");
-        }
+        return set_outcome(
+            execute(OPENKACHE_CLIENT_OPERATION_SET, key, value, options),
+            "SET");
     }
 
     /// Convenience overload for textual keys and values.
@@ -266,15 +251,8 @@ public:
 
     /// Deletes an application-key value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
-        const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_DELETE, key, {}, Set_Options{});
-        if (result.kind == OPENKACHE_CLIENT_RESULT_DELETED) {
-            return true;
-        }
-        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_DELETED) {
-            return false;
-        }
-        throw Error("OpenKache returned an invalid DELETE outcome");
+        return delete_outcome(
+            execute(OPENKACHE_CLIENT_OPERATION_DELETE, key, {}, Set_Options{}));
     }
 
     /// Convenience overload for textual application keys.
@@ -284,15 +262,14 @@ public:
 
     /// Retrieves exact bytes for a fixed-size protocol item ID.
     std::optional<Bytes> get_raw(std::span<const Byte> item_id) const {
-        const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_GET, item_id, {}, Set_Options{}, true);
-        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_FOUND) {
-            return std::nullopt;
-        }
-        if (result.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
-            throw Error("OpenKache returned an invalid raw GET outcome");
-        }
-        return result.payload;
+        return get_outcome(
+            execute(
+                OPENKACHE_CLIENT_OPERATION_GET,
+                item_id,
+                {},
+                Set_Options{},
+                true),
+            "raw GET");
     }
 
     /// Stores exact bytes for a fixed-size protocol item ID without value protection.
@@ -300,31 +277,25 @@ public:
         std::span<const Byte> item_id,
         std::span<const Byte> value,
         Set_Options options = {}) const {
-        const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_SET, item_id, value, options, true);
-        switch (result.kind) {
-        case OPENKACHE_CLIENT_RESULT_CREATED:
-            return Set_Outcome::Created;
-        case OPENKACHE_CLIENT_RESULT_REPLACED:
-            return Set_Outcome::Replaced;
-        case OPENKACHE_CLIENT_RESULT_NOT_STORED:
-            return Set_Outcome::Not_Stored;
-        default:
-            throw Error("OpenKache returned an invalid raw SET outcome");
-        }
+        return set_outcome(
+            execute(
+                OPENKACHE_CLIENT_OPERATION_SET,
+                item_id,
+                value,
+                options,
+                true),
+            "raw SET");
     }
 
     /// Deletes a fixed-size protocol item ID without application-key derivation.
     bool remove_raw(std::span<const Byte> item_id) const {
-        const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_DELETE, item_id, {}, Set_Options{}, true);
-        if (result.kind == OPENKACHE_CLIENT_RESULT_DELETED) {
-            return true;
-        }
-        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_DELETED) {
-            return false;
-        }
-        throw Error("OpenKache returned an invalid raw DELETE outcome");
+        return delete_outcome(
+            execute(
+                OPENKACHE_CLIENT_OPERATION_DELETE,
+                item_id,
+                {},
+                Set_Options{},
+                true));
     }
 
     /// Returns the server's JSON statistics document.
@@ -357,6 +328,47 @@ private:
         Bytes payload;
     };
 
+    static std::optional<Bytes> get_outcome(
+        Operation_Result result,
+        const char* operation) {
+        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_FOUND) {
+            return std::nullopt;
+        }
+        if (result.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
+            throw Error(
+                std::string("OpenKache returned an invalid ") + operation +
+                " outcome");
+        }
+        return std::move(result.payload);
+    }
+
+    static Set_Outcome set_outcome(
+        const Operation_Result& result,
+        const char* operation) {
+        switch (result.kind) {
+        case OPENKACHE_CLIENT_RESULT_CREATED:
+            return Set_Outcome::Created;
+        case OPENKACHE_CLIENT_RESULT_REPLACED:
+            return Set_Outcome::Replaced;
+        case OPENKACHE_CLIENT_RESULT_NOT_STORED:
+            return Set_Outcome::Not_Stored;
+        default:
+            throw Error(
+                std::string("OpenKache returned an invalid ") + operation +
+                " outcome");
+        }
+    }
+
+    static bool delete_outcome(const Operation_Result& result) {
+        if (result.kind == OPENKACHE_CLIENT_RESULT_DELETED) {
+            return true;
+        }
+        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_DELETED) {
+            return false;
+        }
+        throw Error("OpenKache returned an invalid DELETE outcome");
+    }
+
     static std::span<const Byte> as_bytes(std::string_view value) noexcept {
         return {
             reinterpret_cast<const Byte*>(value.data()),
@@ -371,8 +383,11 @@ private:
     static std::string result_payload(const openkache_client_result_t* result) {
         const auto length = openkache_client_result_data_length(result);
         const auto* data = openkache_client_result_data(result);
-        if (length == 0 || data == nullptr) {
+        if (length == 0) {
             return {};
+        }
+        if (data == nullptr) {
+            return "OpenKache returned a null payload";
         }
         return {
             reinterpret_cast<const char*>(data),

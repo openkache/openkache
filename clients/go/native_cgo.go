@@ -504,6 +504,32 @@ func (h *nativeHandle) execute(
 	key, value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	return h.executeNative(ctx, operation, key, value, options, false)
+}
+
+func (h *nativeHandle) executeRaw(
+	ctx context.Context,
+	operation uint32,
+	itemID ItemID,
+	value []byte,
+	options SetOptions,
+) (nativeResult, error) {
+	if !h.raw {
+		return nativeResult{}, &Error{
+			Operation: "execute raw",
+			Message:   "native library does not support exact-item-ID operations",
+		}
+	}
+	return h.executeNative(ctx, operation, itemID[:], value, options, true)
+}
+
+func (h *nativeHandle) executeNative(
+	ctx context.Context,
+	operation uint32,
+	key, value []byte,
+	options SetOptions,
+	raw bool,
+) (nativeResult, error) {
 	client, err := h.begin()
 	if err != nil {
 		return nativeResult{}, err
@@ -523,68 +549,23 @@ func (h *nativeHandle) execute(
 	done := make(chan nativeResult, 1)
 	go func() {
 		defer h.end()
-		result := C.openkache_go_execute(
-			h.library.ptr, client, C.uint32_t(operation),
-			(*C.uint8_t)(keyMemory), C.size_t(len(key)),
-			(*C.uint8_t)(valueMemory), C.size_t(len(value)),
-			C.uint32_t(condition), C.uint8_t(ttlEnabled), C.uint64_t(options.TTLMillis),
-		)
+		var result *C.openkache_client_result
+		if raw {
+			result = C.openkache_go_execute_raw(
+				h.library.ptr, client, C.uint32_t(operation),
+				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
+				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
+				C.uint32_t(condition), C.uint8_t(ttlEnabled), C.uint64_t(options.TTLMillis),
+			)
+		} else {
+			result = C.openkache_go_execute(
+				h.library.ptr, client, C.uint32_t(operation),
+				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
+				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
+				C.uint32_t(condition), C.uint8_t(ttlEnabled), C.uint64_t(options.TTLMillis),
+			)
+		}
 		C.free(keyMemory)
-		C.free(valueMemory)
-		kind, data := decodeResult(h.library, result)
-		done <- nativeResult{kind: kind, data: data}
-	}()
-
-	select {
-	case result := <-done:
-		if result.kind == SmithyFFIResultError {
-			return nativeResult{}, &Error{Message: string(result.data)}
-		}
-		return result, nil
-	case <-ctx.Done():
-		return nativeResult{}, ctx.Err()
-	}
-}
-
-func (h *nativeHandle) executeRaw(
-	ctx context.Context,
-	operation uint32,
-	itemID ItemID,
-	value []byte,
-	options SetOptions,
-) (nativeResult, error) {
-	if !h.raw {
-		return nativeResult{}, &Error{
-			Operation: "execute raw",
-			Message:   "native library does not support exact-item-ID operations",
-		}
-	}
-	client, err := h.begin()
-	if err != nil {
-		return nativeResult{}, err
-	}
-	itemIDMemory := C.CBytes(itemID[:])
-	valueMemory := C.CBytes(value)
-
-	condition := SmithyFFISetConditionNone
-	switch options.Condition {
-	case IfAbsent:
-		condition = SmithyFFISetConditionIfAbsent
-	case IfPresent:
-		condition = SmithyFFISetConditionIfPresent
-	}
-	ttlEnabled := boolByte(options.TTLMillis != 0)
-
-	done := make(chan nativeResult, 1)
-	go func() {
-		defer h.end()
-		result := C.openkache_go_execute_raw(
-			h.library.ptr, client, C.uint32_t(operation),
-			(*C.uint8_t)(itemIDMemory), C.size_t(len(itemID)),
-			(*C.uint8_t)(valueMemory), C.size_t(len(value)),
-			C.uint32_t(condition), C.uint8_t(ttlEnabled), C.uint64_t(options.TTLMillis),
-		)
-		C.free(itemIDMemory)
 		C.free(valueMemory)
 		kind, data := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data}

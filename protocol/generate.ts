@@ -368,9 +368,8 @@ function api_enum(shapes: Json_Object, name: string): Api_Enum {
     throw new Error(`${shape_id} must be an enum`)
   }
   const members = object_member(shape, "members", shape_id)
-  return {
-    name,
-    members: Object.entries(members).map(([member_name, value]): Api_Enum_Member => {
+  const enum_members = Object.entries(members).map(
+    ([member_name, value]): Api_Enum_Member => {
       const member = object_value(value, `${shape_id}.${member_name}`)
       const traits = object_member(member, "traits", `${shape_id}.${member_name}`)
       return {
@@ -381,7 +380,23 @@ function api_enum(shapes: Json_Object, name: string): Api_Enum {
           `${shape_id}.${member_name}.traits`,
         ),
       }
-    }),
+    },
+  )
+  const member_names = new Set<string>()
+  const member_values = new Set<string>()
+  for (const member of enum_members) {
+    if (member_names.has(member.name)) {
+      throw new Error(`duplicate ${name} enum member name ${member.name}`)
+    }
+    if (member_values.has(member.value)) {
+      throw new Error(`duplicate ${name} enum value ${member.value}`)
+    }
+    member_names.add(member.name)
+    member_values.add(member.value)
+  }
+  return {
+    name,
+    members: enum_members,
   }
 }
 
@@ -466,7 +481,7 @@ function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void 
 
 function wire_v1_contract(value: unknown): Wire_V1_Contract {
   const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v1`)
-  return {
+  const v1 = {
     alpn: string_member(contract, "alpn", "wireContract.v1"),
     request_fixed_bytes: integer_member(contract, "requestFixedBytes", "wireContract.v1", 1),
     response_fixed_bytes: integer_member(contract, "responseFixedBytes", "wireContract.v1", 1),
@@ -486,7 +501,32 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
       0,
       0xff,
     ),
+  } satisfies Wire_V1_Contract
+  if (v1.alpn !== "openkache/1") {
+    throw new Error(
+      `${WIRE_CONTRACT_TRAIT_ID}.v1.alpn must be "openkache/1" for the current protocol implementation`,
+    )
   }
+  if (v1.request_fixed_bytes !== 2 || v1.response_fixed_bytes !== 1) {
+    throw new Error(
+      `${WIRE_CONTRACT_TRAIT_ID}.v1 fixed header sizes must be request=2 and response=1`,
+    )
+  }
+  if (v1.max_varuint_bytes !== 9) {
+    throw new Error(
+      `${WIRE_CONTRACT_TRAIT_ID}.v1.maxVaruintBytes must be 9 for the unsigned 64-bit protocol`,
+    )
+  }
+  const flags = [
+    { name: "SetTtl", value: v1.set_ttl_flag },
+    { name: "SetIfAbsent", value: v1.set_if_absent_flag },
+    { name: "SetIfPresent", value: v1.set_if_present_flag },
+  ] as const
+  unique_wire_values(flags, "SET flag")
+  if (flags.some(({ value }) => value === 0 || (value & (value - 1)) !== 0)) {
+    throw new Error("SET flags must each contain exactly one non-zero bit")
+  }
+  return v1
 }
 
 function ffi_entries(

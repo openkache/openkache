@@ -1,6 +1,6 @@
 //! Quinn implementation of the client transport boundary.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,11 +30,14 @@ pub(super) async fn connect(
     let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls)
         .map_err(|error| TransportError::backend(BACKEND, Operation::TlsInitialization, error))?;
     let config = quinn::ClientConfig::new(Arc::new(crypto));
-    let local_address = if address.is_ipv4() {
-        "0.0.0.0:0".parse().expect("valid IPv4 wildcard address")
-    } else {
-        "[::]:0".parse().expect("valid IPv6 wildcard address")
-    };
+    let local_address = SocketAddr::new(
+        if address.is_ipv4() {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        },
+        0,
+    );
     let endpoint = quinn::Endpoint::client(local_address).map_err(|error| {
         TransportError::backend(BACKEND, Operation::EndpointInitialization, error)
     })?;

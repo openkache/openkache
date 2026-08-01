@@ -127,7 +127,9 @@ pub fn encode(encoding: &str, type_name: &str, payload: &[u8]) -> Result<Vec<u8>
     bytes.extend_from_slice(&MAGIC_AND_VERSION);
     bytes.extend_from_slice(
         &u16::try_from(encoding.len())
-            .expect("validated encoding length fits in u16")
+            .map_err(|_| Error::InvalidEncoding {
+                encoding: encoding.to_owned(),
+            })?
             .to_be_bytes(),
     );
     bytes.extend_from_slice(&type_name_length.to_be_bytes());
@@ -159,8 +161,8 @@ pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
         });
     }
 
-    let found = <[u8; MAGIC_AND_VERSION.len()]>::try_from(&bytes[..MAGIC_AND_VERSION.len()])
-        .expect("validated envelope header contains magic bytes");
+    let mut found = [0; MAGIC_AND_VERSION.len()];
+    found.copy_from_slice(&bytes[..MAGIC_AND_VERSION.len()]);
     if found != MAGIC_AND_VERSION {
         return Err(Error::UnsupportedMagicOrVersion { found });
     }
@@ -199,11 +201,7 @@ pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
 }
 
 fn decode_length(bytes: &[u8], offset: usize) -> usize {
-    u16::from_be_bytes(
-        bytes[offset..offset + LENGTH_FIELD_BYTES]
-            .try_into()
-            .expect("validated envelope header contains metadata length"),
-    ) as usize
+    u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize
 }
 
 fn validate_encoding(encoding: &str) -> Result<()> {

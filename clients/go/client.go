@@ -422,21 +422,9 @@ func (c *Client) invoke(
 	key, value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
-	if ctx == nil {
-		return nativeResult{}, validationError("context", "must not be nil")
-	}
-	if err := ctx.Err(); err != nil {
-		return nativeResult{}, err
-	}
-	c.mu.RLock()
-	native := c.native
-	if native == nil {
-		c.mu.RUnlock()
-		return nativeResult{}, ErrClosed
-	}
-	result, err := native.execute(ctx, operation, key, value, options)
-	c.mu.RUnlock()
-	return result, err
+	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.execute(ctx, operation, key, value, options)
+	})
 }
 
 func (c *Client) invokeRaw(
@@ -446,6 +434,15 @@ func (c *Client) invokeRaw(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.executeRaw(ctx, operation, itemID, value, options)
+	})
+}
+
+func (c *Client) invokeNative(
+	ctx context.Context,
+	invoke func(nativeClient) (nativeResult, error),
+) (nativeResult, error) {
 	if ctx == nil {
 		return nativeResult{}, validationError("context", "must not be nil")
 	}
@@ -453,14 +450,12 @@ func (c *Client) invokeRaw(
 		return nativeResult{}, err
 	}
 	c.mu.RLock()
+	defer c.mu.RUnlock()
 	native := c.native
 	if native == nil {
-		c.mu.RUnlock()
 		return nativeResult{}, ErrClosed
 	}
-	result, err := native.executeRaw(ctx, operation, itemID, value, options)
-	c.mu.RUnlock()
-	return result, err
+	return invoke(native)
 }
 
 // Ping verifies the connection and the server's PONG response.
@@ -485,14 +480,7 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, operationError("get", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultValue:
-		return result.data, true, nil
-	case SmithyFFIResultNotFound:
-		return nil, false, nil
-	default:
-		return nil, false, unexpectedResult("get", result.kind)
-	}
+	return getResult("get", result)
 }
 
 // GetJSON retrieves the canonical JSON document stored for key.
@@ -507,14 +495,7 @@ func (c *Client) GetJSON(ctx context.Context, key []byte) ([]byte, bool, error) 
 	if err != nil {
 		return nil, false, operationError("get json", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultValue:
-		return result.data, true, nil
-	case SmithyFFIResultNotFound:
-		return nil, false, nil
-	default:
-		return nil, false, unexpectedResult("get json", result.kind)
-	}
+	return getResult("get json", result)
 }
 
 // GetItem retrieves an exact wire item ID without application-key derivation or
@@ -524,14 +505,7 @@ func (c *Client) GetItem(ctx context.Context, itemID ItemID) ([]byte, bool, erro
 	if err != nil {
 		return nil, false, operationError("get item", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultValue:
-		return result.data, true, nil
-	case SmithyFFIResultNotFound:
-		return nil, false, nil
-	default:
-		return nil, false, unexpectedResult("get item", result.kind)
-	}
+	return getResult("get item", result)
 }
 
 // Set encrypts and stores value for key.
@@ -549,16 +523,7 @@ func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions)
 	if err != nil {
 		return "", operationError("set", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultCreated:
-		return Created, nil
-	case SmithyFFIResultReplaced:
-		return Replaced, nil
-	case SmithyFFIResultNotStored:
-		return NotStored, nil
-	default:
-		return "", unexpectedResult("set", result.kind)
-	}
+	return setResult("set", result)
 }
 
 // SetJSON stores one complete JSON document for key.
@@ -587,16 +552,7 @@ func (c *Client) SetJSON(
 	if err != nil {
 		return "", operationError("set json", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultCreated:
-		return Created, nil
-	case SmithyFFIResultReplaced:
-		return Replaced, nil
-	case SmithyFFIResultNotStored:
-		return NotStored, nil
-	default:
-		return "", unexpectedResult("set json", result.kind)
-	}
+	return setResult("set json", result)
 }
 
 func validateSetOptions(options SetOptions) error {
@@ -623,16 +579,7 @@ func (c *Client) SetItem(
 	if err != nil {
 		return "", operationError("set item", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultCreated:
-		return Created, nil
-	case SmithyFFIResultReplaced:
-		return Replaced, nil
-	case SmithyFFIResultNotStored:
-		return NotStored, nil
-	default:
-		return "", unexpectedResult("set item", result.kind)
-	}
+	return setResult("set item", result)
 }
 
 // Delete removes key and reports whether an item existed.
@@ -644,14 +591,7 @@ func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
 	if err != nil {
 		return false, operationError("delete", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultDeleted:
-		return true, nil
-	case SmithyFFIResultNotDeleted:
-		return false, nil
-	default:
-		return false, unexpectedResult("delete", result.kind)
-	}
+	return deleteResult("delete", result)
 }
 
 // DeleteItem removes an exact wire item ID.
@@ -660,14 +600,7 @@ func (c *Client) DeleteItem(ctx context.Context, itemID ItemID) (bool, error) {
 	if err != nil {
 		return false, operationError("delete item", err)
 	}
-	switch result.kind {
-	case SmithyFFIResultDeleted:
-		return true, nil
-	case SmithyFFIResultNotDeleted:
-		return false, nil
-	default:
-		return false, unexpectedResult("delete item", result.kind)
-	}
+	return deleteResult("delete item", result)
 }
 
 // Stats returns the server's JSON statistics document unchanged.
@@ -771,5 +704,40 @@ func unexpectedResult(operation string, kind uint32) error {
 	return &Error{
 		Operation: operation,
 		Message:   fmt.Sprintf("native ABI returned unexpected result kind %d", kind),
+	}
+}
+
+func getResult(operation string, result nativeResult) ([]byte, bool, error) {
+	switch result.kind {
+	case SmithyFFIResultValue:
+		return result.data, true, nil
+	case SmithyFFIResultNotFound:
+		return nil, false, nil
+	default:
+		return nil, false, unexpectedResult(operation, result.kind)
+	}
+}
+
+func setResult(operation string, result nativeResult) (SetOutcome, error) {
+	switch result.kind {
+	case SmithyFFIResultCreated:
+		return Created, nil
+	case SmithyFFIResultReplaced:
+		return Replaced, nil
+	case SmithyFFIResultNotStored:
+		return NotStored, nil
+	default:
+		return "", unexpectedResult(operation, result.kind)
+	}
+}
+
+func deleteResult(operation string, result nativeResult) (bool, error) {
+	switch result.kind {
+	case SmithyFFIResultDeleted:
+		return true, nil
+	case SmithyFFIResultNotDeleted:
+		return false, nil
+	default:
+		return false, unexpectedResult(operation, result.kind)
 	}
 }

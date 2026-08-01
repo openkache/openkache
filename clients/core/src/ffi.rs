@@ -13,18 +13,16 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub use openkache_protocol::FFI_ABI_VERSION as ABI_VERSION;
-pub use openkache_protocol::{FfiOperation, FfiResultKind, FfiSetCondition};
-use openkache_protocol::{
-    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
-};
-use serde::Deserialize;
-
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
     Endpoint, GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, RetryPolicy,
     ServerTrust, SetCondition, SetOptions, SetOutcome,
+};
+pub use openkache_protocol::FFI_ABI_VERSION as ABI_VERSION;
+pub use openkache_protocol::{FfiOperation, FfiResultKind, FfiSetCondition};
+use openkache_protocol::{
+    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;
@@ -414,18 +412,14 @@ async fn execute_protected(
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
-        FfiOperation::Ping => client
-            .ping()
+        FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
+        FfiOperation::Get => client
+            .get(&application_key)
             .await
-            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Get => client.get(&application_key).await.map(|value| match value {
-            GetOutcome::Found(value) => FfiResult::success(FfiResultKind::Value, value),
-            GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
-        }),
+            .map(|value| get_result(value, bytes_result)),
         FfiOperation::GetJson => client
             .get_value(&application_key)
             .await
-            .map_err(crate::Error::from)
             .and_then(json_result),
         FfiOperation::Set => client
             .set(&application_key, value, set_options)
@@ -438,27 +432,13 @@ async fn execute_protected(
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
-        FfiOperation::Delete => client.delete(&application_key).await.map(|deleted| {
-            FfiResult::success(
-                match deleted {
-                    DeleteOutcome::Deleted => FfiResultKind::Deleted,
-                    DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-                },
-                Vec::new(),
-            )
-        }),
+        FfiOperation::Delete => client.delete(&application_key).await.map(delete_result),
         FfiOperation::Stats => client
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client
-            .sync()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Reconnect => client
-            .reconnect()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
+        FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
             "unsupported operation from the generated Smithy contract",
@@ -474,19 +454,14 @@ async fn execute_raw(
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
-        FfiOperation::Ping => client
-            .raw()
-            .ping()
-            .await
-            .map(|_| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Ping => client.raw().ping().await.map(|_| ok_result()),
         FfiOperation::Get => {
             let item_id = ItemId::from_slice(&item_id)?;
-            client.raw().get(item_id).await.map(|value| match value {
-                GetOutcome::Found(value) => {
-                    FfiResult::success(FfiResultKind::Value, value.into_bytes())
-                }
-                GetOutcome::NotFound => FfiResult::success(FfiResultKind::NotFound, Vec::new()),
-            })
+            client
+                .raw()
+                .get(item_id)
+                .await
+                .map(|value| get_result(value, value_result))
         }
         FfiOperation::Set => {
             let item_id = ItemId::from_slice(&item_id)?;
@@ -494,41 +469,19 @@ async fn execute_raw(
                 .raw()
                 .set(item_id, ItemValue::new(value), set_options)
                 .await
-                .map(|outcome| match outcome {
-                    SetOutcome::Created => FfiResult::success(FfiResultKind::Created, Vec::new()),
-                    SetOutcome::Replaced => FfiResult::success(FfiResultKind::Replaced, Vec::new()),
-                    SetOutcome::NotStored => {
-                        FfiResult::success(FfiResultKind::NotStored, Vec::new())
-                    }
-                })
+                .map(set_result)
         }
         FfiOperation::Delete => {
             let item_id = ItemId::from_slice(&item_id)?;
-            client.raw().delete(item_id).await.map(|deleted| {
-                FfiResult::success(
-                    match deleted {
-                        DeleteOutcome::Deleted => FfiResultKind::Deleted,
-                        DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-                    },
-                    Vec::new(),
-                )
-            })
+            client.raw().delete(item_id).await.map(delete_result)
         }
         FfiOperation::Stats => client
             .raw()
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client
-            .raw()
-            .sync()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
-        FfiOperation::Reconnect => client
-            .raw()
-            .reconnect()
-            .await
-            .map(|()| FfiResult::success(FfiResultKind::Ok, Vec::new())),
+        FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
+        FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
         FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
             "operation",
             "exact item-ID calls do not support formatted JSON operations",
@@ -542,6 +495,39 @@ async fn execute_raw(
 
 fn connection_state_value(state: ConnectionState) -> u32 {
     state.code()
+}
+
+fn ok_result() -> FfiResult {
+    FfiResult::success(FfiResultKind::Ok, Vec::new())
+}
+
+fn not_found_result() -> FfiResult {
+    FfiResult::success(FfiResultKind::NotFound, Vec::new())
+}
+
+fn get_result<T>(outcome: GetOutcome<T>, found: impl FnOnce(T) -> FfiResult) -> FfiResult {
+    match outcome {
+        GetOutcome::Found(value) => found(value),
+        GetOutcome::NotFound => not_found_result(),
+    }
+}
+
+fn value_result(value: ItemValue) -> FfiResult {
+    bytes_result(value.into_bytes())
+}
+
+fn bytes_result(payload: Vec<u8>) -> FfiResult {
+    FfiResult::success(FfiResultKind::Value, payload)
+}
+
+fn delete_result(outcome: DeleteOutcome) -> FfiResult {
+    FfiResult::success(
+        match outcome {
+            DeleteOutcome::Deleted => FfiResultKind::Deleted,
+            DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
+        },
+        Vec::new(),
+    )
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
@@ -561,15 +547,12 @@ fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, cra
             .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
             .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
-        GetOutcome::NotFound => Ok(FfiResult::success(FfiResultKind::NotFound, Vec::new())),
+        GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
 
 fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
-    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-    let value = JsonValue::deserialize(&mut deserializer).map_err(|error| error.to_string())?;
-    deserializer.end().map_err(|error| error.to_string())?;
-    Ok(value)
+    crate::value::parse_json_input(bytes).map_err(|error| error.to_string())
 }
 
 /// Returns the native ABI version implemented by this library.

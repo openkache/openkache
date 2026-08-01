@@ -145,7 +145,7 @@ connection API is not a browser transport.
 Every connection and cache method returns a Promise. The adapter runs native
 networking outside the JavaScript event loop and maintains one reusable
 connection. `connection_state()` reports `connected`, `reconnecting`,
-`disconnected`, or `closed`; `reconnect()` replaces a failed connection without
+`disconnected`, `closed`, or `unknown`; `reconnect()` replaces a failed connection without
 replaying an operation. Call and await `close()` when finished. The
 `client.raw()` view implements the Smithy-generated `Smithy_OpenKache_Api`
 contract for exact 32-byte item IDs and opaque protocol values.

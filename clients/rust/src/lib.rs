@@ -201,7 +201,7 @@ macro_rules! builder_methods {
 
 #[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 macro_rules! client_methods {
-    ($client:ident) => {
+    ($client:ident, $request:ident) => {
         impl $client {
             /// Verifies the connection and returns the complete request round-trip time.
             pub async fn ping(&self) -> Result<Duration> {
@@ -263,6 +263,30 @@ macro_rules! client_methods {
             pub async fn close(&self) -> Result<()> {
                 self.inner.close().await
             }
+
+            /// Starts an awaitable set request with persistent, unconditional defaults.
+            pub fn set<'a>(
+                &'a self,
+                application_key: impl AsRef<[u8]>,
+                value: impl IntoValue,
+            ) -> $request<'a> {
+                self.set_with_options(application_key, value, SetOptions::new())
+            }
+
+            /// Starts an awaitable set request with explicit wire-level options.
+            pub fn set_with_options<'a>(
+                &'a self,
+                application_key: impl AsRef<[u8]>,
+                value: impl IntoValue,
+                options: SetOptions,
+            ) -> $request<'a> {
+                $request {
+                    client: self,
+                    application_key: application_key.as_ref().to_vec(),
+                    value: value.into_value(),
+                    options,
+                }
+            }
         }
     };
 }
@@ -311,34 +335,10 @@ impl Client {
     pub fn raw(&self) -> &RawClient {
         self.inner.raw()
     }
-
-    /// Starts an awaitable set request with persistent, unconditional defaults.
-    pub fn set<'a>(
-        &'a self,
-        application_key: impl AsRef<[u8]>,
-        value: impl IntoValue,
-    ) -> SetRequest<'a> {
-        self.set_with_options(application_key, value, SetOptions::new())
-    }
-
-    /// Starts an awaitable set request with explicit wire-level options.
-    pub fn set_with_options<'a>(
-        &'a self,
-        application_key: impl AsRef<[u8]>,
-        value: impl IntoValue,
-        options: SetOptions,
-    ) -> SetRequest<'a> {
-        SetRequest {
-            client: self,
-            application_key: application_key.as_ref().to_vec(),
-            value: value.into_value(),
-            options,
-        }
-    }
 }
 
 #[cfg(feature = "quic-quinn")]
-client_methods!(Client);
+client_methods!(Client, SetRequest);
 
 #[cfg(feature = "quic-compio")]
 /// High-level application-key and plaintext-value client confined to a Compio runtime.
@@ -390,34 +390,10 @@ impl LocalClient {
     pub fn raw(&self) -> &LocalRawClient {
         self.inner.raw()
     }
-
-    /// Starts an awaitable set request with persistent, unconditional defaults.
-    pub fn set<'a>(
-        &'a self,
-        application_key: impl AsRef<[u8]>,
-        value: impl IntoValue,
-    ) -> LocalSetRequest<'a> {
-        self.set_with_options(application_key, value, SetOptions::new())
-    }
-
-    /// Starts an awaitable set request with explicit wire-level options.
-    pub fn set_with_options<'a>(
-        &'a self,
-        application_key: impl AsRef<[u8]>,
-        value: impl IntoValue,
-        options: SetOptions,
-    ) -> LocalSetRequest<'a> {
-        LocalSetRequest {
-            client: self,
-            application_key: application_key.as_ref().to_vec(),
-            value: value.into_value(),
-            options,
-        }
-    }
 }
 
 #[cfg(feature = "quic-compio")]
-client_methods!(LocalClient);
+client_methods!(LocalClient, LocalSetRequest);
 
 /// Conversion into an owned value buffer without separate borrowed and owned method names.
 pub trait IntoValue {
@@ -443,17 +419,23 @@ impl IntoValue for String {
     }
 }
 
-impl IntoValue for &str {
-    fn into_value(self) -> Vec<u8> {
-        self.as_bytes().to_vec()
-    }
+fn copy_borrowed_value<T: AsRef<[u8]> + ?Sized>(value: &T) -> Vec<u8> {
+    value.as_ref().to_vec()
 }
 
-impl IntoValue for &[u8] {
-    fn into_value(self) -> Vec<u8> {
-        self.to_vec()
-    }
+macro_rules! impl_borrowed_into_value {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl IntoValue for $type {
+                fn into_value(self) -> Vec<u8> {
+                    copy_borrowed_value(self)
+                }
+            }
+        )+
+    };
 }
+
+impl_borrowed_into_value!(&str, &[u8], &Vec<u8>);
 
 impl<const N: usize> IntoValue for [u8; N] {
     fn into_value(self) -> Vec<u8> {
@@ -463,13 +445,7 @@ impl<const N: usize> IntoValue for [u8; N] {
 
 impl<const N: usize> IntoValue for &[u8; N] {
     fn into_value(self) -> Vec<u8> {
-        self.to_vec()
-    }
-}
-
-impl IntoValue for &Vec<u8> {
-    fn into_value(self) -> Vec<u8> {
-        self.clone()
+        copy_borrowed_value(self)
     }
 }
 
@@ -494,48 +470,6 @@ pub struct SetRequest<'a> {
     options: SetOptions,
 }
 
-#[cfg(feature = "quic-quinn")]
-impl SetRequest<'_> {
-    /// Replaces all set options with an explicit value.
-    pub fn options(mut self, options: SetOptions) -> Self {
-        self.options = options;
-        self
-    }
-
-    /// Stores only if the key does not exist.
-    pub fn if_absent(mut self) -> Self {
-        self.options = self.options.if_absent();
-        self
-    }
-
-    /// Stores only if the key already exists.
-    pub fn if_present(mut self) -> Self {
-        self.options = self.options.if_present();
-        self
-    }
-
-    /// Sets a positive relative expiration in exact milliseconds.
-    pub fn expires_after_millis(mut self, milliseconds: u64) -> Self {
-        self.options = self.options.expires_after_millis(milliseconds);
-        self
-    }
-}
-
-#[cfg(feature = "quic-quinn")]
-impl<'a> IntoFuture for SetRequest<'a> {
-    type Output = Result<SetOutcome>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + Send + 'a>>;
-
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            self.client
-                .inner
-                .set(self.application_key, self.value, self.options)
-                .await
-        })
-    }
-}
-
 #[cfg(feature = "quic-compio")]
 /// Awaitable Compio set request with optional condition and TTL modifiers.
 pub struct LocalSetRequest<'a> {
@@ -545,44 +479,63 @@ pub struct LocalSetRequest<'a> {
     options: SetOptions,
 }
 
-#[cfg(feature = "quic-compio")]
-impl LocalSetRequest<'_> {
-    /// Replaces all set options with an explicit value.
-    pub fn options(mut self, options: SetOptions) -> Self {
-        self.options = options;
-        self
-    }
+macro_rules! set_request_methods {
+    ($request:ident) => {
+        impl $request<'_> {
+            /// Replaces all set options with an explicit value.
+            pub fn options(mut self, options: SetOptions) -> Self {
+                self.options = options;
+                self
+            }
 
-    /// Stores only if the key does not exist.
-    pub fn if_absent(mut self) -> Self {
-        self.options = self.options.if_absent();
-        self
-    }
+            /// Stores only if the key does not exist.
+            pub fn if_absent(mut self) -> Self {
+                self.options = self.options.if_absent();
+                self
+            }
 
-    /// Stores only if the key already exists.
-    pub fn if_present(mut self) -> Self {
-        self.options = self.options.if_present();
-        self
-    }
+            /// Stores only if the key already exists.
+            pub fn if_present(mut self) -> Self {
+                self.options = self.options.if_present();
+                self
+            }
 
-    /// Sets a positive relative expiration in exact milliseconds.
-    pub fn expires_after_millis(mut self, milliseconds: u64) -> Self {
-        self.options = self.options.expires_after_millis(milliseconds);
-        self
-    }
+            /// Sets a positive relative expiration in exact milliseconds.
+            pub fn expires_after_millis(mut self, milliseconds: u64) -> Self {
+                self.options = self.options.expires_after_millis(milliseconds);
+                self
+            }
+        }
+    };
 }
 
-#[cfg(feature = "quic-compio")]
-impl<'a> IntoFuture for LocalSetRequest<'a> {
-    type Output = Result<SetOutcome>;
-    type IntoFuture = Pin<Box<dyn Future<Output = Self::Output> + 'a>>;
+macro_rules! set_request_future {
+    ($request:ident $(+ $bound:ident)?) => {
+        impl<'a> IntoFuture for $request<'a> {
+            type Output = Result<SetOutcome>;
+            type IntoFuture =
+                Pin<Box<dyn Future<Output = Self::Output> $(+ $bound)? + 'a>>;
 
-    fn into_future(self) -> Self::IntoFuture {
-        Box::pin(async move {
-            self.client
-                .inner
-                .set(self.application_key, self.value, self.options)
-                .await
-        })
-    }
+            fn into_future(self) -> Self::IntoFuture {
+                Box::pin(async move {
+                    self.client
+                        .inner
+                        .set(self.application_key, self.value, self.options)
+                        .await
+                })
+            }
+        }
+    };
 }
+
+#[cfg(feature = "quic-quinn")]
+set_request_methods!(SetRequest);
+
+#[cfg(feature = "quic-quinn")]
+set_request_future!(SetRequest + Send);
+
+#[cfg(feature = "quic-compio")]
+set_request_methods!(LocalSetRequest);
+
+#[cfg(feature = "quic-compio")]
+set_request_future!(LocalSetRequest);
