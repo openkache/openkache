@@ -267,9 +267,15 @@ impl<B: BackendConnection> PooledConnection<B> {
     }
 
     fn remove_lane(&self) {
-        let previous = self.open_lanes.fetch_sub(1, Ordering::AcqRel);
-        assert!(previous > 0, "a removed stream lane must be open");
-        let _ = self.lane_capacity_tx.try_send(());
+        if self
+            .open_lanes
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |open| {
+                open.checked_sub(1)
+            })
+            .is_ok()
+        {
+            let _ = self.lane_capacity_tx.try_send(());
+        }
     }
 }
 
@@ -282,11 +288,11 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
     }
 
     async fn write_request(&mut self, frame: Vec<u8>, timeout: Duration) -> Result<()> {
-        self.stream
+        let stream = self
+            .stream
             .as_mut()
-            .expect("a checked-out lane must own its stream")
-            .write_all(frame, timeout)
-            .await?;
+            .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
+        stream.write_all(frame, timeout).await?;
         Ok(())
     }
 
@@ -294,7 +300,7 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         let stream = self
             .stream
             .as_mut()
-            .expect("a checked-out lane must own its stream");
+            .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
         let mut frame = stream
             .read_exact(
                 RESPONSE_FIXED_BYTES,
@@ -325,11 +331,9 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
     }
 
     fn release(mut self) {
-        let stream = self
-            .stream
-            .take()
-            .expect("a released lane must own its stream");
-        self.connection.release_lane(stream);
+        if let Some(stream) = self.stream.take() {
+            self.connection.release_lane(stream);
+        }
     }
 }
 

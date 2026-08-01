@@ -7,15 +7,15 @@
 //
 // If a dependency pulls in `libc`, `cxx`, `bindgen`, `cmake`,
 // `pkg-config`, `vcpkg`, or any `napi`/`napi-derive` crate, the
-// client's "pure Rust" property is violated and the build will panic
-// with a clear, actionable error message.
+// client's "pure Rust" property is violated and the build fails with a clear,
+// actionable error message.
 //
 // ## Detection mechanism
 //
 // The script parses `Cargo.toml` as plain text (not TOML, to keep the
 // dependency footprint itself at zero) and scans each non-comment,
 // non-section-header line for known native-dependency names.  Any match
-// triggers a hard `panic!` before Cargo proceeds to dependency resolution.
+// triggers a hard build failure before Cargo proceeds to dependency resolution.
 //
 // ## What this does NOT cover
 //
@@ -25,12 +25,13 @@
 // also audit transitive dependency trees with `cargo tree` when adding
 // new dependencies.
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read the real `Cargo.toml` from the crate root.
-    let content = std::fs::read_to_string(
-        std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml"),
-    )
-    .expect("Cargo.toml not found");
+    let manifest_directory =
+        std::env::var_os("CARGO_MANIFEST_DIR").ok_or("Cargo did not provide CARGO_MANIFEST_DIR")?;
+    let manifest_path = std::path::Path::new(&manifest_directory).join("Cargo.toml");
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {}: {error}", manifest_path.display()))?;
 
     // Known crates that either ARE native code or REQUIRE a C/C++
     // toolchain to build.  Keep this list sorted alphabetically.
@@ -61,12 +62,14 @@ fn main() {
         }
         for dep in &forbidden {
             if trimmed.starts_with(&format!("{dep} =")) || trimmed.starts_with(&format!("{dep}.")) {
-                panic!(
+                return Err(format!(
                     "\n❌ C dependency detected in Cargo.toml: '{dep}'\n\
                      The `openkache-client-core` crate must remain pure Rust.\n\
                      Remove '{dep}' or find a pure-Rust alternative.\n"
-                );
+                )
+                .into());
             }
         }
     }
+    Ok(())
 }

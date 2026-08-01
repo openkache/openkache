@@ -42,6 +42,7 @@ const AAD_BYTES: usize = VALUE_FORMAT_AAD_DOMAIN.len()
     + ITEM_ID_BYTES
     + VERSION_BYTES.len()
     + VALUE_FORMAT_FORMAT_BYTE_BYTES;
+const BINARY64_SIGNIFICAND_BITS: u32 = 53;
 
 /// Client-owned encoded bytes stored opaquely by the server.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,20 +242,32 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
         Ok(JsonValue::Boolean(value))
     }
 
-    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
-        Ok(JsonValue::Number(value as f64))
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value.unsigned_abs() as u128, value as f64).map_err(E::custom)
     }
 
-    fn visit_i128<E>(self, value: i128) -> std::result::Result<Self::Value, E> {
-        Ok(JsonValue::Number(value as f64))
+    fn visit_i128<E>(self, value: i128) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value.unsigned_abs(), value as f64).map_err(E::custom)
     }
 
-    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
-        Ok(JsonValue::Number(value as f64))
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value as u128, value as f64).map_err(E::custom)
     }
 
-    fn visit_u128<E>(self, value: u128) -> std::result::Result<Self::Value, E> {
-        Ok(JsonValue::Number(value as f64))
+    fn visit_u128<E>(self, value: u128) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        visit_json_integer(value, value as f64).map_err(E::custom)
     }
 
     fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E>
@@ -538,7 +551,7 @@ impl ValueCodec {
         };
         let format =
             compression_id | (self.encryption.identifier() << VALUE_FORMAT_ENCRYPTION_SHIFT);
-        let aad = make_aad(item_id, VERSION_BYTES, format);
+        let aad = make_aad(item_id, format);
         let body = match self.encryption {
             Encryption::Unprotected => transformed,
             Encryption::Compact => self.encrypt_compact(item_id, &aad, transformed)?,
@@ -662,7 +675,7 @@ impl ValueCodec {
         let body_length = encoded.len() - body_offset;
         encoded.copy_within(body_offset.., 0);
         encoded.truncate(body_length);
-        let aad = make_aad(item_id, VERSION_BYTES, format);
+        let aad = make_aad(item_id, format);
         let transformed = match encryption {
             Encryption::Unprotected => {
                 if encoded.is_empty() {
@@ -820,15 +833,23 @@ impl ValueCodec {
     }
 
     fn decrypt_robust(&self, item_id: ItemId, aad: &[u8], mut encoded: Vec<u8>) -> Result<Vec<u8>> {
-        let tag_offset = encoded.len() - VALUE_FORMAT_ROBUST_TAG_BYTES;
+        let tag_offset = encoded
+            .len()
+            .checked_sub(VALUE_FORMAT_ROBUST_TAG_BYTES)
+            .ok_or(Error::InvalidEncodedValue("Robust body is truncated"))?;
         let nonce_bytes: [u8; VALUE_FORMAT_ROBUST_NONCE_BYTES] = encoded
-            [..VALUE_FORMAT_ROBUST_NONCE_BYTES]
+            .get(..VALUE_FORMAT_ROBUST_NONCE_BYTES)
+            .ok_or(Error::InvalidEncodedValue("Robust nonce is truncated"))?
             .try_into()
-            .expect("validated Robust nonce length");
-        let tag_bytes: [u8; VALUE_FORMAT_ROBUST_TAG_BYTES] = encoded[tag_offset..]
+            .map_err(|_| Error::InvalidEncodedValue("Robust nonce has an invalid length"))?;
+        let tag_bytes: [u8; VALUE_FORMAT_ROBUST_TAG_BYTES] = encoded
+            .get(tag_offset..)
+            .ok_or(Error::InvalidEncodedValue("Robust tag is truncated"))?
             .try_into()
-            .expect("validated Robust authentication tag");
-        let ciphertext_length = tag_offset - VALUE_FORMAT_ROBUST_NONCE_BYTES;
+            .map_err(|_| Error::InvalidEncodedValue("Robust tag has an invalid length"))?;
+        let ciphertext_length = tag_offset
+            .checked_sub(VALUE_FORMAT_ROBUST_NONCE_BYTES)
+            .ok_or(Error::InvalidEncodedValue("Robust ciphertext is truncated"))?;
         encoded.copy_within(VALUE_FORMAT_ROBUST_NONCE_BYTES..tag_offset, 0);
         encoded.truncate(ciphertext_length);
         let material = item_id_material(self.value_root_key()?, item_id);
@@ -994,7 +1015,7 @@ fn prefix_vu128(identifier: u128, payload: Vec<u8>) -> Result<Vec<u8>> {
     let total_length =
         identifier_length
             .checked_add(payload.len())
-            .ok_or(Error::DecodedValueTooLarge {
+            .ok_or(Error::EncodedValueTooLarge {
                 size: usize::MAX,
                 maximum: MAX_VALUE_BYTES,
             })?;
@@ -1027,7 +1048,12 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
     let mut encoded = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
     encoded[..encoded_length].copy_from_slice(&input[..encoded_length]);
     let (value, decoded_length) = vu128::decode_u128(&encoded);
-    debug_assert_eq!(decoded_length, encoded_length);
+    if decoded_length != encoded_length {
+        return Err(Error::InvalidVu128 {
+            field,
+            reason: "decoder returned an invalid length",
+        });
+    }
 
     let mut canonical = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
     let canonical_length = vu128::encode_u128(&mut canonical, value);
@@ -1064,6 +1090,20 @@ fn validate_json_value(value: &JsonValue) -> Result<()> {
     }
 }
 
+fn visit_json_integer(magnitude: u128, value: f64) -> Result<JsonValue> {
+    let bit_length = u128::BITS - magnitude.leading_zeros();
+    let exactly_representable = bit_length <= BINARY64_SIGNIFICAND_BITS || {
+        let discarded_bits = bit_length - BINARY64_SIGNIFICAND_BITS;
+        magnitude & ((1_u128 << discarded_bits) - 1) == 0
+    };
+    if !exactly_representable {
+        return Err(Error::InvalidJson(
+            "JSON integers must be exactly representable as IEEE-754 binary64 values".into(),
+        ));
+    }
+    Ok(JsonValue::Number(value))
+}
+
 fn validate_object_keys(entries: &[(String, JsonValue)]) -> Result<()> {
     let mut keys = HashSet::with_capacity(entries.len());
     for (key, _) in entries {
@@ -1076,19 +1116,121 @@ fn validate_object_keys(entries: &[(String, JsonValue)]) -> Result<()> {
     Ok(())
 }
 
-fn decode_json(payload: &[u8]) -> Result<JsonValue> {
+pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
+    validate_json_integer_tokens(payload)?;
     let mut deserializer = serde_json::Deserializer::from_slice(payload);
     let value = JsonValue::deserialize(&mut deserializer)
         .map_err(|error| Error::InvalidJson(error.to_string()))?;
     deserializer
         .end()
         .map_err(|error| Error::InvalidJson(error.to_string()))?;
+    Ok(value)
+}
+
+fn decode_json(payload: &[u8]) -> Result<JsonValue> {
+    let value = parse_json_input(payload)?;
     let canonical = serde_json_canonicalizer::to_vec(&value)
         .map_err(|error| Error::InvalidJson(error.to_string()))?;
     if canonical != payload {
         return Err(Error::NonCanonicalJson);
     }
     Ok(value)
+}
+
+fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {
+    let mut in_string = false;
+    let mut index = 0;
+    while index < payload.len() {
+        let byte = payload[index];
+        if in_string {
+            match byte {
+                b'\\' => index = index.saturating_add(2),
+                b'"' => {
+                    in_string = false;
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            index += 1;
+            continue;
+        }
+        if byte == b'-' || byte.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while let Some(&next) = payload.get(index) {
+                if next.is_ascii_whitespace() || matches!(next, b',' | b']' | b'}') {
+                    break;
+                }
+                index += 1;
+            }
+            validate_json_number_token(&payload[start..index])?;
+            continue;
+        }
+        index += 1;
+    }
+    Ok(())
+}
+
+fn validate_json_number_token(token: &[u8]) -> Result<()> {
+    let Ok(token) = std::str::from_utf8(token) else {
+        return Ok(());
+    };
+    if token.bytes().any(|byte| matches!(byte, b'.' | b'e' | b'E')) {
+        return Ok(());
+    }
+    let Ok(value) = token.parse::<f64>() else {
+        return Ok(());
+    };
+    if !value.is_finite() {
+        return Err(Error::InvalidJson(
+            "JSON numbers must be finite IEEE-754 values".into(),
+        ));
+    }
+    let Some(expected) = integer_token(token) else {
+        return Ok(());
+    };
+    let actual = normalize_integer_string(&format!("{value:.0}"));
+    if actual != expected {
+        return Err(Error::InvalidJson(
+            "JSON integers must be exactly representable as IEEE-754 binary64 values".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn integer_token(token: &str) -> Option<String> {
+    let (negative, token) = token
+        .strip_prefix('-')
+        .map_or((false, token), |token| (true, token));
+    if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let digits = token.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some("0".to_owned());
+    }
+    let mut normalized = digits.to_owned();
+    if negative {
+        normalized.insert(0, '-');
+    }
+    Some(normalized)
+}
+
+fn normalize_integer_string(value: &str) -> String {
+    let negative = value.starts_with('-');
+    let digits = value.strip_prefix('-').unwrap_or(value);
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        "0".to_owned()
+    } else if negative {
+        format!("-{digits}")
+    } else {
+        digits.to_owned()
+    }
 }
 
 fn compress_if_beneficial(
@@ -1187,15 +1329,14 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(item_id: ItemId, encoded_version: &[u8], format: u8) -> [u8; AAD_BYTES] {
-    debug_assert_eq!(encoded_version, VERSION_BYTES);
+fn make_aad(item_id: ItemId, format: u8) -> [u8; AAD_BYTES] {
     let mut aad = [0_u8; AAD_BYTES];
     let item_id_offset = VALUE_FORMAT_AAD_DOMAIN.len();
     let version_offset = item_id_offset + ITEM_ID_BYTES;
-    let version_end = version_offset + encoded_version.len();
+    let version_end = version_offset + VERSION_BYTES.len();
     aad[..item_id_offset].copy_from_slice(VALUE_FORMAT_AAD_DOMAIN);
     aad[item_id_offset..version_offset].copy_from_slice(item_id.as_bytes());
-    aad[version_offset..version_end].copy_from_slice(encoded_version);
+    aad[version_offset..version_end].copy_from_slice(VERSION_BYTES);
     aad[version_end..version_end + VALUE_FORMAT_FORMAT_BYTE_BYTES]
         .copy_from_slice(std::slice::from_ref(&format));
     aad

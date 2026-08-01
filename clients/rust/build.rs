@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_directory = PathBuf::from(
-        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR"),
+        std::env::var_os("CARGO_MANIFEST_DIR").ok_or("Cargo did not provide CARGO_MANIFEST_DIR")?,
     );
     let generator = client_directory.join("../../protocol/generate.ts");
     let model = client_directory.join("../../protocol/model");
-    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo always sets OUT_DIR"))
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
         .join("smithy_api.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
@@ -18,15 +18,18 @@ fn main() {
         .env("OPENKACHE_GENERATION_TARGET", "rust-api")
         .env("OPENKACHE_RUST_API_OUTPUT", &output)
         .status()
-        .unwrap_or_else(|error| {
-            panic!(
+        .map_err(|error| {
+            format!(
                 "Smithy API generation could not start Bun: {error}\n\
                  Install Bun and Smithy CLI, ensure both are on PATH, then rerun Cargo."
             )
-        });
-    assert!(
-        status.success(),
-        "Smithy API generation failed with {status}\n\
-         Run `./generate.ts` from the protocol directory for actionable diagnostics."
-    );
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "Smithy API generation failed with {status}\n\
+             Run `./generate.ts` from the protocol directory for actionable diagnostics."
+        )
+        .into());
+    }
+    Ok(())
 }

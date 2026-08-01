@@ -174,6 +174,7 @@ export type Connection_State =
   | "reconnecting"
   | "disconnected"
   | "closed"
+  | "unknown"
 
 /**
  * Error returned by client validation, value codecs, native transport, or server failures.
@@ -211,6 +212,7 @@ export class OpenKache_Client {
     this.#value_codecs = value_codecs
     this.#lifecycle = lifecycle
     this.#raw_client = new Raw_Client(native_client, lifecycle)
+    CLIENT_FINALIZER.register(this.#raw_client, native_client, this.#raw_client)
   }
 
   /**
@@ -261,7 +263,6 @@ export class OpenKache_Client {
       const client = new OpenKache_Client(native_client, value_codecs, {
         closed: false,
       })
-      CLIENT_FINALIZER.register(client, native_client, client)
       return client
     } catch (error) {
       throw as_openkache_error(error)
@@ -574,7 +575,7 @@ export class OpenKache_Client {
     } catch (error) {
       throw as_openkache_error(error)
     } finally {
-      CLIENT_FINALIZER.unregister(this)
+      CLIENT_FINALIZER.unregister(this.#raw_client)
     }
   }
 }
@@ -814,6 +815,8 @@ class Raw_Client implements OpenKache_Raw_Client {
       await close_native_client(this.#native_client, this.#lifecycle)
     } catch (error) {
       throw as_openkache_error(error)
+    } finally {
+      CLIENT_FINALIZER.unregister(this)
     }
   }
 
@@ -1059,6 +1062,7 @@ function parse_connection_state(value: string): Connection_State {
     case "reconnecting":
     case "disconnected":
     case "closed":
+    case "unknown":
       return value
     default:
       throw new OpenKache_Error(

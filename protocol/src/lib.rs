@@ -125,6 +125,21 @@ impl SetOptions {
     }
 }
 
+fn encode_varuint(value: u64) -> ([u8; MAX_VARUINT_BYTES], usize) {
+    let mut encoded = [0; MAX_VARUINT_BYTES];
+    let length = vu128::encode_u64(&mut encoded, value);
+    (encoded, length)
+}
+
+fn prepend_prefix(mut payload: Vec<u8>, prefix: &[u8]) -> Vec<u8> {
+    let payload_len = payload.len();
+    payload.reserve(prefix.len());
+    payload.resize(prefix.len() + payload_len, 0);
+    payload.copy_within(0..payload_len, prefix.len());
+    payload[..prefix.len()].copy_from_slice(prefix);
+    payload
+}
+
 /// A validated variable-length request header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestHeader {
@@ -177,10 +192,7 @@ impl RequestHeader {
     ///
     /// Returns an error for a malformed, non-canonical, zero, or overflowing TTL.
     pub fn frame_len(self, prefix: &[u8]) -> Result<Option<usize>> {
-        let item_id_end = self
-            .encoded_len
-            .checked_add(self.item_id_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let item_id_end = self.item_id_end()?;
         if prefix.len() < item_id_end {
             return Ok(None);
         }
@@ -200,6 +212,12 @@ impl RequestHeader {
             .checked_add(ttl_len)
             .and_then(|size| size.checked_add(self.value_len))
             .map(Some)
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    }
+
+    fn item_id_end(self) -> Result<usize> {
+        self.encoded_len
+            .checked_add(self.item_id_len)
             .ok_or(ProtocolError::FrameLengthOverflow)
     }
 }
@@ -323,13 +341,10 @@ impl Request {
     /// Encodes this request while reusing its value allocation when practical.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
         let prefix = self.encode_prefix()?;
-        let prefix_len = prefix.len;
-        let value_len = self.value.len();
-        self.value.reserve(prefix_len);
-        self.value.resize(prefix_len + value_len, 0);
-        self.value.copy_within(0..value_len, prefix_len);
-        self.value[..prefix_len].copy_from_slice(prefix.as_slice());
-        Ok(self.value)
+        Ok(prepend_prefix(
+            std::mem::take(&mut self.value),
+            prefix.as_slice(),
+        ))
     }
 
     fn encode_prefix(&self) -> Result<RequestPrefix> {
@@ -341,15 +356,12 @@ impl Request {
             self.value.len(),
         )?;
         let item_id_len = self.item_id.map_or(0, |_| ITEM_ID_BYTES);
-        let mut item_id_len_encoded = [0; MAX_VARUINT_BYTES];
-        let item_id_len_bytes = vu128::encode_u64(&mut item_id_len_encoded, item_id_len as u64);
-        let mut value_len_encoded = [0; MAX_VARUINT_BYTES];
-        let value_len_bytes = vu128::encode_u64(&mut value_len_encoded, self.value.len() as u64);
-        let mut ttl_encoded = [0; MAX_VARUINT_BYTES];
-        let ttl_bytes = self
+        let (item_id_len_encoded, item_id_len_bytes) = encode_varuint(item_id_len as u64);
+        let (value_len_encoded, value_len_bytes) = encode_varuint(self.value.len() as u64);
+        let (ttl_encoded, ttl_bytes) = self
             .set_options
             .ttl_ms
-            .map_or(0, |ttl_ms| vu128::encode_u64(&mut ttl_encoded, ttl_ms));
+            .map_or(([0; MAX_VARUINT_BYTES], 0), encode_varuint);
         let len =
             REQUEST_FIXED_BYTES + item_id_len_bytes + value_len_bytes + item_id_len + ttl_bytes;
         let mut bytes = [0; MAX_REQUEST_PREFIX_BYTES];
@@ -438,13 +450,21 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
         Some(ItemId::new(
             frame[header.encoded_len..item_id_end]
                 .try_into()
-                .expect("validated item ID length"),
+                .map_err(|_| ProtocolError::InvalidItemIdLength {
+                    opcode: header.opcode,
+                    expected: ITEM_ID_BYTES,
+                    actual: header.item_id_len,
+                })?,
         ))
     };
     let mut set_options = SetOptions::new(header.condition, None);
     let value_start = if header.has_ttl {
-        let (ttl_ms, ttl_len) = decode_varuint(&frame[item_id_end..], "SET TTL")?
-            .expect("frame length requires a complete TTL");
+        let (ttl_ms, ttl_len) = decode_varuint(&frame[item_id_end..], "SET TTL")?.ok_or(
+            ProtocolError::FrameTooShort {
+                expected: item_id_end + MIN_VARUINT_BYTES,
+                actual: frame.len(),
+            },
+        )?;
         set_options.ttl_ms = Some(ttl_ms);
         item_id_end + ttl_len
     } else {
@@ -594,19 +614,15 @@ impl Response {
     /// Returns an error when the payload exceeds the protocol limit.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
         let prefix = self.encode_prefix()?;
-        let payload_len = self.payload.len();
-        let prefix_len = prefix.len;
-        self.payload.reserve(prefix_len);
-        self.payload.resize(prefix_len + payload_len, 0);
-        self.payload.copy_within(0..payload_len, prefix_len);
-        self.payload[..prefix_len].copy_from_slice(prefix.as_slice());
-        Ok(self.payload)
+        Ok(prepend_prefix(
+            std::mem::take(&mut self.payload),
+            prefix.as_slice(),
+        ))
     }
 
     fn encode_prefix(&self) -> Result<ResponsePrefix> {
         validate_value_length(self.payload.len())?;
-        let mut length = [0; MAX_VARUINT_BYTES];
-        let length_bytes = vu128::encode_u64(&mut length, self.payload.len() as u64);
+        let (length, length_bytes) = encode_varuint(self.payload.len() as u64);
         let len = RESPONSE_FIXED_BYTES + length_bytes;
         let mut bytes = [0; MAX_RESPONSE_PREFIX_BYTES];
         bytes[0] = self.status as u8;
@@ -616,17 +632,7 @@ impl Response {
 
     /// Decodes and validates one complete response frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
-        let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: MIN_RESPONSE_FRAME_BYTES,
-            actual: frame.len(),
-        })?;
-        let expected = header.frame_len()?;
-        if frame.len() != expected {
-            return Err(ProtocolError::FrameLength {
-                expected,
-                actual: frame.len(),
-            });
-        }
+        let header = decode_response_frame(frame)?;
         Ok(Self {
             status: header.status,
             payload: frame[header.encoded_len..].to_vec(),
@@ -635,17 +641,7 @@ impl Response {
 
     /// Decodes a response while reusing the frame allocation for its payload.
     pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
-        let header = Self::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: MIN_RESPONSE_FRAME_BYTES,
-            actual: frame.len(),
-        })?;
-        let expected = header.frame_len()?;
-        if frame.len() != expected {
-            return Err(ProtocolError::FrameLength {
-                expected,
-                actual: frame.len(),
-            });
-        }
+        let header = decode_response_frame(&frame)?;
         frame.copy_within(header.encoded_len.., 0);
         frame.truncate(header.payload_len);
         Ok(Self {
@@ -653,6 +649,21 @@ impl Response {
             payload: frame,
         })
     }
+}
+
+fn decode_response_frame(frame: &[u8]) -> Result<ResponseHeader> {
+    let header = Response::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
+        expected: MIN_RESPONSE_FRAME_BYTES,
+        actual: frame.len(),
+    })?;
+    let expected = header.frame_len()?;
+    if frame.len() != expected {
+        return Err(ProtocolError::FrameLength {
+            expected,
+            actual: frame.len(),
+        });
+    }
+    Ok(header)
 }
 
 struct ResponsePrefix {
@@ -724,7 +735,9 @@ fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, us
     let mut encoded = [0; MAX_VARUINT_BYTES];
     encoded[..encoded_len].copy_from_slice(&input[..encoded_len]);
     let (value, decoded_len) = vu128::decode_u64(&encoded);
-    debug_assert_eq!(decoded_len, encoded_len);
+    if decoded_len != encoded_len {
+        return Err(ProtocolError::NonCanonicalVaruint { context });
+    }
 
     let mut canonical = [0; MAX_VARUINT_BYTES];
     let canonical_len = vu128::encode_u64(&mut canonical, value);

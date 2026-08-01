@@ -493,12 +493,7 @@ fn parse_json_value(value: serde_json::Value) -> Result<JsonValue> {
     match value {
         serde_json::Value::Null => Ok(JsonValue::Null),
         serde_json::Value::Bool(value) => Ok(JsonValue::Boolean(value)),
-        serde_json::Value::Number(value) => {
-            let value = value
-                .as_f64()
-                .ok_or_else(|| invalid_argument("JSON number must fit in finite f64"))?;
-            JsonValue::number(value).map_err(native_error)
-        }
+        serde_json::Value::Number(value) => parse_json_number(value),
         serde_json::Value::String(value) => Ok(JsonValue::String(value)),
         serde_json::Value::Array(values) => values
             .into_iter()
@@ -511,6 +506,33 @@ fn parse_json_value(value: serde_json::Value) -> Result<JsonValue> {
             .collect::<Result<Vec<_>>>()
             .map(JsonValue::Object),
     }
+}
+
+fn parse_json_number(value: serde_json::Number) -> Result<JsonValue> {
+    let number = value
+        .as_f64()
+        .ok_or_else(|| invalid_argument("JSON number must fit in finite f64"))?;
+    if let Some(integer) = value.as_i64() {
+        validate_exact_json_integer(integer.unsigned_abs() as u128, number)?;
+    } else if let Some(integer) = value.as_u64() {
+        validate_exact_json_integer(integer as u128, number)?;
+    }
+    JsonValue::number(number).map_err(native_error)
+}
+
+fn validate_exact_json_integer(magnitude: u128, value: f64) -> Result<()> {
+    let bit_length = u128::BITS - magnitude.leading_zeros();
+    let exactly_representable =
+        bit_length <= 53 || (magnitude & ((1_u128 << (bit_length - 53)) - 1) == 0);
+    if !exactly_representable {
+        return Err(invalid_argument(
+            "JSON integers must be exactly representable as IEEE-754 binary64 values",
+        ));
+    }
+    if !value.is_finite() {
+        return Err(invalid_argument("JSON number must fit in finite f64"));
+    }
+    Ok(())
 }
 
 fn parse_endpoint(address: &str, server_name: &str) -> Result<Endpoint> {

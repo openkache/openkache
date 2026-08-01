@@ -367,32 +367,25 @@ private enum NativeBridge {
         condition: OpenKacheSetCondition? = nil,
         ttl: UInt64? = nil
     ) throws -> NativeResultPointer {
-        let conditionValue: UInt32
-        switch condition {
-        case .none:
-            conditionValue = Smithy_Native_Contract.setConditionNone
-        case .ifAbsent:
-            conditionValue = Smithy_Native_Contract.setConditionIfAbsent
-        case .ifPresent:
-            conditionValue = Smithy_Native_Contract.setConditionIfPresent
-        }
-        return try withBytes(Array(key)) { keyPointer, keyLength in
-            try withBytes(Array(value)) { valuePointer, valueLength in
-                guard let result = nativeExecute(
-                    handle.pointer,
-                    operation,
-                    keyPointer,
-                    keyLength,
-                    valuePointer,
-                    valueLength,
-                    conditionValue,
-                    ttl == nil ? 0 : 1,
-                    ttl ?? 0
-                ) else {
-                    throw OpenKacheError("native client returned a null operation result")
-                }
-                return result
-            }
+        try executeNative(
+            handle,
+            operation: operation,
+            key: key,
+            value: value,
+            condition: condition,
+            ttl: ttl
+        ) { keyPointer, keyLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
+            nativeExecute(
+                handle.pointer,
+                operation,
+                keyPointer,
+                keyLength,
+                valuePointer,
+                valueLength,
+                conditionValue,
+                ttlEnabled,
+                ttlMilliseconds
+            )
         }
     }
 
@@ -404,32 +397,74 @@ private enum NativeBridge {
         condition: OpenKacheSetCondition? = nil,
         ttl: UInt64? = nil
     ) throws -> NativeResultPointer {
-        let conditionValue: UInt32
-        switch condition {
-        case .none:
-            conditionValue = Smithy_Native_Contract.setConditionNone
-        case .ifAbsent:
-            conditionValue = Smithy_Native_Contract.setConditionIfAbsent
-        case .ifPresent:
-            conditionValue = Smithy_Native_Contract.setConditionIfPresent
+        try executeNative(
+            handle,
+            operation: operation,
+            key: itemID,
+            value: value,
+            condition: condition,
+            ttl: ttl
+        ) { itemIDPointer, itemIDLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
+            nativeExecuteRaw(
+                handle.pointer,
+                operation,
+                itemIDPointer,
+                itemIDLength,
+                valuePointer,
+                valueLength,
+                conditionValue,
+                ttlEnabled,
+                ttlMilliseconds
+            )
         }
-        return try withBytes(Array(itemID)) { itemIDPointer, itemIDLength in
+    }
+
+    private static func executeNative(
+        _ handle: NativeHandle,
+        operation: UInt32,
+        key: Data,
+        value: Data,
+        condition: OpenKacheSetCondition?,
+        ttl: UInt64?,
+        call: (
+            UnsafePointer<UInt8>?,
+            Int,
+            UnsafePointer<UInt8>?,
+            Int,
+            UInt32,
+            UInt8,
+            UInt64
+        ) -> NativeResultPointer?
+    ) throws -> NativeResultPointer {
+        let conditionValue = nativeCondition(condition)
+        let ttlEnabled: UInt8 = ttl == nil ? 0 : 1
+        let ttlMilliseconds = ttl ?? 0
+        return try withBytes(Array(key)) { keyPointer, keyLength in
             try withBytes(Array(value)) { valuePointer, valueLength in
-                guard let result = nativeExecuteRaw(
-                    handle.pointer,
-                    operation,
-                    itemIDPointer,
-                    itemIDLength,
+                guard let result = call(
+                    keyPointer,
+                    keyLength,
                     valuePointer,
                     valueLength,
                     conditionValue,
-                    ttl == nil ? 0 : 1,
-                    ttl ?? 0
+                    ttlEnabled,
+                    ttlMilliseconds
                 ) else {
-                    throw OpenKacheError("native client returned a null raw operation result")
+                    throw OpenKacheError("native client returned a null operation result")
                 }
                 return result
             }
+        }
+    }
+
+    private static func nativeCondition(_ condition: OpenKacheSetCondition?) -> UInt32 {
+        switch condition {
+        case .none:
+            return Smithy_Native_Contract.setConditionNone
+        case .ifAbsent:
+            return Smithy_Native_Contract.setConditionIfAbsent
+        case .ifPresent:
+            return Smithy_Native_Contract.setConditionIfPresent
         }
     }
 }
@@ -467,16 +502,29 @@ private func withBytes<T>(
     }
 }
 
-private func resultPayload(_ result: NativeResultPointer) -> Data {
+private func resultPayload(_ result: NativeResultPointer) throws -> Data {
     let length = nativeResultDataLength(result)
-    guard length > 0, let pointer = nativeResultData(result) else {
+    guard length >= 0 else {
+        throw OpenKacheError("native client returned a negative payload length")
+    }
+    if length == 0 {
         return Data()
+    }
+    guard let pointer = nativeResultData(result) else {
+        throw OpenKacheError("native client returned a null payload pointer")
     }
     return Data(bytes: pointer, count: length)
 }
 
 private func resultError(_ result: NativeResultPointer) -> OpenKacheError {
-    let payload = resultPayload(result)
+    let payload: Data
+    do {
+        payload = try resultPayload(result)
+    } catch let error as OpenKacheError {
+        return error
+    } catch {
+        return OpenKacheError("native client returned a malformed result payload")
+    }
     let message = String(decoding: payload, as: UTF8.self)
     return OpenKacheError(message.isEmpty ? "OpenKache native operation failed" : message)
 }
@@ -491,6 +539,51 @@ private func consumeResult<T>(
         throw resultError(result)
     }
     return try transform(kind, resultPayload(result))
+}
+
+private func getOutcome(
+    _ kind: UInt32,
+    payload: Data,
+    operation: String
+) throws -> Data? {
+    switch kind {
+    case Smithy_Native_Contract.resultValue:
+        return payload
+    case Smithy_Native_Contract.resultNotFound:
+        return nil
+    default:
+        throw OpenKacheError("unexpected \(operation) result")
+    }
+}
+
+private func setOutcome(
+    _ kind: UInt32,
+    operation: String
+) throws -> OpenKacheSetOutcome {
+    switch kind {
+    case Smithy_Native_Contract.resultCreated:
+        return .created
+    case Smithy_Native_Contract.resultReplaced:
+        return .replaced
+    case Smithy_Native_Contract.resultNotStored:
+        return .notStored
+    default:
+        throw OpenKacheError("unexpected \(operation) result")
+    }
+}
+
+private func deleteOutcome(
+    _ kind: UInt32,
+    operation: String
+) throws -> OpenKacheDeleteOutcome {
+    switch kind {
+    case Smithy_Native_Contract.resultDeleted:
+        return .deleted
+    case Smithy_Native_Contract.resultNotDeleted:
+        return .notFound
+    default:
+        throw OpenKacheError("unexpected \(operation) result")
+    }
 }
 
 /// Actor-isolated Swift client over the shared Rust core.
@@ -534,14 +627,7 @@ public actor OpenKacheClient {
                 key: key
             )
             return try consumeResult(result) { kind, payload in
-                switch kind {
-                case Smithy_Native_Contract.resultValue:
-                    return payload
-                case Smithy_Native_Contract.resultNotFound:
-                    return nil
-                default:
-                    throw OpenKacheError("unexpected GET result")
-                }
+                try getOutcome(kind, payload: payload, operation: "GET")
             }
         }
     }
@@ -569,16 +655,7 @@ public actor OpenKacheClient {
                 ttl: ttl
             )
             return try consumeResult(result) { kind, _ in
-                switch kind {
-                case Smithy_Native_Contract.resultCreated:
-                    return .created
-                case Smithy_Native_Contract.resultReplaced:
-                    return .replaced
-                case Smithy_Native_Contract.resultNotStored:
-                    return .notStored
-                default:
-                    throw OpenKacheError("unexpected SET result")
-                }
+                try setOutcome(kind, operation: "SET")
             }
         }
     }
@@ -602,14 +679,7 @@ public actor OpenKacheClient {
                 key: key
             )
             return try consumeResult(result) { kind, _ in
-                switch kind {
-                case Smithy_Native_Contract.resultDeleted:
-                    return .deleted
-                case Smithy_Native_Contract.resultNotDeleted:
-                    return .notFound
-                default:
-                    throw OpenKacheError("unexpected DELETE result")
-                }
+                try deleteOutcome(kind, operation: "DELETE")
             }
         }
     }
@@ -758,14 +828,7 @@ public actor OpenKacheRawClient {
                 itemID: itemID
             )
             return try consumeResult(result) { kind, payload in
-                switch kind {
-                case Smithy_Native_Contract.resultValue:
-                    return payload
-                case Smithy_Native_Contract.resultNotFound:
-                    return nil
-                default:
-                    throw OpenKacheError("unexpected raw GET result")
-                }
+                try getOutcome(kind, payload: payload, operation: "raw GET")
             }
         }
     }
@@ -788,16 +851,7 @@ public actor OpenKacheRawClient {
                 ttl: ttl
             )
             return try consumeResult(result) { kind, _ in
-                switch kind {
-                case Smithy_Native_Contract.resultCreated:
-                    return .created
-                case Smithy_Native_Contract.resultReplaced:
-                    return .replaced
-                case Smithy_Native_Contract.resultNotStored:
-                    return .notStored
-                default:
-                    throw OpenKacheError("unexpected raw SET result")
-                }
+                try setOutcome(kind, operation: "raw SET")
             }
         }
     }
@@ -812,14 +866,7 @@ public actor OpenKacheRawClient {
                 itemID: itemID
             )
             return try consumeResult(result) { kind, _ in
-                switch kind {
-                case Smithy_Native_Contract.resultDeleted:
-                    return .deleted
-                case Smithy_Native_Contract.resultNotDeleted:
-                    return .notFound
-                default:
-                    throw OpenKacheError("unexpected raw DELETE result")
-                }
+                try deleteOutcome(kind, operation: "raw DELETE")
             }
         }
     }

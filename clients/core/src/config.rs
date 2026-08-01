@@ -193,7 +193,12 @@ impl Certificate {
     ///
     /// Returns an error when PEM decoding fails or contains other than one certificate.
     pub fn from_pem(bytes: &[u8]) -> Result<Self> {
-        let certificates = decode_pem_certificates(bytes)?;
+        let certificates = decode_pem_certificates(pem_bytes(bytes).ok_or_else(|| {
+            Error::configuration(
+                "certificate",
+                "PEM input must start with a certificate block",
+            )
+        })?)?;
         let [certificate] =
             <[_; 1]>::try_from(certificates).map_err(|certificates: Vec<Self>| {
                 Error::configuration(
@@ -229,8 +234,14 @@ impl Certificate {
                 "input must not be empty",
             ));
         }
-        if bytes.starts_with(b"-----BEGIN") {
-            decode_pem_certificates(bytes)
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Err(Error::configuration(
+                "certificate",
+                "input must contain DER bytes or a PEM certificate block",
+            ));
+        }
+        if let Some(pem) = pem_bytes(bytes) {
+            decode_pem_certificates(pem)
         } else {
             Self::from_der(bytes.to_vec()).map(|certificate| vec![certificate])
         }
@@ -255,6 +266,12 @@ fn decode_pem_certificates(bytes: &[u8]) -> Result<Vec<Certificate>> {
         ));
     }
     Ok(certificates)
+}
+
+fn pem_bytes(bytes: &[u8]) -> Option<&[u8]> {
+    let start = bytes.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    let bytes = &bytes[start..];
+    bytes.starts_with(b"-----BEGIN ").then_some(bytes)
 }
 
 /// Private key accepted by the stable client API.
@@ -295,6 +312,9 @@ impl PrivateKey {
     ///
     /// Returns an error when PEM decoding fails or the key format is unsupported.
     pub fn from_pem(bytes: &[u8]) -> Result<Self> {
+        let bytes = pem_bytes(bytes).ok_or_else(|| {
+            Error::configuration("private_key", "PEM input must start with a key block")
+        })?;
         PrivateKeyDer::from_pem_slice(bytes)
             .map(Self)
             .map_err(|error| Error::configuration("private_key", error.to_string()))
@@ -321,7 +341,13 @@ impl PrivateKey {
                 "input must not be empty",
             ));
         }
-        if bytes.starts_with(b"-----BEGIN") {
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Err(Error::configuration(
+                "private_key",
+                "input must contain DER bytes or a PEM key block",
+            ));
+        }
+        if pem_bytes(bytes).is_some() {
             Self::from_pem(bytes)
         } else {
             Self::from_der(bytes.to_vec())

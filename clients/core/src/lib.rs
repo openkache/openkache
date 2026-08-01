@@ -393,13 +393,8 @@ impl<C: ClientConnection> Core<C> {
     }
 
     fn connection_state(&self) -> ConnectionState {
-        match self.state.load(Ordering::Acquire) {
-            state if state == ConnectionState::Connected.code() => ConnectionState::Connected,
-            state if state == ConnectionState::Reconnecting.code() => ConnectionState::Reconnecting,
-            state if state == ConnectionState::Disconnected.code() => ConnectionState::Disconnected,
-            state if state == ConnectionState::Closed.code() => ConnectionState::Closed,
-            _ => unreachable!("connection state is always a known discriminator"),
-        }
+        ConnectionState::try_from(self.state.load(Ordering::Acquire))
+            .unwrap_or(ConnectionState::Unknown)
     }
 
     async fn ping(&self) -> Result<Duration> {
@@ -501,14 +496,14 @@ impl<C: ClientConnection> Core<C> {
         for attempt in 1..=max_attempts {
             let connection = self.current_connection()?;
             let attempt_request = if attempt == max_attempts {
-                request
-                    .take()
-                    .expect("the final attempt owns the original request")
+                request.take()
             } else {
-                request
-                    .as_ref()
-                    .expect("a retryable request remains available")
-                    .clone()
+                request.as_ref().cloned()
+            };
+            let Some(attempt_request) = attempt_request else {
+                return Err(Error::Connection(
+                    "request retry state was exhausted before the final attempt".into(),
+                ));
             };
             match self
                 .request_once(&connection, attempt_request, deadline)
@@ -539,7 +534,9 @@ impl<C: ClientConnection> Core<C> {
                 }
             }
         }
-        unreachable!("every configured request has at least one attempt")
+        Err(Error::Connection(
+            "request retry policy did not permit an attempt".into(),
+        ))
     }
 
     async fn request_once(
@@ -657,10 +654,12 @@ impl<C: ClientConnection> Core<C> {
             replacement.close();
             return Err(Error::ClientClosed);
         }
-        if Arc::ptr_eq(&connection, failed) {
-            failed.close();
-            *connection = Arc::new(replacement);
+        if !Arc::ptr_eq(&connection, failed) {
+            replacement.close();
+            return Ok(());
         }
+        failed.close();
+        *connection = Arc::new(replacement);
         self.set_state_unless_closed(ConnectionState::Connected)?;
         Ok(())
     }
