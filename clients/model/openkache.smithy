@@ -545,106 +545,17 @@ structure valueFormat {
     metricsSnapshotBytesReceivedOffset: 72,
     metricsSnapshotActiveLanesOffset: 80
 )
+/// The client facade exposes the protocol service operations directly. Their
+/// input/output shapes and enums live in openkache.protocol so the server and
+/// every language binding consume one Smithy API contract.
 service OpenKacheClient {
     version: "1"
-    operations: [Ping, Get, Set, Delete, Stats, Sync]
-}
-
-operation Ping {
-    input: PingInput
-    output: PingOutput
-}
-
-operation Get {
-    input: GetInput
-    output: GetOutput
-}
-
-operation Set {
-    input: SetInput
-    output: SetOutput
-}
-
-operation Delete {
-    input: DeleteInput
-    output: DeleteOutput
-}
-
-operation Stats {
-    input: StatsInput
-    output: StatsOutput
-}
-
-operation Sync {
-    input: SyncInput
-    output: SyncOutput
-}
-
-blob ItemId
-blob Value
-
-structure PingInput {}
-structure PingOutput {}
-
-structure GetInput {
-    @required
-    itemId: ItemId
-}
-
-structure GetOutput {
-    value: Value
-}
-
-structure SetInput {
-    @required
-    itemId: ItemId
-
-    @required
-    value: Value
-
-    condition: SetCondition
-
-    ttlMilliseconds: Long
-
-    /// Optional fixed-width idempotency token reused for mutation retries.
-    mutationId: Blob
-}
-
-structure SetOutput {
-    @required
-    outcome: SetOutcome
-}
-
-structure DeleteInput {
-    @required
-    itemId: ItemId
-
-    /// Optional fixed-width idempotency token reused for mutation retries.
-    mutationId: Blob
-}
-
-structure DeleteOutput {
-    @required
-    deleted: Boolean
-}
-
-structure StatsInput {}
-
-structure StatsOutput {
-    @required
-    json: String
-}
-
-structure SyncInput {}
-structure SyncOutput {}
-
-enum SetCondition {
-    IF_ABSENT = "if_absent"
-    IF_PRESENT = "if_present"
-}
-
-enum SetOutcome {
-    CREATED = "created"
-    REPLACED = "replaced"
-    NOT_STORED = "not_stored"
+    operations: [
+        openkache.protocol#Ping,
+        openkache.protocol#Get,
+        openkache.protocol#Set,
+        openkache.protocol#Delete,
+        openkache.protocol#Stats,
+        openkache.protocol#Sync
+    ]
 }

@@ -1,5 +1,6 @@
 package io.openkache.client.nativebridge;
 
+import io.openkache.client.generated.SmithyApi;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
@@ -457,14 +458,17 @@ public final class NativeOpenKacheClient implements AutoCloseable {
     }
 
     /** Stores protected bytes with idempotent mutation options. */
-    public CompletableFuture<SetOutcome> set(byte[] key, byte[] value, SetOptions options) {
+    public CompletableFuture<SmithyApi.SetOutcome> set(
+            byte[] key,
+            byte[] value,
+            SetOptions options) {
         SetOptions ownedOptions = mutationOptions(options);
         return map(
                 invoke(OP_SET, key, value, ownedOptions, false),
                 result -> switch (result.kind) {
-                    case RESULT_CREATED -> SetOutcome.CREATED;
-                    case RESULT_REPLACED -> SetOutcome.REPLACED;
-                    case RESULT_NOT_STORED -> SetOutcome.NOT_STORED;
+                    case RESULT_CREATED -> SmithyApi.SetOutcome.Created;
+                    case RESULT_REPLACED -> SmithyApi.SetOutcome.Replaced;
+                    case RESULT_NOT_STORED -> SmithyApi.SetOutcome.NotStored;
                     default -> throw unexpected("SET", result.kind);
                 });
     }
@@ -495,7 +499,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
     }
 
     /** Stores one canonical JSON document supplied as UTF-8. */
-    public CompletableFuture<SetOutcome> setJson(
+    public CompletableFuture<SmithyApi.SetOutcome> setJson(
             byte[] key,
             String json,
             SetOptions options) {
@@ -509,9 +513,9 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                         ownedOptions,
                         false),
                 result -> switch (result.kind) {
-                    case RESULT_CREATED -> SetOutcome.CREATED;
-                    case RESULT_REPLACED -> SetOutcome.REPLACED;
-                    case RESULT_NOT_STORED -> SetOutcome.NOT_STORED;
+                    case RESULT_CREATED -> SmithyApi.SetOutcome.Created;
+                    case RESULT_REPLACED -> SmithyApi.SetOutcome.Replaced;
+                    case RESULT_NOT_STORED -> SmithyApi.SetOutcome.NotStored;
                     default -> throw unexpected("SET_JSON", result.kind);
                 });
     }
@@ -527,7 +531,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
     }
 
     /** Stores exact bytes for a 32-byte protocol item ID. */
-    public CompletableFuture<SetOutcome> setRaw(
+    public CompletableFuture<SmithyApi.SetOutcome> setRaw(
             byte[] itemId,
             byte[] value,
             SetOptions options) {
@@ -536,9 +540,9 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         return map(
                 invoke(OP_SET, itemId, value, ownedOptions, true),
                 result -> switch (result.kind) {
-                    case RESULT_CREATED -> SetOutcome.CREATED;
-                    case RESULT_REPLACED -> SetOutcome.REPLACED;
-                    case RESULT_NOT_STORED -> SetOutcome.NOT_STORED;
+                    case RESULT_CREATED -> SmithyApi.SetOutcome.Created;
+                    case RESULT_REPLACED -> SmithyApi.SetOutcome.Replaced;
+                    case RESULT_NOT_STORED -> SmithyApi.SetOutcome.NotStored;
                     default -> throw unexpected("RAW_SET", result.kind);
                 });
     }
@@ -718,7 +722,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                         (long) key.length,
                         valueSegment,
                         (long) value.length,
-                        options.condition(),
+                        options.conditionCode(),
                         (byte) (options.ttlMillis() == 0 ? 0 : 1),
                         options.ttlMillis());
             } else {
@@ -730,7 +734,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                         (long) key.length,
                         valueSegment,
                         (long) value.length,
-                        options.condition(),
+                        options.conditionCode(),
                         (byte) (options.ttlMillis() == 0 ? 0 : 1),
                         options.ttlMillis(),
                         mutationSegment,
@@ -1032,11 +1036,6 @@ public final class NativeOpenKacheClient implements AutoCloseable {
 
     private record Result(int kind, byte[] payload) {}
 
-    /** Native operation outcome. */
-    public enum SetOutcome {
-        CREATED, REPLACED, NOT_STORED
-    }
-
     /** Structured metadata returned with a native error. */
     public record ErrorMetadata(
             int code,
@@ -1118,7 +1117,10 @@ public final class NativeOpenKacheClient implements AutoCloseable {
     }
 
     /** Immutable mutation and TTL options. */
-    public record SetOptions(int condition, long ttlMillis, byte[] mutationId) {
+    public record SetOptions(
+            SmithyApi.SetCondition condition,
+            long ttlMillis,
+            byte[] mutationId) {
         public SetOptions {
             mutationId = mutationId == null ? new byte[0] : mutationId.clone();
             if (mutationId.length != 0 && mutationId.length != MUTATION_ID_BYTES) {
@@ -1128,9 +1130,16 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             if (ttlMillis < 0) {
                 throw new IllegalArgumentException("ttlMillis must not be negative");
             }
-            if (condition < SET_CONDITION_NONE || condition > SET_CONDITION_IF_PRESENT) {
-                throw new IllegalArgumentException("unsupported SET condition " + condition);
+        }
+
+        public int conditionCode() {
+            if (condition == null) {
+                return SET_CONDITION_NONE;
             }
+            return switch (condition) {
+                case IfAbsent -> SET_CONDITION_IF_ABSENT;
+                case IfPresent -> SET_CONDITION_IF_PRESENT;
+            };
         }
 
         @Override
@@ -1143,7 +1152,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         }
 
         public static SetOptions none() {
-            return new SetOptions(SET_CONDITION_NONE, 0, new byte[0]);
+            return new SetOptions(null, 0, new byte[0]);
         }
     }
 

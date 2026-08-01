@@ -182,16 +182,11 @@ final class _MetricsSnapshot extends ffi.Struct {
   external int activeLanes;
 }
 
-/// Atomic SET/DELETE condition values from the shared Smithy contract.
-enum SetCondition {
-  none(_conditionNone),
-  ifAbsent(_conditionIfAbsent),
-  ifPresent(_conditionIfPresent);
+/// Smithy-generated SET condition values.
+typedef SetCondition = smithy.SmithySetCondition;
 
-  const SetCondition(this.code);
-
-  final int code;
-}
+/// Smithy-generated SET outcomes.
+typedef SetOutcome = smithy.SmithySetOutcome;
 
 /// Structured metadata attached to a native operation failure.
 class ErrorMetadata {
@@ -299,14 +294,20 @@ class OpenKacheRequest<T> {
 /// Idempotency and TTL options for SET and DELETE.
 class SetOptions {
   const SetOptions({
-    this.condition = SetCondition.none,
+    this.condition,
     this.ttl,
     this.mutationId,
   });
 
-  final SetCondition condition;
+  final SetCondition? condition;
   final Duration? ttl;
   final Uint8List? mutationId;
+
+  int get conditionCode => switch (condition) {
+        null => _conditionNone,
+        SetCondition.ifAbsent => _conditionIfAbsent,
+        SetCondition.ifPresent => _conditionIfPresent,
+      };
 
   int get ttlMilliseconds {
     if (ttl == null) return 0;
@@ -593,7 +594,7 @@ class OpenKacheClient {
   }
 
   /// Stores protected bytes.
-  Future<String> set(
+  Future<SetOutcome> set(
     Uint8List key,
     Uint8List value, [
     SetOptions options = const SetOptions(),
@@ -610,7 +611,7 @@ class OpenKacheClient {
   }
 
   /// Starts a protected byte SET and exposes native cancellation.
-  OpenKacheRequest<String> setRequest(
+  OpenKacheRequest<SetOutcome> setRequest(
     Uint8List key,
     Uint8List value, {
     SetOptions options = const SetOptions(),
@@ -629,7 +630,7 @@ class OpenKacheClient {
       );
 
   /// Stores a canonical JSON value using the core JSON representation.
-  Future<String> setJson(
+  Future<SetOutcome> setJson(
     Uint8List key,
     Object? value, [
     SetOptions options = const SetOptions(),
@@ -717,7 +718,7 @@ class OpenKacheClient {
   }
 
   /// Stores exact bytes for a 32-byte protocol item ID.
-  Future<String> setRaw(
+  Future<SetOutcome> setRaw(
     Uint8List itemId,
     Uint8List value, [
     SetOptions options = const SetOptions(),
@@ -932,7 +933,7 @@ class OpenKacheClient {
           operation,
           key,
           value,
-          options.condition.code,
+          options.conditionCode,
           options.ttl == null ? 0 : 1,
           options.ttlMilliseconds,
           mutationId,
@@ -1097,14 +1098,14 @@ Uint8List _requireValue(_Result result, String operation) {
   return result.payload;
 }
 
-String _setOutcome(_Result result, String operation) {
+SetOutcome _setOutcome(_Result result, String operation) {
   switch (result.kind) {
     case _resultCreated:
-      return 'created';
+      return SetOutcome.created;
     case _resultReplaced:
-      return 'replaced';
+      return SetOutcome.replaced;
     case _resultNotStored:
-      return 'not_stored';
+      return SetOutcome.notStored;
     default:
       throw OpenKacheError('unexpected $operation result ${result.kind}');
   }

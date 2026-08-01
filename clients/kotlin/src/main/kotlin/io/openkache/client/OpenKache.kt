@@ -1,6 +1,7 @@
 package io.openkache.client
 
 import io.openkache.client.nativebridge.NativeOpenKacheClient
+import io.openkache.client.generated.SmithyApi
 import io.openkache.client.generated.SmithyContract
 import java.util.concurrent.CompletableFuture
 
@@ -33,7 +34,7 @@ class OpenKacheClient private constructor(
         key: ByteArray,
         value: ByteArray,
         options: SetOptions = SetOptions(),
-    ): CompletableFuture<NativeOpenKacheClient.SetOutcome> =
+    ): CompletableFuture<SmithyApi.SetOutcome> =
         delegate.set(key, value, options.toJava())
 
     /** Stores one canonical JSON document. */
@@ -41,7 +42,7 @@ class OpenKacheClient private constructor(
         key: ByteArray,
         json: String,
         options: SetOptions = SetOptions(),
-    ): CompletableFuture<NativeOpenKacheClient.SetOutcome> =
+    ): CompletableFuture<SmithyApi.SetOutcome> =
         delegate.setJson(key, json, options.toJava())
 
     /** Stores exact bytes for a protocol item ID. */
@@ -49,7 +50,7 @@ class OpenKacheClient private constructor(
         itemId: ByteArray,
         value: ByteArray,
         options: SetOptions = SetOptions(),
-    ): CompletableFuture<NativeOpenKacheClient.SetOutcome> =
+    ): CompletableFuture<SmithyApi.SetOutcome> =
         delegate.setRaw(itemId, value, options.toJava())
 
     fun delete(
@@ -150,7 +151,7 @@ data class DataProtectionKeyRing(
 
 /** Kotlin mutation options matching the shared Smithy condition and token contract. */
 data class SetOptions(
-    val condition: Int = SmithyContract.FFI_SET_CONDITION_None,
+    val condition: SmithyApi.SetCondition? = null,
     val ttlMillis: Long = 0,
     val mutationId: ByteArray = byteArrayOf(),
 ) {

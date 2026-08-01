@@ -458,8 +458,7 @@ function api_structure(shapes: Json_Object, target: string): Api_Structure {
   }
 }
 
-function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enum {
-  const shape_id = `${namespace}#${name}`
+function api_enum(shapes: Json_Object, shape_id: string): Api_Enum {
   const shape = object_member(shapes, shape_id, "Smithy AST.shapes")
   if (shape_type(shape, `Smithy AST.shapes.${shape_id}`) !== "enum") {
     throw new Error(`${shape_id} must be an enum`)
@@ -488,18 +487,20 @@ function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enu
   const member_values = new Set<string>()
   for (const member of enum_members) {
     if (member_values.has(member.value)) {
-      throw new Error(`duplicate ${name} enum value ${member.value}`)
+      throw new Error(`duplicate ${shape_name(shape_id)} enum value ${member.value}`)
     }
     member_values.add(member.value)
   }
   for (const member of enum_members) {
     if (member_names.has(member.name)) {
-      throw new Error(`duplicate ${name} enum member name ${member.name}`)
+      throw new Error(
+        `duplicate ${shape_name(shape_id)} enum member name ${member.name}`,
+      )
     }
     member_names.add(member.name)
   }
   return {
-    name,
+    name: shape_name(shape_id),
     members: enum_members,
   }
 }
@@ -507,11 +508,10 @@ function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enu
 function api_contract(
   shapes: Json_Object,
   service_shape_id: string,
-  namespace: string,
 ): Api_Contract {
   const service = object_member(shapes, service_shape_id, "Smithy AST.shapes")
-  const operation_shapes = array_member(service, "operations", service_shape_id)
-    .map((operation, index): Api_Operation => {
+  const operation_details = array_member(service, "operations", service_shape_id)
+    .map((operation, index) => {
       const reference = object_value(operation, `${service_shape_id}.operations[${index}]`)
       const target = string_member(
         reference,
@@ -529,33 +529,40 @@ function api_contract(
         "target",
         `${target}.output`,
       )
-      return {
-        input: shape_name(input),
-        name: shape_name(target),
-        output: shape_name(output),
-      }
+      return { input, operation: target, output }
     })
+  const operation_shapes: Api_Operation[] = operation_details.map(
+    ({ input, operation, output }): Api_Operation => ({
+      input: shape_name(input),
+      name: shape_name(operation),
+      output: shape_name(output),
+    }),
+  )
 
-  const structure_names = new Set<string>()
-  for (const operation of operation_shapes) {
-    structure_names.add(operation.input)
-    structure_names.add(operation.output)
+  const structure_targets = new Set<string>()
+  for (const operation of operation_details) {
+    structure_targets.add(operation.input)
+    structure_targets.add(operation.output)
   }
-  const structures = [...structure_names]
-    .map((name) => api_structure(shapes, `${namespace}#${name}`))
+  const structures = [...structure_targets]
+    .map((target) => api_structure(shapes, target))
     .sort((left, right) => left.name.localeCompare(right.name))
-  const enum_names = new Set<string>()
-  for (const structure of structures) {
-    for (const member of structure.members) {
-      if (member.type.kind === "enum" && member.type.name !== undefined) {
-        enum_names.add(member.type.name)
+  const enum_targets = new Set<string>()
+  for (const target of structure_targets) {
+    const structure = object_member(shapes, target, "Smithy AST.shapes")
+    const members = object_member(structure, "members", target)
+    for (const value of Object.values(members)) {
+      const member = object_value(value, target)
+      const member_target = string_member(member, "target", target)
+      if (api_type(shapes, member_target).kind === "enum") {
+        enum_targets.add(member_target)
       }
     }
   }
 
   return {
-    enums: [...enum_names]
-      .map((name) => api_enum(shapes, namespace, name))
+    enums: [...enum_targets]
+      .map((target) => api_enum(shapes, target))
       .sort((left, right) => left.name.localeCompare(right.name)),
     operations: operation_shapes,
     structures,
@@ -1241,7 +1248,6 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const client_service_id = shapes[CLIENT_SERVICE_SHAPE_ID] === undefined
     ? SERVICE_SHAPE_ID
     : CLIENT_SERVICE_SHAPE_ID
-  const client_namespace = client_service_id.slice(0, client_service_id.lastIndexOf("#"))
   const service = object_member(shapes, client_service_id, "Smithy AST.shapes")
   const location = `Smithy AST.shapes.${client_service_id}`
   const trait_ids = (trait_id: string): readonly string[] =>
@@ -1252,7 +1258,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const client_defaults_trait = trait_value_any(service, trait_ids(CLIENT_DEFAULTS_TRAIT_ID), location)
   const ffi_trait = trait_value_any(service, trait_ids(FFI_CONTRACT_TRAIT_ID), location)
   const ffi_layout_trait = trait_value_any(service, trait_ids(FFI_LAYOUT_TRAIT_ID), location)
-  const parsed_api = api_contract(shapes, client_service_id, client_namespace)
+  const parsed_api = api_contract(shapes, client_service_id)
   const api = {
     ...parsed_api,
     // Smithy AST output is not required to preserve service-operation order.
@@ -2472,7 +2478,7 @@ function java_api_type(type: Api_Type, required: boolean): string {
       break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
-      rendered = `String`
+      rendered = java_api_name(type.name)
       break
     case "long":
       rendered = required ? "long" : "Long"
@@ -2494,7 +2500,8 @@ function kotlin_api_type(type: Api_Type, required: boolean): string {
       rendered = "Boolean"
       break
     case "enum":
-      rendered = "String"
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = java_api_name(type.name)
       break
     case "long":
       rendered = "Long"
@@ -2835,8 +2842,97 @@ export function render_dart_contract(contract: Client_Contract): string {
           `const int ${prefix}_${snake_case(entry.name)} = ${entry.value};`,
       )
       .join("\n")
+  const api_type = (type: Api_Type, required: boolean): string => {
+    let rendered: string
+    switch (type.kind) {
+      case "blob":
+        rendered = "Uint8List"
+        break
+      case "boolean":
+        rendered = "bool"
+        break
+      case "enum":
+        if (type.name === undefined) throw new Error("enum API type has no name")
+        rendered = `Smithy${pascal_case(snake_case(type.name))}`
+        break
+      case "long":
+        rendered = "int"
+        break
+      case "string":
+        rendered = "String"
+        break
+    }
+    return required ? rendered : `${rendered}?`
+  }
+  const api_name = (identifier: string): string =>
+    `Smithy${pascal_case(snake_case(identifier))}`
+  const api_member = (identifier: string): string => {
+    const name = pascal_case(snake_case(identifier))
+    return name.length === 0 ? name : `${name[0]?.toLowerCase()}${name.slice(1)}`
+  }
+  const api_enums = contract.api.enums
+    .map(
+      (enum_) =>
+        `/// Values defined by the Smithy ${enum_.name} shape.
+enum ${api_name(enum_.name)} {
+${enum_.members
+  .map((member) => `  ${api_member(member.name)}(${JSON.stringify(member.value)})`)
+  .join(",\n")};
+
+  const ${api_name(enum_.name)}(this.value);
+
+  final String value;
+}`,
+    )
+    .join("\n\n")
+  const api_structures = contract.api.structures
+    .map((structure) => {
+      const name = api_name(structure.name)
+      if (structure.members.length === 0) {
+        return `/// Smithy ${structure.name} structure.
+class ${name} {
+  const ${name}();
+}`
+      }
+      const fields = structure.members
+        .map(
+          (member) =>
+            `  final ${api_type(member.type, member.required)} ${api_member(member.name)};`,
+        )
+        .join("\n")
+      const parameters = structure.members
+        .map(
+          (member) =>
+            `    ${member.required ? "required " : ""}this.${api_member(member.name)},`,
+        )
+        .join("\n")
+      return `/// Smithy ${structure.name} structure.
+class ${name} {
+  const ${name}({
+${parameters}
+  });
+
+${fields}
+}`
+    })
+    .join("\n\n")
+  const api_operations = contract.api.operations
+    .map(
+      (operation) =>
+        `  /// Invokes the Smithy ${operation.name} operation.
+  Future<${api_name(operation.output)}> ${api_member(operation.name)}(${api_name(operation.input)} input);`,
+    )
+    .join("\n")
+  const api = `${[api_enums, api_structures].filter((value) => value.length > 0).join("\n\n")}
+
+/// Operations defined by the OpenKache Smithy service.
+abstract interface class SmithyOpenKacheApi {
+${api_operations}
+}`
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 library;
+
+import 'dart:typed_data';
 
 const int smithyItemIdBytes = ${contract.item_id_bytes};
 const int smithyMutationIdBytes = ${contract.mutation_id_bytes};
@@ -2878,6 +2974,8 @@ ${entries("smithy_ffi_phase", ffi.phases)}
 ${entries("smithy_ffi_backend", ffi.backends)}
 
 ${entries("smithy_ffi_metrics", ffi.metrics)}
+
+${api}
 `
 }
 
