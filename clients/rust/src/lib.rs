@@ -16,6 +16,8 @@ use std::sync::Arc;
 #[cfg(any(feature = "quic-compio", feature = "quic-quinn"))]
 use std::time::Duration;
 
+/// Client-only generated defaults, ABI discriminators, and value-format identifiers.
+pub use openkache_client_core::contract;
 pub use openkache_client_core::{
     Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
     DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,

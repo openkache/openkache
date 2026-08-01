@@ -5,13 +5,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_directory = PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or("Cargo did not provide CARGO_MANIFEST_DIR")?,
     );
-    let generator = client_directory.join("../../protocol/generate.ts");
-    let model = client_directory.join("../../protocol/model");
+    let generator = client_directory.join("../generate.ts");
+    let protocol_wire_generator = client_directory.join("../../protocol/wire.ts");
+    let model = client_directory.join("../model");
+    let protocol_model = client_directory.join("../../protocol/model");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
         .join("smithy_api.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        protocol_wire_generator.display()
+    );
     println!("cargo:rerun-if-changed={}", model.display());
+    println!("cargo:rerun-if-changed={}", protocol_model.display());
 
     let status = Command::new("bun")
         .arg(&generator)
@@ -27,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !status.success() {
         return Err(format!(
             "Smithy API generation failed with {status}\n\
-             Run `./generate.ts` from the protocol directory for actionable diagnostics."
+             Run `./generate.ts` from the clients directory for actionable diagnostics."
         )
         .into());
     }

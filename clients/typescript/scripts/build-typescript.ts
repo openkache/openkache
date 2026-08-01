@@ -8,13 +8,7 @@ import { fileURLToPath } from "node:url"
 const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const CLIENT_DIRECTORY = dirname(SCRIPT_DIRECTORY)
 const OUTPUT_DIRECTORY = join(CLIENT_DIRECTORY, "dist")
-const PROTOCOL_GENERATOR = join(
-  CLIENT_DIRECTORY,
-  "..",
-  "..",
-  "protocol",
-  "generate.ts",
-)
+const CLIENT_GENERATOR = join(CLIENT_DIRECTORY, "..", "generate.ts")
 const TYPESCRIPT_CLI = join(
   CLIENT_DIRECTORY,
   "node_modules",
@@ -24,7 +18,7 @@ const TYPESCRIPT_CLI = join(
 )
 
 rmSync(OUTPUT_DIRECTORY, { force: true, recursive: true })
-const generation = Bun.spawnSync([process.execPath, PROTOCOL_GENERATOR], {
+const generation = Bun.spawnSync([process.execPath, CLIENT_GENERATOR], {
   env: {
     ...process.env,
     OPENKACHE_GENERATION_TARGET: "typescript",

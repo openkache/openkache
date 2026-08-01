@@ -90,7 +90,9 @@ set_property(
   DIRECTORY
   APPEND
   PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/generate.ts"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../generate.ts"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/wire.ts"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../model"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/model"
 )
 file(MAKE_DIRECTORY "${_openkache_client_generated_include_dir}/openkache")
@@ -138,8 +140,8 @@ else()
       "OPENKACHE_GENERATION_TARGET=c-contract"
       "OPENKACHE_C_CONTRACT_OUTPUT=${_openkache_client_generated_contract}"
       "${_openkache_client_bun_executable}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol/generate.ts"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../protocol"
+      "${CMAKE_CURRENT_SOURCE_DIR}/../generate.ts"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/.."
     RESULT_VARIABLE _openkache_client_generation_result
     OUTPUT_VARIABLE _openkache_client_generation_stdout
     ERROR_VARIABLE _openkache_client_generation_stderr

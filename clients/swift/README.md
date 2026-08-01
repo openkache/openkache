@@ -91,13 +91,14 @@ verification.
 
 The Smithy operation, value-format, connection-state, and native ABI
 declarations are generated into SwiftPM's build directory from
-[`protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
+[`../model/openkache.smithy`](../model/openkache.smithy) and the wire model in
+[`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
 They are not checked into source control: the `GenerateSmithy` SwiftPM build
-plugin regenerates them for every build. The Smithy model remains the single
-source of truth for operation, state, result, limit, and value-format
+plugin regenerates them for every build. These two Smithy models remain the
+scoped sources of truth for operation, state, result, limit, and value-format
 identifiers. The shared C ABI header consumes the same generated contract.
 To regenerate the declarations explicitly:
 
 ```bash
-env OPENKACHE_GENERATION_TARGET=swift bun ../../protocol/generate.ts
+env OPENKACHE_GENERATION_TARGET=swift bun ../generate.ts
 ```

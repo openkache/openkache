@@ -3,7 +3,7 @@
 package openkache
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../core/include -I${SRCDIR}/../../protocol/generated_local
+#cgo CFLAGS: -I${SRCDIR}/../core/include -I${SRCDIR}/../core/generated_local
 #cgo linux LDFLAGS: -ldl
 
 #include <stdint.h>
