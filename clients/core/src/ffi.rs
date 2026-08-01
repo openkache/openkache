@@ -98,9 +98,7 @@ pub struct FfiMetricsSnapshot {
 }
 
 const _: () = {
-    assert!(
-        core::mem::size_of::<FfiErrorMetadata>() == crate::contract::FFI_ERROR_METADATA_BYTES
-    );
+    assert!(core::mem::size_of::<FfiErrorMetadata>() == crate::contract::FFI_ERROR_METADATA_BYTES);
     assert!(
         core::mem::size_of::<FfiMetricsSnapshot>() == crate::contract::FFI_METRICS_SNAPSHOT_BYTES
     );
