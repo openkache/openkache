@@ -3,6 +3,8 @@
 //! ([`BenchmarkOperation`], [`BenchmarkBatchStats`]).
 
 use std::collections::VecDeque;
+use std::future::{Future, poll_fn};
+use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -146,10 +148,9 @@ pub(super) async fn worker_loop(
 ) -> Result<()> {
     let mut batch = VecDeque::with_capacity(io_config.batch_size);
     loop {
-        let first = receiver
-            .recv_async()
-            .await
-            .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
+        let Some(first) = wait_for_request_or_background(&mut cache, &receiver).await? else {
+            continue;
+        };
         let wait_us = io_config.batch_max_wait_us;
         batch.push_back(first);
 
@@ -181,6 +182,33 @@ pub(super) async fn worker_loop(
             return Ok(());
         }
     }
+}
+
+async fn wait_for_request_or_background(
+    cache: &mut Kvkache,
+    receiver: &AsyncReceiver<WorkerRequest>,
+) -> Result<Option<WorkerRequest>> {
+    if !cache.has_background_work() {
+        return receiver
+            .recv_async()
+            .await
+            .map(Some)
+            .map_err(|_| KvError::Worker("request queue disconnected".into()));
+    }
+    let mut incoming = std::pin::pin!(receiver.recv_async());
+    poll_fn(|context| {
+        if let Poll::Ready(result) = cache.poll_background(context) {
+            return Poll::Ready(result.map(|_| None));
+        }
+        match incoming.as_mut().poll(context) {
+            Poll::Ready(Ok(request)) => Poll::Ready(Ok(Some(request))),
+            Poll::Ready(Err(_)) => {
+                Poll::Ready(Err(KvError::Worker("request queue disconnected".into())))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
 }
 
 async fn process_worker_batch(

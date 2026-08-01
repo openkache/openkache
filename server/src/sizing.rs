@@ -41,6 +41,8 @@ pub enum SizingProfile {
     Balanced,
     /// Predominantly 2 KiB values stored densely in Blob Segments.
     Heavy,
+    /// Predominantly 16 KiB values stored in per-SG Blob staging.
+    Blob,
 }
 
 impl SizingProfile {
@@ -54,6 +56,7 @@ impl SizingProfile {
             Self::Light => "light",
             Self::Balanced => "balanced",
             Self::Heavy => "heavy",
+            Self::Blob => "blob",
         }
     }
 
@@ -67,12 +70,13 @@ impl SizingProfile {
             Self::Light => 100,
             Self::Balanced => 1024,
             Self::Heavy => 2048,
+            Self::Blob => 16 * 1024,
         }
     }
 
     const fn segment_size_mib(self) -> usize {
         match self {
-            Self::Light | Self::Balanced => 16,
+            Self::Light | Self::Balanced | Self::Blob => 16,
             Self::Heavy => 2,
         }
     }
@@ -80,7 +84,7 @@ impl SizingProfile {
     const fn blob_segment_size_mib(self) -> usize {
         match self {
             Self::Light | Self::Balanced => 1,
-            Self::Heavy => 64,
+            Self::Heavy | Self::Blob => 64,
         }
     }
 }
@@ -185,6 +189,7 @@ impl SizingRequest {
         config.storage.segment_size_mib = self.profile.segment_size_mib();
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
         config.storage.max_item_size_mib = config.storage.blob_segment_size_mib.min(16);
+        config.storage.large_value_capacity_mib_per_thread = config.storage.max_item_size_mib;
 
         for exponent in (0..=16).rev() {
             let segments_per_thread = 1usize << exponent;
@@ -575,9 +580,10 @@ fn checked_product<const N: usize>(values: [u64; N], name: &str) -> Result<u64> 
 fn storage_file_bytes(config: &AppConfig) -> Result<u64> {
     let per_worker = config.worker_config(0);
     per_worker
-        .segment_file_bytes()?
-        .checked_add(per_worker.blob_bytes())
-        .and_then(|bytes| bytes.checked_mul(config.runtime.thread_count as u64))
+        .generation_file_bytes()?
+        .checked_add(per_worker.large_value_capacity as u64)
+        .ok_or_else(|| KvError::InvalidConfig("sized per-worker storage length overflowed".into()))?
+        .checked_mul(config.runtime.thread_count as u64)
         .ok_or_else(|| KvError::InvalidConfig("sized storage file length overflowed".into()))
 }
 

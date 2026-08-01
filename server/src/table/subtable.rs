@@ -22,7 +22,7 @@ use std::arch::{aarch64::*, is_aarch64_feature_detected};
 /// the paired Blob Segment.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct TableLocation {
-    pub(crate) sg_index: u16,
+    pub(crate) sg_index: u32,
     pub(crate) bucket_hash_index: u8,
 }
 
@@ -36,14 +36,14 @@ impl TableLocation {
     /// Packs the Segment index and Bucket hash index.
     pub(crate) fn encode(self, sg_index_bits: usize, bucket_choice_bits: usize) -> u32 {
         debug_assert!(self.is_valid(sg_index_bits, bucket_choice_bits));
-        ((self.sg_index as u32) << bucket_choice_bits) | self.bucket_hash_index as u32
+        (self.sg_index << bucket_choice_bits) | self.bucket_hash_index as u32
     }
 
     /// Decodes a packed Table location.
     pub(crate) fn decode(value: u32, _sg_index_bits: usize, bucket_choice_bits: usize) -> Self {
         let bucket_choice_mask = (1u32 << bucket_choice_bits) - 1;
         Self {
-            sg_index: (value >> bucket_choice_bits) as u16,
+            sg_index: value >> bucket_choice_bits,
             bucket_hash_index: (value & bucket_choice_mask) as u8,
         }
     }
