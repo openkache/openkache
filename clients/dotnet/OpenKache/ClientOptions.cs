@@ -9,9 +9,10 @@ namespace OpenKache;
 public sealed class ClientOptions
 {
     /// <summary>
-    /// Active 32-byte data-protection key. Use <see cref="KeyRing"/> when rotating keys.
+    /// Active 32-byte data-protection key. A random key must be supplied when
+    /// <see cref="KeyRing"/> is not used.
     /// </summary>
-    public byte[] DataProtectionKey { get; init; } = new byte[Protocol.ValueFormatDataProtectionKeyBytes];
+    public byte[] DataProtectionKey { get; init; } = Array.Empty<byte>();
 
     /// <summary>
     /// Active key and a bounded retired-key window used for read/delete rotation.
@@ -71,6 +72,10 @@ public sealed class ClientOptions
                 $"The key must contain exactly {Protocol.ValueFormatDataProtectionKeyBytes} bytes.",
                 name);
         }
+        if (key.All(static value => value == 0))
+        {
+            throw new ArgumentException("The key must contain non-zero secret material.", name);
+        }
     }
 
     private static void ValidateTimeout(string name, TimeSpan timeout)
@@ -117,6 +122,10 @@ public sealed class DataProtectionKeyRing
             throw new ArgumentException(
                 $"The key must contain exactly {Protocol.ValueFormatDataProtectionKeyBytes} bytes.",
                 name);
+        }
+        if (key.All(static value => value == 0))
+        {
+            throw new ArgumentException("The key must contain non-zero secret material.", name);
         }
     }
 }

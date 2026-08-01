@@ -509,6 +509,7 @@ internal sealed class NativeClient : IAsyncDisposable
             .SelectMany(static key => key.ToArray())
             .ToArray();
         using var previousDataProtectionKeysBuffer = new NativeBuffer(previousBytes);
+        Array.Clear(previousBytes, 0, previousBytes.Length);
         var options = new NativeMethods.ConnectOptions
         {
             Address = addressBuffer.Pointer,

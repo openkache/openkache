@@ -523,6 +523,11 @@ class OpenKacheClient:
         if self._closed:
             raise OpenKacheError("client is closed")
 
+    async def _cancel_native(self, request_id: int) -> None:
+        """Deliver cancellation without blocking the asyncio event loop."""
+
+        await asyncio.to_thread(self._native.cancel, request_id)
+
     async def _execute(
         self,
         operation: int,
@@ -548,7 +553,7 @@ class OpenKacheClient:
                 request_id=request_id,
             )
         except asyncio.CancelledError:
-            self._native.cancel(request_id)
+            await self._cancel_native(request_id)
             raise OpenKacheCancelledError(
                 metadata=ErrorMetadata(
                     code=SMITHY_FFI_ERROR_CANCELLED,
@@ -603,7 +608,7 @@ class OpenKacheClient:
                 request_id=request_id,
             )
         except asyncio.CancelledError:
-            self._native.cancel(request_id)
+            await self._cancel_native(request_id)
             raise OpenKacheCancelledError(
                 metadata=ErrorMetadata(
                     code=SMITHY_FFI_ERROR_CANCELLED,

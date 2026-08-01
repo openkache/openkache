@@ -924,7 +924,6 @@ class OpenKacheClient {
     );
     final execution = Future<void>(() async {
       try {
-        if (cancelRequested) return;
         started = true;
         final encoded = await _runNativeRequest(
           _nativePath,

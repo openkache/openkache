@@ -866,6 +866,7 @@ async fn serve_connection<C: TransportConnection>(
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 ) {
     let mut streams = FuturesUnordered::new();
+    let max_mutation_tasks = max_stream_lanes.clamp(1, crate::mutation::DEFAULT_CAPACITY);
     loop {
         if streams.len() >= max_stream_lanes {
             let _ = streams.next().await;
@@ -883,6 +884,7 @@ async fn serve_connection<C: TransportConnection>(
                         request_budget.clone(),
                         max_item_bytes,
                         Arc::clone(&mutation_dedupe),
+                        max_mutation_tasks,
                     ));
                 }
                 Err(_) => break,
@@ -903,6 +905,7 @@ async fn serve_connection<C: TransportConnection>(
                             request_budget.clone(),
                             max_item_bytes,
                             Arc::clone(&mutation_dedupe),
+                            max_mutation_tasks,
                         ));
                     }
                     Err(_) => break,
@@ -972,6 +975,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
+    max_mutation_tasks: usize,
 ) {
     let mut mutation_tasks = FuturesUnordered::new();
     loop {
@@ -1087,6 +1091,13 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     ),
                     Some(MutationDecision::Capacity) => {
                         response_bytes(Status::Overloaded, b"mutation replay store is at capacity")
+                    }
+                    Some(MutationDecision::New) if mutation_tasks.len() >= max_mutation_tasks => {
+                        should_record = false;
+                        response_bytes(
+                            Status::Overloaded,
+                            b"mutation execution lanes are at capacity",
+                        )
                     }
                     Some(MutationDecision::New) => {
                         should_record = false;

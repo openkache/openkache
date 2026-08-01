@@ -226,6 +226,13 @@ type PendingRequest = (
     Arc<AtomicBool>,
 );
 
+/// Upper bound for cancellation intents that arrive before an adapter starts
+/// the corresponding Execute call.
+const MAX_PRE_CANCELLED_REQUESTS: usize = 65_536;
+/// Bounds the native command channel even when an untrusted caller supplies
+/// an impractically large `max_in_flight` value.
+const MAX_COMMAND_QUEUE_LANES: usize = 65_536;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestState {
     /// The caller has reserved a request ID, but the worker has not started it.
@@ -243,7 +250,35 @@ enum RequestClaim {
     Invalid,
 }
 
-type RequestRegistry = Arc<Mutex<HashMap<u64, RequestState>>>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestRegistration {
+    Registered,
+    CancelRequested,
+    InUse,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestCancellation {
+    /// Cancellation for a request already reserved by an adapter.
+    Existing,
+    /// Cancellation recorded before the matching execute command arrived.
+    PreCancelled,
+}
+
+#[derive(Debug, Default)]
+struct RequestRegistryInner {
+    states: HashMap<u64, RequestState>,
+    /// Request IDs whose cancellation arrived before their Execute command.
+    ///
+    /// `pre_cancelled_order` is intentionally lazy: consumed entries remain
+    /// in the FIFO until capacity eviction. The generation map distinguishes
+    /// stale entries from a newer cancellation for a reused request ID.
+    pre_cancelled: HashMap<u64, u64>,
+    pre_cancelled_order: VecDeque<(u64, u64)>,
+    next_pre_cancel_generation: u64,
+}
+
+type RequestRegistry = Arc<Mutex<RequestRegistryInner>>;
 
 struct WorkerOptions {
     endpoint: Endpoint,
@@ -384,12 +419,17 @@ impl FfiClient {
         retry: RetryPolicy,
         max_in_flight: usize,
     ) -> std::result::Result<Self, String> {
-        // Reserve one command slot per possible in-flight request for
-        // cancellation/shutdown control messages. Execute requests still
-        // reserve their capacity through `in_flight`, so this remains
-        // bounded by the caller's `max_in_flight` setting without allowing a
-        // full execute queue to make cancellation impossible.
-        let command_capacity = max_in_flight.max(1).saturating_mul(2).max(1);
+        let max_in_flight = max_in_flight.max(1).min(MAX_COMMAND_QUEUE_LANES);
+        // Reserve two command slots per lane for cancellation/shutdown
+        // control messages. The channel itself remains bounded even when an
+        // untrusted caller supplies an impractically large max-in-flight
+        // value; request reservations still enforce the caller's requested
+        // concurrency limit.
+        let command_capacity = max_in_flight
+            .max(1)
+            .min(MAX_COMMAND_QUEUE_LANES)
+            .saturating_mul(2)
+            .max(1);
         let (commands, receiver) = crossfire::mpsc::bounded_blocking_async(command_capacity);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -397,7 +437,7 @@ impl FfiClient {
         let metrics = Arc::new(FfiMetrics::default());
         let worker_shutdown = Arc::clone(&shutdown);
         let worker_in_flight = Arc::clone(&in_flight);
-        let requests = Arc::new(Mutex::new(HashMap::new()));
+        let requests = Arc::new(Mutex::new(RequestRegistryInner::default()));
         let worker_requests = Arc::clone(&requests);
         let state = Arc::new(AtomicU32::new(connection_state_value(
             ConnectionState::Reconnecting,
@@ -516,19 +556,27 @@ impl FfiClient {
             };
             set_options = set_options.with_mutation_id(mutation_id);
         }
-        if !self.register_request(request_id) {
-            return FfiResult::error_with_operation(
-                format!("request ID {request_id} is already active"),
-                crate::contract::FFI_ERROR_RUNTIME,
-                Some(operation),
-            );
+        let mutation_id = set_options.mutation_id();
+        match self.register_request(request_id) {
+            RequestRegistration::Registered => {}
+            RequestRegistration::CancelRequested => {
+                self.metrics.requests.fetch_add(1, Ordering::Relaxed);
+                self.metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+                return FfiResult::cancelled(Some(operation), mutation_id, false);
+            }
+            RequestRegistration::InUse => {
+                return FfiResult::error_with_operation(
+                    format!("request ID {request_id} is already active"),
+                    crate::contract::FFI_ERROR_RUNTIME,
+                    Some(operation),
+                );
+            }
         }
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         self.metrics.bytes_sent.fetch_add(
             (application_key.len() + value.len()) as u64,
             Ordering::Relaxed,
         );
-        let mutation_id = set_options.mutation_id();
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
             self.remove_request(request_id);
@@ -623,50 +671,120 @@ impl FfiClient {
     }
 
     fn cancel_with_timeout(&self, request_id: u64, timeout: Duration) -> bool {
-        if !self.request_cancel(request_id) {
+        let Some(registration) = self.request_cancel(request_id) else {
             return false;
-        }
+        };
         // Record the intent before enqueueing the control command. If the
         // worker observes Execute first, it will still turn that request into
         // a cancellation result; if it observes Cancel first, the intent is
         // retained until Execute arrives.
-        self.commands
+        if self
+            .commands
             .send_timeout(Command::Cancel { request_id }, timeout)
-            .is_ok()
+            .is_err()
+        {
+            // A disconnected or full channel did not accept the command.
+            //
+            // A pre-cancel has no native request to clean up, so remove that
+            // tombstone when the control command was not accepted. An
+            // already queued/active request must retain its cancellation
+            // state until the worker reaps the lane; otherwise a caller
+            // could reuse the ID while the old future is still in flight.
+            if registration == RequestCancellation::PreCancelled {
+                self.clear_pre_cancelled_request(request_id);
+            }
+            return false;
+        }
+        true
     }
 
-    fn register_request(&self, request_id: u64) -> bool {
+    fn register_request(&self, request_id: u64) -> RequestRegistration {
         let mut requests = self
             .requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if requests.contains_key(&request_id) {
-            return false;
+        match requests.states.get(&request_id).copied() {
+            Some(RequestState::CancelRequested)
+                if requests.pre_cancelled.contains_key(&request_id) =>
+            {
+                requests.states.remove(&request_id);
+                requests.pre_cancelled.remove(&request_id);
+                RequestRegistration::CancelRequested
+            }
+            Some(RequestState::CancelRequested) => RequestRegistration::InUse,
+            Some(RequestState::Queued | RequestState::Active) => RequestRegistration::InUse,
+            None => {
+                requests.states.insert(request_id, RequestState::Queued);
+                RequestRegistration::Registered
+            }
         }
-        requests.insert(request_id, RequestState::Queued);
-        true
     }
 
     fn remove_request(&self, request_id: u64) {
-        self.requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&request_id);
-    }
-
-    fn request_cancel(&self, request_id: u64) -> bool {
         let mut requests = self
             .requests
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(state) = requests.get_mut(&request_id) else {
-            return false;
-        };
-        if *state == RequestState::CancelRequested {
-            return false;
+        requests.states.remove(&request_id);
+        requests.pre_cancelled.remove(&request_id);
+    }
+
+    fn request_cancel(&self, request_id: u64) -> Option<RequestCancellation> {
+        if request_id == 0 {
+            return None;
         }
-        *state = RequestState::CancelRequested;
-        true
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(state) = requests.states.get_mut(&request_id) {
+            if *state == RequestState::CancelRequested {
+                return None;
+            }
+            *state = RequestState::CancelRequested;
+            return Some(RequestCancellation::Existing);
+        }
+        while requests.pre_cancelled_order.len() >= MAX_PRE_CANCELLED_REQUESTS {
+            let Some((expired, generation)) = requests.pre_cancelled_order.pop_front() else {
+                break;
+            };
+            if requests.pre_cancelled.get(&expired).copied() == Some(generation)
+                && requests.pre_cancelled.remove(&expired).is_some()
+                && requests.states.get(&expired) == Some(&RequestState::CancelRequested)
+            {
+                requests.states.remove(&expired);
+            }
+        }
+        let generation = if requests.next_pre_cancel_generation == 0 {
+            1
+        } else {
+            requests.next_pre_cancel_generation
+        };
+        requests.next_pre_cancel_generation = if generation == u64::MAX {
+            1
+        } else {
+            generation + 1
+        };
+        requests
+            .states
+            .insert(request_id, RequestState::CancelRequested);
+        requests.pre_cancelled.insert(request_id, generation);
+        requests
+            .pre_cancelled_order
+            .push_back((request_id, generation));
+        Some(RequestCancellation::PreCancelled)
+    }
+
+    fn clear_pre_cancelled_request(&self, request_id: u64) {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if requests.pre_cancelled.remove(&request_id).is_some()
+            && requests.states.get(&request_id) == Some(&RequestState::CancelRequested)
+        {
+            requests.states.remove(&request_id);
+        }
     }
 
     fn metrics_snapshot(&self) -> FfiMetricsSnapshot {
@@ -819,6 +937,7 @@ async fn run_worker_loop(
     requests: RequestRegistry,
 ) {
     let mut pending = VecDeque::new();
+    let pending_limit = max_in_flight.clamp(1, MAX_COMMAND_QUEUE_LANES);
     let mut core_metrics = CoreMetricsSnapshot::default();
     let mut active = futures_util::stream::FuturesUnordered::new();
     let mut active_requests = HashMap::new();
@@ -933,7 +1052,7 @@ async fn run_worker_loop(
                                     transmission.load(Ordering::Acquire),
                                 ));
                             }
-                            Some(RequestState::Queued) if pending.len() < max_in_flight => {
+                            Some(RequestState::Queued) if pending.len() < pending_limit => {
                                 pending.push_back(Command::Execute {
                                     request_id,
                                     operation,
@@ -1131,6 +1250,7 @@ fn request_state(requests: &RequestRegistry, request_id: u64) -> Option<RequestS
     requests
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .states
         .get(&request_id)
         .copied()
 }
@@ -1139,7 +1259,7 @@ fn claim_request(requests: &RequestRegistry, request_id: u64) -> RequestClaim {
     let mut requests = requests
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match requests.get_mut(&request_id) {
+    match requests.states.get_mut(&request_id) {
         Some(state @ RequestState::Queued) => {
             *state = RequestState::Active;
             RequestClaim::Claimed
@@ -1150,10 +1270,11 @@ fn claim_request(requests: &RequestRegistry, request_id: u64) -> RequestClaim {
 }
 
 fn remove_request(requests: &RequestRegistry, request_id: u64) {
-    requests
+    let mut requests = requests
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&request_id);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    requests.states.remove(&request_id);
+    requests.pre_cancelled.remove(&request_id);
 }
 
 fn drain_pending(
@@ -1906,9 +2027,11 @@ pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiCli
 
 /// Requests cancellation of a queued or active operation.
 ///
-/// Returns one when the request was found and cancellation was recorded, and zero when it had
-/// already completed or a cancellation was already requested. The canceled operation's result is
-/// delivered through its normal result pointer with structured cancellation metadata.
+/// Returns one when cancellation was recorded for a queued/active request or
+/// for an adapter that is about to submit the matching request ID, and zero
+/// when the request ID is zero or a cancellation was already requested. The
+/// canceled operation's result is delivered through its normal result pointer
+/// with structured cancellation metadata.
 ///
 /// # Safety
 ///

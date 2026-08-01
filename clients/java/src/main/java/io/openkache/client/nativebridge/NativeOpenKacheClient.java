@@ -18,6 +18,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 
@@ -643,29 +644,52 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             boolean raw) {
         byte[] ownedKey = Objects.requireNonNull(key, "key").clone();
         byte[] ownedValue = Objects.requireNonNull(value, "value").clone();
-        SetOptions ownedOptions = Objects.requireNonNull(options, "options");
+        SetOptions ownedOptions = Objects.requireNonNull(options, "options").copy();
         long requestId = nextRequestId();
+        Object submissionLock = new Object();
+        AtomicBoolean submitted = new AtomicBoolean(false);
+        AtomicBoolean cancelledBeforeSubmit = new AtomicBoolean(false);
         CancelableFuture<Result> future = new CancelableFuture<>(
-                () -> cancel(requestId));
+                () -> {
+                    synchronized (submissionLock) {
+                        if (!submitted.get()) {
+                            cancelledBeforeSubmit.set(true);
+                        } else {
+                            cancel(requestId);
+                        }
+                    }
+                });
         try {
-            executor.execute(() -> {
-                if (future.isCancelled()) {
-                    return;
-                }
-                try {
-                    Result result = invokeNative(
-                            requestId,
-                            operation,
-                            ownedKey,
-                            ownedValue,
-                            ownedOptions,
-                            raw);
-                    future.complete(result);
-                } catch (Throwable error) {
-                    future.completeExceptionally(error);
-                }
-            });
+            synchronized (submissionLock) {
+                executor.execute(() -> {
+                    try {
+                        synchronized (submissionLock) {
+                            if (cancelledBeforeSubmit.get()) {
+                                return;
+                            }
+                        }
+                        Result result = invokeNative(
+                                requestId,
+                                operation,
+                                ownedKey,
+                                ownedValue,
+                                ownedOptions,
+                                raw);
+                        future.complete(result);
+                    } catch (Throwable error) {
+                        future.completeExceptionally(error);
+                    } finally {
+                        zeroize(ownedKey);
+                        zeroize(ownedValue);
+                        ownedOptions.zeroizeMutationId();
+                    }
+                });
+                submitted.set(true);
+            }
         } catch (RejectedExecutionException error) {
+            zeroize(ownedKey);
+            zeroize(ownedValue);
+            ownedOptions.zeroizeMutationId();
             future.completeExceptionally(
                     new OpenKacheException("native executor rejected operation", error));
         }
@@ -706,59 +730,66 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         try (Arena callArena = Arena.ofConfined()) {
             MemorySegment keySegment = bytes(callArena, key);
             MemorySegment valueSegment = bytes(callArena, value);
-            byte[] mutationId = options.mutationId();
+            byte[] mutationId = options.mutationId;
             MemorySegment mutationSegment = bytes(callArena, mutationId);
-            MemorySegment result;
-            MethodHandle selectedExecute = raw ? executeRaw : execute;
-            MethodHandle selectedExecuteMutation = raw
-                    ? executeRawMutation
-                    : executeMutation;
-            if (mutationId.length == 0) {
-                result = (MemorySegment) selectedExecute.invokeExact(
-                        handle,
-                        requestId,
-                        operation,
-                        keySegment,
-                        (long) key.length,
-                        valueSegment,
-                        (long) value.length,
-                        options.conditionCode(),
-                        (byte) (options.ttlMillis() == 0 ? 0 : 1),
-                        options.ttlMillis());
-            } else {
-                result = (MemorySegment) selectedExecuteMutation.invokeExact(
-                        handle,
-                        requestId,
-                        operation,
-                        keySegment,
-                        (long) key.length,
-                        valueSegment,
-                        (long) value.length,
-                        options.conditionCode(),
-                        (byte) (options.ttlMillis() == 0 ? 0 : 1),
-                        options.ttlMillis(),
-                        mutationSegment,
-                        (long) mutationId.length);
-            }
-            if (result.equals(MemorySegment.NULL)) {
-                throw new OpenKacheException("native operation returned a null result");
-            }
             try {
-                int kind = (int) resultKind.invokeExact(result);
-                byte[] payload = readPayload(result);
-                if (kind == RESULT_ERROR) {
-                    throw readError(
-                            result,
-                            resultKind,
-                            resultData,
-                            resultDataLength,
-                            resultErrorMetadata,
-                            callArena,
-                            payload);
+                MemorySegment result;
+                MethodHandle selectedExecute = raw ? executeRaw : execute;
+                MethodHandle selectedExecuteMutation = raw
+                        ? executeRawMutation
+                        : executeMutation;
+                if (mutationId.length == 0) {
+                    result = (MemorySegment) selectedExecute.invokeExact(
+                            handle,
+                            requestId,
+                            operation,
+                            keySegment,
+                            (long) key.length,
+                            valueSegment,
+                            (long) value.length,
+                            options.conditionCode(),
+                            (byte) (options.ttlMillis() == 0 ? 0 : 1),
+                            options.ttlMillis());
+                } else {
+                    result = (MemorySegment) selectedExecuteMutation.invokeExact(
+                            handle,
+                            requestId,
+                            operation,
+                            keySegment,
+                            (long) key.length,
+                            valueSegment,
+                            (long) value.length,
+                            options.conditionCode(),
+                            (byte) (options.ttlMillis() == 0 ? 0 : 1),
+                            options.ttlMillis(),
+                            mutationSegment,
+                            (long) mutationId.length);
                 }
-                return new Result(kind, payload);
+                if (result.equals(MemorySegment.NULL)) {
+                    throw new OpenKacheException("native operation returned a null result");
+                }
+                try {
+                    int kind = (int) resultKind.invokeExact(result);
+                    byte[] payload = readPayload(result);
+                    if (kind == RESULT_ERROR) {
+                        throw readError(
+                                result,
+                                resultKind,
+                                resultData,
+                                resultDataLength,
+                                resultErrorMetadata,
+                                callArena,
+                                payload);
+                    }
+                    return new Result(kind, payload);
+                } finally {
+                    resultFree.invokeExact(result);
+                }
             } finally {
-                resultFree.invokeExact(result);
+                zeroize(keySegment);
+                zeroize(valueSegment);
+                zeroize(mutationSegment);
+                zeroize(mutationId);
             }
         } catch (OpenKacheException error) {
             throw error;
@@ -1149,6 +1180,14 @@ public final class NativeOpenKacheClient implements AutoCloseable {
 
         public SetOptions withMutationId(byte[] value) {
             return new SetOptions(condition, ttlMillis, value);
+        }
+
+        private SetOptions copy() {
+            return new SetOptions(condition, ttlMillis, mutationId);
+        }
+
+        private void zeroizeMutationId() {
+            Arrays.fill(mutationId, (byte) 0);
         }
 
         public static SetOptions none() {

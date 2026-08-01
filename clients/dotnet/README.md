@@ -47,11 +47,16 @@ using Smithy = OpenKache.Smithy;
 
 var certificate = await File.ReadAllBytesAsync(
     "target/openkache-local/certificate.local.der");
+var dataProtectionKey = Convert.FromBase64String(
+    Environment.GetEnvironmentVariable("OPENKACHE_DATA_PROTECTION_KEY")
+        ?? throw new InvalidOperationException(
+            "OPENKACHE_DATA_PROTECTION_KEY must contain the persistent key"));
 await using var client = await Client.ConnectAsync(
     "127.0.0.1",
     4433,
     "localhost",
-    certificate);
+    certificate,
+    new ClientOptions { DataProtectionKey = dataProtectionKey });
 
 await client.PingAsync();
 var itemId = new byte[32];

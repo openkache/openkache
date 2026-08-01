@@ -10,6 +10,14 @@ private let nativeMutationIDBytes = Smithy_Value_Format.mutationIdBytes
 private let nativeConnectOptionsBytes = Smithy_Native_Contract.connectOptionsBytes
 private let nativeMetricsSnapshotBytes = Smithy_Native_Contract.metricsSnapshotBytes
 
+private func zeroize(_ bytes: inout [UInt8]) {
+    bytes.withUnsafeMutableBufferPointer { buffer in
+        for index in buffer.indices {
+            buffer[index] = 0
+        }
+    }
+}
+
 @_silgen_name("openkache_client_abi_version")
 private func nativeAbiVersion() -> UInt32
 
@@ -509,9 +517,14 @@ private enum NativeBridge {
         let serverName = Array((options.serverName ?? "").utf8)
         let certificate = Array(options.certificate ?? Data())
         let clientCertificate = Array(options.identity?.certificate ?? Data())
-        let clientPrivateKey = Array(options.identity?.privateKey ?? Data())
-        let dataProtectionKey = Array(activeKey)
-        let previousDataProtectionKeys = previousKeys.flatMap(Array.init)
+        var clientPrivateKey = Array(options.identity?.privateKey ?? Data())
+        var dataProtectionKey = Array(activeKey)
+        var previousDataProtectionKeys = previousKeys.flatMap(Array.init)
+        defer {
+            zeroize(&clientPrivateKey)
+            zeroize(&dataProtectionKey)
+            zeroize(&previousDataProtectionKeys)
+        }
         let result = withBytes(address) { addressPointer, addressLength in
             withBytes(serverName) { serverNamePointer, serverNameLength in
                 withBytes(certificate) { certificatePointer, certificateLength in
@@ -690,7 +703,7 @@ private enum NativeBridge {
             mutationID: mutationID
         ) { keyPointer, keyLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
             if let mutationID {
-                return withBytes(Array(mutationID)) { mutationPointer, mutationLength in
+                return withZeroizedData(mutationID) { mutationPointer, mutationLength in
                     nativeExecuteWithRequestIDAndMutationID(
                         handle.pointer,
                         requestID ?? handle.reserveRequestID(),
@@ -742,7 +755,7 @@ private enum NativeBridge {
             mutationID: mutationID
         ) { itemIDPointer, itemIDLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
             if let mutationID {
-                return withBytes(Array(mutationID)) { mutationPointer, mutationLength in
+                return withZeroizedData(mutationID) { mutationPointer, mutationLength in
                     nativeExecuteRawWithRequestIDAndMutationID(
                         handle.pointer,
                         requestID ?? handle.reserveRequestID(),
@@ -795,8 +808,8 @@ private enum NativeBridge {
         let conditionValue = nativeCondition(condition)
         let ttlEnabled: UInt8 = ttl == nil ? 0 : 1
         let ttlMilliseconds = ttl ?? 0
-        return try withBytes(Array(key)) { keyPointer, keyLength in
-            try withBytes(Array(value)) { valuePointer, valueLength in
+        return try withZeroizedData(key) { keyPointer, keyLength in
+            try withZeroizedData(value) { valuePointer, valueLength in
                 guard let result = call(
                     keyPointer,
                     keyLength,
@@ -856,6 +869,15 @@ private func withBytes<T>(
     try bytes.withUnsafeBufferPointer { buffer in
         try body(buffer.baseAddress, buffer.count)
     }
+}
+
+private func withZeroizedData<T>(
+    _ data: Data,
+    _ body: (UnsafePointer<UInt8>?, Int) throws -> T
+) rethrows -> T {
+    var bytes = Array(data)
+    defer { zeroize(&bytes) }
+    return try withBytes(bytes, body)
 }
 
 private func resultPayload(_ result: NativeResultPointer) throws -> Data {

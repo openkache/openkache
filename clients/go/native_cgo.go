@@ -109,6 +109,15 @@ static void openkache_go_close(openkache_go_library_handle handle) {
 #endif
 }
 
+// Clear native buffers through volatile byte stores before releasing them.
+// A plain memset may be removed when the buffer is immediately freed.
+static void openkache_go_free_secret(void *pointer, size_t length) {
+    if (pointer == NULL) return;
+    volatile unsigned char *bytes = (volatile unsigned char *)pointer;
+    while (length-- > 0) *bytes++ = 0;
+    free(pointer);
+}
+
 openkache_go_library *openkache_go_library_load(
     const char *requested_path,
     char **error_message
@@ -339,6 +348,18 @@ import (
 	"unsafe"
 )
 
+func zeroizeBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
+}
+
+func freeSecret(pointer unsafe.Pointer, length int) {
+	if pointer != nil {
+		C.openkache_go_free_secret(pointer, C.size_t(length))
+	}
+}
+
 type nativeLibrary struct {
 	ptr *C.openkache_go_library
 }
@@ -372,6 +393,9 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 			message = C.GoString(cError)
 			C.free(unsafe.Pointer(cError))
 		}
+		zeroizeBytes(options.identityPrivateKey)
+		zeroizeBytes(options.dataProtectionKey)
+		zeroizeBytes(options.previousKeys)
 		return nil, &Error{Operation: "connect", Message: message}
 	}
 	nativeLibrary := &nativeLibrary{ptr: library}
@@ -390,9 +414,12 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		C.free(serverName)
 		C.free(certificate)
 		C.free(identityCertificate)
-		C.free(identityPrivateKey)
-		C.free(dataProtectionKey)
-		C.free(previousKeys)
+		freeSecret(identityPrivateKey, len(options.identityPrivateKey))
+		freeSecret(dataProtectionKey, len(options.dataProtectionKey))
+		freeSecret(previousKeys, len(options.previousKeys))
+		zeroizeBytes(options.identityPrivateKey)
+		zeroizeBytes(options.dataProtectionKey)
+		zeroizeBytes(options.previousKeys)
 		C.openkache_go_library_free(library)
 		return nil, err
 	}
@@ -414,6 +441,9 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	}
 	reply := make(chan connectReply)
 	go func() {
+		defer zeroizeBytes(options.identityPrivateKey)
+		defer zeroizeBytes(options.dataProtectionKey)
+		defer zeroizeBytes(options.previousKeys)
 		connectOptions := C.openkache_client_connect_options_t{
 			address:                              (*C.uint8_t)(address),
 			address_length:                       C.size_t(len(options.address)),
@@ -446,9 +476,9 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		C.free(serverName)
 		C.free(certificate)
 		C.free(identityCertificate)
-		C.free(identityPrivateKey)
-		C.free(dataProtectionKey)
-		C.free(previousKeys)
+		freeSecret(identityPrivateKey, len(options.identityPrivateKey))
+		freeSecret(dataProtectionKey, len(options.dataProtectionKey))
+		freeSecret(previousKeys, len(options.previousKeys))
 		handle, err := decodeConnectResult(nativeLibrary, result)
 		select {
 		case reply <- connectReply{handle: handle, err: err}:
@@ -590,10 +620,10 @@ func (h *nativeHandle) executeNative(
 				C.int(boolByte(raw)),
 			)
 		}
-		C.free(keyMemory)
-		C.free(valueMemory)
+		freeSecret(keyMemory, len(key))
+		freeSecret(valueMemory, len(value))
 		if mutationMemory != nil {
-			C.free(mutationMemory)
+			freeSecret(mutationMemory, len(options.MutationID))
 		}
 		kind, data, metadata := decodeResult(h.library, result)
 		done <- nativeResult{kind: kind, data: data, metadata: metadata}

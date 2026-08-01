@@ -179,12 +179,15 @@ impl DataProtectionKeyRing {
 impl DataProtectionKey {
     /// Creates a data protection key from exact random bytes.
     pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
-        let item_id_root =
-            blake3::derive_key(crate::contract::VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT, &bytes);
+        let bytes = Zeroizing::new(bytes);
+        let item_id_root = blake3::derive_key(
+            crate::contract::VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT,
+            &bytes[..],
+        );
         let value_root_key =
-            blake3::derive_key(crate::contract::VALUE_FORMAT_VALUE_ROOT_CONTEXT, &bytes);
+            blake3::derive_key(crate::contract::VALUE_FORMAT_VALUE_ROOT_CONTEXT, &bytes[..]);
         Self {
-            master_key: bytes,
+            master_key: *bytes,
             item_id_root,
             value_root_key,
         }

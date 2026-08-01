@@ -1,6 +1,6 @@
 //! Node-API adapter for the OpenKache client on Node.js, Bun, and Deno.
 
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -28,6 +28,7 @@ use openkache_client_core::{
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const MAX_SAFE_REQUEST_ID: u64 = 9_007_199_254_740_991;
+const MAX_PRE_CANCELLED_REQUESTS: usize = 65_536;
 
 /// Mutual TLS identity accepted from JavaScript.
 #[napi(object)]
@@ -131,13 +132,54 @@ impl Drop for ActiveRequest<'_> {
     }
 }
 
+#[derive(Default)]
+struct RequestRegistry {
+    active: HashMap<u64, AbortHandle>,
+    pre_cancelled: HashMap<u64, u64>,
+    pre_cancelled_order: VecDeque<(u64, u64)>,
+    next_pre_cancel_generation: u64,
+}
+
+impl RequestRegistry {
+    fn reserve_pre_cancelled(&mut self, request_id: u64) -> bool {
+        if self.pre_cancelled.contains_key(&request_id) {
+            return false;
+        }
+        while self.pre_cancelled_order.len() >= MAX_PRE_CANCELLED_REQUESTS {
+            let Some((expired, generation)) = self.pre_cancelled_order.pop_front() else {
+                break;
+            };
+            if self.pre_cancelled.get(&expired).copied() == Some(generation) {
+                self.pre_cancelled.remove(&expired);
+            }
+        }
+        let generation = if self.next_pre_cancel_generation == 0 {
+            1
+        } else {
+            self.next_pre_cancel_generation
+        };
+        self.next_pre_cancel_generation = if generation == u64::MAX {
+            1
+        } else {
+            generation + 1
+        };
+        self.pre_cancelled.insert(request_id, generation);
+        self.pre_cancelled_order.push_back((request_id, generation));
+        true
+    }
+
+    fn consume_pre_cancelled(&mut self, request_id: u64) -> bool {
+        self.pre_cancelled.remove(&request_id).is_some()
+    }
+}
+
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
     client: RwLock<Option<Arc<ProtectedClient>>>,
     metrics: LocalMetrics,
     next_request_id: AtomicU64,
-    requests: std::sync::Mutex<HashMap<u64, AbortHandle>>,
+    requests: std::sync::Mutex<RequestRegistry>,
 }
 
 #[napi]
@@ -152,13 +194,18 @@ impl NativeClient {
     #[napi]
     pub fn cancel(&self, request_id: f64) -> Result<bool> {
         let request_id = parse_request_id(request_id)?;
-        let request = self
+        let mut requests = self
             .requests
             .lock()
-            .map_err(|_| state_error("native request registry lock is poisoned"))?
-            .remove(&request_id);
-        if let Some(request) = request {
+            .map_err(|_| state_error("native request registry lock is poisoned"))?;
+        if let Some(request) = requests.active.get(&request_id) {
+            if request.is_aborted() {
+                return Ok(false);
+            }
             request.abort();
+            self.metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        } else if requests.reserve_pre_cancelled(request_id) {
             self.metrics.cancellations.fetch_add(1, Ordering::Relaxed);
             Ok(true)
         } else {
@@ -569,25 +616,33 @@ impl NativeClient {
             .transpose()?
             .unwrap_or_else(|| self.allocate_request_id());
         let (abort, registration) = AbortHandle::new_pair();
-        {
+        let pre_cancelled = {
             let mut requests = self
                 .requests
                 .lock()
                 .map_err(|_| state_error("native request registry lock is poisoned"))?;
-            match requests.entry(request_id) {
-                Entry::Vacant(entry) => {
-                    entry.insert(abort);
-                }
-                Entry::Occupied(_) => {
-                    return Err(invalid_argument(format!(
-                        "request ID {request_id} is already active"
-                    )));
+            if requests.consume_pre_cancelled(request_id) {
+                true
+            } else {
+                match requests.active.entry(request_id) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(abort);
+                        false
+                    }
+                    Entry::Occupied(_) => {
+                        return Err(invalid_argument(format!(
+                            "request ID {request_id} is already active"
+                        )));
+                    }
                 }
             }
+        };
+        if pre_cancelled {
+            return Err(native_cancelled_error(operation, mutation_id));
         }
         let result = Abortable::new(future, registration).await;
         if let Ok(mut requests) = self.requests.lock() {
-            requests.remove(&request_id);
+            requests.active.remove(&request_id);
         }
         match result {
             Ok(result) => result,
@@ -619,9 +674,11 @@ impl NativeClient {
 
     fn abort_all_requests(&self) {
         if let Ok(mut requests) = self.requests.lock() {
-            for (_, request) in requests.drain() {
+            for (_, request) in requests.active.drain() {
                 request.abort();
             }
+            requests.pre_cancelled.clear();
+            requests.pre_cancelled_order.clear();
         }
     }
 
@@ -733,7 +790,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         client: RwLock::new(Some(Arc::new(client))),
         metrics: LocalMetrics::default(),
         next_request_id: AtomicU64::new(1),
-        requests: std::sync::Mutex::new(HashMap::new()),
+        requests: std::sync::Mutex::new(RequestRegistry::default()),
     })
 }
 

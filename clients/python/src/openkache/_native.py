@@ -132,7 +132,9 @@ class _MetricsSnapshot(ctypes.Structure):
     ]
 
 
-def _as_native_buffer(data: bytes) -> tuple[object | None, _U8_POINTER | None]:
+def _as_native_buffer(
+    data: bytes | bytearray,
+) -> tuple[object | None, _U8_POINTER | None]:
     if not data:
         return None, None
     buffer = (_U8 * len(data)).from_buffer_copy(data)
@@ -375,7 +377,7 @@ class NativeClient:
         native_path: str | os.PathLike[str] | None = None,
     ) -> NativeClient:
         api = _NativeApi(native_path)
-        previous_keys = b"".join(previous_data_protection_keys)
+        previous_keys = bytearray().join(previous_data_protection_keys)
         buffers = [
             _as_native_buffer(address),
             _as_native_buffer(server_name),
@@ -420,6 +422,7 @@ class NativeClient:
         finally:
             for buffer, _ in buffers:
                 _zeroize_native_buffer(buffer)
+            previous_keys[:] = b"\x00" * len(previous_keys)
 
     def execute(
         self,
@@ -499,6 +502,9 @@ class NativeClient:
         # concurrently.
         with self._lifecycle:
             if not self._handle:
+                _zeroize_native_buffer(key_buffer)
+                _zeroize_native_buffer(value_buffer)
+                _zeroize_native_buffer(mutation_buffer)
                 raise NativeError("client is closed")
             handle = self._handle
             self._active_calls += 1
@@ -530,6 +536,9 @@ class NativeClient:
             kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
+            _zeroize_native_buffer(key_buffer)
+            _zeroize_native_buffer(value_buffer)
+            _zeroize_native_buffer(mutation_buffer)
             with self._lifecycle:
                 self._active_calls -= 1
                 if self._active_calls == 0:

@@ -142,6 +142,13 @@ public:
 
     /// Connects with the supplied certificate, protection key, and deadlines.
     static Client connect(const Connect_Options& options) {
+        const auto key_is_zero = std::all_of(
+            options.data_protection_key.begin(),
+            options.data_protection_key.end(),
+            [](Byte value) { return value == 0; });
+        if (key_is_zero) {
+            throw Error("data_protection_key must contain non-zero secret material");
+        }
         const auto* certificate = options.certificate.empty()
             ? nullptr
             : options.certificate.data();
