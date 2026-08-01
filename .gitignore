@@ -6,6 +6,10 @@
 # Rust output
 target/
 
+# Bazel workspace-local output symlinks and generated action trees
+/bazel-*
+/bazel/target/
+
 # Managed client output
 clients/dotnet/**/bin/
 clients/dotnet/**/obj/

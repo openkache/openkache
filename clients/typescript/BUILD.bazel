@@ -1,0 +1,107 @@
+"""Bazel source and generated-contract targets for the TypeScript adapter."""
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "smithy_typescript_contract",
+    srcs = [
+        "//clients:client_generator_inputs",
+        "//clients:generate.ts",
+    ],
+    outs = [
+        "generated/src/generated_local/smithy-api.ts",
+        "generated/src/generated_local/smithy-value-envelope.ts",
+        "generated/src/generated_local/smithy-value-format.ts",
+    ],
+    cmd = """
+        set -eu
+        mkdir -p "$(RULEDIR)/generated/src/generated_local"
+        export OPENKACHE_GENERATION_TARGET=typescript
+        export OPENKACHE_SMITHY_EXECUTABLE="$(execpath //bazel:smithy)"
+        export OPENKACHE_SMITHY_USE_SHELL=1
+        export OPENKACHE_TYPESCRIPT_API_OUTPUT="$(RULEDIR)/generated/src/generated_local/smithy-api.ts"
+        export OPENKACHE_TYPESCRIPT_VALUE_ENVELOPE_OUTPUT="$(RULEDIR)/generated/src/generated_local/smithy-value-envelope.ts"
+        export OPENKACHE_TYPESCRIPT_VALUE_FORMAT_OUTPUT="$(RULEDIR)/generated/src/generated_local/smithy-value-format.ts"
+        "$(execpath //bazel:bun)" "$(location //clients:generate.ts)"
+    """,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+filegroup(
+    name = "openkache_client_typescript",
+    srcs = glob([
+        "package.json",
+        "scripts/**/*.ts",
+        "src/**/*.ts",
+        "tsconfig*.json",
+    ]) + [":smithy_typescript_contract"],
+)
+
+genrule(
+    name = "openkache_client_typescript_package",
+    srcs = glob([
+        "package.json",
+        "src/**/*.ts",
+        "tsconfig.json",
+    ]) + [
+        ":smithy_typescript_contract",
+        ":generated/src/generated_local/smithy-api.ts",
+        ":generated/src/generated_local/smithy-value-envelope.ts",
+        ":generated/src/generated_local/smithy-value-format.ts",
+        "@openkache_node_types//:all",
+        "@openkache_node_types//:index.d.ts",
+        "@openkache_undici_types//:all",
+        "@openkache_undici_types//:package.json",
+    ],
+    outs = ["openkache-client-typescript.tgz"],
+    cmd = """
+        set -eu
+        work="$$(mktemp -d)"
+        trap 'rm -rf "$$work"' EXIT
+        mkdir -p "$$work/src/generated_local" "$$work/node_modules/typescript"
+        mkdir -p "$$work/node_modules/@types/node" "$$work/node_modules/undici-types"
+        cp "$(location package.json)" "$$work/package.json"
+        cp "$(location tsconfig.json)" "$$work/tsconfig.json"
+        cp -R "$$(dirname "$(execpath @openkache_typescript_compiler//:bin/tsc)")/.."/* "$$work/node_modules/typescript/"
+        cp -RL "$$(dirname "$(execpath @openkache_node_types//:index.d.ts)")"/. "$$work/node_modules/@types/node/"
+        cp -RL "$$(dirname "$(execpath @openkache_undici_types//:package.json)")"/. "$$work/node_modules/undici-types/"
+        mkdir -p "$$work/src"
+        cp -R "$(location src/index.ts)" "$$work/src/index.ts"
+        cp -R "$(location src/native-binding.ts)" "$$work/src/native-binding.ts"
+        cp -R "$(location src/value-codec.ts)" "$$work/src/value-codec.ts"
+        cp "$(location generated/src/generated_local/smithy-api.ts)" "$$work/src/generated_local/smithy-api.ts"
+        cp "$(location generated/src/generated_local/smithy-value-envelope.ts)" "$$work/src/generated_local/smithy-value-envelope.ts"
+        cp "$(location generated/src/generated_local/smithy-value-format.ts)" "$$work/src/generated_local/smithy-value-format.ts"
+        NODE_PATH="$$work/node_modules" \
+          "$(execpath //bazel:bun)" "$$work/node_modules/typescript/bin/tsc" \
+          --project "$$work/tsconfig.json" \
+          --typeRoots "$$work/node_modules/@types"
+        tar -czf "$@" -C "$$work" package.json dist
+    """,
+    tools = [
+        "//bazel:bun",
+        "@openkache_node_types//:all",
+        "@openkache_typescript_compiler//:bin/tsc",
+        "@openkache_undici_types//:all",
+    ],
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "README.md",
+        "package.json",
+        "scripts/**/*.ts",
+        "src/**/*.ts",
+        "tsconfig*.json",
+    ]) + [":smithy_typescript_contract"],
+)
+
+alias(
+    name = "client_typescript",
+    actual = ":openkache_client_typescript",
+)

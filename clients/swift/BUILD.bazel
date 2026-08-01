@@ -1,0 +1,57 @@
+"""Bazel source and generated-contract targets for the Swift adapter."""
+
+load("@rules_swift//swift:swift.bzl", "swift_library")
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "smithy_swift_contract",
+    srcs = [
+        "//clients:client_generator_inputs",
+        "//clients:generate.ts",
+    ],
+    outs = ["generated/SmithyAPI.swift"],
+    cmd = """
+        set -eu
+        mkdir -p "$(RULEDIR)/generated"
+        export OPENKACHE_GENERATION_TARGET=swift
+        export OPENKACHE_SMITHY_EXECUTABLE="$(execpath //bazel:smithy)"
+        export OPENKACHE_SMITHY_USE_SHELL=1
+        export OPENKACHE_SWIFT_API_OUTPUT="$(RULEDIR)/generated/SmithyAPI.swift"
+        "$(execpath //bazel:bun)" "$(location //clients:generate.ts)"
+    """,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+filegroup(
+    name = "openkache_client_swift",
+    srcs = glob([
+        "Package.swift",
+        "Plugins/**/*.swift",
+        "Sources/**/*.swift",
+    ]) + [":smithy_swift_contract"],
+)
+
+swift_library(
+    name = "openkache_client_swift_library",
+    srcs = glob(["Sources/**/*.swift"]) + [":smithy_swift_contract"],
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "Package.swift",
+        "Plugins/**/*.swift",
+        "README.md",
+        "Sources/**/*.swift",
+    ]) + [":smithy_swift_contract"],
+)
+
+alias(
+    name = "client_swift",
+    actual = ":openkache_client_swift_library",
+)

@@ -1,0 +1,110 @@
+"""Shared inputs and language-source groups for public clients."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "client_generator_inputs",
+    srcs = glob([
+        "generate.ts",
+        "model/**",
+    ]) + ["//protocol:generator_inputs"],
+)
+
+filegroup(
+    name = "client_c_sources",
+    srcs = ["//clients/c:openkache_client_c"],
+)
+
+filegroup(
+    name = "client_cpp_sources",
+    srcs = ["//clients/cpp:openkache_client_cpp"],
+)
+
+filegroup(
+    name = "client_dart_sources",
+    srcs = ["//clients/dart:openkache_client_dart"],
+)
+
+filegroup(
+    name = "client_dotnet_sources",
+    srcs = [
+        "//clients/dotnet:openkache_client_dotnet",
+        "//clients/dotnet:openkache_client_dotnet_library",
+    ],
+)
+
+filegroup(
+    name = "client_go_sources",
+    srcs = ["//clients/go:openkache_client_go_library"],
+)
+
+filegroup(
+    name = "client_java_sources",
+    srcs = ["//clients/java:openkache_client_java"],
+)
+
+filegroup(
+    name = "client_kotlin_sources",
+    srcs = ["//clients/kotlin:openkache_client_kotlin"],
+)
+
+filegroup(
+    name = "client_python_sources",
+    srcs = ["//clients/python:openkache_client_python"],
+)
+
+filegroup(
+    name = "client_swift_sources",
+    srcs = [
+        "//clients/swift:openkache_client_swift",
+        "//clients/swift:openkache_client_swift_library",
+    ],
+)
+
+filegroup(
+    name = "client_typescript_sources",
+    srcs = [
+        "//clients/typescript:openkache_client_typescript",
+        "//clients/typescript:openkache_client_typescript_package",
+    ],
+)
+
+filegroup(
+    name = "client_language_sources",
+    srcs = [
+        ":client_c_sources",
+        ":client_cpp_sources",
+        ":client_dart_sources",
+        ":client_dotnet_sources",
+        ":client_go_sources",
+        ":client_java_sources",
+        ":client_kotlin_sources",
+        ":client_python_sources",
+        ":client_swift_sources",
+        ":client_typescript_sources",
+    ],
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = [
+        "README.md",
+        ":client_generator_inputs",
+        ":client_language_sources",
+        "//clients/cli:README.md",
+        "//clients/core:README.md",
+        "//clients/dotnet:README.md",
+        "//clients/go:README.md",
+        "//clients/rust:README.md",
+        "//clients/typescript:README.md",
+    ] + glob([
+        "generate.ts",
+        "model/**",
+    ]) + [
+        "//clients/cli:runtime_sources",
+        "//clients/core:runtime_sources",
+        "//clients/go:runtime_sources",
+        "//clients/rust:runtime_sources",
+        "//clients/typescript/native:runtime_sources",
+    ],
+)

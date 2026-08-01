@@ -1,0 +1,17 @@
+"""Bazel compile target for the Java adapter scaffold."""
+
+load("@rules_java//java:defs.bzl", "java_library")
+
+package(default_visibility = ["//visibility:public"])
+
+java_library(
+    name = "openkache_client_java",
+    srcs = glob([
+        "src/**/*.java",
+    ]),
+)
+
+alias(
+    name = "client_java",
+    actual = ":openkache_client_java",
+)

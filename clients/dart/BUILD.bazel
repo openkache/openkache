@@ -1,0 +1,18 @@
+"""Bazel compile target for the Dart adapter scaffold."""
+
+load("@rules_dart//dart:defs.bzl", "dart_library")
+
+package(default_visibility = ["//visibility:public"])
+
+dart_library(
+    name = "openkache_client_dart",
+    package_name = "openkache",
+    srcs = glob([
+        "lib/**/*.dart",
+    ]),
+)
+
+alias(
+    name = "client_dart",
+    actual = ":openkache_client_dart",
+)

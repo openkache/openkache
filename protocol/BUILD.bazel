@@ -1,0 +1,59 @@
+"""Bazel targets for the public wire-protocol crate."""
+
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//bazel:openkache_defs.bzl", "cargo_deps", "crate_aliases", "rust_metadata")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "generator_inputs",
+    srcs = glob([
+        "generate.ts",
+        "wire.ts",
+        "model/**",
+    ]),
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "Cargo.toml",
+        "README.md",
+        "build.rs",
+        "src/**",
+        "generate.ts",
+        "wire.ts",
+        "model/**",
+    ]),
+)
+
+cargo_build_script(
+    name = "openkache_protocol_build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "OPENKACHE_BUN_EXECUTABLE": "$(execpath //bazel:bun)",
+        "OPENKACHE_SMITHY_EXECUTABLE": "$(execpath //bazel:smithy)",
+        "OPENKACHE_SMITHY_USE_SHELL": "1",
+    },
+    crate_name = "openkache_protocol_build_script",
+    crate_root = "build.rs",
+    data = [":generator_inputs"],
+    edition = "2024",
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+rust_library(
+    name = "openkache_protocol",
+    srcs = ["src/lib.rs"],
+    aliases = crate_aliases("protocol"),
+    crate_name = "openkache_protocol",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-protocol"),
+    deps = [":openkache_protocol_build_script"] + cargo_deps("protocol"),
+)

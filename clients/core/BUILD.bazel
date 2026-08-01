@@ -1,0 +1,138 @@
+"""Bazel target for the shared public Rust client core."""
+
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library")
+load(
+    "//bazel:openkache_defs.bzl",
+    "cargo_deps",
+    "crate_aliases",
+    "rust_metadata",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "smithy_c_contract",
+    srcs = [
+        "//clients:client_generator_inputs",
+        "//clients:generate.ts",
+    ],
+    outs = ["generated/include/openkache/smithy_contract.h"],
+    cmd = """
+        set -eu
+        mkdir -p "$(RULEDIR)/generated/include/openkache"
+        export OPENKACHE_GENERATION_TARGET=c-contract
+        export OPENKACHE_SMITHY_EXECUTABLE="$(execpath //bazel:smithy)"
+        export OPENKACHE_SMITHY_USE_SHELL=1
+        export OPENKACHE_C_CONTRACT_OUTPUT="$(RULEDIR)/generated/include/openkache/smithy_contract.h"
+        "$(execpath //bazel:bun)" "$(location //clients:generate.ts)"
+    """,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+cc_library(
+    name = "openkache_client_core_headers",
+    hdrs = glob(["include/**/*.h"]) + [":smithy_c_contract"],
+    includes = [
+        "generated/include",
+        "include",
+    ],
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "Cargo.toml",
+        "README.md",
+        "build.rs",
+        "src/**",
+    ]),
+)
+
+cargo_build_script(
+    name = "openkache_client_core_build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "OPENKACHE_BUN_EXECUTABLE": "$(execpath //bazel:bun)",
+        "OPENKACHE_SMITHY_EXECUTABLE": "$(execpath //bazel:smithy)",
+        "OPENKACHE_SMITHY_USE_SHELL": "1",
+    },
+    crate_name = "openkache_client_core_build_script",
+    crate_root = "build.rs",
+    data = [
+        "Cargo.toml",
+        "//clients:client_generator_inputs",
+    ],
+    edition = "2024",
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+rust_library(
+    name = "openkache_client_core",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/core"),
+    crate_features = [
+        "quic-compio",
+        "quic-quinn",
+    ],
+    crate_name = "openkache_client_core",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-core"),
+    deps = [
+        ":openkache_client_core_build_script",
+        "//protocol:openkache_protocol",
+    ] + cargo_deps("clients/core"),
+)
+
+# Rust adapters need the FFI feature variant as a normal crate dependency so
+# `use openkache_client_core::ffi` resolves through rules_rust's CrateInfo.
+# Keep this rlib target separate from the externally consumed cdylib below:
+# rules_rust intentionally does not expose shared-library targets as Rust
+# dependencies.
+rust_library(
+    name = "openkache_client_core_ffi_library",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/core"),
+    crate_features = [
+        "ffi",
+        "quic-compio",
+    ],
+    crate_name = "openkache_client_core",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-core"),
+    deps = [
+        ":openkache_client_core_build_script",
+        "//protocol:openkache_protocol",
+    ] + cargo_deps("clients/core"),
+)
+
+# The C ABI is a separate feature variant of the same core crate. Keeping it
+# as a Bazel target gives native package rules one stable artifact boundary
+# instead of requiring each adapter to invoke Cargo or CMake independently.
+rust_shared_library(
+    name = "openkache_client_core_ffi",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/core"),
+    crate_features = [
+        "ffi",
+        "quic-compio",
+    ],
+    crate_name = "openkache_client_core",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-core"),
+    deps = [
+        ":openkache_client_core_build_script",
+        "//protocol:openkache_protocol",
+    ] + cargo_deps("clients/core"),
+)

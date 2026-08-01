@@ -1,0 +1,140 @@
+"""Public aliases and source groups for the OpenKache Bazel module.
+
+Each Cargo package has its own Bazel package below this root. That keeps
+`CARGO_MANIFEST_DIR` aligned with the Cargo package in both a standalone
+checkout and a private monorepo external-repository build.
+"""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+alias(
+    name = "openkache_protocol",
+    actual = "//protocol:openkache_protocol",
+)
+
+alias(
+    name = "openkache_server",
+    actual = "//server:openkache_server",
+)
+
+alias(
+    name = "openkache_server_bin",
+    actual = "//server:openkache_server_bin",
+)
+
+alias(
+    name = "kvkache_v1_bin",
+    actual = "//server:kvkache_v1_bin",
+)
+
+alias(
+    name = "openkache_client_core",
+    actual = "//clients/core:openkache_client_core",
+)
+
+alias(
+    name = "openkache_client_core_ffi",
+    actual = "//clients/core:openkache_client_core_ffi",
+)
+
+alias(
+    name = "openkache_client",
+    actual = "//clients/rust:openkache_client",
+)
+
+alias(
+    name = "openkache_cli",
+    actual = "//clients/cli:openkache_cli",
+)
+
+alias(
+    name = "openkache_cli_bin",
+    actual = "//clients/cli:openkache_cli_bin",
+)
+
+alias(
+    name = "openkache_client_napi",
+    actual = "//clients/typescript/native:openkache_client_napi",
+)
+
+alias(
+    name = "openkache_client_python_native",
+    actual = "//clients/python:openkache_client_python_native",
+)
+
+filegroup(
+    name = "server_source_tree",
+    srcs = ["//server:server_source_tree"],
+)
+
+filegroup(
+    name = "workspace_runtime_sources",
+    srcs = [
+        ".gitignore",
+        "Cargo.lock",
+        "Cargo.toml",
+        "//clients:runtime_sources",
+        "//protocol:runtime_sources",
+        "//server:runtime_sources",
+    ],
+)
+
+filegroup(
+    name = "client_language_sources",
+    srcs = ["//clients:client_language_sources"],
+)
+
+alias(
+    name = "client_c_sources",
+    actual = "//clients:client_c_sources",
+)
+
+alias(
+    name = "client_cpp_sources",
+    actual = "//clients:client_cpp_sources",
+)
+
+alias(
+    name = "client_dart_sources",
+    actual = "//clients:client_dart_sources",
+)
+
+alias(
+    name = "client_dotnet_sources",
+    actual = "//clients:client_dotnet_sources",
+)
+
+alias(
+    name = "client_go_sources",
+    actual = "//clients:client_go_sources",
+)
+
+alias(
+    name = "client_java_sources",
+    actual = "//clients:client_java_sources",
+)
+
+alias(
+    name = "client_kotlin_sources",
+    actual = "//clients:client_kotlin_sources",
+)
+
+alias(
+    name = "client_python_sources",
+    actual = "//clients:client_python_sources",
+)
+
+alias(
+    name = "client_swift_sources",
+    actual = "//clients:client_swift_sources",
+)
+
+alias(
+    name = "client_typescript_sources",
+    actual = "//clients:client_typescript_sources",
+)

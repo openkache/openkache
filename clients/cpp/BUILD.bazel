@@ -1,0 +1,20 @@
+"""Bazel target for the public C++ header adapter."""
+
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "openkache_client_cpp",
+    hdrs = glob(["include/**/*.hpp"]),
+    includes = ["include"],
+    deps = [
+        "//clients/c:openkache_client_c",
+        "//clients/core:openkache_client_core_headers",
+    ],
+)
+
+alias(
+    name = "client_cpp",
+    actual = ":openkache_client_cpp",
+)

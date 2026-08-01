@@ -1,0 +1,15 @@
+--- a/dotnet/private/compiler_wrapper.sh
++++ b/dotnet/private/compiler_wrapper.sh
+@@ -1,8 +1,12 @@
+ #! /usr/bin/env bash
+ set -eou pipefail
+ 
++# The SDK archive intentionally omits ICU. C# compilation does not need
++# culture-specific data, so keep the toolchain hermetic on minimal hosts.
++export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT="${DOTNET_SYSTEM_GLOBALIZATION_INVARIANT:-1}"
++
+ # This wrapper script is used because the C#/F# compilers both embed absolute paths
+ # into their outputs and those paths are not deterministic. The compilers also
+ # allow overriding these paths using pathmaps. Since the paths can not be known
+ # at analysis time we need to override them at execution time.
+ 

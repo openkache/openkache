@@ -268,6 +268,36 @@ The root Cargo workspace owns the server, protocol, shared client core, Rust
 client, and Node-API adapter under one `Cargo.lock`. The default build omits
 only the Node-API adapter, which the TypeScript build stages separately.
 
+### Bazel (incremental production graph)
+
+The public checkout is also a standalone Bazel module. Bazel 8.7 (or
+Bazelisk, which reads `.bazelversion`) can build the production targets without
+the private monorepo or its integration-test infrastructure:
+
+```bash
+bazel build --lockfile_mode=error \
+  //:openkache_protocol \
+  //:openkache_server_bin \
+  //:kvkache_v1_bin \
+  //:openkache_cli_bin \
+  //:openkache_client_napi \
+  //:openkache_client_core_ffi \
+  //:openkache_client_python_native \
+  //:client_language_sources
+```
+
+`Cargo.Bazel.lock` and `MODULE.bazel.lock` keep dependency and module
+resolution reproducible. Use `bazel build --lockfile_mode=error //...` for the
+complete public graph. The private monorepo imports this module and reuses
+these targets for its integration tests.
+
+`//:client_language_sources` includes compile targets for the Go, .NET, Swift,
+Java, Kotlin, and Dart adapters. For example, the Swift implementation can be
+built directly with
+`bazel build --lockfile_mode=error //clients/swift:openkache_client_swift_library`.
+C and C++ remain header/interface targets, while Python and TypeScript retain
+their package-native assembly steps around the Bazel-built Rust artifacts.
+
 For the canonical locked release build of only the server binary, use the
 shared Cargo alias:
 

@@ -2,6 +2,7 @@
 /** Generates client-owned Smithy contracts and their generated language bindings. */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -140,6 +141,8 @@ const CLIENTS_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_ROOT = dirname(CLIENTS_DIRECTORY)
 const PROTOCOL_DIRECTORY = join(PUBLIC_ROOT, "protocol")
 const MODEL_DIRECTORY = "model"
+const SMITHY_EXECUTABLE = process.env.OPENKACHE_SMITHY_EXECUTABLE ?? "smithy"
+const SMITHY_USE_SHELL = process.env.OPENKACHE_SMITHY_USE_SHELL === "1"
 const SERVICE_SHAPE_ID = "openkache.protocol#OpenKache"
 const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
@@ -181,22 +184,47 @@ const GENERATED_OUTPUT_ROOT = resolve(
 function generated_path(...segments: string[]): string {
   return join(GENERATED_OUTPUT_ROOT, ...segments)
 }
+
+function resolve_smithy_executable(): string {
+  if (
+    SMITHY_EXECUTABLE.length === 0 ||
+    !SMITHY_EXECUTABLE.includes("/") ||
+    SMITHY_EXECUTABLE.startsWith("/")
+  ) {
+    return SMITHY_EXECUTABLE
+  }
+  let directory = resolve(process.cwd())
+  for (;;) {
+    if (
+      SMITHY_EXECUTABLE.startsWith("external/") &&
+      existsSync(resolve(directory, "external"))
+    ) {
+      return resolve(directory, SMITHY_EXECUTABLE)
+    }
+    const candidate = resolve(directory, SMITHY_EXECUTABLE)
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(directory)
+    if (parent === directory) return SMITHY_EXECUTABLE
+    directory = parent
+  }
+}
 const GENERATED_OUTPUTS = {
-  csharp_api: generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
-  csharp_wire: generated_path("clients/dotnet/OpenKache/generated_local/WireValues.g.cs"),
+  csharp_api: process.env.OPENKACHE_CSHARP_API_OUTPUT ??
+    generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
+  csharp_wire: process.env.OPENKACHE_CSHARP_WIRE_OUTPUT ??
+    generated_path("clients/dotnet/OpenKache/generated_local/WireValues.g.cs"),
   rust_client: process.env.OPENKACHE_RUST_CLIENT_OUTPUT ??
     generated_path("clients/core/generated_local/client_contract.rs"),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
     generated_path("clients/rust/generated_local/smithy_api.rs"),
   rust_wire: process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
     generated_path("protocol/generated_local/wire_values.rs"),
-  typescript_api: generated_path("clients/typescript/src/generated_local/smithy-api.ts"),
-  typescript_value_format: generated_path(
-    "clients/typescript/src/generated_local/smithy-value-format.ts",
-  ),
-  typescript_value_envelope: generated_path(
-    "clients/typescript/src/generated_local/smithy-value-envelope.ts",
-  ),
+  typescript_api: process.env.OPENKACHE_TYPESCRIPT_API_OUTPUT ??
+    generated_path("clients/typescript/src/generated_local/smithy-api.ts"),
+  typescript_value_format: process.env.OPENKACHE_TYPESCRIPT_VALUE_FORMAT_OUTPUT ??
+    generated_path("clients/typescript/src/generated_local/smithy-value-format.ts"),
+  typescript_value_envelope: process.env.OPENKACHE_TYPESCRIPT_VALUE_ENVELOPE_OUTPUT ??
+    generated_path("clients/typescript/src/generated_local/smithy-value-envelope.ts"),
   python_api: process.env.OPENKACHE_PYTHON_API_OUTPUT ??
     generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
   python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
@@ -205,8 +233,10 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/swift/generated_local/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
     generated_path("clients/core/generated_local/smithy_contract.h"),
-  go_api: generated_path("clients/go/smithy_api.go"),
-  go_contract: generated_path("clients/go/smithy_contract.go"),
+  go_api: process.env.OPENKACHE_GO_API_OUTPUT ??
+    generated_path("clients/go/smithy_api.go"),
+  go_contract: process.env.OPENKACHE_GO_CONTRACT_OUTPUT ??
+    generated_path("clients/go/smithy_contract.go"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -2572,7 +2602,12 @@ function smithy_ast(client_model: boolean): unknown {
   const models = client_model
     ? [join("..", "protocol", MODEL_DIRECTORY), MODEL_DIRECTORY]
     : [MODEL_DIRECTORY]
-  const result = Bun.spawnSync(["smithy", "ast", ...models], {
+  const smithy_executable = resolve_smithy_executable()
+  const smithy_command =
+    SMITHY_USE_SHELL && process.platform !== "win32"
+      ? ["sh", smithy_executable, "ast", ...models]
+      : [smithy_executable, "ast", ...models]
+  const result = Bun.spawnSync(smithy_command, {
     cwd,
     stderr: "pipe",
     stdout: "pipe",

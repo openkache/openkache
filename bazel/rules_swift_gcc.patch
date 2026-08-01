@@ -1,0 +1,158 @@
+--- a/swift/toolchains/swift_toolchain.bzl
++++ b/swift/toolchains/swift_toolchain.bzl
+@@ -137,7 +137,10 @@
+         driver_config = _driver_config(mode = "swiftc"),
+         resource_set = _swift_compile_resource_set,
+         use_param_file = True,
+-        worker_mode = "persistent",
++        # Nix's Swift wrapper exposes module overlays through absolute store
++        # paths. Use a one-shot worker wrapper so rules_swift removes its
++        # -Xwrapped-swift metadata before invoking the compiler.
++        worker_mode = "wrap",
+         env = env,
+     )
+
+@@ -418,11 +418,6 @@
+         target_triples.parse(target_system_name),
+     )
+ 
+-    if "clang" not in cc_toolchain.compiler:
+-        fail("Swift requires the configured CC toolchain to be LLVM (clang). " +
+-             "Either use the locally installed LLVM by setting `CC=clang` in your environment " +
+-             "before invoking Bazel, or configure a Bazel LLVM CC toolchain.")
+-
+     if ctx.attr.os == "windows":
+         swift_linkopts_cc_info = _swift_windows_linkopts_cc_info(
+             ctx.attr.arch,
+@@ -444,6 +439,8 @@
+     else:
+         swiftcopts = []
+ 
++    swiftcopts.extend(ctx.attr.nix_swiftcopts)
++
+     if "-exec-" in ctx.bin_dir.path:
+         swiftcopts.extend(ctx.attr._exec_copts[BuildSettingInfo].value)
+     else:
+@@ -604,6 +601,11 @@
+                 mandatory = True,
+                 allow_single_file = True,
+             ),
++            "nix_swiftcopts": attr.string_list(
++                default = [],
++                doc = """Additional Swift compiler options supplied by the host
++environment's toolchain wrapper.""",
++            ),
+             "_cc_toolchain": attr.label(
+                 default = Label("@bazel_tools//tools/cpp:current_cc_toolchain"),
+                 doc = """\
+
+--- a/swift/internal/swift_autoconfiguration.bzl
++++ b/swift/internal/swift_autoconfiguration.bzl
+@@ -248,6 +248,48 @@
+     if not path_to_swiftc:
+         fail("No 'swiftc' executable found in $PATH")
+ 
++    nix_swift_flags = []
++    for variable in ["NIX_SWIFTFLAGS_COMPILE", "NIX_SWIFTFLAGS_COMPILE_FOR_TARGET"]:
++        nix_swift_flags.extend([
++            flag
++            for flag in repository_ctx.os.environ.get(variable, "").split(" ")
++            if flag
++        ])
++
++    # The Nix Swift wrapper derives its clang/resource flags from these
++    # variables. Bazel normally preserves only a small default shell
++    # environment for actions, so capture the stable wrapper inputs in the
++    # generated toolchain and pass them only to Swift actions. Do not capture
++    # NIX_LDFLAGS: the development shell adds a worktree-specific rpath there,
++    # and Swift compile actions do not link.
++    nix_swift_env = {}
++    for variable in [
++        "NIX_BINTOOLS",
++        "NIX_BINTOOLS_FOR_TARGET",
++        "NIX_CC",
++        "NIX_CC_FOR_TARGET",
++        "NIX_CFLAGS_COMPILE",
++        "NIX_CFLAGS_COMPILE_FOR_TARGET",
++        "NIX_ENFORCE_PURITY",
++        "NIX_LDFLAGS_FOR_TARGET",
++        "NIX_STORE",
++    ]:
++        value = repository_ctx.os.environ.get(variable)
++        if value:
++            nix_swift_env[variable] = value
++
++    # Target-qualified marker variables select the host/target wrapper flags
++    # in Nix's generated add-flags scripts. Keep them architecture-agnostic
++    # instead of baking x86_64 names into the repository rule.
++    for variable in repository_ctx.os.environ:
++        if variable.startswith((
++            "NIX_BINTOOLS_WRAPPER_TARGET_",
++            "NIX_CC_WRAPPER_TARGET_",
++        )):
++            value = repository_ctx.os.environ.get(variable)
++            if value:
++                nix_swift_env[variable] = value
++
+     root = path_to_swiftc.dirname.dirname
+     feature_values = _compute_feature_values(repository_ctx, path_to_swiftc)
+     version_file = _write_swift_version(repository_ctx, path_to_swiftc)
+@@ -263,6 +301,16 @@
+     if "load-plugin-executable" in swift_features_config:
+         feature_values.append(SWIFT_FEATURE__SUPPORTS_MACROS)
+ 
++    nix_swift_flags_text = ", ".join([
++        '"{}"'.format(flag)
++        for flag in nix_swift_flags
++    ])
++
++    nix_swift_env_text = ", ".join([
++        '"{}": "{}"'.format(variable, nix_swift_env[variable])
++        for variable in sorted(nix_swift_env.keys())
++    ])
++
+     repository_ctx.file(
+         "BUILD",
+         """
+@@ -280,6 +328,8 @@
+     os = "linux",
+     root = "{root}",
+     version_file = "{version_file}",
++    nix_swiftcopts = [{nix_swift_flags}],
++    env = {{{nix_swift_env}}},
+ )
+ """.format(
+             cpu = _normalized_linux_cpu(repository_ctx.os.arch),
+@@ -287,6 +337,8 @@
+                 '"{}"'.format(feature)
+                 for feature in feature_values
+             ]),
++            nix_swift_flags = nix_swift_flags_text,
++            nix_swift_env = nix_swift_env_text,
+             root = root,
+             version_file = version_file,
+         ),
+@@ -416,7 +468,22 @@
+         _create_linux_toolchain(repository_ctx)
+ 
+ swift_autoconfiguration = repository_rule(
+-    environ = ["CC", "PATH", "ProgramData", "Path"],
++    environ = [
++        "CC",
++        "NIX_BINTOOLS",
++        "NIX_BINTOOLS_FOR_TARGET",
++        "NIX_CFLAGS_COMPILE",
++        "NIX_CFLAGS_COMPILE_FOR_TARGET",
++        "NIX_ENFORCE_PURITY",
++        "NIX_LDFLAGS",
++        "NIX_LDFLAGS_FOR_TARGET",
++        "NIX_STORE",
++        "NIX_SWIFTFLAGS_COMPILE",
++        "NIX_SWIFTFLAGS_COMPILE_FOR_TARGET",
++        "PATH",
++        "ProgramData",
++        "Path",
++    ],
+     implementation = _swift_autoconfiguration_impl,
+     local = True,
+ )

@@ -1,0 +1,84 @@
+"""Bazel targets for the public Python adapter and native ABI library."""
+
+load("@rules_rust//rust:defs.bzl", "rust_shared_library")
+load(
+    "//bazel:openkache_defs.bzl",
+    "crate_aliases",
+    "rust_metadata",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "smithy_python_contract",
+    srcs = [
+        "//clients:client_generator_inputs",
+        "//clients:generate.ts",
+    ],
+    outs = [
+        "generated/src/openkache/_generated/smithy_api.py",
+        "generated/src/openkache/_generated/smithy_contract.py",
+    ],
+    cmd = """
+        set -eu
+        mkdir -p "$(RULEDIR)/generated/src/openkache/_generated"
+        export OPENKACHE_GENERATION_TARGET=python
+        export OPENKACHE_SMITHY_EXECUTABLE="$(execpath //bazel:smithy)"
+        export OPENKACHE_SMITHY_USE_SHELL=1
+        export OPENKACHE_PYTHON_API_OUTPUT="$(RULEDIR)/generated/src/openkache/_generated/smithy_api.py"
+        export OPENKACHE_PYTHON_CONTRACT_OUTPUT="$(RULEDIR)/generated/src/openkache/_generated/smithy_contract.py"
+        "$(execpath //bazel:bun)" "$(location //clients:generate.ts)"
+    """,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+py_library(
+    name = "openkache_client_python",
+    srcs = glob(["src/**/*.py"]) + [
+        ":smithy_python_contract",
+    ],
+    data = [
+        "README.md",
+        "pyproject.toml",
+    ],
+    imports = [
+        "generated/src",
+        "src",
+    ],
+)
+
+rust_shared_library(
+    name = "openkache_client_python_native",
+    srcs = ["native/src/lib.rs"],
+    aliases = crate_aliases("clients/core"),
+    crate_name = "openkache_client_python_native",
+    crate_root = "native/src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-python-native"),
+    deps = [
+        "//clients/core:openkache_client_core_ffi_library",
+    ],
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "MANIFEST.in",
+        "README.md",
+        "pyproject.toml",
+        "setup.py",
+        "src/**",
+        "native/Cargo.lock",
+        "native/Cargo.toml",
+        "native/src/**",
+    ]) + [":smithy_python_contract"],
+)
+
+alias(
+    name = "client_python",
+    actual = ":openkache_client_python",
+)

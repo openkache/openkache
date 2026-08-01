@@ -1,0 +1,71 @@
+"""Bazel compile and generated-contract targets for the public Go adapter."""
+
+load("@rules_go//go:def.bzl", "go_library")
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "smithy_go_contract",
+    srcs = [
+        "//clients:client_generator_inputs",
+        "//clients:generate.ts",
+    ],
+    outs = [
+        "generated/smithy_api.go",
+        "generated/smithy_contract.go",
+    ],
+    cmd = """
+        set -eu
+        mkdir -p "$(RULEDIR)/generated"
+        export OPENKACHE_GENERATION_TARGET=go
+        export OPENKACHE_SMITHY_EXECUTABLE="$(execpath //bazel:smithy)"
+        export OPENKACHE_SMITHY_USE_SHELL=1
+        export OPENKACHE_GO_API_OUTPUT="$(RULEDIR)/generated/smithy_api.go"
+        export OPENKACHE_GO_CONTRACT_OUTPUT="$(RULEDIR)/generated/smithy_contract.go"
+        "$(execpath //bazel:bun)" "$(location //clients:generate.ts)"
+    """,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+filegroup(
+    name = "openkache_client_go",
+    srcs = glob(
+        ["*.go"],
+        exclude = [
+            "smithy_api.go",
+            "smithy_contract.go",
+        ],
+    ) + [":smithy_go_contract"],
+)
+
+go_library(
+    name = "openkache_client_go_library",
+    srcs = glob(
+        ["*.go"],
+        exclude = [
+            "smithy_api.go",
+            "smithy_contract.go",
+        ],
+    ) + [":smithy_go_contract"],
+    cdeps = ["//clients/core:openkache_client_core_headers"],
+    cgo = True,
+    importpath = "github.com/openkache/openkache/clients/go",
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "README.md",
+        "go.mod",
+        "*.go",
+    ]) + [":smithy_go_contract"],
+)
+
+alias(
+    name = "client_go",
+    actual = ":openkache_client_go_library",
+)

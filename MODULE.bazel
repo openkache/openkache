@@ -1,0 +1,239 @@
+"""Standalone Bazel module for OpenKache's public production workspace."""
+
+module(
+    name = "openkache_public",
+    version = "0.1.0",
+)
+
+_http_archive = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_archive",
+)
+
+bazel_dep(name = "rules_rust", version = "0.73.0")
+bazel_dep(name = "rules_cc", version = "0.2.8")
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_go", version = "0.60.0")
+bazel_dep(name = "rules_java", version = "8.14.0")
+bazel_dep(name = "rules_kotlin", version = "2.2.0")
+bazel_dep(name = "rules_dart", version = "0.2.0")
+bazel_dep(name = "rules_dotnet", version = "0.0.0")
+bazel_dep(name = "rules_swift", version = "2.0.0")
+
+# rules_dotnet is not published to the Bazel Central Registry yet. Keep the
+# release archive pinned until it is, while using its native SDK toolchain
+# rather than the developer's dotnet installation.
+archive_override(
+    module_name = "rules_dotnet",
+    integrity = "sha256-DxGbnvsEDjWDJzRaV6FouiwMK0HHJIllKehhV44hLl8=",
+    patch_strip = 1,
+    patches = ["//bazel:rules_dotnet_invariant.patch"],
+    strip_prefix = "rules_dotnet-0.22.1",
+    urls = ["https://github.com/bazel-contrib/rules_dotnet/archive/refs/tags/v0.22.1.tar.gz"],
+)
+
+archive_override(
+    module_name = "rules_swift",
+    integrity = "sha256-Mu607zPHCNnJpO4PqEdTIu8UnavIGITdw7UOsu//eEM=",
+    patch_strip = 1,
+    patches = ["//bazel:rules_swift_gcc.patch"],
+    strip_prefix = "",
+    urls = ["https://github.com/bazelbuild/rules_swift/releases/download/2.0.0/rules_swift.2.0.0.tar.gz"],
+)
+
+# The public module owns the language compiler SDKs as well as the Rust graph.
+# This keeps adapter builds independent from Cargo, Maven, Gradle, pub, and
+# developer-installed Go/Kotlin/Dart binaries.
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.from_file(
+    go_mod = "//clients/go:go.mod",
+)
+use_repo(go_sdk, "go_toolchains")
+
+register_toolchains("@go_toolchains//:all")
+
+dotnet = use_extension("@rules_dotnet//dotnet:extensions.bzl", "dotnet")
+dotnet.toolchain(
+    dotnet_version = "8.0.422",
+)
+use_repo(dotnet, "dotnet_toolchains")
+
+register_toolchains("@dotnet_toolchains//:all")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:Cargo.Bazel.lock",
+    manifests = ["//:Cargo.toml"],
+    # Cargo owns the public workspace lockfile; Bazel must not rewrite it.
+    skip_cargo_lockfile_overwrite = True,
+)
+use_repo(crate, "crates")
+
+# The Smithy generators are part of the production source graph. Download
+# pinned, self-contained Bun and Smithy CLI archives instead of inheriting PATH
+# from Nix, Cargo, or a developer shell. Each archive is fetched lazily only
+# when its host platform is selected by //bazel:generator_tools.
+_http_archive(
+    name = "openkache_bun_linux_x86_64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a",
+    strip_prefix = "bun-linux-x64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_linux_aarch64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "70bae41b3908b0a120e1e58c5c8af30e74afae3b8d11b0d3fdd8e787ddfb4b22",
+    strip_prefix = "bun-linux-aarch64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_darwin_x86_64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "e5a6c8b64f419925232d111ecb13e25f0abf55e54f792341f987623fd0778009",
+    strip_prefix = "bun-darwin-x64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-x64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_darwin_aarch64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "5467e3f65dba526b9fea98f0cce04efafc0c63e169733ec27b876a3ad32da190",
+    strip_prefix = "bun-darwin-aarch64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_windows_x86_64",
+    build_file_content = """exports_files(["bun.exe"], visibility = ["//visibility:public"])""",
+    sha256 = "85b14f3e0584218e9b63407b3aa6b90c4835ec5c32435c1f12cb6fc13667c7c9",
+    strip_prefix = "bun-windows-x64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-x64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_windows_aarch64",
+    build_file_content = """exports_files(["bun.exe"], visibility = ["//visibility:public"])""",
+    sha256 = "feaf3f2951c50104dc9a33cf1a2e1ae3422f0c7e5d8890601c87b97b5d90b376",
+    strip_prefix = "bun-windows-aarch64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_linux_x86_64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy"], visibility = ["//visibility:public"])
+""",
+    sha256 = "ee6e6d24416b53624ba7f323628b2ca8aa67a349fbe3b2e92e98172c3f3d6a45",
+    strip_prefix = "smithy-cli-linux-x86_64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-linux-x86_64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_linux_aarch64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy"], visibility = ["//visibility:public"])
+""",
+    sha256 = "2bbed6177b0c4fc2f75c4266a5cf72571ca35ce66da8800a90d4cf03c6bb2d42",
+    strip_prefix = "smithy-cli-linux-aarch64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-linux-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_darwin_x86_64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy"], visibility = ["//visibility:public"])
+""",
+    sha256 = "55b5e397fd42fea407326e512daf9bcd38819c03534e1243e4a0fc71a9ec5ded",
+    strip_prefix = "smithy-cli-darwin-x86_64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-darwin-x86_64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_darwin_aarch64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy"], visibility = ["//visibility:public"])
+""",
+    sha256 = "e836bb468eb117f05597fa263864681728950e32c10a85592eb4dd643cfdee88",
+    strip_prefix = "smithy-cli-darwin-aarch64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-darwin-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_windows_x86_64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy.bat"], visibility = ["//visibility:public"])
+""",
+    sha256 = "604f7017f4dfc50b802fa8d74401bbb4604ccbec5af2df39639897f467aaf663",
+    strip_prefix = "smithy-cli-windows-x64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-windows-x64.zip"],
+)
+
+# TypeScript's compiler and Node's ambient declarations are package inputs,
+# not host tools. Keep the small npm archives pinned so a TypeScript package
+# build works from a clean checkout without `bun install`.
+_http_archive(
+    name = "openkache_typescript_compiler",
+    build_file_content = """exports_files(["bin/tsc"], visibility = ["//visibility:public"])""",
+    sha256 = "da2513f4b95176d6dde8b51aab7afe8a927656c9d277369793f77f7e59371c08",
+    strip_prefix = "package",
+    urls = ["https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz"],
+)
+
+_http_archive(
+    name = "openkache_node_types",
+    build_file_content = """exports_files(["index.d.ts"], visibility = ["//visibility:public"])
+filegroup(name = "all", srcs = glob(["**"], allow_empty = False), visibility = ["//visibility:public"])""",
+    sha256 = "14200e662b222ab262da7ac16f60565f353a8be6ddc98d9d34b1a97e66c5bebc",
+    strip_prefix = "node v24.13",
+    urls = ["https://registry.npmjs.org/@types/node/-/node-24.13.3.tgz"],
+)
+
+_http_archive(
+    name = "openkache_undici_types",
+    build_file_content = """exports_files(["package.json"], visibility = ["//visibility:public"])
+filegroup(name = "all", srcs = glob(["**"], allow_empty = False), visibility = ["//visibility:public"])""",
+    sha256 = "4d92799b0e619468a30f70eff033c1a27e713134a4ff353e1a6794f67e425497",
+    strip_prefix = "package",
+    urls = ["https://registry.npmjs.org/undici-types/-/undici-types-7.18.2.tgz"],
+)

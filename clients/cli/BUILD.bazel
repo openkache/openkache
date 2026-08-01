@@ -1,0 +1,44 @@
+"""Bazel targets for the public Rust client CLI."""
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load(
+    "//bazel:openkache_defs.bzl",
+    "cargo_deps",
+    "crate_aliases",
+    "rust_metadata",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "Cargo.toml",
+        "README.md",
+        "src/**",
+    ]),
+)
+
+rust_library(
+    name = "openkache_cli",
+    srcs = ["src/lib.rs"],
+    aliases = crate_aliases("clients/cli"),
+    crate_features = ["quic-compio"],
+    crate_name = "openkache_cli",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-cli"),
+    deps = ["//clients/rust:openkache_client"] + cargo_deps("clients/cli"),
+)
+
+rust_binary(
+    name = "openkache_cli_bin",
+    srcs = ["src/main.rs"],
+    aliases = crate_aliases("clients/cli"),
+    crate_features = ["quic-compio"],
+    crate_name = "openkache_cli_bin",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-cli"),
+    deps = [":openkache_cli"] + cargo_deps("clients/cli"),
+)

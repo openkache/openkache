@@ -1,0 +1,17 @@
+"""Bazel compile target for the Kotlin adapter scaffold."""
+
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+
+package(default_visibility = ["//visibility:public"])
+
+kt_jvm_library(
+    name = "openkache_client_kotlin",
+    srcs = glob([
+        "src/**/*.kt",
+    ]),
+)
+
+alias(
+    name = "client_kotlin",
+    actual = ":openkache_client_kotlin",
+)

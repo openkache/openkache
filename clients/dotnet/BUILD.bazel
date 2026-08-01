@@ -1,0 +1,61 @@
+"""Bazel source and generated-contract targets for the .NET adapter."""
+
+load("@rules_dotnet//dotnet:defs.bzl", "csharp_library")
+
+package(default_visibility = ["//visibility:public"])
+
+genrule(
+    name = "smithy_dotnet_contract",
+    srcs = [
+        "//clients:client_generator_inputs",
+        "//clients:generate.ts",
+    ],
+    outs = [
+        "generated/OpenKache/SmithyApi.g.cs",
+        "generated/OpenKache/WireValues.g.cs",
+    ],
+    cmd = """
+        set -eu
+        mkdir -p "$(RULEDIR)/generated/OpenKache"
+        export OPENKACHE_GENERATION_TARGET=dotnet
+        export OPENKACHE_SMITHY_EXECUTABLE="$(execpath //bazel:smithy)"
+        export OPENKACHE_SMITHY_USE_SHELL=1
+        export OPENKACHE_CSHARP_API_OUTPUT="$(RULEDIR)/generated/OpenKache/SmithyApi.g.cs"
+        export OPENKACHE_CSHARP_WIRE_OUTPUT="$(RULEDIR)/generated/OpenKache/WireValues.g.cs"
+        "$(execpath //bazel:bun)" "$(location //clients:generate.ts)"
+    """,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+filegroup(
+    name = "openkache_client_dotnet",
+    srcs = glob(["OpenKache/**/*.cs"]) + [
+        "OpenKache/OpenKache.csproj",
+        ":smithy_dotnet_contract",
+    ],
+)
+
+csharp_library(
+    name = "openkache_client_dotnet_library",
+    srcs = glob(["OpenKache/**/*.cs"]) + [":smithy_dotnet_contract"],
+    nullable = "enable",
+    target_frameworks = ["net8.0"],
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "OpenKache/**/*.cs",
+        "OpenKache/OpenKache.csproj",
+        "README.md",
+    ]) + [":smithy_dotnet_contract"],
+)
+
+alias(
+    name = "client_dotnet",
+    actual = ":openkache_client_dotnet_library",
+)
