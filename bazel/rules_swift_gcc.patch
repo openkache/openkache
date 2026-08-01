@@ -132,7 +132,7 @@
              root = root,
              version_file = version_file,
          ),
-@@ -416,7 +468,22 @@
+@@ -416,7 +468,21 @@
          _create_linux_toolchain(repository_ctx)
  
  swift_autoconfiguration = repository_rule(
@@ -144,7 +144,6 @@
 +        "NIX_CFLAGS_COMPILE",
 +        "NIX_CFLAGS_COMPILE_FOR_TARGET",
 +        "NIX_ENFORCE_PURITY",
-+        "NIX_LDFLAGS",
 +        "NIX_LDFLAGS_FOR_TARGET",
 +        "NIX_STORE",
 +        "NIX_SWIFTFLAGS_COMPILE",

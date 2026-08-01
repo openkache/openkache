@@ -3145,7 +3145,7 @@
     },
     "@@rules_swift+//swift:extensions.bzl%non_module_deps": {
       "general": {
-        "bzlTransitiveDigest": "MtIr7Rkypf9teviU6eLaB0hbfK61jqgyrSt1vgT6lmE=",
+        "bzlTransitiveDigest": "jVqe7X5YQjFCpKstUwa0PC0svNwgWfr7RQ41BABeEl4=",
         "usagesDigest": "mbxc/w+QB6+HxN+/1OLr7IYf5Rrdluul+wdTTRMLmlE=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
