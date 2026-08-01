@@ -23,7 +23,13 @@ if not PROTOCOL_ROOT.is_dir():
 CORE_ROOT = PUBLIC_ROOT / "clients" / "core"
 if not CORE_ROOT.is_dir():
     CORE_ROOT = PACKAGE_ROOT / "core"
-PROTOCOL_GENERATOR = PROTOCOL_ROOT / "generate.ts"
+CLIENTS_ROOT = PUBLIC_ROOT / "clients"
+CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
+CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
+if not CLIENT_GENERATOR.is_file():
+    CLIENTS_ROOT = PACKAGE_ROOT / "clients"
+    CLIENT_GENERATOR = CLIENTS_ROOT / "generate.ts"
+    CLIENT_MODEL_ROOT = CLIENTS_ROOT / "model"
 
 
 def native_library_name() -> str:
@@ -35,12 +41,12 @@ def native_library_name() -> str:
 
 
 def generate_smithy_contract() -> None:
-    """Generate Python contracts from the canonical Smithy model."""
+    """Generate Python contracts from the scoped wire and client Smithy models."""
 
-    if not PROTOCOL_GENERATOR.is_file():
+    if not CLIENT_GENERATOR.is_file():
         raise RuntimeError(
-            "Python package builds require the bundled protocol/generate.ts "
-            "and Smithy model."
+            "Python package builds require the bundled clients/generate.ts, "
+            "clients/model, and protocol/model Smithy sources."
         )
     environment = os.environ.copy()
     environment["OPENKACHE_GENERATION_TARGET"] = "python"
@@ -53,9 +59,9 @@ def generate_smithy_contract() -> None:
         subprocess.run(
             [
                 os.environ.get("BUN", "bun"),
-                str(PROTOCOL_GENERATOR),
+                str(CLIENT_GENERATOR),
             ],
-            cwd=PROTOCOL_ROOT,
+            cwd=CLIENTS_ROOT,
             env=environment,
             check=True,
         )
@@ -153,6 +159,13 @@ class sdist(_sdist):
         )
         shutil.copytree(CORE_ROOT, release_root / "core", ignore=source_ignore)
         shutil.copytree(PROTOCOL_ROOT, release_root / "protocol", ignore=source_ignore)
+        (release_root / "clients").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(CLIENT_GENERATOR, release_root / "clients" / "generate.ts")
+        shutil.copytree(
+            CLIENT_MODEL_ROOT,
+            release_root / "clients" / "model",
+            ignore=source_ignore,
+        )
         _replace_path_dependency(
             release_root / "native" / "Cargo.toml",
             'path = "../../core"',

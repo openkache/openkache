@@ -1,14 +1,14 @@
 //! Canonical framing for self-describing, cross-language values.
 
 /// Legacy metadata-envelope magic and version.
-pub const MAGIC_AND_VERSION: [u8; openkache_protocol::VALUE_ENVELOPE_MAGIC_AND_VERSION.len()] =
-    openkache_protocol::VALUE_ENVELOPE_MAGIC_AND_VERSION;
+pub const MAGIC_AND_VERSION: [u8; crate::contract::VALUE_ENVELOPE_MAGIC_AND_VERSION.len()] =
+    crate::contract::VALUE_ENVELOPE_MAGIC_AND_VERSION;
 
 /// Maximum UTF-8 byte length of an encoding identifier.
-pub const MAX_ENCODING_BYTES: usize = openkache_protocol::VALUE_ENVELOPE_MAX_ENCODING_BYTES;
+pub const MAX_ENCODING_BYTES: usize = crate::contract::VALUE_ENVELOPE_MAX_ENCODING_BYTES;
 
 /// Maximum UTF-8 byte length of a logical type name.
-pub const MAX_TYPE_NAME_BYTES: usize = openkache_protocol::VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES;
+pub const MAX_TYPE_NAME_BYTES: usize = crate::contract::VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES;
 
 const LENGTH_FIELD_BYTES: usize = std::mem::size_of::<u16>();
 const ENCODING_LENGTH_OFFSET: usize = MAGIC_AND_VERSION.len();

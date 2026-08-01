@@ -71,5 +71,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    let core_directory = std::path::Path::new(&manifest_directory);
+    let checkout_clients_directory = core_directory
+        .parent()
+        .ok_or("client core manifest has no parent directory")?;
+    // Source checkouts keep this crate under `clients/core`. Python sdists
+    // flatten the shared sources to `core/` and place the generator/model
+    // under a sibling `clients/` directory, so resolve both supported layouts
+    // without making package builds copy a second model.
+    let client_directory = if checkout_clients_directory.join("generate.ts").is_file() {
+        checkout_clients_directory.to_path_buf()
+    } else {
+        let flattened_clients_directory = core_directory
+            .parent()
+            .map(|root| root.join("clients"))
+            .ok_or("client core manifest has no flattened sdist root")?;
+        if flattened_clients_directory.join("generate.ts").is_file() {
+            flattened_clients_directory
+        } else {
+            return Err(format!(
+                "client generator is missing from {} and {}",
+                checkout_clients_directory.display(),
+                flattened_clients_directory.display()
+            )
+            .into());
+        }
+    };
+    let generator = client_directory.join("generate.ts");
+    let protocol_wire_generator = client_directory.join("../protocol/wire.ts");
+    let client_model = client_directory.join("model");
+    let protocol_model = client_directory.join("../protocol/model");
+    let output = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
+    )
+    .join("client_contract.rs");
+
+    println!("cargo:rerun-if-changed={}", generator.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        protocol_wire_generator.display()
+    );
+    println!("cargo:rerun-if-changed={}", client_model.display());
+    println!("cargo:rerun-if-changed={}", protocol_model.display());
+
+    let status = std::process::Command::new("bun")
+        .arg(&generator)
+        .env("OPENKACHE_GENERATION_TARGET", "rust-client")
+        .env("OPENKACHE_RUST_CLIENT_OUTPUT", &output)
+        .status()
+        .map_err(|error| {
+            format!(
+                "client contract generation could not start Bun: {error}\n\
+                 Install Bun and Smithy CLI, ensure both are on PATH, then rerun Cargo."
+            )
+        })?;
+    if !status.success() {
+        return Err(format!(
+            "client contract generation failed with {status}\n\
+             Run `./generate.ts` from the clients directory for actionable diagnostics."
+        )
+        .into());
+    }
     Ok(())
 }

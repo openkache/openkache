@@ -5,9 +5,10 @@ Rust client core. QUIC, TLS, retries, application-key derivation, compression,
 encryption, and the v1 value format stay in [`../core`](../core); Python only
 converts Python values and owns the async scheduling and resource lifecycle.
 
-The Smithy model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy)
-is the source of the generated operation types, wire/value constants, and
-native ABI identifiers in `src/openkache/_generated/`. The `RawClient` adapter
+The Smithy client model in [`../model/openkache.smithy`](../model/openkache.smithy), together with
+the wire model in [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy),
+is the source of the generated operation types, client constants, and native ABI identifiers in
+`src/openkache/_generated/`. The `RawClient` adapter
 implements those exact item-ID operations. `Client` adds protected
 application-key operations and JSON values.
 

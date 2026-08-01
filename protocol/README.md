@@ -18,14 +18,16 @@ project status.
 From `protocol`:
 
 ```bash
-./generate.ts
+./generate.ts                 # Generate the Rust wire contract
 cargo build
 cargo check
 cargo fmt --check
 ```
 
 Generation and Rust builds require Bun and Smithy CLI on `PATH`. Cargo invokes
-the generator automatically before compiling the protocol crate.
+the wire generator automatically before compiling the protocol crate. To
+regenerate language-client artifacts, run `../clients/generate.ts` from this
+directory or use `just generate-protocol-contract` from the repository root.
 
 ## Usage
 
@@ -48,15 +50,15 @@ variable-integer parsing.
 
 ## Core components
 
-- `model/openkache.smithy` is the canonical source for assigned wire values,
-  operation inputs and outputs, shared limits, version-specific layouts,
-  native-binding ABI identifiers, the complete cross-language value-format
-  contract, and the legacy TypeScript metadata-envelope limits.
-- `generate.ts` validates the Smithy AST and emits Rust, TypeScript, C#, and
-  native C definitions into ignored `generated_local` directories or Cargo
-  output, plus Python API and contract modules during package builds. The CMake
-  client build generates its native header into the CMake build tree and
-  installs it with the package.
+- `model/openkache.smithy` is the canonical source for server-visible wire
+  values: operation and status assignments, shared limits, and version-specific
+  frame layout.
+- `wire.ts` owns wire-model AST extraction and Rust wire rendering.
+- `generate.ts` validates the wire Smithy model and emits only the Rust wire
+  definitions used by this crate. Client defaults, API shapes, native ABI
+  identifiers, value-format metadata, and language-specific outputs belong to
+  [`../clients/model/openkache.smithy`](../clients/model/openkache.smithy) and
+  [`../clients/generate.ts`](../clients/generate.ts).
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.
@@ -71,6 +73,6 @@ policy; protocol v1 specifies only when a successful response may be sent.
 
 ## Configuration
 
-Protocol identifiers, operation shapes, and wire ceilings are compile-time
-definitions sourced from the Smithy model. The crate has no runtime
+Protocol identifiers, operation assignments, and wire ceilings are compile-time
+definitions sourced from the wire Smithy model. The crate has no runtime
 configuration files.

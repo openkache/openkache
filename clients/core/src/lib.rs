@@ -1,5 +1,11 @@
 //! Low-level QUIC client core for the OpenKache binary protocol.
 
+/// Client-only defaults, ABI discriminators, and value-format constants generated from
+/// `clients/model/openkache.smithy`.
+pub mod contract {
+    include!(concat!(env!("OUT_DIR"), "/client_contract.rs"));
+}
+
 mod config;
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -24,9 +30,9 @@ pub use config::{
     Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy, ServerTrust,
     SetOptions,
 };
+pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
-/// Best-effort connection state generated from the Smithy native ABI contract.
-pub use openkache_protocol::{ConnectionState, DEFAULT_MAX_IN_FLIGHT, ITEM_ID_BYTES, SetCondition};
+pub use openkache_protocol::{ITEM_ID_BYTES, SetCondition};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]

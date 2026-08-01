@@ -13,8 +13,6 @@ struct GenerateSmithyPlugin: BuildToolPlugin {
 
         let generator = context.package.directory
             .appending("..")
-            .appending("..")
-            .appending("protocol")
             .appending("generate.ts")
         let outputDirectory = context.pluginWorkDirectory.appending("Generated")
         let output = outputDirectory.appending("SmithyAPI.swift")

@@ -6,11 +6,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or("Cargo did not provide CARGO_MANIFEST_DIR")?,
     );
     let generator = protocol_directory.join("generate.ts");
+    let wire_generator = protocol_directory.join("wire.ts");
     let model = protocol_directory.join("model");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
         .join("wire_values.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
+    println!("cargo:rerun-if-changed={}", wire_generator.display());
     println!("cargo:rerun-if-changed={}", model.display());
 
     let status = Command::new("bun")

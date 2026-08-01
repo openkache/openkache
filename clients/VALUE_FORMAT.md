@@ -33,9 +33,9 @@ bytes use the low-level raw client rather than the formatted API.
 
 The interoperable v1 version bytes, layout sizes, algorithm identifiers, key sizes, derivation
 context strings, and shared numeric compression defaults are declared in the
-[Smithy protocol model](../protocol/model/openkache.smithy) and generated into each language
-build. The shared core owns the algorithms and policy implementation, including the compression
-thresholds and cryptographic operation flow.
+[Smithy client model](model/openkache.smithy) and generated into each language build. The shared
+core owns the algorithms and policy implementation, including the compression thresholds and
+cryptographic operation flow.
 
 ## Processing model
 

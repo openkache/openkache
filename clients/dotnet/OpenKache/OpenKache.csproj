@@ -21,7 +21,7 @@
   </ItemGroup>
   <Target Name="GenerateSmithyContract" BeforeTargets="CoreCompile">
     <Exec
-      Command="bun &quot;$(MSBuildThisFileDirectory)../../../protocol/generate.ts&quot;"
+      Command="bun &quot;$(MSBuildThisFileDirectory)../../generate.ts&quot;"
       EnvironmentVariables="OPENKACHE_GENERATION_TARGET=dotnet"
     />
     <ItemGroup>

@@ -13,16 +13,16 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
+pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
+use crate::contract::{
+    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
+};
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
     Endpoint, GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, RetryPolicy,
     ServerTrust, SetCondition, SetOptions, SetOutcome,
-};
-pub use openkache_protocol::FFI_ABI_VERSION as ABI_VERSION;
-pub use openkache_protocol::{FfiOperation, FfiResultKind, FfiSetCondition};
-use openkache_protocol::{
-    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;

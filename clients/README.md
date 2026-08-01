@@ -94,9 +94,16 @@ The C, C++, Python, and Swift packages use the native ABI exported by
 `clients/core`. Their adapters only marshal native values, expose their
 language-appropriate lifecycle, and own result handles; protocol, retry, TLS,
 value-format, and protection behavior remain in the core. Every operation,
-result, state, limit, and value-format identifier is generated from the
-Smithy model for each package's build output, keeping all bindings aligned
-without hand-maintained constants.
+result, state, limit, and value-format identifier is generated from the two
+scoped Smithy models for each package's build output, keeping all bindings
+aligned without hand-maintained constants. The wire model in
+[`../protocol/model/openkache.smithy`](../protocol/model/openkache.smithy)
+contains only values the server must understand; the client model in
+[`model/openkache.smithy`](model/openkache.smithy) owns adapter defaults, API
+shapes, native ABI identifiers, and value-format metadata. The client entry
+point [`generate.ts`](generate.ts) owns client extraction/rendering and
+combines them for SDK outputs; its only protocol dependency is the wire
+contract module [`../protocol/wire.ts`](../protocol/wire.ts).
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.
 See each implemented package README for accepted configuration fields, platform

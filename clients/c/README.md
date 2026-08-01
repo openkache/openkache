@@ -58,7 +58,8 @@ protected item IDs from application keys, while `openkache_client_execute_raw`
 requires a 32-byte item ID and sends opaque values unchanged.
 
 Operation and value-format constants in the generated
-`openkache/smithy_contract.h` are sourced from the canonical Smithy model at
-build/package time. C and C++ adapters therefore share the same operation
-numbers, limits, and value-format identifiers without checking generated files
-into the repository.
+`openkache/smithy_contract.h` are sourced at build/package time from the client
+model [`../model/openkache.smithy`](../model/openkache.smithy) and wire model
+[`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
+C and C++ adapters therefore share the same operation numbers, limits, and
+value-format identifiers without checking generated files into the repository.
