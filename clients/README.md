@@ -28,7 +28,7 @@ formats or protocol behavior.
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
 | C# / .NET | [`dotnet/`](dotnet/) | Shared-core C ABI adapter for the raw Smithy API |
 | Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
-| Go | `go/` | Package scaffold |
+| Go | [`go/`](go/) | Context-aware protected and raw CGO binding over the shared native ABI |
 | Java | `java/` | Package scaffold |
 | Kotlin | `kotlin/` | Package scaffold |
 | C | [`c/`](c/) | Protocol v1 protected C17 ABI over the shared core |
@@ -36,13 +36,11 @@ formats or protocol behavior.
 | Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
 | Dart | `dart/` | Package scaffold |
 
-Go, Java, Kotlin, and Dart currently contain registry metadata and reserved
-source layouts only. They do not connect to OpenKache or expose cache
-operations yet.
+Java, Kotlin, and Dart currently contain registry metadata and reserved source
+layouts only. They do not connect to OpenKache or expose cache operations yet.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
-format v1. The core owns Raw and canonical JSON serialization; language
-adapters convert native values into that shared logical model. TypeScript's
+format v1. The core owns Raw and canonical JSON serialization. TypeScript's
 legacy metadata envelope remains a package-level compatibility detail; new
 cross-language values should use its `set_json`/`get_json` API.
 
@@ -77,7 +75,7 @@ package structure only.
 | C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
 | C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
 | Dart | `dart analyze` | `lib/openkache.dart` |
-| Go | `go vet ./... && go build ./...` | `doc.go` |
+| Go | `go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
 | Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |

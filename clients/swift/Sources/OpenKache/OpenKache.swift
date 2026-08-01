@@ -280,9 +280,14 @@ private enum NativeBridge {
             throw OpenKacheError("maxInFlight must be greater than zero")
         }
         if options.compression.enabled
-            && !(1...22).contains(options.compression.level)
+            && !(Smithy_Value_Format.defaultZstandardLevelMin...Smithy_Value_Format.defaultZstandardLevelMax)
+                .contains(options.compression.level)
         {
-            throw OpenKacheError("compression.level must be from 1 through 22")
+            throw OpenKacheError(
+                "compression.level must be from "
+                    + "\(Smithy_Value_Format.defaultZstandardLevelMin) through "
+                    + "\(Smithy_Value_Format.defaultZstandardLevelMax)"
+            )
         }
         guard options.compression.minimumInputSize >= 0 else {
             throw OpenKacheError("compression.minimumInputSize must not be negative")

@@ -14,7 +14,7 @@ structure wireContract {
     v1: WireV1
 }
 
-/// Defaults shared by the Rust client core and its native language adapters.
+/// Defaults shared by the Rust client core and all language adapters.
 @trait(selector: "service")
 structure clientDefaults {
     @required
@@ -37,6 +37,26 @@ structure clientDefaults {
 
     @required
     zstandardMinimumSavingsBytes: Integer
+
+    /// Stable TLS server-name default used by adapters without a platform-specific default.
+    @required
+    serverName: String
+
+    /// PEM label for certificate chains assembled by an adapter.
+    @required
+    certificatePemType: String
+
+    /// Minimum positive value for settings where zero selects a default.
+    @required
+    minimumPositiveValue: Integer
+
+    /// Inclusive lower bound accepted by Zstandard adapters.
+    @required
+    zstandardLevelMin: Integer
+
+    /// Inclusive upper bound accepted by Zstandard adapters.
+    @required
+    zstandardLevelMax: Integer
 }
 
 /// Native binding ABI identifiers generated alongside the wire contract.
@@ -85,6 +105,15 @@ structure ffiContract {
     resultNotStored: Integer
 
     @required
+    setConditionNone: Integer
+
+    @required
+    setConditionIfAbsent: Integer
+
+    @required
+    setConditionIfPresent: Integer
+
+    @required
     connectionStateConnected: Integer
 
     @required
@@ -98,15 +127,6 @@ structure ffiContract {
 
     @required
     connectionStateUnknown: Integer
-
-    @required
-    setConditionNone: Integer
-
-    @required
-    setConditionIfAbsent: Integer
-
-    @required
-    setConditionIfPresent: Integer
 }
 
 /// Cross-language v1 value container and protection contract.
@@ -250,7 +270,12 @@ structure wireStatus {
     retryMaxAttempts: 2,
     zstandardLevel: 1,
     zstandardMinimumInputBytes: 1024,
-    zstandardMinimumSavingsBytes: 64
+    zstandardMinimumSavingsBytes: 64,
+    serverName: "localhost",
+    certificatePemType: "CERTIFICATE",
+    minimumPositiveValue: 1,
+    zstandardLevelMin: 1,
+    zstandardLevelMax: 22
 )
 @ffiContract(
     abiVersion: 2,
@@ -267,14 +292,14 @@ structure wireStatus {
     resultNotDeleted: 7,
     resultConnected: 8,
     resultNotStored: 9,
+    setConditionNone: 0,
+    setConditionIfAbsent: 1,
+    setConditionIfPresent: 2,
     connectionStateConnected: 0,
     connectionStateReconnecting: 1,
     connectionStateDisconnected: 2,
     connectionStateClosed: 3,
-    connectionStateUnknown: 4,
-    setConditionNone: 0,
-    setConditionIfAbsent: 1,
-    setConditionIfPresent: 2
+    connectionStateUnknown: 4
 )
 @valueFormat(
     version: 1,

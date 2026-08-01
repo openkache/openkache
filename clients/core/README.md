@@ -57,11 +57,12 @@ The `ffi` feature builds a dedicated Compio worker around
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,
-reconnect, state snapshots, and bounded request lanes. CMake and Python package
-builds generate canonical Smithy-derived contracts into their build or release
-output; generated files are not checked into the source tree. Reusable ABI
+reconnect, state snapshots, and bounded request lanes. CMake, Go, and Python
+package builds regenerate the canonical Smithy-derived contract as needed.
+Reusable ABI
 declarations are in `include/openkache/client_abi.h` (with the
-`include/openkache_client.h` compatibility include).
+`include/openkache_client.h` compatibility include); the generated Smithy
+contract header is supplied by each package build.
 
 ## Usage
 

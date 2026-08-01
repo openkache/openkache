@@ -7,9 +7,9 @@ use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
 use openkache_protocol::{
-    DEFAULT_ZSTANDARD_LEVEL, DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
-    DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES, ITEM_ID_BYTES, MAX_VALUE_BYTES,
-    VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
+    DEFAULT_ZSTANDARD_LEVEL, DEFAULT_ZSTANDARD_LEVEL_MAX, DEFAULT_ZSTANDARD_LEVEL_MIN,
+    DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES, DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES, ITEM_ID_BYTES,
+    MAX_VALUE_BYTES, VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
     VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
     VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE,
     VALUE_FORMAT_COMPRESSION_ZSTANDARD, VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES,
@@ -855,7 +855,7 @@ impl ValueCodec {
 #[non_exhaustive]
 pub enum Error {
     /// The configured Zstandard level is unsupported.
-    #[error("Zstandard level {0} is outside the supported range 1..=22")]
+    #[error("Zstandard level {0} is outside the configured compression-level range")]
     InvalidCompressionLevel(i32),
     /// An unprotected profile was passed to a protected constructor.
     #[error("protected value codecs require Compact or Robust encryption")]
@@ -956,7 +956,7 @@ fn validate_compression(compression: Compression) -> Result<()> {
     let Compression::Zstandard(options) = compression else {
         return Ok(());
     };
-    if !(1..=22).contains(&options.level) {
+    if !(DEFAULT_ZSTANDARD_LEVEL_MIN..=DEFAULT_ZSTANDARD_LEVEL_MAX).contains(&options.level) {
         return Err(Error::InvalidCompressionLevel(options.level));
     }
     Ok(())

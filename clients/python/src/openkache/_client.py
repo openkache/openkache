@@ -54,8 +54,13 @@ from ._generated.smithy_contract import (
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
     SMITHY_DEFAULT_ZSTANDARD_LEVEL,
+    SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX,
+    SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN,
     SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
     SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
+    SMITHY_CLIENT_CERTIFICATE_PEM_TYPE,
+    SMITHY_CLIENT_DEFAULT_SERVER_NAME,
+    SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE,
     SMITHY_ITEM_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
@@ -136,8 +141,16 @@ class CompressionOptions:
         if not isinstance(self.enabled, bool):
             raise OpenKacheValueError("compression.enabled must be a bool")
         _positive_or_zero(self.level, "compression.level", allow_zero=False)
-        if self.level > 22:
-            raise OpenKacheValueError("compression.level must be between 1 and 22")
+        if not (
+            SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN
+            <= self.level
+            <= SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX
+        ):
+            raise OpenKacheValueError(
+                "compression.level must be between "
+                f"{SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN} and "
+                f"{SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX}"
+            )
         _positive_or_zero(
             self.minimum_input_size,
             "compression.minimum_input_size",
@@ -615,7 +628,9 @@ def _connection_settings(
         identity_key = identity.private_key
     try:
         native_address_bytes = native_address.encode("ascii")
-        server_name_bytes = (server_name or host).encode("utf-8")
+        server_name_bytes = (
+            server_name or SMITHY_CLIENT_DEFAULT_SERVER_NAME or host
+        ).encode("utf-8")
     except UnicodeEncodeError as error:
         raise OpenKacheValueError("server_name must contain valid Unicode text") from error
     return {
@@ -726,7 +741,10 @@ def _certificate_chain_bytes(chain: Iterable[bytes]) -> bytes:
         return certificates[0]
     pem_entries = []
     for certificate in certificates:
-        if certificate.startswith(b"-----BEGIN"):
+        pem_begin = f"-----BEGIN {SMITHY_CLIENT_CERTIFICATE_PEM_TYPE}-----".encode(
+            "ascii"
+        )
+        if certificate.startswith(pem_begin):
             pem_entries.append(certificate)
             continue
         encoded = base64.b64encode(certificate)
@@ -734,9 +752,9 @@ def _certificate_chain_bytes(chain: Iterable[bytes]) -> bytes:
             encoded[offset : offset + 64] for offset in range(0, len(encoded), 64)
         )
         pem_entries.append(
-            b"-----BEGIN CERTIFICATE-----\n"
+            f"-----BEGIN {SMITHY_CLIENT_CERTIFICATE_PEM_TYPE}-----\n".encode("ascii")
             + body
-            + b"\n-----END CERTIFICATE-----\n"
+            + f"\n-----END {SMITHY_CLIENT_CERTIFICATE_PEM_TYPE}-----\n".encode("ascii")
         )
     return b"\n".join(pem_entries)
 
@@ -814,7 +832,7 @@ def _positive_or_zero(
 ) -> None:
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(f"{name} must be an integer")
-    minimum = 0 if allow_zero else 1
+    minimum = 0 if allow_zero else SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE
     if value < minimum:
         requirement = "non-negative" if allow_zero else "positive"
         raise OpenKacheValueError(f"{name} must be {requirement}")

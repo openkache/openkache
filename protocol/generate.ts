@@ -78,6 +78,11 @@ export interface Client_Defaults_Contract {
   readonly zstandard_level: number
   readonly zstandard_minimum_input_bytes: number
   readonly zstandard_minimum_savings_bytes: number
+  readonly zstandard_level_min: number
+  readonly zstandard_level_max: number
+  readonly server_name: string
+  readonly certificate_pem_type: string
+  readonly minimum_positive_value: number
 }
 
 type Api_Type_Kind = "blob" | "boolean" | "enum" | "long" | "string"
@@ -219,6 +224,8 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/swift/Sources/OpenKache/Generated/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
     generated_path("protocol/generated_local/smithy_contract.h"),
+  go_api: generated_path("clients/go/smithy_api.go"),
+  go_contract: generated_path("clients/go/smithy_contract.go"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -793,7 +800,6 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       "zstandardLevel",
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
-      22,
     ),
     zstandard_minimum_input_bytes: integer_member(
       contract,
@@ -807,7 +813,44 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       CLIENT_DEFAULTS_TRAIT_ID,
       0,
     ),
+    zstandard_level_min: integer_member(
+      contract,
+      "zstandardLevelMin",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    zstandard_level_max: integer_member(
+      contract,
+      "zstandardLevelMax",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    server_name: string_member(contract, "serverName", CLIENT_DEFAULTS_TRAIT_ID),
+    certificate_pem_type: string_member(
+      contract,
+      "certificatePemType",
+      CLIENT_DEFAULTS_TRAIT_ID,
+    ),
+    minimum_positive_value: integer_member(
+      contract,
+      "minimumPositiveValue",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
   } satisfies Client_Defaults_Contract
+  if (defaults.zstandard_level_min > defaults.zstandard_level_max) {
+    throw new Error(
+      `${CLIENT_DEFAULTS_TRAIT_ID}.zstandardLevelMin must not exceed zstandardLevelMax`,
+    )
+  }
+  if (
+    defaults.zstandard_level < defaults.zstandard_level_min ||
+    defaults.zstandard_level > defaults.zstandard_level_max
+  ) {
+    throw new Error(
+      `${CLIENT_DEFAULTS_TRAIT_ID}.zstandardLevel must be within the configured range`,
+    )
+  }
   return defaults
 }
 
@@ -1278,6 +1321,16 @@ pub const DEFAULT_ZSTANDARD_LEVEL: i32 = ${formatted_decimal(defaults.zstandard_
 pub const DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES: usize = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
 /// Default minimum Zstandard savings required to retain compression.
 pub const DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES: usize = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
+/// Inclusive minimum supported Zstandard compression level.
+pub const DEFAULT_ZSTANDARD_LEVEL_MIN: i32 = ${formatted_decimal(defaults.zstandard_level_min)};
+/// Inclusive maximum supported Zstandard compression level.
+pub const DEFAULT_ZSTANDARD_LEVEL_MAX: i32 = ${formatted_decimal(defaults.zstandard_level_max)};
+/// Default TLS server name used when an adapter does not provide one.
+pub const CLIENT_DEFAULT_SERVER_NAME: &str = ${rust_string_literal(defaults.server_name)};
+/// PEM label used for adapter-assembled certificate chains.
+pub const CLIENT_CERTIFICATE_PEM_TYPE: &str = ${rust_string_literal(defaults.certificate_pem_type)};
+/// Minimum positive setting value when zero selects a default.
+pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.minimum_positive_value)};
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
@@ -1422,7 +1475,6 @@ export function render_c_contract(contract: Wire_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
   const envelope = contract.value_envelope
-  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   const ffi = contract.ffi
   const ffi_defines = [
     `#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${c_unsigned_literal(ffi.abi_version)}`,
@@ -1469,6 +1521,11 @@ export function render_c_contract(contract: Wire_Contract): string {
 #define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL ${defaults.zstandard_level}u
 #define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES ${defaults.zstandard_minimum_input_bytes}u
 #define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES ${defaults.zstandard_minimum_savings_bytes}u
+#define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN ${defaults.zstandard_level_min}u
+#define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX ${defaults.zstandard_level_max}u
+#define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
+#define OPENKACHE_SMITHY_CLIENT_CERTIFICATE_PEM_TYPE ${c_string_literal(defaults.certificate_pem_type)}
+#define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
 ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
@@ -1496,12 +1553,6 @@ ${status_enum}
 /* Smithy string-enum values used by the language-neutral set API. */
 ${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION")}
 ${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
-
-/* Four-byte legacy value-envelope magic, in wire order. */
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_0 ${formatted_byte(magic[0] ?? 0)}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_1 ${formatted_byte(magic[1] ?? 0)}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_2 ${formatted_byte(magic[2] ?? 0)}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAGIC_3 ${formatted_byte(magic[3] ?? 0)}u
 
 #endif
 `
@@ -1707,6 +1758,16 @@ export const SMITHY_DEFAULT_ZSTANDARD_LEVEL = ${contract.client_defaults.zstanda
 export const SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${contract.client_defaults.zstandard_minimum_input_bytes}
 /** Default minimum Zstandard savings required to retain compression. */
 export const SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${contract.client_defaults.zstandard_minimum_savings_bytes}
+/** Inclusive minimum supported Zstandard compression level. */
+export const SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN = ${contract.client_defaults.zstandard_level_min}
+/** Inclusive maximum supported Zstandard compression level. */
+export const SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX = ${contract.client_defaults.zstandard_level_max}
+/** Default TLS server name used when no explicit name is supplied. */
+export const SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(contract.client_defaults.server_name)}
+/** PEM label used for adapter-assembled certificate chains. */
+export const SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(contract.client_defaults.certificate_pem_type)}
+/** Minimum positive setting value when zero selects a default. */
+export const SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${contract.client_defaults.minimum_positive_value}
 
 ${[...enums, ...structures].join("\n\n")}
 
@@ -1715,6 +1776,223 @@ export interface Smithy_OpenKache_Api {
 ${operations.join("\n")}
 }
 `
+}
+
+function go_api_name(identifier: string): string {
+  return `Smithy${pascal_case(snake_case(identifier))}`
+}
+
+function go_exported_name(identifier: string): string {
+  return pascal_case(snake_case(identifier))
+    .replace(/Id$/, "ID")
+    .replace(/^Ttl/, "TTL")
+    .replace(/^Json$/, "JSON")
+}
+
+function go_ffi_name(identifier: string): string {
+  const name = go_exported_name(identifier)
+  return name === "Ok" ? "OK" : name
+}
+
+function go_api_value_name(enum_name: string, member_name: string): string {
+  return `${go_api_name(enum_name)}${member_name}Value`
+}
+
+function go_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "[]byte"
+      break
+    case "boolean":
+      rendered = "bool"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = go_api_name(type.name)
+      break
+    case "long":
+      rendered = "int64"
+      break
+    case "string":
+      rendered = "string"
+      break
+  }
+  return required ? rendered : `*${rendered}`
+}
+
+/** Renders Smithy operation types and a context-aware Go service interface. */
+export function render_go_api(contract: Wire_Contract): string {
+  const enums = contract.api.enums.map((enum_) => {
+    const members = enum_.members
+      .map(
+        (member) =>
+          `\t${go_api_name(enum_.name)}${member.name} ${go_api_name(enum_.name)} = ${go_api_value_name(enum_.name, member.name)}`,
+      )
+      .join("\n")
+    return `// ${go_api_name(enum_.name)} is the Smithy ${enum_.name} enum.
+type ${go_api_name(enum_.name)} string
+
+const (
+${members}
+)`
+  })
+  const structures = contract.api.structures.map((structure) => {
+    const members = structure.members
+      .map((member) => {
+        const field = go_exported_name(member.name)
+        const optional = member.required ? "" : ",omitempty"
+        return `\t${field} ${go_api_type(member.type, member.required)} \`json:"${snake_case(member.name)}${optional}"\``
+      })
+      .join("\n")
+    const body = members.length === 0 ? "" : `\n${members}\n`
+    return `// ${go_api_name(structure.name)} is the Smithy ${structure.name} structure.
+type ${go_api_name(structure.name)} struct {${body}}`
+  })
+  const operations = contract.api.operations.map(
+    (operation) =>
+      `\t${operation.name}(context.Context, ${go_api_name(operation.input)}) (${go_api_name(operation.output)}, error)`,
+  )
+  return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
+
+package openkache
+
+import "context"
+
+${[...enums, ...structures].join("\n\n")}
+
+// SmithyOpenKacheAPI describes the operations defined by the OpenKache Smithy service.
+type SmithyOpenKacheAPI interface {
+${operations.join("\n")}
+}
+`
+}
+
+/** Renders generated wire, ABI, and client-default constants for Go. */
+export function render_go_contract(contract: Wire_Contract): string {
+  const value = contract.value_format
+  const defaults = contract.client_defaults
+  return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
+
+package openkache
+
+const (
+\t// SmithyProtocolALPN is the negotiated protocol identifier.
+\tSmithyProtocolALPN = ${JSON.stringify(contract.v1.alpn)}
+\t// SmithyItemIDBytes is the exact protocol item-ID width.
+\tSmithyItemIDBytes = ${contract.item_id_bytes}
+\t// SmithyMaxValueBytes is the protocol value and payload ceiling.
+\tSmithyMaxValueBytes = ${contract.max_value_bytes}
+\t// SmithyDataProtectionKeyBytes is the shared key width.
+\tSmithyDataProtectionKeyBytes = ${value.data_protection_key_bytes}
+\t// SmithyValueEncryptionNone selects unprotected values.
+\tSmithyValueEncryptionNone uint32 = ${value.encryption_none}
+\t// SmithyValueEncryptionCompact selects deterministic AES-SIV protection.
+\tSmithyValueEncryptionCompact uint32 = ${value.encryption_compact}
+\t// SmithyValueEncryptionRobust selects randomized AES-GCM-SIV protection.
+\tSmithyValueEncryptionRobust uint32 = ${value.encryption_robust}
+)
+
+// Smithy operation values carried by the native ABI.
+const (
+${contract.opcodes
+  .map((entry) => `\tSmithyOpcode${entry.name} uint32 = ${entry.value}`)
+  .join("\n")}
+)
+
+// Smithy native ABI values shared by language adapters.
+const (
+\t// SmithyFFIABIVersion is the native ABI version implemented by the core.
+\tSmithyFFIABIVersion uint32 = ${contract.ffi.abi_version}
+${contract.ffi.operations
+  .map(
+    (entry) =>
+      `\t// SmithyFFIOperation${go_ffi_name(entry.name)} identifies the native operation ${entry.name}.
+\tSmithyFFIOperation${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.result_kinds
+  .map(
+    (entry) =>
+      `\t// SmithyFFIResult${go_ffi_name(entry.name)} is the native ABI result kind for ${entry.name}.
+\tSmithyFFIResult${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.set_conditions
+  .map(
+    (entry) =>
+      `\t// SmithyFFISetCondition${go_ffi_name(entry.name)} is the native ABI SET condition for ${entry.name}.
+\tSmithyFFISetCondition${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.connection_states
+  .map(
+    (entry) =>
+      `\t// SmithyFFIConnectionState${go_ffi_name(entry.name)} identifies a native connection state.
+\tSmithyFFIConnectionState${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+)
+
+// Shared client defaults extracted from the Smithy service contract.
+const (
+\t// SmithyDefaultMaxInFlight is the default number of request lanes.
+\tSmithyDefaultMaxInFlight = ${defaults.max_in_flight}
+\t// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
+\tSmithyDefaultConnectTimeoutMilliseconds uint64 = ${defaults.connect_timeout_milliseconds}
+\t// SmithyDefaultRequestTimeoutMilliseconds is the default complete request timeout.
+\tSmithyDefaultRequestTimeoutMilliseconds uint64 = ${defaults.request_timeout_milliseconds}
+\t// SmithyDefaultRetryMaxAttempts is the default total retry attempt count.
+\tSmithyDefaultRetryMaxAttempts = ${defaults.retry_max_attempts}
+\t// SmithyDefaultZstandardLevel is the default Zstandard level.
+\tSmithyDefaultZstandardLevel int32 = ${defaults.zstandard_level}
+\t// SmithyDefaultZstandardMinimumInputBytes is the compression input threshold.
+\tSmithyDefaultZstandardMinimumInputBytes = ${defaults.zstandard_minimum_input_bytes}
+\t// SmithyDefaultZstandardMinimumSavingsBytes is the compression savings threshold.
+\tSmithyDefaultZstandardMinimumSavingsBytes = ${defaults.zstandard_minimum_savings_bytes}
+\t// SmithyDefaultZstandardLevelMin is the minimum supported Zstandard level.
+\tSmithyDefaultZstandardLevelMin int32 = ${defaults.zstandard_level_min}
+\t// SmithyDefaultZstandardLevelMax is the maximum supported Zstandard level.
+\tSmithyDefaultZstandardLevelMax int32 = ${defaults.zstandard_level_max}
+\t// SmithyClientDefaultServerName is used when no TLS server name is supplied.
+\tSmithyClientDefaultServerName = ${JSON.stringify(defaults.server_name)}
+\t// SmithyClientCertificatePEMType is the PEM block type used for certificate chains.
+\tSmithyClientCertificatePEMType = ${JSON.stringify(defaults.certificate_pem_type)}
+\t// SmithyClientMinimumPositiveValue is the minimum accepted positive setting.
+\tSmithyClientMinimumPositiveValue = ${defaults.minimum_positive_value}
+)
+
+// Smithy API enum string values extracted from the Smithy service contract.
+const (
+${contract.api.enums
+  .flatMap((enum_) =>
+    enum_.members.map(
+      (member) =>
+        `\t// ${go_api_value_name(enum_.name, member.name)} is the Smithy ${enum_.name} value for ${member.value}.
+\t${go_api_value_name(enum_.name, member.name)} = ${JSON.stringify(member.value)}`,
+    ),
+  )
+  .join("\n")}
+)
+`
+}
+
+function format_go_source(source: string): string {
+  const result = Bun.spawnSync({
+    cmd: ["gofmt"],
+    stdin: Buffer.from(source),
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  if (result.exitCode !== 0) {
+    const diagnostics = result.stderr.toString().trim()
+    throw new Error(
+      diagnostics.length === 0
+        ? "gofmt failed while formatting generated Go source"
+        : `gofmt failed while formatting generated Go source:\n${diagnostics}`,
+    )
+  }
+  return result.stdout.toString()
 }
 
 function python_api_name(identifier: string): string {
@@ -1862,6 +2140,11 @@ SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts}
 SMITHY_DEFAULT_ZSTANDARD_LEVEL = ${defaults.zstandard_level}
 SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${defaults.zstandard_minimum_input_bytes}
 SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${defaults.zstandard_minimum_savings_bytes}
+SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN = ${defaults.zstandard_level_min}
+SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX = ${defaults.zstandard_level_max}
+SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)}
+SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(defaults.certificate_pem_type)}
+SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}
@@ -2090,6 +2373,11 @@ public enum Smithy_Value_Format: Sendable {
   public static let defaultZstandardLevel: Int32 = ${contract.client_defaults.zstandard_level}
   public static let defaultZstandardMinimumInputBytes: Int = ${contract.client_defaults.zstandard_minimum_input_bytes}
   public static let defaultZstandardMinimumSavingsBytes: Int = ${contract.client_defaults.zstandard_minimum_savings_bytes}
+  public static let defaultZstandardLevelMin: Int32 = ${contract.client_defaults.zstandard_level_min}
+  public static let defaultZstandardLevelMax: Int32 = ${contract.client_defaults.zstandard_level_max}
+  public static let defaultServerName: String = ${swift_string_literal(contract.client_defaults.server_name)}
+  public static let certificatePemType: String = ${swift_string_literal(contract.client_defaults.certificate_pem_type)}
+  public static let minimumPositiveValue: Int = ${contract.client_defaults.minimum_positive_value}
   public static let version: Int = ${value.version}
   public static let versionBytes: [UInt8] = [${version_bytes.join(", ")}]
   public static let maxVu128Bytes: Int = ${value.max_vu128_bytes}
@@ -2417,6 +2705,7 @@ type Generation_Target =
   | "all"
   | "c-contract"
   | "dotnet"
+  | "go"
   | "python"
   | "rust-api"
   | "rust-wire"
@@ -2432,6 +2721,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "c-contract"
     case "dotnet":
       return "dotnet"
+    case "go":
+      return "go"
     case "python":
       return "python"
     case "rust-api":
@@ -2467,6 +2758,8 @@ function expected_outputs(
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
+        [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
+        [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
       }
     case "c-contract":
       return {
@@ -2476,6 +2769,11 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
+      }
+    case "go":
+      return {
+        [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
+        [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
       }
     case "rust-api":
       return {
