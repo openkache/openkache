@@ -11,7 +11,7 @@ pub mod value;
 pub mod value_envelope;
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ pub use config::{
 };
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 /// Best-effort connection state generated from the Smithy native ABI contract.
-pub use openkache_protocol::{ConnectionState, ITEM_ID_BYTES, SetCondition};
+pub use openkache_protocol::{ConnectionState, DEFAULT_MAX_IN_FLIGHT, ITEM_ID_BYTES, SetCondition};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -36,9 +36,6 @@ pub use value::ItemValue;
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
 compile_error!("enable at least one client QUIC backend feature");
-
-/// Default maximum number of concurrently active request lanes.
-pub const DEFAULT_MAX_IN_FLIGHT: usize = 256;
 
 /// Client-owned identifier for an asynchronous runtime and QUIC backend.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -334,7 +331,7 @@ struct Core<C: ClientConnection> {
     request_timeout: Duration,
     retry: RetryPolicy,
     max_in_flight: usize,
-    state: AtomicU8,
+    state: AtomicU32,
 }
 
 struct RequestFailure {
@@ -391,16 +388,16 @@ impl<C: ClientConnection> Core<C> {
             request_timeout: timeouts.request,
             retry,
             max_in_flight,
-            state: AtomicU8::new(ConnectionState::Connected as u8),
+            state: AtomicU32::new(ConnectionState::Connected.code()),
         })
     }
 
     fn connection_state(&self) -> ConnectionState {
         match self.state.load(Ordering::Acquire) {
-            state if state == ConnectionState::Connected as u8 => ConnectionState::Connected,
-            state if state == ConnectionState::Reconnecting as u8 => ConnectionState::Reconnecting,
-            state if state == ConnectionState::Disconnected as u8 => ConnectionState::Disconnected,
-            state if state == ConnectionState::Closed as u8 => ConnectionState::Closed,
+            state if state == ConnectionState::Connected.code() => ConnectionState::Connected,
+            state if state == ConnectionState::Reconnecting.code() => ConnectionState::Reconnecting,
+            state if state == ConnectionState::Disconnected.code() => ConnectionState::Disconnected,
+            state if state == ConnectionState::Closed.code() => ConnectionState::Closed,
             _ => unreachable!("connection state is always a known discriminator"),
         }
     }
@@ -587,15 +584,15 @@ impl<C: ClientConnection> Core<C> {
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (state != ConnectionState::Closed as u8)
-                    .then_some(ConnectionState::Disconnected as u8)
+                (state != ConnectionState::Closed.code())
+                    .then_some(ConnectionState::Disconnected.code())
             });
     }
 
     fn set_state_unless_closed(&self, next: ConnectionState) -> Result<()> {
         self.state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (state != ConnectionState::Closed as u8).then_some(next as u8)
+                (state != ConnectionState::Closed.code()).then_some(next.code())
             })
             .map(|_| ())
             .map_err(|_| Error::ClientClosed)
@@ -678,8 +675,8 @@ impl<C: ClientConnection> Core<C> {
     async fn close(&self) -> Result<()> {
         let previous = self
             .state
-            .swap(ConnectionState::Closed as u8, Ordering::AcqRel);
-        if previous != ConnectionState::Closed as u8 {
+            .swap(ConnectionState::Closed.code(), Ordering::AcqRel);
+        if previous != ConnectionState::Closed.code() {
             let connection = self
                 .connection
                 .read()

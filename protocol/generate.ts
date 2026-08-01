@@ -24,22 +24,8 @@ export interface Wire_Entry {
   readonly value: number
 }
 
-/** Protocol v2 constants consumed by the managed client. */
-export interface Wire_V2_Contract {
-  readonly alpn: string
-  readonly request_header_bytes: number
-  readonly response_header_bytes: number
-  readonly set_ttl_bytes: number
-  readonly response_value_length_mask: number
-  readonly value_compressed_bit: number
-  readonly value_encrypted_bit: number
-  readonly set_ttl_bit: number
-  readonly set_if_absent_bit: number
-  readonly set_if_present_bit: number
-}
-
 /** Protocol v1 constants consumed by the Rust protocol crate. */
-export interface Wire_V3_Contract {
+export interface Wire_V1_Contract {
   readonly alpn: string
   readonly request_fixed_bytes: number
   readonly response_fixed_bytes: number
@@ -81,6 +67,17 @@ export interface Value_Envelope_Contract {
   readonly magic_and_version_hex: string
   readonly max_encoding_bytes: number
   readonly max_type_name_bytes: number
+}
+
+/** Defaults shared by the Rust client core and its native language adapters. */
+export interface Client_Defaults_Contract {
+  readonly connect_timeout_milliseconds: number
+  readonly max_in_flight: number
+  readonly request_timeout_milliseconds: number
+  readonly retry_max_attempts: number
+  readonly zstandard_level: number
+  readonly zstandard_minimum_input_bytes: number
+  readonly zstandard_minimum_savings_bytes: number
 }
 
 type Api_Type_Kind = "blob" | "boolean" | "enum" | "long" | "string"
@@ -142,6 +139,7 @@ export interface Ffi_Contract {
 /** Language-neutral subset of the OpenKache Smithy model used by generators. */
 export interface Wire_Contract {
   readonly api: Api_Contract
+  readonly client_defaults: Client_Defaults_Contract
   readonly ffi: Ffi_Contract
   readonly item_id_bytes: number
   readonly max_value_bytes: number
@@ -149,8 +147,7 @@ export interface Wire_Contract {
   readonly statuses: readonly Wire_Entry[]
   readonly value_envelope: Value_Envelope_Contract
   readonly value_format: Value_Format_Contract
-  readonly v2: Wire_V2_Contract
-  readonly v3: Wire_V3_Contract
+  readonly v1: Wire_V1_Contract
 }
 
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -162,6 +159,7 @@ const WIRE_CONTRACT_TRAIT_ID = "openkache.protocol#wireContract"
 const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
 const FFI_CONTRACT_TRAIT_ID = "openkache.protocol#ffiContract"
+const CLIENT_DEFAULTS_TRAIT_ID = "openkache.protocol#clientDefaults"
 const VALUE_FORMAT_TRAIT_ID = "openkache.protocol#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.protocol#valueEnvelope"
 const FFI_OPERATION_FIELDS = [
@@ -459,71 +457,25 @@ function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void 
   }
 }
 
-function wire_v2_contract(value: unknown): Wire_V2_Contract {
-  const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v2`)
+function wire_v1_contract(value: unknown): Wire_V1_Contract {
+  const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v1`)
   return {
-    alpn: string_member(contract, "alpn", "wireContract.v2"),
-    request_header_bytes: integer_member(contract, "requestHeaderBytes", "wireContract.v2", 1),
-    response_header_bytes: integer_member(contract, "responseHeaderBytes", "wireContract.v2", 1),
-    set_ttl_bytes: integer_member(contract, "setTtlBytes", "wireContract.v2", 1),
-    response_value_length_mask: integer_member(
-      contract,
-      "responseValueLengthMask",
-      "wireContract.v2",
-      0,
-      0xffff_ffff,
-    ),
-    value_compressed_bit: integer_member(
-      contract,
-      "valueCompressedBit",
-      "wireContract.v2",
-      0,
-      0xffff_ffff,
-    ),
-    value_encrypted_bit: integer_member(
-      contract,
-      "valueEncryptedBit",
-      "wireContract.v2",
-      0,
-      0xffff_ffff,
-    ),
-    set_ttl_bit: integer_member(contract, "setTtlBit", "wireContract.v2", 0, 0xffff_ffff),
-    set_if_absent_bit: integer_member(
-      contract,
-      "setIfAbsentBit",
-      "wireContract.v2",
-      0,
-      0xffff_ffff,
-    ),
-    set_if_present_bit: integer_member(
-      contract,
-      "setIfPresentBit",
-      "wireContract.v2",
-      0,
-      0xffff_ffff,
-    ),
-  }
-}
-
-function wire_v3_contract(value: unknown): Wire_V3_Contract {
-  const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v3`)
-  return {
-    alpn: string_member(contract, "alpn", "wireContract.v3"),
-    request_fixed_bytes: integer_member(contract, "requestFixedBytes", "wireContract.v3", 1),
-    response_fixed_bytes: integer_member(contract, "responseFixedBytes", "wireContract.v3", 1),
-    max_varuint_bytes: integer_member(contract, "maxVaruintBytes", "wireContract.v3", 1),
-    set_ttl_flag: integer_member(contract, "setTtlFlag", "wireContract.v3", 0, 0xff),
+    alpn: string_member(contract, "alpn", "wireContract.v1"),
+    request_fixed_bytes: integer_member(contract, "requestFixedBytes", "wireContract.v1", 1),
+    response_fixed_bytes: integer_member(contract, "responseFixedBytes", "wireContract.v1", 1),
+    max_varuint_bytes: integer_member(contract, "maxVaruintBytes", "wireContract.v1", 1),
+    set_ttl_flag: integer_member(contract, "setTtlFlag", "wireContract.v1", 0, 0xff),
     set_if_absent_flag: integer_member(
       contract,
       "setIfAbsentFlag",
-      "wireContract.v3",
+      "wireContract.v1",
       0,
       0xff,
     ),
     set_if_present_flag: integer_member(
       contract,
       "setIfPresentFlag",
-      "wireContract.v3",
+      "wireContract.v1",
       0,
       0xff,
     ),
@@ -809,6 +761,56 @@ function value_envelope_contract(value: unknown): Value_Envelope_Contract {
   }
 }
 
+function client_defaults_contract(value: unknown): Client_Defaults_Contract {
+  const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
+  const defaults = {
+    max_in_flight: integer_member(
+      contract,
+      "maxInFlight",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    connect_timeout_milliseconds: integer_member(
+      contract,
+      "connectTimeoutMilliseconds",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    request_timeout_milliseconds: integer_member(
+      contract,
+      "requestTimeoutMilliseconds",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    retry_max_attempts: integer_member(
+      contract,
+      "retryMaxAttempts",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    zstandard_level: integer_member(
+      contract,
+      "zstandardLevel",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+      22,
+    ),
+    zstandard_minimum_input_bytes: integer_member(
+      contract,
+      "zstandardMinimumInputBytes",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+    ),
+    zstandard_minimum_savings_bytes: integer_member(
+      contract,
+      "zstandardMinimumSavingsBytes",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      0,
+    ),
+  } satisfies Client_Defaults_Contract
+  return defaults
+}
+
 function valid_encoding_identifier(encoding: string, maximum_bytes: number): boolean {
   const bytes = new TextEncoder().encode(encoding)
   return (
@@ -850,6 +852,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
   const value_envelope_trait = trait_value(
     service,
     VALUE_ENVELOPE_TRAIT_ID,
+    `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
+  )
+  const client_defaults_trait = trait_value(
+    service,
+    CLIENT_DEFAULTS_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
   const ffi_trait = trait_value(
@@ -918,6 +925,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
   return {
     api: api_contract(shapes, service),
+    client_defaults: client_defaults_contract(client_defaults_trait),
     ffi,
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
@@ -925,8 +933,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     statuses,
     value_envelope: value_envelope_contract(value_envelope_trait),
     value_format: value_format_contract(value_format_trait),
-    v2: wire_v2_contract(contract_trait.v2),
-    v3: wire_v3_contract(contract_trait.v3),
+    v1: wire_v1_contract(contract_trait.v1),
   }
 }
 
@@ -1153,7 +1160,7 @@ function rust_ffi_enum(
   const try_from_arms = entries
     .map(
       (entry) =>
-        `            value if value == Self::${entry.name} as u32 => Ok(Self::${entry.name}),`,
+        `            value if value == Self::${entry.name}.code() => Ok(Self::${entry.name}),`,
     )
     .join("\n")
   const display_arms = entries
@@ -1168,6 +1175,13 @@ function rust_ffi_enum(
 #[repr(u32)]
 pub enum ${name} {
 ${variants}
+}
+
+impl ${name} {
+    /// Returns the Smithy-assigned native ABI discriminator.
+    pub const fn code(self) -> u32 {
+        self as u32
+    }
 }
 
 impl core::convert::TryFrom<u32> for ${name} {
@@ -1190,13 +1204,14 @@ ${display_arms}
 }`
 }
 
-/** Renders protocol v3 Rust definitions.
+/** Renders protocol v1 Rust definitions.
  *
  * @param contract - Validated language-neutral wire contract.
  * @returns Deterministic Rust source with a trailing newline.
  */
 export function render_rust(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const value_version_bytes = encode_vu128(value.version)
   const envelope = contract.value_envelope
   const envelope_magic = bytes_from_hex(
@@ -1238,17 +1253,31 @@ pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${for
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 1.
-pub const ALPN: &[u8] = ${rust_byte_string_literal(contract.v3.alpn)};
+pub const ALPN: &[u8] = ${rust_byte_string_literal(contract.v1.alpn)};
 /// Bytes before the variable-length request lengths.
-pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.request_fixed_bytes)};
+pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v1.request_fixed_bytes)};
 /// Bytes before the variable-length response payload length.
-pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(contract.v3.response_fixed_bytes)};
+pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(contract.v1.response_fixed_bytes)};
 /// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
-pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v3.max_varuint_bytes)};
+pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v1.max_varuint_bytes)};
 /// Bytes in every canonical item ID carried by the protocol.
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
+/// Default maximum number of concurrent request lanes.
+pub const DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
+/// Default connection-establishment timeout in milliseconds.
+pub const DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: u64 = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
+/// Default complete-request timeout in milliseconds.
+pub const DEFAULT_REQUEST_TIMEOUT_MILLISECONDS: u64 = ${formatted_decimal(defaults.request_timeout_milliseconds)};
+/// Default maximum total attempts for response-safe operations.
+pub const DEFAULT_RETRY_MAX_ATTEMPTS: usize = ${formatted_decimal(defaults.retry_max_attempts)};
+/// Default Zstandard compression level.
+pub const DEFAULT_ZSTANDARD_LEVEL: i32 = ${formatted_decimal(defaults.zstandard_level)};
+/// Default minimum serialized input size considered for Zstandard compression.
+pub const DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES: usize = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
+/// Default minimum Zstandard savings required to retain compression.
+pub const DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES: usize = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
@@ -1341,9 +1370,9 @@ pub const VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES: usize = ${formatted_decimal(envelo
 /// Built-in canonical JSON codec identifier used by the legacy envelope adapter.
 pub const VALUE_ENVELOPE_JSON_ENCODING: &str = ${rust_string_literal(envelope.json_encoding)};
 
-const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v3.set_ttl_flag)};
-const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_absent_flag)};
-const SET_IF_PRESENT_FLAG: u8 = ${formatted_byte(contract.v3.set_if_present_flag)};
+const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v1.set_ttl_flag)};
+const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v1.set_if_absent_flag)};
+const SET_IF_PRESENT_FLAG: u8 = ${formatted_byte(contract.v1.set_if_present_flag)};
 
 ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 
@@ -1391,6 +1420,7 @@ function c_contract_api_enum(
  */
 export function render_c_contract(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const envelope = contract.value_envelope
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   const ffi = contract.ffi
@@ -1431,7 +1461,14 @@ export function render_c_contract(contract: Wire_Contract): string {
 
 #define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
-#define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v3.alpn)}
+#define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
+#define OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT ${defaults.max_in_flight}u
+#define OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS ${defaults.connect_timeout_milliseconds}u
+#define OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS ${defaults.request_timeout_milliseconds}u
+#define OPENKACHE_SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS ${defaults.retry_max_attempts}u
+#define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL ${defaults.zstandard_level}u
+#define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES ${defaults.zstandard_minimum_input_bytes}u
+#define OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES ${defaults.zstandard_minimum_savings_bytes}u
 ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
@@ -1480,6 +1517,18 @@ ${variants}
     }`
 }
 
+function ffi_value(
+  entries: readonly Wire_Entry[],
+  name: string,
+  category: string,
+): number {
+  const entry = entries.find((candidate) => candidate.name === name)
+  if (entry === undefined) {
+    throw new Error(`missing ${category} entry ${name}`)
+  }
+  return entry.value
+}
+
 /** Renders protocol v1 C# definitions.
  *
  * @param contract - Validated language-neutral wire contract.
@@ -1487,6 +1536,19 @@ ${variants}
  */
 export function render_csharp(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
+  const ffi = contract.ffi
+  const ffi_operation_reconnect = ffi_value(
+    ffi.operations,
+    "Reconnect",
+    "FFI operation",
+  )
+  const ffi_result = (name: string): number =>
+    ffi_value(ffi.result_kinds, name, "FFI result")
+  const ffi_connection = (name: string): number =>
+    ffi_value(ffi.connection_states, name, "FFI connection state")
+  const ffi_set_condition = (name: string): number =>
+    ffi_value(ffi.set_conditions, name, "FFI SET condition")
   const version_bytes = encode_vu128(value.version)
   const envelope = contract.value_envelope
   const envelope_magic = bytes_from_hex(
@@ -1502,14 +1564,41 @@ namespace OpenKache;
 
 internal static partial class Protocol
 {
-    internal const string ApplicationProtocol = ${JSON.stringify(contract.v3.alpn)};
+    internal const string ApplicationProtocol = ${JSON.stringify(contract.v1.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
+    internal const int DefaultMaxInFlight = ${formatted_decimal(defaults.max_in_flight)};
+    internal const long DefaultConnectTimeoutMilliseconds = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
+    internal const long DefaultRequestTimeoutMilliseconds = ${formatted_decimal(defaults.request_timeout_milliseconds)};
+    internal const int DefaultRetryMaxAttempts = ${formatted_decimal(defaults.retry_max_attempts)};
+    internal const int DefaultZstandardLevel = ${formatted_decimal(defaults.zstandard_level)};
+    internal const int DefaultZstandardMinimumInputBytes = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
+    internal const int DefaultZstandardMinimumSavingsBytes = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
+    internal const uint FfiAbiVersion = ${formatted_decimal(ffi.abi_version)}u;
+    internal const uint FfiOperationReconnect = ${formatted_decimal(ffi_operation_reconnect)}u;
+    internal const uint FfiResultError = ${formatted_decimal(ffi_result("Error"))}u;
+    internal const uint FfiResultOk = ${formatted_decimal(ffi_result("Ok"))}u;
+    internal const uint FfiResultValue = ${formatted_decimal(ffi_result("Value"))}u;
+    internal const uint FfiResultNotFound = ${formatted_decimal(ffi_result("NotFound"))}u;
+    internal const uint FfiResultCreated = ${formatted_decimal(ffi_result("Created"))}u;
+    internal const uint FfiResultReplaced = ${formatted_decimal(ffi_result("Replaced"))}u;
+    internal const uint FfiResultDeleted = ${formatted_decimal(ffi_result("Deleted"))}u;
+    internal const uint FfiResultNotDeleted = ${formatted_decimal(ffi_result("NotDeleted"))}u;
+    internal const uint FfiResultConnected = ${formatted_decimal(ffi_result("Connected"))}u;
+    internal const uint FfiResultNotStored = ${formatted_decimal(ffi_result("NotStored"))}u;
+    internal const uint FfiConnectionConnected = ${formatted_decimal(ffi_connection("Connected"))}u;
+    internal const uint FfiConnectionReconnecting = ${formatted_decimal(ffi_connection("Reconnecting"))}u;
+    internal const uint FfiConnectionDisconnected = ${formatted_decimal(ffi_connection("Disconnected"))}u;
+    internal const uint FfiConnectionClosed = ${formatted_decimal(ffi_connection("Closed"))}u;
+    internal const uint FfiConnectionUnknown = ${formatted_decimal(ffi_connection("Unknown"))}u;
+    internal const uint FfiSetConditionNone = ${formatted_decimal(ffi_set_condition("None"))}u;
+    internal const uint FfiSetConditionIfAbsent = ${formatted_decimal(ffi_set_condition("IfAbsent"))}u;
+    internal const uint FfiSetConditionIfPresent = ${formatted_decimal(ffi_set_condition("IfPresent"))}u;
 
-    private const int MaximumVarUIntBytes = ${formatted_decimal(contract.v3.max_varuint_bytes)};
-    private const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
-    private const byte SetTtlBit = ${formatted_byte(contract.v3.set_ttl_flag)};
-    private const byte SetIfAbsentBit = ${formatted_byte(contract.v3.set_if_absent_flag)};
-    private const byte SetIfPresentBit = ${formatted_byte(contract.v3.set_if_present_flag)};
+    private const int MaximumVarUIntBytes = ${formatted_decimal(contract.v1.max_varuint_bytes)};
+    internal const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
+    private const byte SetTtlBit = ${formatted_byte(contract.v1.set_ttl_flag)};
+    private const byte SetIfAbsentBit = ${formatted_byte(contract.v1.set_if_absent_flag)};
+    private const byte SetIfPresentBit = ${formatted_byte(contract.v1.set_if_present_flag)};
 
     internal const uint ValueFormatVersion = ${formatted_decimal(value.version)}u;
     internal const int ValueFormatMaxVu128Bytes = ${formatted_decimal(value.max_vu128_bytes)};
@@ -1604,6 +1693,20 @@ ${members.join("\n")}
 export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 /** Maximum opaque value bytes accepted by the protocol. */
 export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+/** Default maximum number of concurrent request lanes. */
+export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
+/** Default connection-establishment timeout in milliseconds. */
+export const SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${contract.client_defaults.connect_timeout_milliseconds}
+/** Default complete-request timeout in milliseconds. */
+export const SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${contract.client_defaults.request_timeout_milliseconds}
+/** Default maximum total attempts for response-safe operations. */
+export const SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS = ${contract.client_defaults.retry_max_attempts}
+/** Default Zstandard compression level. */
+export const SMITHY_DEFAULT_ZSTANDARD_LEVEL = ${contract.client_defaults.zstandard_level}
+/** Default minimum serialized input size considered for Zstandard compression. */
+export const SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${contract.client_defaults.zstandard_minimum_input_bytes}
+/** Default minimum Zstandard savings required to retain compression. */
+export const SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${contract.client_defaults.zstandard_minimum_savings_bytes}
 
 ${[...enums, ...structures].join("\n\n")}
 
@@ -1710,6 +1813,7 @@ ${operations}
  */
 export function render_python_contract(contract: Wire_Contract): string {
   const value = contract.value_format
+  const defaults = contract.client_defaults
   const envelope = contract.value_envelope
   const version_bytes = encode_vu128(value.version)
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
@@ -1745,20 +1849,27 @@ export function render_python_contract(contract: Wire_Contract): string {
     .join("\n")
   return `# Generated from the OpenKache Smithy contract. Do not edit.
 
-SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v3.alpn)}
-SMITHY_REQUEST_FIXED_BYTES = ${contract.v3.request_fixed_bytes}
-SMITHY_RESPONSE_FIXED_BYTES = ${contract.v3.response_fixed_bytes}
-SMITHY_MAX_VARUINT_BYTES = ${contract.v3.max_varuint_bytes}
+SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v1.alpn)}
+SMITHY_REQUEST_FIXED_BYTES = ${contract.v1.request_fixed_bytes}
+SMITHY_RESPONSE_FIXED_BYTES = ${contract.v1.response_fixed_bytes}
+SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
 SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+SMITHY_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
+SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}
+SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}
+SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts}
+SMITHY_DEFAULT_ZSTANDARD_LEVEL = ${defaults.zstandard_level}
+SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${defaults.zstandard_minimum_input_bytes}
+SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${defaults.zstandard_minimum_savings_bytes}
 SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
-SMITHY_SET_TTL_FLAG = ${contract.v3.set_ttl_flag}
-SMITHY_SET_IF_ABSENT_FLAG = ${contract.v3.set_if_absent_flag}
-SMITHY_SET_IF_PRESENT_FLAG = ${contract.v3.set_if_present_flag}
+SMITHY_SET_TTL_FLAG = ${contract.v1.set_ttl_flag}
+SMITHY_SET_IF_ABSENT_FLAG = ${contract.v1.set_if_absent_flag}
+SMITHY_SET_IF_PRESENT_FLAG = ${contract.v1.set_if_present_flag}
 SMITHY_VALUE_FORMAT_VERSION = ${value.version}
 SMITHY_VALUE_FORMAT_VERSION_BYTES = bytes([${version_bytes.join(", ")}])
 SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
@@ -1969,17 +2080,24 @@ ${opcodes}
 
 /// Wire and value-format identifiers shared by all language bindings.
 public enum Smithy_Value_Format: Sendable {
-  public static let protocolAlpn: String = ${swift_string_literal(contract.v3.alpn)}
+  public static let protocolAlpn: String = ${swift_string_literal(contract.v1.alpn)}
   public static let itemIdBytes: Int = ${contract.item_id_bytes}
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
+  public static let defaultMaxInFlight: Int = ${contract.client_defaults.max_in_flight}
+  public static let defaultConnectTimeoutMilliseconds: Int = ${contract.client_defaults.connect_timeout_milliseconds}
+  public static let defaultRequestTimeoutMilliseconds: Int = ${contract.client_defaults.request_timeout_milliseconds}
+  public static let defaultRetryMaxAttempts: Int = ${contract.client_defaults.retry_max_attempts}
+  public static let defaultZstandardLevel: Int32 = ${contract.client_defaults.zstandard_level}
+  public static let defaultZstandardMinimumInputBytes: Int = ${contract.client_defaults.zstandard_minimum_input_bytes}
+  public static let defaultZstandardMinimumSavingsBytes: Int = ${contract.client_defaults.zstandard_minimum_savings_bytes}
   public static let version: Int = ${value.version}
   public static let versionBytes: [UInt8] = [${version_bytes.join(", ")}]
   public static let maxVu128Bytes: Int = ${value.max_vu128_bytes}
   public static let formatByteBytes: Int = ${value.format_byte_bytes}
-  public static let maxVaruintBytes: Int = ${contract.v3.max_varuint_bytes}
-  public static let setTtlFlag: UInt8 = ${contract.v3.set_ttl_flag}
-  public static let setIfAbsentFlag: UInt8 = ${contract.v3.set_if_absent_flag}
-  public static let setIfPresentFlag: UInt8 = ${contract.v3.set_if_present_flag}
+  public static let maxVaruintBytes: Int = ${contract.v1.max_varuint_bytes}
+  public static let setTtlFlag: UInt8 = ${contract.v1.set_ttl_flag}
+  public static let setIfAbsentFlag: UInt8 = ${contract.v1.set_if_absent_flag}
+  public static let setIfPresentFlag: UInt8 = ${contract.v1.set_if_present_flag}
   public static let formatCompressionMask: UInt8 = ${value.format_compression_mask}
   public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
   public static let serializationRaw: UInt8 = ${value.serialization_raw}

@@ -31,10 +31,11 @@ The format contains no magic bytes and no encoded body length. An OpenKache prot
 provides the exact container boundary. Callers that need to store arbitrary unformatted protocol
 bytes use the low-level raw client rather than the formatted API.
 
-The interoperable v1 version bytes, layout sizes, algorithm identifiers, key sizes, and derivation
-context strings are declared in the [Smithy protocol model](../protocol/model/openkache.smithy)
-and generated into each language build. The shared core still owns the algorithms and Rust-only
-policies, such as compression thresholds and cryptographic operation flow.
+The interoperable v1 version bytes, layout sizes, algorithm identifiers, key sizes, derivation
+context strings, and shared numeric compression defaults are declared in the
+[Smithy protocol model](../protocol/model/openkache.smithy) and generated into each language
+build. The shared core owns the algorithms and policy implementation, including the compression
+thresholds and cryptographic operation flow.
 
 ## Processing model
 
@@ -273,6 +274,12 @@ Compression level and the decision to compress are encoder policy rather than wi
 The initial recommended policy is Zstandard level `1`, no compression below `1,024` serialized
 bytes, and a compressed-frame length at least `64` bytes smaller than the serialized value. The
 encoder stores the uncompressed representation when compression does not satisfy its policy.
+
+The core's low-level, Rust, C++, and Swift clients leave compression disabled unless explicitly
+selected. Python and TypeScript convenience clients enable the same Smithy-defined Zstandard
+policy for their protected JSON APIs by default; callers can disable it through their language
+options. This activation choice is an API convenience policy, not a wire-format difference: the
+format byte always records whether the core stored a Zstandard frame.
 
 Encryption does not hide the stored length. An application that combines secrets with
 attacker-controlled data and lets the attacker observe value lengths across chosen writes SHOULD
@@ -606,6 +613,12 @@ representations. Writers emit version `1`; readers accept version `1` only.
 
 The earlier magic-prefixed envelope beginning with `4f 4b 56 01` is not version `1` of this format
 and MUST be rejected rather than unwrapped or migrated implicitly.
+
+The TypeScript adapter may still place that legacy envelope inside a version-1 Raw serialization
+for package-local backwards compatibility. That nested payload is not a value-format v1 codec and
+MUST NOT be used as a cross-language interchange format. TypeScript applications that need
+interoperability MUST use its `set_json` and `get_json` APIs (or the raw API with an independently
+specified byte contract).
 
 A future version is required when changing:
 

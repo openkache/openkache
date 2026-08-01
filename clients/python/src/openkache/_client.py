@@ -18,6 +18,7 @@ from ._generated import (
     SmithyDeleteOutput,
     SmithyGetInput,
     SmithyGetOutput,
+    SmithyOpenKacheApi,
     SmithyPingInput,
     SmithyPingOutput,
     SmithySetCondition,
@@ -48,6 +49,13 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
     SMITHY_FFI_SET_CONDITION_NONE,
+    SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
+    SMITHY_DEFAULT_MAX_IN_FLIGHT,
+    SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
+    SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+    SMITHY_DEFAULT_ZSTANDARD_LEVEL,
+    SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
+    SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
     SMITHY_ITEM_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
@@ -120,9 +128,9 @@ class CompressionOptions:
     """Zstandard policy applied before core encryption."""
 
     enabled: bool = True
-    level: int = 1
-    minimum_input_size: int = 1_024
-    minimum_savings: int = 64
+    level: int = SMITHY_DEFAULT_ZSTANDARD_LEVEL
+    minimum_input_size: int = SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES
+    minimum_savings: int = SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
@@ -146,8 +154,8 @@ class CompressionOptions:
 class ClientTimeouts:
     """Connection and complete-request deadlines in milliseconds."""
 
-    connect_ms: int = 5_000
-    request_ms: int = 2_000
+    connect_ms: int = SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS
+    request_ms: int = SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS
 
     def __post_init__(self) -> None:
         _positive_or_zero(
@@ -258,8 +266,8 @@ class OpenKacheClient:
         compression: CompressionOptions | None = None,
         encryption: Encryption = Encryption.ROBUST,
         timeouts: ClientTimeouts | None = None,
-        max_in_flight: int = 256,
-        retry_max_attempts: int = 2,
+        max_in_flight: int = SMITHY_DEFAULT_MAX_IN_FLIGHT,
+        retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         try:
@@ -490,7 +498,7 @@ class OpenKacheClient:
             raise OpenKacheError(f"SET returned unexpected native result {kind}") from error
 
 
-class RawClient:
+class RawClient(SmithyOpenKacheApi):
     """Smithy-generated exact item-ID operations over a shared connection."""
 
     def __init__(self, owner: OpenKacheClient) -> None:
@@ -734,6 +742,13 @@ def _certificate_chain_bytes(chain: Iterable[bytes]) -> bytes:
 
 
 def _json_bytes(value: Any) -> bytes:
+    """Encode a Python value for the core's JSON-input FFI operation.
+
+    This is only the ABI transport representation. The core parses these bytes into its
+    ``JsonValue`` model and owns canonical JSON serialization, value-format framing, compression,
+    and encryption. Keeping the conversion here lets the ctypes boundary accept one stable byte
+    buffer without making Python a second value-format implementation.
+    """
     try:
         _validate_json_value(value, "$", set())
         text = json.dumps(

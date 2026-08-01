@@ -4,16 +4,21 @@
 namespace OpenKache;
 
 /// <summary>
-/// Controls whether a set operation may create or replace an item ID.
+/// Compatibility aliases for the generated Smithy set-condition shape.
 /// </summary>
-public enum SetCondition
+/// <remarks>
+/// The canonical type is <see cref="Smithy.SetCondition"/>. The nullable
+/// <see cref="SetOptions.Condition"/> property represents an unconditional set with
+/// <see cref="None"/>.
+/// </remarks>
+public static class SetCondition
 {
     /// <summary>Store the value regardless of whether the item ID exists.</summary>
-    None,
+    public static Smithy.SetCondition? None => null;
 
     /// <summary>Store the value only when the item ID does not exist.</summary>
-    IfAbsent,
+    public const Smithy.SetCondition IfAbsent = Smithy.SetCondition.IfAbsent;
 
     /// <summary>Store the value only when the item ID already exists.</summary>
-    IfPresent,
+    public const Smithy.SetCondition IfPresent = Smithy.SetCondition.IfPresent;
 }
