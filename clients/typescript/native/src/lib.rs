@@ -930,7 +930,7 @@ fn native_cancelled_error(operation: FfiOperation, mutation_id: Option<MutationI
             code: FFI_ERROR_CANCELLED,
             operation: operation.code(),
             retryable: has_mutation,
-            ambiguous: has_mutation,
+            ambiguous: false,
             mutation_id: mutation_id.map(MutationId::into_bytes),
             ..NativeErrorMetadata::default()
         },

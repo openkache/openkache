@@ -200,6 +200,7 @@ enum Command {
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
+        transmission: Arc<AtomicBool>,
         response: SyncSender<FfiResult>,
     },
     Cancel {
@@ -211,6 +212,19 @@ enum Command {
 
 type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
 type CommandReceiver = crossfire::AsyncRx<crossfire::mpsc::Array<Command>>;
+type ActiveRequest = (
+    tokio::task::AbortHandle,
+    SyncSender<FfiResult>,
+    FfiOperation,
+    Option<MutationId>,
+    Arc<AtomicBool>,
+);
+type PendingRequest = (
+    SyncSender<FfiResult>,
+    FfiOperation,
+    Option<MutationId>,
+    Arc<AtomicBool>,
+);
 
 struct WorkerOptions {
     endpoint: Endpoint,
@@ -269,13 +283,17 @@ impl FfiResult {
         }
     }
 
-    fn cancelled(operation: Option<FfiOperation>, mutation_id: Option<MutationId>) -> Self {
+    fn cancelled(
+        operation: Option<FfiOperation>,
+        mutation_id: Option<MutationId>,
+        ambiguous: bool,
+    ) -> Self {
         let mut metadata = FfiErrorMetadata {
             code: FFI_ERROR_CANCELLED,
             operation: operation.map_or(0, ffi_operation_code),
             ..FfiErrorMetadata::default()
         };
-        attach_mutation_metadata(&mut metadata, mutation_id);
+        attach_mutation_metadata(&mut metadata, mutation_id, ambiguous);
         Self {
             kind: FfiResultKind::Error,
             payload: b"client operation canceled".to_vec(),
@@ -284,13 +302,17 @@ impl FfiResult {
         }
     }
 
-    fn timed_out(operation: FfiOperation, mutation_id: Option<MutationId>) -> Self {
+    fn timed_out(
+        operation: FfiOperation,
+        mutation_id: Option<MutationId>,
+        ambiguous: bool,
+    ) -> Self {
         let mut metadata = FfiErrorMetadata {
             code: FFI_ERROR_TIMEOUT,
             operation: ffi_operation_code(operation),
             ..FfiErrorMetadata::default()
         };
-        attach_mutation_metadata(&mut metadata, mutation_id);
+        attach_mutation_metadata(&mut metadata, mutation_id, ambiguous);
         Self {
             kind: FfiResultKind::Error,
             payload: format!("client operation timed out during {operation:?}").into_bytes(),
@@ -319,10 +341,14 @@ impl FfiResult {
     }
 }
 
-fn attach_mutation_metadata(metadata: &mut FfiErrorMetadata, mutation_id: Option<MutationId>) {
+fn attach_mutation_metadata(
+    metadata: &mut FfiErrorMetadata,
+    mutation_id: Option<MutationId>,
+    ambiguous: bool,
+) {
     if let Some(mutation_id) = mutation_id {
         metadata.retryable = 1;
-        metadata.ambiguous = 1;
+        metadata.ambiguous = u8::from(ambiguous);
         metadata.mutation_id_length = MUTATION_ID_BYTES as u8;
         metadata.mutation_id = mutation_id.into_bytes();
     }
@@ -486,6 +512,7 @@ impl FfiClient {
         if !self.reserve_slot_until(deadline) {
             return FfiResult::queue_full(operation);
         }
+        let transmission = Arc::new(AtomicBool::new(false));
         let command = Command::Execute {
             request_id,
             operation,
@@ -493,6 +520,7 @@ impl FfiClient {
             value,
             set_options,
             raw,
+            transmission: Arc::clone(&transmission),
             response,
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -509,7 +537,7 @@ impl FfiClient {
             // The request deadline has already elapsed. Do not spend another
             // request-timeout waiting for the cancellation acknowledgement.
             let _ = self.cancel_with_timeout(request_id, Duration::ZERO);
-            FfiResult::timed_out(operation, mutation_id)
+            FfiResult::timed_out(operation, mutation_id, transmission.load(Ordering::Acquire))
         });
         match result.kind {
             FfiResultKind::Value => {
@@ -736,10 +764,16 @@ async fn run_worker_loop(
             .active_lanes
             .store(active_requests.len(), Ordering::Release);
         if shutdown.load(Ordering::Acquire) {
-            for (_, (abort, response, operation, mutation_id)) in active_requests.drain() {
+            for (_, (abort, response, operation, mutation_id, transmission)) in
+                active_requests.drain()
+            {
                 abort.abort();
                 release_slot(&in_flight);
-                let _ = response.send(FfiResult::cancelled(Some(operation), mutation_id));
+                let _ = response.send(FfiResult::cancelled(
+                    Some(operation),
+                    mutation_id,
+                    transmission.load(Ordering::Acquire),
+                ));
             }
             drain_pending(&mut pending, &in_flight);
             drain_commands(&commands, &in_flight);
@@ -753,7 +787,7 @@ async fn run_worker_loop(
             completed = completed, if has_active => {
                 match completed {
                     Some(Ok((request_id, result))) => {
-                        if let Some((_, response, _, _)) = active_requests.remove(&request_id) {
+                        if let Some((_, response, _, _, _)) = active_requests.remove(&request_id) {
                             release_slot(&in_flight);
                             sync_core_metrics(&client, &metrics, &mut core_metrics);
                             state.store(
@@ -771,7 +805,7 @@ async fn run_worker_loop(
                     }
                     Some(Err(error)) => {
                         let message = format!("native client worker task failed: {error}");
-                        for (_, (abort, response, operation, mutation_id)) in
+                        for (_, (abort, response, operation, mutation_id, transmission)) in
                             active_requests.drain()
                         {
                             abort.abort();
@@ -781,7 +815,11 @@ async fn run_worker_loop(
                                 crate::contract::FFI_ERROR_RUNTIME,
                                 Some(operation),
                             );
-                            attach_mutation_metadata(&mut result.metadata, mutation_id);
+                            attach_mutation_metadata(
+                                &mut result.metadata,
+                                mutation_id,
+                                transmission.load(Ordering::Acquire),
+                            );
                             let _ = response.send(result);
                         }
                         drain_pending(&mut pending, &in_flight);
@@ -800,6 +838,7 @@ async fn run_worker_loop(
                         value,
                         set_options,
                         raw,
+                        transmission,
                         response,
                     }) => {
                         let request_id_in_use = active_requests.contains_key(&request_id)
@@ -827,6 +866,7 @@ async fn run_worker_loop(
                                 value,
                                 set_options,
                                 raw,
+                                transmission,
                                 response,
                             });
                         } else {
@@ -835,22 +875,41 @@ async fn run_worker_loop(
                         }
                     }
                     Ok(Command::Cancel { request_id, response }) => {
-                        if let Some((abort, original_response, operation, mutation_id)) =
+                        if let Some((
+                            abort,
+                            original_response,
+                            operation,
+                            mutation_id,
+                            transmission,
+                        )) =
                             active_requests.remove(&request_id)
                         {
                             abort.abort();
                             release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
                             let _ = original_response
-                                .send(FfiResult::cancelled(Some(operation), mutation_id));
+                                .send(FfiResult::cancelled(
+                                    Some(operation),
+                                    mutation_id,
+                                    transmission.load(Ordering::Acquire),
+                                ));
                             let _ = response.send(ok_result());
-                        } else if let Some((original_response, operation, mutation_id)) =
+                        } else if let Some((
+                            original_response,
+                            operation,
+                            mutation_id,
+                            transmission,
+                        )) =
                             cancel_pending(&mut pending, request_id)
                         {
                             release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
                             let _ = original_response
-                                .send(FfiResult::cancelled(Some(operation), mutation_id));
+                                .send(FfiResult::cancelled(
+                                    Some(operation),
+                                    mutation_id,
+                                    transmission.load(Ordering::Acquire),
+                                ));
                             let _ = response.send(ok_result());
                         } else {
                             let _ = response.send(FfiResult::error("request is not active"));
@@ -869,15 +928,7 @@ fn spawn_request(
     command: Command,
     client: &ProtectedClient,
     active: &mut futures_util::stream::FuturesUnordered<tokio::task::JoinHandle<(u64, FfiResult)>>,
-    active_requests: &mut HashMap<
-        u64,
-        (
-            tokio::task::AbortHandle,
-            SyncSender<FfiResult>,
-            FfiOperation,
-            Option<MutationId>,
-        ),
-    >,
+    active_requests: &mut HashMap<u64, ActiveRequest>,
 ) {
     let Command::Execute {
         request_id,
@@ -886,6 +937,7 @@ fn spawn_request(
         value,
         set_options,
         raw,
+        transmission,
         response,
     } = command
     else {
@@ -893,6 +945,7 @@ fn spawn_request(
     };
     let task_client = client.clone();
     let mutation_id = set_options.mutation_id();
+    let task_transmission = Arc::clone(&transmission);
     let task = tokio::spawn(async move {
         let result = AssertUnwindSafe(execute(
             &task_client,
@@ -901,6 +954,7 @@ fn spawn_request(
             value,
             set_options,
             raw,
+            task_transmission.clone(),
         ))
         .catch_unwind()
         .await
@@ -910,7 +964,11 @@ fn spawn_request(
                 crate::contract::FFI_ERROR_RUNTIME,
                 Some(operation),
             );
-            attach_mutation_metadata(&mut result.metadata, mutation_id);
+            attach_mutation_metadata(
+                &mut result.metadata,
+                mutation_id,
+                task_transmission.load(Ordering::Acquire),
+            );
             result
         });
         (request_id, result)
@@ -921,31 +979,28 @@ fn spawn_request(
             task.abort_handle(),
             response,
             operation,
-            set_options.mutation_id(),
+            mutation_id,
+            transmission,
         ),
     );
     active.push(task);
 }
 
-fn cancel_pending(
-    pending: &mut VecDeque<Command>,
-    request_id: u64,
-) -> Option<(SyncSender<FfiResult>, FfiOperation, Option<MutationId>)> {
-    let Some(index) = pending.iter().position(|command| {
+fn cancel_pending(pending: &mut VecDeque<Command>, request_id: u64) -> Option<PendingRequest> {
+    let index = pending.iter().position(|command| {
         matches!(command, Command::Execute { request_id: queued_id, .. } if *queued_id == request_id)
-    }) else {
-        return None;
-    };
+    })?;
     let Some(Command::Execute {
         response,
         operation,
         set_options,
+        transmission,
         ..
     }) = pending.remove(index)
     else {
         return None;
     };
-    Some((response, operation, set_options.mutation_id()))
+    Some((response, operation, set_options.mutation_id(), transmission))
 }
 
 fn drain_pending(pending: &mut VecDeque<Command>, in_flight: &AtomicUsize) {
@@ -961,6 +1016,7 @@ fn drain_pending(pending: &mut VecDeque<Command>, in_flight: &AtomicUsize) {
                 let _ = response.send(FfiResult::cancelled(
                     Some(operation),
                     set_options.mutation_id(),
+                    false,
                 ));
             }
             Command::Cancel { response, .. } => {
@@ -984,6 +1040,7 @@ fn drain_commands(commands: &CommandReceiver, in_flight: &AtomicUsize) {
                 let _ = response.send(FfiResult::cancelled(
                     Some(operation),
                     set_options.mutation_id(),
+                    false,
                 ));
             }
             Command::Cancel { response, .. } => {
@@ -1054,13 +1111,39 @@ async fn execute(
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
+    transmission: Arc<AtomicBool>,
 ) -> FfiResult {
+    let mutation_id = set_options.mutation_id();
     let result = if raw {
-        execute_raw(client, operation, application_key, value, set_options).await
+        execute_raw(
+            client,
+            operation,
+            application_key,
+            value,
+            set_options,
+            &transmission,
+        )
+        .await
     } else {
-        execute_protected(client, operation, application_key, value, set_options).await
+        execute_protected(
+            client,
+            operation,
+            application_key,
+            value,
+            set_options,
+            &transmission,
+        )
+        .await
     };
-    result.unwrap_or_else(|error| FfiResult::error_from(&error, operation))
+    result.unwrap_or_else(|error| {
+        let mut result = FfiResult::error_from(&error, operation);
+        attach_mutation_metadata(
+            &mut result.metadata,
+            mutation_id,
+            transmission.load(Ordering::Acquire),
+        );
+        result
+    })
 }
 
 async fn execute_protected(
@@ -1069,6 +1152,7 @@ async fn execute_protected(
     application_key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
+    transmission: &AtomicBool,
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
         FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
@@ -1081,19 +1165,28 @@ async fn execute_protected(
             .await
             .and_then(json_result),
         FfiOperation::Set => client
-            .set(&application_key, value, set_options)
+            .set_with_transmission(&application_key, value, set_options, transmission)
             .await
             .map(set_result),
         FfiOperation::SetJson => match parse_json(&value) {
             Ok(json) => client
-                .set_value(&application_key, Value::Json(json), set_options)
+                .set_value_with_transmission(
+                    &application_key,
+                    Value::Json(json),
+                    set_options,
+                    transmission,
+                )
                 .await
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
         FfiOperation::Delete => match set_options.mutation_id() {
             Some(mutation_id) => client
-                .delete_with_mutation_id(&application_key, mutation_id)
+                .delete_with_mutation_id_with_transmission(
+                    &application_key,
+                    mutation_id,
+                    Some(transmission),
+                )
                 .await
                 .map(delete_result),
             None => client.delete(&application_key).await.map(delete_result),
@@ -1113,6 +1206,7 @@ async fn execute_raw(
     item_id: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
+    transmission: &AtomicBool,
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
         FfiOperation::Ping => client.raw().ping().await.map(|_| ok_result()),
@@ -1128,7 +1222,7 @@ async fn execute_raw(
             let item_id = ItemId::from_slice(&item_id)?;
             client
                 .raw()
-                .set(item_id, ItemValue::new(value), set_options)
+                .set_with_transmission(item_id, ItemValue::new(value), set_options, transmission)
                 .await
                 .map(set_result)
         }
@@ -1137,7 +1231,7 @@ async fn execute_raw(
             match set_options.mutation_id() {
                 Some(mutation_id) => client
                     .raw()
-                    .delete_with_mutation_id(item_id, mutation_id)
+                    .delete_with_mutation_id_with_transmission(item_id, mutation_id, transmission)
                     .await
                     .map(delete_result),
                 None => client.raw().delete(item_id).await.map(delete_result),

@@ -52,7 +52,6 @@ export interface Client_Defaults_Contract {
   readonly connect_timeout_milliseconds: number
   readonly max_in_flight: number
   readonly max_previous_data_protection_keys: number
-  readonly mutation_id_bytes: number
   readonly request_timeout_milliseconds: number
   readonly retry_max_attempts: number
   readonly zstandard_level: number
@@ -1128,12 +1127,6 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
     ),
-    mutation_id_bytes: integer_member(
-      contract,
-      "mutationIdBytes",
-      CLIENT_DEFAULTS_TRAIT_ID,
-      1,
-    ),
     max_previous_data_protection_keys: integer_member(
       contract,
       "maxPreviousDataProtectionKeys",
@@ -1283,13 +1276,8 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const client_defaults = client_defaults_contract(client_defaults_trait)
   const ffi_layout = ffi_layout_contract(
     ffi_layout_trait,
-    client_defaults.mutation_id_bytes,
+    wire.mutation_id_bytes,
   )
-  if (client_defaults.mutation_id_bytes !== wire.mutation_id_bytes) {
-    throw new Error(
-      `${CLIENT_DEFAULTS_TRAIT_ID}.mutationIdBytes must match the protocol wire contract`,
-    )
-  }
   const opcode_values = new Set(wire.opcodes.map((entry) => entry.value))
   for (const entry of ffi.operations) {
     if (opcode_values.has(entry.value)) {
@@ -1628,7 +1616,7 @@ pub const FFI_METRICS_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted
 /// Default maximum number of concurrent request lanes.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
 /// Fixed width of a mutation idempotency token.
-pub const MUTATION_ID_BYTES: usize = ${formatted_decimal(defaults.mutation_id_bytes)};
+pub const MUTATION_ID_BYTES: usize = ${formatted_decimal(contract.mutation_id_bytes)};
 /// Maximum number of retired data-protection keys retained for rotation.
 pub const MAX_PREVIOUS_DATA_PROTECTION_KEYS: usize = ${formatted_decimal(defaults.max_previous_data_protection_keys)};
 /// Default connection-establishment timeout in milliseconds.
@@ -1852,7 +1840,7 @@ export function render_c_contract(contract: Client_Contract): string {
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
 #define OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT ${defaults.max_in_flight}u
-#define OPENKACHE_SMITHY_MUTATION_ID_BYTES ${defaults.mutation_id_bytes}u
+#define OPENKACHE_SMITHY_MUTATION_ID_BYTES ${contract.mutation_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS ${defaults.max_previous_data_protection_keys}u
 #define OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS ${defaults.connect_timeout_milliseconds}u
 #define OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS ${defaults.request_timeout_milliseconds}u
@@ -2005,7 +1993,7 @@ internal static partial class Protocol
     internal const string ApplicationProtocol = ${JSON.stringify(contract.v1.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
     internal const int DefaultMaxInFlight = ${formatted_decimal(defaults.max_in_flight)};
-    internal const int MutationIdBytes = ${formatted_decimal(defaults.mutation_id_bytes)};
+    internal const int MutationIdBytes = ${formatted_decimal(contract.mutation_id_bytes)};
     internal const int MaxPreviousDataProtectionKeys = ${formatted_decimal(defaults.max_previous_data_protection_keys)};
     internal const long DefaultConnectTimeoutMilliseconds = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
     internal const long DefaultRequestTimeoutMilliseconds = ${formatted_decimal(defaults.request_timeout_milliseconds)};
@@ -2186,7 +2174,7 @@ export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 /** Default maximum number of concurrent request lanes. */
 export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
 /** Fixed width of a mutation idempotency token. */
-export const SMITHY_MUTATION_ID_BYTES = ${contract.client_defaults.mutation_id_bytes}
+export const SMITHY_MUTATION_ID_BYTES = ${contract.mutation_id_bytes}
 /** Maximum number of retired data-protection keys retained for rotation. */
 export const SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${contract.client_defaults.max_previous_data_protection_keys}
 /** Default connection-establishment timeout in milliseconds. */
@@ -2422,7 +2410,7 @@ const (
 \t// SmithyDefaultMaxInFlight is the default number of request lanes.
 \tSmithyDefaultMaxInFlight = ${defaults.max_in_flight}
 \t// SmithyMutationIDBytes is the fixed width of a mutation idempotency token.
-\tSmithyMutationIDBytes = ${defaults.mutation_id_bytes}
+\tSmithyMutationIDBytes = ${contract.mutation_id_bytes}
 \t// SmithyMaxPreviousDataProtectionKeys bounds the retired key read/delete window.
 \tSmithyMaxPreviousDataProtectionKeys = ${defaults.max_previous_data_protection_keys}
 \t// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
@@ -3072,7 +3060,7 @@ SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
 SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
-SMITHY_MUTATION_ID_BYTES = ${defaults.mutation_id_bytes}
+SMITHY_MUTATION_ID_BYTES = ${contract.mutation_id_bytes}
 SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${defaults.max_previous_data_protection_keys}
 SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}
 SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}
@@ -3331,7 +3319,7 @@ public enum Smithy_Value_Format: Sendable {
   public static let itemIdBytes: Int = ${contract.item_id_bytes}
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
   public static let defaultMaxInFlight: Int = ${contract.client_defaults.max_in_flight}
-  public static let mutationIdBytes: Int = ${contract.client_defaults.mutation_id_bytes}
+  public static let mutationIdBytes: Int = ${contract.mutation_id_bytes}
   public static let maxPreviousDataProtectionKeys: Int = ${contract.client_defaults.max_previous_data_protection_keys}
   public static let defaultConnectTimeoutMilliseconds: Int = ${contract.client_defaults.connect_timeout_milliseconds}
   public static let defaultRequestTimeoutMilliseconds: Int = ${contract.client_defaults.request_timeout_milliseconds}

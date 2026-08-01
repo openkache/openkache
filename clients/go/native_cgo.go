@@ -175,9 +175,13 @@ openkache_go_library *openkache_go_library_load(
 
     if (library->abi == NULL || library->connect_options == NULL ||
         library->execute_request == NULL || library->execute_raw_request == NULL ||
-        library->result_kind == NULL || library->result_data == NULL ||
+        library->execute_mutation == NULL || library->execute_raw_mutation == NULL ||
+        library->connection_state == NULL || library->cancel == NULL ||
+        library->metrics == NULL || library->result_kind == NULL ||
+        library->result_data == NULL ||
         library->result_data_length == NULL || library->result_take_client == NULL ||
-        library->result_free == NULL || library->client_free == NULL) {
+        library->result_metadata == NULL || library->result_free == NULL ||
+        library->client_free == NULL) {
         openkache_go_close(handle);
         free(library);
         *error_message = openkache_go_error_copy("native library is missing the OpenKache ABI");
@@ -619,10 +623,9 @@ func contextNativeError(operation uint32, cause error, mutationID *MutationID) *
 	var mutationBytes []byte
 	ambiguous := false
 	if mutationID != nil {
-		// A caller-visible mutation token makes an interrupted mutation safe to
-		// retry, but the request may already have reached the server.
+		// The token remains safe to retry, but this locally synthesized
+		// cancellation does not establish that the request was transmitted.
 		mutationBytes = append([]byte(nil), mutationID[:]...)
-		ambiguous = true
 		retryable = true
 	}
 	return &Error{

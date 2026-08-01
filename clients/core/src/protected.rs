@@ -1,6 +1,7 @@
 //! Shared application-key and plaintext-value clients for language bindings.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
@@ -170,6 +171,23 @@ macro_rules! protected_client_methods {
                 .await
         }
 
+        #[allow(dead_code)]
+        pub(crate) async fn set_with_transmission(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            plaintext: Vec<u8>,
+            options: SetOptions,
+            transmission: &AtomicBool,
+        ) -> Result<SetOutcome> {
+            self.set_value_with_transmission(
+                application_key,
+                Value::Raw(plaintext),
+                options,
+                transmission,
+            )
+            .await
+        }
+
         /// Serializes, protects, and stores a core logical value.
         ///
         /// # Arguments
@@ -197,6 +215,21 @@ macro_rules! protected_client_methods {
             self.raw.set(item_id, value, options).await
         }
 
+        #[allow(dead_code)]
+        pub(crate) async fn set_value_with_transmission(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            value: Value,
+            options: SetOptions,
+            transmission: &AtomicBool,
+        ) -> Result<SetOutcome> {
+            let item_id = self.protection.item_id(application_key);
+            let value = self.protection.encode(item_id, value)?;
+            self.raw
+                .set_with_transmission(item_id, value, options, transmission)
+                .await
+        }
+
         /// Deletes a value for arbitrary application key bytes.
         pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
             self.delete_with_mutation_id(application_key, random_mutation_id()?)
@@ -209,12 +242,36 @@ macro_rules! protected_client_methods {
             application_key: impl AsRef<[u8]>,
             mutation_id: MutationId,
         ) -> Result<DeleteOutcome> {
+            self.delete_with_mutation_id_with_transmission(application_key, mutation_id, None)
+                .await
+        }
+
+        #[allow(dead_code)]
+        pub(crate) async fn delete_with_mutation_id_with_transmission(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            mutation_id: MutationId,
+            transmission: Option<&AtomicBool>,
+        ) -> Result<DeleteOutcome> {
             for item_id in self.protection.item_ids(application_key.as_ref()) {
-                match self
-                    .raw
-                    .delete_with_mutation_id(item_id, scoped_mutation_id(mutation_id, item_id))
-                    .await?
-                {
+                let scoped_mutation_id = scoped_mutation_id(mutation_id, item_id);
+                let result = match transmission {
+                    Some(transmission) => {
+                        self.raw
+                            .delete_with_mutation_id_with_transmission(
+                                item_id,
+                                scoped_mutation_id,
+                                transmission,
+                            )
+                            .await?
+                    }
+                    None => {
+                        self.raw
+                            .delete_with_mutation_id(item_id, scoped_mutation_id)
+                            .await?
+                    }
+                };
+                match result {
                     DeleteOutcome::Deleted => return Ok(DeleteOutcome::Deleted),
                     DeleteOutcome::NotFound => {}
                 }

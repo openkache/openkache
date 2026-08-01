@@ -811,7 +811,7 @@ class OpenKacheClient {
 
   /// Returns the shared core's best-effort connection state.
   int get connectionState {
-    if (_closed) return 3;
+    if (_closed) return smithy.smithy_ffi_connection_state_closed;
     final state = _library.lookupFunction<_ConnectionStateNative, _ConnectionStateNative>(
       'openkache_client_connection_state',
     );
@@ -895,7 +895,7 @@ class OpenKacheClient {
           phase: _ffiPhaseUnknown,
           backend: _ffiBackendNone,
           retryable: mutationId.isNotEmpty,
-          ambiguous: mutationId.isNotEmpty,
+          ambiguous: false,
           mutationId: mutationId.isEmpty ? null : Uint8List.fromList(mutationId),
         );
     final completer = Completer<_Result>();

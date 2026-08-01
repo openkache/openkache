@@ -440,6 +440,11 @@ impl Request {
 
     fn encode_prefix(&self) -> Result<RequestPrefix> {
         validate_value_length(self.value.len())?;
+        if self.set_options.mutation_id != self.mutation_id {
+            return Err(ProtocolError::InvalidSetOptions {
+                opcode: self.opcode,
+            });
+        }
         validate_request_shape(
             self.opcode,
             self.item_id.is_some(),

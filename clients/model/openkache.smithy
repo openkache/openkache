@@ -8,10 +8,6 @@ structure clientDefaults {
     @required
     maxInFlight: Integer
 
-    /// Fixed mutation idempotency-token width in bytes.
-    @required
-    mutationIdBytes: Integer
-
     /// Maximum number of retired data-protection keys retained for rotation.
     @required
     maxPreviousDataProtectionKeys: Integer
@@ -396,7 +392,6 @@ structure valueFormat {
 
 @clientDefaults(
     maxInFlight: 256,
-    mutationIdBytes: 16,
     maxPreviousDataProtectionKeys: 8,
     connectTimeoutMilliseconds: 5000,
     requestTimeoutMilliseconds: 2000,

@@ -116,6 +116,16 @@ impl MutationDedupeStore {
         now: Instant,
     ) {
         self.purge(now);
+        if self
+            .entries
+            .get(&mutation_id)
+            .is_some_and(|entry| entry.fingerprint != fingerprint)
+        {
+            // The token may have expired and been reserved again while an
+            // earlier request was still finishing. Never let that stale
+            // completion overwrite the newer request's reservation.
+            return;
+        }
         let existing = self.entries.contains_key(&mutation_id);
         if existing {
             self.order.retain(|candidate| candidate != &mutation_id);

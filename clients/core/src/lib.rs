@@ -16,7 +16,7 @@ mod transport;
 pub mod value;
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -536,9 +536,16 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn ping(&self) -> Result<Duration> {
+        self.ping_with_transmission(None).await
+    }
+
+    async fn ping_with_transmission(&self, transmission: Option<&AtomicBool>) -> Result<Duration> {
         let started = Instant::now();
         let response = self
-            .request(Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?)
+            .request_with_transmission(
+                Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?,
+                transmission,
+            )
             .await?;
         expect_status(Operation::Ping, response.status, &[Status::Ok])?;
         if response.payload != b"PONG" {
@@ -551,10 +558,19 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
+        self.get_with_transmission(item_id, None).await
+    }
+
+    async fn get_with_transmission(
+        &self,
+        item_id: ItemId,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<GetOutcome<ItemValue>> {
         let response = self
-            .request(
+            .request_with_transmission(
                 Request::new(Opcode::Get, Some(item_id.into_protocol()), Vec::new())
                     .map_err(Error::protocol)?,
+                transmission,
             )
             .await?;
         match response.status {
@@ -570,6 +586,17 @@ impl<C: ClientConnection> Core<C> {
         value: ItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
+        self.set_with_transmission(item_id, value, options, None)
+            .await
+    }
+
+    async fn set_with_transmission(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<SetOutcome> {
         let mutation_id = options.mutation_id().unwrap_or(random_mutation_id()?);
         let request = Request::new_set(
             Opcode::Set,
@@ -578,7 +605,11 @@ impl<C: ClientConnection> Core<C> {
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
-        match self.request(request).await?.status {
+        match self
+            .request_with_transmission(request, transmission)
+            .await?
+            .status
+        {
             Status::Created => Ok(SetOutcome::Created),
             Status::Replaced => Ok(SetOutcome::Replaced),
             Status::NotStored => Ok(SetOutcome::NotStored),
@@ -587,7 +618,17 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
-        self.delete_with_mutation_id(item_id, random_mutation_id()?)
+        self.delete_with_transmission(item_id, random_mutation_id()?, None)
+            .await
+    }
+
+    async fn delete_with_transmission(
+        &self,
+        item_id: ItemId,
+        mutation_id: MutationId,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<DeleteOutcome> {
+        self.delete_with_mutation_id(item_id, mutation_id, transmission)
             .await
     }
 
@@ -595,9 +636,10 @@ impl<C: ClientConnection> Core<C> {
         &self,
         item_id: ItemId,
         mutation_id: MutationId,
+        transmission: Option<&AtomicBool>,
     ) -> Result<DeleteOutcome> {
         let response = self
-            .request(
+            .request_with_transmission(
                 Request::new_with_mutation(
                     Opcode::Delete,
                     Some(item_id.into_protocol()),
@@ -605,6 +647,7 @@ impl<C: ClientConnection> Core<C> {
                     Vec::new(),
                 )
                 .map_err(Error::protocol)?,
+                transmission,
             )
             .await?;
         match response.status {
@@ -615,8 +658,15 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn stats(&self) -> Result<String> {
+        self.stats_with_transmission(None).await
+    }
+
+    async fn stats_with_transmission(&self, transmission: Option<&AtomicBool>) -> Result<String> {
         let response = self
-            .request(Request::new(Opcode::Stats, None, Vec::new()).map_err(Error::protocol)?)
+            .request_with_transmission(
+                Request::new(Opcode::Stats, None, Vec::new()).map_err(Error::protocol)?,
+                transmission,
+            )
             .await?;
         expect_status(Operation::Stats, response.status, &[Status::Ok])?;
         String::from_utf8(response.payload)
@@ -624,13 +674,24 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn sync(&self) -> Result<()> {
+        self.sync_with_transmission(None).await
+    }
+
+    async fn sync_with_transmission(&self, transmission: Option<&AtomicBool>) -> Result<()> {
         let response = self
-            .request(Request::new(Opcode::Sync, None, Vec::new()).map_err(Error::protocol)?)
+            .request_with_transmission(
+                Request::new(Opcode::Sync, None, Vec::new()).map_err(Error::protocol)?,
+                transmission,
+            )
             .await?;
         expect_status(Operation::Sync, response.status, &[Status::Ok])
     }
 
-    async fn request(&self, request: Request) -> Result<Response> {
+    async fn request_with_transmission(
+        &self,
+        request: Request,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<Response> {
         if self.connection_state() == ConnectionState::Closed {
             return Err(Error::ClientClosed);
         }
@@ -673,6 +734,7 @@ impl<C: ClientConnection> Core<C> {
                     &connection,
                     attempt_request,
                     deadline,
+                    transmission,
                     // A retried request may be racing another retry on a
                     // replacement connection. Discarding its stream after
                     // the response prevents a remotely finished stream from
@@ -742,7 +804,9 @@ impl<C: ClientConnection> Core<C> {
                         if let Err(reconnect_error) =
                             self.reconnect_failed(&connection, deadline).await
                         {
-                            if mutation && failure.may_have_reached_server {
+                            if (mutation || operation == Operation::Sync)
+                                && failure.may_have_reached_server
+                            {
                                 return Err(Error::AmbiguousOutcome {
                                     operation,
                                     mutation_id,
@@ -775,6 +839,7 @@ impl<C: ClientConnection> Core<C> {
         connection: &C,
         request: Request,
         deadline: transport::Deadline,
+        transmission: Option<&AtomicBool>,
         reuse_lane: bool,
     ) -> std::result::Result<Response, RequestFailure> {
         let mut stream = connection
@@ -792,6 +857,9 @@ impl<C: ClientConnection> Core<C> {
             .write_request(frame, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
+        if let Some(transmission) = transmission {
+            transmission.store(true, Ordering::Release);
+        }
         let frame = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await
@@ -1097,6 +1165,19 @@ macro_rules! raw_client_methods {
                 self.0.set(item_id, value, options).await
             }
 
+            #[allow(dead_code)]
+            pub(crate) async fn set_with_transmission(
+                &self,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+                transmission: &AtomicBool,
+            ) -> Result<SetOutcome> {
+                self.0
+                    .set_with_transmission(item_id, value, options, Some(transmission))
+                    .await
+            }
+
             /// Deletes a fixed-size item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
@@ -1108,7 +1189,21 @@ macro_rules! raw_client_methods {
                 item_id: ItemId,
                 mutation_id: MutationId,
             ) -> Result<DeleteOutcome> {
-                self.0.delete_with_mutation_id(item_id, mutation_id).await
+                self.0
+                    .delete_with_mutation_id(item_id, mutation_id, None)
+                    .await
+            }
+
+            #[allow(dead_code)]
+            pub(crate) async fn delete_with_mutation_id_with_transmission(
+                &self,
+                item_id: ItemId,
+                mutation_id: MutationId,
+                transmission: &AtomicBool,
+            ) -> Result<DeleteOutcome> {
+                self.0
+                    .delete_with_mutation_id(item_id, mutation_id, Some(transmission))
+                    .await
             }
 
             /// Returns server statistics as their JSON text.
