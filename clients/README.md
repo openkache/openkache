@@ -84,9 +84,11 @@ README for package-specific linker or packaging configuration. Artifact
 distribution for each binding is selected by its package build and release
 matrix.
 
-Java, Kotlin, and Dart contract sources are generated build outputs and are
-intentionally ignored by Git. From this directory, run `./generate.ts` before
-building those packages; release workflows regenerate the same outputs.
+Go, Java, Kotlin, and Dart contract sources are generated build outputs and are
+intentionally ignored by Git. Go consumers run `go generate`; Maven and Gradle
+invoke the generator for Java and Kotlin, while Dart builds run
+`OPENKACHE_GENERATION_TARGET=dart ./generate.ts` first. Release workflows
+regenerate the same outputs.
 
 ## Shared configuration
 

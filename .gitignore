@@ -10,6 +10,8 @@ target/
 clients/dotnet/**/bin/
 clients/dotnet/**/obj/
 clients/dart/lib/generated_contract.dart
+clients/go/smithy_api.go
+clients/go/smithy_contract.go
 clients/java/src/main/java/io/openkache/client/generated/*.java
 clients/kotlin/src/main/kotlin/io/openkache/client/generated/*.kt
 

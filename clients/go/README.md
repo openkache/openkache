@@ -7,10 +7,11 @@ wire or cryptographic implementation.
 
 ## Commands
 
-From the repository root, regenerate the native contract header before a CGO
-build. The header is a build artifact, not a hand-maintained Go constant file:
+From the repository root, regenerate the Smithy Go bindings and native contract
+header when updating the Smithy models:
 
 ```bash
+(cd openkache/clients/go && go generate ./...)
 OPENKACHE_GENERATION_TARGET=c-contract ./openkache/clients/generate.ts
 ```
 
@@ -98,6 +99,6 @@ Use `client.Smithy()` when an application needs the generated
 Protocol operations, Smithy models, and value-format identifiers are generated
 from [`../model/openkache.smithy`](../model/openkache.smithy) and
 [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
-The generated Go files are checked in for module consumers; the C contract
-header is emitted into `core/generated_local/` and is supplied to CGO via the
-package include path.
+The generated Go files are build outputs and are intentionally ignored by Git.
+The C contract header remains a build artifact in `core/generated_local/` and
+is supplied to CGO via the package include path.

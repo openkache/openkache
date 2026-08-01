@@ -97,6 +97,15 @@ pub struct FfiMetricsSnapshot {
     pub active_lanes: u64,
 }
 
+const _: () = {
+    assert!(
+        core::mem::size_of::<FfiErrorMetadata>() == crate::contract::FFI_ERROR_METADATA_BYTES
+    );
+    assert!(
+        core::mem::size_of::<FfiMetricsSnapshot>() == crate::contract::FFI_METRICS_SNAPSHOT_BYTES
+    );
+};
+
 #[derive(Default)]
 struct FfiMetrics {
     requests: AtomicU64,
@@ -166,10 +175,18 @@ pub struct FfiConnectOptions {
     pub max_in_flight: usize,
 }
 
+const _: () = {
+    assert!(
+        core::mem::size_of::<FfiConnectOptions>() == crate::contract::FFI_CONNECT_OPTIONS_BYTES
+    );
+};
+
 /// Opaque native handle to a dedicated Rust client worker.
 pub struct FfiClient {
     commands: CommandSender,
     request_timeout: Duration,
+    max_in_flight: usize,
+    in_flight: Arc<AtomicUsize>,
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
     worker: Mutex<Option<JoinHandle<()>>>,
@@ -335,8 +352,10 @@ impl FfiClient {
         let (commands, receiver) = crossfire::mpsc::bounded_blocking_async(max_in_flight.max(1));
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
+        let in_flight = Arc::new(AtomicUsize::new(0));
         let metrics = Arc::new(FfiMetrics::default());
         let worker_shutdown = Arc::clone(&shutdown);
+        let worker_in_flight = Arc::clone(&in_flight);
         let state = Arc::new(AtomicU32::new(connection_state_value(
             ConnectionState::Reconnecting,
         )));
@@ -364,6 +383,7 @@ impl FfiClient {
                     worker_shutdown,
                     worker_state,
                     worker_metrics,
+                    worker_in_flight,
                 )
             })
             .map_err(|error| format!("failed to start client worker: {error}"))?;
@@ -372,6 +392,8 @@ impl FfiClient {
             Ok(Ok(())) => Ok(Self {
                 commands,
                 request_timeout: timeouts.request,
+                max_in_flight: max_in_flight.max(1),
+                in_flight,
                 shutdown,
                 state,
                 worker: Mutex::new(Some(worker)),
@@ -399,7 +421,7 @@ impl FfiClient {
         set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.allocate_request_id();
         self.execute_with_request_id(
             request_id,
             operation,
@@ -408,6 +430,18 @@ impl FfiClient {
             set_options,
             raw,
         )
+    }
+
+    fn allocate_request_id(&self) -> u64 {
+        self.next_request_id
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(if current == u64::MAX {
+                    1
+                } else {
+                    current.saturating_add(1).max(1)
+                })
+            })
+            .unwrap_or(1)
     }
 
     fn execute_with_request_id(
@@ -451,6 +485,9 @@ impl FfiClient {
                 Some(operation),
             );
         };
+        if !self.reserve_slot_until(deadline) {
+            return FfiResult::queue_full(operation);
+        }
         let command = Command::Execute {
             request_id,
             operation,
@@ -462,6 +499,7 @@ impl FfiClient {
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
+            self.release_slot();
             return FfiResult::error_with_operation(
                 format!("client worker queue deadline exceeded: {error}"),
                 crate::contract::FFI_ERROR_RUNTIME,
@@ -470,7 +508,9 @@ impl FfiClient {
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let result = receiver.recv_timeout(remaining).unwrap_or_else(|_| {
-            let _ = self.cancel(request_id);
+            // The request deadline has already elapsed. Do not spend another
+            // request-timeout waiting for the cancellation acknowledgement.
+            let _ = self.cancel_with_timeout(request_id, Duration::ZERO);
             FfiResult::timed_out(operation, mutation_id)
         });
         match result.kind {
@@ -488,7 +528,35 @@ impl FfiClient {
         result
     }
 
+    fn try_reserve_slot(&self) -> bool {
+        try_reserve_slot(&self.in_flight, self.max_in_flight)
+    }
+
+    fn reserve_slot_until(&self, deadline: Instant) -> bool {
+        loop {
+            if self.try_reserve_slot() {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            // Native adapters invoke this synchronous ABI from their own
+            // worker/task threads. A short bounded wait provides backpressure
+            // without turning max_in_flight into an immediate reject gate.
+            thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
+    }
+
+    fn release_slot(&self) {
+        release_slot(&self.in_flight);
+    }
+
     fn cancel(&self, request_id: u64) -> bool {
+        self.cancel_with_timeout(request_id, self.request_timeout)
+    }
+
+    fn cancel_with_timeout(&self, request_id: u64, timeout: Duration) -> bool {
         let (response, receiver) = sync_channel(1);
         if self
             .commands
@@ -497,14 +565,14 @@ impl FfiClient {
                     request_id,
                     response,
                 },
-                self.request_timeout,
+                timeout,
             )
             .is_err()
         {
             return false;
         }
         receiver
-            .recv_timeout(self.request_timeout)
+            .recv_timeout(timeout)
             .is_ok_and(|result| result.kind == FfiResultKind::Ok)
     }
 
@@ -552,6 +620,7 @@ fn run_worker(
     shutdown: Arc<AtomicBool>,
     state: Arc<AtomicU32>,
     metrics: Arc<FfiMetrics>,
+    in_flight: Arc<AtomicUsize>,
 ) {
     let WorkerOptions {
         endpoint,
@@ -640,6 +709,7 @@ fn run_worker(
         state,
         metrics,
         max_in_flight,
+        in_flight,
     ));
 }
 
@@ -650,6 +720,7 @@ async fn run_worker_loop(
     state: Arc<AtomicU32>,
     metrics: Arc<FfiMetrics>,
     max_in_flight: usize,
+    in_flight: Arc<AtomicUsize>,
 ) {
     let mut pending = VecDeque::new();
     let mut core_metrics = CoreMetricsSnapshot::default();
@@ -669,10 +740,11 @@ async fn run_worker_loop(
         if shutdown.load(Ordering::Acquire) {
             for (_, (abort, response, operation, mutation_id)) in active_requests.drain() {
                 abort.abort();
+                release_slot(&in_flight);
                 let _ = response.send(FfiResult::cancelled(Some(operation), mutation_id));
             }
-            drain_pending(&mut pending);
-            drain_commands(&commands);
+            drain_pending(&mut pending, &in_flight);
+            drain_commands(&commands, &in_flight);
             return;
         }
         let has_active = !active.is_empty();
@@ -684,6 +756,7 @@ async fn run_worker_loop(
                 match completed {
                     Some(Ok((request_id, result))) => {
                         if let Some((_, response, _, _)) = active_requests.remove(&request_id) {
+                            release_slot(&in_flight);
                             sync_core_metrics(&client, &metrics, &mut core_metrics);
                             state.store(
                                 connection_state_value(client.connection_state()),
@@ -700,16 +773,21 @@ async fn run_worker_loop(
                     }
                     Some(Err(error)) => {
                         let message = format!("native client worker task failed: {error}");
-                        for (_, (abort, response, operation, _)) in active_requests.drain() {
+                        for (_, (abort, response, operation, mutation_id)) in
+                            active_requests.drain()
+                        {
                             abort.abort();
-                            let _ = response.send(FfiResult::error_with_operation(
+                            release_slot(&in_flight);
+                            let mut result = FfiResult::error_with_operation(
                                 message.clone(),
                                 crate::contract::FFI_ERROR_RUNTIME,
                                 Some(operation),
-                            ));
+                            );
+                            attach_mutation_metadata(&mut result.metadata, mutation_id);
+                            let _ = response.send(result);
                         }
-                        drain_pending(&mut pending);
-                        drain_commands(&commands);
+                        drain_pending(&mut pending, &in_flight);
+                        drain_commands(&commands, &in_flight);
                         return;
                     }
                     None => {}
@@ -737,6 +815,7 @@ async fn run_worker_loop(
                                 )
                         });
                         if request_id_in_use {
+                            release_slot(&in_flight);
                             let _ = response.send(FfiResult::error_with_operation(
                                 format!("request ID {request_id} is already active"),
                                 crate::contract::FFI_ERROR_RUNTIME,
@@ -753,6 +832,7 @@ async fn run_worker_loop(
                                 response,
                             });
                         } else {
+                            release_slot(&in_flight);
                             let _ = response.send(FfiResult::queue_full(operation));
                         }
                     }
@@ -761,6 +841,7 @@ async fn run_worker_loop(
                             active_requests.remove(&request_id)
                         {
                             abort.abort();
+                            release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
                             let _ = original_response
                                 .send(FfiResult::cancelled(Some(operation), mutation_id));
@@ -768,6 +849,7 @@ async fn run_worker_loop(
                         } else if let Some((original_response, operation, mutation_id)) =
                             cancel_pending(&mut pending, request_id)
                         {
+                            release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
                             let _ = original_response
                                 .send(FfiResult::cancelled(Some(operation), mutation_id));
@@ -812,6 +894,7 @@ fn spawn_request(
         return;
     };
     let task_client = client.clone();
+    let mutation_id = set_options.mutation_id();
     let task = tokio::spawn(async move {
         let result = AssertUnwindSafe(execute(
             &task_client,
@@ -824,11 +907,13 @@ fn spawn_request(
         .catch_unwind()
         .await
         .unwrap_or_else(|_| {
-            FfiResult::error_with_operation(
+            let mut result = FfiResult::error_with_operation(
                 "native client worker panicked",
                 crate::contract::FFI_ERROR_RUNTIME,
                 Some(operation),
-            )
+            );
+            attach_mutation_metadata(&mut result.metadata, mutation_id);
+            result
         });
         (request_id, result)
     });
@@ -865,7 +950,7 @@ fn cancel_pending(
     Some((response, operation, set_options.mutation_id()))
 }
 
-fn drain_pending(pending: &mut VecDeque<Command>) {
+fn drain_pending(pending: &mut VecDeque<Command>, in_flight: &AtomicUsize) {
     while let Some(command) = pending.pop_front() {
         match command {
             Command::Execute {
@@ -874,6 +959,7 @@ fn drain_pending(pending: &mut VecDeque<Command>) {
                 set_options,
                 ..
             } => {
+                release_slot(in_flight);
                 let _ = response.send(FfiResult::cancelled(
                     Some(operation),
                     set_options.mutation_id(),
@@ -887,7 +973,7 @@ fn drain_pending(pending: &mut VecDeque<Command>) {
     }
 }
 
-fn drain_commands(commands: &CommandReceiver) {
+fn drain_commands(commands: &CommandReceiver, in_flight: &AtomicUsize) {
     while let Ok(command) = commands.try_recv() {
         match command {
             Command::Execute {
@@ -896,6 +982,7 @@ fn drain_commands(commands: &CommandReceiver) {
                 set_options,
                 ..
             } => {
+                release_slot(in_flight);
                 let _ = response.send(FfiResult::cancelled(
                     Some(operation),
                     set_options.mutation_id(),
@@ -907,6 +994,30 @@ fn drain_commands(commands: &CommandReceiver) {
             Command::Shutdown => {}
         }
     }
+}
+
+fn try_reserve_slot(in_flight: &AtomicUsize, max_in_flight: usize) -> bool {
+    let max_in_flight = max_in_flight.max(1);
+    let mut current = in_flight.load(Ordering::Acquire);
+    loop {
+        if current >= max_in_flight {
+            return false;
+        }
+        match in_flight.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn release_slot(in_flight: &AtomicUsize) {
+    let previous = in_flight.fetch_sub(1, Ordering::Release);
+    debug_assert!(previous > 0, "in-flight reservation released twice");
 }
 
 fn sync_core_metrics(
@@ -1129,7 +1240,7 @@ pub extern "C" fn openkache_client_abi_version() -> u32 {
 pub unsafe extern "C" fn openkache_client_connect_with_options(
     options: *const FfiConnectOptions,
 ) -> *mut FfiResult {
-    boxed_result(catch_result(|| {
+    boxed_result(catch_result(None, || {
         let options = unsafe {
             options
                 .as_ref()
@@ -1421,12 +1532,16 @@ fn execute_entry_with_request_id(
     mutation_id_length: usize,
     raw: bool,
 ) -> *mut FfiResult {
-    boxed_result(catch_result(|| {
+    let caller_operation = FfiOperation::try_from(operation).ok();
+    boxed_result(catch_result(caller_operation, || {
         let client = unsafe {
             client
                 .as_ref()
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
+        if request_id == Some(0) {
+            return Err("request ID must be greater than zero".to_owned());
+        }
         let application_key =
             copy_bytes(application_key, application_key_length, "application_key")?;
         let value = copy_bytes(value, value_length, "value")?;
@@ -1690,11 +1805,20 @@ fn boxed_result(result: FfiResult) -> *mut FfiResult {
     Box::into_raw(Box::new(result))
 }
 
-fn catch_result(operation: impl FnOnce() -> std::result::Result<FfiResult, String>) -> FfiResult {
+fn catch_result(
+    caller_operation: Option<FfiOperation>,
+    operation: impl FnOnce() -> std::result::Result<FfiResult, String>,
+) -> FfiResult {
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(result)) => result,
-        Ok(Err(error)) => FfiResult::error(error),
-        Err(_) => FfiResult::error("native client panicked"),
+        Ok(Err(error)) => {
+            FfiResult::error_with_operation(error, FFI_ERROR_CONFIGURATION, caller_operation)
+        }
+        Err(_) => FfiResult::error_with_operation(
+            "native client panicked",
+            crate::contract::FFI_ERROR_RUNTIME,
+            caller_operation,
+        ),
     }
 }
 

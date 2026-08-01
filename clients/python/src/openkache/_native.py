@@ -70,6 +70,7 @@ _U8 = ctypes.c_uint8
 _U8_POINTER = ctypes.POINTER(_U8)
 _RESULT_POINTER = ctypes.c_void_p
 _CLIENT_POINTER = ctypes.c_void_p
+_MAX_REQUEST_ID = (1 << 64) - 1
 
 
 class _ConnectOptions(ctypes.Structure):
@@ -502,8 +503,7 @@ class NativeClient:
             handle = self._handle
             self._active_calls += 1
             if request_id is None:
-                request_id = self._next_request_id
-                self._next_request_id += 1
+                request_id = self._allocate_request_id()
         try:
             selected_function = function
             if mutation_id is not None:
@@ -537,9 +537,15 @@ class NativeClient:
 
     def next_request_id(self) -> int:
         with self._lifecycle:
-            request_id = self._next_request_id
-            self._next_request_id += 1
-            return request_id
+            return self._allocate_request_id()
+
+    def _allocate_request_id(self) -> int:
+        request_id = self._next_request_id
+        if request_id <= 0 or request_id >= _MAX_REQUEST_ID:
+            self._next_request_id = 1
+        else:
+            self._next_request_id = request_id + 1
+        return request_id if request_id > 0 else 1
 
     def cancel(self, request_id: int) -> bool:
         with self._lifecycle:

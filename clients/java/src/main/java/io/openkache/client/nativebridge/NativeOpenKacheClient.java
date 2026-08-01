@@ -68,41 +68,68 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             io.openkache.client.generated.SmithyContract.FFI_ERROR_Cancelled;
     private static final int FFI_ABI_VERSION =
             io.openkache.client.generated.SmithyContract.FFI_ABI_VERSION;
-    private static final int ERROR_METADATA_BYTES = 36;
-    private static final int METRICS_SNAPSHOT_BYTES = 88;
+    private static final int ERROR_METADATA_BYTES =
+            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_BYTES;
+    private static final int METRICS_SNAPSHOT_BYTES =
+            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_BYTES;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     /*
      * FfiConnectOptions is a C repr(C) structure. OpenKache's supported
      * native artifacts use a 64-bit size_t, so the Java FFM layout uses
-     * JAVA_LONG for size_t fields. Keep these offsets in one place so the
-     * named-field ABI remains independent of Java record ordering.
+     * JAVA_LONG for size_t fields. The generated Smithy layout keeps these
+     * offsets in the versioned contract, independent of Java record ordering.
      */
-    private static final long CONNECT_ADDRESS = 0;
-    private static final long CONNECT_ADDRESS_LENGTH = 8;
-    private static final long CONNECT_SERVER_NAME = 16;
-    private static final long CONNECT_SERVER_NAME_LENGTH = 24;
-    private static final long CONNECT_CERTIFICATE = 32;
-    private static final long CONNECT_CERTIFICATE_LENGTH = 40;
-    private static final long CONNECT_CLIENT_CERTIFICATE = 48;
-    private static final long CONNECT_CLIENT_CERTIFICATE_LENGTH = 56;
-    private static final long CONNECT_CLIENT_PRIVATE_KEY = 64;
-    private static final long CONNECT_CLIENT_PRIVATE_KEY_LENGTH = 72;
-    private static final long CONNECT_DATA_PROTECTION_KEY = 80;
-    private static final long CONNECT_DATA_PROTECTION_KEY_LENGTH = 88;
-    private static final long CONNECT_PREVIOUS_KEYS = 96;
-    private static final long CONNECT_PREVIOUS_KEYS_LENGTH = 104;
-    private static final long CONNECT_PREVIOUS_KEY_COUNT = 112;
-    private static final long CONNECT_COMPRESSION_ENABLED = 120;
-    private static final long CONNECT_COMPRESSION_LEVEL = 124;
-    private static final long CONNECT_MINIMUM_INPUT_SIZE = 128;
-    private static final long CONNECT_MINIMUM_SAVINGS = 136;
-    private static final long CONNECT_ENCRYPTION = 144;
-    private static final long CONNECT_TIMEOUT = 152;
-    private static final long CONNECT_REQUEST_TIMEOUT = 160;
-    private static final long CONNECT_RETRY_MAX_ATTEMPTS = 168;
-    private static final long CONNECT_MAX_IN_FLIGHT = 176;
-    private static final long CONNECT_OPTIONS_BYTES = 184;
+    private static final long CONNECT_ADDRESS =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_ADDRESS_OFFSET;
+    private static final long CONNECT_ADDRESS_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_ADDRESS_LENGTH_OFFSET;
+    private static final long CONNECT_SERVER_NAME =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_SERVER_NAME_OFFSET;
+    private static final long CONNECT_SERVER_NAME_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET;
+    private static final long CONNECT_CERTIFICATE =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_CERTIFICATE_OFFSET;
+    private static final long CONNECT_CERTIFICATE_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET;
+    private static final long CONNECT_CLIENT_CERTIFICATE =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET;
+    private static final long CONNECT_CLIENT_CERTIFICATE_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET;
+    private static final long CONNECT_CLIENT_PRIVATE_KEY =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET;
+    private static final long CONNECT_CLIENT_PRIVATE_KEY_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET;
+    private static final long CONNECT_DATA_PROTECTION_KEY =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET;
+    private static final long CONNECT_DATA_PROTECTION_KEY_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET;
+    private static final long CONNECT_PREVIOUS_KEYS =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET;
+    private static final long CONNECT_PREVIOUS_KEYS_LENGTH =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET;
+    private static final long CONNECT_PREVIOUS_KEY_COUNT =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET;
+    private static final long CONNECT_COMPRESSION_ENABLED =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_COMPRESSION_ENABLED_OFFSET;
+    private static final long CONNECT_COMPRESSION_LEVEL =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_COMPRESSION_LEVEL_OFFSET;
+    private static final long CONNECT_MINIMUM_INPUT_SIZE =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET;
+    private static final long CONNECT_MINIMUM_SAVINGS =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_MINIMUM_SAVINGS_OFFSET;
+    private static final long CONNECT_ENCRYPTION =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_ENCRYPTION_OFFSET;
+    private static final long CONNECT_TIMEOUT =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_TIMEOUT_OFFSET;
+    private static final long CONNECT_REQUEST_TIMEOUT =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_REQUEST_TIMEOUT_OFFSET;
+    private static final long CONNECT_RETRY_MAX_ATTEMPTS =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET;
+    private static final long CONNECT_MAX_IN_FLIGHT =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_MAX_IN_FLIGHT_OFFSET;
+    private static final long CONNECT_OPTIONS_BYTES =
+            io.openkache.client.generated.SmithyContract.FFI_CONNECT_OPTIONS_BYTES;
 
     private final Arena arena;
     private final MemorySegment client;
@@ -1022,18 +1049,30 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         private static ErrorMetadata from(MemorySegment segment) {
             int mutationIdLength = Math.min(
                     MUTATION_ID_BYTES,
-                    Byte.toUnsignedInt(segment.get(ValueLayout.JAVA_BYTE, 18)));
+                    Byte.toUnsignedInt(segment.get(
+                            ValueLayout.JAVA_BYTE,
+                            io.openkache.client.generated.SmithyContract
+                                    .FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET)));
             byte[] mutationId = mutationIdLength == 0
                     ? null
-                    : segment.asSlice(20, mutationIdLength)
+                    : segment.asSlice(
+                            io.openkache.client.generated.SmithyContract
+                                    .FFI_ERROR_METADATA_MUTATION_ID_OFFSET,
+                            mutationIdLength)
                             .toArray(ValueLayout.JAVA_BYTE);
             return new ErrorMetadata(
-                    segment.get(ValueLayout.JAVA_INT, 0),
-                    segment.get(ValueLayout.JAVA_INT, 4),
-                    segment.get(ValueLayout.JAVA_INT, 8),
-                    segment.get(ValueLayout.JAVA_INT, 12),
-                    segment.get(ValueLayout.JAVA_BYTE, 16) != 0,
-                    segment.get(ValueLayout.JAVA_BYTE, 17) != 0,
+                    segment.get(ValueLayout.JAVA_INT,
+                            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_CODE_OFFSET),
+                    segment.get(ValueLayout.JAVA_INT,
+                            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_OPERATION_OFFSET),
+                    segment.get(ValueLayout.JAVA_INT,
+                            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_PHASE_OFFSET),
+                    segment.get(ValueLayout.JAVA_INT,
+                            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_BACKEND_OFFSET),
+                    segment.get(ValueLayout.JAVA_BYTE,
+                            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_RETRYABLE_OFFSET) != 0,
+                    segment.get(ValueLayout.JAVA_BYTE,
+                            io.openkache.client.generated.SmithyContract.FFI_ERROR_METADATA_AMBIGUOUS_OFFSET) != 0,
                     mutationId);
         }
     }
@@ -1053,17 +1092,28 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             long activeLanes) {
         private static MetricsSnapshot from(MemorySegment segment) {
             return new MetricsSnapshot(
-                    segment.get(ValueLayout.JAVA_LONG, 0),
-                    segment.get(ValueLayout.JAVA_LONG, 8),
-                    segment.get(ValueLayout.JAVA_LONG, 16),
-                    segment.get(ValueLayout.JAVA_LONG, 24),
-                    segment.get(ValueLayout.JAVA_LONG, 32),
-                    segment.get(ValueLayout.JAVA_LONG, 40),
-                    segment.get(ValueLayout.JAVA_LONG, 48),
-                    segment.get(ValueLayout.JAVA_LONG, 56),
-                    segment.get(ValueLayout.JAVA_LONG, 64),
-                    segment.get(ValueLayout.JAVA_LONG, 72),
-                    segment.get(ValueLayout.JAVA_LONG, 80));
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_HITS_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_MISSES_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_RETRIES_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET),
+                    segment.get(ValueLayout.JAVA_LONG,
+                            io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET));
         }
     }
 

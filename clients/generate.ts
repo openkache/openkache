@@ -125,11 +125,62 @@ export interface Ffi_Contract {
   readonly set_conditions: readonly Wire_Entry[]
 }
 
+/** Native C ABI structure sizes and byte offsets shared by raw FFI adapters. */
+export interface Ffi_Layout_Contract {
+  readonly connect_options_bytes: number
+  readonly connect_address_offset: number
+  readonly connect_address_length_offset: number
+  readonly connect_server_name_offset: number
+  readonly connect_server_name_length_offset: number
+  readonly connect_certificate_offset: number
+  readonly connect_certificate_length_offset: number
+  readonly connect_client_certificate_chain_offset: number
+  readonly connect_client_certificate_chain_length_offset: number
+  readonly connect_client_private_key_offset: number
+  readonly connect_client_private_key_length_offset: number
+  readonly connect_data_protection_key_offset: number
+  readonly connect_data_protection_key_length_offset: number
+  readonly connect_previous_data_protection_keys_offset: number
+  readonly connect_previous_data_protection_keys_length_offset: number
+  readonly connect_previous_data_protection_key_count_offset: number
+  readonly connect_compression_enabled_offset: number
+  readonly connect_compression_level_offset: number
+  readonly connect_minimum_input_size_offset: number
+  readonly connect_minimum_savings_offset: number
+  readonly connect_encryption_offset: number
+  readonly connect_timeout_offset: number
+  readonly connect_request_timeout_offset: number
+  readonly connect_retry_max_attempts_offset: number
+  readonly connect_max_in_flight_offset: number
+  readonly error_metadata_bytes: number
+  readonly error_metadata_code_offset: number
+  readonly error_metadata_operation_offset: number
+  readonly error_metadata_phase_offset: number
+  readonly error_metadata_backend_offset: number
+  readonly error_metadata_retryable_offset: number
+  readonly error_metadata_ambiguous_offset: number
+  readonly error_metadata_mutation_id_length_offset: number
+  readonly error_metadata_mutation_id_offset: number
+  readonly metrics_snapshot_bytes: number
+  readonly metrics_snapshot_requests_offset: number
+  readonly metrics_snapshot_hits_offset: number
+  readonly metrics_snapshot_misses_offset: number
+  readonly metrics_snapshot_retries_offset: number
+  readonly metrics_snapshot_reconnects_offset: number
+  readonly metrics_snapshot_cancellations_offset: number
+  readonly metrics_snapshot_transport_errors_offset: number
+  readonly metrics_snapshot_protocol_errors_offset: number
+  readonly metrics_snapshot_bytes_sent_offset: number
+  readonly metrics_snapshot_bytes_received_offset: number
+  readonly metrics_snapshot_active_lanes_offset: number
+}
+
 /** Wire contract combined with the client-owned Smithy model. */
 export interface Client_Contract extends Wire_Contract {
   readonly api: Api_Contract
   readonly client_defaults: Client_Defaults_Contract
   readonly ffi: Ffi_Contract
+  readonly ffi_layout: Ffi_Layout_Contract
   readonly value_format: Value_Format_Contract
 }
 
@@ -142,6 +193,7 @@ const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
+const FFI_LAYOUT_TRAIT_ID = "openkache.client#ffiLayout"
 const FFI_OPERATION_FIELDS = [
   { name: "GetJson", field: "operationGetJson" },
   { name: "SetJson", field: "operationSetJson" },
@@ -574,6 +626,314 @@ function ffi_contract(value: unknown): Ffi_Contract {
   }
 }
 
+function ffi_layout_member(
+  contract: Json_Object,
+  field: string,
+  minimum = 0,
+): number {
+  return integer_member(
+    contract,
+    field,
+    `${FFI_LAYOUT_TRAIT_ID}.${field}`,
+    minimum,
+    0xffff_ffff,
+  )
+}
+
+function ffi_layout_contract(
+  value: unknown,
+  mutation_id_bytes: number,
+): Ffi_Layout_Contract {
+  const contract = object_value(value, FFI_LAYOUT_TRAIT_ID)
+  const layout = {
+    connect_options_bytes: ffi_layout_member(contract, "connectOptionsBytes", 1),
+    connect_address_offset: ffi_layout_member(contract, "connectAddressOffset"),
+    connect_address_length_offset: ffi_layout_member(
+      contract,
+      "connectAddressLengthOffset",
+    ),
+    connect_server_name_offset: ffi_layout_member(contract, "connectServerNameOffset"),
+    connect_server_name_length_offset: ffi_layout_member(
+      contract,
+      "connectServerNameLengthOffset",
+    ),
+    connect_certificate_offset: ffi_layout_member(contract, "connectCertificateOffset"),
+    connect_certificate_length_offset: ffi_layout_member(
+      contract,
+      "connectCertificateLengthOffset",
+    ),
+    connect_client_certificate_chain_offset: ffi_layout_member(
+      contract,
+      "connectClientCertificateChainOffset",
+    ),
+    connect_client_certificate_chain_length_offset: ffi_layout_member(
+      contract,
+      "connectClientCertificateChainLengthOffset",
+    ),
+    connect_client_private_key_offset: ffi_layout_member(
+      contract,
+      "connectClientPrivateKeyOffset",
+    ),
+    connect_client_private_key_length_offset: ffi_layout_member(
+      contract,
+      "connectClientPrivateKeyLengthOffset",
+    ),
+    connect_data_protection_key_offset: ffi_layout_member(
+      contract,
+      "connectDataProtectionKeyOffset",
+    ),
+    connect_data_protection_key_length_offset: ffi_layout_member(
+      contract,
+      "connectDataProtectionKeyLengthOffset",
+    ),
+    connect_previous_data_protection_keys_offset: ffi_layout_member(
+      contract,
+      "connectPreviousDataProtectionKeysOffset",
+    ),
+    connect_previous_data_protection_keys_length_offset: ffi_layout_member(
+      contract,
+      "connectPreviousDataProtectionKeysLengthOffset",
+    ),
+    connect_previous_data_protection_key_count_offset: ffi_layout_member(
+      contract,
+      "connectPreviousDataProtectionKeyCountOffset",
+    ),
+    connect_compression_enabled_offset: ffi_layout_member(
+      contract,
+      "connectCompressionEnabledOffset",
+    ),
+    connect_compression_level_offset: ffi_layout_member(
+      contract,
+      "connectCompressionLevelOffset",
+    ),
+    connect_minimum_input_size_offset: ffi_layout_member(
+      contract,
+      "connectMinimumInputSizeOffset",
+    ),
+    connect_minimum_savings_offset: ffi_layout_member(
+      contract,
+      "connectMinimumSavingsOffset",
+    ),
+    connect_encryption_offset: ffi_layout_member(contract, "connectEncryptionOffset"),
+    connect_timeout_offset: ffi_layout_member(contract, "connectTimeoutOffset"),
+    connect_request_timeout_offset: ffi_layout_member(
+      contract,
+      "connectRequestTimeoutOffset",
+    ),
+    connect_retry_max_attempts_offset: ffi_layout_member(
+      contract,
+      "connectRetryMaxAttemptsOffset",
+    ),
+    connect_max_in_flight_offset: ffi_layout_member(
+      contract,
+      "connectMaxInFlightOffset",
+    ),
+    error_metadata_bytes: ffi_layout_member(contract, "errorMetadataBytes", 1),
+    error_metadata_code_offset: ffi_layout_member(
+      contract,
+      "errorMetadataCodeOffset",
+    ),
+    error_metadata_operation_offset: ffi_layout_member(
+      contract,
+      "errorMetadataOperationOffset",
+    ),
+    error_metadata_phase_offset: ffi_layout_member(
+      contract,
+      "errorMetadataPhaseOffset",
+    ),
+    error_metadata_backend_offset: ffi_layout_member(
+      contract,
+      "errorMetadataBackendOffset",
+    ),
+    error_metadata_retryable_offset: ffi_layout_member(
+      contract,
+      "errorMetadataRetryableOffset",
+    ),
+    error_metadata_ambiguous_offset: ffi_layout_member(
+      contract,
+      "errorMetadataAmbiguousOffset",
+    ),
+    error_metadata_mutation_id_length_offset: ffi_layout_member(
+      contract,
+      "errorMetadataMutationIdLengthOffset",
+    ),
+    error_metadata_mutation_id_offset: ffi_layout_member(
+      contract,
+      "errorMetadataMutationIdOffset",
+    ),
+    metrics_snapshot_bytes: ffi_layout_member(contract, "metricsSnapshotBytes", 1),
+    metrics_snapshot_requests_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotRequestsOffset",
+    ),
+    metrics_snapshot_hits_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotHitsOffset",
+    ),
+    metrics_snapshot_misses_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotMissesOffset",
+    ),
+    metrics_snapshot_retries_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotRetriesOffset",
+    ),
+    metrics_snapshot_reconnects_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotReconnectsOffset",
+    ),
+    metrics_snapshot_cancellations_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotCancellationsOffset",
+    ),
+    metrics_snapshot_transport_errors_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotTransportErrorsOffset",
+    ),
+    metrics_snapshot_protocol_errors_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotProtocolErrorsOffset",
+    ),
+    metrics_snapshot_bytes_sent_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotBytesSentOffset",
+    ),
+    metrics_snapshot_bytes_received_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotBytesReceivedOffset",
+    ),
+    metrics_snapshot_active_lanes_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotActiveLanesOffset",
+    ),
+  } satisfies Ffi_Layout_Contract
+
+  const bounded = [
+    ["connectAddressOffset", layout.connect_address_offset],
+    ["connectAddressLengthOffset", layout.connect_address_length_offset],
+    ["connectServerNameOffset", layout.connect_server_name_offset],
+    ["connectServerNameLengthOffset", layout.connect_server_name_length_offset],
+    ["connectCertificateOffset", layout.connect_certificate_offset],
+    ["connectCertificateLengthOffset", layout.connect_certificate_length_offset],
+    [
+      "connectClientCertificateChainOffset",
+      layout.connect_client_certificate_chain_offset,
+    ],
+    [
+      "connectClientCertificateChainLengthOffset",
+      layout.connect_client_certificate_chain_length_offset,
+    ],
+    ["connectClientPrivateKeyOffset", layout.connect_client_private_key_offset],
+    [
+      "connectClientPrivateKeyLengthOffset",
+      layout.connect_client_private_key_length_offset,
+    ],
+    ["connectDataProtectionKeyOffset", layout.connect_data_protection_key_offset],
+    [
+      "connectDataProtectionKeyLengthOffset",
+      layout.connect_data_protection_key_length_offset,
+    ],
+    [
+      "connectPreviousDataProtectionKeysOffset",
+      layout.connect_previous_data_protection_keys_offset,
+    ],
+    [
+      "connectPreviousDataProtectionKeysLengthOffset",
+      layout.connect_previous_data_protection_keys_length_offset,
+    ],
+    [
+      "connectPreviousDataProtectionKeyCountOffset",
+      layout.connect_previous_data_protection_key_count_offset,
+    ],
+    [
+      "connectCompressionEnabledOffset",
+      layout.connect_compression_enabled_offset,
+    ],
+    ["connectCompressionLevelOffset", layout.connect_compression_level_offset],
+    ["connectMinimumInputSizeOffset", layout.connect_minimum_input_size_offset],
+    ["connectMinimumSavingsOffset", layout.connect_minimum_savings_offset],
+    ["connectEncryptionOffset", layout.connect_encryption_offset],
+    ["connectTimeoutOffset", layout.connect_timeout_offset],
+    ["connectRequestTimeoutOffset", layout.connect_request_timeout_offset],
+    [
+      "connectRetryMaxAttemptsOffset",
+      layout.connect_retry_max_attempts_offset,
+    ],
+    ["connectMaxInFlightOffset", layout.connect_max_in_flight_offset],
+  ] as const
+  for (const [name, offset] of bounded) {
+    if (offset >= layout.connect_options_bytes) {
+      throw new Error(
+        `${FFI_LAYOUT_TRAIT_ID}.${name} must be smaller than connectOptionsBytes`,
+      )
+    }
+  }
+  const metadata_offsets = [
+    ["errorMetadataCodeOffset", layout.error_metadata_code_offset],
+    ["errorMetadataOperationOffset", layout.error_metadata_operation_offset],
+    ["errorMetadataPhaseOffset", layout.error_metadata_phase_offset],
+    ["errorMetadataBackendOffset", layout.error_metadata_backend_offset],
+    ["errorMetadataRetryableOffset", layout.error_metadata_retryable_offset],
+    ["errorMetadataAmbiguousOffset", layout.error_metadata_ambiguous_offset],
+    [
+      "errorMetadataMutationIdLengthOffset",
+      layout.error_metadata_mutation_id_length_offset,
+    ],
+    ["errorMetadataMutationIdOffset", layout.error_metadata_mutation_id_offset],
+  ] as const
+  for (const [name, offset] of metadata_offsets) {
+    if (offset >= layout.error_metadata_bytes) {
+      throw new Error(
+        `${FFI_LAYOUT_TRAIT_ID}.${name} must be smaller than errorMetadataBytes`,
+      )
+    }
+  }
+  if (
+    layout.error_metadata_mutation_id_offset + mutation_id_bytes >
+    layout.error_metadata_bytes
+  ) {
+    throw new Error(
+      `${FFI_LAYOUT_TRAIT_ID}.errorMetadataMutationIdOffset leaves no room for a mutation ID`,
+    )
+  }
+  const metrics_offsets = [
+    ["metricsSnapshotRequestsOffset", layout.metrics_snapshot_requests_offset],
+    ["metricsSnapshotHitsOffset", layout.metrics_snapshot_hits_offset],
+    ["metricsSnapshotMissesOffset", layout.metrics_snapshot_misses_offset],
+    ["metricsSnapshotRetriesOffset", layout.metrics_snapshot_retries_offset],
+    [
+      "metricsSnapshotReconnectsOffset",
+      layout.metrics_snapshot_reconnects_offset,
+    ],
+    [
+      "metricsSnapshotCancellationsOffset",
+      layout.metrics_snapshot_cancellations_offset,
+    ],
+    [
+      "metricsSnapshotTransportErrorsOffset",
+      layout.metrics_snapshot_transport_errors_offset,
+    ],
+    [
+      "metricsSnapshotProtocolErrorsOffset",
+      layout.metrics_snapshot_protocol_errors_offset,
+    ],
+    ["metricsSnapshotBytesSentOffset", layout.metrics_snapshot_bytes_sent_offset],
+    [
+      "metricsSnapshotBytesReceivedOffset",
+      layout.metrics_snapshot_bytes_received_offset,
+    ],
+    ["metricsSnapshotActiveLanesOffset", layout.metrics_snapshot_active_lanes_offset],
+  ] as const
+  for (const [name, offset] of metrics_offsets) {
+    if (offset + 8 > layout.metrics_snapshot_bytes) {
+      throw new Error(
+        `${FFI_LAYOUT_TRAIT_ID}.${name} exceeds metricsSnapshotBytes`,
+      )
+    }
+  }
+  return layout
+}
+
 function value_format_contract(value: unknown): Value_Format_Contract {
   const contract = object_value(value, VALUE_FORMAT_TRAIT_ID)
   const values = {
@@ -898,6 +1258,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const value_format_trait = trait_value_any(service, trait_ids(VALUE_FORMAT_TRAIT_ID), location)
   const client_defaults_trait = trait_value_any(service, trait_ids(CLIENT_DEFAULTS_TRAIT_ID), location)
   const ffi_trait = trait_value_any(service, trait_ids(FFI_CONTRACT_TRAIT_ID), location)
+  const ffi_layout_trait = trait_value_any(service, trait_ids(FFI_LAYOUT_TRAIT_ID), location)
   const parsed_api = api_contract(shapes, client_service_id, client_namespace)
   const api = {
     ...parsed_api,
@@ -920,6 +1281,10 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   }
   const ffi = ffi_contract(ffi_trait)
   const client_defaults = client_defaults_contract(client_defaults_trait)
+  const ffi_layout = ffi_layout_contract(
+    ffi_layout_trait,
+    client_defaults.mutation_id_bytes,
+  )
   if (client_defaults.mutation_id_bytes !== wire.mutation_id_bytes) {
     throw new Error(
       `${CLIENT_DEFAULTS_TRAIT_ID}.mutationIdBytes must match the protocol wire contract`,
@@ -938,6 +1303,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     api,
     client_defaults,
     ffi,
+    ffi_layout,
     value_format: value_format_contract(value_format_trait),
   }
 }
@@ -1195,6 +1561,7 @@ ${display_arms}
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const layout = contract.ffi_layout
   const value_version_bytes = encode_vu128(value.version)
   const ffi = contract.ffi
   const ffi_operations = ffi.operations
@@ -1289,6 +1656,12 @@ pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.mi
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
+/// Size in bytes of the native FfiConnectOptions structure.
+pub const FFI_CONNECT_OPTIONS_BYTES: usize = ${formatted_decimal(layout.connect_options_bytes)};
+/// Size in bytes of the native FfiErrorMetadata structure.
+pub const FFI_ERROR_METADATA_BYTES: usize = ${formatted_decimal(layout.error_metadata_bytes)};
+/// Size in bytes of the native FfiMetricsSnapshot structure.
+pub const FFI_METRICS_SNAPSHOT_BYTES: usize = ${formatted_decimal(layout.metrics_snapshot_bytes)};
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
@@ -1423,6 +1796,7 @@ export function render_c_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
   const ffi = contract.ffi
+  const layout = contract.ffi_layout
   const ffi_defines = [
     `#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${c_unsigned_literal(ffi.abi_version)}`,
     ...ffi.error_codes.map(
@@ -1491,6 +1865,52 @@ export function render_c_contract(contract: Client_Contract): string {
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
 #define OPENKACHE_SMITHY_CLIENT_CERTIFICATE_PEM_TYPE ${c_string_literal(defaults.certificate_pem_type)}
 #define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_OPTIONS_BYTES ${layout.connect_options_bytes}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_ADDRESS_OFFSET ${layout.connect_address_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_ADDRESS_LENGTH_OFFSET ${layout.connect_address_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_SERVER_NAME_OFFSET ${layout.connect_server_name_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET ${layout.connect_server_name_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CERTIFICATE_OFFSET ${layout.connect_certificate_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET ${layout.connect_certificate_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET ${layout.connect_client_certificate_chain_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET ${layout.connect_client_certificate_chain_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET ${layout.connect_client_private_key_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET ${layout.connect_client_private_key_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET ${layout.connect_data_protection_key_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET ${layout.connect_data_protection_key_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET ${layout.connect_previous_data_protection_keys_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET ${layout.connect_previous_data_protection_keys_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET ${layout.connect_previous_data_protection_key_count_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_COMPRESSION_ENABLED_OFFSET ${layout.connect_compression_enabled_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_COMPRESSION_LEVEL_OFFSET ${layout.connect_compression_level_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET ${layout.connect_minimum_input_size_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_MINIMUM_SAVINGS_OFFSET ${layout.connect_minimum_savings_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_ENCRYPTION_OFFSET ${layout.connect_encryption_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_TIMEOUT_OFFSET ${layout.connect_timeout_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_REQUEST_TIMEOUT_OFFSET ${layout.connect_request_timeout_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET ${layout.connect_retry_max_attempts_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_MAX_IN_FLIGHT_OFFSET ${layout.connect_max_in_flight_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_BYTES ${layout.error_metadata_bytes}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_CODE_OFFSET ${layout.error_metadata_code_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_OPERATION_OFFSET ${layout.error_metadata_operation_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_PHASE_OFFSET ${layout.error_metadata_phase_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_BACKEND_OFFSET ${layout.error_metadata_backend_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_RETRYABLE_OFFSET ${layout.error_metadata_retryable_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_AMBIGUOUS_OFFSET ${layout.error_metadata_ambiguous_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET ${layout.error_metadata_mutation_id_length_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_MUTATION_ID_OFFSET ${layout.error_metadata_mutation_id_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_BYTES ${layout.metrics_snapshot_bytes}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET ${layout.metrics_snapshot_requests_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_HITS_OFFSET ${layout.metrics_snapshot_hits_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_MISSES_OFFSET ${layout.metrics_snapshot_misses_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_RETRIES_OFFSET ${layout.metrics_snapshot_retries_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET ${layout.metrics_snapshot_reconnects_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET ${layout.metrics_snapshot_cancellations_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET ${layout.metrics_snapshot_transport_errors_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET ${layout.metrics_snapshot_protocol_errors_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET ${layout.metrics_snapshot_bytes_sent_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET ${layout.metrics_snapshot_bytes_received_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET ${layout.metrics_snapshot_active_lanes_offset}u
 ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
@@ -2106,6 +2526,7 @@ function java_int_literal(value: number): string {
 /** Renders Java contract constants generated from the Smithy model. */
 export function render_java_contract(contract: Client_Contract): string {
   const ffi = contract.ffi
+  const layout = contract.ffi_layout
   const defaults = contract.client_defaults
   const value = contract.value_format
   const entries = (prefix: string, values: readonly Wire_Entry[]): string =>
@@ -2144,6 +2565,52 @@ public final class SmithyContract {
     public static final int VALUE_FORMAT_ENCRYPTION_COMPACT = ${value.encryption_compact};
     public static final int VALUE_FORMAT_ENCRYPTION_ROBUST = ${value.encryption_robust};
     public static final int FFI_ABI_VERSION = ${ffi.abi_version};
+    public static final int FFI_CONNECT_OPTIONS_BYTES = ${layout.connect_options_bytes};
+    public static final int FFI_CONNECT_ADDRESS_OFFSET = ${layout.connect_address_offset};
+    public static final int FFI_CONNECT_ADDRESS_LENGTH_OFFSET = ${layout.connect_address_length_offset};
+    public static final int FFI_CONNECT_SERVER_NAME_OFFSET = ${layout.connect_server_name_offset};
+    public static final int FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET = ${layout.connect_server_name_length_offset};
+    public static final int FFI_CONNECT_CERTIFICATE_OFFSET = ${layout.connect_certificate_offset};
+    public static final int FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET = ${layout.connect_certificate_length_offset};
+    public static final int FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET = ${layout.connect_client_certificate_chain_offset};
+    public static final int FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET = ${layout.connect_client_certificate_chain_length_offset};
+    public static final int FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET = ${layout.connect_client_private_key_offset};
+    public static final int FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET = ${layout.connect_client_private_key_length_offset};
+    public static final int FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET = ${layout.connect_data_protection_key_offset};
+    public static final int FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET = ${layout.connect_data_protection_key_length_offset};
+    public static final int FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET = ${layout.connect_previous_data_protection_keys_offset};
+    public static final int FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET = ${layout.connect_previous_data_protection_keys_length_offset};
+    public static final int FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET = ${layout.connect_previous_data_protection_key_count_offset};
+    public static final int FFI_CONNECT_COMPRESSION_ENABLED_OFFSET = ${layout.connect_compression_enabled_offset};
+    public static final int FFI_CONNECT_COMPRESSION_LEVEL_OFFSET = ${layout.connect_compression_level_offset};
+    public static final int FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET = ${layout.connect_minimum_input_size_offset};
+    public static final int FFI_CONNECT_MINIMUM_SAVINGS_OFFSET = ${layout.connect_minimum_savings_offset};
+    public static final int FFI_CONNECT_ENCRYPTION_OFFSET = ${layout.connect_encryption_offset};
+    public static final int FFI_CONNECT_TIMEOUT_OFFSET = ${layout.connect_timeout_offset};
+    public static final int FFI_CONNECT_REQUEST_TIMEOUT_OFFSET = ${layout.connect_request_timeout_offset};
+    public static final int FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET = ${layout.connect_retry_max_attempts_offset};
+    public static final int FFI_CONNECT_MAX_IN_FLIGHT_OFFSET = ${layout.connect_max_in_flight_offset};
+    public static final int FFI_ERROR_METADATA_BYTES = ${layout.error_metadata_bytes};
+    public static final int FFI_ERROR_METADATA_CODE_OFFSET = ${layout.error_metadata_code_offset};
+    public static final int FFI_ERROR_METADATA_OPERATION_OFFSET = ${layout.error_metadata_operation_offset};
+    public static final int FFI_ERROR_METADATA_PHASE_OFFSET = ${layout.error_metadata_phase_offset};
+    public static final int FFI_ERROR_METADATA_BACKEND_OFFSET = ${layout.error_metadata_backend_offset};
+    public static final int FFI_ERROR_METADATA_RETRYABLE_OFFSET = ${layout.error_metadata_retryable_offset};
+    public static final int FFI_ERROR_METADATA_AMBIGUOUS_OFFSET = ${layout.error_metadata_ambiguous_offset};
+    public static final int FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET = ${layout.error_metadata_mutation_id_length_offset};
+    public static final int FFI_ERROR_METADATA_MUTATION_ID_OFFSET = ${layout.error_metadata_mutation_id_offset};
+    public static final int FFI_METRICS_SNAPSHOT_BYTES = ${layout.metrics_snapshot_bytes};
+    public static final int FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET = ${layout.metrics_snapshot_requests_offset};
+    public static final int FFI_METRICS_SNAPSHOT_HITS_OFFSET = ${layout.metrics_snapshot_hits_offset};
+    public static final int FFI_METRICS_SNAPSHOT_MISSES_OFFSET = ${layout.metrics_snapshot_misses_offset};
+    public static final int FFI_METRICS_SNAPSHOT_RETRIES_OFFSET = ${layout.metrics_snapshot_retries_offset};
+    public static final int FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET = ${layout.metrics_snapshot_reconnects_offset};
+    public static final int FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET = ${layout.metrics_snapshot_cancellations_offset};
+    public static final int FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET = ${layout.metrics_snapshot_transport_errors_offset};
+    public static final int FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET = ${layout.metrics_snapshot_protocol_errors_offset};
+    public static final int FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET = ${layout.metrics_snapshot_bytes_sent_offset};
+    public static final int FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET = ${layout.metrics_snapshot_bytes_received_offset};
+    public static final int FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET = ${layout.metrics_snapshot_active_lanes_offset};
 
 ${entries("OPCODE_", contract.opcodes)}
 
@@ -2218,6 +2685,7 @@ ${operations}
 /** Renders Kotlin Smithy operation types and stable contract constants. */
 export function render_kotlin_contract(contract: Client_Contract): string {
   const ffi = contract.ffi
+  const layout = contract.ffi_layout
   const defaults = contract.client_defaults
   const value = contract.value_format
   const entries = (prefix: string, values: readonly Wire_Entry[]): string =>
@@ -2254,6 +2722,52 @@ object SmithyContract {
     const val VALUE_FORMAT_ENCRYPTION_COMPACT: Int = ${value.encryption_compact}
     const val VALUE_FORMAT_ENCRYPTION_ROBUST: Int = ${value.encryption_robust}
     const val FFI_ABI_VERSION: Int = ${ffi.abi_version}
+    const val FFI_CONNECT_OPTIONS_BYTES: Int = ${layout.connect_options_bytes}
+    const val FFI_CONNECT_ADDRESS_OFFSET: Int = ${layout.connect_address_offset}
+    const val FFI_CONNECT_ADDRESS_LENGTH_OFFSET: Int = ${layout.connect_address_length_offset}
+    const val FFI_CONNECT_SERVER_NAME_OFFSET: Int = ${layout.connect_server_name_offset}
+    const val FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET: Int = ${layout.connect_server_name_length_offset}
+    const val FFI_CONNECT_CERTIFICATE_OFFSET: Int = ${layout.connect_certificate_offset}
+    const val FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET: Int = ${layout.connect_certificate_length_offset}
+    const val FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET: Int = ${layout.connect_client_certificate_chain_offset}
+    const val FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET: Int = ${layout.connect_client_certificate_chain_length_offset}
+    const val FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET: Int = ${layout.connect_client_private_key_offset}
+    const val FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET: Int = ${layout.connect_client_private_key_length_offset}
+    const val FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET: Int = ${layout.connect_data_protection_key_offset}
+    const val FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET: Int = ${layout.connect_data_protection_key_length_offset}
+    const val FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET: Int = ${layout.connect_previous_data_protection_keys_offset}
+    const val FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET: Int = ${layout.connect_previous_data_protection_keys_length_offset}
+    const val FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET: Int = ${layout.connect_previous_data_protection_key_count_offset}
+    const val FFI_CONNECT_COMPRESSION_ENABLED_OFFSET: Int = ${layout.connect_compression_enabled_offset}
+    const val FFI_CONNECT_COMPRESSION_LEVEL_OFFSET: Int = ${layout.connect_compression_level_offset}
+    const val FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET: Int = ${layout.connect_minimum_input_size_offset}
+    const val FFI_CONNECT_MINIMUM_SAVINGS_OFFSET: Int = ${layout.connect_minimum_savings_offset}
+    const val FFI_CONNECT_ENCRYPTION_OFFSET: Int = ${layout.connect_encryption_offset}
+    const val FFI_CONNECT_TIMEOUT_OFFSET: Int = ${layout.connect_timeout_offset}
+    const val FFI_CONNECT_REQUEST_TIMEOUT_OFFSET: Int = ${layout.connect_request_timeout_offset}
+    const val FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET: Int = ${layout.connect_retry_max_attempts_offset}
+    const val FFI_CONNECT_MAX_IN_FLIGHT_OFFSET: Int = ${layout.connect_max_in_flight_offset}
+    const val FFI_ERROR_METADATA_BYTES: Int = ${layout.error_metadata_bytes}
+    const val FFI_ERROR_METADATA_CODE_OFFSET: Int = ${layout.error_metadata_code_offset}
+    const val FFI_ERROR_METADATA_OPERATION_OFFSET: Int = ${layout.error_metadata_operation_offset}
+    const val FFI_ERROR_METADATA_PHASE_OFFSET: Int = ${layout.error_metadata_phase_offset}
+    const val FFI_ERROR_METADATA_BACKEND_OFFSET: Int = ${layout.error_metadata_backend_offset}
+    const val FFI_ERROR_METADATA_RETRYABLE_OFFSET: Int = ${layout.error_metadata_retryable_offset}
+    const val FFI_ERROR_METADATA_AMBIGUOUS_OFFSET: Int = ${layout.error_metadata_ambiguous_offset}
+    const val FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET: Int = ${layout.error_metadata_mutation_id_length_offset}
+    const val FFI_ERROR_METADATA_MUTATION_ID_OFFSET: Int = ${layout.error_metadata_mutation_id_offset}
+    const val FFI_METRICS_SNAPSHOT_BYTES: Int = ${layout.metrics_snapshot_bytes}
+    const val FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET: Int = ${layout.metrics_snapshot_requests_offset}
+    const val FFI_METRICS_SNAPSHOT_HITS_OFFSET: Int = ${layout.metrics_snapshot_hits_offset}
+    const val FFI_METRICS_SNAPSHOT_MISSES_OFFSET: Int = ${layout.metrics_snapshot_misses_offset}
+    const val FFI_METRICS_SNAPSHOT_RETRIES_OFFSET: Int = ${layout.metrics_snapshot_retries_offset}
+    const val FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET: Int = ${layout.metrics_snapshot_reconnects_offset}
+    const val FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET: Int = ${layout.metrics_snapshot_cancellations_offset}
+    const val FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET: Int = ${layout.metrics_snapshot_transport_errors_offset}
+    const val FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET: Int = ${layout.metrics_snapshot_protocol_errors_offset}
+    const val FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET: Int = ${layout.metrics_snapshot_bytes_sent_offset}
+    const val FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET: Int = ${layout.metrics_snapshot_bytes_received_offset}
+    const val FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET: Int = ${layout.metrics_snapshot_active_lanes_offset}
 
 ${entries("OPCODE_", contract.opcodes)}
 
@@ -2739,6 +3253,7 @@ ${assignments}
     .join("\n")
   const value = contract.value_format
   const ffi = contract.ffi
+  const layout = contract.ffi_layout
   const version_bytes = encode_vu128(value.version)
   const operation_get_json = swift_ffi_value(ffi.operations, "GetJson", "operation")
   const operation_set_json = swift_ffi_value(ffi.operations, "SetJson", "operation")
@@ -2867,6 +3382,52 @@ ${connection_states}
 /// Native ABI identifiers shared by every language adapter.
 public enum Smithy_Native_Contract: Sendable {
   public static let abiVersion: UInt32 = ${ffi.abi_version}
+  public static let connectOptionsBytes: Int = ${layout.connect_options_bytes}
+  public static let connectAddressOffset: Int = ${layout.connect_address_offset}
+  public static let connectAddressLengthOffset: Int = ${layout.connect_address_length_offset}
+  public static let connectServerNameOffset: Int = ${layout.connect_server_name_offset}
+  public static let connectServerNameLengthOffset: Int = ${layout.connect_server_name_length_offset}
+  public static let connectCertificateOffset: Int = ${layout.connect_certificate_offset}
+  public static let connectCertificateLengthOffset: Int = ${layout.connect_certificate_length_offset}
+  public static let connectClientCertificateChainOffset: Int = ${layout.connect_client_certificate_chain_offset}
+  public static let connectClientCertificateChainLengthOffset: Int = ${layout.connect_client_certificate_chain_length_offset}
+  public static let connectClientPrivateKeyOffset: Int = ${layout.connect_client_private_key_offset}
+  public static let connectClientPrivateKeyLengthOffset: Int = ${layout.connect_client_private_key_length_offset}
+  public static let connectDataProtectionKeyOffset: Int = ${layout.connect_data_protection_key_offset}
+  public static let connectDataProtectionKeyLengthOffset: Int = ${layout.connect_data_protection_key_length_offset}
+  public static let connectPreviousDataProtectionKeysOffset: Int = ${layout.connect_previous_data_protection_keys_offset}
+  public static let connectPreviousDataProtectionKeysLengthOffset: Int = ${layout.connect_previous_data_protection_keys_length_offset}
+  public static let connectPreviousDataProtectionKeyCountOffset: Int = ${layout.connect_previous_data_protection_key_count_offset}
+  public static let connectCompressionEnabledOffset: Int = ${layout.connect_compression_enabled_offset}
+  public static let connectCompressionLevelOffset: Int = ${layout.connect_compression_level_offset}
+  public static let connectMinimumInputSizeOffset: Int = ${layout.connect_minimum_input_size_offset}
+  public static let connectMinimumSavingsOffset: Int = ${layout.connect_minimum_savings_offset}
+  public static let connectEncryptionOffset: Int = ${layout.connect_encryption_offset}
+  public static let connectTimeoutOffset: Int = ${layout.connect_timeout_offset}
+  public static let connectRequestTimeoutOffset: Int = ${layout.connect_request_timeout_offset}
+  public static let connectRetryMaxAttemptsOffset: Int = ${layout.connect_retry_max_attempts_offset}
+  public static let connectMaxInFlightOffset: Int = ${layout.connect_max_in_flight_offset}
+  public static let errorMetadataBytes: Int = ${layout.error_metadata_bytes}
+  public static let errorMetadataCodeOffset: Int = ${layout.error_metadata_code_offset}
+  public static let errorMetadataOperationOffset: Int = ${layout.error_metadata_operation_offset}
+  public static let errorMetadataPhaseOffset: Int = ${layout.error_metadata_phase_offset}
+  public static let errorMetadataBackendOffset: Int = ${layout.error_metadata_backend_offset}
+  public static let errorMetadataRetryableOffset: Int = ${layout.error_metadata_retryable_offset}
+  public static let errorMetadataAmbiguousOffset: Int = ${layout.error_metadata_ambiguous_offset}
+  public static let errorMetadataMutationIdLengthOffset: Int = ${layout.error_metadata_mutation_id_length_offset}
+  public static let errorMetadataMutationIdOffset: Int = ${layout.error_metadata_mutation_id_offset}
+  public static let metricsSnapshotBytes: Int = ${layout.metrics_snapshot_bytes}
+  public static let metricsSnapshotRequestsOffset: Int = ${layout.metrics_snapshot_requests_offset}
+  public static let metricsSnapshotHitsOffset: Int = ${layout.metrics_snapshot_hits_offset}
+  public static let metricsSnapshotMissesOffset: Int = ${layout.metrics_snapshot_misses_offset}
+  public static let metricsSnapshotRetriesOffset: Int = ${layout.metrics_snapshot_retries_offset}
+  public static let metricsSnapshotReconnectsOffset: Int = ${layout.metrics_snapshot_reconnects_offset}
+  public static let metricsSnapshotCancellationsOffset: Int = ${layout.metrics_snapshot_cancellations_offset}
+  public static let metricsSnapshotTransportErrorsOffset: Int = ${layout.metrics_snapshot_transport_errors_offset}
+  public static let metricsSnapshotProtocolErrorsOffset: Int = ${layout.metrics_snapshot_protocol_errors_offset}
+  public static let metricsSnapshotBytesSentOffset: Int = ${layout.metrics_snapshot_bytes_sent_offset}
+  public static let metricsSnapshotBytesReceivedOffset: Int = ${layout.metrics_snapshot_bytes_received_offset}
+  public static let metricsSnapshotActiveLanesOffset: Int = ${layout.metrics_snapshot_active_lanes_offset}
   public static let operationGetJson: UInt32 = ${operation_get_json}
   public static let operationSetJson: UInt32 = ${operation_set_json}
   public static let operationReconnect: UInt32 = ${operation_reconnect}

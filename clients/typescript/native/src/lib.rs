@@ -27,6 +27,7 @@ use openkache_client_core::{
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const MAX_SAFE_REQUEST_ID: u64 = 9_007_199_254_740_991;
 
 /// Mutual TLS identity accepted from JavaScript.
 #[napi(object)]
@@ -584,11 +585,24 @@ impl NativeClient {
     }
 
     fn allocate_request_id(&self) -> u64 {
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        if request_id == 0 {
-            self.next_request_id.fetch_add(1, Ordering::Relaxed)
-        } else {
+        let request_id = self
+            .next_request_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let current = (1..=MAX_SAFE_REQUEST_ID)
+                    .contains(&current)
+                    .then_some(current)
+                    .unwrap_or(1);
+                Some(if current == MAX_SAFE_REQUEST_ID {
+                    1
+                } else {
+                    current + 1
+                })
+            })
+            .unwrap_or(1);
+        if (1..=MAX_SAFE_REQUEST_ID).contains(&request_id) {
             request_id
+        } else {
+            1
         }
     }
 

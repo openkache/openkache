@@ -982,13 +982,15 @@ class OpenKacheClient {
   }
 
   int _allocateRequestId() {
+    const maxRequestId = 0xffff_ffff_ffff_ffff;
     while (true) {
       final requestId = _nextRequestId;
-      _nextRequestId++;
-      if (_nextRequestId == 0x7fff_ffff_ffff_ffff) {
-        _nextRequestId = 1;
+      _nextRequestId = requestId <= 0 || requestId >= maxRequestId
+          ? 1
+          : requestId + 1;
+      if (requestId > 0 && !_activeRequests.containsKey(requestId)) {
+        return requestId;
       }
-      if (!_activeRequests.containsKey(requestId)) return requestId;
     }
   }
 

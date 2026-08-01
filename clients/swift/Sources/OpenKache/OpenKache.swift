@@ -7,8 +7,8 @@ import Foundation
 private typealias NativeClientPointer = OpaquePointer
 private typealias NativeResultPointer = OpaquePointer
 private let nativeMutationIDBytes = Smithy_Value_Format.mutationIdBytes
-private let nativeConnectOptionsBytes = 184
-private let nativeMetricsSnapshotBytes = 88
+private let nativeConnectOptionsBytes = Smithy_Native_Contract.connectOptionsBytes
+private let nativeMetricsSnapshotBytes = Smithy_Native_Contract.metricsSnapshotBytes
 
 @_silgen_name("openkache_client_abi_version")
 private func nativeAbiVersion() -> UInt32
@@ -390,17 +390,39 @@ private final class NativeHandle: @unchecked Sendable {
             throw OpenKacheError("native client did not return metrics")
         }
         return OpenKacheMetricsSnapshot(
-            requests: pointer.load(fromByteOffset: 0, as: UInt64.self),
-            hits: pointer.load(fromByteOffset: 8, as: UInt64.self),
-            misses: pointer.load(fromByteOffset: 16, as: UInt64.self),
-            retries: pointer.load(fromByteOffset: 24, as: UInt64.self),
-            reconnects: pointer.load(fromByteOffset: 32, as: UInt64.self),
-            cancellations: pointer.load(fromByteOffset: 40, as: UInt64.self),
-            transportErrors: pointer.load(fromByteOffset: 48, as: UInt64.self),
-            protocolErrors: pointer.load(fromByteOffset: 56, as: UInt64.self),
-            bytesSent: pointer.load(fromByteOffset: 64, as: UInt64.self),
-            bytesReceived: pointer.load(fromByteOffset: 72, as: UInt64.self),
-            activeLanes: pointer.load(fromByteOffset: 80, as: UInt64.self)
+            requests: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotRequestsOffset,
+                as: UInt64.self),
+            hits: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotHitsOffset,
+                as: UInt64.self),
+            misses: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotMissesOffset,
+                as: UInt64.self),
+            retries: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotRetriesOffset,
+                as: UInt64.self),
+            reconnects: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotReconnectsOffset,
+                as: UInt64.self),
+            cancellations: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotCancellationsOffset,
+                as: UInt64.self),
+            transportErrors: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotTransportErrorsOffset,
+                as: UInt64.self),
+            protocolErrors: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotProtocolErrorsOffset,
+                as: UInt64.self),
+            bytesSent: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotBytesSentOffset,
+                as: UInt64.self),
+            bytesReceived: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotBytesReceivedOffset,
+                as: UInt64.self),
+            activeLanes: pointer.load(
+                fromByteOffset: Smithy_Native_Contract.metricsSnapshotActiveLanesOffset,
+                as: UInt64.self)
         )
     }
 
@@ -578,42 +600,72 @@ private enum NativeBridge {
                 )
             }
 
-            storePointer(address, at: 0)
-            storeSize(addressLength, at: 8)
-            storePointer(serverName, at: 16)
-            storeSize(serverNameLength, at: 24)
-            storePointer(certificate, at: 32)
-            storeSize(certificateLength, at: 40)
-            storePointer(clientCertificate, at: 48)
-            storeSize(clientCertificateLength, at: 56)
-            storePointer(clientPrivateKey, at: 64)
-            storeSize(clientPrivateKeyLength, at: 72)
-            storePointer(dataProtectionKey, at: 80)
-            storeSize(dataProtectionKeyLength, at: 88)
-            storePointer(previousKeys, at: 96)
-            storeSize(previousKeysLength, at: 104)
-            storeSize(previousKeyCount, at: 112)
+            storePointer(address, at: Smithy_Native_Contract.connectAddressOffset)
+            storeSize(addressLength, at: Smithy_Native_Contract.connectAddressLengthOffset)
+            storePointer(serverName, at: Smithy_Native_Contract.connectServerNameOffset)
+            storeSize(serverNameLength, at: Smithy_Native_Contract.connectServerNameLengthOffset)
+            storePointer(certificate, at: Smithy_Native_Contract.connectCertificateOffset)
+            storeSize(certificateLength, at: Smithy_Native_Contract.connectCertificateLengthOffset)
+            storePointer(
+                clientCertificate,
+                at: Smithy_Native_Contract.connectClientCertificateChainOffset)
+            storeSize(
+                clientCertificateLength,
+                at: Smithy_Native_Contract.connectClientCertificateChainLengthOffset)
+            storePointer(clientPrivateKey, at: Smithy_Native_Contract.connectClientPrivateKeyOffset)
+            storeSize(
+                clientPrivateKeyLength,
+                at: Smithy_Native_Contract.connectClientPrivateKeyLengthOffset)
+            storePointer(
+                dataProtectionKey,
+                at: Smithy_Native_Contract.connectDataProtectionKeyOffset)
+            storeSize(
+                dataProtectionKeyLength,
+                at: Smithy_Native_Contract.connectDataProtectionKeyLengthOffset)
+            storePointer(
+                previousKeys,
+                at: Smithy_Native_Contract.connectPreviousDataProtectionKeysOffset)
+            storeSize(
+                previousKeysLength,
+                at: Smithy_Native_Contract.connectPreviousDataProtectionKeysLengthOffset)
+            storeSize(
+                previousKeyCount,
+                at: Smithy_Native_Contract.connectPreviousDataProtectionKeyCountOffset)
             buffer.storeBytes(
                 of: options.compression.enabled ? UInt8(1) : UInt8(0),
-                toByteOffset: 120,
+                toByteOffset: Smithy_Native_Contract.connectCompressionEnabledOffset,
                 as: UInt8.self
             )
             buffer.storeBytes(
                 of: options.compression.level,
-                toByteOffset: 124,
+                toByteOffset: Smithy_Native_Contract.connectCompressionLevelOffset,
                 as: Int32.self
             )
-            storeSize(options.compression.minimumInputSize, at: 128)
-            storeSize(options.compression.minimumSavings, at: 136)
+            storeSize(
+                options.compression.minimumInputSize,
+                at: Smithy_Native_Contract.connectMinimumInputSizeOffset)
+            storeSize(
+                options.compression.minimumSavings,
+                at: Smithy_Native_Contract.connectMinimumSavingsOffset)
             buffer.storeBytes(
                 of: options.encryption.nativeValue,
-                toByteOffset: 144,
+                toByteOffset: Smithy_Native_Contract.connectEncryptionOffset,
                 as: UInt32.self
             )
-            buffer.storeBytes(of: connectTimeout, toByteOffset: 152, as: UInt64.self)
-            buffer.storeBytes(of: requestTimeout, toByteOffset: 160, as: UInt64.self)
-            storeSize(options.retryMaxAttempts, at: 168)
-            storeSize(options.maxInFlight, at: 176)
+            buffer.storeBytes(
+                of: connectTimeout,
+                toByteOffset: Smithy_Native_Contract.connectTimeoutOffset,
+                as: UInt64.self)
+            buffer.storeBytes(
+                of: requestTimeout,
+                toByteOffset: Smithy_Native_Contract.connectRequestTimeoutOffset,
+                as: UInt64.self)
+            storeSize(
+                options.retryMaxAttempts,
+                at: Smithy_Native_Contract.connectRetryMaxAttemptsOffset)
+            storeSize(
+                options.maxInFlight,
+                at: Smithy_Native_Contract.connectMaxInFlightOffset)
             return nativeConnectWithOptions(buffer.baseAddress)
         }
     }
@@ -836,26 +888,41 @@ private func resultError(_ result: NativeResultPointer) -> OpenKacheError {
 }
 
 private func resultMetadata(_ result: NativeResultPointer) -> ErrorMetadata? {
-    let bytes = 36
+    let bytes = Smithy_Native_Contract.errorMetadataBytes
     let pointer = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: 4)
     defer { pointer.deallocate() }
     guard nativeResultErrorMetadata(result, pointer) != 0 else {
         return nil
     }
-    let mutationLength = Int(pointer.load(fromByteOffset: 18, as: UInt8.self))
+    let mutationLength = Int(pointer.load(
+        fromByteOffset: Smithy_Native_Contract.errorMetadataMutationIdLengthOffset,
+        as: UInt8.self))
     let boundedLength = min(mutationLength, nativeMutationIDBytes)
     let mutationID = boundedLength == 0
         ? nil
         : Data(
-            bytes: pointer.advanced(by: 20),
+            bytes: pointer.advanced(
+                by: Smithy_Native_Contract.errorMetadataMutationIdOffset),
             count: boundedLength)
     return ErrorMetadata(
-        code: pointer.load(fromByteOffset: 0, as: UInt32.self),
-        operation: pointer.load(fromByteOffset: 4, as: UInt32.self),
-        phase: pointer.load(fromByteOffset: 8, as: UInt32.self),
-        backend: pointer.load(fromByteOffset: 12, as: UInt32.self),
-        retryable: pointer.load(fromByteOffset: 16, as: UInt8.self) != 0,
-        ambiguous: pointer.load(fromByteOffset: 17, as: UInt8.self) != 0,
+        code: pointer.load(
+            fromByteOffset: Smithy_Native_Contract.errorMetadataCodeOffset,
+            as: UInt32.self),
+        operation: pointer.load(
+            fromByteOffset: Smithy_Native_Contract.errorMetadataOperationOffset,
+            as: UInt32.self),
+        phase: pointer.load(
+            fromByteOffset: Smithy_Native_Contract.errorMetadataPhaseOffset,
+            as: UInt32.self),
+        backend: pointer.load(
+            fromByteOffset: Smithy_Native_Contract.errorMetadataBackendOffset,
+            as: UInt32.self),
+        retryable: pointer.load(
+            fromByteOffset: Smithy_Native_Contract.errorMetadataRetryableOffset,
+            as: UInt8.self) != 0,
+        ambiguous: pointer.load(
+            fromByteOffset: Smithy_Native_Contract.errorMetadataAmbiguousOffset,
+            as: UInt8.self) != 0,
         mutationID: mutationID)
 }
 

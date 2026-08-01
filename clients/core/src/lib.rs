@@ -683,10 +683,24 @@ impl<C: ClientConnection> Core<C> {
                 .await
             {
                 Ok(response) if response.status.is_error() => {
-                    return Err(Error::Server {
+                    let error = Error::Server {
                         code: server_error_code(response.status),
                         message: String::from_utf8_lossy(&response.payload).into_owned(),
-                    });
+                    };
+                    // A server-side timeout means execution may have
+                    // started before the response deadline. Preserve the
+                    // mutation token (and SYNC's legacy ambiguity) so the
+                    // caller can safely retry or reconcile the outcome.
+                    if (mutation || operation == Operation::Sync)
+                        && response.status == Status::Timeout
+                    {
+                        return Err(Error::AmbiguousOutcome {
+                            operation,
+                            mutation_id,
+                            cause: Box::new(error),
+                        });
+                    }
+                    return Err(error);
                 }
                 Ok(response) => return Ok(response),
                 Err(failure) => {
@@ -862,15 +876,15 @@ impl<C: ClientConnection> Core<C> {
         if !backoff.is_zero() {
             C::sleep(backoff).await;
         }
-        let timeout = deadline
-            .remaining(Operation::ConnectionRetry)
-            .inspect_err(|_| self.mark_disconnected(failed))?
-            .min(self.connect_timeout);
         let start = self.next_address.fetch_add(1, Ordering::Relaxed);
         let mut replacement = None;
         let mut last_error = None;
         for offset in 0..self.addresses.len() {
             let address = self.addresses[(start + offset) % self.addresses.len()];
+            let timeout = deadline
+                .remaining(Operation::ConnectionRetry)
+                .inspect_err(|_| self.mark_disconnected(failed))?
+                .min(self.connect_timeout);
             match C::connect(
                 address,
                 &self.server_name,

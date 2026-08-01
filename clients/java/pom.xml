@@ -40,6 +40,29 @@
           <argLine>--enable-preview</argLine>
         </configuration>
       </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>generate-smithy-contract</id>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>bun</executable>
+              <arguments>
+                <argument>../generate.ts</argument>
+              </arguments>
+              <environmentVariables>
+                <OPENKACHE_GENERATION_TARGET>java</OPENKACHE_GENERATION_TARGET>
+              </environmentVariables>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
     </plugins>
   </build>
 </project>

@@ -221,6 +221,109 @@ structure ffiContract {
     connectionStateUnknown: Integer
 }
 
+/// Native C ABI structure sizes and offsets used by raw FFI adapters.
+///
+/// These values are part of the versioned ABI. Bindings that allocate or decode
+/// raw native buffers must consume the generated contract instead of duplicating
+/// platform-layout assumptions in language-specific source.
+@trait(selector: "service")
+structure ffiLayout {
+    @required
+    connectOptionsBytes: Integer
+    @required
+    connectAddressOffset: Integer
+    @required
+    connectAddressLengthOffset: Integer
+    @required
+    connectServerNameOffset: Integer
+    @required
+    connectServerNameLengthOffset: Integer
+    @required
+    connectCertificateOffset: Integer
+    @required
+    connectCertificateLengthOffset: Integer
+    @required
+    connectClientCertificateChainOffset: Integer
+    @required
+    connectClientCertificateChainLengthOffset: Integer
+    @required
+    connectClientPrivateKeyOffset: Integer
+    @required
+    connectClientPrivateKeyLengthOffset: Integer
+    @required
+    connectDataProtectionKeyOffset: Integer
+    @required
+    connectDataProtectionKeyLengthOffset: Integer
+    @required
+    connectPreviousDataProtectionKeysOffset: Integer
+    @required
+    connectPreviousDataProtectionKeysLengthOffset: Integer
+    @required
+    connectPreviousDataProtectionKeyCountOffset: Integer
+    @required
+    connectCompressionEnabledOffset: Integer
+    @required
+    connectCompressionLevelOffset: Integer
+    @required
+    connectMinimumInputSizeOffset: Integer
+    @required
+    connectMinimumSavingsOffset: Integer
+    @required
+    connectEncryptionOffset: Integer
+    @required
+    connectTimeoutOffset: Integer
+    @required
+    connectRequestTimeoutOffset: Integer
+    @required
+    connectRetryMaxAttemptsOffset: Integer
+    @required
+    connectMaxInFlightOffset: Integer
+
+    @required
+    errorMetadataBytes: Integer
+    @required
+    errorMetadataCodeOffset: Integer
+    @required
+    errorMetadataOperationOffset: Integer
+    @required
+    errorMetadataPhaseOffset: Integer
+    @required
+    errorMetadataBackendOffset: Integer
+    @required
+    errorMetadataRetryableOffset: Integer
+    @required
+    errorMetadataAmbiguousOffset: Integer
+    @required
+    errorMetadataMutationIdLengthOffset: Integer
+    @required
+    errorMetadataMutationIdOffset: Integer
+
+    @required
+    metricsSnapshotBytes: Integer
+    @required
+    metricsSnapshotRequestsOffset: Integer
+    @required
+    metricsSnapshotHitsOffset: Integer
+    @required
+    metricsSnapshotMissesOffset: Integer
+    @required
+    metricsSnapshotRetriesOffset: Integer
+    @required
+    metricsSnapshotReconnectsOffset: Integer
+    @required
+    metricsSnapshotCancellationsOffset: Integer
+    @required
+    metricsSnapshotTransportErrorsOffset: Integer
+    @required
+    metricsSnapshotProtocolErrorsOffset: Integer
+    @required
+    metricsSnapshotBytesSentOffset: Integer
+    @required
+    metricsSnapshotBytesReceivedOffset: Integer
+    @required
+    metricsSnapshotActiveLanesOffset: Integer
+}
+
 /// Client-owned v1 value container and protection contract.
 @trait(selector: "service")
 structure valueFormat {
@@ -398,6 +501,54 @@ structure valueFormat {
     compactMacContext: "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
     compactEncryptionContext: "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
     robustContext: "OpenKache value format v1 AES-256-GCM-SIV key"
+)
+@ffiLayout(
+    connectOptionsBytes: 184,
+    connectAddressOffset: 0,
+    connectAddressLengthOffset: 8,
+    connectServerNameOffset: 16,
+    connectServerNameLengthOffset: 24,
+    connectCertificateOffset: 32,
+    connectCertificateLengthOffset: 40,
+    connectClientCertificateChainOffset: 48,
+    connectClientCertificateChainLengthOffset: 56,
+    connectClientPrivateKeyOffset: 64,
+    connectClientPrivateKeyLengthOffset: 72,
+    connectDataProtectionKeyOffset: 80,
+    connectDataProtectionKeyLengthOffset: 88,
+    connectPreviousDataProtectionKeysOffset: 96,
+    connectPreviousDataProtectionKeysLengthOffset: 104,
+    connectPreviousDataProtectionKeyCountOffset: 112,
+    connectCompressionEnabledOffset: 120,
+    connectCompressionLevelOffset: 124,
+    connectMinimumInputSizeOffset: 128,
+    connectMinimumSavingsOffset: 136,
+    connectEncryptionOffset: 144,
+    connectTimeoutOffset: 152,
+    connectRequestTimeoutOffset: 160,
+    connectRetryMaxAttemptsOffset: 168,
+    connectMaxInFlightOffset: 176,
+    errorMetadataBytes: 36,
+    errorMetadataCodeOffset: 0,
+    errorMetadataOperationOffset: 4,
+    errorMetadataPhaseOffset: 8,
+    errorMetadataBackendOffset: 12,
+    errorMetadataRetryableOffset: 16,
+    errorMetadataAmbiguousOffset: 17,
+    errorMetadataMutationIdLengthOffset: 18,
+    errorMetadataMutationIdOffset: 20,
+    metricsSnapshotBytes: 88,
+    metricsSnapshotRequestsOffset: 0,
+    metricsSnapshotHitsOffset: 8,
+    metricsSnapshotMissesOffset: 16,
+    metricsSnapshotRetriesOffset: 24,
+    metricsSnapshotReconnectsOffset: 32,
+    metricsSnapshotCancellationsOffset: 40,
+    metricsSnapshotTransportErrorsOffset: 48,
+    metricsSnapshotProtocolErrorsOffset: 56,
+    metricsSnapshotBytesSentOffset: 64,
+    metricsSnapshotBytesReceivedOffset: 72,
+    metricsSnapshotActiveLanesOffset: 80
 )
 service OpenKacheClient {
     version: "1"

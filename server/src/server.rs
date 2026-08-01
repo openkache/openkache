@@ -646,7 +646,7 @@ async fn run_quic_role(
         return None;
     }
     Some(
-        run_selected_endpoint(endpoint, &cache, &access_policy, limits, stop)
+        run_selected_endpoint(endpoint, cache, &access_policy, limits, stop)
             .await
             .map_err(|error| error.to_string()),
     )
@@ -750,7 +750,7 @@ struct NetworkWorkerLimits {
 
 async fn run_selected_endpoint(
     endpoint: ServerEndpoint,
-    cache: &ThreadedKvkache,
+    cache: Arc<ThreadedKvkache>,
     access_policy: &AccessPolicy,
     limits: NetworkWorkerLimits,
     stop: AsyncReceiver<()>,
@@ -773,7 +773,7 @@ async fn run_selected_endpoint(
 
 async fn run_network_worker<E: TransportEndpoint>(
     endpoint: E,
-    cache: &ThreadedKvkache,
+    cache: Arc<ThreadedKvkache>,
     access_policy: &AccessPolicy,
     limits: NetworkWorkerLimits,
     stop: AsyncReceiver<()>,
@@ -795,7 +795,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                 incoming = incoming => {
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming, cache, access_policy, request_timeout, max_stream_lanes,
+                        incoming, Arc::clone(&cache), access_policy, request_timeout, max_stream_lanes,
                         request_budget.clone(), max_item_bytes, Arc::clone(&mutation_dedupe),
                     ));
                 }
@@ -810,7 +810,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                 incoming = incoming => {
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming, cache, access_policy, request_timeout, max_stream_lanes,
+                        incoming, Arc::clone(&cache), access_policy, request_timeout, max_stream_lanes,
                         request_budget.clone(), max_item_bytes, Arc::clone(&mutation_dedupe),
                     ));
                 }
@@ -828,7 +828,7 @@ async fn run_network_worker<E: TransportEndpoint>(
 #[allow(clippy::too_many_arguments)]
 async fn serve_incoming<I: TransportIncoming>(
     incoming: I,
-    cache: &ThreadedKvkache,
+    cache: Arc<ThreadedKvkache>,
     access_policy: &AccessPolicy,
     request_timeout: Duration,
     max_stream_lanes: usize,
@@ -857,7 +857,7 @@ async fn serve_incoming<I: TransportIncoming>(
 #[allow(clippy::too_many_arguments)]
 async fn serve_connection<C: TransportConnection>(
     connection: C,
-    cache: &ThreadedKvkache,
+    cache: Arc<ThreadedKvkache>,
     administrator: bool,
     request_timeout: Duration,
     max_stream_lanes: usize,
@@ -877,7 +877,7 @@ async fn serve_connection<C: TransportConnection>(
                     streams.push(serve_stream(
                         send,
                         receive,
-                        cache,
+                        Arc::clone(&cache),
                         administrator,
                         request_timeout,
                         request_budget.clone(),
@@ -897,7 +897,7 @@ async fn serve_connection<C: TransportConnection>(
                         streams.push(serve_stream(
                             send,
                             receive,
-                            cache,
+                            Arc::clone(&cache),
                             administrator,
                             request_timeout,
                             request_budget.clone(),
@@ -962,14 +962,19 @@ impl Drop for PendingMutationGuard {
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
-    cache: &ThreadedKvkache,
+    cache: Arc<ThreadedKvkache>,
     administrator: bool,
     request_timeout: Duration,
     request_budget: RequestBudget,
     max_item_bytes: usize,
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 ) {
+    let mut mutation_tasks = FuturesUnordered::new();
     loop {
+        // A timed-out mutation continues in the storage worker so its final
+        // result can be replayed. Reap completed tasks while the stream
+        // remains active, and join the remaining bounded tasks on exit.
+        while let Some(Some(_)) = mutation_tasks.next().now_or_never() {}
         let mut frame = match receive
             .read_request(MAX_REQUEST_FRAME_BYTES, request_timeout, &request_budget)
             .await
@@ -1011,7 +1016,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .check(mutation_id, fingerprint, std::time::Instant::now())
                 });
-                let should_record = decision
+                let mut should_record = decision
                     .as_ref()
                     .is_some_and(|decision| matches!(decision, MutationDecision::New));
                 let mut reservation_guard = match (mutation_id, should_record) {
@@ -1073,9 +1078,39 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     Some(MutationDecision::Capacity) => {
                         response_bytes(Status::Overloaded, b"mutation replay store is at capacity")
                     }
-                    Some(MutationDecision::New) | None => match compio::runtime::time::timeout(
+                    Some(MutationDecision::New) => {
+                        should_record = false;
+                        let mutation_cache = Arc::clone(&cache);
+                        let mutation_store = Arc::clone(&mutation_dedupe);
+                        let reservation = reservation_guard.take();
+                        mutation_tasks.push(compio::runtime::spawn(async move {
+                            let response =
+                                execute_request(&mutation_cache, request, administrator).await;
+                            mutation_store
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .record(
+                                    mutation_id.expect("new mutations carry a token"),
+                                    fingerprint,
+                                    response.status as u8,
+                                    response.payload,
+                                    std::time::Instant::now(),
+                                );
+                            if let Some(mut reservation) = reservation {
+                                reservation.disarm();
+                            }
+                        }));
+                        wait_for_mutation_result(
+                            &mutation_dedupe,
+                            mutation_id.expect("new mutations carry a token"),
+                            fingerprint,
+                            request_timeout,
+                        )
+                        .await
+                    }
+                    None => match compio::runtime::time::timeout(
                         request_timeout,
-                        execute_request(cache, request, administrator),
+                        execute_request(&cache, request, administrator),
                     )
                     .await
                     {
@@ -1106,6 +1141,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             break;
         }
     }
+    while mutation_tasks.next().await.is_some() {}
 }
 
 async fn wait_for_mutation_result(

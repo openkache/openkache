@@ -499,8 +499,9 @@ func decodeConnectResult(
 		return nil, &Error{Operation: "connect", Message: "native ABI returned a null client"}
 	}
 	handle := &nativeHandle{
-		library: library,
-		client:  client,
+		library:       library,
+		client:        client,
+		nextRequestID: 1,
 	}
 	handle.cond = sync.NewCond(&handle.mu)
 	return handle, nil
@@ -553,7 +554,14 @@ func (h *nativeHandle) executeNative(
 	ttlEnabled := boolByte(options.TTLMillis != 0)
 	h.mu.Lock()
 	requestID := h.nextRequestID
-	h.nextRequestID++
+	if requestID == 0 {
+		requestID = 1
+	}
+	if requestID == ^uint64(0) {
+		h.nextRequestID = 1
+	} else {
+		h.nextRequestID = requestID + 1
+	}
 	h.mu.Unlock()
 
 	done := make(chan nativeResult, 1)

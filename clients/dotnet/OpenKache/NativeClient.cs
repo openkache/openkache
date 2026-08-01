@@ -331,7 +331,7 @@ internal sealed class NativeClient : IAsyncDisposable
     private IntPtr _handle;
     private int _activeCalls;
     private bool _closed;
-    private long _nextRequestId;
+    private long _nextRequestId = 1;
 
     private NativeClient(IntPtr handle)
     {
@@ -392,7 +392,7 @@ internal sealed class NativeClient : IAsyncDisposable
         bool raw,
         CancellationToken cancellationToken)
     {
-        var requestId = unchecked((ulong)Interlocked.Increment(ref _nextRequestId));
+        var requestId = AllocateRequestId();
         var task = Task.Run(
             () => ExecuteNative(
                 requestId,
@@ -413,6 +413,19 @@ internal sealed class NativeClient : IAsyncDisposable
         {
             TryCancel(requestId);
             throw;
+        }
+    }
+
+    private ulong AllocateRequestId()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _nextRequestId);
+            var next = current <= 0 || current == long.MaxValue ? 1 : current + 1;
+            if (Interlocked.CompareExchange(ref _nextRequestId, next, current) == current)
+            {
+                return (ulong)(current > 0 ? current : 1);
+            }
         }
     }
 
