@@ -373,7 +373,13 @@ impl FfiClient {
         retry: RetryPolicy,
         max_in_flight: usize,
     ) -> std::result::Result<Self, String> {
-        let (commands, receiver) = crossfire::mpsc::bounded_blocking_async(max_in_flight.max(1));
+        // Reserve one command slot per possible in-flight request for
+        // cancellation/shutdown control messages. Execute requests still
+        // reserve their capacity through `in_flight`, so this remains
+        // bounded by the caller's `max_in_flight` setting without allowing a
+        // full execute queue to make cancellation impossible.
+        let command_capacity = max_in_flight.max(1).saturating_mul(2).max(1);
+        let (commands, receiver) = crossfire::mpsc::bounded_blocking_async(command_capacity);
         let (ready_sender, ready_receiver) = sync_channel(1);
         let shutdown = Arc::new(AtomicBool::new(false));
         let in_flight = Arc::new(AtomicUsize::new(0));

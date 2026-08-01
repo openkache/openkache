@@ -556,7 +556,7 @@ class OpenKacheClient:
                     phase=SMITHY_FFI_PHASE_UNKNOWN,
                     backend=SMITHY_FFI_BACKEND_NONE,
                     retryable=selected.mutation_id is not None,
-                    ambiguous=False,
+                    ambiguous=selected.mutation_id is not None,
                     mutation_id=selected.mutation_id,
                 )
             ) from None
@@ -611,7 +611,7 @@ class OpenKacheClient:
                     phase=SMITHY_FFI_PHASE_UNKNOWN,
                     backend=SMITHY_FFI_BACKEND_NONE,
                     retryable=selected.mutation_id is not None,
-                    ambiguous=False,
+                    ambiguous=selected.mutation_id is not None,
                     mutation_id=selected.mutation_id,
                 )
             ) from None

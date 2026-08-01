@@ -30,10 +30,9 @@ pub use config::{
     SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
-use key::random_mutation_id;
 pub use key::{
     DATA_PROTECTION_KEY_BYTES, DataProtectionKey, DataProtectionKeyRing, ItemId,
-    MAX_PREVIOUS_DATA_PROTECTION_KEYS,
+    MAX_PREVIOUS_DATA_PROTECTION_KEYS, random_mutation_id,
 };
 pub use openkache_protocol::MutationId;
 pub use openkache_protocol::{ITEM_ID_BYTES, SetCondition};
@@ -853,13 +852,17 @@ impl<C: ClientConnection> Core<C> {
         let write_timeout = deadline
             .remaining(Operation::RequestWrite)
             .map_err(RequestFailure::before_send)?;
+        // A write can be interrupted after only part of the frame reached
+        // the transport. Mark the request as potentially transmitted before
+        // starting it so cancellation and write-timeout errors retain the
+        // mutation token needed for a safe retry.
+        if let Some(transmission) = transmission {
+            transmission.store(true, Ordering::Release);
+        }
         stream
             .write_request(frame, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
-        if let Some(transmission) = transmission {
-            transmission.store(true, Ordering::Release);
-        }
         let frame = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await

@@ -918,6 +918,7 @@ struct PendingMutationGuard {
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
     mutation_id: openkache_protocol::MutationId,
     fingerprint: [u8; 32],
+    generation: u64,
     armed: bool,
 }
 
@@ -926,11 +927,13 @@ impl PendingMutationGuard {
         mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
         mutation_id: openkache_protocol::MutationId,
         fingerprint: [u8; 32],
+        generation: u64,
     ) -> Self {
         Self {
             mutation_dedupe,
             mutation_id,
             fingerprint,
+            generation,
             armed: true,
         }
     }
@@ -949,9 +952,10 @@ impl Drop for PendingMutationGuard {
             .mutation_dedupe
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release_pending(
+            .release_pending_with_reservation(
                 self.mutation_id,
                 self.fingerprint,
+                self.generation,
                 std::time::Instant::now(),
             );
     }
@@ -1010,21 +1014,27 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         let (response, _response_permit) = match Request::decode_owned(request_bytes) {
             Ok(request) => {
                 let mutation_id = request.mutation_id;
-                let decision = mutation_id.map(|mutation_id| {
+                let mutation_check = mutation_id.map(|mutation_id| {
                     mutation_dedupe
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .check(mutation_id, fingerprint, std::time::Instant::now())
+                        .check_with_reservation(mutation_id, fingerprint, std::time::Instant::now())
                 });
-                let mut should_record = decision
+                let mut should_record = mutation_check
                     .as_ref()
-                    .is_some_and(|decision| matches!(decision, MutationDecision::New));
+                    .is_some_and(|(decision, _)| matches!(decision, MutationDecision::New));
+                let reservation_generation = mutation_check
+                    .as_ref()
+                    .and_then(|(_, generation)| *generation);
                 let mut reservation_guard = match (mutation_id, should_record) {
-                    (Some(mutation_id), true) => Some(PendingMutationGuard::new(
-                        Arc::clone(&mutation_dedupe),
-                        mutation_id,
-                        fingerprint,
-                    )),
+                    (Some(mutation_id), true) => reservation_generation.map(|generation| {
+                        PendingMutationGuard::new(
+                            Arc::clone(&mutation_dedupe),
+                            mutation_id,
+                            fingerprint,
+                            generation,
+                        )
+                    }),
                     _ => None,
                 };
                 let response_permit = if request.opcode == Opcode::Get {
@@ -1057,7 +1067,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 } else {
                     None
                 };
-                let response = match decision {
+                let response = match mutation_check.map(|(decision, _)| decision) {
                     Some(MutationDecision::Replay { status, payload }) => response(
                         Status::try_from(status).unwrap_or(Status::InternalError),
                         payload,
@@ -1083,15 +1093,18 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         let mutation_cache = Arc::clone(&cache);
                         let mutation_store = Arc::clone(&mutation_dedupe);
                         let reservation = reservation_guard.take();
+                        let generation = reservation_generation
+                            .expect("new mutations carry a reservation generation");
                         mutation_tasks.push(compio::runtime::spawn(async move {
                             let response =
                                 execute_request(&mutation_cache, request, administrator).await;
-                            mutation_store
+                            let _ = mutation_store
                                 .lock()
                                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .record(
+                                .record_with_reservation(
                                     mutation_id.expect("new mutations carry a token"),
                                     fingerprint,
+                                    generation,
                                     response.status as u8,
                                     response.payload,
                                     std::time::Instant::now(),

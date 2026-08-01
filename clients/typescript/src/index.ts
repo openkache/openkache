@@ -767,7 +767,7 @@ function cancellation_error(
     phase: metadata?.phase ?? SMITHY_FFI_PHASE_UNKNOWN,
     backend: metadata?.backend ?? SMITHY_FFI_BACKEND_NONE,
     retryable: metadata?.retryable ?? mutation_id !== undefined,
-    ambiguous: metadata?.ambiguous ?? false,
+    ambiguous: metadata?.ambiguous ?? mutation_id !== undefined,
     mutation_id: mutation_id?.slice() ?? metadata?.mutation_id?.slice(),
   }
   return new OpenKache_Error(

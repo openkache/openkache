@@ -15,7 +15,8 @@ pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Maximum number of retired keys retained for a rotation window.
 pub use crate::contract::MAX_PREVIOUS_DATA_PROTECTION_KEYS;
 
-pub(crate) fn random_mutation_id() -> Result<MutationId> {
+/// Generates a cryptographically random idempotency token for one mutation.
+pub fn random_mutation_id() -> Result<MutationId> {
     let mut bytes = [0; openkache_protocol::MUTATION_ID_BYTES];
     getrandom::fill(&mut bytes).map_err(|error| Error::Io(error.to_string()))?;
     Ok(MutationId::new(bytes))

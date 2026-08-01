@@ -1,6 +1,6 @@
 //! Node-API adapter for the OpenKache client on Node.js, Bun, and Deno.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -23,7 +23,7 @@ use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
     DataProtectionKeyRing, DeleteOutcome, Endpoint, Error as CoreError, GetOutcome, ItemId,
     ItemValue, MAX_PREVIOUS_DATA_PROTECTION_KEYS, MutationId, PrivateKey, ProtectedClient,
-    RetryPolicy, ServerErrorCode, SetCondition, SetOptions, SetOutcome,
+    RetryPolicy, ServerErrorCode, SetCondition, SetOptions, SetOutcome, random_mutation_id,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -314,18 +314,23 @@ impl NativeClient {
         mutation_id: Option<Uint8Array>,
         request_id: Option<f64>,
     ) -> Result<bool> {
-        let mutation_id = parse_mutation_id(mutation_id.as_ref().map(Uint8Array::as_ref))?;
+        let mutation_id = parse_mutation_id(mutation_id.as_ref().map(Uint8Array::as_ref))?
+            .unwrap_or(random_mutation_id().map_err(native_core_error)?);
         let client = self.active_client()?;
         let _request = self.metrics.begin(key.len());
         let key = key.to_vec();
         let outcome = self
-            .run_request(FfiOperation::Delete, request_id, mutation_id, async move {
-                match mutation_id {
-                    Some(mutation_id) => client.delete_with_mutation_id(&key, mutation_id).await,
-                    None => client.delete(&key).await,
-                }
-                .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
-            })
+            .run_request(
+                FfiOperation::Delete,
+                request_id,
+                Some(mutation_id),
+                async move {
+                    client
+                        .delete_with_mutation_id(&key, mutation_id)
+                        .await
+                        .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
+                },
+            )
             .await?;
         Ok(outcome == DeleteOutcome::Deleted)
     }
@@ -499,22 +504,23 @@ impl NativeClient {
         request_id: Option<f64>,
     ) -> Result<bool> {
         let item_id = parse_item_id(item_id.as_ref())?;
-        let mutation_id = parse_mutation_id(mutation_id.as_ref().map(Uint8Array::as_ref))?;
+        let mutation_id = parse_mutation_id(mutation_id.as_ref().map(Uint8Array::as_ref))?
+            .unwrap_or(random_mutation_id().map_err(native_core_error)?);
         let client = self.active_client()?;
         let _request = self.metrics.begin(item_id.as_bytes().len());
         let outcome = self
-            .run_request(FfiOperation::Delete, request_id, mutation_id, async move {
-                match mutation_id {
-                    Some(mutation_id) => {
-                        client
-                            .raw()
-                            .delete_with_mutation_id(item_id, mutation_id)
-                            .await
-                    }
-                    None => client.raw().delete(item_id).await,
-                }
-                .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
-            })
+            .run_request(
+                FfiOperation::Delete,
+                request_id,
+                Some(mutation_id),
+                async move {
+                    client
+                        .raw()
+                        .delete_with_mutation_id(item_id, mutation_id)
+                        .await
+                        .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
+                },
+            )
             .await?;
         Ok(outcome == DeleteOutcome::Deleted)
     }
@@ -568,10 +574,15 @@ impl NativeClient {
                 .requests
                 .lock()
                 .map_err(|_| state_error("native request registry lock is poisoned"))?;
-            if requests.insert(request_id, abort).is_some() {
-                return Err(invalid_argument(format!(
-                    "request ID {request_id} is already active"
-                )));
+            match requests.entry(request_id) {
+                Entry::Vacant(entry) => {
+                    entry.insert(abort);
+                }
+                Entry::Occupied(_) => {
+                    return Err(invalid_argument(format!(
+                        "request ID {request_id} is already active"
+                    )));
+                }
             }
         }
         let result = Abortable::new(future, registration).await;
@@ -779,9 +790,9 @@ fn parse_set_options(
     if let Some(ttl_ms) = ttl_ms {
         options = options.expires_after_millis(ttl_ms);
     }
-    if let Some(mutation_id) = parse_mutation_id(mutation_id)? {
-        options = options.with_mutation_id(mutation_id);
-    }
+    let mutation_id =
+        parse_mutation_id(mutation_id)?.unwrap_or(random_mutation_id().map_err(native_core_error)?);
+    options = options.with_mutation_id(mutation_id);
     Ok(options)
 }
 
@@ -930,7 +941,11 @@ fn native_cancelled_error(operation: FfiOperation, mutation_id: Option<MutationI
             code: FFI_ERROR_CANCELLED,
             operation: operation.code(),
             retryable: has_mutation,
-            ambiguous: false,
+            // This adapter aborts the native future directly and cannot
+            // observe whether a partial write reached the transport. A
+            // mutation token makes the conservative outcome reusable: the
+            // caller can retry it safely through the server dedupe store.
+            ambiguous: has_mutation,
             mutation_id: mutation_id.map(MutationId::into_bytes),
             ..NativeErrorMetadata::default()
         },

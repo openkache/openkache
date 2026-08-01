@@ -895,7 +895,7 @@ class OpenKacheClient {
           phase: _ffiPhaseUnknown,
           backend: _ffiBackendNone,
           retryable: mutationId.isNotEmpty,
-          ambiguous: false,
+          ambiguous: mutationId.isNotEmpty,
           mutationId: mutationId.isEmpty ? null : Uint8List.fromList(mutationId),
         );
     final completer = Completer<_Result>();

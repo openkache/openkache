@@ -621,10 +621,11 @@ func contextNativeError(operation uint32, cause error, mutationID *MutationID) *
 		retryable = true
 	}
 	var mutationBytes []byte
-	ambiguous := false
+	// A context cancellation races the native worker and does not prove that
+	// the write stayed local. Treat a tokenized mutation conservatively as
+	// ambiguous so the caller can safely retry it through server dedupe.
+	ambiguous := mutationID != nil
 	if mutationID != nil {
-		// The token remains safe to retry, but this locally synthesized
-		// cancellation does not establish that the request was transmitted.
 		mutationBytes = append([]byte(nil), mutationID[:]...)
 		retryable = true
 	}

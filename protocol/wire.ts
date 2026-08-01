@@ -115,19 +115,6 @@ function integer_member(
   return value
 }
 
-function optional_integer_member(
-  object: Json_Object,
-  member: string,
-  fallback: number,
-  location: string,
-  minimum = 0,
-  maximum = Number.MAX_SAFE_INTEGER,
-): number {
-  return object[member] === undefined
-    ? fallback
-    : integer_member(object, member, location, minimum, maximum)
-}
-
 function shape_name(shape_id: string): string {
   const separator = shape_id.lastIndexOf("#")
   if (separator < 0 || separator === shape_id.length - 1) {
@@ -192,10 +179,9 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
       0,
       0xff,
     ),
-    set_mutation_id_flag: optional_integer_member(
+    set_mutation_id_flag: integer_member(
       contract,
       "setMutationIdFlag",
-      8,
       "wireContract.v1",
       0,
       0xff,
@@ -390,13 +376,7 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
   return {
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
-    mutation_id_bytes: optional_integer_member(
-      contract_trait,
-      "mutationIdBytes",
-      16,
-      "wireContract",
-      1,
-    ),
+    mutation_id_bytes: integer_member(contract_trait, "mutationIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     operation_specs,
     opcodes,

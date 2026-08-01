@@ -7,8 +7,8 @@ use std::time::Duration;
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, CoreMetricsSnapshot,
-    DataProtection, DataProtectionKey, DataProtectionKeyRing, DeleteOutcome, Endpoint, GetOutcome,
-    MutationId, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    DataProtection, DataProtectionKey, DataProtectionKeyRing, DeleteOutcome, Endpoint, Error,
+    GetOutcome, MutationId, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -263,14 +263,30 @@ macro_rules! protected_client_methods {
                                 scoped_mutation_id,
                                 transmission,
                             )
-                            .await?
+                            .await
                     }
                     None => {
                         self.raw
                             .delete_with_mutation_id(item_id, scoped_mutation_id)
-                            .await?
+                            .await
                     }
                 };
+                let result = result.map_err(|error| match error {
+                    Error::AmbiguousOutcome {
+                        operation, cause, ..
+                    } => {
+                        // The wire request uses a token scoped to this
+                        // physical item ID, but callers retry the logical
+                        // protected mutation. Keep the logical token in the
+                        // public error so a retry derives the same scoped ID.
+                        Error::AmbiguousOutcome {
+                            operation,
+                            mutation_id: Some(mutation_id),
+                            cause,
+                        }
+                    }
+                    error => error,
+                })?;
                 match result {
                     DeleteOutcome::Deleted => return Ok(DeleteOutcome::Deleted),
                     DeleteOutcome::NotFound => {}
