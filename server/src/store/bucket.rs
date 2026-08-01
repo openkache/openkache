@@ -82,8 +82,8 @@ impl Item {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ItemState {
-    is_tombstone: bool,
-    expires_at_ms: u64,
+    pub(super) is_tombstone: bool,
+    pub(super) expires_at_ms: u64,
 }
 
 pub(crate) struct MutableSegment {
