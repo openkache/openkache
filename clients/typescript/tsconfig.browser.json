@@ -9,5 +9,5 @@
     "types": [],
     "verbatimModuleSyntax": true
   },
-  "include": ["src/value-codec.ts"]
+  "include": ["src/json.ts"]
 }

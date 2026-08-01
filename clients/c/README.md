@@ -21,8 +21,7 @@ cmake --build target/build
 
 For a shared build, use
 `-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
-The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
-single-library builds. If Bun or the Smithy CLI is not available, pass a
+If Bun or the Smithy CLI is not available, pass a
 previously generated header with
 `-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
 

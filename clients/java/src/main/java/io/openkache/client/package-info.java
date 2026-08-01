@@ -1,4 +1,4 @@
 /**
- * Package scaffold for the future Rust-backed OpenKache Java client.
+ * CompletableFuture and Panama FFM bindings for the Rust-backed OpenKache client.
  */
 package io.openkache.client;

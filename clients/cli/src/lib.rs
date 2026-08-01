@@ -16,6 +16,7 @@ use openkache_client::{
     Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
     PrivateKey, ServerTrust, SetOptions, SetOutcome,
 };
+use zeroize::Zeroizing;
 
 #[cfg(all(feature = "quic-compio", feature = "quic-quinn"))]
 compile_error!("enable exactly one CLI QUIC backend feature");
@@ -380,7 +381,7 @@ fn client_identity_from_arguments(arguments: &Arguments) -> Result<Option<Client
     let certificate_bytes = std::fs::read(certificate_path)?;
     let certificates =
         Certificate::from_der_or_pem_chain(&certificate_bytes).map_err(CliError::from)?;
-    let key_bytes = std::fs::read(key_path)?;
+    let key_bytes = Zeroizing::new(std::fs::read(key_path)?);
     let key = PrivateKey::from_der_or_pem(&key_bytes).map_err(CliError::from)?;
     ClientIdentity::new(certificates, key)
         .map(Some)

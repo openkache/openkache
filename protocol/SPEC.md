@@ -101,9 +101,8 @@ The following rules apply:
    within one lane.
 
 Version 1 has no request identifier because lane order provides correlation.
-It also has no deduplication token. If a lane fails after a mutating request is
-sent but before its response is received, the client cannot determine from the
-protocol alone whether the mutation took effect.
+Mutating requests may carry a fixed-width deduplication token so a client can
+retry an ambiguous `SET` or `DELETE` without applying the mutation twice.
 
 ## Unsigned `vu128`
 
@@ -174,39 +173,42 @@ The 64 MiB value and payload limit is a wire ceiling. A server MAY configure a
 smaller operational item limit. A request within the wire ceiling but above
 the server limit receives `TooLarge`.
 
-The largest valid request is 67,108,912 octets: a `SET` with two fixed octets,
+The largest valid request is 67,108,928 octets: a `SET` with two fixed octets,
 one-octet `item_id_len`, four-octet maximum `value_len`, a 32-octet item ID, a
-nine-octet TTL, and a 64 MiB value. The largest valid response is 67,108,869
-octets: one status octet, a four-octet maximum `payload_len`, and a 64 MiB
-payload.
+16-octet mutation ID, a nine-octet TTL, and a 64 MiB value. The largest valid
+response is 67,108,869 octets: one status octet, a four-octet maximum
+`payload_len`, and a 64 MiB payload.
 
 ## Request frame
 
 Every request has this layout:
 
 ```text
-+------------+----------+----------------+------------------+
-| opcode:u8  | flags:u8 | item_id_len:vu128  | value_len:vu128  |
-+------------+----------+----------------+------------------+
-| item_id:item_id_len                                    ...
-+----------------------------------------------------------+
-| ttl_ms:vu128, present only when SET flag bit 0 is set    ...
-+----------------------------------------------------------+
-| value:value_len                                         ...
-+----------------------------------------------------------+
++------------+----------+------------------+-----------------+
+| opcode:u8  | flags:u8 | item_id_len:vu128 | value_len:vu128 |
++------------+----------+------------------+-----------------+
+| item_id:item_id_len                                       ...
++-----------------------------------------------------------+
+| mutation_id:16, present when bit 3 is set                 ...
++-----------------------------------------------------------+
+| ttl_ms:vu128, present only when SET flag bit 0 is set     ...
++-----------------------------------------------------------+
+| value:value_len                                           ...
++-----------------------------------------------------------+
 ```
 
 In compact notation:
 
 ```text
 request = opcode | flags | item_id_len | value_len |
-          item_id | [ttl_ms] | value
+          item_id | [mutation_id] | [ttl_ms] | value
 ```
 
 `item_id_len` and `value_len` are present for every opcode, including operations
 that require zero lengths. The item ID immediately follows both lengths. A
-present TTL follows the complete item ID. The value follows the TTL, or the
-item ID when no TTL is present.
+mutation ID, when present, follows the complete item ID. A present TTL follows
+the mutation ID (or the item ID when no mutation ID is present). The value
+follows the TTL, or the preceding field when no TTL is present.
 
 This ordering lets a server validate the opcode, flags, lengths, item ID, and TTL
 before admitting or reading a large value. A receiver SHOULD perform those
@@ -232,18 +234,20 @@ MUST respond with `UnsupportedOpcode` when it can send a response.
 ### Request flags
 
 The flags octet is operation-specific. All flags MUST be zero for operations
-other than `SET`.
+other than `SET` and `DELETE`.
 
 | Bit | Mask | `SET` meaning |
 |---:|---:|---|
 | 0 | `01` | A `ttl_ms` field is present |
 | 1 | `02` | Store only if the item is absent (`if_absent`) |
 | 2 | `04` | Store only if the item is present (`if_present`) |
-| 3–7 | `F8` | Reserved; MUST be zero |
+| 3 | `08` | A 16-octet mutation identifier is present (`SET`, `DELETE`) |
+| 4–7 | `F0` | Reserved; MUST be zero |
 
 Bits 1 and 2 are mutually exclusive. A receiver MUST reject a `SET` with both
-bits set. A receiver MUST also reject any reserved bit or any nonzero flag on
-another opcode.
+bits set. Bit 3 is valid only on `SET` and `DELETE`; those operations MUST
+contain exactly 16 mutation-ID octets when it is set. A receiver MUST also
+reject any reserved bit or any nonzero flag on another opcode.
 
 ### Item ID
 
@@ -262,7 +266,7 @@ A server MUST NOT interpret any value prefix or maintain protocol metadata for:
 - serialization format;
 - compression state or algorithm;
 - application-level encryption state or algorithm;
-- client envelope version.
+- package-specific value envelope metadata.
 
 A successful `GET` MUST return the same value octets accepted by `SET`, unless
 the item was subsequently replaced, deleted, expired, or evicted.
@@ -377,6 +381,7 @@ request identifier, flags, item ID, or TTL.
 | `43` | `Overloaded` | The server temporarily lacks admission capacity |
 | `44` | `Timeout` | Reading, admission, execution, or response preparation timed out |
 | `45` | `Forbidden` | The authenticated identity is not authorized |
+| `46` | `MutationConflict` | A mutation ID was reused for different request bytes |
 | `7F` | `InternalError` | The server could not complete the operation |
 
 Statuses `06` through `3F`, `46` through `7E`, and `80` through `FF` are
@@ -397,8 +402,9 @@ A conforming receiver MUST validate, in order where practical:
 4. field-specific length limits;
 5. opcode-specific item ID and value lengths;
 6. the complete item ID;
-7. TTL presence, canonical encoding, and positive value;
-8. the exact remaining body length.
+7. mutation-ID presence and exact length;
+8. TTL presence, canonical encoding, and positive value;
+9. the exact remaining body length.
 
 Receiving end-of-stream before a frame is complete is a truncated-frame error.
 A receiver MUST NOT scan for a possible next frame after malformed framing.
@@ -419,7 +425,11 @@ connection and use other lanes.
 
 ## Retry and outcome rules
 
-The protocol provides no replay protection or mutation identifier.
+SET and DELETE may carry a fixed 16-byte mutation identifier immediately after
+the item ID and before the optional TTL. A server retains completed mutation
+results for a bounded window and replays an identical request carrying the same
+identifier. Reusing an identifier for different request bytes is rejected as a
+`MutationConflict` response.
 
 - `PING`, `GET`, and `STATS` are safe to retry after reconnecting.
 - A client SHOULD NOT automatically replay `SET`, `DELETE`, or `SYNC` after an
@@ -427,8 +437,8 @@ The protocol provides no replay protection or mutation identifier.
 - `Created`, `Replaced`, `Deleted`, and `NotStored` are successful domain
   outcomes, not transport errors.
 
-Applications that require stronger mutation retry semantics must provide them
-above protocol v1.
+Clients generate one identifier per mutation and reuse it when retrying an
+ambiguous outcome.
 
 ## Security and resource handling
 

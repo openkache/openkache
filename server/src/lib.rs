@@ -36,6 +36,7 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+pub(crate) mod mutation;
 pub mod platform;
 pub mod resp;
 pub mod server;

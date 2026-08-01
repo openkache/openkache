@@ -24,10 +24,11 @@ go build ./...
 
 The package supports both CGO builds and `CGO_ENABLED=0` cross-compilation.
 Runtime connections require CGO and a native library built from the Rust
-client with the `ffi` feature. The current native runtime uses Compio's
-io_uring backend on Linux; `CGO_ENABLED=0` remains useful for packaging and
-cross-compilation but returns an explicit unsupported-runtime error at connect
-time:
+client with the `ffi` feature. The default native runtime uses portable
+Tokio/Quinn on Linux, macOS, and Windows; the optional Compio/io_uring feature
+remains available for Linux fast-path builds. `CGO_ENABLED=0` remains useful
+for packaging and cross-compilation but returns an explicit unsupported-runtime
+error at connect time:
 
 ```bash
 cargo build --manifest-path ../core/Cargo.toml \
@@ -91,7 +92,7 @@ Use `client.Smithy()` when an application needs the generated
 - `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
   `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 2 and the extended
+  artifact. The native artifact must have ABI version 3 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated

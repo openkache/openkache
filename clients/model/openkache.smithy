@@ -8,6 +8,10 @@ structure clientDefaults {
     @required
     maxInFlight: Integer
 
+    /// Fixed mutation idempotency-token width in bytes.
+    @required
+    mutationIdBytes: Integer
+
     @required
     connectTimeoutMilliseconds: Long
 
@@ -52,6 +56,102 @@ structure clientDefaults {
 structure ffiContract {
     @required
     abiVersion: Integer
+
+    /// Stable structured-error category identifiers.
+    @required
+    errorConfiguration: Integer
+    @required
+    errorConnection: Integer
+    @required
+    errorTimeout: Integer
+    @required
+    errorRuntime: Integer
+    @required
+    errorTransport: Integer
+    @required
+    errorServer: Integer
+    @required
+    errorUnexpectedResponse: Integer
+    @required
+    errorResponseTooLarge: Integer
+    @required
+    errorTls: Integer
+    @required
+    errorProtocol: Integer
+    @required
+    errorIo: Integer
+    @required
+    errorValue: Integer
+    @required
+    errorClosed: Integer
+    @required
+    errorAmbiguous: Integer
+    @required
+    errorCancelled: Integer
+
+    /// Stable operation-phase identifiers used by structured-error metadata.
+    @required
+    phaseUnknown: Integer
+    @required
+    phaseDnsResolution: Integer
+    @required
+    phaseConnectionSetup: Integer
+    @required
+    phaseConnectionRetry: Integer
+    @required
+    phaseStreamAcquisition: Integer
+    @required
+    phaseRequestWrite: Integer
+    @required
+    phaseResponseHeaderRead: Integer
+    @required
+    phaseResponseBodyRead: Integer
+    @required
+    phaseTlsInitialization: Integer
+    @required
+    phaseEndpointInitialization: Integer
+    @required
+    phaseConnectionInitialization: Integer
+    @required
+    phaseHandshake: Integer
+    @required
+    phaseStreamOpen: Integer
+    @required
+    phaseStreamWrite: Integer
+    @required
+    phaseStreamRead: Integer
+
+    /// Native transport backend identifiers.
+    @required
+    backendNone: Integer
+    @required
+    backendQuinn: Integer
+    @required
+    backendCompio: Integer
+
+    /// Metrics snapshot field identifiers.
+    @required
+    metricsRequests: Integer
+    @required
+    metricsHits: Integer
+    @required
+    metricsMisses: Integer
+    @required
+    metricsRetries: Integer
+    @required
+    metricsReconnects: Integer
+    @required
+    metricsCancellations: Integer
+    @required
+    metricsTransportErrors: Integer
+    @required
+    metricsProtocolErrors: Integer
+    @required
+    metricsBytesSent: Integer
+    @required
+    metricsBytesReceived: Integer
+    @required
+    metricsActiveLanes: Integer
 
     @required
     operationGetJson: Integer
@@ -187,24 +287,9 @@ structure valueFormat {
     robustContext: String
 }
 
-/// Legacy metadata envelope retained for the TypeScript adapter migration.
-@trait(selector: "service")
-structure valueEnvelope {
-    @required
-    magicAndVersionHex: String
-
-    @required
-    maxEncodingBytes: Integer
-
-    @required
-    maxTypeNameBytes: Integer
-
-    @required
-    jsonEncoding: String
-}
-
 @clientDefaults(
     maxInFlight: 256,
+    mutationIdBytes: 16,
     connectTimeoutMilliseconds: 5000,
     requestTimeoutMilliseconds: 2000,
     retryMaxAttempts: 2,
@@ -218,7 +303,51 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 2,
+    abiVersion: 3,
+    errorConfiguration: 1,
+    errorConnection: 2,
+    errorTimeout: 3,
+    errorRuntime: 4,
+    errorTransport: 5,
+    errorServer: 6,
+    errorUnexpectedResponse: 7,
+    errorResponseTooLarge: 8,
+    errorTls: 9,
+    errorProtocol: 10,
+    errorIo: 11,
+    errorValue: 12,
+    errorClosed: 13,
+    errorAmbiguous: 14,
+    errorCancelled: 15,
+    phaseUnknown: 0,
+    phaseDnsResolution: 1,
+    phaseConnectionSetup: 2,
+    phaseConnectionRetry: 3,
+    phaseStreamAcquisition: 4,
+    phaseRequestWrite: 5,
+    phaseResponseHeaderRead: 6,
+    phaseResponseBodyRead: 7,
+    phaseTlsInitialization: 8,
+    phaseEndpointInitialization: 9,
+    phaseConnectionInitialization: 10,
+    phaseHandshake: 11,
+    phaseStreamOpen: 12,
+    phaseStreamWrite: 13,
+    phaseStreamRead: 14,
+    backendNone: 0,
+    backendQuinn: 1,
+    backendCompio: 2,
+    metricsRequests: 0,
+    metricsHits: 1,
+    metricsMisses: 2,
+    metricsRetries: 3,
+    metricsReconnects: 4,
+    metricsCancellations: 5,
+    metricsTransportErrors: 6,
+    metricsProtocolErrors: 7,
+    metricsBytesSent: 8,
+    metricsBytesReceived: 9,
+    metricsActiveLanes: 10,
     operationGetJson: 7,
     operationSetJson: 8,
     operationReconnect: 4294967041,
@@ -264,12 +393,6 @@ structure valueEnvelope {
     compactMacContext: "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
     compactEncryptionContext: "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
     robustContext: "OpenKache value format v1 AES-256-GCM-SIV key"
-)
-@valueEnvelope(
-    magicAndVersionHex: "4f4b5601",
-    maxEncodingBytes: 64,
-    maxTypeNameBytes: 65535,
-    jsonEncoding: "json"
 )
 service OpenKacheClient {
     version: "1"
@@ -331,6 +454,9 @@ structure SetInput {
     condition: SetCondition
 
     ttlMilliseconds: Long
+
+    /// Optional fixed-width idempotency token reused for mutation retries.
+    mutationId: Blob
 }
 
 structure SetOutput {
@@ -341,6 +467,9 @@ structure SetOutput {
 structure DeleteInput {
     @required
     itemId: ItemId
+
+    /// Optional fixed-width idempotency token reused for mutation retries.
+    mutationId: Blob
 }
 
 structure DeleteOutput {

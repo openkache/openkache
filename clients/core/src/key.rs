@@ -2,15 +2,39 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+use std::collections::VecDeque;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::{Error, ITEM_ID_BYTES, Result};
+use crate::{Error, ITEM_ID_BYTES, MutationId, Result};
 
 pub(crate) const PROTECTION_KEY_BYTES: usize =
     crate::contract::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
 /// Bytes in an application-managed data protection key.
 pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
+/// Maximum number of retired keys retained for a rotation window.
+pub const MAX_PREVIOUS_DATA_PROTECTION_KEYS: usize = 8;
+
+pub(crate) fn random_mutation_id() -> Result<MutationId> {
+    let mut bytes = [0; openkache_protocol::MUTATION_ID_BYTES];
+    getrandom::fill(&mut bytes).map_err(|error| Error::Io(error.to_string()))?;
+    Ok(MutationId::new(bytes))
+}
+
+/// Derives a stable physical-request token from one logical mutation token and item ID.
+///
+/// Protected key rotation can probe more than one derived item ID for a single logical
+/// delete. Each probe is a distinct wire request, so it needs a distinct token to avoid
+/// being rejected as a mutation conflict while still being replayable on a caller retry.
+pub(crate) fn scoped_mutation_id(mutation_id: MutationId, item_id: ItemId) -> MutationId {
+    let mut input = [0_u8; openkache_protocol::MUTATION_ID_BYTES + ITEM_ID_BYTES];
+    input[..openkache_protocol::MUTATION_ID_BYTES].copy_from_slice(mutation_id.as_bytes());
+    input[openkache_protocol::MUTATION_ID_BYTES..].copy_from_slice(item_id.as_bytes());
+    let digest = blake3::hash(&input);
+    let mut bytes = [0_u8; openkache_protocol::MUTATION_ID_BYTES];
+    bytes.copy_from_slice(&digest.as_bytes()[..openkache_protocol::MUTATION_ID_BYTES]);
+    MutationId::new(bytes)
+}
 
 /// Exact fixed-size item ID sent through the OpenKache protocol.
 #[repr(transparent)]
@@ -90,6 +114,65 @@ pub struct DataProtectionKey {
     master_key: [u8; DATA_PROTECTION_KEY_BYTES],
     item_id_root: [u8; DATA_PROTECTION_KEY_BYTES],
     value_root_key: [u8; DATA_PROTECTION_KEY_BYTES],
+}
+
+/// Active data-protection key plus a bounded read/delete rotation window.
+pub struct DataProtectionKeyRing {
+    active: DataProtectionKey,
+    previous: VecDeque<DataProtectionKey>,
+}
+
+impl DataProtectionKeyRing {
+    /// Creates a ring with one active key and no retired keys.
+    pub fn new(active: DataProtectionKey) -> Self {
+        Self {
+            active,
+            previous: VecDeque::new(),
+        }
+    }
+
+    /// Creates a ring from an active key and up to eight previous keys.
+    pub fn with_previous(
+        active: DataProtectionKey,
+        previous: impl IntoIterator<Item = DataProtectionKey>,
+    ) -> Result<Self> {
+        let previous = previous.into_iter().collect::<VecDeque<_>>();
+        if previous.len() > MAX_PREVIOUS_DATA_PROTECTION_KEYS {
+            return Err(Error::configuration(
+                "data_protection_key_ring",
+                format!("retains at most {MAX_PREVIOUS_DATA_PROTECTION_KEYS} previous keys"),
+            ));
+        }
+        Ok(Self { active, previous })
+    }
+
+    /// Returns the active key without exposing its bytes.
+    pub fn active(&self) -> &DataProtectionKey {
+        &self.active
+    }
+
+    /// Returns retired keys in newest-to-oldest order.
+    pub fn previous(&self) -> impl Iterator<Item = &DataProtectionKey> {
+        self.previous.iter()
+    }
+
+    /// Returns the number of retired keys retained for reads and deletes.
+    pub fn previous_len(&self) -> usize {
+        self.previous.len()
+    }
+
+    /// Promotes a new key and retains the former active key at the front of the window.
+    pub fn rotate(&mut self, next_active: DataProtectionKey) {
+        let old_active = std::mem::replace(&mut self.active, next_active);
+        self.previous.push_front(old_active);
+        while self.previous.len() > MAX_PREVIOUS_DATA_PROTECTION_KEYS {
+            self.previous.pop_back();
+        }
+    }
+
+    pub(crate) fn into_keys(self) -> Vec<DataProtectionKey> {
+        std::iter::once(self.active).chain(self.previous).collect()
+    }
 }
 
 impl DataProtectionKey {

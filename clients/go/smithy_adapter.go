@@ -62,6 +62,17 @@ func (s smithyClient) Set(
 		}
 		options.TTLMillis = uint64(*input.TTLMilliseconds)
 	}
+	if input.MutationID != nil {
+		if len(*input.MutationID) != SmithyMutationIDBytes {
+			return SmithySetOutput{}, validationError(
+				"set.mutation_id",
+				"must contain exactly 16 bytes",
+			)
+		}
+		var mutationID MutationID
+		copy(mutationID[:], *input.MutationID)
+		options.MutationID = &mutationID
+	}
 	outcome, err := s.client.SetItem(ctx, itemID, input.Value, options)
 	return SmithySetOutput{Outcome: outcome}, err
 }
@@ -73,6 +84,28 @@ func (s smithyClient) Delete(
 	itemID, err := NewItemID(input.ItemID)
 	if err != nil {
 		return SmithyDeleteOutput{}, err
+	}
+	if input.MutationID != nil {
+		if len(*input.MutationID) != SmithyMutationIDBytes {
+			return SmithyDeleteOutput{}, validationError(
+				"delete.mutation_id",
+				"must contain exactly 16 bytes",
+			)
+		}
+		var mutationID MutationID
+		copy(mutationID[:], *input.MutationID)
+		deleted, err := s.client.invokeRaw(
+			ctx,
+			SmithyOpcodeDelete,
+			itemID,
+			nil,
+			SetOptions{MutationID: &mutationID},
+		)
+		if err != nil {
+			return SmithyDeleteOutput{}, err
+		}
+		value, err := deleteResult("delete", deleted)
+		return SmithyDeleteOutput{Deleted: value}, err
 	}
 	deleted, err := s.client.DeleteItem(ctx, itemID)
 	return SmithyDeleteOutput{Deleted: deleted}, err

@@ -1,12 +1,12 @@
 //! Shared application-key hiding and value-protection composition.
 
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
-use crate::{DataProtectionKey, ItemId, Result};
+use crate::{DataProtectionKey, DataProtectionKeyRing, ItemId, Result};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
-    key: DataProtectionKey,
-    codec: ValueCodec,
+    keys: Vec<DataProtectionKey>,
+    codecs: Vec<ValueCodec>,
 }
 
 impl DataProtection {
@@ -25,8 +25,11 @@ impl DataProtection {
     ///
     /// Returns an error when the compression settings are invalid.
     pub fn new(key: DataProtectionKey, compression: Compression) -> Result<Self> {
-        let codec = ValueCodec::protected(&key, compression)?;
-        Ok(Self { key, codec })
+        Self::with_key_ring(
+            DataProtectionKeyRing::new(key),
+            compression,
+            Encryption::Robust,
+        )
     }
 
     /// Creates protection with an explicit authenticated-encryption profile.
@@ -49,13 +52,38 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
-        Ok(Self { key, codec })
+        Self::with_key_ring(DataProtectionKeyRing::new(key), compression, encryption)
+    }
+
+    /// Creates protection that writes with the active ring key and reads/deletes with
+    /// the active key followed by each retained previous key.
+    pub fn with_key_ring(
+        key_ring: DataProtectionKeyRing,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        let keys = key_ring.into_keys();
+        let codecs = keys
+            .iter()
+            .map(|key| {
+                ValueCodec::protected_with_profile(key, compression, encryption).map_err(Into::into)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self { keys, codecs })
     }
 
     /// Derives the deterministic BLAKE3 item ID for application key bytes.
     pub fn item_id(&self, application_key: impl AsRef<[u8]>) -> ItemId {
-        self.key.derive_item_id(application_key)
+        self.keys[0].derive_item_id(application_key)
+    }
+
+    /// Returns item IDs for the active key followed by all retained previous keys.
+    pub fn item_ids(&self, application_key: impl AsRef<[u8]>) -> Vec<ItemId> {
+        let application_key = application_key.as_ref();
+        self.keys
+            .iter()
+            .map(|key| key.derive_item_id(application_key))
+            .collect()
     }
 
     /// Serializes and protects one core logical value.
@@ -74,7 +102,7 @@ impl DataProtection {
     /// Returns an error for invalid logical values, size-limit violations, compression failures,
     /// entropy failures, or encryption failures.
     pub fn encode(&self, item_id: ItemId, value: Value) -> Result<ItemValue> {
-        self.codec.encode(item_id, value).map_err(Into::into)
+        self.codecs[0].encode(item_id, value).map_err(Into::into)
     }
 
     /// Authenticates and decodes one stored value into the core logical model.
@@ -93,7 +121,16 @@ impl DataProtection {
     /// Returns an error when the value is malformed, unsupported, oversized, unauthenticated, or
     /// cannot be decompressed or deserialized.
     pub fn decode(&self, item_id: ItemId, encoded: ItemValue) -> Result<Value> {
-        self.codec.decode(item_id, encoded).map_err(Into::into)
+        let mut last_error = None;
+        for codec in &self.codecs {
+            match codec.decode(item_id, encoded.clone()) {
+                Ok(value) => return Ok(value),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error
+            .expect("a key ring always contains an active codec")
+            .into())
     }
 
     /// Encrypts a borrowed plaintext value and binds it to its item ID.

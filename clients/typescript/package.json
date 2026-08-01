@@ -12,10 +12,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./value-codec": {
-      "types": "./dist/value-codec.d.ts",
-      "import": "./dist/value-codec.js"
     }
   },
   "files": [

@@ -5,19 +5,20 @@ use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, Result, RetryPolicy, ServerTrust,
-    SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, CoreMetricsSnapshot,
+    DataProtection, DataProtectionKey, DataProtectionKeyRing, DeleteOutcome, Endpoint, GetOutcome,
+    MutationId, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
 #[cfg(feature = "quic-quinn")]
 use crate::{RawClient, RawClientBuilder};
+use crate::{key::random_mutation_id, key::scoped_mutation_id};
 
 struct ProtectionSettings {
     compression: Compression,
     encryption: Encryption,
-    key: DataProtectionKey,
+    key_ring: DataProtectionKeyRing,
 }
 
 impl ProtectionSettings {
@@ -25,12 +26,13 @@ impl ProtectionSettings {
         Self {
             compression: Compression::Disabled,
             encryption: Encryption::Robust,
-            key,
+            key_ring: DataProtectionKeyRing::new(key),
         }
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
-        DataProtection::with_profile(self.key, self.compression, self.encryption).map(Arc::new)
+        DataProtection::with_key_ring(self.key_ring, self.compression, self.encryption)
+            .map(Arc::new)
     }
 }
 
@@ -92,6 +94,12 @@ macro_rules! protected_builder_methods {
                 self.protection.encryption = encryption;
                 self
             }
+
+            /// Uses an active key plus a bounded set of previous keys for rotation.
+            pub fn key_ring(mut self, key_ring: DataProtectionKeyRing) -> Self {
+                self.protection.key_ring = key_ring;
+                self
+            }
         }
     };
 }
@@ -137,14 +145,18 @@ macro_rules! protected_client_methods {
             &self,
             application_key: impl AsRef<[u8]>,
         ) -> Result<GetOutcome<Value>> {
-            let item_id = self.protection.item_id(application_key);
-            match self.raw.get(item_id).await? {
-                GetOutcome::Found(value) => self
-                    .protection
-                    .decode(item_id, value)
-                    .map(GetOutcome::Found),
-                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            for item_id in self.protection.item_ids(application_key.as_ref()) {
+                match self.raw.get(item_id).await? {
+                    GetOutcome::Found(value) => {
+                        return self
+                            .protection
+                            .decode(item_id, value)
+                            .map(GetOutcome::Found);
+                    }
+                    GetOutcome::NotFound => {}
+                }
             }
+            Ok(GetOutcome::NotFound)
         }
 
         /// Protects and stores plaintext bytes for arbitrary application key bytes.
@@ -187,9 +199,27 @@ macro_rules! protected_client_methods {
 
         /// Deletes a value for arbitrary application key bytes.
         pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
-            self.raw
-                .delete(self.protection.item_id(application_key))
+            self.delete_with_mutation_id(application_key, random_mutation_id()?)
                 .await
+        }
+
+        /// Deletes an application key while reusing an idempotency token.
+        pub async fn delete_with_mutation_id(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            mutation_id: MutationId,
+        ) -> Result<DeleteOutcome> {
+            for item_id in self.protection.item_ids(application_key.as_ref()) {
+                match self
+                    .raw
+                    .delete_with_mutation_id(item_id, scoped_mutation_id(mutation_id, item_id))
+                    .await?
+                {
+                    DeleteOutcome::Deleted => return Ok(DeleteOutcome::Deleted),
+                    DeleteOutcome::NotFound => {}
+                }
+            }
+            Ok(DeleteOutcome::NotFound)
         }
 
         /// Returns server statistics as their JSON text.
@@ -205,6 +235,12 @@ macro_rules! protected_client_methods {
         /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
         pub fn connection_state(&self) -> ConnectionState {
             self.raw.connection_state()
+        }
+
+        /// Returns retry, reconnect, and transport/protocol error counters
+        /// collected by the shared core.
+        pub fn metrics_snapshot(&self) -> CoreMetricsSnapshot {
+            self.raw.metrics_snapshot()
         }
 
         /// Explicitly replaces the current connection without replaying an operation.
@@ -262,6 +298,21 @@ impl ProtectedClient {
         }
     }
 
+    /// Starts a builder using an active key and a bounded read/delete rotation window.
+    pub fn builder_with_key_ring(
+        endpoint: Endpoint,
+        key_ring: DataProtectionKeyRing,
+    ) -> ProtectedClientBuilder {
+        ProtectedClientBuilder {
+            raw: RawClient::builder(endpoint),
+            protection: ProtectionSettings {
+                compression: Compression::Disabled,
+                encryption: Encryption::Robust,
+                key_ring,
+            },
+        }
+    }
+
     protected_client_methods!(RawClient);
 }
 
@@ -305,6 +356,21 @@ impl LocalProtectedClient {
         LocalProtectedClientBuilder {
             raw: LocalRawClient::builder(endpoint),
             protection: ProtectionSettings::new(key),
+        }
+    }
+
+    /// Starts a builder using an active key and a bounded read/delete rotation window.
+    pub fn builder_with_key_ring(
+        endpoint: Endpoint,
+        key_ring: DataProtectionKeyRing,
+    ) -> LocalProtectedClientBuilder {
+        LocalProtectedClientBuilder {
+            raw: LocalRawClient::builder(endpoint),
+            protection: ProtectionSettings {
+                compression: Compression::Disabled,
+                encryption: Encryption::Robust,
+                key_ring,
+            },
         }
     }
 

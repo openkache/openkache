@@ -33,6 +33,81 @@ extern "C" {
 typedef struct openkache_client openkache_client_t;
 typedef struct openkache_client_result openkache_client_result_t;
 
+typedef struct openkache_client_error_metadata {
+    uint32_t code;
+    uint32_t operation;
+    uint32_t phase;
+    uint32_t backend;
+    uint8_t retryable;
+    uint8_t ambiguous;
+    uint8_t mutation_id_length;
+    uint8_t reserved;
+    uint8_t mutation_id[OPENKACHE_SMITHY_MUTATION_ID_BYTES];
+} openkache_client_error_metadata_t;
+
+typedef struct openkache_client_metrics_snapshot {
+    uint64_t requests;
+    uint64_t hits;
+    uint64_t misses;
+    uint64_t retries;
+    uint64_t reconnects;
+    uint64_t cancellations;
+    uint64_t transport_errors;
+    uint64_t protocol_errors;
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t active_lanes;
+} openkache_client_metrics_snapshot_t;
+
+typedef enum openkache_client_error_code {
+    OPENKACHE_CLIENT_ERROR_CONFIGURATION = OPENKACHE_SMITHY_FFI_ERROR_CONFIGURATION,
+    OPENKACHE_CLIENT_ERROR_CONNECTION = OPENKACHE_SMITHY_FFI_ERROR_CONNECTION,
+    OPENKACHE_CLIENT_ERROR_TIMEOUT = OPENKACHE_SMITHY_FFI_ERROR_TIMEOUT,
+    OPENKACHE_CLIENT_ERROR_RUNTIME = OPENKACHE_SMITHY_FFI_ERROR_RUNTIME,
+    OPENKACHE_CLIENT_ERROR_TRANSPORT = OPENKACHE_SMITHY_FFI_ERROR_TRANSPORT,
+    OPENKACHE_CLIENT_ERROR_SERVER = OPENKACHE_SMITHY_FFI_ERROR_SERVER,
+    OPENKACHE_CLIENT_ERROR_UNEXPECTED_RESPONSE =
+        OPENKACHE_SMITHY_FFI_ERROR_UNEXPECTED_RESPONSE,
+    OPENKACHE_CLIENT_ERROR_RESPONSE_TOO_LARGE =
+        OPENKACHE_SMITHY_FFI_ERROR_RESPONSE_TOO_LARGE,
+    OPENKACHE_CLIENT_ERROR_TLS = OPENKACHE_SMITHY_FFI_ERROR_TLS,
+    OPENKACHE_CLIENT_ERROR_PROTOCOL = OPENKACHE_SMITHY_FFI_ERROR_PROTOCOL,
+    OPENKACHE_CLIENT_ERROR_IO = OPENKACHE_SMITHY_FFI_ERROR_IO,
+    OPENKACHE_CLIENT_ERROR_VALUE = OPENKACHE_SMITHY_FFI_ERROR_VALUE,
+    OPENKACHE_CLIENT_ERROR_CLOSED = OPENKACHE_SMITHY_FFI_ERROR_CLOSED,
+    OPENKACHE_CLIENT_ERROR_AMBIGUOUS = OPENKACHE_SMITHY_FFI_ERROR_AMBIGUOUS,
+    OPENKACHE_CLIENT_ERROR_CANCELLED = OPENKACHE_SMITHY_FFI_ERROR_CANCELLED,
+} openkache_client_error_code_t;
+
+typedef enum openkache_client_backend {
+    OPENKACHE_CLIENT_BACKEND_NONE = OPENKACHE_SMITHY_FFI_BACKEND_NONE,
+    OPENKACHE_CLIENT_BACKEND_QUINN = OPENKACHE_SMITHY_FFI_BACKEND_QUINN,
+    OPENKACHE_CLIENT_BACKEND_COMPIO = OPENKACHE_SMITHY_FFI_BACKEND_COMPIO,
+} openkache_client_backend_t;
+
+typedef enum openkache_client_error_phase {
+    OPENKACHE_CLIENT_PHASE_UNKNOWN = OPENKACHE_SMITHY_FFI_PHASE_UNKNOWN,
+    OPENKACHE_CLIENT_PHASE_DNS_RESOLUTION = OPENKACHE_SMITHY_FFI_PHASE_DNS_RESOLUTION,
+    OPENKACHE_CLIENT_PHASE_CONNECTION_SETUP = OPENKACHE_SMITHY_FFI_PHASE_CONNECTION_SETUP,
+    OPENKACHE_CLIENT_PHASE_CONNECTION_RETRY = OPENKACHE_SMITHY_FFI_PHASE_CONNECTION_RETRY,
+    OPENKACHE_CLIENT_PHASE_STREAM_ACQUISITION = OPENKACHE_SMITHY_FFI_PHASE_STREAM_ACQUISITION,
+    OPENKACHE_CLIENT_PHASE_REQUEST_WRITE = OPENKACHE_SMITHY_FFI_PHASE_REQUEST_WRITE,
+    OPENKACHE_CLIENT_PHASE_RESPONSE_HEADER_READ =
+        OPENKACHE_SMITHY_FFI_PHASE_RESPONSE_HEADER_READ,
+    OPENKACHE_CLIENT_PHASE_RESPONSE_BODY_READ =
+        OPENKACHE_SMITHY_FFI_PHASE_RESPONSE_BODY_READ,
+    OPENKACHE_CLIENT_PHASE_TLS_INITIALIZATION =
+        OPENKACHE_SMITHY_FFI_PHASE_TLS_INITIALIZATION,
+    OPENKACHE_CLIENT_PHASE_ENDPOINT_INITIALIZATION =
+        OPENKACHE_SMITHY_FFI_PHASE_ENDPOINT_INITIALIZATION,
+    OPENKACHE_CLIENT_PHASE_CONNECTION_INITIALIZATION =
+        OPENKACHE_SMITHY_FFI_PHASE_CONNECTION_INITIALIZATION,
+    OPENKACHE_CLIENT_PHASE_HANDSHAKE = OPENKACHE_SMITHY_FFI_PHASE_HANDSHAKE,
+    OPENKACHE_CLIENT_PHASE_STREAM_OPEN = OPENKACHE_SMITHY_FFI_PHASE_STREAM_OPEN,
+    OPENKACHE_CLIENT_PHASE_STREAM_WRITE = OPENKACHE_SMITHY_FFI_PHASE_STREAM_WRITE,
+    OPENKACHE_CLIENT_PHASE_STREAM_READ = OPENKACHE_SMITHY_FFI_PHASE_STREAM_READ,
+} openkache_client_error_phase_t;
+
 /* Naming aliases used by generated adapters in other languages. */
 typedef openkache_client_t openkache_client_handle;
 typedef openkache_client_result_t openkache_client_result;
@@ -103,6 +178,13 @@ typedef struct openkache_client_connect_options {
     size_t client_private_key_length;
     const uint8_t *data_protection_key;
     size_t data_protection_key_length;
+    /*
+     * Retired data-protection keys concatenated newest-first. Each key is
+     * exactly OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES bytes.
+     */
+    const uint8_t *previous_data_protection_keys;
+    size_t previous_data_protection_keys_length;
+    size_t previous_data_protection_key_count;
     uint8_t compression_enabled;
     int32_t compression_level;
     size_t minimum_input_size;
@@ -197,6 +279,48 @@ openkache_client_result_t *openkache_client_execute(
     uint64_t ttl_ms
 );
 
+openkache_client_result_t *openkache_client_execute_with_request_id(
+    const openkache_client_t *client,
+    uint64_t request_id,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_execute_with_request_id_and_mutation_id(
+    const openkache_client_t *client,
+    uint64_t request_id,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    const uint8_t *mutation_id,
+    size_t mutation_id_length
+);
+
+openkache_client_result_t *openkache_client_execute_with_mutation_id(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    const uint8_t *mutation_id,
+    size_t mutation_id_length
+);
+
 /*
  * Executes exact protocol item-ID operations. GET, SET, and DELETE require
  * exactly OPENKACHE_SMITHY_ITEM_ID_BYTES key bytes and bypass application-key
@@ -214,12 +338,66 @@ openkache_client_result_t *openkache_client_execute_raw(
     uint64_t ttl_ms
 );
 
+openkache_client_result_t *openkache_client_execute_raw_with_request_id(
+    const openkache_client_t *client,
+    uint64_t request_id,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_execute_raw_with_request_id_and_mutation_id(
+    const openkache_client_t *client,
+    uint64_t request_id,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    const uint8_t *mutation_id,
+    size_t mutation_id_length
+);
+
+openkache_client_result_t *openkache_client_execute_raw_with_mutation_id(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    const uint8_t *mutation_id,
+    size_t mutation_id_length
+);
+
 /* Returns one of openkache_client_connection_state_t; null handles return UNKNOWN. */
 uint32_t openkache_client_connection_state(const openkache_client_t *client);
+uint8_t openkache_client_cancel(
+    const openkache_client_t *client,
+    uint64_t request_id
+);
+uint8_t openkache_client_metrics_snapshot(
+    const openkache_client_t *client,
+    openkache_client_metrics_snapshot_t *snapshot
+);
 
 uint32_t openkache_client_result_kind(const openkache_client_result_t *result);
 const uint8_t *openkache_client_result_data(const openkache_client_result_t *result);
 size_t openkache_client_result_data_length(const openkache_client_result_t *result);
+uint8_t openkache_client_result_error_metadata(
+    const openkache_client_result_t *result,
+    openkache_client_error_metadata_t *metadata
+);
 openkache_client_t *openkache_client_result_take_client(openkache_client_result_t *result);
 void openkache_client_result_free(openkache_client_result_t *result);
 void openkache_client_free(openkache_client_t *client);

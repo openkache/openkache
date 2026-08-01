@@ -15,3 +15,13 @@ repositories {
 kotlin {
     jvmToolchain(21)
 }
+
+sourceSets {
+    main {
+        java.srcDir("../java/src/main/java")
+    }
+}
+
+tasks.withType<JavaCompile>().configureEach {
+    options.compilerArgs.add("--enable-preview")
+}

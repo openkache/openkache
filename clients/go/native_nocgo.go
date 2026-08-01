@@ -37,6 +37,10 @@ func (unavailableNativeClient) state() uint32 {
 	return SmithyFFIConnectionStateUnknown
 }
 
+func (unavailableNativeClient) metrics() MetricsSnapshot {
+	return MetricsSnapshot{}
+}
+
 func (unavailableNativeClient) close() error {
 	return nil
 }

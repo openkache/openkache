@@ -32,7 +32,7 @@ const (
 // Smithy native ABI values shared by language adapters.
 const (
 	// SmithyFFIABIVersion is the native ABI version implemented by the core.
-	SmithyFFIABIVersion uint32 = 2
+	SmithyFFIABIVersion uint32 = 3
 	// SmithyFFIOperationGetJson identifies the native operation GetJson.
 	SmithyFFIOperationGetJson uint32 = 7
 	// SmithyFFIOperationSetJson identifies the native operation SetJson.
@@ -75,12 +75,102 @@ const (
 	SmithyFFIConnectionStateClosed uint32 = 3
 	// SmithyFFIConnectionStateUnknown identifies a native connection state.
 	SmithyFFIConnectionStateUnknown uint32 = 4
+	// SmithyFFIErrorConfiguration identifies a structured native error code.
+	SmithyFFIErrorConfiguration uint32 = 1
+	// SmithyFFIErrorConnection identifies a structured native error code.
+	SmithyFFIErrorConnection uint32 = 2
+	// SmithyFFIErrorTimeout identifies a structured native error code.
+	SmithyFFIErrorTimeout uint32 = 3
+	// SmithyFFIErrorRuntime identifies a structured native error code.
+	SmithyFFIErrorRuntime uint32 = 4
+	// SmithyFFIErrorTransport identifies a structured native error code.
+	SmithyFFIErrorTransport uint32 = 5
+	// SmithyFFIErrorServer identifies a structured native error code.
+	SmithyFFIErrorServer uint32 = 6
+	// SmithyFFIErrorUnexpectedResponse identifies a structured native error code.
+	SmithyFFIErrorUnexpectedResponse uint32 = 7
+	// SmithyFFIErrorResponseTooLarge identifies a structured native error code.
+	SmithyFFIErrorResponseTooLarge uint32 = 8
+	// SmithyFFIErrorTls identifies a structured native error code.
+	SmithyFFIErrorTls uint32 = 9
+	// SmithyFFIErrorProtocol identifies a structured native error code.
+	SmithyFFIErrorProtocol uint32 = 10
+	// SmithyFFIErrorIo identifies a structured native error code.
+	SmithyFFIErrorIo uint32 = 11
+	// SmithyFFIErrorValue identifies a structured native error code.
+	SmithyFFIErrorValue uint32 = 12
+	// SmithyFFIErrorClosed identifies a structured native error code.
+	SmithyFFIErrorClosed uint32 = 13
+	// SmithyFFIErrorAmbiguous identifies a structured native error code.
+	SmithyFFIErrorAmbiguous uint32 = 14
+	// SmithyFFIErrorCancelled identifies a structured native error code.
+	SmithyFFIErrorCancelled uint32 = 15
+	// SmithyFFIPhaseUnknown identifies a structured native error phase.
+	SmithyFFIPhaseUnknown uint32 = 0
+	// SmithyFFIPhaseDnsResolution identifies a structured native error phase.
+	SmithyFFIPhaseDnsResolution uint32 = 1
+	// SmithyFFIPhaseConnectionSetup identifies a structured native error phase.
+	SmithyFFIPhaseConnectionSetup uint32 = 2
+	// SmithyFFIPhaseConnectionRetry identifies a structured native error phase.
+	SmithyFFIPhaseConnectionRetry uint32 = 3
+	// SmithyFFIPhaseStreamAcquisition identifies a structured native error phase.
+	SmithyFFIPhaseStreamAcquisition uint32 = 4
+	// SmithyFFIPhaseRequestWrite identifies a structured native error phase.
+	SmithyFFIPhaseRequestWrite uint32 = 5
+	// SmithyFFIPhaseResponseHeaderRead identifies a structured native error phase.
+	SmithyFFIPhaseResponseHeaderRead uint32 = 6
+	// SmithyFFIPhaseResponseBodyRead identifies a structured native error phase.
+	SmithyFFIPhaseResponseBodyRead uint32 = 7
+	// SmithyFFIPhaseTlsInitialization identifies a structured native error phase.
+	SmithyFFIPhaseTlsInitialization uint32 = 8
+	// SmithyFFIPhaseEndpointInitialization identifies a structured native error phase.
+	SmithyFFIPhaseEndpointInitialization uint32 = 9
+	// SmithyFFIPhaseConnectionInitialization identifies a structured native error phase.
+	SmithyFFIPhaseConnectionInitialization uint32 = 10
+	// SmithyFFIPhaseHandshake identifies a structured native error phase.
+	SmithyFFIPhaseHandshake uint32 = 11
+	// SmithyFFIPhaseStreamOpen identifies a structured native error phase.
+	SmithyFFIPhaseStreamOpen uint32 = 12
+	// SmithyFFIPhaseStreamWrite identifies a structured native error phase.
+	SmithyFFIPhaseStreamWrite uint32 = 13
+	// SmithyFFIPhaseStreamRead identifies a structured native error phase.
+	SmithyFFIPhaseStreamRead uint32 = 14
+	// SmithyFFIBackendNone identifies a native transport backend.
+	SmithyFFIBackendNone uint32 = 0
+	// SmithyFFIBackendQuinn identifies a native transport backend.
+	SmithyFFIBackendQuinn uint32 = 1
+	// SmithyFFIBackendCompio identifies a native transport backend.
+	SmithyFFIBackendCompio uint32 = 2
+	// SmithyFFIMetricsRequests identifies a metrics snapshot field.
+	SmithyFFIMetricsRequests uint32 = 0
+	// SmithyFFIMetricsHits identifies a metrics snapshot field.
+	SmithyFFIMetricsHits uint32 = 1
+	// SmithyFFIMetricsMisses identifies a metrics snapshot field.
+	SmithyFFIMetricsMisses uint32 = 2
+	// SmithyFFIMetricsRetries identifies a metrics snapshot field.
+	SmithyFFIMetricsRetries uint32 = 3
+	// SmithyFFIMetricsReconnects identifies a metrics snapshot field.
+	SmithyFFIMetricsReconnects uint32 = 4
+	// SmithyFFIMetricsCancellations identifies a metrics snapshot field.
+	SmithyFFIMetricsCancellations uint32 = 5
+	// SmithyFFIMetricsTransportErrors identifies a metrics snapshot field.
+	SmithyFFIMetricsTransportErrors uint32 = 6
+	// SmithyFFIMetricsProtocolErrors identifies a metrics snapshot field.
+	SmithyFFIMetricsProtocolErrors uint32 = 7
+	// SmithyFFIMetricsBytesSent identifies a metrics snapshot field.
+	SmithyFFIMetricsBytesSent uint32 = 8
+	// SmithyFFIMetricsBytesReceived identifies a metrics snapshot field.
+	SmithyFFIMetricsBytesReceived uint32 = 9
+	// SmithyFFIMetricsActiveLanes identifies a metrics snapshot field.
+	SmithyFFIMetricsActiveLanes uint32 = 10
 )
 
 // Shared client defaults extracted from the Smithy service contract.
 const (
 	// SmithyDefaultMaxInFlight is the default number of request lanes.
 	SmithyDefaultMaxInFlight = 256
+	// SmithyMutationIDBytes is the fixed width of a mutation idempotency token.
+	SmithyMutationIDBytes = 16
 	// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
 	SmithyDefaultConnectTimeoutMilliseconds uint64 = 5000
 	// SmithyDefaultRequestTimeoutMilliseconds is the default complete request timeout.

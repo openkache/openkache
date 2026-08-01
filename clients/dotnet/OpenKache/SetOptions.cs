@@ -18,6 +18,11 @@ public sealed class SetOptions
     /// </summary>
     public TimeSpan? TimeToLive { get; init; }
 
+    /// <summary>
+    /// Optional fixed-width idempotency token. A token is generated when omitted.
+    /// </summary>
+    public byte[]? MutationId { get; init; }
+
     internal ulong? ValidateAndGetTtlMilliseconds()
     {
         if (Condition is not null
@@ -29,10 +34,15 @@ public sealed class SetOptions
                 "The set condition is not supported.");
         }
 
-        if (TimeToLive is not { } timeToLive)
+        if (MutationId is not null
+            && MutationId.Length != Protocol.MutationIdBytes)
         {
-            return null;
+            throw new ArgumentException(
+                $"The mutation ID must contain exactly {Protocol.MutationIdBytes} bytes.",
+                nameof(MutationId));
         }
+
+        if (TimeToLive is not { } timeToLive) return null;
 
         if (timeToLive <= TimeSpan.Zero)
         {

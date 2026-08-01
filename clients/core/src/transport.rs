@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{RESPONSE_FIXED_BYTES, Response};
+use openkache_protocol::{MAX_VARUINT_BYTES, RESPONSE_FIXED_BYTES, Response};
 
 use crate::{Backend, Error, Operation, Result};
 
@@ -35,6 +35,8 @@ pub(crate) trait ClientConnection: Sized {
         duration: Duration,
         future: F,
     ) -> impl Future<Output = Result<Option<F::Output>>>;
+
+    fn sleep(duration: Duration) -> impl Future<Output = ()>;
 
     fn close(&self);
 }
@@ -92,6 +94,10 @@ macro_rules! connection_backend {
                 future: F,
             ) -> Result<Option<F::Output>> {
                 $timeout(duration, future).await
+            }
+
+            async fn sleep(duration: Duration) {
+                $module::sleep(duration).await;
             }
 
             fn close(&self) {
@@ -171,6 +177,12 @@ trait BackendStream {
         length: usize,
         timeout: Duration,
     ) -> impl Future<Output = std::result::Result<Vec<u8>, TransportError>>;
+
+    /// Reads a small fixed-size prefix without a heap allocation.
+    fn read_exact_fixed<const N: usize>(
+        &mut self,
+        timeout: Duration,
+    ) -> impl Future<Output = std::result::Result<[u8; N], TransportError>>;
 }
 
 type LaneSender<T> = MAsyncTx<crossfire::mpmc::Array<T>>;
@@ -301,25 +313,37 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
             .stream
             .as_mut()
             .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
-        let mut frame = stream
-            .read_exact(
-                RESPONSE_FIXED_BYTES,
-                deadline.remaining(Operation::ResponseHeaderRead)?,
-            )
-            .await?;
+        let mut prefix = [0_u8; RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES];
+        prefix[..RESPONSE_FIXED_BYTES].copy_from_slice(
+            &stream
+                .read_exact_fixed::<RESPONSE_FIXED_BYTES>(
+                    deadline.remaining(Operation::ResponseHeaderRead)?,
+                )
+                .await?,
+        );
+        let mut prefix_len = RESPONSE_FIXED_BYTES;
         let header = loop {
-            if let Some(header) = Response::decode_header(&frame).map_err(Error::protocol)? {
+            if let Some(header) =
+                Response::decode_header(&prefix[..prefix_len]).map_err(Error::protocol)?
+            {
                 break header;
             }
-            let next = stream
-                .read_exact(1, deadline.remaining(Operation::ResponseHeaderRead)?)
-                .await?;
-            frame.extend_from_slice(&next);
+            if prefix_len == prefix.len() {
+                return Err(Error::Protocol(
+                    "response header exceeded the maximum variable-length prefix".into(),
+                ));
+            }
+            prefix[prefix_len] = stream
+                .read_exact_fixed::<1>(deadline.remaining(Operation::ResponseHeaderRead)?)
+                .await?[0];
+            prefix_len += 1;
         };
         let frame_len = header.frame_len().map_err(Error::protocol)?;
         if frame_len > maximum {
             return Err(Error::ResponseTooLarge { maximum });
         }
+        let mut frame = Vec::with_capacity(frame_len);
+        frame.extend_from_slice(&prefix[..prefix_len]);
         let body_len = header.payload_len();
         if body_len > 0 {
             let body = stream

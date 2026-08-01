@@ -23,7 +23,8 @@ const (
 
 // SmithyDeleteInput is the Smithy DeleteInput structure.
 type SmithyDeleteInput struct {
-	ItemID []byte `json:"item_id"`
+	ItemID     []byte  `json:"item_id"`
+	MutationID *[]byte `json:"mutation_id,omitempty"`
 }
 
 // SmithyDeleteOutput is the Smithy DeleteOutput structure.
@@ -53,6 +54,7 @@ type SmithySetInput struct {
 	Value           []byte              `json:"value"`
 	Condition       *SmithySetCondition `json:"condition,omitempty"`
 	TTLMilliseconds *int64              `json:"ttl_milliseconds,omitempty"`
+	MutationID      *[]byte             `json:"mutation_id,omitempty"`
 }
 
 // SmithySetOutput is the Smithy SetOutput structure.

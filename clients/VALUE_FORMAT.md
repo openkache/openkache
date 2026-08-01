@@ -614,11 +614,9 @@ representations. Writers emit version `1`; readers accept version `1` only.
 The earlier magic-prefixed envelope beginning with `4f 4b 56 01` is not version `1` of this format
 and MUST be rejected rather than unwrapped or migrated implicitly.
 
-The TypeScript adapter may still place that legacy envelope inside a version-1 Raw serialization
-for package-local backwards compatibility. That nested payload is not a value-format v1 codec and
-MUST NOT be used as a cross-language interchange format. TypeScript applications that need
-interoperability MUST use its `set_json` and `get_json` APIs (or the raw API with an independently
-specified byte contract).
+No adapter may place a package-specific metadata envelope inside a version-1
+Raw serialization. Applications that need an independently specified binary
+contract MUST use the raw API and own that contract themselves.
 
 A future version is required when changing:
 

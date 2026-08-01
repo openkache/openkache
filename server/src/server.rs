@@ -6,6 +6,7 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use compio::driver::ProactorBuilder;
@@ -17,9 +18,12 @@ use openkache_protocol::{
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use sha2::{Digest, Sha256};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+use zeroize::Zeroizing;
 
 use crate::channel::{self, AsyncReceiver, Sender};
+use crate::mutation::{MutationDecision, MutationDedupeStore};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
@@ -306,17 +310,19 @@ fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let bytes = std::fs::read(path).map_err(|error| ServerError::TlsIdentity {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let bytes = Zeroizing::new(
+        std::fs::read(path).map_err(|error| ServerError::TlsIdentity {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?,
+    );
     if bytes.starts_with(b"-----BEGIN") {
         PrivateKeyDer::from_pem_slice(&bytes).map_err(|error| ServerError::TlsIdentity {
             path: path.to_path_buf(),
             message: error.to_string(),
         })
     } else {
-        PrivateKeyDer::try_from(bytes).map_err(|message| ServerError::TlsIdentity {
+        PrivateKeyDer::try_from(bytes.to_vec()).map_err(|message| ServerError::TlsIdentity {
             path: path.to_path_buf(),
             message: message.into(),
         })
@@ -334,6 +340,7 @@ pub struct KacheServer {
     network: NetworkConfig,
     request_timeout: Duration,
     max_item_bytes: usize,
+    mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 }
 
 impl KacheServer {
@@ -434,6 +441,7 @@ impl KacheServer {
             network,
             request_timeout,
             max_item_bytes,
+            mutation_dedupe: Arc::new(Mutex::new(MutationDedupeStore::default())),
         })
     }
 
@@ -486,6 +494,7 @@ impl KacheServer {
             network,
             request_timeout,
             max_item_bytes,
+            mutation_dedupe,
             ..
         } = self;
         let (started_tx, started_rx) =
@@ -511,6 +520,7 @@ impl KacheServer {
                 max_stream_lanes: network.max_stream_lanes_per_connection,
                 request_budget: request_budget.clone(),
                 max_item_bytes,
+                mutation_dedupe: Arc::clone(&mutation_dedupe),
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
             let role = QuicNetworkRole {
@@ -735,6 +745,7 @@ struct NetworkWorkerLimits {
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 }
 
 async fn run_selected_endpoint(
@@ -772,6 +783,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         max_stream_lanes,
         request_budget,
         max_item_bytes,
+        mutation_dedupe,
     } = limits;
     let mut connections = FuturesUnordered::new();
     loop {
@@ -784,7 +796,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, cache, access_policy, request_timeout, max_stream_lanes,
-                        request_budget.clone(), max_item_bytes,
+                        request_budget.clone(), max_item_bytes, Arc::clone(&mutation_dedupe),
                     ));
                 }
                 _ = stopping => break,
@@ -799,7 +811,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, cache, access_policy, request_timeout, max_stream_lanes,
-                        request_budget.clone(), max_item_bytes,
+                        request_budget.clone(), max_item_bytes, Arc::clone(&mutation_dedupe),
                     ));
                 }
                 _ = completed => {}
@@ -813,6 +825,7 @@ async fn run_network_worker<E: TransportEndpoint>(
 }
 
 /// Completes one QUIC handshake and serves the accepted connection.
+#[allow(clippy::too_many_arguments)]
 async fn serve_incoming<I: TransportIncoming>(
     incoming: I,
     cache: &ThreadedKvkache,
@@ -821,6 +834,7 @@ async fn serve_incoming<I: TransportIncoming>(
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 ) {
     if let Ok(mut connection) = incoming.connect().await {
         let administrator =
@@ -833,12 +847,14 @@ async fn serve_incoming<I: TransportIncoming>(
             max_stream_lanes,
             request_budget,
             max_item_bytes,
+            mutation_dedupe,
         )
         .await;
     }
 }
 
 /// Multiplexes bounded reusable request lanes for one QUIC connection.
+#[allow(clippy::too_many_arguments)]
 async fn serve_connection<C: TransportConnection>(
     connection: C,
     cache: &ThreadedKvkache,
@@ -847,6 +863,7 @@ async fn serve_connection<C: TransportConnection>(
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 ) {
     let mut streams = FuturesUnordered::new();
     loop {
@@ -865,6 +882,7 @@ async fn serve_connection<C: TransportConnection>(
                         request_timeout,
                         request_budget.clone(),
                         max_item_bytes,
+                        Arc::clone(&mutation_dedupe),
                     ));
                 }
                 Err(_) => break,
@@ -884,6 +902,7 @@ async fn serve_connection<C: TransportConnection>(
                             request_timeout,
                             request_budget.clone(),
                             max_item_bytes,
+                            Arc::clone(&mutation_dedupe),
                         ));
                     }
                     Err(_) => break,
@@ -896,6 +915,7 @@ async fn serve_connection<C: TransportConnection>(
 }
 
 /// Reuses one QUIC stream as a sequential request lane until either peer closes it.
+#[allow(clippy::too_many_arguments)]
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
@@ -904,6 +924,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_timeout: Duration,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
 ) {
     loop {
         let mut frame = match receive
@@ -937,8 +958,19 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
+        let fingerprint: [u8; 32] = Sha256::digest(&request_bytes).into();
         let (response, _response_permit) = match Request::decode_owned(request_bytes) {
             Ok(request) => {
+                let mutation_id = request.mutation_id;
+                let decision = mutation_id.map(|mutation_id| {
+                    mutation_dedupe
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .check(mutation_id, fingerprint, std::time::Instant::now())
+                });
+                let should_record = decision
+                    .as_ref()
+                    .is_some_and(|decision| matches!(decision, MutationDecision::New));
                 let response_permit = if request.opcode == Opcode::Get {
                     match request_budget
                         .acquire(max_item_bytes, request_timeout)
@@ -969,24 +1001,103 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 } else {
                     None
                 };
-                match compio::runtime::time::timeout(
-                    request_timeout,
-                    execute_request(cache, request, administrator),
-                )
-                .await
-                {
-                    Ok(response) => (response, response_permit),
-                    Err(_) => (
-                        response_bytes(Status::Timeout, b"request execution timed out"),
-                        response_permit,
+                let response = match decision {
+                    Some(MutationDecision::Replay { status, payload }) => response(
+                        Status::try_from(status).unwrap_or(Status::InternalError),
+                        payload,
                     ),
+                    Some(MutationDecision::Pending) => {
+                        wait_for_mutation_result(
+                            &mutation_dedupe,
+                            mutation_id.expect("pending mutations carry a token"),
+                            fingerprint,
+                            request_timeout,
+                        )
+                        .await
+                    }
+                    Some(MutationDecision::Conflict) => response_bytes(
+                        Status::MutationConflict,
+                        b"mutation token was already used for a different request",
+                    ),
+                    Some(MutationDecision::Capacity) => {
+                        response_bytes(Status::Overloaded, b"mutation replay store is at capacity")
+                    }
+                    Some(MutationDecision::New) | None => match compio::runtime::time::timeout(
+                        request_timeout,
+                        execute_request(cache, request, administrator),
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(_) => response_bytes(Status::Timeout, b"request execution timed out"),
+                    },
+                };
+                if should_record && let Some(mutation_id) = mutation_id {
+                    mutation_dedupe
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .record(
+                            mutation_id,
+                            fingerprint,
+                            response.status as u8,
+                            response.payload.clone(),
+                            std::time::Instant::now(),
+                        );
                 }
+                (response, response_permit)
             }
             Err(error) => (protocol_error_response(error), None),
         };
         if !write_response(&mut send, response, request_timeout).await {
             break;
         }
+    }
+}
+
+async fn wait_for_mutation_result(
+    mutation_dedupe: &Arc<Mutex<MutationDedupeStore>>,
+    mutation_id: openkache_protocol::MutationId,
+    fingerprint: [u8; 32],
+    request_timeout: Duration,
+) -> Response {
+    let deadline = std::time::Instant::now()
+        .checked_add(request_timeout)
+        .unwrap_or_else(std::time::Instant::now);
+    loop {
+        let decision = mutation_dedupe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup(mutation_id, fingerprint, std::time::Instant::now());
+        match decision {
+            MutationDecision::Replay { status, payload } => {
+                return response(
+                    Status::try_from(status).unwrap_or(Status::InternalError),
+                    payload,
+                );
+            }
+            MutationDecision::Conflict => {
+                return response_bytes(
+                    Status::MutationConflict,
+                    b"mutation token was already used for a different request",
+                );
+            }
+            MutationDecision::Capacity => {
+                return response_bytes(Status::Overloaded, b"mutation replay store is at capacity");
+            }
+            MutationDecision::New => {
+                return response_bytes(
+                    Status::Timeout,
+                    b"mutation result reservation expired before replay",
+                );
+            }
+            MutationDecision::Pending => {}
+        }
+
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return response_bytes(Status::Timeout, b"mutation replay timed out");
+        }
+        compio::runtime::time::sleep(remaining.min(Duration::from_millis(1))).await;
     }
 }
 
@@ -1012,6 +1123,7 @@ async fn execute_request(
         item_id,
         set_options,
         value,
+        mutation_id: _,
     } = request;
     let result = match opcode {
         Opcode::Ping => return response_bytes(Status::Ok, b"PONG"),

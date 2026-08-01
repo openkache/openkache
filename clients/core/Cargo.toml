@@ -10,7 +10,8 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 
 [features]
 default = ["quic-quinn"]
-ffi = ["quic-compio"]
+ffi = ["quic-quinn"]
+ffi-compio = ["quic-compio"]
 quic-compio = ["dep:compio", "dep:compio-quic"]
 quic-quinn = ["dep:quinn", "dep:tokio"]
 
@@ -37,7 +38,7 @@ serde = "*"
 serde_json = "*"
 serde_json_canonicalizer = "*"
 thiserror = "*"
-tokio = { version = "*", features = ["io-util", "net", "rt", "time"], optional = true }
+tokio = { version = "*", features = ["io-util", "macros", "net", "rt", "time"], optional = true }
 vu128 = "*"
 zeroize = { version = "*", features = ["derive"] }
 zstd-pure-rs = "*"

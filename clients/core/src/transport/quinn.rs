@@ -56,6 +56,10 @@ pub(super) async fn connect(
     })
 }
 
+pub(super) async fn sleep(duration: Duration) {
+    tokio::time::sleep(duration).await;
+}
+
 impl BackendConnection for Connection {
     type Stream = Stream;
 
@@ -86,6 +90,18 @@ impl BackendStream for Stream {
         timeout: Duration,
     ) -> Result<Vec<u8>, TransportError> {
         let mut bytes = vec![0; length];
+        tokio::time::timeout(timeout, self.receive.read_exact(&mut bytes))
+            .await
+            .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?
+            .map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
+        Ok(bytes)
+    }
+
+    async fn read_exact_fixed<const N: usize>(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<[u8; N], TransportError> {
+        let mut bytes = [0_u8; N];
         tokio::time::timeout(timeout, self.receive.read_exact(&mut bytes))
             .await
             .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?

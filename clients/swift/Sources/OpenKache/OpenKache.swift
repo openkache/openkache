@@ -6,33 +6,16 @@ import Foundation
 
 private typealias NativeClientPointer = OpaquePointer
 private typealias NativeResultPointer = OpaquePointer
+private let nativeMutationIDBytes = Smithy_Value_Format.mutationIdBytes
+private let nativeConnectOptionsBytes = 184
+private let nativeMetricsSnapshotBytes = 88
 
 @_silgen_name("openkache_client_abi_version")
 private func nativeAbiVersion() -> UInt32
 
-@_silgen_name("openkache_client_connect_ex")
-private func nativeConnect(
-    _ address: UnsafePointer<UInt8>?,
-    _ addressLength: Int,
-    _ serverName: UnsafePointer<UInt8>?,
-    _ serverNameLength: Int,
-    _ certificate: UnsafePointer<UInt8>?,
-    _ certificateLength: Int,
-    _ clientCertificate: UnsafePointer<UInt8>?,
-    _ clientCertificateLength: Int,
-    _ clientPrivateKey: UnsafePointer<UInt8>?,
-    _ clientPrivateKeyLength: Int,
-    _ dataProtectionKey: UnsafePointer<UInt8>?,
-    _ dataProtectionKeyLength: Int,
-    _ compressionEnabled: UInt8,
-    _ compressionLevel: Int32,
-    _ minimumInputSize: Int,
-    _ minimumSavings: Int,
-    _ encryption: UInt32,
-    _ retryMaxAttempts: Int,
-    _ maxInFlight: Int,
-    _ connectTimeoutMilliseconds: UInt64,
-    _ requestTimeoutMilliseconds: UInt64
+@_silgen_name("openkache_client_connect_with_options")
+private func nativeConnectWithOptions(
+    _ options: UnsafeRawPointer?
 ) -> NativeResultPointer?
 
 @_silgen_name("openkache_client_execute")
@@ -48,6 +31,51 @@ private func nativeExecute(
     _ ttlMilliseconds: UInt64
 ) -> NativeResultPointer?
 
+@_silgen_name("openkache_client_execute_with_request_id")
+private func nativeExecuteWithRequestID(
+    _ client: NativeClientPointer?,
+    _ requestID: UInt64,
+    _ operation: UInt32,
+    _ applicationKey: UnsafePointer<UInt8>?,
+    _ applicationKeyLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setCondition: UInt32,
+    _ ttlEnabled: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_with_mutation_id")
+private func nativeExecuteWithMutationID(
+    _ client: NativeClientPointer?,
+    _ operation: UInt32,
+    _ applicationKey: UnsafePointer<UInt8>?,
+    _ applicationKeyLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setCondition: UInt32,
+    _ ttlEnabled: UInt8,
+    _ ttlMilliseconds: UInt64,
+    _ mutationID: UnsafePointer<UInt8>?,
+    _ mutationIDLength: Int
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_with_request_id_and_mutation_id")
+private func nativeExecuteWithRequestIDAndMutationID(
+    _ client: NativeClientPointer?,
+    _ requestID: UInt64,
+    _ operation: UInt32,
+    _ applicationKey: UnsafePointer<UInt8>?,
+    _ applicationKeyLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setCondition: UInt32,
+    _ ttlEnabled: UInt8,
+    _ ttlMilliseconds: UInt64,
+    _ mutationID: UnsafePointer<UInt8>?,
+    _ mutationIDLength: Int
+) -> NativeResultPointer?
+
 @_silgen_name("openkache_client_execute_raw")
 private func nativeExecuteRaw(
     _ client: NativeClientPointer?,
@@ -61,6 +89,51 @@ private func nativeExecuteRaw(
     _ ttlMilliseconds: UInt64
 ) -> NativeResultPointer?
 
+@_silgen_name("openkache_client_execute_raw_with_request_id")
+private func nativeExecuteRawWithRequestID(
+    _ client: NativeClientPointer?,
+    _ requestID: UInt64,
+    _ operation: UInt32,
+    _ itemID: UnsafePointer<UInt8>?,
+    _ itemIDLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setCondition: UInt32,
+    _ ttlEnabled: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_raw_with_mutation_id")
+private func nativeExecuteRawWithMutationID(
+    _ client: NativeClientPointer?,
+    _ operation: UInt32,
+    _ itemID: UnsafePointer<UInt8>?,
+    _ itemIDLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setCondition: UInt32,
+    _ ttlEnabled: UInt8,
+    _ ttlMilliseconds: UInt64,
+    _ mutationID: UnsafePointer<UInt8>?,
+    _ mutationIDLength: Int
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_raw_with_request_id_and_mutation_id")
+private func nativeExecuteRawWithRequestIDAndMutationID(
+    _ client: NativeClientPointer?,
+    _ requestID: UInt64,
+    _ operation: UInt32,
+    _ itemID: UnsafePointer<UInt8>?,
+    _ itemIDLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setCondition: UInt32,
+    _ ttlEnabled: UInt8,
+    _ ttlMilliseconds: UInt64,
+    _ mutationID: UnsafePointer<UInt8>?,
+    _ mutationIDLength: Int
+) -> NativeResultPointer?
+
 @_silgen_name("openkache_client_result_kind")
 private func nativeResultKind(_ result: NativeResultPointer?) -> UInt32
 
@@ -69,6 +142,21 @@ private func nativeResultData(_ result: NativeResultPointer?) -> UnsafePointer<U
 
 @_silgen_name("openkache_client_result_data_length")
 private func nativeResultDataLength(_ result: NativeResultPointer?) -> Int
+
+@_silgen_name("openkache_client_cancel")
+private func nativeCancel(_ client: NativeClientPointer?, _ requestID: UInt64) -> UInt8
+
+@_silgen_name("openkache_client_metrics_snapshot")
+private func nativeMetricsSnapshot(
+    _ client: NativeClientPointer?,
+    _ snapshot: UnsafeMutableRawPointer?
+) -> UInt8
+
+@_silgen_name("openkache_client_result_error_metadata")
+private func nativeResultErrorMetadata(
+    _ result: NativeResultPointer?,
+    _ metadata: UnsafeMutableRawPointer?
+) -> UInt8
 
 @_silgen_name("openkache_client_result_take_client")
 private func nativeTakeClient(_ result: NativeResultPointer?) -> NativeClientPointer?
@@ -83,15 +171,29 @@ private func nativeFreeClient(_ client: NativeClientPointer?)
 public struct OpenKacheError: Error, LocalizedError, Equatable, Sendable {
     /// Human-readable diagnostic supplied by the core.
     public let message: String
+    /// Structured metadata supplied by the native core, when available.
+    public let metadata: ErrorMetadata?
 
     /// Creates an error with a caller-owned diagnostic.
-    public init(_ message: String) {
+    public init(_ message: String, metadata: ErrorMetadata? = nil) {
         self.message = message
+        self.metadata = metadata
     }
 
     public var errorDescription: String? {
         message
     }
+}
+
+/// Stable structured metadata attached to a native operation failure.
+public struct ErrorMetadata: Equatable, Sendable {
+    public let code: UInt32
+    public let operation: UInt32
+    public let phase: UInt32
+    public let backend: UInt32
+    public let retryable: Bool
+    public let ambiguous: Bool
+    public let mutationID: Data?
 }
 
 /// Optional mutual-TLS identity.
@@ -105,6 +207,20 @@ public struct OpenKacheClientIdentity: Sendable {
     public init(certificate: Data, privateKey: Data) {
         self.certificate = certificate
         self.privateKey = privateKey
+    }
+}
+
+/// Active data-protection key and a bounded read/delete rotation window.
+public struct OpenKacheDataProtectionKeyRing: Sendable {
+    /// Key used for new writes.
+    public var active: Data
+    /// Retired keys tried newest-first for reads and deletes.
+    public var previous: [Data]
+
+    /// Creates a key ring with at most eight retired keys.
+    public init(active: Data, previous: [Data] = []) {
+        self.active = active
+        self.previous = previous
     }
 }
 
@@ -183,7 +299,11 @@ public struct OpenKacheClientOptions: Sendable {
     /// Optional mutual-TLS identity.
     public var identity: OpenKacheClientIdentity?
     /// Persistent 32-byte application data-protection key.
-    public var dataProtectionKey: Data
+    ///
+    /// Set this when `keyRing` is nil. A key ring may be supplied instead.
+    public var dataProtectionKey: Data?
+    /// Optional active key plus retired keys for key rotation.
+    public var keyRing: OpenKacheDataProtectionKeyRing?
     /// Value compression policy.
     public var compression: OpenKacheCompression
     /// Value authenticated-encryption profile.
@@ -213,13 +333,15 @@ public struct OpenKacheClientOptions: Sendable {
             Int64(Smithy_Value_Format.defaultRequestTimeoutMilliseconds)
         ),
         retryMaxAttempts: Int = Smithy_Value_Format.defaultRetryMaxAttempts,
-        maxInFlight: Int = Smithy_Value_Format.defaultMaxInFlight
+        maxInFlight: Int = Smithy_Value_Format.defaultMaxInFlight,
+        keyRing: OpenKacheDataProtectionKeyRing? = nil
     ) {
         self.address = address
         self.serverName = serverName
         self.certificate = certificate
         self.identity = identity
         self.dataProtectionKey = dataProtectionKey
+        self.keyRing = keyRing
         self.compression = compression
         self.encryption = encryption
         self.connectTimeout = connectTimeout
@@ -227,6 +349,53 @@ public struct OpenKacheClientOptions: Sendable {
         self.retryMaxAttempts = retryMaxAttempts
         self.maxInFlight = maxInFlight
     }
+
+    /// Creates options using an active key and optional retired rotation keys.
+    public init(
+        address: String,
+        keyRing: OpenKacheDataProtectionKeyRing,
+        serverName: String? = nil,
+        certificate: Data? = nil,
+        identity: OpenKacheClientIdentity? = nil,
+        compression: OpenKacheCompression = .disabled,
+        encryption: OpenKacheEncryption = .robust,
+        connectTimeout: Duration = .milliseconds(
+            Int64(Smithy_Value_Format.defaultConnectTimeoutMilliseconds)
+        ),
+        requestTimeout: Duration = .milliseconds(
+            Int64(Smithy_Value_Format.defaultRequestTimeoutMilliseconds)
+        ),
+        retryMaxAttempts: Int = Smithy_Value_Format.defaultRetryMaxAttempts,
+        maxInFlight: Int = Smithy_Value_Format.defaultMaxInFlight
+    ) {
+        self.address = address
+        self.serverName = serverName
+        self.certificate = certificate
+        self.identity = identity
+        self.dataProtectionKey = nil
+        self.keyRing = keyRing
+        self.compression = compression
+        self.encryption = encryption
+        self.connectTimeout = connectTimeout
+        self.requestTimeout = requestTimeout
+        self.retryMaxAttempts = retryMaxAttempts
+        self.maxInFlight = maxInFlight
+    }
+}
+
+/// Point-in-time counters collected by one native client connection.
+public struct OpenKacheMetricsSnapshot: Sendable, Equatable {
+    public let requests: UInt64
+    public let hits: UInt64
+    public let misses: UInt64
+    public let retries: UInt64
+    public let reconnects: UInt64
+    public let cancellations: UInt64
+    public let transportErrors: UInt64
+    public let protocolErrors: UInt64
+    public let bytesSent: UInt64
+    public let bytesReceived: UInt64
+    public let activeLanes: UInt64
 }
 
 /// Conditional behavior for one SET operation.
@@ -248,9 +417,47 @@ public typealias OpenKacheConnectionState = Smithy_Connection_State
 
 private final class NativeHandle: @unchecked Sendable {
     let pointer: NativeClientPointer
+    private let lock = NSLock()
+    private var nextRequestID: UInt64 = 1
 
     init(pointer: NativeClientPointer) {
         self.pointer = pointer
+    }
+
+    func reserveRequestID() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        let requestID = nextRequestID
+        nextRequestID = nextRequestID == UInt64.max ? 1 : nextRequestID + 1
+        return requestID == 0 ? reserveRequestID() : requestID
+    }
+
+    func cancel(requestID: UInt64) {
+        _ = nativeCancel(pointer, requestID)
+    }
+
+    func metricsSnapshot() throws -> OpenKacheMetricsSnapshot {
+        let pointer = UnsafeMutableRawPointer.allocate(
+            byteCount: nativeMetricsSnapshotBytes,
+            alignment: MemoryLayout<UInt64>.alignment
+        )
+        defer { pointer.deallocate() }
+        guard nativeMetricsSnapshot(self.pointer, pointer) != 0 else {
+            throw OpenKacheError("native client did not return metrics")
+        }
+        return OpenKacheMetricsSnapshot(
+            requests: pointer.load(fromByteOffset: 0, as: UInt64.self),
+            hits: pointer.load(fromByteOffset: 8, as: UInt64.self),
+            misses: pointer.load(fromByteOffset: 16, as: UInt64.self),
+            retries: pointer.load(fromByteOffset: 24, as: UInt64.self),
+            reconnects: pointer.load(fromByteOffset: 32, as: UInt64.self),
+            cancellations: pointer.load(fromByteOffset: 40, as: UInt64.self),
+            transportErrors: pointer.load(fromByteOffset: 48, as: UInt64.self),
+            protocolErrors: pointer.load(fromByteOffset: 56, as: UInt64.self),
+            bytesSent: pointer.load(fromByteOffset: 64, as: UInt64.self),
+            bytesReceived: pointer.load(fromByteOffset: 72, as: UInt64.self),
+            activeLanes: pointer.load(fromByteOffset: 80, as: UInt64.self)
+        )
     }
 
     deinit {
@@ -266,10 +473,35 @@ private enum NativeBridge {
         guard !options.address.isEmpty else {
             throw OpenKacheError("address must not be empty")
         }
-        guard options.dataProtectionKey.count == Smithy_Value_Format.dataProtectionKeyBytes else {
+        let activeKey: Data
+        let previousKeys: [Data]
+        if let keyRing = options.keyRing {
+            guard options.dataProtectionKey == nil else {
+                throw OpenKacheError("provide either dataProtectionKey or keyRing, not both")
+            }
+            activeKey = keyRing.active
+            previousKeys = keyRing.previous
+        } else if let dataProtectionKey = options.dataProtectionKey {
+            activeKey = dataProtectionKey
+            previousKeys = []
+        } else {
+            throw OpenKacheError("dataProtectionKey or keyRing must be supplied")
+        }
+        guard activeKey.count == Smithy_Value_Format.dataProtectionKeyBytes else {
             throw OpenKacheError(
                 "dataProtectionKey must contain exactly \(Smithy_Value_Format.dataProtectionKeyBytes) bytes"
             )
+        }
+        guard previousKeys.count <= 8 else {
+            throw OpenKacheError("keyRing.previous may contain at most eight keys")
+        }
+        for (index, key) in previousKeys.enumerated() {
+            guard key.count == Smithy_Value_Format.dataProtectionKeyBytes else {
+                throw OpenKacheError(
+                    "keyRing.previous[\(index)] must contain exactly "
+                        + "\(Smithy_Value_Format.dataProtectionKeyBytes) bytes"
+                )
+            }
         }
         let connectTimeout = try milliseconds(options.connectTimeout, named: "connectTimeout")
         let requestTimeout = try milliseconds(options.requestTimeout, named: "requestTimeout")
@@ -309,37 +541,39 @@ private enum NativeBridge {
         let certificate = Array(options.certificate ?? Data())
         let clientCertificate = Array(options.identity?.certificate ?? Data())
         let clientPrivateKey = Array(options.identity?.privateKey ?? Data())
-        let dataProtectionKey = Array(options.dataProtectionKey)
-
+        let dataProtectionKey = Array(activeKey)
+        let previousDataProtectionKeys = previousKeys.flatMap(Array.init)
         let result = withBytes(address) { addressPointer, addressLength in
             withBytes(serverName) { serverNamePointer, serverNameLength in
                 withBytes(certificate) { certificatePointer, certificateLength in
                     withBytes(clientCertificate) { clientCertificatePointer, clientCertificateLength in
                         withBytes(clientPrivateKey) { clientPrivateKeyPointer, clientPrivateKeyLength in
                             withBytes(dataProtectionKey) { keyPointer, keyLength in
-                                nativeConnect(
-                                    addressPointer,
-                                    addressLength,
-                                    serverNamePointer,
-                                    serverNameLength,
-                                    certificatePointer,
-                                    certificateLength,
-                                    clientCertificatePointer,
-                                    clientCertificateLength,
-                                    clientPrivateKeyPointer,
-                                    clientPrivateKeyLength,
-                                    keyPointer,
-                                    keyLength,
-                                    options.compression.enabled ? 1 : 0,
-                                    options.compression.level,
-                                    options.compression.minimumInputSize,
-                                    options.compression.minimumSavings,
-                                    options.encryption.nativeValue,
-                                    options.retryMaxAttempts,
-                                    options.maxInFlight,
-                                    connectTimeout,
-                                    requestTimeout
-                                )
+                                withBytes(previousDataProtectionKeys) {
+                                    previousKeysPointer,
+                                    previousKeysLength
+                                in
+                                    connectWithOptions(
+                                        addressPointer,
+                                        addressLength,
+                                        serverNamePointer,
+                                        serverNameLength,
+                                        certificatePointer,
+                                        certificateLength,
+                                        clientCertificatePointer,
+                                        clientCertificateLength,
+                                        clientPrivateKeyPointer,
+                                        clientPrivateKeyLength,
+                                        keyPointer,
+                                        keyLength,
+                                        previousKeysPointer,
+                                        previousKeysLength,
+                                        previousKeys.count,
+                                        options,
+                                        connectTimeout,
+                                        requestTimeout
+                                    )
+                                }
                             }
                         }
                     }
@@ -359,13 +593,93 @@ private enum NativeBridge {
         return NativeHandle(pointer: client)
     }
 
+    private static func connectWithOptions(
+        _ address: UnsafePointer<UInt8>?,
+        _ addressLength: Int,
+        _ serverName: UnsafePointer<UInt8>?,
+        _ serverNameLength: Int,
+        _ certificate: UnsafePointer<UInt8>?,
+        _ certificateLength: Int,
+        _ clientCertificate: UnsafePointer<UInt8>?,
+        _ clientCertificateLength: Int,
+        _ clientPrivateKey: UnsafePointer<UInt8>?,
+        _ clientPrivateKeyLength: Int,
+        _ dataProtectionKey: UnsafePointer<UInt8>?,
+        _ dataProtectionKeyLength: Int,
+        _ previousKeys: UnsafePointer<UInt8>?,
+        _ previousKeysLength: Int,
+        _ previousKeyCount: Int,
+        _ options: OpenKacheClientOptions,
+        _ connectTimeout: UInt64,
+        _ requestTimeout: UInt64
+    ) -> NativeResultPointer? {
+        var bytes = [UInt8](repeating: 0, count: nativeConnectOptionsBytes)
+        return bytes.withUnsafeMutableBytes { buffer in
+            func storePointer(_ value: UnsafePointer<UInt8>?, at offset: Int) {
+                buffer.storeBytes(
+                    of: value.map { UInt(bitPattern: $0) } ?? 0,
+                    toByteOffset: offset,
+                    as: UInt.self
+                )
+            }
+
+            func storeSize(_ value: Int, at offset: Int) {
+                buffer.storeBytes(
+                    of: UInt(value),
+                    toByteOffset: offset,
+                    as: UInt.self
+                )
+            }
+
+            storePointer(address, at: 0)
+            storeSize(addressLength, at: 8)
+            storePointer(serverName, at: 16)
+            storeSize(serverNameLength, at: 24)
+            storePointer(certificate, at: 32)
+            storeSize(certificateLength, at: 40)
+            storePointer(clientCertificate, at: 48)
+            storeSize(clientCertificateLength, at: 56)
+            storePointer(clientPrivateKey, at: 64)
+            storeSize(clientPrivateKeyLength, at: 72)
+            storePointer(dataProtectionKey, at: 80)
+            storeSize(dataProtectionKeyLength, at: 88)
+            storePointer(previousKeys, at: 96)
+            storeSize(previousKeysLength, at: 104)
+            storeSize(previousKeyCount, at: 112)
+            buffer.storeBytes(
+                of: options.compression.enabled ? UInt8(1) : UInt8(0),
+                toByteOffset: 120,
+                as: UInt8.self
+            )
+            buffer.storeBytes(
+                of: options.compression.level,
+                toByteOffset: 124,
+                as: Int32.self
+            )
+            storeSize(options.compression.minimumInputSize, at: 128)
+            storeSize(options.compression.minimumSavings, at: 136)
+            buffer.storeBytes(
+                of: options.encryption.nativeValue,
+                toByteOffset: 144,
+                as: UInt32.self
+            )
+            buffer.storeBytes(of: connectTimeout, toByteOffset: 152, as: UInt64.self)
+            buffer.storeBytes(of: requestTimeout, toByteOffset: 160, as: UInt64.self)
+            storeSize(options.retryMaxAttempts, at: 168)
+            storeSize(options.maxInFlight, at: 176)
+            return nativeConnectWithOptions(buffer.baseAddress)
+        }
+    }
+
     static func execute(
         _ handle: NativeHandle,
         operation: UInt32,
         key: Data = Data(),
         value: Data = Data(),
         condition: OpenKacheSetCondition? = nil,
-        ttl: UInt64? = nil
+        ttl: UInt64? = nil,
+        mutationID: Data? = nil,
+        requestID: UInt64? = nil
     ) throws -> NativeResultPointer {
         try executeNative(
             handle,
@@ -373,9 +687,57 @@ private enum NativeBridge {
             key: key,
             value: value,
             condition: condition,
-            ttl: ttl
+            ttl: ttl,
+            mutationID: mutationID
         ) { keyPointer, keyLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
-            nativeExecute(
+            if let mutationID {
+                return withBytes(Array(mutationID)) { mutationPointer, mutationLength in
+                    if let requestID {
+                        return nativeExecuteWithRequestIDAndMutationID(
+                            handle.pointer,
+                            requestID,
+                            operation,
+                            keyPointer,
+                            keyLength,
+                            valuePointer,
+                            valueLength,
+                            conditionValue,
+                            ttlEnabled,
+                            ttlMilliseconds,
+                            mutationPointer,
+                            mutationLength
+                        )
+                    }
+                    return nativeExecuteWithMutationID(
+                        handle.pointer,
+                        operation,
+                        keyPointer,
+                        keyLength,
+                        valuePointer,
+                        valueLength,
+                        conditionValue,
+                        ttlEnabled,
+                        ttlMilliseconds,
+                        mutationPointer,
+                        mutationLength
+                    )
+                }
+            }
+            if let requestID {
+                return nativeExecuteWithRequestID(
+                    handle.pointer,
+                    requestID,
+                    operation,
+                    keyPointer,
+                    keyLength,
+                    valuePointer,
+                    valueLength,
+                    conditionValue,
+                    ttlEnabled,
+                    ttlMilliseconds
+                )
+            }
+            return nativeExecute(
                 handle.pointer,
                 operation,
                 keyPointer,
@@ -395,7 +757,9 @@ private enum NativeBridge {
         itemID: Data = Data(),
         value: Data = Data(),
         condition: OpenKacheSetCondition? = nil,
-        ttl: UInt64? = nil
+        ttl: UInt64? = nil,
+        mutationID: Data? = nil,
+        requestID: UInt64? = nil
     ) throws -> NativeResultPointer {
         try executeNative(
             handle,
@@ -403,9 +767,57 @@ private enum NativeBridge {
             key: itemID,
             value: value,
             condition: condition,
-            ttl: ttl
+            ttl: ttl,
+            mutationID: mutationID
         ) { itemIDPointer, itemIDLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
-            nativeExecuteRaw(
+            if let mutationID {
+                return withBytes(Array(mutationID)) { mutationPointer, mutationLength in
+                    if let requestID {
+                        return nativeExecuteRawWithRequestIDAndMutationID(
+                            handle.pointer,
+                            requestID,
+                            operation,
+                            itemIDPointer,
+                            itemIDLength,
+                            valuePointer,
+                            valueLength,
+                            conditionValue,
+                            ttlEnabled,
+                            ttlMilliseconds,
+                            mutationPointer,
+                            mutationLength
+                        )
+                    }
+                    return nativeExecuteRawWithMutationID(
+                        handle.pointer,
+                        operation,
+                        itemIDPointer,
+                        itemIDLength,
+                        valuePointer,
+                        valueLength,
+                        conditionValue,
+                        ttlEnabled,
+                        ttlMilliseconds,
+                        mutationPointer,
+                        mutationLength
+                    )
+                }
+            }
+            if let requestID {
+                return nativeExecuteRawWithRequestID(
+                    handle.pointer,
+                    requestID,
+                    operation,
+                    itemIDPointer,
+                    itemIDLength,
+                    valuePointer,
+                    valueLength,
+                    conditionValue,
+                    ttlEnabled,
+                    ttlMilliseconds
+                )
+            }
+            return nativeExecuteRaw(
                 handle.pointer,
                 operation,
                 itemIDPointer,
@@ -426,6 +838,7 @@ private enum NativeBridge {
         value: Data,
         condition: OpenKacheSetCondition?,
         ttl: UInt64?,
+        mutationID: Data?,
         call: (
             UnsafePointer<UInt8>?,
             Int,
@@ -526,7 +939,33 @@ private func resultError(_ result: NativeResultPointer) -> OpenKacheError {
         return OpenKacheError("native client returned a malformed result payload")
     }
     let message = String(decoding: payload, as: UTF8.self)
-    return OpenKacheError(message.isEmpty ? "OpenKache native operation failed" : message)
+    return OpenKacheError(
+        message.isEmpty ? "OpenKache native operation failed" : message,
+        metadata: resultMetadata(result))
+}
+
+private func resultMetadata(_ result: NativeResultPointer) -> ErrorMetadata? {
+    let bytes = 36
+    let pointer = UnsafeMutableRawPointer.allocate(byteCount: bytes, alignment: 4)
+    defer { pointer.deallocate() }
+    guard nativeResultErrorMetadata(result, pointer) != 0 else {
+        return nil
+    }
+    let mutationLength = Int(pointer.load(fromByteOffset: 18, as: UInt8.self))
+    let boundedLength = min(mutationLength, nativeMutationIDBytes)
+    let mutationID = boundedLength == 0
+        ? nil
+        : Data(
+            bytes: pointer.advanced(by: 20),
+            count: boundedLength)
+    return ErrorMetadata(
+        code: pointer.load(fromByteOffset: 0, as: UInt32.self),
+        operation: pointer.load(fromByteOffset: 4, as: UInt32.self),
+        phase: pointer.load(fromByteOffset: 8, as: UInt32.self),
+        backend: pointer.load(fromByteOffset: 12, as: UInt32.self),
+        retryable: pointer.load(fromByteOffset: 16, as: UInt8.self) != 0,
+        ambiguous: pointer.load(fromByteOffset: 17, as: UInt8.self) != 0,
+        mutationID: mutationID)
 }
 
 private func consumeResult<T>(
@@ -604,10 +1043,11 @@ public actor OpenKacheClient {
 
     /// Verifies the connection.
     public func ping() async throws {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: UInt32(Smithy_Opcode.ping.rawValue)
+                operation: UInt32(Smithy_Opcode.ping.rawValue),
+                requestID: requestID
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
@@ -620,11 +1060,12 @@ public actor OpenKacheClient {
     /// Retrieves protected bytes, or nil when the key does not exist.
     public func get(_ key: Data) async throws -> Data? {
         try validateKey(key)
-        return try await perform { handle in
+        return try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
                 operation: UInt32(Smithy_Opcode.get.rawValue),
-                key: key
+                key: key,
+                requestID: requestID
             )
             return try consumeResult(result) { kind, payload in
                 try getOutcome(kind, payload: payload, operation: "GET")
@@ -645,14 +1086,17 @@ public actor OpenKacheClient {
     ) async throws -> OpenKacheSetOutcome {
         try validateKey(key)
         let ttl = try options.ttlMilliseconds()
-        return try await perform { handle in
+        let mutationID = try options.validatedMutationID()
+        return try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
                 operation: UInt32(Smithy_Opcode.set.rawValue),
                 key: key,
                 value: value,
                 condition: options.condition,
-                ttl: ttl
+                ttl: ttl,
+                mutationID: mutationID,
+                requestID: requestID
             )
             return try consumeResult(result) { kind, _ in
                 try setOutcome(kind, operation: "SET")
@@ -670,13 +1114,19 @@ public actor OpenKacheClient {
     }
 
     /// Deletes a key and reports whether it existed.
-    public func delete(_ key: Data) async throws -> OpenKacheDeleteOutcome {
+    public func delete(
+        _ key: Data,
+        options: OpenKacheSetOptions = .init()
+    ) async throws -> OpenKacheDeleteOutcome {
         try validateKey(key)
-        return try await perform { handle in
+        let mutationID = try options.validatedMutationID()
+        return try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
                 operation: UInt32(Smithy_Opcode.delete.rawValue),
-                key: key
+                key: key,
+                mutationID: mutationID,
+                requestID: requestID
             )
             return try consumeResult(result) { kind, _ in
                 try deleteOutcome(kind, operation: "DELETE")
@@ -685,16 +1135,20 @@ public actor OpenKacheClient {
     }
 
     /// Deletes a UTF-8 string key.
-    public func delete(_ key: String) async throws -> OpenKacheDeleteOutcome {
-        try await delete(Data(key.utf8))
+    public func delete(
+        _ key: String,
+        options: OpenKacheSetOptions = .init()
+    ) async throws -> OpenKacheDeleteOutcome {
+        try await delete(Data(key.utf8), options: options)
     }
 
     /// Returns the server's JSON statistics payload.
     public func stats() async throws -> String {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: UInt32(Smithy_Opcode.stats.rawValue)
+                operation: UInt32(Smithy_Opcode.stats.rawValue),
+                requestID: requestID
             )
             return try consumeResult(result) { kind, payload in
                 guard kind == Smithy_Native_Contract.resultValue else {
@@ -710,10 +1164,11 @@ public actor OpenKacheClient {
 
     /// Waits for the server durability barrier.
     public func sync() async throws {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: UInt32(Smithy_Opcode.sync.rawValue)
+                operation: UInt32(Smithy_Opcode.sync.rawValue),
+                requestID: requestID
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
@@ -725,10 +1180,11 @@ public actor OpenKacheClient {
 
     /// Replaces a failed connection without replaying an operation.
     public func reconnect() async throws {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: Smithy_Native_Contract.operationReconnect
+                operation: Smithy_Native_Contract.operationReconnect,
+                requestID: requestID
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
@@ -749,6 +1205,16 @@ public actor OpenKacheClient {
         return OpenKacheConnectionState(rawValue: value) ?? .unknown
     }
 
+    /// Returns a point-in-time request, retry, cancellation, and lane snapshot.
+    public func metricsSnapshot() async throws -> OpenKacheMetricsSnapshot {
+        guard let native else {
+            throw OpenKacheError("client is closed")
+        }
+        return try await Task.detached(priority: nil) {
+            try native.metricsSnapshot()
+        }.value
+    }
+
     /// Permanently closes this client. Repeated calls are safe.
     public func close() {
         native = nil
@@ -767,14 +1233,22 @@ public actor OpenKacheClient {
     }
 
     private func perform<T: Sendable>(
-        _ operation: @escaping @Sendable (NativeHandle) throws -> T
+        _ operation: @escaping @Sendable (NativeHandle, UInt64) throws -> T
     ) async throws -> T {
         guard let native else {
             throw OpenKacheError("client is closed")
         }
-        return try await Task.detached(priority: nil) {
-            try operation(native)
-        }.value
+        let requestID = native.reserveRequestID()
+        return try await withTaskCancellationHandler(
+            operation: {
+                try await Task.detached(priority: nil) {
+                    try operation(native, requestID)
+                }.value
+            },
+            onCancel: {
+                native.cancel(requestID: requestID)
+            }
+        )
     }
 
     private func validateKey(_ key: Data) throws {
@@ -805,10 +1279,11 @@ public actor OpenKacheRawClient {
 
     /// Verifies the connection.
     public func ping() async throws {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: UInt32(Smithy_Opcode.ping.rawValue)
+                operation: UInt32(Smithy_Opcode.ping.rawValue),
+                requestID: requestID
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
@@ -821,11 +1296,12 @@ public actor OpenKacheRawClient {
     /// Retrieves exact bytes for a 32-byte protocol item ID.
     public func get(_ itemID: Data) async throws -> Data? {
         try validateItemID(itemID)
-        return try await perform { handle in
+        return try await perform { handle, requestID in
             let result = try NativeBridge.executeRaw(
                 handle,
                 operation: UInt32(Smithy_Opcode.get.rawValue),
-                itemID: itemID
+                itemID: itemID,
+                requestID: requestID
             )
             return try consumeResult(result) { kind, payload in
                 try getOutcome(kind, payload: payload, operation: "raw GET")
@@ -841,14 +1317,17 @@ public actor OpenKacheRawClient {
     ) async throws -> OpenKacheSetOutcome {
         try validateItemID(itemID)
         let ttl = try options.ttlMilliseconds()
-        return try await perform { handle in
+        let mutationID = try options.validatedMutationID()
+        return try await perform { handle, requestID in
             let result = try NativeBridge.executeRaw(
                 handle,
                 operation: UInt32(Smithy_Opcode.set.rawValue),
                 itemID: itemID,
                 value: value,
                 condition: options.condition,
-                ttl: ttl
+                ttl: ttl,
+                mutationID: mutationID,
+                requestID: requestID
             )
             return try consumeResult(result) { kind, _ in
                 try setOutcome(kind, operation: "raw SET")
@@ -857,13 +1336,19 @@ public actor OpenKacheRawClient {
     }
 
     /// Deletes a 32-byte protocol item ID.
-    public func delete(_ itemID: Data) async throws -> OpenKacheDeleteOutcome {
+    public func delete(
+        _ itemID: Data,
+        options: OpenKacheSetOptions = .init()
+    ) async throws -> OpenKacheDeleteOutcome {
         try validateItemID(itemID)
-        return try await perform { handle in
+        let mutationID = try options.validatedMutationID()
+        return try await perform { handle, requestID in
             let result = try NativeBridge.executeRaw(
                 handle,
                 operation: UInt32(Smithy_Opcode.delete.rawValue),
-                itemID: itemID
+                itemID: itemID,
+                mutationID: mutationID,
+                requestID: requestID
             )
             return try consumeResult(result) { kind, _ in
                 try deleteOutcome(kind, operation: "raw DELETE")
@@ -873,10 +1358,11 @@ public actor OpenKacheRawClient {
 
     /// Returns the server's JSON statistics payload.
     public func stats() async throws -> String {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: UInt32(Smithy_Opcode.stats.rawValue)
+                operation: UInt32(Smithy_Opcode.stats.rawValue),
+                requestID: requestID
             )
             return try consumeResult(result) { kind, payload in
                 guard kind == Smithy_Native_Contract.resultValue else {
@@ -892,10 +1378,11 @@ public actor OpenKacheRawClient {
 
     /// Waits for the server durability barrier.
     public func sync() async throws {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: UInt32(Smithy_Opcode.sync.rawValue)
+                operation: UInt32(Smithy_Opcode.sync.rawValue),
+                requestID: requestID
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
@@ -907,10 +1394,11 @@ public actor OpenKacheRawClient {
 
     /// Replaces a failed connection without replaying an operation.
     public func reconnect() async throws {
-        try await perform { handle in
+        try await perform { handle, requestID in
             let result = try NativeBridge.execute(
                 handle,
-                operation: Smithy_Native_Contract.operationReconnect
+                operation: Smithy_Native_Contract.operationReconnect,
+                requestID: requestID
             )
             try consumeResult(result) { kind, _ in
                 guard kind == Smithy_Native_Contract.resultOk else {
@@ -931,20 +1419,38 @@ public actor OpenKacheRawClient {
         return OpenKacheConnectionState(rawValue: value) ?? .unknown
     }
 
+    /// Returns a point-in-time request, retry, cancellation, and lane snapshot.
+    public func metricsSnapshot() async throws -> OpenKacheMetricsSnapshot {
+        guard let native else {
+            throw OpenKacheError("client is closed")
+        }
+        return try await Task.detached(priority: nil) {
+            try native.metricsSnapshot()
+        }.value
+    }
+
     /// Permanently closes this client. Repeated calls are safe.
     public func close() {
         native = nil
     }
 
     private func perform<T: Sendable>(
-        _ operation: @escaping @Sendable (NativeHandle) throws -> T
+        _ operation: @escaping @Sendable (NativeHandle, UInt64) throws -> T
     ) async throws -> T {
         guard let native else {
             throw OpenKacheError("client is closed")
         }
-        return try await Task.detached(priority: nil) {
-            try operation(native)
-        }.value
+        let requestID = native.reserveRequestID()
+        return try await withTaskCancellationHandler(
+            operation: {
+                try await Task.detached(priority: nil) {
+                    try operation(native, requestID)
+                }.value
+            },
+            onCancel: {
+                native.cancel(requestID: requestID)
+            }
+        )
     }
 
     private func validateItemID(_ itemID: Data) throws {
@@ -979,14 +1485,18 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
         }
         let options = OpenKacheSetOptions(
             condition: input.condition,
-            expiresAfter: ttl
+            expiresAfter: ttl,
+            mutationID: input.mutationId
         )
         let outcome = try await set(input.itemId, value: input.value, options: options)
         return Smithy_Set_Output(outcome: outcome)
     }
 
     public func delete(_ input: Smithy_Delete_Input) async throws -> Smithy_Delete_Output {
-        let outcome = try await delete(input.itemId)
+        let outcome = try await delete(
+            input.itemId,
+            options: OpenKacheSetOptions(mutationID: input.mutationId)
+        )
         return Smithy_Delete_Output(deleted: outcome == .deleted)
     }
 
@@ -1011,14 +1521,18 @@ public struct OpenKacheSetOptions: Sendable {
     public var condition: OpenKacheSetCondition?
     /// Positive relative lifetime.
     public var expiresAfter: Duration?
+    /// Optional fixed-width idempotency token reused across retries.
+    public var mutationID: Data?
 
     /// Creates unconditional persistent options.
     public init(
         condition: OpenKacheSetCondition? = nil,
-        expiresAfter: Duration? = nil
+        expiresAfter: Duration? = nil,
+        mutationID: Data? = nil
     ) {
         self.condition = condition
         self.expiresAfter = expiresAfter
+        self.mutationID = mutationID
     }
 
     fileprivate func ttlMilliseconds() throws -> UInt64? {
@@ -1026,5 +1540,17 @@ public struct OpenKacheSetOptions: Sendable {
             return nil
         }
         return try milliseconds(expiresAfter, named: "expiresAfter")
+    }
+
+    fileprivate func validatedMutationID() throws -> Data? {
+        guard let mutationID else {
+            return nil
+        }
+        guard mutationID.count == Smithy_Value_Format.mutationIdBytes else {
+            throw OpenKacheError(
+                "mutationID must contain exactly \(Smithy_Value_Format.mutationIdBytes) bytes"
+            )
+        }
+        return mutationID
     }
 }
