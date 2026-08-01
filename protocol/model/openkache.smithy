@@ -11,10 +11,32 @@ structure wireContract {
     maxValueBytes: Integer
 
     @required
-    v2: WireV2
+    v1: WireV1
+}
+
+/// Defaults shared by the Rust client core and its native language adapters.
+@trait(selector: "service")
+structure clientDefaults {
+    @required
+    maxInFlight: Integer
 
     @required
-    v3: WireV3
+    connectTimeoutMilliseconds: Long
+
+    @required
+    requestTimeoutMilliseconds: Long
+
+    @required
+    retryMaxAttempts: Integer
+
+    @required
+    zstandardLevel: Integer
+
+    @required
+    zstandardMinimumInputBytes: Integer
+
+    @required
+    zstandardMinimumSavingsBytes: Integer
 }
 
 /// Native binding ABI identifiers generated alongside the wire contract.
@@ -173,39 +195,7 @@ structure valueEnvelope {
     jsonEncoding: String
 }
 
-structure WireV2 {
-    @required
-    alpn: String
-
-    @required
-    requestHeaderBytes: Integer
-
-    @required
-    responseHeaderBytes: Integer
-
-    @required
-    setTtlBytes: Integer
-
-    @required
-    responseValueLengthMask: Long
-
-    @required
-    valueCompressedBit: Long
-
-    @required
-    valueEncryptedBit: Long
-
-    @required
-    setTtlBit: Long
-
-    @required
-    setIfAbsentBit: Long
-
-    @required
-    setIfPresentBit: Long
-}
-
-structure WireV3 {
+structure WireV1 {
     @required
     alpn: String
 
@@ -243,19 +233,7 @@ structure wireStatus {
 @wireContract(
     itemIdBytes: 32,
     maxValueBytes: 67108864,
-    v2: {
-        alpn: "openkache/2",
-        requestHeaderBytes: 9,
-        responseHeaderBytes: 5,
-        setTtlBytes: 8,
-        responseValueLengthMask: 1073741823,
-        valueCompressedBit: 2147483648,
-        valueEncryptedBit: 1073741824,
-        setTtlBit: 536870912,
-        setIfAbsentBit: 268435456,
-        setIfPresentBit: 134217728
-    },
-    v3: {
+    v1: {
         alpn: "openkache/1",
         requestFixedBytes: 2,
         responseFixedBytes: 1,
@@ -264,6 +242,15 @@ structure wireStatus {
         setIfAbsentFlag: 2,
         setIfPresentFlag: 4
     }
+)
+@clientDefaults(
+    maxInFlight: 256,
+    connectTimeoutMilliseconds: 5000,
+    requestTimeoutMilliseconds: 2000,
+    retryMaxAttempts: 2,
+    zstandardLevel: 1,
+    zstandardMinimumInputBytes: 1024,
+    zstandardMinimumSavingsBytes: 64
 )
 @ffiContract(
     abiVersion: 2,

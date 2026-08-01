@@ -26,7 +26,7 @@ formats or protocol behavior.
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
 | CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
 | TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
-| C# / .NET | [`dotnet/`](dotnet/) | Standalone raw protocol v1 client |
+| C# / .NET | [`dotnet/`](dotnet/) | Shared-core C ABI adapter for the raw Smithy API |
 | Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | `go/` | Package scaffold |
 | Java | `java/` | Package scaffold |
@@ -63,9 +63,9 @@ Language adapters must not implement their own wire framing, retry semantics,
 key derivation, compression, encryption, or value containers. Extend the shared
 core when a binding needs shared behavior.
 
-The managed .NET client predates this boundary. Do not extend its duplicated
-protocol v1 transport; replace it with a core-backed adapter when the protected
-.NET API is implemented.
+The .NET package uses the shared native ABI for transport and protocol work.
+Its managed surface remains a raw Smithy adapter; protected value handling can
+be added without introducing a second protocol implementation.
 
 ## Scaffold commands and entry points
 

@@ -1,13 +1,14 @@
 # OpenKache .NET client
 
-The OpenKache package is a managed .NET client that uses `System.Net.Quic`
-directly.
+The OpenKache package is a managed .NET adapter over the shared Rust client
+core's C ABI.
 
 ## Purpose
 
 The package provides binary-safe cache operations over one authenticated QUIC
-connection. It accepts exact 32-byte item IDs and plaintext values and uses a
-bounded pool of reusable bidirectional streams.
+connection owned by the shared core. It accepts exact 32-byte item IDs and
+plaintext values; framing, TLS, retries, stream lanes, and protocol validation
+remain in `clients/core`.
 
 The [client status table](../README.md#sdk-status) describes this package's
 implementation and migration status.
@@ -21,19 +22,27 @@ dotnet build clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 dotnet pack clients/dotnet/OpenKache/OpenKache.csproj --configuration Release
 ```
 
-The package targets .NET 8 and opts into its preview QUIC APIs. Windows ships
-MsQuic with .NET. Linux must make a compatible `libmsquic` available to the
-runtime. Building from source also requires Bun and Smithy CLI on `PATH`; the
-project generates ignored wire values and Smithy API contracts before
-compilation.
+The package targets .NET 8. It loads the native core library from
+`OPENKACHE_CLIENT_NATIVE` or the platform's normal native-library search path.
+Build the shared core with the `ffi` feature before running the package or its
+integration tests:
+
+```bash
+cargo build --manifest-path clients/core/Cargo.toml --features ffi
+export OPENKACHE_CLIENT_NATIVE="$PWD/target/debug/libopenkache_client_core.so"
+```
+
+Building from source also requires Bun and Smithy CLI on `PATH`; the project
+generates ignored wire values and Smithy API contracts before compilation.
 
 ## Connect and use
 
-Pass the exact DER bytes of the server's certificate; the client has no
+Pass the DER bytes of a server or CA certificate; the client has no
 certificate-verification bypass.
 
 ```csharp
 using OpenKache;
+using Smithy = OpenKache.Smithy;
 
 var certificate = await File.ReadAllBytesAsync(
     "target/openkache-local/certificate.local.der");
@@ -51,7 +60,7 @@ var outcome = await client.SetAsync(
     "hello"u8.ToArray(),
     new SetOptions
     {
-        Condition = SetCondition.IfAbsent,
+        Condition = Smithy.SetCondition.IfAbsent,
         TimeToLive = TimeSpan.FromMinutes(5),
     });
 var value = await client.GetAsync(itemId);
@@ -70,11 +79,20 @@ requires exactly 32 bytes and sends them unchanged.
 This package requires TLS 1.3 and ALPN `openkache/1`. The complete wire
 contract is defined by [`protocol/SPEC.md`](../../protocol/SPEC.md).
 
-`ClientOptions` controls the request timeout and maximum reusable stream lanes.
-The defaults are 10 seconds and 256 lanes.
+`ClientOptions` controls connection and request deadlines plus maximum reusable
+request lanes. Defaults come from the Smithy client-defaults contract: 5
+seconds, 2 seconds, and 256 lanes. `OperationTimeout` remains as a legacy
+compatibility alias for callers that need one deadline for both phases.
+
+The generated Smithy operation, input, output, and enum types under
+`OpenKache.Smithy` are the canonical .NET API types. The
+`OpenKache.SetCondition` and `OpenKache.SetOutcome` members remain compatibility
+aliases for earlier callers, and their values have those generated types.
+`SetOptions.Condition` and `SetAsync` return types use the generated shapes
+directly.
 
 The package reads and writes plaintext values. It does not implement the
 [shared formatted value contract](../VALUE_FORMAT.md).
 
-The client currently owns a small raw protocol adapter. Protected value
-handling remains in the shared Rust core and is not part of this package.
+The client exposes the raw Smithy API. Protected value handling remains in the
+shared Rust core and is not part of this package.

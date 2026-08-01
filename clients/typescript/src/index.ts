@@ -22,6 +22,13 @@ export * from "./generated_local/smithy-api.js"
 export * from "./generated_local/smithy-value-format.js"
 export * from "./generated_local/smithy-value-envelope.js"
 import {
+  SMITHY_DEFAULT_MAX_IN_FLIGHT,
+  SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
+  SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
+  SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+  SMITHY_DEFAULT_ZSTANDARD_LEVEL,
+  SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
+  SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
   SMITHY_ITEM_ID_BYTES,
   SMITHY_MAX_VALUE_BYTES,
   type Smithy_Delete_Input,
@@ -31,7 +38,9 @@ import {
   type Smithy_OpenKache_Api,
   type Smithy_Ping_Input,
   type Smithy_Ping_Output,
+  type Smithy_Set_Condition,
   type Smithy_Set_Input,
+  type Smithy_Set_Outcome,
   type Smithy_Set_Output,
   type Smithy_Stats_Input,
   type Smithy_Stats_Output,
@@ -132,14 +141,14 @@ export interface Client_Options {
 /**
  * Outcome of a successful `set` operation.
  */
-export type Set_Outcome = "created" | "replaced" | "not_stored"
+export type Set_Outcome = Smithy_Set_Outcome
 
 /**
  * Optional TTL and atomic existence condition for `set`.
  */
 export interface Set_Options {
   /** Store only when the key is absent (`if_absent`) or present (`if_present`). */
-  readonly condition?: "if_absent" | "if_present"
+  readonly condition?: Smithy_Set_Condition
   /** Positive relative lifetime in milliseconds. */
   readonly ttl_ms?: number
 }
@@ -229,13 +238,18 @@ export class OpenKache_Client {
       identity: owned_identity(options.identity),
       data_protection_key: options.data_protection_key.slice(),
       compression_enabled: compression.enabled !== false,
-      compression_level: compression.level,
-      minimum_input_size: compression.minimum_input_size,
-      minimum_savings: compression.minimum_savings,
-      connect_timeout_ms: timeouts.connect_ms,
-      request_timeout_ms: timeouts.request_ms,
-      retry_max_attempts: retry.max_attempts,
-      max_in_flight: options.max_in_flight,
+      compression_level: compression.level ?? SMITHY_DEFAULT_ZSTANDARD_LEVEL,
+      minimum_input_size:
+        compression.minimum_input_size ?? SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
+      minimum_savings:
+        compression.minimum_savings ?? SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
+      connect_timeout_ms:
+        timeouts.connect_ms ?? SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
+      request_timeout_ms:
+        timeouts.request_ms ?? SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
+      retry_max_attempts:
+        retry.max_attempts ?? SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+      max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
     }
     try {

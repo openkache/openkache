@@ -11,7 +11,7 @@ public sealed class SetOptions
     /// <summary>
     /// Atomic existence condition applied by the server.
     /// </summary>
-    public SetCondition Condition { get; init; }
+    public Smithy.SetCondition? Condition { get; init; }
 
     /// <summary>
     /// Relative lifetime of the stored value. A missing value stores it without expiration.
@@ -20,9 +20,9 @@ public sealed class SetOptions
 
     internal ulong? ValidateAndGetTtlMilliseconds()
     {
-        if (Condition is not SetCondition.None
-            and not SetCondition.IfAbsent
-            and not SetCondition.IfPresent)
+        if (Condition is not null
+            and not Smithy.SetCondition.IfAbsent
+            and not Smithy.SetCondition.IfPresent)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(Condition),

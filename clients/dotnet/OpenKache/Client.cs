@@ -1,43 +1,36 @@
 // SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Net.Quic;
-using System.Net.Sockets;
 using System.Text;
 
 namespace OpenKache;
 
 /// <summary>
-/// An asynchronous, thread-safe client for the OpenKache QUIC protocol.
+/// An asynchronous, thread-safe client for the OpenKache protocol.
 /// </summary>
-public sealed class Client : IAsyncDisposable
+public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
 {
-    private static readonly UTF8Encoding StrictUtf8 = new(false, true);
-    private static readonly SetOptions DefaultSetOptions = new();
-
-    private readonly QuicTransport _transport;
-    private readonly TimeSpan _operationTimeout;
+    private readonly NativeClient _nativeClient;
     private int _disposed;
 
-    private Client(QuicTransport transport, TimeSpan operationTimeout)
+    private Client(NativeClient nativeClient)
     {
-        _transport = transport;
-        _operationTimeout = operationTimeout;
+        _nativeClient = nativeClient;
     }
 
     /// <summary>
-    /// Connects to an OpenKache server and authenticates its TLS certificate.
+    /// Connects to an OpenKache server through the shared Rust client core.
     /// </summary>
     /// <param name="host">Server host or IP address.</param>
     /// <param name="port">Server UDP port.</param>
     /// <param name="serverName">DNS name required by the server certificate.</param>
     /// <param name="trustedCertificateDer">Exact DER certificate trusted for this connection.</param>
-    /// <param name="options">Optional stream-pool and timeout settings.</param>
+    /// <param name="options">Optional shared-core timeout and lane settings.</param>
     /// <param name="cancellationToken">Cancels connection establishment.</param>
-    /// <returns>A connected client that owns one reusable QUIC connection.</returns>
+    /// <returns>A connected client that owns one shared-core worker.</returns>
     /// <exception cref="OpenKacheException">
-    /// Thrown when QUIC is unavailable, configuration is invalid, certificate validation fails,
-    /// or the connection cannot be established.
+    /// Thrown when the native core is unavailable, configuration is invalid, certificate
+    /// validation fails, or the connection cannot be established.
     /// </exception>
     public static async ValueTask<Client> ConnectAsync(
         string host,
@@ -60,37 +53,45 @@ public sealed class Client : IAsyncDisposable
 
         options ??= new ClientOptions();
         options.Validate();
-
-        using var timeout = CreateTimeout(
-            cancellationToken,
-            options.OperationTimeout);
         try
         {
-            var transport = await QuicTransport.ConnectAsync(
-                host,
-                port,
+            var address = host.Contains(':', StringComparison.Ordinal)
+                && !host.StartsWith("[", StringComparison.Ordinal)
+                ? $"[{host}]:{port}"
+                : $"{host}:{port}";
+            var nativeClient = await NativeClient.ConnectAsync(
+                address,
                 serverName,
-                trustedCertificateDer.ToArray(),
+                trustedCertificateDer,
+                options.EffectiveConnectTimeout,
+                options.EffectiveRequestTimeout,
                 options.MaximumStreamLanes,
-                timeout.Token).ConfigureAwait(false);
-            return new Client(transport, options.OperationTimeout);
+                cancellationToken).ConfigureAwait(false);
+            return new Client(nativeClient);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             throw new OpenKacheException(
                 "TIMEOUT",
-                $"Connection exceeded {options.OperationTimeout}.");
+                $"Connection exceeded {options.EffectiveConnectTimeout}.");
         }
-        catch (PlatformNotSupportedException error)
+        catch (NativeException error)
         {
-            throw new OpenKacheException("QUIC_UNAVAILABLE", error.Message, error);
+            throw MapNativeError(error, "CONNECTION_FAILED");
         }
-        catch (Exception error) when (
-            error is QuicException
-                or SocketException
-                or System.Security.Authentication.AuthenticationException)
+        catch (DllNotFoundException error)
         {
-            throw new OpenKacheException("CONNECTION_FAILED", error.Message, error);
+            throw new OpenKacheException(
+                "NATIVE_UNAVAILABLE",
+                "The shared OpenKache client core could not be loaded.",
+                error);
+        }
+        catch (EntryPointNotFoundException error)
+        {
+            throw new OpenKacheException(
+                "NATIVE_UNAVAILABLE",
+                "The shared OpenKache client core does not expose the required ABI.",
+                error);
         }
     }
 
@@ -99,18 +100,12 @@ public sealed class Client : IAsyncDisposable
     /// </summary>
     public async ValueTask PingAsync(CancellationToken cancellationToken = default)
     {
-        var response = await RequestAsync(
+        var result = await RequestAsync(
             Protocol.Opcode.Ping,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
-            cancellationToken).ConfigureAwait(false);
-        ExpectStatus("PING", response.Status, Protocol.Status.Ok);
-        if (!response.Payload.AsSpan().SequenceEqual("PONG"u8))
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "PING returned an unexpected payload.");
-        }
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("PING", result, Protocol.FfiResultOk);
     }
 
     /// <summary>
@@ -121,16 +116,16 @@ public sealed class Client : IAsyncDisposable
         ReadOnlyMemory<byte> itemId,
         CancellationToken cancellationToken = default)
     {
-        var response = await RequestAsync(
+        var result = await RequestAsync(
             Protocol.Opcode.Get,
-            itemId,
+            ValidateItemId(itemId),
             ReadOnlyMemory<byte>.Empty,
-            cancellationToken).ConfigureAwait(false);
-        return response.Status switch
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
         {
-            Protocol.Status.Ok => DecodePlaintextValue(response),
-            Protocol.Status.NotFound => null,
-            _ => throw UnexpectedStatus("GET", response.Status),
+            var kind when kind == Protocol.FfiResultValue => result.Payload,
+            var kind when kind == Protocol.FfiResultNotFound => null,
+            _ => throw UnexpectedKind("GET", result.Kind),
         };
     }
 
@@ -138,16 +133,12 @@ public sealed class Client : IAsyncDisposable
     /// Stores exact bytes under an exact binary item ID.
     /// </summary>
     /// <returns>Whether the operation created or replaced the item ID.</returns>
-    public async ValueTask<SetOutcome> SetAsync(
+    public ValueTask<Smithy.SetOutcome> SetAsync(
         ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         CancellationToken cancellationToken = default)
     {
-        return await SetAsync(
-            itemId,
-            value,
-            DefaultSetOptions,
-            cancellationToken).ConfigureAwait(false);
+        return SetAsync(itemId, value, new SetOptions(), cancellationToken);
     }
 
     /// <summary>
@@ -158,7 +149,7 @@ public sealed class Client : IAsyncDisposable
     /// Whether the operation created, replaced, or did not store the item ID because its condition
     /// failed.
     /// </returns>
-    public async ValueTask<SetOutcome> SetAsync(
+    public async ValueTask<Smithy.SetOutcome> SetAsync(
         ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         SetOptions options,
@@ -166,19 +157,19 @@ public sealed class Client : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(options);
         var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
-        var response = await RequestAsync(
+        var result = await RequestAsync(
             Protocol.Opcode.Set,
-            itemId,
-            value,
-            cancellationToken,
+            ValidateItemId(itemId),
+            ValidateValue(value),
             options.Condition,
-            ttlMilliseconds).ConfigureAwait(false);
-        return response.Status switch
+            ttlMilliseconds,
+            cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
         {
-            Protocol.Status.Created => SetOutcome.Created,
-            Protocol.Status.Replaced => SetOutcome.Replaced,
-            Protocol.Status.NotStored => SetOutcome.NotStored,
-            _ => throw UnexpectedStatus("SET", response.Status),
+            var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
+            var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
+            var kind when kind == Protocol.FfiResultNotStored => Smithy.SetOutcome.NotStored,
+            _ => throw UnexpectedKind("SET", result.Kind),
         };
     }
 
@@ -190,16 +181,16 @@ public sealed class Client : IAsyncDisposable
         ReadOnlyMemory<byte> itemId,
         CancellationToken cancellationToken = default)
     {
-        var response = await RequestAsync(
+        var result = await RequestAsync(
             Protocol.Opcode.Delete,
-            itemId,
+            ValidateItemId(itemId),
             ReadOnlyMemory<byte>.Empty,
-            cancellationToken).ConfigureAwait(false);
-        return response.Status switch
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
         {
-            Protocol.Status.Deleted => true,
-            Protocol.Status.NotFound => false,
-            _ => throw UnexpectedStatus("DELETE", response.Status),
+            var kind when kind == Protocol.FfiResultDeleted => true,
+            var kind when kind == Protocol.FfiResultNotDeleted => false,
+            _ => throw UnexpectedKind("DELETE", result.Kind),
         };
     }
 
@@ -209,15 +200,15 @@ public sealed class Client : IAsyncDisposable
     public async ValueTask<string> StatsAsync(
         CancellationToken cancellationToken = default)
     {
-        var response = await RequestAsync(
+        var result = await RequestAsync(
             Protocol.Opcode.Stats,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
-            cancellationToken).ConfigureAwait(false);
-        ExpectStatus("STATS", response.Status, Protocol.Status.Ok);
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("STATS", result, Protocol.FfiResultValue);
         try
         {
-            return StrictUtf8.GetString(response.Payload);
+            return new UTF8Encoding(false, true).GetString(result.Payload);
         }
         catch (DecoderFallbackException error)
         {
@@ -233,16 +224,111 @@ public sealed class Client : IAsyncDisposable
     /// </summary>
     public async ValueTask SyncAsync(CancellationToken cancellationToken = default)
     {
-        var response = await RequestAsync(
+        var result = await RequestAsync(
             Protocol.Opcode.Sync,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
-            cancellationToken).ConfigureAwait(false);
-        ExpectStatus("SYNC", response.Status, Protocol.Status.Ok);
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("SYNC", result, Protocol.FfiResultOk);
     }
 
     /// <summary>
-    /// Closes the QUIC connection and releases every idle stream lane.
+    /// Invokes the generated Smithy PING operation.
+    /// </summary>
+    public async ValueTask<Smithy.PingOutput> PingAsync(
+        Smithy.PingInput input,
+        CancellationToken cancellationToken = default)
+    {
+        _ = input;
+        await PingAsync(cancellationToken).ConfigureAwait(false);
+        return new Smithy.PingOutput();
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy GET operation.
+    /// </summary>
+    public async ValueTask<Smithy.GetOutput> GetAsync(
+        Smithy.GetInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return new Smithy.GetOutput
+        {
+            Value = await GetAsync(input.ItemId, cancellationToken).ConfigureAwait(false),
+        };
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy SET operation.
+    /// </summary>
+    public async ValueTask<Smithy.SetOutput> SetAsync(
+        Smithy.SetInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        TimeSpan? timeToLive = input.TtlMilliseconds switch
+        {
+            null => null,
+            <= 0 => throw new ArgumentOutOfRangeException(nameof(input.TtlMilliseconds)),
+            var milliseconds => TimeSpan.FromMilliseconds(milliseconds.Value),
+        };
+        var outcome = await SetAsync(
+            input.ItemId,
+            input.Value,
+            new SetOptions
+            {
+                Condition = input.Condition,
+                TimeToLive = timeToLive,
+            },
+            cancellationToken).ConfigureAwait(false);
+        return new Smithy.SetOutput
+        {
+            Outcome = outcome,
+        };
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy DELETE operation.
+    /// </summary>
+    public async ValueTask<Smithy.DeleteOutput> DeleteAsync(
+        Smithy.DeleteInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return new Smithy.DeleteOutput
+        {
+            Deleted = await DeleteAsync(input.ItemId, cancellationToken).ConfigureAwait(false),
+        };
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy STATS operation.
+    /// </summary>
+    public async ValueTask<Smithy.StatsOutput> StatsAsync(
+        Smithy.StatsInput input,
+        CancellationToken cancellationToken = default)
+    {
+        _ = input;
+        return new Smithy.StatsOutput
+        {
+            Json = await StatsAsync(cancellationToken).ConfigureAwait(false),
+        };
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy SYNC operation.
+    /// </summary>
+    public async ValueTask<Smithy.SyncOutput> SyncAsync(
+        Smithy.SyncInput input,
+        CancellationToken cancellationToken = default)
+    {
+        _ = input;
+        await SyncAsync(cancellationToken).ConfigureAwait(false);
+        return new Smithy.SyncOutput();
+    }
+
+    /// <summary>
+    /// Closes the shared-core worker and releases its native resources.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -251,91 +337,118 @@ public sealed class Client : IAsyncDisposable
             return;
         }
 
-        await _transport.DisposeAsync().ConfigureAwait(false);
+        await _nativeClient.DisposeAsync().ConfigureAwait(false);
     }
 
-    private static CancellationTokenSource CreateTimeout(
-        CancellationToken cancellationToken,
-        TimeSpan timeout)
-    {
-        var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        source.CancelAfter(timeout);
-        return source;
-    }
-
-    private async ValueTask<Protocol.Response> RequestAsync(
+    private async ValueTask<NativeResult> RequestAsync(
         Protocol.Opcode opcode,
         ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
-        CancellationToken cancellationToken,
-        SetCondition setCondition = SetCondition.None,
-        ulong? ttlMilliseconds = null)
+        Smithy.SetCondition? condition = null,
+        ulong? ttlMilliseconds = null,
+        CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(
             Volatile.Read(ref _disposed) != 0,
             this);
-        var frame = Protocol.EncodeRequest(
-            opcode,
-            itemId.Span,
-            value.Span,
-            setCondition,
-            ttlMilliseconds);
-        using var timeout = CreateTimeout(cancellationToken, _operationTimeout);
         try
         {
-            var response = await _transport.RequestAsync(
-                frame,
-                timeout.Token).ConfigureAwait(false);
-            if (Protocol.IsError(response.Status))
-            {
-                throw new OpenKacheException(
-                    Protocol.ErrorCode(response.Status),
-                    Encoding.UTF8.GetString(response.Payload));
-            }
-
-            return response;
+            return await _nativeClient.ExecuteAsync(
+                (uint)opcode,
+                itemId,
+                value,
+                NativeSetCondition(condition),
+                ttlMilliseconds.HasValue,
+                ttlMilliseconds.GetValueOrDefault(),
+                cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             throw new OpenKacheException(
                 "TIMEOUT",
-                $"{opcode.ToString().ToUpperInvariant()} exceeded {_operationTimeout}.");
+                $"{opcode.ToString().ToUpperInvariant()} exceeded.");
         }
-        catch (OpenKacheException)
+        catch (NativeException error)
         {
-            throw;
-        }
-        catch (Exception error) when (
-            error is QuicException
-                or IOException
-                or ObjectDisposedException)
-        {
-            throw new OpenKacheException("CONNECTION_FAILED", error.Message, error);
+            throw MapNativeError(error, "CONNECTION_FAILED");
         }
     }
 
-    private static byte[] DecodePlaintextValue(Protocol.Response response)
+    private static ReadOnlyMemory<byte> ValidateItemId(ReadOnlyMemory<byte> itemId)
     {
-        return response.Payload;
+        if (itemId.Length != Protocol.ItemIdBytes)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"item ID must contain exactly {Protocol.ItemIdBytes} bytes.");
+        }
+
+        return itemId;
     }
 
-    private static void ExpectStatus(
-        string operation,
-        Protocol.Status actual,
-        Protocol.Status expected)
+    private static ReadOnlyMemory<byte> ValidateValue(ReadOnlyMemory<byte> value)
     {
-        if (actual != expected)
+        if (value.Length > Protocol.MaximumValueBytes)
         {
-            throw UnexpectedStatus(operation, actual);
+            throw new OpenKacheException(
+                "VALUE_TOO_LARGE",
+                $"Value size {value.Length} exceeds {Protocol.MaximumValueBytes} bytes.");
+        }
+
+        return value;
+    }
+
+    private static uint NativeSetCondition(Smithy.SetCondition? condition)
+    {
+        return condition switch
+        {
+            null => Protocol.FfiSetConditionNone,
+            Smithy.SetCondition.IfAbsent => Protocol.FfiSetConditionIfAbsent,
+            Smithy.SetCondition.IfPresent => Protocol.FfiSetConditionIfPresent,
+            _ => throw new ArgumentOutOfRangeException(nameof(condition)),
+        };
+    }
+
+    private static void ExpectKind(string operation, NativeResult result, uint expected)
+    {
+        if (result.Kind != expected)
+        {
+            throw UnexpectedKind(operation, result.Kind);
         }
     }
 
-    private static OpenKacheException UnexpectedStatus(
-        string operation,
-        Protocol.Status status)
+    private static OpenKacheException UnexpectedKind(string operation, uint kind)
     {
         return new OpenKacheException(
             "PROTOCOL_ERROR",
-            $"{operation} returned unexpected status {status}.");
+            $"{operation} returned unexpected native result kind {kind}.");
+    }
+
+    private static OpenKacheException MapNativeError(
+        NativeException error,
+        string fallbackCode)
+    {
+        var message = error.Message;
+        var normalized = message.ToUpperInvariant();
+        var code = normalized switch
+        {
+            _ when normalized.Contains("TIMEOUT", StringComparison.Ordinal)
+                || normalized.Contains("TIMED OUT", StringComparison.Ordinal) => "TIMEOUT",
+            _ when normalized.Contains("ITEM_ID", StringComparison.Ordinal)
+                || normalized.Contains("PROTOCOL", StringComparison.Ordinal)
+                || normalized.Contains("OPERATION DOES NOT", StringComparison.Ordinal)
+                || normalized.Contains("SET TTL", StringComparison.Ordinal) => "PROTOCOL_ERROR",
+            _ when normalized.Contains("EXCEEDS", StringComparison.Ordinal)
+                && normalized.Contains("VALUE", StringComparison.Ordinal) => "VALUE_TOO_LARGE",
+            _ when normalized.Contains("TOOLARGE", StringComparison.Ordinal) => "TOO_LARGE",
+            _ when normalized.Contains("INVALIDREQUEST", StringComparison.Ordinal) => "INVALID_REQUEST",
+            _ when normalized.Contains("UNSUPPORTEDOPERATION", StringComparison.Ordinal) =>
+                "UNSUPPORTED_OPCODE",
+            _ when normalized.Contains("FORBIDDEN", StringComparison.Ordinal) => "FORBIDDEN",
+            _ when normalized.Contains("OVERLOADED", StringComparison.Ordinal) => "OVERLOADED",
+            _ when normalized.Contains("INTERNAL", StringComparison.Ordinal) => "INTERNAL_ERROR",
+            _ => fallbackCode,
+        };
+        return new OpenKacheException(code, message, error);
     }
 }

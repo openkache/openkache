@@ -363,7 +363,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | QUIC client (TypeScript) | 🚧 Preview | Node.js, Bun, and Deno-compatible Node-API SDK |
 | QUIC server | 🚧 Preview | SSD-backed worker shards over multiplexed QUIC streams |
 | Container image | ✅ Available | Non-root `linux/amd64` and `linux/arm64` image on GHCR |
-| QUIC client (.NET) | 🚧 Preview | Managed `System.Net.Quic`, binary protocol v1 |
+| QUIC client (.NET) | 🚧 Preview | Shared-core C ABI adapter, raw Smithy API, binary protocol v1 |
 | Clustering | ❌ Not started | Future: consistent hashing, gossip, replication |
 
 ---
@@ -415,7 +415,7 @@ OpenKache provides [`/llms.txt`](./llms.txt) and [`/llms-full.txt`](./llms-full.
 | `clients/rust/` | Ergonomic Rust end-user SDK over the client core |
 | `clients/cli/` | Bash-friendly one-shot and interactive CLI binary |
 | `clients/typescript/` | Node.js, Bun, and Deno client backed by Rust through Node-API |
-| `clients/dotnet/` | Managed .NET client over QUIC |
+| `clients/dotnet/` | Managed .NET raw Smithy adapter over the shared core C ABI |
 
 
 ---
