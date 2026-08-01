@@ -190,6 +190,7 @@ pub struct FfiClient {
     worker: Mutex<Option<JoinHandle<()>>>,
     next_request_id: AtomicU64,
     metrics: Arc<FfiMetrics>,
+    requests: RequestRegistry,
 }
 
 enum Command {
@@ -205,7 +206,6 @@ enum Command {
     },
     Cancel {
         request_id: u64,
-        response: SyncSender<FfiResult>,
     },
     Shutdown,
 }
@@ -226,6 +226,25 @@ type PendingRequest = (
     Arc<AtomicBool>,
 );
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestState {
+    /// The caller has reserved a request ID, but the worker has not started it.
+    Queued,
+    /// The worker owns a running native future for this request.
+    Active,
+    /// A cancellation was requested before the worker observed the request.
+    CancelRequested,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestClaim {
+    Claimed,
+    CancelRequested,
+    Invalid,
+}
+
+type RequestRegistry = Arc<Mutex<HashMap<u64, RequestState>>>;
+
 struct WorkerOptions {
     endpoint: Endpoint,
     certificate: Vec<u8>,
@@ -240,14 +259,6 @@ struct WorkerOptions {
 }
 
 impl FfiResult {
-    fn error(message: impl Into<String>) -> Self {
-        Self::error_with_code(message, FFI_ERROR_CONFIGURATION)
-    }
-
-    fn error_with_code(message: impl Into<String>, code: u32) -> Self {
-        Self::error_with_operation(message, code, None)
-    }
-
     fn error_with_operation(
         message: impl Into<String>,
         code: u32,
@@ -386,6 +397,8 @@ impl FfiClient {
         let metrics = Arc::new(FfiMetrics::default());
         let worker_shutdown = Arc::clone(&shutdown);
         let worker_in_flight = Arc::clone(&in_flight);
+        let requests = Arc::new(Mutex::new(HashMap::new()));
+        let worker_requests = Arc::clone(&requests);
         let state = Arc::new(AtomicU32::new(connection_state_value(
             ConnectionState::Reconnecting,
         )));
@@ -414,6 +427,7 @@ impl FfiClient {
                     worker_state,
                     worker_metrics,
                     worker_in_flight,
+                    worker_requests,
                 )
             })
             .map_err(|error| format!("failed to start client worker: {error}"))?;
@@ -429,6 +443,7 @@ impl FfiClient {
                 worker: Mutex::new(Some(worker)),
                 next_request_id: AtomicU64::new(1),
                 metrics,
+                requests,
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -501,6 +516,13 @@ impl FfiClient {
             };
             set_options = set_options.with_mutation_id(mutation_id);
         }
+        if !self.register_request(request_id) {
+            return FfiResult::error_with_operation(
+                format!("request ID {request_id} is already active"),
+                crate::contract::FFI_ERROR_RUNTIME,
+                Some(operation),
+            );
+        }
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         self.metrics.bytes_sent.fetch_add(
             (application_key.len() + value.len()) as u64,
@@ -509,6 +531,7 @@ impl FfiClient {
         let mutation_id = set_options.mutation_id();
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
+            self.remove_request(request_id);
             return FfiResult::error_with_operation(
                 "client request timeout exceeds the platform clock range",
                 crate::contract::FFI_ERROR_RUNTIME,
@@ -516,6 +539,7 @@ impl FfiClient {
             );
         };
         if !self.reserve_slot_until(deadline) {
+            self.remove_request(request_id);
             return FfiResult::queue_full(operation);
         }
         let transmission = Arc::new(AtomicBool::new(false));
@@ -532,6 +556,7 @@ impl FfiClient {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
             self.release_slot();
+            self.remove_request(request_id);
             return FfiResult::error_with_operation(
                 format!("client worker queue deadline exceeded: {error}"),
                 crate::contract::FFI_ERROR_RUNTIME,
@@ -539,12 +564,21 @@ impl FfiClient {
             );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let result = receiver.recv_timeout(remaining).unwrap_or_else(|_| {
-            // The request deadline has already elapsed. Do not spend another
-            // request-timeout waiting for the cancellation acknowledgement.
-            let _ = self.cancel_with_timeout(request_id, Duration::ZERO);
-            FfiResult::timed_out(operation, mutation_id, transmission.load(Ordering::Acquire))
-        });
+        let result = match receiver.recv_timeout(remaining) {
+            Ok(result) => result,
+            Err(_) => {
+                // The request deadline has already elapsed. Do not spend
+                // another request-timeout waiting for cancellation. The
+                // worker retains the request registry entry until it has
+                // observed the cancellation intent and cleaned up its lane.
+                let _ = self.cancel_with_timeout(request_id, Duration::ZERO);
+                return FfiResult::timed_out(
+                    operation,
+                    mutation_id,
+                    transmission.load(Ordering::Acquire),
+                );
+            }
+        };
         match result.kind {
             FfiResultKind::Value => {
                 self.metrics.hits.fetch_add(1, Ordering::Relaxed);
@@ -589,23 +623,50 @@ impl FfiClient {
     }
 
     fn cancel_with_timeout(&self, request_id: u64, timeout: Duration) -> bool {
-        let (response, receiver) = sync_channel(1);
-        if self
-            .commands
-            .send_timeout(
-                Command::Cancel {
-                    request_id,
-                    response,
-                },
-                timeout,
-            )
-            .is_err()
-        {
+        if !self.request_cancel(request_id) {
             return false;
         }
-        receiver
-            .recv_timeout(timeout)
-            .is_ok_and(|result| result.kind == FfiResultKind::Ok)
+        // Record the intent before enqueueing the control command. If the
+        // worker observes Execute first, it will still turn that request into
+        // a cancellation result; if it observes Cancel first, the intent is
+        // retained until Execute arrives.
+        self.commands
+            .send_timeout(Command::Cancel { request_id }, timeout)
+            .is_ok()
+    }
+
+    fn register_request(&self, request_id: u64) -> bool {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if requests.contains_key(&request_id) {
+            return false;
+        }
+        requests.insert(request_id, RequestState::Queued);
+        true
+    }
+
+    fn remove_request(&self, request_id: u64) {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&request_id);
+    }
+
+    fn request_cancel(&self, request_id: u64) -> bool {
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(state) = requests.get_mut(&request_id) else {
+            return false;
+        };
+        if *state == RequestState::CancelRequested {
+            return false;
+        }
+        *state = RequestState::CancelRequested;
+        true
     }
 
     fn metrics_snapshot(&self) -> FfiMetricsSnapshot {
@@ -653,6 +714,7 @@ fn run_worker(
     state: Arc<AtomicU32>,
     metrics: Arc<FfiMetrics>,
     in_flight: Arc<AtomicUsize>,
+    requests: RequestRegistry,
 ) {
     let WorkerOptions {
         endpoint,
@@ -742,6 +804,7 @@ fn run_worker(
         metrics,
         max_in_flight,
         in_flight,
+        requests,
     ));
 }
 
@@ -753,6 +816,7 @@ async fn run_worker_loop(
     metrics: Arc<FfiMetrics>,
     max_in_flight: usize,
     in_flight: Arc<AtomicUsize>,
+    requests: RequestRegistry,
 ) {
     let mut pending = VecDeque::new();
     let mut core_metrics = CoreMetricsSnapshot::default();
@@ -764,15 +828,24 @@ async fn run_worker_loop(
             let Some(command) = pending.pop_front() else {
                 break;
             };
-            spawn_request(command, &client, &mut active, &mut active_requests);
+            spawn_request(
+                command,
+                &client,
+                &mut active,
+                &mut active_requests,
+                &requests,
+                &in_flight,
+                &metrics,
+            );
         }
         metrics
             .active_lanes
             .store(active_requests.len(), Ordering::Release);
         if shutdown.load(Ordering::Acquire) {
-            for (_, (abort, response, operation, mutation_id, transmission)) in
+            for (request_id, (abort, response, operation, mutation_id, transmission)) in
                 active_requests.drain()
             {
+                remove_request(&requests, request_id);
                 abort.abort();
                 release_slot(&in_flight);
                 let _ = response.send(FfiResult::cancelled(
@@ -781,8 +854,8 @@ async fn run_worker_loop(
                     transmission.load(Ordering::Acquire),
                 ));
             }
-            drain_pending(&mut pending, &in_flight);
-            drain_commands(&commands, &in_flight);
+            drain_pending(&mut pending, &in_flight, &requests);
+            drain_commands(&commands, &in_flight, &requests);
             return;
         }
         let has_active = !active.is_empty();
@@ -794,6 +867,7 @@ async fn run_worker_loop(
                 match completed {
                     Some(Ok((request_id, result))) => {
                         if let Some((_, response, _, _, _)) = active_requests.remove(&request_id) {
+                            remove_request(&requests, request_id);
                             release_slot(&in_flight);
                             sync_core_metrics(&client, &metrics, &mut core_metrics);
                             state.store(
@@ -811,9 +885,10 @@ async fn run_worker_loop(
                     }
                     Some(Err(error)) => {
                         let message = format!("native client worker task failed: {error}");
-                        for (_, (abort, response, operation, mutation_id, transmission)) in
+                        for (request_id, (abort, response, operation, mutation_id, transmission)) in
                             active_requests.drain()
                         {
+                            remove_request(&requests, request_id);
                             abort.abort();
                             release_slot(&in_flight);
                             let mut result = FfiResult::error_with_operation(
@@ -828,8 +903,8 @@ async fn run_worker_loop(
                             );
                             let _ = response.send(result);
                         }
-                        drain_pending(&mut pending, &in_flight);
-                        drain_commands(&commands, &in_flight);
+                        drain_pending(&mut pending, &in_flight, &requests);
+                        drain_commands(&commands, &in_flight, &requests);
                         return;
                     }
                     None => {}
@@ -847,40 +922,54 @@ async fn run_worker_loop(
                         transmission,
                         response,
                     }) => {
-                        let request_id_in_use = active_requests.contains_key(&request_id)
-                            || pending.iter().any(|command| {
-                                matches!(
-                                    command,
-                                    Command::Execute {
-                                        request_id: queued_id,
-                                        ..
-                                    } if *queued_id == request_id
-                                )
-                        });
-                        if request_id_in_use {
-                            release_slot(&in_flight);
-                            let _ = response.send(FfiResult::error_with_operation(
-                                format!("request ID {request_id} is already active"),
-                                crate::contract::FFI_ERROR_RUNTIME,
-                                Some(operation),
-                            ));
-                        } else if pending.len() < max_in_flight {
-                            pending.push_back(Command::Execute {
-                                request_id,
-                                operation,
-                                application_key,
-                                value,
-                                set_options,
-                                raw,
-                                transmission,
-                                response,
-                            });
-                        } else {
-                            release_slot(&in_flight);
-                            let _ = response.send(FfiResult::queue_full(operation));
+                        match request_state(&requests, request_id) {
+                            Some(RequestState::CancelRequested) => {
+                                remove_request(&requests, request_id);
+                                release_slot(&in_flight);
+                                metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+                                let _ = response.send(FfiResult::cancelled(
+                                    Some(operation),
+                                    set_options.mutation_id(),
+                                    transmission.load(Ordering::Acquire),
+                                ));
+                            }
+                            Some(RequestState::Queued) if pending.len() < max_in_flight => {
+                                pending.push_back(Command::Execute {
+                                    request_id,
+                                    operation,
+                                    application_key,
+                                    value,
+                                    set_options,
+                                    raw,
+                                    transmission,
+                                    response,
+                                });
+                            }
+                            Some(RequestState::Queued) => {
+                                remove_request(&requests, request_id);
+                                release_slot(&in_flight);
+                                let _ = response.send(FfiResult::queue_full(operation));
+                            }
+                            Some(RequestState::Active) => {
+                                remove_request(&requests, request_id);
+                                release_slot(&in_flight);
+                                let _ = response.send(FfiResult::error_with_operation(
+                                    format!("request ID {request_id} is already active"),
+                                    crate::contract::FFI_ERROR_RUNTIME,
+                                    Some(operation),
+                                ));
+                            }
+                            None => {
+                                release_slot(&in_flight);
+                                let _ = response.send(FfiResult::error_with_operation(
+                                    format!("request ID {request_id} is no longer active"),
+                                    crate::contract::FFI_ERROR_RUNTIME,
+                                    Some(operation),
+                                ));
+                            }
                         }
                     }
-                    Ok(Command::Cancel { request_id, response }) => {
+                    Ok(Command::Cancel { request_id }) => {
                         if let Some((
                             abort,
                             original_response,
@@ -890,16 +979,15 @@ async fn run_worker_loop(
                         )) =
                             active_requests.remove(&request_id)
                         {
+                            remove_request(&requests, request_id);
                             abort.abort();
                             release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
-                            let _ = original_response
-                                .send(FfiResult::cancelled(
-                                    Some(operation),
-                                    mutation_id,
-                                    transmission.load(Ordering::Acquire),
-                                ));
-                            let _ = response.send(ok_result());
+                            let _ = original_response.send(FfiResult::cancelled(
+                                Some(operation),
+                                mutation_id,
+                                transmission.load(Ordering::Acquire),
+                            ));
                         } else if let Some((
                             original_response,
                             operation,
@@ -908,17 +996,20 @@ async fn run_worker_loop(
                         )) =
                             cancel_pending(&mut pending, request_id)
                         {
+                            remove_request(&requests, request_id);
                             release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
-                            let _ = original_response
-                                .send(FfiResult::cancelled(
-                                    Some(operation),
-                                    mutation_id,
-                                    transmission.load(Ordering::Acquire),
-                                ));
-                            let _ = response.send(ok_result());
-                        } else {
-                            let _ = response.send(FfiResult::error("request is not active"));
+                            let _ = original_response.send(FfiResult::cancelled(
+                                Some(operation),
+                                mutation_id,
+                                transmission.load(Ordering::Acquire),
+                            ));
+                        } else if request_state(&requests, request_id)
+                            == Some(RequestState::CancelRequested)
+                        {
+                            // The Execute command has not reached the worker
+                            // yet. Leave the intent in the registry so the
+                            // eventual Execute is completed as canceled.
                         }
                     }
                     Ok(Command::Shutdown) | Err(_) => {
@@ -935,6 +1026,9 @@ fn spawn_request(
     client: &ProtectedClient,
     active: &mut futures_util::stream::FuturesUnordered<tokio::task::JoinHandle<(u64, FfiResult)>>,
     active_requests: &mut HashMap<u64, ActiveRequest>,
+    requests: &RequestRegistry,
+    in_flight: &AtomicUsize,
+    metrics: &FfiMetrics,
 ) {
     let Command::Execute {
         request_id,
@@ -949,6 +1043,30 @@ fn spawn_request(
     else {
         return;
     };
+    match claim_request(requests, request_id) {
+        RequestClaim::Claimed => {}
+        RequestClaim::CancelRequested => {
+            remove_request(requests, request_id);
+            release_slot(in_flight);
+            metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+            let _ = response.send(FfiResult::cancelled(
+                Some(operation),
+                set_options.mutation_id(),
+                transmission.load(Ordering::Acquire),
+            ));
+            return;
+        }
+        RequestClaim::Invalid => {
+            remove_request(requests, request_id);
+            release_slot(in_flight);
+            let _ = response.send(FfiResult::error_with_operation(
+                format!("request ID {request_id} is already active"),
+                crate::contract::FFI_ERROR_RUNTIME,
+                Some(operation),
+            ));
+            return;
+        }
+    }
     let task_client = client.clone();
     let mutation_id = set_options.mutation_id();
     let task_transmission = Arc::clone(&transmission);
@@ -1009,15 +1127,50 @@ fn cancel_pending(pending: &mut VecDeque<Command>, request_id: u64) -> Option<Pe
     Some((response, operation, set_options.mutation_id(), transmission))
 }
 
-fn drain_pending(pending: &mut VecDeque<Command>, in_flight: &AtomicUsize) {
+fn request_state(requests: &RequestRegistry, request_id: u64) -> Option<RequestState> {
+    requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&request_id)
+        .copied()
+}
+
+fn claim_request(requests: &RequestRegistry, request_id: u64) -> RequestClaim {
+    let mut requests = requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match requests.get_mut(&request_id) {
+        Some(state @ RequestState::Queued) => {
+            *state = RequestState::Active;
+            RequestClaim::Claimed
+        }
+        Some(RequestState::CancelRequested) => RequestClaim::CancelRequested,
+        Some(RequestState::Active) | None => RequestClaim::Invalid,
+    }
+}
+
+fn remove_request(requests: &RequestRegistry, request_id: u64) {
+    requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&request_id);
+}
+
+fn drain_pending(
+    pending: &mut VecDeque<Command>,
+    in_flight: &AtomicUsize,
+    requests: &RequestRegistry,
+) {
     while let Some(command) = pending.pop_front() {
         match command {
             Command::Execute {
+                request_id,
                 response,
                 operation,
                 set_options,
                 ..
             } => {
+                remove_request(requests, request_id);
                 release_slot(in_flight);
                 let _ = response.send(FfiResult::cancelled(
                     Some(operation),
@@ -1025,23 +1178,23 @@ fn drain_pending(pending: &mut VecDeque<Command>, in_flight: &AtomicUsize) {
                     false,
                 ));
             }
-            Command::Cancel { response, .. } => {
-                let _ = response.send(FfiResult::error("client worker is shutting down"));
-            }
+            Command::Cancel { .. } => {}
             Command::Shutdown => {}
         }
     }
 }
 
-fn drain_commands(commands: &CommandReceiver, in_flight: &AtomicUsize) {
+fn drain_commands(commands: &CommandReceiver, in_flight: &AtomicUsize, requests: &RequestRegistry) {
     while let Ok(command) = commands.try_recv() {
         match command {
             Command::Execute {
+                request_id,
                 response,
                 operation,
                 set_options,
                 ..
             } => {
+                remove_request(requests, request_id);
                 release_slot(in_flight);
                 let _ = response.send(FfiResult::cancelled(
                     Some(operation),
@@ -1049,9 +1202,7 @@ fn drain_commands(commands: &CommandReceiver, in_flight: &AtomicUsize) {
                     false,
                 ));
             }
-            Command::Cancel { response, .. } => {
-                let _ = response.send(FfiResult::error("client worker is shutting down"));
-            }
+            Command::Cancel { .. } => {}
             Command::Shutdown => {}
         }
     }
@@ -1755,9 +1906,9 @@ pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiCli
 
 /// Requests cancellation of a queued or active operation.
 ///
-/// Returns one when the request was found and canceled, and zero when it had already completed or
-/// the client was closed. The canceled operation's result is delivered through its normal result
-/// pointer with structured cancellation metadata.
+/// Returns one when the request was found and cancellation was recorded, and zero when it had
+/// already completed or a cancellation was already requested. The canceled operation's result is
+/// delivered through its normal result pointer with structured cancellation metadata.
 ///
 /// # Safety
 ///
