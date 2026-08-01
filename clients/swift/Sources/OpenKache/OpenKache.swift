@@ -280,7 +280,8 @@ private enum NativeBridge {
             throw OpenKacheError("maxInFlight must be greater than zero")
         }
         if options.compression.enabled
-            && !(Int(Smithy_Value_Format.defaultZstandardLevelMin)...Int(Smithy_Value_Format.defaultZstandardLevelMax))
+            && !(Smithy_Value_Format.defaultZstandardLevelMin...Smithy_Value_Format.defaultZstandardLevelMax)
+                .contains(options.compression.level)
         {
             throw OpenKacheError(
                 "compression.level must be from "
