@@ -79,30 +79,30 @@ const (
 
 // Shared client defaults extracted from the Smithy service contract.
 const (
+	// SmithyDefaultMaxInFlight is the default number of request lanes.
+	SmithyDefaultMaxInFlight = 256
+	// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
+	SmithyDefaultConnectTimeoutMilliseconds uint64 = 5000
+	// SmithyDefaultRequestTimeoutMilliseconds is the default complete request timeout.
+	SmithyDefaultRequestTimeoutMilliseconds uint64 = 2000
+	// SmithyDefaultRetryMaxAttempts is the default total retry attempt count.
+	SmithyDefaultRetryMaxAttempts = 2
+	// SmithyDefaultZstandardLevel is the default Zstandard level.
+	SmithyDefaultZstandardLevel int32 = 1
+	// SmithyDefaultZstandardMinimumInputBytes is the compression input threshold.
+	SmithyDefaultZstandardMinimumInputBytes = 1024
+	// SmithyDefaultZstandardMinimumSavingsBytes is the compression savings threshold.
+	SmithyDefaultZstandardMinimumSavingsBytes = 64
+	// SmithyDefaultZstandardLevelMin is the minimum supported Zstandard level.
+	SmithyDefaultZstandardLevelMin int32 = 1
+	// SmithyDefaultZstandardLevelMax is the maximum supported Zstandard level.
+	SmithyDefaultZstandardLevelMax int32 = 22
 	// SmithyClientDefaultServerName is used when no TLS server name is supplied.
 	SmithyClientDefaultServerName = "localhost"
 	// SmithyClientCertificatePEMType is the PEM block type used for certificate chains.
 	SmithyClientCertificatePEMType = "CERTIFICATE"
 	// SmithyClientMinimumPositiveValue is the minimum accepted positive setting.
 	SmithyClientMinimumPositiveValue = 1
-	// SmithyClientDefaultConnectTimeoutMS is the default connection timeout.
-	SmithyClientDefaultConnectTimeoutMS uint64 = 5000
-	// SmithyClientDefaultRequestTimeoutMS is the default complete request timeout.
-	SmithyClientDefaultRequestTimeoutMS uint64 = 2000
-	// SmithyClientDefaultRetryMaxAttempts is the default total retry attempt count.
-	SmithyClientDefaultRetryMaxAttempts = 2
-	// SmithyClientDefaultMaxInFlight is the default number of request lanes.
-	SmithyClientDefaultMaxInFlight = 256
-	// SmithyClientDefaultCompressionLevel is the default Zstandard level.
-	SmithyClientDefaultCompressionLevel int32 = 1
-	// SmithyClientDefaultCompressionMinimumInputSize is the compression input threshold.
-	SmithyClientDefaultCompressionMinimumInputSize = 1024
-	// SmithyClientDefaultCompressionMinimumSavings is the compression savings threshold.
-	SmithyClientDefaultCompressionMinimumSavings = 64
-	// SmithyClientCompressionLevelMin is the minimum supported Zstandard level.
-	SmithyClientCompressionLevelMin int32 = 1
-	// SmithyClientCompressionLevelMax is the maximum supported Zstandard level.
-	SmithyClientCompressionLevelMax int32 = 22
 )
 
 // Smithy API enum string values extracted from the Smithy service contract.

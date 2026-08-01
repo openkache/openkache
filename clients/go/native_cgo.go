@@ -378,15 +378,15 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	}
 	compressionLevel := options.compression.Level
 	if compressionLevel == 0 {
-		compressionLevel = SmithyClientDefaultCompressionLevel
+		compressionLevel = SmithyDefaultZstandardLevel
 	}
 	minimumInputSize := options.compression.MinimumInputSize
 	if minimumInputSize == 0 {
-		minimumInputSize = SmithyClientDefaultCompressionMinimumInputSize
+		minimumInputSize = SmithyDefaultZstandardMinimumInputBytes
 	}
 	minimumSavings := options.compression.MinimumSavings
 	if minimumSavings == 0 {
-		minimumSavings = SmithyClientDefaultCompressionMinimumSavings
+		minimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 	}
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
 	useExtended := hasExtended
@@ -394,8 +394,8 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
 			options.encryption != EncryptionRobust ||
-			options.retryAttempts != SmithyClientDefaultRetryMaxAttempts ||
-			options.maxInFlight != SmithyClientDefaultMaxInFlight) {
+			options.retryAttempts != SmithyDefaultRetryMaxAttempts ||
+			options.maxInFlight != SmithyDefaultMaxInFlight) {
 		C.free(address)
 		C.free(serverName)
 		C.free(certificate)

@@ -122,16 +122,16 @@ public struct OpenKacheCompression: Sendable {
     /// Disables compression.
     public static let disabled = OpenKacheCompression(
         enabled: false,
-        level: 1,
-        minimumInputSize: 1_024,
-        minimumSavings: 64
+        level: Smithy_Value_Format.defaultZstandardLevel,
+        minimumInputSize: Smithy_Value_Format.defaultZstandardMinimumInputBytes,
+        minimumSavings: Smithy_Value_Format.defaultZstandardMinimumSavingsBytes
     )
 
     /// Creates Zstandard compression settings.
     public static func zstandard(
-        level: Int32 = 1,
-        minimumInputSize: Int = 1_024,
-        minimumSavings: Int = 64
+        level: Int32 = Smithy_Value_Format.defaultZstandardLevel,
+        minimumInputSize: Int = Smithy_Value_Format.defaultZstandardMinimumInputBytes,
+        minimumSavings: Int = Smithy_Value_Format.defaultZstandardMinimumSavingsBytes
     ) -> OpenKacheCompression {
         OpenKacheCompression(
             enabled: true,
@@ -206,10 +206,14 @@ public struct OpenKacheClientOptions: Sendable {
         identity: OpenKacheClientIdentity? = nil,
         compression: OpenKacheCompression = .disabled,
         encryption: OpenKacheEncryption = .robust,
-        connectTimeout: Duration = .seconds(5),
-        requestTimeout: Duration = .seconds(2),
-        retryMaxAttempts: Int = 2,
-        maxInFlight: Int = 256
+        connectTimeout: Duration = .milliseconds(
+            Int64(Smithy_Value_Format.defaultConnectTimeoutMilliseconds)
+        ),
+        requestTimeout: Duration = .milliseconds(
+            Int64(Smithy_Value_Format.defaultRequestTimeoutMilliseconds)
+        ),
+        retryMaxAttempts: Int = Smithy_Value_Format.defaultRetryMaxAttempts,
+        maxInFlight: Int = Smithy_Value_Format.defaultMaxInFlight
     ) {
         self.address = address
         self.serverName = serverName
@@ -276,9 +280,13 @@ private enum NativeBridge {
             throw OpenKacheError("maxInFlight must be greater than zero")
         }
         if options.compression.enabled
-            && !(1...22).contains(options.compression.level)
+            && !(Int(Smithy_Value_Format.defaultZstandardLevelMin)...Int(Smithy_Value_Format.defaultZstandardLevelMax))
         {
-            throw OpenKacheError("compression.level must be from 1 through 22")
+            throw OpenKacheError(
+                "compression.level must be from "
+                    + "\(Smithy_Value_Format.defaultZstandardLevelMin) through "
+                    + "\(Smithy_Value_Format.defaultZstandardLevelMax)"
+            )
         }
         guard options.compression.minimumInputSize >= 0 else {
             throw OpenKacheError("compression.minimumInputSize must not be negative")

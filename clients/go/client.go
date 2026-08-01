@@ -151,11 +151,11 @@ func (o Options) normalize() (normalizedOptions, error) {
 
 	connectTimeout := o.Timeouts.Connect
 	if connectTimeout == 0 {
-		connectTimeout = time.Duration(SmithyClientDefaultConnectTimeoutMS) * time.Millisecond
+		connectTimeout = time.Duration(SmithyDefaultConnectTimeoutMilliseconds) * time.Millisecond
 	}
 	requestTimeout := o.Timeouts.Request
 	if requestTimeout == 0 {
-		requestTimeout = time.Duration(SmithyClientDefaultRequestTimeoutMS) * time.Millisecond
+		requestTimeout = time.Duration(SmithyDefaultRequestTimeoutMilliseconds) * time.Millisecond
 	}
 	minimumTimeout := time.Duration(SmithyClientMinimumPositiveValue) * time.Millisecond
 	if connectTimeout < 0 || requestTimeout < 0 {
@@ -171,24 +171,24 @@ func (o Options) normalize() (normalizedOptions, error) {
 	}
 	if compression.Enabled {
 		if compression.Level == 0 {
-			compression.Level = SmithyClientDefaultCompressionLevel
+			compression.Level = SmithyDefaultZstandardLevel
 		}
-		if compression.Level < SmithyClientCompressionLevelMin ||
-			compression.Level > SmithyClientCompressionLevelMax {
+		if compression.Level < SmithyDefaultZstandardLevelMin ||
+			compression.Level > SmithyDefaultZstandardLevelMax {
 			return normalizedOptions{}, validationError(
 				"compression.level",
 				fmt.Sprintf(
 					"must be from %d through %d",
-					SmithyClientCompressionLevelMin,
-					SmithyClientCompressionLevelMax,
+					SmithyDefaultZstandardLevelMin,
+					SmithyDefaultZstandardLevelMax,
 				),
 			)
 		}
 		if compression.MinimumInputSize == 0 {
-			compression.MinimumInputSize = SmithyClientDefaultCompressionMinimumInputSize
+			compression.MinimumInputSize = SmithyDefaultZstandardMinimumInputBytes
 		}
 		if compression.MinimumSavings == 0 {
-			compression.MinimumSavings = SmithyClientDefaultCompressionMinimumSavings
+			compression.MinimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 		}
 	}
 
@@ -202,14 +202,14 @@ func (o Options) normalize() (normalizedOptions, error) {
 
 	retryAttempts := o.Retry.MaxAttempts
 	if retryAttempts == 0 {
-		retryAttempts = SmithyClientDefaultRetryMaxAttempts
+		retryAttempts = SmithyDefaultRetryMaxAttempts
 	}
 	if retryAttempts < SmithyClientMinimumPositiveValue {
 		return normalizedOptions{}, validationError("retry.max_attempts", "must be greater than zero")
 	}
 	maxInFlight := o.MaxInFlight
 	if maxInFlight == 0 {
-		maxInFlight = SmithyClientDefaultMaxInFlight
+		maxInFlight = SmithyDefaultMaxInFlight
 	}
 	if maxInFlight < SmithyClientMinimumPositiveValue {
 		return normalizedOptions{}, validationError("max_in_flight", "must be greater than zero")

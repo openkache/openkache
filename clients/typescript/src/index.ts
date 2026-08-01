@@ -22,6 +22,16 @@ export * from "./generated_local/smithy-api.js"
 export * from "./generated_local/smithy-value-format.js"
 export * from "./generated_local/smithy-value-envelope.js"
 import {
+  SMITHY_DEFAULT_MAX_IN_FLIGHT,
+  SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
+  SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
+  SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+  SMITHY_DEFAULT_ZSTANDARD_LEVEL,
+  SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX,
+  SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN,
+  SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
+  SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
+  SMITHY_CLIENT_DEFAULT_SERVER_NAME,
   SMITHY_ITEM_ID_BYTES,
   SMITHY_MAX_VALUE_BYTES,
   type Smithy_Delete_Input,
@@ -31,7 +41,9 @@ import {
   type Smithy_OpenKache_Api,
   type Smithy_Ping_Input,
   type Smithy_Ping_Output,
+  type Smithy_Set_Condition,
   type Smithy_Set_Input,
+  type Smithy_Set_Outcome,
   type Smithy_Set_Output,
   type Smithy_Stats_Input,
   type Smithy_Stats_Output,
@@ -63,7 +75,7 @@ const CLIENT_FINALIZER = new FinalizationRegistry<Native_Client>(
 export interface Zstandard_Options {
   /** Enables Zstandard compression before encryption. */
   readonly enabled?: boolean
-  /** Zstandard compression level from 1 through 22. */
+  /** Zstandard compression level from the shared contract range. */
   readonly level?: number
   /** Values below this byte length bypass compression. */
   readonly minimum_input_size?: number
@@ -109,7 +121,7 @@ export interface Client_Options {
   readonly certificate: Uint8Array
   /** Exact 32-byte master secret used to derive key-hiding and value-encryption subkeys. */
   readonly data_protection_key: Uint8Array
-  /** TLS server name. Defaults to `localhost`. */
+  /** TLS server name. Defaults to the shared contract value. */
   readonly server_name?: string
   /** Client certificate and private key required by production mutual TLS. */
   readonly identity?: Client_Identity
@@ -132,14 +144,14 @@ export interface Client_Options {
 /**
  * Outcome of a successful `set` operation.
  */
-export type Set_Outcome = "created" | "replaced" | "not_stored"
+export type Set_Outcome = Smithy_Set_Outcome
 
 /**
  * Optional TTL and atomic existence condition for `set`.
  */
 export interface Set_Options {
   /** Store only when the key is absent (`if_absent`) or present (`if_present`). */
-  readonly condition?: "if_absent" | "if_present"
+  readonly condition?: Smithy_Set_Condition
   /** Positive relative lifetime in milliseconds. */
   readonly ttl_ms?: number
 }
@@ -224,18 +236,23 @@ export class OpenKache_Client {
     const retry = options.retry ?? {}
     const native_options: Native_Client_Options = {
       address: options.address,
-      server_name: options.server_name ?? "localhost",
+      server_name: options.server_name ?? SMITHY_CLIENT_DEFAULT_SERVER_NAME,
       certificate: options.certificate.slice(),
       identity: owned_identity(options.identity),
       data_protection_key: options.data_protection_key.slice(),
       compression_enabled: compression.enabled !== false,
-      compression_level: compression.level,
-      minimum_input_size: compression.minimum_input_size,
-      minimum_savings: compression.minimum_savings,
-      connect_timeout_ms: timeouts.connect_ms,
-      request_timeout_ms: timeouts.request_ms,
-      retry_max_attempts: retry.max_attempts,
-      max_in_flight: options.max_in_flight,
+      compression_level: compression.level ?? SMITHY_DEFAULT_ZSTANDARD_LEVEL,
+      minimum_input_size:
+        compression.minimum_input_size ?? SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
+      minimum_savings:
+        compression.minimum_savings ?? SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
+      connect_timeout_ms:
+        timeouts.connect_ms ?? SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
+      request_timeout_ms:
+        timeouts.request_ms ?? SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
+      retry_max_attempts:
+        retry.max_attempts ?? SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+      max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
     }
     try {
@@ -951,10 +968,13 @@ function validate_compression(options: Zstandard_Options | undefined): void {
   if (
     options.level !== undefined &&
     (!Number.isSafeInteger(options.level) ||
-      options.level < 1 ||
-      options.level > 22)
+      options.level < SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN ||
+      options.level > SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX)
   ) {
-    throw new OpenKache_Error("compression.level must be an integer from 1 through 22")
+    throw new OpenKache_Error(
+      "compression.level must be an integer from "
+        + `${SMITHY_DEFAULT_ZSTANDARD_LEVEL_MIN} through ${SMITHY_DEFAULT_ZSTANDARD_LEVEL_MAX}`,
+    )
   }
   validate_non_negative_integer(options.minimum_input_size, "compression.minimum_input_size")
   validate_non_negative_integer(options.minimum_savings, "compression.minimum_savings")

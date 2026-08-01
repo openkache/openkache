@@ -541,7 +541,7 @@ async fn execute_raw(
 }
 
 fn connection_state_value(state: ConnectionState) -> u32 {
-    state as u32
+    state.code()
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
@@ -1003,7 +1003,7 @@ fn execute_entry(
 /// [`openkache_client_result_take_client`] and remain valid until this call returns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiClient) -> u32 {
-    unsafe { client.as_ref() }.map_or(ConnectionState::Unknown as u32, FfiClient::connection_state)
+    unsafe { client.as_ref() }.map_or(ConnectionState::Unknown.code(), FfiClient::connection_state)
 }
 
 /// Returns an FFI result discriminator.
@@ -1015,7 +1015,7 @@ pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiCli
 /// `result` must be null or a live pointer returned by this library.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_kind(result: *const FfiResult) -> u32 {
-    unsafe { result.as_ref() }.map_or(FfiResultKind::Error as u32, |result| result.kind as u32)
+    unsafe { result.as_ref() }.map_or(FfiResultKind::Error.code(), |result| result.kind.code())
 }
 
 /// Returns a borrowed pointer to an FFI result payload.

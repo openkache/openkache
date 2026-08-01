@@ -11,10 +11,52 @@ structure wireContract {
     maxValueBytes: Integer
 
     @required
-    v2: WireV2
+    v1: WireV1
+}
+
+/// Defaults shared by the Rust client core and all language adapters.
+@trait(selector: "service")
+structure clientDefaults {
+    @required
+    maxInFlight: Integer
 
     @required
-    v3: WireV3
+    connectTimeoutMilliseconds: Long
+
+    @required
+    requestTimeoutMilliseconds: Long
+
+    @required
+    retryMaxAttempts: Integer
+
+    @required
+    zstandardLevel: Integer
+
+    @required
+    zstandardMinimumInputBytes: Integer
+
+    @required
+    zstandardMinimumSavingsBytes: Integer
+
+    /// Stable TLS server-name default used by adapters without a platform-specific default.
+    @required
+    serverName: String
+
+    /// PEM label for certificate chains assembled by an adapter.
+    @required
+    certificatePemType: String
+
+    /// Minimum positive value for settings where zero selects a default.
+    @required
+    minimumPositiveValue: Integer
+
+    /// Inclusive lower bound accepted by Zstandard adapters.
+    @required
+    zstandardLevelMin: Integer
+
+    /// Inclusive upper bound accepted by Zstandard adapters.
+    @required
+    zstandardLevelMax: Integer
 }
 
 /// Native binding ABI identifiers generated alongside the wire contract.
@@ -85,46 +127,6 @@ structure ffiContract {
 
     @required
     connectionStateUnknown: Integer
-}
-
-/// Defaults shared by all client bindings and the native core.
-@trait(selector: "service")
-structure clientDefaults {
-    @required
-    serverName: String
-
-    @required
-    certificatePemType: String
-
-    @required
-    minimumPositiveValue: Integer
-
-    @required
-    connectTimeoutMs: Integer
-
-    @required
-    requestTimeoutMs: Integer
-
-    @required
-    retryMaxAttempts: Integer
-
-    @required
-    maxInFlight: Integer
-
-    @required
-    compressionLevel: Integer
-
-    @required
-    compressionMinimumInputSize: Integer
-
-    @required
-    compressionMinimumSavings: Integer
-
-    @required
-    compressionLevelMin: Integer
-
-    @required
-    compressionLevelMax: Integer
 }
 
 /// Cross-language v1 value container and protection contract.
@@ -213,39 +215,7 @@ structure valueEnvelope {
     jsonEncoding: String
 }
 
-structure WireV2 {
-    @required
-    alpn: String
-
-    @required
-    requestHeaderBytes: Integer
-
-    @required
-    responseHeaderBytes: Integer
-
-    @required
-    setTtlBytes: Integer
-
-    @required
-    responseValueLengthMask: Long
-
-    @required
-    valueCompressedBit: Long
-
-    @required
-    valueEncryptedBit: Long
-
-    @required
-    setTtlBit: Long
-
-    @required
-    setIfAbsentBit: Long
-
-    @required
-    setIfPresentBit: Long
-}
-
-structure WireV3 {
+structure WireV1 {
     @required
     alpn: String
 
@@ -283,19 +253,7 @@ structure wireStatus {
 @wireContract(
     itemIdBytes: 32,
     maxValueBytes: 67108864,
-    v2: {
-        alpn: "openkache/2",
-        requestHeaderBytes: 9,
-        responseHeaderBytes: 5,
-        setTtlBytes: 8,
-        responseValueLengthMask: 1073741823,
-        valueCompressedBit: 2147483648,
-        valueEncryptedBit: 1073741824,
-        setTtlBit: 536870912,
-        setIfAbsentBit: 268435456,
-        setIfPresentBit: 134217728
-    },
-    v3: {
+    v1: {
         alpn: "openkache/1",
         requestFixedBytes: 2,
         responseFixedBytes: 1,
@@ -304,6 +262,20 @@ structure wireStatus {
         setIfAbsentFlag: 2,
         setIfPresentFlag: 4
     }
+)
+@clientDefaults(
+    maxInFlight: 256,
+    connectTimeoutMilliseconds: 5000,
+    requestTimeoutMilliseconds: 2000,
+    retryMaxAttempts: 2,
+    zstandardLevel: 1,
+    zstandardMinimumInputBytes: 1024,
+    zstandardMinimumSavingsBytes: 64,
+    serverName: "localhost",
+    certificatePemType: "CERTIFICATE",
+    minimumPositiveValue: 1,
+    zstandardLevelMin: 1,
+    zstandardLevelMax: 22
 )
 @ffiContract(
     abiVersion: 2,
@@ -328,20 +300,6 @@ structure wireStatus {
     connectionStateDisconnected: 2,
     connectionStateClosed: 3,
     connectionStateUnknown: 4
-)
-@clientDefaults(
-    serverName: "localhost",
-    certificatePemType: "CERTIFICATE",
-    minimumPositiveValue: 1,
-    connectTimeoutMs: 5000,
-    requestTimeoutMs: 2000,
-    retryMaxAttempts: 2,
-    maxInFlight: 256,
-    compressionLevel: 1,
-    compressionMinimumInputSize: 1024,
-    compressionMinimumSavings: 64,
-    compressionLevelMin: 1,
-    compressionLevelMax: 22
 )
 @valueFormat(
     version: 1,

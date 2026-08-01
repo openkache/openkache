@@ -55,7 +55,9 @@ finally:
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
 `get_raw` for exact bytes; empty raw values are supported. Keys may be UTF-8
 strings or bytes and must not be empty. JSON numbers are finite and limited to
-the exact IEEE-754 integer range.
+the exact IEEE-754 integer range. Python converts a native value to a UTF-8
+JSON input buffer only to cross the ctypes ABI; the core reparses that input
+and owns canonical serialization, compression, encryption, and value framing.
 
 `client.raw` exposes the Smithy-shaped exact item-ID API:
 
