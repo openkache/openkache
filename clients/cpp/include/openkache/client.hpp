@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -287,6 +288,24 @@ public:
         return get(as_bytes(key));
     }
 
+    /// Retrieves the canonical JSON document stored under an application key.
+    std::optional<std::string> get_json(std::span<const Byte> key) const {
+        auto result = get_outcome(
+            execute(OPENKACHE_CLIENT_OPERATION_GET_JSON, key, {}, Set_Options{}),
+            "GET_JSON");
+        if (!result.has_value()) {
+            return std::nullopt;
+        }
+        return std::string(
+            reinterpret_cast<const char*>(result->data()),
+            result->size());
+    }
+
+    /// Convenience overload for textual application keys.
+    std::optional<std::string> get_json(std::string_view key) const {
+        return get_json(as_bytes(key));
+    }
+
     /// Stores an application-key value and returns the server outcome.
     Set_Outcome set(
         std::span<const Byte> key,
@@ -320,6 +339,28 @@ public:
         std::string_view value,
         Set_Options options = {}) const {
         return set(as_bytes(key), as_bytes(value), options);
+    }
+
+    /// Stores a canonical JSON document under an application key.
+    Set_Outcome set_json(
+        std::span<const Byte> key,
+        std::string_view json,
+        Set_Options options = {}) const {
+        return set_outcome(
+            execute(
+                OPENKACHE_CLIENT_OPERATION_SET_JSON,
+                key,
+                as_bytes(json),
+                options),
+            "SET_JSON");
+    }
+
+    /// Convenience overload for textual application keys.
+    Set_Outcome set_json(
+        std::string_view key,
+        std::string_view json,
+        Set_Options options = {}) const {
+        return set_json(as_bytes(key), json, options);
     }
 
     /// Deletes an application-key value and reports whether it existed.
@@ -609,6 +650,7 @@ private:
         if (client_ == nullptr) {
             throw Error("OpenKache client is closed");
         }
+        const auto selected_request_id = request_id.value_or(reserve_request_id());
         const auto ttl_enabled = options.ttl_ms.has_value();
         const auto ttl_ms = options.ttl_ms.value_or(0);
         const auto* key_data = key.empty() ? nullptr : key.data();
@@ -617,38 +659,9 @@ private:
         const auto condition = static_cast<std::uint32_t>(options.condition);
         if (raw) {
             if (options.mutation_id.has_value()) {
-                if (request_id.has_value()) {
-                    result = openkache_client_execute_raw_with_request_id_and_mutation_id(
-                        client_,
-                        *request_id,
-                        operation,
-                        key_data,
-                        key.size(),
-                        value_data,
-                        value.size(),
-                        condition,
-                        ttl_enabled ? 1u : 0u,
-                        ttl_ms,
-                        options.mutation_id->data(),
-                        options.mutation_id->size());
-                } else {
-                    result = openkache_client_execute_raw_with_mutation_id(
-                        client_,
-                        operation,
-                        key_data,
-                        key.size(),
-                        value_data,
-                        value.size(),
-                        condition,
-                        ttl_enabled ? 1u : 0u,
-                        ttl_ms,
-                        options.mutation_id->data(),
-                        options.mutation_id->size());
-                }
-            } else if (request_id.has_value()) {
-                result = openkache_client_execute_raw_with_request_id(
+                result = openkache_client_execute_raw_with_request_id_and_mutation_id(
                     client_,
-                    *request_id,
+                    selected_request_id,
                     operation,
                     key_data,
                     key.size(),
@@ -656,10 +669,13 @@ private:
                     value.size(),
                     condition,
                     ttl_enabled ? 1u : 0u,
-                    ttl_ms);
+                    ttl_ms,
+                    options.mutation_id->data(),
+                    options.mutation_id->size());
             } else {
-                result = openkache_client_execute_raw(
+                result = openkache_client_execute_raw_with_request_id(
                     client_,
+                    selected_request_id,
                     operation,
                     key_data,
                     key.size(),
@@ -670,38 +686,9 @@ private:
                     ttl_ms);
             }
         } else if (options.mutation_id.has_value()) {
-            if (request_id.has_value()) {
-                result = openkache_client_execute_with_request_id_and_mutation_id(
-                    client_,
-                    *request_id,
-                    operation,
-                    key_data,
-                    key.size(),
-                    value_data,
-                    value.size(),
-                    condition,
-                    ttl_enabled ? 1u : 0u,
-                    ttl_ms,
-                    options.mutation_id->data(),
-                    options.mutation_id->size());
-            } else {
-                result = openkache_client_execute_with_mutation_id(
-                    client_,
-                    operation,
-                    key_data,
-                    key.size(),
-                    value_data,
-                    value.size(),
-                    condition,
-                    ttl_enabled ? 1u : 0u,
-                    ttl_ms,
-                    options.mutation_id->data(),
-                    options.mutation_id->size());
-            }
-        } else if (request_id.has_value()) {
-            result = openkache_client_execute_with_request_id(
+            result = openkache_client_execute_with_request_id_and_mutation_id(
                 client_,
-                *request_id,
+                selected_request_id,
                 operation,
                 key_data,
                 key.size(),
@@ -709,10 +696,13 @@ private:
                 value.size(),
                 condition,
                 ttl_enabled ? 1u : 0u,
-                ttl_ms);
+                ttl_ms,
+                options.mutation_id->data(),
+                options.mutation_id->size());
         } else {
-            result = openkache_client_execute(
+            result = openkache_client_execute_with_request_id(
                 client_,
+                selected_request_id,
                 operation,
                 key_data,
                 key.size(),
@@ -725,7 +715,18 @@ private:
         return take_result(result);
     }
 
+    std::uint64_t reserve_request_id() const noexcept {
+        for (;;) {
+            const auto request_id =
+                next_request_id_.fetch_add(1, std::memory_order_relaxed);
+            if (request_id != 0) {
+                return request_id;
+            }
+        }
+    }
+
     openkache_client_t* client_ = nullptr;
+    mutable std::atomic<std::uint64_t> next_request_id_{1};
 };
 
 } // namespace openkache

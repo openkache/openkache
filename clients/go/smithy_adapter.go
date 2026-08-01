@@ -1,6 +1,9 @@
 package openkache
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // Smithy returns a context-aware adapter implementing the generated Smithy
 // service contract. The adapter is useful when an application shares request
@@ -66,7 +69,7 @@ func (s smithyClient) Set(
 		if len(*input.MutationID) != SmithyMutationIDBytes {
 			return SmithySetOutput{}, validationError(
 				"set.mutation_id",
-				"must contain exactly 16 bytes",
+				fmt.Sprintf("must contain exactly %d bytes", SmithyMutationIDBytes),
 			)
 		}
 		var mutationID MutationID
@@ -89,7 +92,7 @@ func (s smithyClient) Delete(
 		if len(*input.MutationID) != SmithyMutationIDBytes {
 			return SmithyDeleteOutput{}, validationError(
 				"delete.mutation_id",
-				"must contain exactly 16 bytes",
+				fmt.Sprintf("must contain exactly %d bytes", SmithyMutationIDBytes),
 			)
 		}
 		var mutationID MutationID

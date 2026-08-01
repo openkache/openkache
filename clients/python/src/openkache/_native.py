@@ -204,63 +204,6 @@ class _NativeApi:
             (ctypes.POINTER(_ConnectOptions),),
             _RESULT_POINTER,
         )
-        self.connect = self._function(
-            "openkache_client_connect_ex",
-            (
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_int32,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute = self._function(
-            "openkache_client_execute",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_raw = self._function(
-            "openkache_client_execute_raw",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
         execute_with_request_id_arguments = (
             _CLIENT_POINTER,
             ctypes.c_uint64,

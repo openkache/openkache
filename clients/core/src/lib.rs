@@ -66,6 +66,16 @@ impl std::fmt::Display for Backend {
     }
 }
 
+impl Backend {
+    /// Returns the Smithy-defined native backend discriminator.
+    pub const fn ffi_code(self) -> u32 {
+        match self {
+            Self::Quinn => contract::FFI_BACKEND_QUINN,
+            Self::Compio => contract::FFI_BACKEND_COMPIO,
+        }
+    }
+}
+
 /// Stable client operation or operation phase used by structured errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -136,6 +146,58 @@ impl std::fmt::Display for Operation {
             Self::StreamWrite => "stream write",
             Self::StreamRead => "stream read",
         })
+    }
+}
+
+impl Operation {
+    /// Returns the caller-facing FFI operation discriminator when this value
+    /// identifies a protocol operation.
+    pub const fn ffi_operation_code(self) -> u32 {
+        match self {
+            Self::Ping => contract::FfiOperation::Ping.code(),
+            Self::Get => contract::FfiOperation::Get.code(),
+            Self::Set => contract::FfiOperation::Set.code(),
+            Self::Delete => contract::FfiOperation::Delete.code(),
+            Self::Stats => contract::FfiOperation::Stats.code(),
+            Self::Sync => contract::FfiOperation::Sync.code(),
+            Self::DnsResolution
+            | Self::ConnectionSetup
+            | Self::ConnectionRetry
+            | Self::StreamAcquisition
+            | Self::RequestWrite
+            | Self::ResponseHeaderRead
+            | Self::ResponseBodyRead
+            | Self::TlsInitialization
+            | Self::EndpointInitialization
+            | Self::ConnectionInitialization
+            | Self::Handshake
+            | Self::StreamOpen
+            | Self::StreamWrite
+            | Self::StreamRead => 0,
+        }
+    }
+
+    /// Returns the Smithy-defined phase discriminator for this operation.
+    pub const fn ffi_phase_code(self) -> u32 {
+        match self {
+            Self::DnsResolution => contract::FFI_PHASE_DNS_RESOLUTION,
+            Self::ConnectionSetup => contract::FFI_PHASE_CONNECTION_SETUP,
+            Self::ConnectionRetry => contract::FFI_PHASE_CONNECTION_RETRY,
+            Self::StreamAcquisition => contract::FFI_PHASE_STREAM_ACQUISITION,
+            Self::RequestWrite => contract::FFI_PHASE_REQUEST_WRITE,
+            Self::ResponseHeaderRead => contract::FFI_PHASE_RESPONSE_HEADER_READ,
+            Self::ResponseBodyRead => contract::FFI_PHASE_RESPONSE_BODY_READ,
+            Self::TlsInitialization => contract::FFI_PHASE_TLS_INITIALIZATION,
+            Self::EndpointInitialization => contract::FFI_PHASE_ENDPOINT_INITIALIZATION,
+            Self::ConnectionInitialization => contract::FFI_PHASE_CONNECTION_INITIALIZATION,
+            Self::Handshake => contract::FFI_PHASE_HANDSHAKE,
+            Self::StreamOpen => contract::FFI_PHASE_STREAM_OPEN,
+            Self::StreamWrite => contract::FFI_PHASE_STREAM_WRITE,
+            Self::StreamRead => contract::FFI_PHASE_STREAM_READ,
+            Self::Ping | Self::Get | Self::Set | Self::Delete | Self::Stats | Self::Sync => {
+                contract::FFI_PHASE_UNKNOWN
+            }
+        }
     }
 }
 
@@ -417,7 +479,8 @@ impl<C: ClientConnection> Core<C> {
     ) -> Result<Self> {
         let mut last_error = None;
         let mut connection = None;
-        for address in &addresses {
+        let mut connected_address_index = None;
+        for (index, address) in addresses.iter().enumerate() {
             match C::connect(
                 *address,
                 &server_name,
@@ -429,6 +492,7 @@ impl<C: ClientConnection> Core<C> {
             {
                 Ok(value) => {
                     connection = Some(value);
+                    connected_address_index = Some(index);
                     break;
                 }
                 Err(error) => last_error = Some(error),
@@ -437,11 +501,14 @@ impl<C: ClientConnection> Core<C> {
         let connection = connection.ok_or_else(|| {
             last_error.unwrap_or_else(|| Error::Connection("DNS returned no addresses".into()))
         })?;
+        let next_address = connected_address_index
+            .map(|index| (index + 1) % addresses.len())
+            .unwrap_or(0);
         Ok(Self {
             connection: RwLock::new(Arc::new(connection)),
             reconnect: futures_util::lock::Mutex::new(()),
             addresses,
-            next_address: AtomicUsize::new(0),
+            next_address: AtomicUsize::new(next_address),
             reconnect_attempts: AtomicUsize::new(0),
             server_name,
             tls,
@@ -783,7 +850,11 @@ impl<C: ClientConnection> Core<C> {
         self.set_state_unless_closed(ConnectionState::Reconnecting)?;
         let reconnect_attempt = self.reconnect_attempts.fetch_add(1, Ordering::Relaxed) + 1;
         let backoff = self.retry.delay_before(reconnect_attempt.saturating_add(1));
-        if backoff > deadline.remaining(Operation::ConnectionRetry)? {
+        let remaining = deadline
+            .remaining(Operation::ConnectionRetry)
+            .inspect_err(|_| self.mark_disconnected(failed))?;
+        if backoff > remaining {
+            self.mark_disconnected(failed);
             return Err(Error::Timeout {
                 operation: Operation::ConnectionRetry,
             });
@@ -792,7 +863,8 @@ impl<C: ClientConnection> Core<C> {
             C::sleep(backoff).await;
         }
         let timeout = deadline
-            .remaining(Operation::ConnectionRetry)?
+            .remaining(Operation::ConnectionRetry)
+            .inspect_err(|_| self.mark_disconnected(failed))?
             .min(self.connect_timeout);
         let start = self.next_address.fetch_add(1, Ordering::Relaxed);
         let mut replacement = None;

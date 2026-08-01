@@ -18,19 +18,6 @@ private func nativeConnectWithOptions(
     _ options: UnsafeRawPointer?
 ) -> NativeResultPointer?
 
-@_silgen_name("openkache_client_execute")
-private func nativeExecute(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ applicationKey: UnsafePointer<UInt8>?,
-    _ applicationKeyLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setCondition: UInt32,
-    _ ttlEnabled: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
 @_silgen_name("openkache_client_execute_with_request_id")
 private func nativeExecuteWithRequestID(
     _ client: NativeClientPointer?,
@@ -43,21 +30,6 @@ private func nativeExecuteWithRequestID(
     _ setCondition: UInt32,
     _ ttlEnabled: UInt8,
     _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute_with_mutation_id")
-private func nativeExecuteWithMutationID(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ applicationKey: UnsafePointer<UInt8>?,
-    _ applicationKeyLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setCondition: UInt32,
-    _ ttlEnabled: UInt8,
-    _ ttlMilliseconds: UInt64,
-    _ mutationID: UnsafePointer<UInt8>?,
-    _ mutationIDLength: Int
 ) -> NativeResultPointer?
 
 @_silgen_name("openkache_client_execute_with_request_id_and_mutation_id")
@@ -76,19 +48,6 @@ private func nativeExecuteWithRequestIDAndMutationID(
     _ mutationIDLength: Int
 ) -> NativeResultPointer?
 
-@_silgen_name("openkache_client_execute_raw")
-private func nativeExecuteRaw(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ itemID: UnsafePointer<UInt8>?,
-    _ itemIDLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setCondition: UInt32,
-    _ ttlEnabled: UInt8,
-    _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
 @_silgen_name("openkache_client_execute_raw_with_request_id")
 private func nativeExecuteRawWithRequestID(
     _ client: NativeClientPointer?,
@@ -101,21 +60,6 @@ private func nativeExecuteRawWithRequestID(
     _ setCondition: UInt32,
     _ ttlEnabled: UInt8,
     _ ttlMilliseconds: UInt64
-) -> NativeResultPointer?
-
-@_silgen_name("openkache_client_execute_raw_with_mutation_id")
-private func nativeExecuteRawWithMutationID(
-    _ client: NativeClientPointer?,
-    _ operation: UInt32,
-    _ itemID: UnsafePointer<UInt8>?,
-    _ itemIDLength: Int,
-    _ value: UnsafePointer<UInt8>?,
-    _ valueLength: Int,
-    _ setCondition: UInt32,
-    _ ttlEnabled: UInt8,
-    _ ttlMilliseconds: UInt64,
-    _ mutationID: UnsafePointer<UInt8>?,
-    _ mutationIDLength: Int
 ) -> NativeResultPointer?
 
 @_silgen_name("openkache_client_execute_raw_with_request_id_and_mutation_id")
@@ -217,7 +161,7 @@ public struct OpenKacheDataProtectionKeyRing: Sendable {
     /// Retired keys tried newest-first for reads and deletes.
     public var previous: [Data]
 
-    /// Creates a key ring with at most eight retired keys.
+    /// Creates a key ring within the Smithy-defined retired-key window.
     public init(active: Data, previous: [Data] = []) {
         self.active = active
         self.previous = previous
@@ -492,8 +436,11 @@ private enum NativeBridge {
                 "dataProtectionKey must contain exactly \(Smithy_Value_Format.dataProtectionKeyBytes) bytes"
             )
         }
-        guard previousKeys.count <= 8 else {
-            throw OpenKacheError("keyRing.previous may contain at most eight keys")
+        guard previousKeys.count <= Smithy_Value_Format.maxPreviousDataProtectionKeys else {
+            throw OpenKacheError(
+                "keyRing.previous may contain at most "
+                    + "\(Smithy_Value_Format.maxPreviousDataProtectionKeys) keys"
+            )
         }
         for (index, key) in previousKeys.enumerated() {
             guard key.count == Smithy_Value_Format.dataProtectionKeyBytes else {
@@ -692,24 +639,9 @@ private enum NativeBridge {
         ) { keyPointer, keyLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
             if let mutationID {
                 return withBytes(Array(mutationID)) { mutationPointer, mutationLength in
-                    if let requestID {
-                        return nativeExecuteWithRequestIDAndMutationID(
-                            handle.pointer,
-                            requestID,
-                            operation,
-                            keyPointer,
-                            keyLength,
-                            valuePointer,
-                            valueLength,
-                            conditionValue,
-                            ttlEnabled,
-                            ttlMilliseconds,
-                            mutationPointer,
-                            mutationLength
-                        )
-                    }
-                    return nativeExecuteWithMutationID(
+                    nativeExecuteWithRequestIDAndMutationID(
                         handle.pointer,
+                        requestID ?? handle.reserveRequestID(),
                         operation,
                         keyPointer,
                         keyLength,
@@ -723,22 +655,9 @@ private enum NativeBridge {
                     )
                 }
             }
-            if let requestID {
-                return nativeExecuteWithRequestID(
-                    handle.pointer,
-                    requestID,
-                    operation,
-                    keyPointer,
-                    keyLength,
-                    valuePointer,
-                    valueLength,
-                    conditionValue,
-                    ttlEnabled,
-                    ttlMilliseconds
-                )
-            }
-            return nativeExecute(
+            return nativeExecuteWithRequestID(
                 handle.pointer,
+                requestID ?? handle.reserveRequestID(),
                 operation,
                 keyPointer,
                 keyLength,
@@ -772,24 +691,9 @@ private enum NativeBridge {
         ) { itemIDPointer, itemIDLength, valuePointer, valueLength, conditionValue, ttlEnabled, ttlMilliseconds in
             if let mutationID {
                 return withBytes(Array(mutationID)) { mutationPointer, mutationLength in
-                    if let requestID {
-                        return nativeExecuteRawWithRequestIDAndMutationID(
-                            handle.pointer,
-                            requestID,
-                            operation,
-                            itemIDPointer,
-                            itemIDLength,
-                            valuePointer,
-                            valueLength,
-                            conditionValue,
-                            ttlEnabled,
-                            ttlMilliseconds,
-                            mutationPointer,
-                            mutationLength
-                        )
-                    }
-                    return nativeExecuteRawWithMutationID(
+                    nativeExecuteRawWithRequestIDAndMutationID(
                         handle.pointer,
+                        requestID ?? handle.reserveRequestID(),
                         operation,
                         itemIDPointer,
                         itemIDLength,
@@ -803,22 +707,9 @@ private enum NativeBridge {
                     )
                 }
             }
-            if let requestID {
-                return nativeExecuteRawWithRequestID(
-                    handle.pointer,
-                    requestID,
-                    operation,
-                    itemIDPointer,
-                    itemIDLength,
-                    valuePointer,
-                    valueLength,
-                    conditionValue,
-                    ttlEnabled,
-                    ttlMilliseconds
-                )
-            }
-            return nativeExecuteRaw(
+            return nativeExecuteRawWithRequestID(
                 handle.pointer,
+                requestID ?? handle.reserveRequestID(),
                 operation,
                 itemIDPointer,
                 itemIDLength,

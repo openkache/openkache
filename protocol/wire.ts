@@ -157,16 +157,6 @@ function trait_value(
   return object_member(traits, trait_id, `${location}.traits`)
 }
 
-function optional_trait_value(
-  shape: Json_Object,
-  trait_id: string,
-  location: string,
-): Json_Object | undefined {
-  const traits = object_member(shape, "traits", location)
-  const value = traits[trait_id]
-  return value === undefined ? undefined : object_value(value, `${location}.traits.${trait_id}`)
-}
-
 function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void {
   const names = new Set<string>()
   const values = new Set<number>()
@@ -327,24 +317,11 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
         WIRE_OPCODE_TRAIT_ID,
         `Smithy AST.shapes.${target}`,
       )
-      const spec = optional_trait_value(
+      const spec = trait_value(
         operation_shape,
         OPERATION_SPEC_TRAIT_ID,
         `Smithy AST.shapes.${target}`,
       )
-      const operation_name = shape_name(target).toLowerCase()
-      const inferred = {
-        itemIdBytes: ["get", "set", "delete"].includes(operation_name) ? 32 : 0,
-        valueMinBytes: 0,
-        valueMaxBytes: operation_name === "set" ? 67_108_864 : 0,
-        allowedFlags:
-          operation_name === "set" ? 15 : operation_name === "delete" ? 8 : 0,
-        ttlAllowed: operation_name === "set",
-        mutation: operation_name === "set" || operation_name === "delete",
-        successStatus:
-          operation_name === "set" ? 2 : operation_name === "delete" ? 4 : 0,
-      }
-      const selected_spec = spec ?? inferred
       return {
         opcode: integer_member(
           opcode_trait,
@@ -354,42 +331,42 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
           0xff,
         ),
         item_id_bytes: integer_member(
-          selected_spec,
+          spec,
           "itemIdBytes",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
         ),
         value_min_bytes: integer_member(
-          selected_spec,
+          spec,
           "valueMinBytes",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
         ),
         value_max_bytes: integer_member(
-          selected_spec,
+          spec,
           "valueMaxBytes",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
         ),
         allowed_flags: integer_member(
-          selected_spec,
+          spec,
           "allowedFlags",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
           0xff,
         ),
         ttl_allowed: boolean_member(
-          selected_spec,
+          spec,
           "ttlAllowed",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
         ),
         mutation: boolean_member(
-          selected_spec,
+          spec,
           "mutation",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
         ),
         success_status: integer_member(
-          selected_spec,
+          spec,
           "successStatus",
           `${target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,

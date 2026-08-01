@@ -77,7 +77,7 @@ type Identity struct {
 	PrivateKey       []byte
 }
 
-// DataProtectionKeyRing keeps an active key and up to eight retired keys.
+// DataProtectionKeyRing keeps an active key and a bounded retired-key window.
 type DataProtectionKeyRing struct {
 	Active   []byte
 	Previous [][]byte
@@ -90,8 +90,11 @@ func (ring DataProtectionKeyRing) normalize() ([]byte, []byte, error) {
 			fmt.Sprintf("must contain exactly %d bytes", SmithyDataProtectionKeyBytes),
 		)
 	}
-	if len(ring.Previous) > 8 {
-		return nil, nil, validationError("key_ring.previous", "may contain at most eight keys")
+	if len(ring.Previous) > SmithyMaxPreviousDataProtectionKeys {
+		return nil, nil, validationError(
+			"key_ring.previous",
+			fmt.Sprintf("may contain at most %d keys", SmithyMaxPreviousDataProtectionKeys),
+		)
 	}
 	previous := make([]byte, 0, len(ring.Previous)*SmithyDataProtectionKeyBytes)
 	for index, key := range ring.Previous {

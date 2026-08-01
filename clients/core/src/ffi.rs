@@ -18,19 +18,16 @@ use openkache_protocol::{MUTATION_ID_BYTES, MutationId};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 use crate::contract::{
-    FFI_BACKEND_COMPIO, FFI_BACKEND_QUINN, FFI_ERROR_AMBIGUOUS, FFI_ERROR_CANCELLED,
-    FFI_ERROR_CLOSED, FFI_ERROR_CONFIGURATION, FFI_ERROR_CONNECTION, FFI_ERROR_IO,
-    FFI_ERROR_PROTOCOL, FFI_ERROR_RESPONSE_TOO_LARGE, FFI_ERROR_RUNTIME, FFI_ERROR_SERVER,
-    FFI_ERROR_TIMEOUT, FFI_ERROR_TLS, FFI_ERROR_TRANSPORT, FFI_ERROR_UNEXPECTED_RESPONSE,
-    FFI_ERROR_VALUE, FFI_PHASE_CONNECTION_RETRY, FFI_PHASE_CONNECTION_SETUP,
-    FFI_PHASE_DNS_RESOLUTION, FFI_PHASE_ENDPOINT_INITIALIZATION, FFI_PHASE_HANDSHAKE,
-    FFI_PHASE_REQUEST_WRITE, FFI_PHASE_RESPONSE_BODY_READ, FFI_PHASE_RESPONSE_HEADER_READ,
-    FFI_PHASE_STREAM_ACQUISITION, FFI_PHASE_STREAM_OPEN, FFI_PHASE_STREAM_READ,
-    FFI_PHASE_STREAM_WRITE, FFI_PHASE_TLS_INITIALIZATION, VALUE_FORMAT_ENCRYPTION_COMPACT,
+    FFI_ERROR_AMBIGUOUS, FFI_ERROR_CANCELLED, FFI_ERROR_CLOSED, FFI_ERROR_CONFIGURATION,
+    FFI_ERROR_CONNECTION, FFI_ERROR_IO, FFI_ERROR_PROTOCOL, FFI_ERROR_RESPONSE_TOO_LARGE,
+    FFI_ERROR_RUNTIME, FFI_ERROR_SERVER, FFI_ERROR_TIMEOUT, FFI_ERROR_TLS, FFI_ERROR_TRANSPORT,
+    FFI_ERROR_UNEXPECTED_RESPONSE, FFI_ERROR_VALUE, VALUE_FORMAT_ENCRYPTION_COMPACT,
     VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
 pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
-use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
+use crate::value::{
+    Compression, Encryption, JsonValue, Value, ZstandardOptions, canonical_json_bytes,
+};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, CoreMetricsSnapshot,
     DataProtectionKey, DataProtectionKeyRing, DeleteOutcome, Endpoint, GetOutcome, ItemId,
@@ -248,24 +245,41 @@ impl FfiResult {
         }
     }
 
-    fn error_from(error: &crate::Error) -> Self {
+    fn error_from(error: &crate::Error, operation: FfiOperation) -> Self {
         Self {
             kind: FfiResultKind::Error,
             payload: error.to_string().into_bytes(),
-            metadata: error_metadata(error),
+            metadata: error_metadata(error, operation),
             client: None,
         }
     }
 
-    fn cancelled(operation: Option<FfiOperation>) -> Self {
+    fn cancelled(operation: Option<FfiOperation>, mutation_id: Option<MutationId>) -> Self {
+        let mut metadata = FfiErrorMetadata {
+            code: FFI_ERROR_CANCELLED,
+            operation: operation.map_or(0, ffi_operation_code),
+            ..FfiErrorMetadata::default()
+        };
+        attach_mutation_metadata(&mut metadata, mutation_id);
         Self {
             kind: FfiResultKind::Error,
             payload: b"client operation canceled".to_vec(),
-            metadata: FfiErrorMetadata {
-                code: FFI_ERROR_CANCELLED,
-                operation: operation.map_or(0, ffi_operation_code),
-                ..FfiErrorMetadata::default()
-            },
+            metadata,
+            client: None,
+        }
+    }
+
+    fn timed_out(operation: FfiOperation, mutation_id: Option<MutationId>) -> Self {
+        let mut metadata = FfiErrorMetadata {
+            code: FFI_ERROR_TIMEOUT,
+            operation: ffi_operation_code(operation),
+            ..FfiErrorMetadata::default()
+        };
+        attach_mutation_metadata(&mut metadata, mutation_id);
+        Self {
+            kind: FfiResultKind::Error,
+            payload: format!("client operation timed out during {operation:?}").into_bytes(),
+            metadata,
             client: None,
         }
     }
@@ -290,16 +304,17 @@ impl FfiResult {
     }
 }
 
-fn ffi_operation_code(operation: FfiOperation) -> u32 {
-    match operation {
-        FfiOperation::Ping => 1,
-        FfiOperation::Get | FfiOperation::GetJson => 2,
-        FfiOperation::Set | FfiOperation::SetJson => 3,
-        FfiOperation::Delete => 4,
-        FfiOperation::Stats => 5,
-        FfiOperation::Sync => 6,
-        FfiOperation::Reconnect => 102,
+fn attach_mutation_metadata(metadata: &mut FfiErrorMetadata, mutation_id: Option<MutationId>) {
+    if let Some(mutation_id) = mutation_id {
+        metadata.retryable = 1;
+        metadata.ambiguous = 1;
+        metadata.mutation_id_length = MUTATION_ID_BYTES as u8;
+        metadata.mutation_id = mutation_id.into_bytes();
     }
+}
+
+fn ffi_operation_code(operation: FfiOperation) -> u32 {
+    operation.code()
 }
 
 impl FfiClient {
@@ -401,14 +416,33 @@ impl FfiClient {
         operation: FfiOperation,
         application_key: Vec<u8>,
         value: Vec<u8>,
-        set_options: SetOptions,
+        mut set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
+        if set_options.mutation_id().is_none()
+            && matches!(
+                operation,
+                FfiOperation::Set | FfiOperation::SetJson | FfiOperation::Delete
+            )
+        {
+            let mutation_id = match crate::key::random_mutation_id() {
+                Ok(mutation_id) => mutation_id,
+                Err(error) => {
+                    return FfiResult::error_with_operation(
+                        error.to_string(),
+                        crate::contract::FFI_ERROR_RUNTIME,
+                        Some(operation),
+                    );
+                }
+            };
+            set_options = set_options.with_mutation_id(mutation_id);
+        }
         self.metrics.requests.fetch_add(1, Ordering::Relaxed);
         self.metrics.bytes_sent.fetch_add(
             (application_key.len() + value.len()) as u64,
             Ordering::Relaxed,
         );
+        let mutation_id = set_options.mutation_id();
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
             return FfiResult::error_with_operation(
@@ -435,13 +469,9 @@ impl FfiClient {
             );
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let result = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+        let result = receiver.recv_timeout(remaining).unwrap_or_else(|_| {
             let _ = self.cancel(request_id);
-            FfiResult::error_with_operation(
-                format!("client operation timed out: {error}"),
-                crate::contract::FFI_ERROR_TIMEOUT,
-                Some(operation),
-            )
+            FfiResult::timed_out(operation, mutation_id)
         });
         match result.kind {
             FfiResultKind::Value => {
@@ -637,9 +667,9 @@ async fn run_worker_loop(
             .active_lanes
             .store(active_requests.len(), Ordering::Release);
         if shutdown.load(Ordering::Acquire) {
-            for (_, (abort, response, operation)) in active_requests.drain() {
+            for (_, (abort, response, operation, mutation_id)) in active_requests.drain() {
                 abort.abort();
-                let _ = response.send(FfiResult::cancelled(Some(operation)));
+                let _ = response.send(FfiResult::cancelled(Some(operation), mutation_id));
             }
             drain_pending(&mut pending);
             drain_commands(&commands);
@@ -653,7 +683,7 @@ async fn run_worker_loop(
             completed = completed, if has_active => {
                 match completed {
                     Some(Ok((request_id, result))) => {
-                        if let Some((_, response, _)) = active_requests.remove(&request_id) {
+                        if let Some((_, response, _, _)) = active_requests.remove(&request_id) {
                             sync_core_metrics(&client, &metrics, &mut core_metrics);
                             state.store(
                                 connection_state_value(client.connection_state()),
@@ -670,7 +700,7 @@ async fn run_worker_loop(
                     }
                     Some(Err(error)) => {
                         let message = format!("native client worker task failed: {error}");
-                        for (_, (abort, response, operation)) in active_requests.drain() {
+                        for (_, (abort, response, operation, _)) in active_requests.drain() {
                             abort.abort();
                             let _ = response.send(FfiResult::error_with_operation(
                                 message.clone(),
@@ -727,15 +757,20 @@ async fn run_worker_loop(
                         }
                     }
                     Ok(Command::Cancel { request_id, response }) => {
-                        if let Some((abort, original_response, operation)) =
+                        if let Some((abort, original_response, operation, mutation_id)) =
                             active_requests.remove(&request_id)
                         {
                             abort.abort();
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
-                            let _ = original_response.send(FfiResult::cancelled(Some(operation)));
+                            let _ = original_response
+                                .send(FfiResult::cancelled(Some(operation), mutation_id));
                             let _ = response.send(ok_result());
-                        } else if cancel_pending(&mut pending, request_id) {
+                        } else if let Some((original_response, operation, mutation_id)) =
+                            cancel_pending(&mut pending, request_id)
+                        {
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+                            let _ = original_response
+                                .send(FfiResult::cancelled(Some(operation), mutation_id));
                             let _ = response.send(ok_result());
                         } else {
                             let _ = response.send(FfiResult::error("request is not active"));
@@ -760,6 +795,7 @@ fn spawn_request(
             tokio::task::AbortHandle,
             SyncSender<FfiResult>,
             FfiOperation,
+            Option<MutationId>,
         ),
     >,
 ) {
@@ -796,26 +832,37 @@ fn spawn_request(
         });
         (request_id, result)
     });
-    active_requests.insert(request_id, (task.abort_handle(), response, operation));
+    active_requests.insert(
+        request_id,
+        (
+            task.abort_handle(),
+            response,
+            operation,
+            set_options.mutation_id(),
+        ),
+    );
     active.push(task);
 }
 
-fn cancel_pending(pending: &mut VecDeque<Command>, request_id: u64) -> bool {
+fn cancel_pending(
+    pending: &mut VecDeque<Command>,
+    request_id: u64,
+) -> Option<(SyncSender<FfiResult>, FfiOperation, Option<MutationId>)> {
     let Some(index) = pending.iter().position(|command| {
         matches!(command, Command::Execute { request_id: queued_id, .. } if *queued_id == request_id)
     }) else {
-        return false;
+        return None;
     };
     let Some(Command::Execute {
         response,
         operation,
+        set_options,
         ..
     }) = pending.remove(index)
     else {
-        return false;
+        return None;
     };
-    let _ = response.send(FfiResult::cancelled(Some(operation)));
-    true
+    Some((response, operation, set_options.mutation_id()))
 }
 
 fn drain_pending(pending: &mut VecDeque<Command>) {
@@ -824,9 +871,13 @@ fn drain_pending(pending: &mut VecDeque<Command>) {
             Command::Execute {
                 response,
                 operation,
+                set_options,
                 ..
             } => {
-                let _ = response.send(FfiResult::cancelled(Some(operation)));
+                let _ = response.send(FfiResult::cancelled(
+                    Some(operation),
+                    set_options.mutation_id(),
+                ));
             }
             Command::Cancel { response, .. } => {
                 let _ = response.send(FfiResult::error("client worker is shutting down"));
@@ -842,9 +893,13 @@ fn drain_commands(commands: &CommandReceiver) {
             Command::Execute {
                 response,
                 operation,
+                set_options,
                 ..
             } => {
-                let _ = response.send(FfiResult::cancelled(Some(operation)));
+                let _ = response.send(FfiResult::cancelled(
+                    Some(operation),
+                    set_options.mutation_id(),
+                ));
             }
             Command::Cancel { response, .. } => {
                 let _ = response.send(FfiResult::error("client worker is shutting down"));
@@ -896,7 +951,7 @@ async fn execute(
     } else {
         execute_protected(client, operation, application_key, value, set_options).await
     };
-    result.unwrap_or_else(|error| FfiResult::error_from(&error))
+    result.unwrap_or_else(|error| FfiResult::error_from(&error, operation))
 }
 
 async fn execute_protected(
@@ -1043,7 +1098,7 @@ fn set_result(outcome: SetOutcome) -> FfiResult {
 
 fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
     match outcome {
-        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
+        GetOutcome::Found(Value::Json(value)) => canonical_json_bytes(&value)
             .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
             .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
@@ -1059,125 +1114,6 @@ fn parse_json(bytes: &[u8]) -> std::result::Result<JsonValue, String> {
 #[unsafe(no_mangle)]
 pub extern "C" fn openkache_client_abi_version() -> u32 {
     ABI_VERSION
-}
-
-/// Connects a protected native client and returns an opaque result.
-///
-/// The address is a UTF-8 host/port authority such as `127.0.0.1:4433` or
-/// `cache.example.com:4433`. The certificate may be one DER certificate, a
-/// PEM chain, or empty to use system trust roots. The data-protection key is
-/// exactly 32 bytes. All input buffers are copied before this function returns.
-///
-/// # Safety
-///
-/// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_connect(
-    address: *const u8,
-    address_length: usize,
-    server_name: *const u8,
-    server_name_length: usize,
-    certificate: *const u8,
-    certificate_length: usize,
-    data_protection_key: *const u8,
-    data_protection_key_length: usize,
-    compression_enabled: u8,
-    compression_level: i32,
-    minimum_input_size: usize,
-    minimum_savings: usize,
-    connect_timeout_ms: u64,
-    request_timeout_ms: u64,
-) -> *mut FfiResult {
-    let options = FfiConnectOptions {
-        address,
-        address_length,
-        server_name,
-        server_name_length,
-        certificate,
-        certificate_length,
-        data_protection_key,
-        data_protection_key_length,
-        client_certificate_chain: ptr::null(),
-        client_certificate_chain_length: 0,
-        client_private_key: ptr::null(),
-        client_private_key_length: 0,
-        previous_data_protection_keys: ptr::null(),
-        previous_data_protection_keys_length: 0,
-        previous_data_protection_key_count: 0,
-        compression_enabled,
-        compression_level,
-        minimum_input_size,
-        minimum_savings,
-        encryption: VALUE_FORMAT_ENCRYPTION_NONE as u32,
-        connect_timeout_ms,
-        request_timeout_ms,
-        retry_max_attempts: 0,
-        max_in_flight: 0,
-    };
-    boxed_result(catch_result(|| connect_options(&options)))
-}
-
-/// Connects a native client with the complete shared-core configuration.
-///
-/// Zero retry and lane limits select shared-core defaults. The Smithy None and
-/// Robust encryption values select Robust; Compact selects Compact.
-///
-/// # Safety
-///
-/// Every non-empty pointer/length pair must identify readable memory for the duration of this
-/// call. `data_protection_key` must contain exactly 32 bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_connect_ex(
-    address: *const u8,
-    address_length: usize,
-    server_name: *const u8,
-    server_name_length: usize,
-    certificate: *const u8,
-    certificate_length: usize,
-    client_certificate_chain: *const u8,
-    client_certificate_chain_length: usize,
-    client_private_key: *const u8,
-    client_private_key_length: usize,
-    data_protection_key: *const u8,
-    data_protection_key_length: usize,
-    compression_enabled: u8,
-    compression_level: i32,
-    minimum_input_size: usize,
-    minimum_savings: usize,
-    encryption: u32,
-    retry_max_attempts: usize,
-    max_in_flight: usize,
-    connect_timeout_ms: u64,
-    request_timeout_ms: u64,
-) -> *mut FfiResult {
-    let options = FfiConnectOptions {
-        address,
-        address_length,
-        server_name,
-        server_name_length,
-        certificate,
-        certificate_length,
-        data_protection_key,
-        data_protection_key_length,
-        client_certificate_chain,
-        client_certificate_chain_length,
-        client_private_key,
-        client_private_key_length,
-        previous_data_protection_keys: ptr::null(),
-        previous_data_protection_keys_length: 0,
-        previous_data_protection_key_count: 0,
-        compression_enabled,
-        compression_level,
-        minimum_input_size,
-        minimum_savings,
-        encryption,
-        retry_max_attempts,
-        max_in_flight,
-        connect_timeout_ms,
-        request_timeout_ms,
-    };
-    boxed_result(catch_result(|| connect_options(&options)))
 }
 
 /// Connects using a caller-owned options structure.
@@ -1309,46 +1245,6 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
     .map(FfiResult::connected)
 }
 
-/// Executes one protected operation through an opaque native client.
-///
-/// For `GET`, `SET`, and `DELETE`, `application_key` is the exact application key used by the
-/// shared data-protection layer. `SET` accepts an empty value and optional existence/TTL options.
-/// `PING`, `STATS`, and `SYNC` require empty key and value buffers.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
-/// non-empty application-key/value pointer pair must identify readable memory for this call, and
-/// the client must not be freed until this call returns.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_execute(
-    client: *const FfiClient,
-    operation: u32,
-    application_key: *const u8,
-    application_key_length: usize,
-    value: *const u8,
-    value_length: usize,
-    set_condition: u32,
-    ttl_enabled: u8,
-    ttl_ms: u64,
-) -> *mut FfiResult {
-    execute_entry_with_request_id(
-        client,
-        operation,
-        application_key,
-        application_key_length,
-        value,
-        value_length,
-        set_condition,
-        ttl_enabled,
-        ttl_ms,
-        None,
-        ptr::null(),
-        0,
-        false,
-    )
-}
-
 /// Starts one protected operation with a caller-assigned request identifier.
 ///
 /// The identifier is returned only through the caller's bookkeeping; use
@@ -1430,85 +1326,6 @@ pub unsafe extern "C" fn openkache_client_execute_with_request_id_and_mutation_i
     )
 }
 
-/// Starts one protected operation with an automatically assigned request ID
-/// and a fixed-width mutation token.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. The
-/// client must remain valid until this call returns. Every non-empty buffer pointer, including
-/// `mutation_id`, must identify readable memory for the duration of the call.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn openkache_client_execute_with_mutation_id(
-    client: *const FfiClient,
-    operation: u32,
-    application_key: *const u8,
-    application_key_length: usize,
-    value: *const u8,
-    value_length: usize,
-    set_condition: u32,
-    ttl_enabled: u8,
-    ttl_ms: u64,
-    mutation_id: *const u8,
-    mutation_id_length: usize,
-) -> *mut FfiResult {
-    execute_entry_with_request_id(
-        client,
-        operation,
-        application_key,
-        application_key_length,
-        value,
-        value_length,
-        set_condition,
-        ttl_enabled,
-        ttl_ms,
-        None,
-        mutation_id,
-        mutation_id_length,
-        false,
-    )
-}
-
-/// Executes one exact-item-ID operation without application-key derivation or
-/// value protection.
-///
-/// `GET`, `SET`, and `DELETE` use the exact item ID supplied by the caller.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by [`openkache_client_result_take_client`].
-/// Every non-empty item-ID/value pointer pair must identify readable memory for this call, and
-/// the client must not be freed until this call returns.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn openkache_client_execute_raw(
-    client: *const FfiClient,
-    operation: u32,
-    item_id: *const u8,
-    item_id_length: usize,
-    value: *const u8,
-    value_length: usize,
-    set_condition: u32,
-    ttl_enabled: u8,
-    ttl_ms: u64,
-) -> *mut FfiResult {
-    execute_entry_with_request_id(
-        client,
-        operation,
-        item_id,
-        item_id_length,
-        value,
-        value_length,
-        set_condition,
-        ttl_enabled,
-        ttl_ms,
-        None,
-        ptr::null(),
-        0,
-        true,
-    )
-}
-
 /// Starts one exact-item-ID operation with a caller-assigned request identifier.
 ///
 /// # Safety
@@ -1581,46 +1398,6 @@ pub unsafe extern "C" fn openkache_client_execute_raw_with_request_id_and_mutati
         ttl_enabled,
         ttl_ms,
         Some(request_id),
-        mutation_id,
-        mutation_id_length,
-        true,
-    )
-}
-
-/// Starts one exact-item-ID operation with an automatically assigned request
-/// ID and a fixed-width mutation token.
-///
-/// # Safety
-///
-/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. The
-/// client must remain valid until this call returns. Every non-empty buffer pointer, including
-/// `mutation_id`, must identify readable memory for the duration of the call.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn openkache_client_execute_raw_with_mutation_id(
-    client: *const FfiClient,
-    operation: u32,
-    item_id: *const u8,
-    item_id_length: usize,
-    value: *const u8,
-    value_length: usize,
-    set_condition: u32,
-    ttl_enabled: u8,
-    ttl_ms: u64,
-    mutation_id: *const u8,
-    mutation_id_length: usize,
-) -> *mut FfiResult {
-    execute_entry_with_request_id(
-        client,
-        operation,
-        item_id,
-        item_id_length,
-        value,
-        value_length,
-        set_condition,
-        ttl_enabled,
-        ttl_ms,
-        None,
         mutation_id,
         mutation_id_length,
         true,
@@ -1871,7 +1648,8 @@ pub unsafe extern "C" fn openkache_client_result_error_metadata(
 ///
 /// # Safety
 ///
-/// `result` must be null or a unique, live pointer returned by [`openkache_client_connect`].
+/// `result` must be null or a unique, live pointer returned by
+/// [`openkache_client_connect_with_options`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_take_client(
     result: *mut FfiResult,
@@ -1920,8 +1698,11 @@ fn catch_result(operation: impl FnOnce() -> std::result::Result<FfiResult, Strin
     }
 }
 
-fn error_metadata(error: &crate::Error) -> FfiErrorMetadata {
-    let mut metadata = FfiErrorMetadata::default();
+fn error_metadata(error: &crate::Error, caller_operation: FfiOperation) -> FfiErrorMetadata {
+    let mut metadata = FfiErrorMetadata {
+        operation: ffi_operation_code(caller_operation),
+        ..FfiErrorMetadata::default()
+    };
     match error {
         crate::Error::Configuration { .. } => metadata.code = FFI_ERROR_CONFIGURATION,
         crate::Error::Connection(_) => {
@@ -1930,21 +1711,19 @@ fn error_metadata(error: &crate::Error) -> FfiErrorMetadata {
         }
         crate::Error::Timeout { operation } => {
             metadata.code = FFI_ERROR_TIMEOUT;
-            metadata.operation = operation_code(*operation);
-            metadata.phase = phase_code(*operation);
+            metadata.phase = operation.ffi_phase_code();
             metadata.retryable = 1;
         }
         crate::Error::Runtime { backend, .. } => {
             metadata.code = FFI_ERROR_RUNTIME;
-            metadata.backend = backend_code(*backend);
+            metadata.backend = backend.ffi_code();
         }
         crate::Error::Transport {
             backend, operation, ..
         } => {
             metadata.code = FFI_ERROR_TRANSPORT;
-            metadata.backend = backend_code(*backend);
-            metadata.operation = operation_code(*operation);
-            metadata.phase = phase_code(*operation);
+            metadata.backend = backend.ffi_code();
+            metadata.phase = operation.ffi_phase_code();
             metadata.retryable = 1;
         }
         crate::Error::Server { code, .. } => {
@@ -1956,7 +1735,7 @@ fn error_metadata(error: &crate::Error) -> FfiErrorMetadata {
         }
         crate::Error::UnexpectedResponse { operation, .. } => {
             metadata.code = FFI_ERROR_UNEXPECTED_RESPONSE;
-            metadata.operation = operation_code(*operation);
+            metadata.phase = operation.ffi_phase_code();
         }
         crate::Error::ResponseTooLarge { .. } => metadata.code = FFI_ERROR_RESPONSE_TOO_LARGE,
         crate::Error::Tls(_) => metadata.code = FFI_ERROR_TLS,
@@ -1968,75 +1747,23 @@ fn error_metadata(error: &crate::Error) -> FfiErrorMetadata {
         crate::Error::Value(_) => metadata.code = FFI_ERROR_VALUE,
         crate::Error::ClientClosed => metadata.code = FFI_ERROR_CLOSED,
         crate::Error::AmbiguousOutcome {
-            operation,
+            operation: _,
             mutation_id,
             cause,
         } => {
             metadata.code = FFI_ERROR_AMBIGUOUS;
-            metadata.operation = operation_code(*operation);
             metadata.ambiguous = 1;
             metadata.retryable = 1;
             if let Some(mutation_id) = mutation_id {
                 metadata.mutation_id_length = MUTATION_ID_BYTES as u8;
                 metadata.mutation_id = mutation_id.into_bytes();
             }
-            let nested = error_metadata(cause);
+            let nested = error_metadata(cause, caller_operation);
             metadata.phase = nested.phase;
             metadata.backend = nested.backend;
         }
     }
     metadata
-}
-
-fn operation_code(operation: crate::Operation) -> u32 {
-    match operation {
-        crate::Operation::Ping => 1,
-        crate::Operation::Get => 2,
-        crate::Operation::Set => 3,
-        crate::Operation::Delete => 4,
-        crate::Operation::Stats => 5,
-        crate::Operation::Sync => 6,
-        crate::Operation::DnsResolution => 100,
-        crate::Operation::ConnectionSetup => 101,
-        crate::Operation::ConnectionRetry => 102,
-        crate::Operation::StreamAcquisition => 103,
-        crate::Operation::RequestWrite => 104,
-        crate::Operation::ResponseHeaderRead => 105,
-        crate::Operation::ResponseBodyRead => 106,
-        crate::Operation::TlsInitialization => 107,
-        crate::Operation::EndpointInitialization => 108,
-        crate::Operation::ConnectionInitialization => 109,
-        crate::Operation::Handshake => 110,
-        crate::Operation::StreamOpen => 111,
-        crate::Operation::StreamWrite => 112,
-        crate::Operation::StreamRead => 113,
-    }
-}
-
-fn backend_code(backend: crate::Backend) -> u32 {
-    match backend {
-        crate::Backend::Quinn => FFI_BACKEND_QUINN,
-        crate::Backend::Compio => FFI_BACKEND_COMPIO,
-    }
-}
-
-fn phase_code(operation: crate::Operation) -> u32 {
-    match operation {
-        crate::Operation::DnsResolution => FFI_PHASE_DNS_RESOLUTION,
-        crate::Operation::ConnectionSetup => FFI_PHASE_CONNECTION_SETUP,
-        crate::Operation::ConnectionRetry => FFI_PHASE_CONNECTION_RETRY,
-        crate::Operation::StreamAcquisition => FFI_PHASE_STREAM_ACQUISITION,
-        crate::Operation::RequestWrite => FFI_PHASE_REQUEST_WRITE,
-        crate::Operation::ResponseHeaderRead => FFI_PHASE_RESPONSE_HEADER_READ,
-        crate::Operation::ResponseBodyRead => FFI_PHASE_RESPONSE_BODY_READ,
-        crate::Operation::TlsInitialization => FFI_PHASE_TLS_INITIALIZATION,
-        crate::Operation::EndpointInitialization => FFI_PHASE_ENDPOINT_INITIALIZATION,
-        crate::Operation::Handshake => FFI_PHASE_HANDSHAKE,
-        crate::Operation::StreamOpen => FFI_PHASE_STREAM_OPEN,
-        crate::Operation::StreamWrite => FFI_PHASE_STREAM_WRITE,
-        crate::Operation::StreamRead => FFI_PHASE_STREAM_READ,
-        _ => crate::contract::FFI_PHASE_UNKNOWN,
-    }
 }
 
 fn copy_utf8(pointer: *const u8, length: usize, name: &str) -> std::result::Result<String, String> {

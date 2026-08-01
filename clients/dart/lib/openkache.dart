@@ -13,16 +13,16 @@ import 'package:ffi/ffi.dart';
 
 import 'generated_contract.dart' as smithy;
 
-const int _resultError = 0;
-const int _resultOk = 1;
-const int _resultValue = 2;
-const int _resultNotFound = 3;
-const int _resultCreated = 4;
-const int _resultReplaced = 5;
-const int _resultDeleted = 6;
-const int _resultNotDeleted = 7;
-const int _resultConnected = 8;
-const int _resultNotStored = 9;
+const int _resultError = smithy.smithy_ffi_result_error;
+const int _resultOk = smithy.smithy_ffi_result_ok;
+const int _resultValue = smithy.smithy_ffi_result_value;
+const int _resultNotFound = smithy.smithy_ffi_result_not_found;
+const int _resultCreated = smithy.smithy_ffi_result_created;
+const int _resultReplaced = smithy.smithy_ffi_result_replaced;
+const int _resultDeleted = smithy.smithy_ffi_result_deleted;
+const int _resultNotDeleted = smithy.smithy_ffi_result_not_deleted;
+const int _resultConnected = smithy.smithy_ffi_result_connected;
+const int _resultNotStored = smithy.smithy_ffi_result_not_stored;
 const int _opcodePing = smithy.smithy_opcode_ping;
 const int _opcodeGet = smithy.smithy_opcode_get;
 const int _opcodeSet = smithy.smithy_opcode_set;
@@ -38,8 +38,10 @@ const int _conditionIfPresent = smithy.smithy_ffi_set_condition_if_present;
 const int _mutationIdBytes = smithy.smithyMutationIdBytes;
 const int _itemIdBytes = smithy.smithyItemIdBytes;
 const int _keyBytes = smithy.smithyValueDataProtectionKeyBytes;
-const int _maxPreviousKeys = 8;
+const int _maxPreviousKeys = smithy.smithyMaxPreviousDataProtectionKeys;
 const int _ffiErrorCancelled = smithy.smithy_ffi_error_cancelled;
+const int _ffiPhaseUnknown = smithy.smithy_ffi_phase_unknown;
+const int _ffiBackendNone = smithy.smithy_ffi_backend_none;
 
 typedef _ConnectOptionsNative = ffi.Pointer<ffi.Void> Function(
   ffi.Pointer<_ConnectOptions>,
@@ -309,7 +311,7 @@ class SetOptions {
   int get ttlMilliseconds {
     if (ttl == null) return 0;
     final milliseconds = ttl!.inMilliseconds;
-    if (milliseconds <= 0) {
+    if (milliseconds < smithy.smithyClientMinimumPositiveValue) {
       throw ArgumentError.value(ttl, 'ttl', 'must be positive');
     }
     return milliseconds;
@@ -334,7 +336,7 @@ class SetOptions {
       );
 }
 
-/// Active data-protection key and up to eight retired keys.
+/// Active data-protection key and a bounded retired-key window.
 class DataProtectionKeyRing {
   DataProtectionKeyRing({
     required Uint8List active,
@@ -387,15 +389,15 @@ class OpenKacheClient {
     required Uint8List certificate,
     Uint8List? dataProtectionKey,
     DataProtectionKeyRing? keyRing,
-    String serverName = 'localhost',
+    String serverName = smithy.smithyDefaultServerName,
     List<Uint8List> previousDataProtectionKeys = const <Uint8List>[],
     bool compressionEnabled = false,
     int compressionLevel = smithy.smithyDefaultZstandardLevel,
     int minimumInputBytes = smithy.smithyDefaultZstandardMinimumInputBytes,
     int minimumSavings = smithy.smithyDefaultZstandardMinimumSavingsBytes,
-    int encryption = 2,
-    int retryMaxAttempts = 2,
-    int maxInFlight = 256,
+    int encryption = smithy.smithyValueEncryptionRobust,
+    int retryMaxAttempts = smithy.smithyDefaultRetryMaxAttempts,
+    int maxInFlight = smithy.smithyDefaultMaxInFlight,
     Duration connectTimeout = const Duration(
       milliseconds: smithy.smithyDefaultConnectTimeoutMilliseconds,
     ),
@@ -426,11 +428,34 @@ class OpenKacheClient {
     for (final key in retiredKeys) {
       _validateKey(key, 'previousDataProtectionKeys entry');
     }
-    if (connectTimeout <= Duration.zero || requestTimeout <= Duration.zero) {
+    if (connectTimeout.inMilliseconds <
+            smithy.smithyClientMinimumPositiveValue ||
+        requestTimeout.inMilliseconds <
+            smithy.smithyClientMinimumPositiveValue) {
       throw ArgumentError('connection and request timeouts must be positive');
     }
-    if (retryMaxAttempts <= 0 || maxInFlight <= 0) {
+    if (retryMaxAttempts < smithy.smithyClientMinimumPositiveValue ||
+        maxInFlight < smithy.smithyClientMinimumPositiveValue) {
       throw ArgumentError('retryMaxAttempts and maxInFlight must be positive');
+    }
+    if (compressionLevel < smithy.smithyDefaultZstandardLevelMin ||
+        compressionLevel > smithy.smithyDefaultZstandardLevelMax) {
+      throw ArgumentError.value(
+        compressionLevel,
+        'compressionLevel',
+        'must be within the Smithy Zstandard level range',
+      );
+    }
+    if (minimumInputBytes < 0 || minimumSavings < 0) {
+      throw ArgumentError('compression thresholds must not be negative');
+    }
+    if (encryption < smithy.smithyValueEncryptionNone ||
+        encryption > smithy.smithyValueEncryptionRobust) {
+      throw ArgumentError.value(
+        encryption,
+        'encryption',
+        'must be a Smithy value-encryption profile',
+      );
     }
     final resolvedPath = nativePath ??
         Platform.environment['OPENKACHE_CLIENT_NATIVE'] ??
@@ -863,6 +888,16 @@ class OpenKacheClient {
       throw StateError('client is closed');
     }
     final requestId = _allocateRequestId();
+    final mutationId = options.validateMutationId() ?? Uint8List(0);
+    ErrorMetadata cancellationMetadata() => ErrorMetadata(
+          code: _ffiErrorCancelled,
+          operation: operation,
+          phase: _ffiPhaseUnknown,
+          backend: _ffiBackendNone,
+          retryable: mutationId.isNotEmpty,
+          ambiguous: mutationId.isNotEmpty,
+          mutationId: mutationId.isEmpty ? null : Uint8List.fromList(mutationId),
+        );
     final completer = Completer<_Result>();
     var started = false;
     var cancelRequested = false;
@@ -874,21 +909,14 @@ class OpenKacheClient {
         cancelRequested = true;
         final nativeFound = _cancel(requestId);
         if (!nativeFound || !started) {
-          if (!completer.isCompleted) {
-            completer.completeError(
-              OpenKacheError(
-                'client operation canceled',
-                metadata: const ErrorMetadata(
-                  code: _ffiErrorCancelled,
-                  operation: 0,
-                  phase: 0,
-                  backend: 0,
-                  retryable: false,
-                  ambiguous: false,
+            if (!completer.isCompleted) {
+              completer.completeError(
+                OpenKacheError(
+                  'client operation canceled',
+                  metadata: cancellationMetadata(),
                 ),
-              ),
-            );
-          }
+              );
+            }
         }
         return true;
       },
@@ -907,7 +935,7 @@ class OpenKacheClient {
           options.condition.code,
           options.ttl == null ? 0 : 1,
           options.ttlMilliseconds,
-          options.validateMutationId() ?? Uint8List(0),
+          mutationId,
           raw,
         );
         if (complete || completer.isCompleted) return;
@@ -916,14 +944,7 @@ class OpenKacheClient {
           completer.completeError(
             OpenKacheError(
               'client operation canceled',
-              metadata: const ErrorMetadata(
-                code: _ffiErrorCancelled,
-                operation: 0,
-                phase: 0,
-                backend: 0,
-                retryable: false,
-                ambiguous: false,
-              ),
+              metadata: cancellationMetadata(),
             ),
           );
           return;

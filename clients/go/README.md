@@ -92,8 +92,8 @@ Use `client.Smithy()` when an application needs the generated
 - `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
   `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 3 and the extended
-  connect symbol when `Identity` is used.
+  artifact. The native artifact must expose ABI version 3 and the canonical
+  options/request-ID entry points.
 
 Protocol operations, Smithy models, and value-format identifiers are generated
 from [`../model/openkache.smithy`](../model/openkache.smithy) and
@@ -101,7 +101,3 @@ from [`../model/openkache.smithy`](../model/openkache.smithy) and
 The generated Go files are checked in for module consumers; the C contract
 header is emitted into `core/generated_local/` and is supplied to CGO via the
 package include path.
-
-When using a pre-ABI-extension native library, `Identity`, `EncryptionCompact`,
-non-default `Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading
-the native library to one that exports `openkache_client_connect_ex`.

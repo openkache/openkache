@@ -1,6 +1,7 @@
 package io.openkache.client
 
 import io.openkache.client.nativebridge.NativeOpenKacheClient
+import io.openkache.client.generated.SmithyContract
 import java.util.concurrent.CompletableFuture
 
 /**
@@ -96,20 +97,20 @@ class OpenKacheClient private constructor(
 /** Immutable Kotlin connection settings. */
 data class Options(
     val address: String,
-    val serverName: String = "localhost",
+    val serverName: String = SmithyContract.DEFAULT_SERVER_NAME,
     val certificate: ByteArray = byteArrayOf(),
     val dataProtectionKey: ByteArray = byteArrayOf(),
     val clientCertificateChain: ByteArray = byteArrayOf(),
     val clientPrivateKey: ByteArray = byteArrayOf(),
     val compressionEnabled: Boolean = false,
-    val compressionLevel: Int = 1,
-    val minimumInputBytes: Int = 1024,
-    val minimumSavingsBytes: Int = 64,
-    val encryption: Int = 2,
-    val retryMaxAttempts: Int = 2,
-    val maxInFlight: Int = 256,
-    val connectTimeoutMillis: Long = 5000,
-    val requestTimeoutMillis: Long = 2000,
+    val compressionLevel: Int = SmithyContract.DEFAULT_ZSTANDARD_LEVEL,
+    val minimumInputBytes: Int = SmithyContract.DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
+    val minimumSavingsBytes: Int = SmithyContract.DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
+    val encryption: Int = SmithyContract.VALUE_FORMAT_ENCRYPTION_ROBUST,
+    val retryMaxAttempts: Int = SmithyContract.DEFAULT_RETRY_MAX_ATTEMPTS,
+    val maxInFlight: Int = SmithyContract.DEFAULT_MAX_IN_FLIGHT,
+    val connectTimeoutMillis: Long = SmithyContract.DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
+    val requestTimeoutMillis: Long = SmithyContract.DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
     val previousDataProtectionKeys: Array<ByteArray> = emptyArray(),
     val keyRing: DataProtectionKeyRing? = null,
 ) {
@@ -141,7 +142,7 @@ data class Options(
     }
 }
 
-/** Active data-protection key and up to eight retired keys. */
+/** Active data-protection key and a bounded retired-key window. */
 data class DataProtectionKeyRing(
     val active: ByteArray,
     val previous: Array<ByteArray> = emptyArray(),
@@ -149,7 +150,7 @@ data class DataProtectionKeyRing(
 
 /** Kotlin mutation options matching the shared Smithy condition and token contract. */
 data class SetOptions(
-    val condition: Int = 0,
+    val condition: Int = SmithyContract.FFI_SET_CONDITION_None,
     val ttlMillis: Long = 0,
     val mutationId: ByteArray = byteArrayOf(),
 ) {

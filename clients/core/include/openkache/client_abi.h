@@ -199,64 +199,8 @@ typedef struct openkache_client_connect_options {
 uint32_t openkache_client_abi_version(void);
 
 /*
- * Connects a protected client.
- *
- * `address` is a UTF-8 host/port authority such as "127.0.0.1:4433" or
- * "cache.example.com:4433".
- * `server_name` is the TLS DNS name or IP identity.
- * `certificate` is one DER-encoded server trust certificate, a PEM chain,
- * or an empty buffer to use system trust roots.
- * All input buffers are copied before this call returns.
- */
-openkache_client_result_t *openkache_client_connect(
-    const uint8_t *address,
-    size_t address_length,
-    const uint8_t *server_name,
-    size_t server_name_length,
-    const uint8_t *certificate,
-    size_t certificate_length,
-    const uint8_t *data_protection_key,
-    size_t data_protection_key_length,
-    uint8_t compression_enabled,
-    int32_t compression_level,
-    size_t minimum_input_size,
-    size_t minimum_savings,
-    uint64_t connect_timeout_ms,
-    uint64_t request_timeout_ms
-);
-
-/*
- * Extended connection entry point. It accepts the same fields as the
- * legacy function plus optional mutual TLS, encryption, retry, and lane
- * settings. Zero numeric extension fields select shared-core defaults.
- */
-openkache_client_result_t *openkache_client_connect_ex(
-    const uint8_t *address,
-    size_t address_length,
-    const uint8_t *server_name,
-    size_t server_name_length,
-    const uint8_t *certificate,
-    size_t certificate_length,
-    const uint8_t *client_certificate_chain,
-    size_t client_certificate_chain_length,
-    const uint8_t *client_private_key,
-    size_t client_private_key_length,
-    const uint8_t *data_protection_key,
-    size_t data_protection_key_length,
-    uint8_t compression_enabled,
-    int32_t compression_level,
-    size_t minimum_input_size,
-    size_t minimum_savings,
-    uint32_t encryption,
-    size_t retry_max_attempts,
-    size_t max_in_flight,
-    uint64_t connect_timeout_ms,
-    uint64_t request_timeout_ms
-);
-
-/*
  * Named-field convenience entry point for C callers. It is equivalent to
- * the flat `openkache_client_connect_ex` function.
+ * the canonical ABI connection entry point.
  */
 openkache_client_result_t *openkache_client_connect_with_options(
     const openkache_client_connect_options_t *options
@@ -267,18 +211,6 @@ openkache_client_result_t *openkache_client_connect_with_options(
  * before freeing the result. Empty buffers are represented by a null pointer
  * or any pointer with length zero.
  */
-openkache_client_result_t *openkache_client_execute(
-    const openkache_client_t *client,
-    uint32_t operation,
-    const uint8_t *application_key,
-    size_t application_key_length,
-    const uint8_t *value,
-    size_t value_length,
-    uint32_t set_condition,
-    uint8_t ttl_enabled,
-    uint64_t ttl_ms
-);
-
 openkache_client_result_t *openkache_client_execute_with_request_id(
     const openkache_client_t *client,
     uint64_t request_id,
@@ -307,37 +239,11 @@ openkache_client_result_t *openkache_client_execute_with_request_id_and_mutation
     size_t mutation_id_length
 );
 
-openkache_client_result_t *openkache_client_execute_with_mutation_id(
-    const openkache_client_t *client,
-    uint32_t operation,
-    const uint8_t *application_key,
-    size_t application_key_length,
-    const uint8_t *value,
-    size_t value_length,
-    uint32_t set_condition,
-    uint8_t ttl_enabled,
-    uint64_t ttl_ms,
-    const uint8_t *mutation_id,
-    size_t mutation_id_length
-);
-
 /*
  * Executes exact protocol item-ID operations. GET, SET, and DELETE require
  * exactly OPENKACHE_SMITHY_ITEM_ID_BYTES key bytes and bypass application-key
  * derivation and value protection.
  */
-openkache_client_result_t *openkache_client_execute_raw(
-    const openkache_client_t *client,
-    uint32_t operation,
-    const uint8_t *item_id,
-    size_t item_id_length,
-    const uint8_t *value,
-    size_t value_length,
-    uint32_t set_condition,
-    uint8_t ttl_enabled,
-    uint64_t ttl_ms
-);
-
 openkache_client_result_t *openkache_client_execute_raw_with_request_id(
     const openkache_client_t *client,
     uint64_t request_id,
@@ -354,20 +260,6 @@ openkache_client_result_t *openkache_client_execute_raw_with_request_id(
 openkache_client_result_t *openkache_client_execute_raw_with_request_id_and_mutation_id(
     const openkache_client_t *client,
     uint64_t request_id,
-    uint32_t operation,
-    const uint8_t *item_id,
-    size_t item_id_length,
-    const uint8_t *value,
-    size_t value_length,
-    uint32_t set_condition,
-    uint8_t ttl_enabled,
-    uint64_t ttl_ms,
-    const uint8_t *mutation_id,
-    size_t mutation_id_length
-);
-
-openkache_client_result_t *openkache_client_execute_raw_with_mutation_id(
-    const openkache_client_t *client,
     uint32_t operation,
     const uint8_t *item_id,
     size_t item_id_length,

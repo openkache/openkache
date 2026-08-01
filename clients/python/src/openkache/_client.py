@@ -37,9 +37,12 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
     SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
     SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
+    SMITHY_FFI_BACKEND_NONE,
     SMITHY_FFI_OPERATION_GET_JSON,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
+    SMITHY_FFI_ERROR_CANCELLED,
+    SMITHY_FFI_PHASE_UNKNOWN,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
@@ -52,6 +55,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_NONE,
     SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_MAX_IN_FLIGHT,
+    SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS,
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
     SMITHY_DEFAULT_ZSTANDARD_LEVEL,
@@ -99,6 +103,14 @@ class OpenKacheError(RuntimeError):
         metadata: ErrorMetadata | None = None,
     ) -> None:
         super().__init__(message)
+        self.metadata = metadata
+
+
+class OpenKacheCancelledError(asyncio.CancelledError):
+    """Cancellation carrying the caller operation and mutation retry metadata."""
+
+    def __init__(self, *, metadata: ErrorMetadata) -> None:
+        super().__init__("client operation canceled")
         self.metadata = metadata
 
 
@@ -150,7 +162,7 @@ class ClientIdentity:
 
 @dataclass(frozen=True, slots=True)
 class DataProtectionKeyRing:
-    """Active data-protection key plus up to eight retired keys."""
+    """Active data-protection key plus a bounded retired-key window."""
 
     active: bytes
     previous: tuple[bytes, ...] = ()
@@ -165,8 +177,11 @@ class DataProtectionKeyRing:
         previous = tuple(
             _as_bytes(key, "key_ring.previous entry") for key in self.previous
         )
-        if len(previous) > 8:
-            raise OpenKacheValueError("key_ring.previous may contain at most eight keys")
+        if len(previous) > SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS:
+            raise OpenKacheValueError(
+                "key_ring.previous may contain at most "
+                f"{SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS} keys"
+            )
         if any(len(key) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES for key in previous):
             raise OpenKacheValueError(
                 "each key_ring.previous entry must contain exactly "
@@ -534,7 +549,17 @@ class OpenKacheClient:
             )
         except asyncio.CancelledError:
             self._native.cancel(request_id)
-            raise
+            raise OpenKacheCancelledError(
+                metadata=ErrorMetadata(
+                    code=SMITHY_FFI_ERROR_CANCELLED,
+                    operation=operation,
+                    phase=SMITHY_FFI_PHASE_UNKNOWN,
+                    backend=SMITHY_FFI_BACKEND_NONE,
+                    retryable=selected.mutation_id is not None,
+                    ambiguous=selected.mutation_id is not None,
+                    mutation_id=selected.mutation_id,
+                )
+            ) from None
         except NativeError as error:
             raise _map_native_error(error) from error
 
@@ -579,7 +604,17 @@ class OpenKacheClient:
             )
         except asyncio.CancelledError:
             self._native.cancel(request_id)
-            raise
+            raise OpenKacheCancelledError(
+                metadata=ErrorMetadata(
+                    code=SMITHY_FFI_ERROR_CANCELLED,
+                    operation=operation,
+                    phase=SMITHY_FFI_PHASE_UNKNOWN,
+                    backend=SMITHY_FFI_BACKEND_NONE,
+                    retryable=selected.mutation_id is not None,
+                    ambiguous=selected.mutation_id is not None,
+                    mutation_id=selected.mutation_id,
+                )
+            ) from None
         except NativeError as error:
             raise _map_native_error(error) from error
 
@@ -1004,6 +1039,7 @@ __all__ = [
     "ErrorMetadata",
     "MetricsSnapshot",
     "OpenKacheClient",
+    "OpenKacheCancelledError",
     "OpenKacheError",
     "OpenKacheValueError",
     "RawClient",

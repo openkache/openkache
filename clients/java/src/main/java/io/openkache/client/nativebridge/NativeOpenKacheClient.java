@@ -9,6 +9,7 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -27,36 +28,46 @@ import java.util.function.Function;
  * opaque client handle alive.</p>
  */
 public final class NativeOpenKacheClient implements AutoCloseable {
-    public static final int ITEM_ID_BYTES = 32;
-    public static final int MUTATION_ID_BYTES = 16;
+    private static final int ITEM_ID_BYTES =
+            io.openkache.client.generated.SmithyContract.ITEM_ID_BYTES;
+    private static final int MUTATION_ID_BYTES =
+            io.openkache.client.generated.SmithyContract.MUTATION_ID_BYTES;
 
-    public static final int RESULT_ERROR = 0;
-    public static final int RESULT_OK = 1;
-    public static final int RESULT_VALUE = 2;
-    public static final int RESULT_NOT_FOUND = 3;
-    public static final int RESULT_CREATED = 4;
-    public static final int RESULT_REPLACED = 5;
-    public static final int RESULT_DELETED = 6;
-    public static final int RESULT_NOT_DELETED = 7;
-    public static final int RESULT_CONNECTED = 8;
-    public static final int RESULT_NOT_STORED = 9;
+    private static final int RESULT_ERROR = io.openkache.client.generated.SmithyContract.FFI_RESULT_Error;
+    private static final int RESULT_OK = io.openkache.client.generated.SmithyContract.FFI_RESULT_Ok;
+    private static final int RESULT_VALUE = io.openkache.client.generated.SmithyContract.FFI_RESULT_Value;
+    private static final int RESULT_NOT_FOUND = io.openkache.client.generated.SmithyContract.FFI_RESULT_NotFound;
+    private static final int RESULT_CREATED = io.openkache.client.generated.SmithyContract.FFI_RESULT_Created;
+    private static final int RESULT_REPLACED = io.openkache.client.generated.SmithyContract.FFI_RESULT_Replaced;
+    private static final int RESULT_DELETED = io.openkache.client.generated.SmithyContract.FFI_RESULT_Deleted;
+    private static final int RESULT_NOT_DELETED = io.openkache.client.generated.SmithyContract.FFI_RESULT_NotDeleted;
+    private static final int RESULT_CONNECTED = io.openkache.client.generated.SmithyContract.FFI_RESULT_Connected;
+    private static final int RESULT_NOT_STORED = io.openkache.client.generated.SmithyContract.FFI_RESULT_NotStored;
 
-    public static final int OP_PING = 1;
-    public static final int OP_GET = 2;
-    public static final int OP_SET = 3;
-    public static final int OP_DELETE = 4;
-    public static final int OP_STATS = 5;
-    public static final int OP_SYNC = 6;
-    public static final int FFI_OPERATION_GET_JSON = 7;
-    public static final int FFI_OPERATION_SET_JSON = 8;
-    public static final int FFI_OPERATION_RECONNECT = 0xffff_ff01;
+    private static final int OP_PING = io.openkache.client.generated.SmithyContract.OPCODE_Ping;
+    private static final int OP_GET = io.openkache.client.generated.SmithyContract.OPCODE_Get;
+    private static final int OP_SET = io.openkache.client.generated.SmithyContract.OPCODE_Set;
+    private static final int OP_DELETE = io.openkache.client.generated.SmithyContract.OPCODE_Delete;
+    private static final int OP_STATS = io.openkache.client.generated.SmithyContract.OPCODE_Stats;
+    private static final int OP_SYNC = io.openkache.client.generated.SmithyContract.OPCODE_Sync;
+    private static final int FFI_OPERATION_GET_JSON =
+            io.openkache.client.generated.SmithyContract.FFI_OPERATION_GetJson;
+    private static final int FFI_OPERATION_SET_JSON =
+            io.openkache.client.generated.SmithyContract.FFI_OPERATION_SetJson;
+    private static final int FFI_OPERATION_RECONNECT =
+            io.openkache.client.generated.SmithyContract.FFI_OPERATION_Reconnect;
 
-    public static final int SET_CONDITION_NONE = 0;
-    public static final int SET_CONDITION_IF_ABSENT = 1;
-    public static final int SET_CONDITION_IF_PRESENT = 2;
+    private static final int SET_CONDITION_NONE =
+            io.openkache.client.generated.SmithyContract.FFI_SET_CONDITION_None;
+    private static final int SET_CONDITION_IF_ABSENT =
+            io.openkache.client.generated.SmithyContract.FFI_SET_CONDITION_IfAbsent;
+    private static final int SET_CONDITION_IF_PRESENT =
+            io.openkache.client.generated.SmithyContract.FFI_SET_CONDITION_IfPresent;
 
-    private static final int FFI_ERROR_CANCELLED = 15;
-    private static final int FFI_ABI_VERSION = 3;
+    private static final int FFI_ERROR_CANCELLED =
+            io.openkache.client.generated.SmithyContract.FFI_ERROR_Cancelled;
+    private static final int FFI_ABI_VERSION =
+            io.openkache.client.generated.SmithyContract.FFI_ABI_VERSION;
     private static final int ERROR_METADATA_BYTES = 36;
     private static final int METRICS_SNAPSHOT_BYTES = 88;
     private static final SecureRandom RANDOM = new SecureRandom();
@@ -163,6 +174,17 @@ public final class NativeOpenKacheClient implements AutoCloseable {
     private static NativeOpenKacheClient connect(Options options, Executor executor) {
         options.validate();
         Arena arena = Arena.ofShared();
+        boolean retain_arena = false;
+        byte[] certificate_bytes = new byte[0];
+        byte[] identity_certificate_bytes = new byte[0];
+        byte[] identity_private_key_bytes = new byte[0];
+        byte[] data_protection_key_bytes = new byte[0];
+        byte[] previous_keys = new byte[0];
+        MemorySegment certificate = MemorySegment.NULL;
+        MemorySegment identity_certificate = MemorySegment.NULL;
+        MemorySegment identity_private_key = MemorySegment.NULL;
+        MemorySegment data_protection_key = MemorySegment.NULL;
+        MemorySegment previous_data_protection_keys = MemorySegment.NULL;
         try {
             SymbolLookup lookup = lookup(arena);
             MethodHandle abiVersion = downcall(
@@ -295,24 +317,33 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             MemorySegment serverName = bytes(
                     arena,
                     options.serverName().getBytes(StandardCharsets.UTF_8));
-            MemorySegment certificate = bytes(arena, options.certificate());
-            MemorySegment identityCertificate = bytes(
-                    arena,
-                    options.clientCertificateChain());
-            MemorySegment identityPrivateKey = bytes(arena, options.clientPrivateKey());
-            MemorySegment dataProtectionKey = bytes(arena, options.dataProtectionKey());
-            byte[] previousKeys = concatenate(options.previousDataProtectionKeys());
-            MemorySegment previousDataProtectionKeys = bytes(arena, previousKeys);
+            /*
+             * FFM allocations are retained by the shared arena for the lifetime of a
+             * connected client. The native connect call copies these buffers into
+             * Rust-owned storage, so keep only zeroized allocations after it returns.
+             * Clone the record fields first: zeroizing a temporary must not mutate an
+             * Options value that a caller may reuse for another connection.
+             */
+            certificate_bytes = options.certificate().clone();
+            identity_certificate_bytes = options.clientCertificateChain().clone();
+            identity_private_key_bytes = options.clientPrivateKey().clone();
+            data_protection_key_bytes = options.dataProtectionKey().clone();
+            previous_keys = concatenate(options.previousDataProtectionKeys());
+            certificate = bytes(arena, certificate_bytes);
+            identity_certificate = bytes(arena, identity_certificate_bytes);
+            identity_private_key = bytes(arena, identity_private_key_bytes);
+            data_protection_key = bytes(arena, data_protection_key_bytes);
+            previous_data_protection_keys = bytes(arena, previous_keys);
             writeConnectOptions(
                     optionsSegment,
                     address,
                     serverName,
                     certificate,
-                    identityCertificate,
-                    identityPrivateKey,
-                    dataProtectionKey,
-                    previousDataProtectionKeys,
-                    previousKeys.length,
+                    identity_certificate,
+                    identity_private_key,
+                    data_protection_key,
+                    previous_data_protection_keys,
+                    previous_keys.length,
                     options);
 
             MemorySegment result = (MemorySegment) connect.invokeExact(optionsSegment);
@@ -334,7 +365,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                 if (connected.equals(MemorySegment.NULL)) {
                     throw new OpenKacheException("native connect returned no client handle");
                 }
-                return new NativeOpenKacheClient(
+                NativeOpenKacheClient client = new NativeOpenKacheClient(
                         arena,
                         connected,
                         execute,
@@ -350,15 +381,30 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                         resultFree,
                         clientFree,
                         executor);
+                retain_arena = true;
+                return client;
             } finally {
                 resultFree.invokeExact(result);
             }
         } catch (Throwable error) {
-            arena.close();
             if (error instanceof RuntimeException runtime) {
                 throw runtime;
             }
             throw new OpenKacheException("native connect failed", error);
+        } finally {
+            zeroize(certificate);
+            zeroize(identity_certificate);
+            zeroize(identity_private_key);
+            zeroize(data_protection_key);
+            zeroize(previous_data_protection_keys);
+            zeroize(certificate_bytes);
+            zeroize(identity_certificate_bytes);
+            zeroize(identity_private_key_bytes);
+            zeroize(data_protection_key_bytes);
+            zeroize(previous_keys);
+            if (!retain_arena) {
+                arena.close();
+            }
         }
     }
 
@@ -869,6 +915,16 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         return segment;
     }
 
+    private static void zeroize(MemorySegment segment) {
+        if (!segment.equals(MemorySegment.NULL) && segment.byteSize() > 0) {
+            segment.fill((byte) 0);
+        }
+    }
+
+    private static void zeroize(byte[] value) {
+        Arrays.fill(value, (byte) 0);
+    }
+
     private static void writeConnectOptions(
             MemorySegment target,
             MemorySegment address,
@@ -936,7 +992,8 @@ public final class NativeOpenKacheClient implements AutoCloseable {
     private static void validateItemId(byte[] itemId) {
         Objects.requireNonNull(itemId, "itemId");
         if (itemId.length != ITEM_ID_BYTES) {
-            throw new IllegalArgumentException("itemId must contain exactly 32 bytes");
+            throw new IllegalArgumentException(
+                    "itemId must contain exactly " + ITEM_ID_BYTES + " bytes");
         }
     }
 
@@ -1015,7 +1072,8 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         public SetOptions {
             mutationId = mutationId == null ? new byte[0] : mutationId.clone();
             if (mutationId.length != 0 && mutationId.length != MUTATION_ID_BYTES) {
-                throw new IllegalArgumentException("mutationId must contain exactly 16 bytes");
+                throw new IllegalArgumentException(
+                        "mutationId must contain exactly " + MUTATION_ID_BYTES + " bytes");
             }
             if (ttlMillis < 0) {
                 throw new IllegalArgumentException("ttlMillis must not be negative");
@@ -1044,17 +1102,33 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         public DataProtectionKeyRing {
             active = active == null ? new byte[0] : active.clone();
             previous = Options.deepCopy(previous == null ? new byte[0][] : previous);
-            if (active.length != 32) {
-                throw new IllegalArgumentException("active key must contain 32 bytes");
-            }
-            if (previous.length > 8) {
+            if (active.length
+                    != io.openkache.client.generated.SmithyContract
+                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
                 throw new IllegalArgumentException(
-                        "previous keys may contain at most eight entries");
+                        "active key must contain "
+                                + io.openkache.client.generated.SmithyContract
+                                        .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
+                                + " bytes");
+            }
+            if (previous.length
+                    > io.openkache.client.generated.SmithyContract
+                            .MAX_PREVIOUS_DATA_PROTECTION_KEYS) {
+                throw new IllegalArgumentException(
+                        "previous keys may contain at most "
+                                + io.openkache.client.generated.SmithyContract
+                                        .MAX_PREVIOUS_DATA_PROTECTION_KEYS
+                                + " entries");
             }
             for (byte[] key : previous) {
-                if (key.length != 32) {
+                if (key.length
+                        != io.openkache.client.generated.SmithyContract
+                                .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
                     throw new IllegalArgumentException(
-                            "each previous key must contain 32 bytes");
+                            "each previous key must contain "
+                                    + io.openkache.client.generated.SmithyContract
+                                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
+                                    + " bytes");
                 }
             }
         }
@@ -1189,32 +1263,68 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             if (serverName == null) {
                 throw new IllegalArgumentException("serverName");
             }
-            if (dataProtectionKey.length != 32) {
-                throw new IllegalArgumentException("dataProtectionKey must contain 32 bytes");
-            }
-            if (previousDataProtectionKeys.length > 8) {
+            if (dataProtectionKey.length
+                    != io.openkache.client.generated.SmithyContract
+                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
                 throw new IllegalArgumentException(
-                        "previousDataProtectionKeys may contain at most eight keys");
+                        "dataProtectionKey must contain "
+                                + io.openkache.client.generated.SmithyContract
+                                        .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
+                                + " bytes");
+            }
+            if (previousDataProtectionKeys.length
+                    > io.openkache.client.generated.SmithyContract
+                            .MAX_PREVIOUS_DATA_PROTECTION_KEYS) {
+                throw new IllegalArgumentException(
+                        "previousDataProtectionKeys may contain at most "
+                                + io.openkache.client.generated.SmithyContract
+                                        .MAX_PREVIOUS_DATA_PROTECTION_KEYS
+                                + " keys");
             }
             for (byte[] key : previousDataProtectionKeys) {
-                if (key.length != 32) {
+                if (key.length
+                        != io.openkache.client.generated.SmithyContract
+                                .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
                     throw new IllegalArgumentException(
-                            "each previous data-protection key must contain 32 bytes");
+                            "each previous data-protection key must contain "
+                                    + io.openkache.client.generated.SmithyContract
+                                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
+                                    + " bytes");
                 }
             }
-            if (connectTimeoutMillis <= 0 || requestTimeoutMillis <= 0) {
+            if (connectTimeoutMillis
+                            < io.openkache.client.generated.SmithyContract
+                                    .CLIENT_MINIMUM_POSITIVE_VALUE
+                    || requestTimeoutMillis
+                            < io.openkache.client.generated.SmithyContract
+                                    .CLIENT_MINIMUM_POSITIVE_VALUE) {
                 throw new IllegalArgumentException("timeouts must be positive");
             }
-            if (retryMaxAttempts <= 0 || maxInFlight <= 0) {
+            if (retryMaxAttempts
+                            < io.openkache.client.generated.SmithyContract
+                                    .CLIENT_MINIMUM_POSITIVE_VALUE
+                    || maxInFlight
+                            < io.openkache.client.generated.SmithyContract
+                                    .CLIENT_MINIMUM_POSITIVE_VALUE) {
                 throw new IllegalArgumentException("retry and lane limits must be positive");
             }
-            if (compressionLevel < -5 || compressionLevel > 22) {
+            if (compressionLevel
+                            < io.openkache.client.generated.SmithyContract
+                                    .DEFAULT_ZSTANDARD_LEVEL_MIN
+                    || compressionLevel
+                            > io.openkache.client.generated.SmithyContract
+                                    .DEFAULT_ZSTANDARD_LEVEL_MAX) {
                 throw new IllegalArgumentException("compressionLevel is outside Zstandard limits");
             }
             if (minimumInputBytes < 0 || minimumSavingsBytes < 0) {
                 throw new IllegalArgumentException("compression thresholds must not be negative");
             }
-            if (encryption < 0 || encryption > 2) {
+            if (encryption
+                            < io.openkache.client.generated.SmithyContract
+                                    .VALUE_FORMAT_ENCRYPTION_NONE
+                    || encryption
+                            > io.openkache.client.generated.SmithyContract
+                                    .VALUE_FORMAT_ENCRYPTION_ROBUST) {
                 throw new IllegalArgumentException("unsupported encryption profile " + encryption);
             }
         }

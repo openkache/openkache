@@ -24,7 +24,20 @@ import {
   SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
   SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
   SMITHY_CLIENT_DEFAULT_SERVER_NAME,
+  SMITHY_FFI_ERROR_CANCELLED,
+  SMITHY_FFI_BACKEND_NONE,
+  SMITHY_FFI_OPERATION_GET_JSON,
+  SMITHY_FFI_OPERATION_RECONNECT,
+  SMITHY_FFI_OPERATION_SET_JSON,
+  SMITHY_FFI_PHASE_UNKNOWN,
+  SMITHY_OPCODE_DELETE,
+  SMITHY_OPCODE_GET,
+  SMITHY_OPCODE_PING,
+  SMITHY_OPCODE_SET,
+  SMITHY_OPCODE_STATS,
+  SMITHY_OPCODE_SYNC,
   SMITHY_ITEM_ID_BYTES,
+  SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS,
   SMITHY_MUTATION_ID_BYTES,
   SMITHY_MAX_VALUE_BYTES,
   type Smithy_Delete_Input,
@@ -46,7 +59,6 @@ import {
 import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
 const TEXT_ENCODER = new TextEncoder()
-const NATIVE_CANCELLED_ERROR_CODE = 15
 
 interface Client_Lifecycle {
   closed: boolean
@@ -312,6 +324,8 @@ export class OpenKache_Client {
       await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_PING,
+        undefined,
         (request_id): Promise<void> => this.#native_client.ping(request_id),
       )
     } catch (error) {
@@ -357,6 +371,8 @@ export class OpenKache_Client {
       await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_FFI_OPERATION_RECONNECT,
+        undefined,
         (request_id): Promise<void> => this.#native_client.reconnect(request_id),
       )
     } catch (error) {
@@ -388,16 +404,19 @@ export class OpenKache_Client {
     validate_set_options(options)
     try {
       assert_json_value(value)
+      const mutation_id = owned_mutation_id(options.mutation_id)
       const outcome = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_FFI_OPERATION_SET_JSON,
+        mutation_id,
         (request_id): Promise<string> =>
           this.#native_client.set_json(
             owned_key_bytes(key),
             value,
             options.condition,
             options.ttl_ms,
-            owned_mutation_id(options.mutation_id),
+            mutation_id,
             request_id,
           ),
       )
@@ -423,6 +442,8 @@ export class OpenKache_Client {
       const value = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_GET,
+        undefined,
         (request_id): Promise<Uint8Array | null> =>
           this.#native_client.get(owned_key_bytes(key), request_id),
       )
@@ -473,6 +494,8 @@ export class OpenKache_Client {
       result = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_FFI_OPERATION_GET_JSON,
+        undefined,
         (request_id): Promise<string | null> =>
           this.#native_client.get_json(owned_key_bytes(key), request_id),
       )
@@ -505,16 +528,19 @@ export class OpenKache_Client {
     validate_set_options(options)
     try {
       assert_json_value(value)
+      const mutation_id = owned_mutation_id(options.mutation_id)
       const outcome = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_FFI_OPERATION_SET_JSON,
+        mutation_id,
         (request_id): Promise<string> =>
           this.#native_client.set_json(
             owned_key_bytes(key),
             value,
             options.condition,
             options.ttl_ms,
-            owned_mutation_id(options.mutation_id),
+            mutation_id,
             request_id,
           ),
       )
@@ -538,13 +564,16 @@ export class OpenKache_Client {
     this.#assert_open()
     validate_delete_options(options)
     try {
+      const mutation_id = owned_mutation_id(options.mutation_id)
       return await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_DELETE,
+        mutation_id,
         (request_id): Promise<boolean> =>
           this.#native_client.delete(
             owned_key_bytes(key),
-            owned_mutation_id(options.mutation_id),
+            mutation_id,
             request_id,
           ),
       )
@@ -566,6 +595,8 @@ export class OpenKache_Client {
       text = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_STATS,
+        undefined,
         (request_id): Promise<string> => this.#native_client.stats(request_id),
       )
     } catch (error) {
@@ -590,6 +621,8 @@ export class OpenKache_Client {
       await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_SYNC,
+        undefined,
         (request_id): Promise<void> => this.#native_client.sync(request_id),
       )
     } catch (error) {
@@ -627,16 +660,19 @@ export class OpenKache_Client {
   ): Promise<Set_Outcome> {
     this.#assert_open()
     try {
+      const mutation_id = owned_mutation_id(options.mutation_id)
       const outcome = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_SET,
+        mutation_id,
         (request_id): Promise<string> =>
           this.#native_client.set(
             owned_key_bytes(key),
             bytes,
             options.condition,
             options.ttl_ms,
-            owned_mutation_id(options.mutation_id),
+            mutation_id,
             request_id,
           ),
       )
@@ -684,11 +720,13 @@ function close_native_client(
 async function run_with_signal<T>(
   native_client: Native_Client,
   signal: AbortSignal | undefined,
+  operation: number,
+  mutation_id: Uint8Array | undefined,
   invoke: (request_id: number) => Promise<T>,
 ): Promise<T> {
   const request_id = native_client.next_request_id()
   if (signal?.aborted) {
-    throw cancellation_error()
+    throw cancellation_error(undefined, undefined, operation, mutation_id)
   }
   let cancelled = false
   const on_abort = (): void => {
@@ -703,13 +741,13 @@ async function run_with_signal<T>(
   try {
     const result = await invoke(request_id)
     if (cancelled || signal?.aborted) {
-      throw cancellation_error()
+      throw cancellation_error(undefined, undefined, operation, mutation_id)
     }
     return result
   } catch (error) {
     if (cancelled || signal?.aborted) {
       const normalized_error = as_openkache_error(error)
-      throw cancellation_error(error, normalized_error.metadata)
+      throw cancellation_error(error, normalized_error.metadata, operation, mutation_id)
     }
     throw as_openkache_error(error)
   } finally {
@@ -720,18 +758,22 @@ async function run_with_signal<T>(
 function cancellation_error(
   cause?: unknown,
   metadata?: Error_Metadata,
+  operation = 0,
+  mutation_id?: Uint8Array,
 ): OpenKache_Error {
+  const cancellation_metadata: Error_Metadata = {
+    code: SMITHY_FFI_ERROR_CANCELLED,
+    operation,
+    phase: metadata?.phase ?? SMITHY_FFI_PHASE_UNKNOWN,
+    backend: metadata?.backend ?? SMITHY_FFI_BACKEND_NONE,
+    retryable: mutation_id !== undefined || metadata?.retryable === true,
+    ambiguous: mutation_id !== undefined || metadata?.ambiguous === true,
+    mutation_id: mutation_id?.slice() ?? metadata?.mutation_id?.slice(),
+  }
   return new OpenKache_Error(
     "client operation canceled",
     cause,
-    metadata ?? {
-      code: NATIVE_CANCELLED_ERROR_CODE,
-      operation: 0,
-      phase: 0,
-      backend: 0,
-      retryable: false,
-      ambiguous: false,
-    },
+    cancellation_metadata,
   )
 }
 
@@ -837,6 +879,8 @@ class Raw_Client implements OpenKache_Raw_Client {
       await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_PING,
+        undefined,
         (request_id): Promise<void> => this.#native_client.ping(request_id),
       )
       return {}
@@ -861,6 +905,8 @@ class Raw_Client implements OpenKache_Raw_Client {
       const value = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_GET,
+        undefined,
         (request_id): Promise<Uint8Array | null> =>
           this.#native_client.raw_get(owned_item_id(input.item_id), request_id),
       )
@@ -888,16 +934,19 @@ class Raw_Client implements OpenKache_Raw_Client {
         ttl_ms: input.ttl_milliseconds,
         mutation_id: input.mutation_id,
       })
+      const mutation_id = owned_mutation_id(input.mutation_id)
       const outcome = await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_SET,
+        mutation_id,
         (request_id): Promise<string> =>
           this.#native_client.raw_set(
             owned_item_id(input.item_id),
             owned_raw_value(input.value),
             input.condition,
             input.ttl_milliseconds,
-            owned_mutation_id(input.mutation_id),
+            mutation_id,
             request_id,
           ),
       )
@@ -920,18 +969,20 @@ class Raw_Client implements OpenKache_Raw_Client {
   ): Promise<Smithy_Delete_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      return {
-        deleted: await run_with_signal(
-          this.#native_client,
-          options.signal,
-          (request_id): Promise<boolean> =>
-            this.#native_client.raw_delete(
-              owned_item_id(input.item_id),
-              owned_mutation_id(input.mutation_id),
-              request_id,
-            ),
-        ),
-      }
+      const mutation_id = owned_mutation_id(input.mutation_id)
+      const deleted = await run_with_signal(
+        this.#native_client,
+        options.signal,
+        SMITHY_OPCODE_DELETE,
+        mutation_id,
+        (request_id): Promise<boolean> =>
+          this.#native_client.raw_delete(
+            owned_item_id(input.item_id),
+            mutation_id,
+            request_id,
+          ),
+      )
+      return { deleted }
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -954,6 +1005,8 @@ class Raw_Client implements OpenKache_Raw_Client {
         json: await run_with_signal(
           this.#native_client,
           options.signal,
+          SMITHY_OPCODE_STATS,
+          undefined,
           (request_id): Promise<string> => this.#native_client.stats(request_id),
         ),
       }
@@ -978,6 +1031,8 @@ class Raw_Client implements OpenKache_Raw_Client {
       await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_OPCODE_SYNC,
+        undefined,
         (request_id): Promise<void> => this.#native_client.sync(request_id),
       )
       return {}
@@ -998,6 +1053,8 @@ class Raw_Client implements OpenKache_Raw_Client {
       await run_with_signal(
         this.#native_client,
         options.signal,
+        SMITHY_FFI_OPERATION_RECONNECT,
+        undefined,
         (request_id): Promise<void> => this.#native_client.reconnect(request_id),
       )
     } catch (error) {
@@ -1265,8 +1322,13 @@ function validate_key_ring(key_ring: Data_Protection_Key_Ring | undefined): void
     )
   }
   const previous = key_ring.previous ?? []
-  if (!Array.isArray(previous) || previous.length > 8) {
-    throw new OpenKache_Error("key_ring.previous may contain at most eight keys")
+  if (
+    !Array.isArray(previous) ||
+    previous.length > SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS
+  ) {
+    throw new OpenKache_Error(
+      `key_ring.previous may contain at most ${SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS} keys`,
+    )
   }
   for (const key of previous) {
     if (

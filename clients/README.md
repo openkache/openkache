@@ -84,6 +84,10 @@ README for package-specific linker or packaging configuration. Artifact
 distribution for each binding is selected by its package build and release
 matrix.
 
+Java, Kotlin, and Dart contract sources are generated build outputs and are
+intentionally ignored by Git. From this directory, run `./generate.ts` before
+building those packages; release workflows regenerate the same outputs.
+
 ## Shared configuration
 
 The C, C++, Python, and Swift packages use the native ABI exported by

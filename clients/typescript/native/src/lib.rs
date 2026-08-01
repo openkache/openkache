@@ -11,22 +11,19 @@ use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::contract::{
-    FFI_BACKEND_COMPIO, FFI_BACKEND_QUINN, FFI_ERROR_AMBIGUOUS, FFI_ERROR_CANCELLED,
-    FFI_ERROR_CLOSED, FFI_ERROR_CONFIGURATION, FFI_ERROR_CONNECTION, FFI_ERROR_IO,
-    FFI_ERROR_PROTOCOL, FFI_ERROR_RESPONSE_TOO_LARGE, FFI_ERROR_RUNTIME, FFI_ERROR_SERVER,
-    FFI_ERROR_TIMEOUT, FFI_ERROR_TLS, FFI_ERROR_TRANSPORT, FFI_ERROR_UNEXPECTED_RESPONSE,
-    FFI_ERROR_VALUE, FFI_PHASE_CONNECTION_RETRY, FFI_PHASE_CONNECTION_SETUP,
-    FFI_PHASE_DNS_RESOLUTION, FFI_PHASE_ENDPOINT_INITIALIZATION, FFI_PHASE_HANDSHAKE,
-    FFI_PHASE_REQUEST_WRITE, FFI_PHASE_RESPONSE_BODY_READ, FFI_PHASE_RESPONSE_HEADER_READ,
-    FFI_PHASE_STREAM_ACQUISITION, FFI_PHASE_STREAM_OPEN, FFI_PHASE_STREAM_READ,
-    FFI_PHASE_STREAM_WRITE, FFI_PHASE_TLS_INITIALIZATION,
+    FFI_ERROR_AMBIGUOUS, FFI_ERROR_CANCELLED, FFI_ERROR_CLOSED, FFI_ERROR_CONFIGURATION,
+    FFI_ERROR_CONNECTION, FFI_ERROR_IO, FFI_ERROR_PROTOCOL, FFI_ERROR_RESPONSE_TOO_LARGE,
+    FFI_ERROR_RUNTIME, FFI_ERROR_SERVER, FFI_ERROR_TIMEOUT, FFI_ERROR_TLS, FFI_ERROR_TRANSPORT,
+    FFI_ERROR_UNEXPECTED_RESPONSE, FFI_ERROR_VALUE, FfiOperation,
 };
-use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
+use openkache_client_core::value::{
+    Compression, Encryption, JsonValue, Value, ZstandardOptions, canonical_json_bytes,
+};
 use openkache_client_core::{
-    Backend, Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
+    Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
     DataProtectionKeyRing, DeleteOutcome, Endpoint, Error as CoreError, GetOutcome, ItemId,
-    ItemValue, MAX_PREVIOUS_DATA_PROTECTION_KEYS, MutationId, Operation, PrivateKey,
-    ProtectedClient, RetryPolicy, ServerErrorCode, SetCondition, SetOptions, SetOutcome,
+    ItemValue, MAX_PREVIOUS_DATA_PROTECTION_KEYS, MutationId, PrivateKey, ProtectedClient,
+    RetryPolicy, ServerErrorCode, SetCondition, SetOptions, SetOutcome,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -80,10 +77,15 @@ pub struct NativeMetricsSnapshot {
     pub retries: f64,
     pub reconnects: f64,
     pub cancellations: f64,
+    #[napi(js_name = "transport_errors")]
     pub transport_errors: f64,
+    #[napi(js_name = "protocol_errors")]
     pub protocol_errors: f64,
+    #[napi(js_name = "bytes_sent")]
     pub bytes_sent: f64,
+    #[napi(js_name = "bytes_received")]
     pub bytes_received: f64,
+    #[napi(js_name = "active_lanes")]
     pub active_lanes: f64,
 }
 
@@ -168,8 +170,12 @@ impl NativeClient {
     pub async fn ping(&self, request_id: Option<f64>) -> Result<()> {
         let _request = self.metrics.begin(0);
         let client = self.active_client()?;
-        self.run_request(Operation::Ping, request_id, async move {
-            client.ping().await.map(|_| ()).map_err(native_core_error)
+        self.run_request(FfiOperation::Ping, request_id, None, async move {
+            client
+                .ping()
+                .await
+                .map(|_| ())
+                .map_err(|error| native_core_error_for(error, FfiOperation::Ping))
         })
         .await
     }
@@ -185,8 +191,11 @@ impl NativeClient {
         let _request = self.metrics.begin(key.len());
         let key = key.to_vec();
         let outcome = self
-            .run_request(Operation::Get, request_id, async move {
-                client.get(&key).await.map_err(native_core_error)
+            .run_request(FfiOperation::Get, request_id, None, async move {
+                client
+                    .get(&key)
+                    .await
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Get))
             })
             .await?;
         let value = outcome.into_option().map(Uint8Array::new);
@@ -210,8 +219,11 @@ impl NativeClient {
         let _request = self.metrics.begin(key.len());
         let key = key.to_vec();
         let outcome = self
-            .run_request(Operation::Get, request_id, async move {
-                client.get_value(&key).await.map_err(native_core_error)
+            .run_request(FfiOperation::GetJson, request_id, None, async move {
+                client
+                    .get_value(&key)
+                    .await
+                    .map_err(|error| native_core_error_for(error, FfiOperation::GetJson))
             })
             .await?;
         match outcome {
@@ -220,12 +232,15 @@ impl NativeClient {
                 Ok(None)
             }
             GetOutcome::Found(Value::Json(value)) => {
-                let serialized = serde_json::to_string(&value).map_err(native_error)?;
+                let serialized = canonical_json_bytes(&value)
+                    .map_err(|error| native_core_error_for(error.into(), FfiOperation::GetJson))
+                    .and_then(|bytes| String::from_utf8(bytes).map_err(native_error))?;
                 self.metrics.record_get(true, serialized.len());
                 Ok(Some(serialized))
             }
-            GetOutcome::Found(Value::Raw(_)) => Err(native_error(
-                "stored value uses raw serialization, expected canonical JSON",
+            GetOutcome::Found(Value::Raw(_)) => Err(native_core_error_for(
+                openkache_client_core::value::Error::ExpectedRawValue.into(),
+                FfiOperation::GetJson,
             )),
         }
     }
@@ -265,21 +280,28 @@ impl NativeClient {
         request_id: Option<f64>,
     ) -> Result<String> {
         let value = parse_json_value(value)?;
+        let serialized_value = canonical_json_bytes(&value)
+            .map_err(|error| native_core_error_for(error.into(), FfiOperation::SetJson))?;
         let options = parse_set_options(
             condition.as_deref(),
             ttl_ms,
             mutation_id.as_ref().map(Uint8Array::as_ref),
         )?;
         let client = self.active_client()?;
-        let _request = self.metrics.begin(key.len());
+        let _request = self.metrics.begin(key.len() + serialized_value.len());
         let key = key.to_vec();
-        self.run_request(Operation::Set, request_id, async move {
-            client
-                .set_value(&key, Value::Json(value), options)
-                .await
-                .map(map_set_outcome)
-                .map_err(native_core_error)
-        })
+        self.run_request(
+            FfiOperation::SetJson,
+            request_id,
+            options.mutation_id(),
+            async move {
+                client
+                    .set_value(&key, Value::Json(value), options)
+                    .await
+                    .map(map_set_outcome)
+                    .map_err(|error| native_core_error_for(error, FfiOperation::SetJson))
+            },
+        )
         .await
     }
 
@@ -296,12 +318,12 @@ impl NativeClient {
         let _request = self.metrics.begin(key.len());
         let key = key.to_vec();
         let outcome = self
-            .run_request(Operation::Delete, request_id, async move {
+            .run_request(FfiOperation::Delete, request_id, mutation_id, async move {
                 match mutation_id {
                     Some(mutation_id) => client.delete_with_mutation_id(&key, mutation_id).await,
                     None => client.delete(&key).await,
                 }
-                .map_err(native_core_error)
+                .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
             })
             .await?;
         Ok(outcome == DeleteOutcome::Deleted)
@@ -329,9 +351,13 @@ impl NativeClient {
     /// Returns the server's JSON statistics payload.
     #[napi]
     pub async fn stats(&self, request_id: Option<f64>) -> Result<String> {
+        let _request = self.metrics.begin(0);
         let client = self.active_client()?;
-        self.run_request(Operation::Stats, request_id, async move {
-            client.stats().await.map_err(native_core_error)
+        self.run_request(FfiOperation::Stats, request_id, None, async move {
+            client
+                .stats()
+                .await
+                .map_err(|error| native_core_error_for(error, FfiOperation::Stats))
         })
         .await
     }
@@ -341,8 +367,11 @@ impl NativeClient {
     pub async fn sync(&self, request_id: Option<f64>) -> Result<()> {
         let _request = self.metrics.begin(0);
         let client = self.active_client()?;
-        self.run_request(Operation::Sync, request_id, async move {
-            client.sync().await.map_err(native_core_error)
+        self.run_request(FfiOperation::Sync, request_id, None, async move {
+            client
+                .sync()
+                .await
+                .map_err(|error| native_core_error_for(error, FfiOperation::Sync))
         })
         .await
     }
@@ -386,8 +415,11 @@ impl NativeClient {
     pub async fn reconnect(&self, request_id: Option<f64>) -> Result<()> {
         let _request = self.metrics.begin(0);
         let client = self.active_client()?;
-        self.run_request(Operation::ConnectionRetry, request_id, async move {
-            client.reconnect().await.map_err(native_core_error)
+        self.run_request(FfiOperation::Reconnect, request_id, None, async move {
+            client
+                .reconnect()
+                .await
+                .map_err(|error| native_core_error_for(error, FfiOperation::Reconnect))
         })
         .await
     }
@@ -403,8 +435,12 @@ impl NativeClient {
         let client = self.active_client()?;
         let _request = self.metrics.begin(item_id.as_bytes().len());
         let outcome = self
-            .run_request(Operation::Get, request_id, async move {
-                client.raw().get(item_id).await.map_err(native_core_error)
+            .run_request(FfiOperation::Get, request_id, None, async move {
+                client
+                    .raw()
+                    .get(item_id)
+                    .await
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Get))
             })
             .await?;
         let value = outcome
@@ -437,14 +473,19 @@ impl NativeClient {
         let client = self.active_client()?;
         let _request = self.metrics.begin(item_id.as_bytes().len() + value.len());
         let value = value.to_vec();
-        self.run_request(Operation::Set, request_id, async move {
-            client
-                .raw()
-                .set(item_id, ItemValue::new(value), options)
-                .await
-                .map(map_set_outcome)
-                .map_err(native_core_error)
-        })
+        self.run_request(
+            FfiOperation::Set,
+            request_id,
+            options.mutation_id(),
+            async move {
+                client
+                    .raw()
+                    .set(item_id, ItemValue::new(value), options)
+                    .await
+                    .map(map_set_outcome)
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Set))
+            },
+        )
         .await
     }
 
@@ -461,7 +502,7 @@ impl NativeClient {
         let client = self.active_client()?;
         let _request = self.metrics.begin(item_id.as_bytes().len());
         let outcome = self
-            .run_request(Operation::Delete, request_id, async move {
+            .run_request(FfiOperation::Delete, request_id, mutation_id, async move {
                 match mutation_id {
                     Some(mutation_id) => {
                         client
@@ -471,7 +512,7 @@ impl NativeClient {
                     }
                     None => client.raw().delete(item_id).await,
                 }
-                .map_err(native_core_error)
+                .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
             })
             .await?;
         Ok(outcome == DeleteOutcome::Deleted)
@@ -491,20 +532,26 @@ impl NativeClient {
         let options = parse_set_options(condition.as_deref(), ttl_ms, mutation_id)?;
         let client = self.active_client()?;
         let key = key.to_vec();
-        self.run_request(Operation::Set, request_id, async move {
-            client
-                .set(&key, value, options)
-                .await
-                .map(map_set_outcome)
-                .map_err(native_core_error)
-        })
+        self.run_request(
+            FfiOperation::Set,
+            request_id,
+            options.mutation_id(),
+            async move {
+                client
+                    .set(&key, value, options)
+                    .await
+                    .map(map_set_outcome)
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Set))
+            },
+        )
         .await
     }
 
     async fn run_request<T, F>(
         &self,
-        operation: Operation,
+        operation: FfiOperation,
         request_id: Option<f64>,
+        mutation_id: Option<MutationId>,
         future: F,
     ) -> Result<T>
     where
@@ -532,7 +579,7 @@ impl NativeClient {
         }
         match result {
             Ok(result) => result,
-            Err(_) => Err(native_cancelled_error(operation)),
+            Err(_) => Err(native_cancelled_error(operation, mutation_id)),
         }
     }
 
@@ -861,13 +908,16 @@ struct NativeErrorMetadata {
     mutation_id: Option<[u8; openkache_client_core::contract::MUTATION_ID_BYTES]>,
 }
 
-fn native_cancelled_error(operation: Operation) -> Error {
+fn native_cancelled_error(operation: FfiOperation, mutation_id: Option<MutationId>) -> Error {
+    let has_mutation = mutation_id.is_some();
     native_error_with_metadata(
         "client operation canceled",
         NativeErrorMetadata {
             code: FFI_ERROR_CANCELLED,
-            operation: operation_code(operation),
-            phase: phase_code(operation),
+            operation: operation.code(),
+            retryable: has_mutation,
+            ambiguous: has_mutation,
+            mutation_id: mutation_id.map(MutationId::into_bytes),
             ..NativeErrorMetadata::default()
         },
     )
@@ -897,12 +947,23 @@ fn native_error_with_metadata(message: impl Into<String>, metadata: NativeErrorM
 /// error message stable while allowing the TypeScript adapter to recover the
 /// ABI-v3 metadata without a second native call.
 fn native_core_error(error: CoreError) -> Error {
-    let metadata = core_error_metadata(&error);
+    let metadata = core_error_metadata(&error, None);
     native_error_with_metadata(error.to_string(), metadata)
 }
 
-fn core_error_metadata(error: &CoreError) -> NativeErrorMetadata {
-    let mut metadata = NativeErrorMetadata::default();
+fn native_core_error_for(error: CoreError, operation: FfiOperation) -> Error {
+    let metadata = core_error_metadata(&error, Some(operation));
+    native_error_with_metadata(error.to_string(), metadata)
+}
+
+fn core_error_metadata(
+    error: &CoreError,
+    caller_operation: Option<FfiOperation>,
+) -> NativeErrorMetadata {
+    let mut metadata = NativeErrorMetadata {
+        operation: caller_operation.map_or(0, FfiOperation::code),
+        ..NativeErrorMetadata::default()
+    };
     match error {
         CoreError::Configuration { .. } => metadata.code = FFI_ERROR_CONFIGURATION,
         CoreError::Connection(_) => {
@@ -911,21 +972,25 @@ fn core_error_metadata(error: &CoreError) -> NativeErrorMetadata {
         }
         CoreError::Timeout { operation } => {
             metadata.code = FFI_ERROR_TIMEOUT;
-            metadata.operation = operation_code(*operation);
-            metadata.phase = phase_code(*operation);
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.phase = operation.ffi_phase_code();
             metadata.retryable = true;
         }
         CoreError::Runtime { backend, .. } => {
             metadata.code = FFI_ERROR_RUNTIME;
-            metadata.backend = backend_code(*backend);
+            metadata.backend = backend.ffi_code();
         }
         CoreError::Transport {
             backend, operation, ..
         } => {
             metadata.code = FFI_ERROR_TRANSPORT;
-            metadata.backend = backend_code(*backend);
-            metadata.operation = operation_code(*operation);
-            metadata.phase = phase_code(*operation);
+            metadata.backend = backend.ffi_code();
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.phase = operation.ffi_phase_code();
             metadata.retryable = true;
         }
         CoreError::Server { code, .. } => {
@@ -935,7 +1000,10 @@ fn core_error_metadata(error: &CoreError) -> NativeErrorMetadata {
         }
         CoreError::UnexpectedResponse { operation, .. } => {
             metadata.code = FFI_ERROR_UNEXPECTED_RESPONSE;
-            metadata.operation = operation_code(*operation);
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.phase = operation.ffi_phase_code();
         }
         CoreError::ResponseTooLarge { .. } => metadata.code = FFI_ERROR_RESPONSE_TOO_LARGE,
         CoreError::Tls(_) => metadata.code = FFI_ERROR_TLS,
@@ -952,70 +1020,19 @@ fn core_error_metadata(error: &CoreError) -> NativeErrorMetadata {
             cause,
         } => {
             metadata.code = FFI_ERROR_AMBIGUOUS;
-            metadata.operation = operation_code(*operation);
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
             metadata.ambiguous = true;
             metadata.retryable = true;
             metadata.mutation_id = mutation_id.map(MutationId::into_bytes);
-            let nested = core_error_metadata(cause);
+            let nested = core_error_metadata(cause, caller_operation);
             metadata.phase = nested.phase;
             metadata.backend = nested.backend;
         }
         _ => {}
     }
     metadata
-}
-
-fn operation_code(operation: Operation) -> u32 {
-    match operation {
-        Operation::Ping => 1,
-        Operation::Get => 2,
-        Operation::Set => 3,
-        Operation::Delete => 4,
-        Operation::Stats => 5,
-        Operation::Sync => 6,
-        Operation::DnsResolution => 100,
-        Operation::ConnectionSetup => 101,
-        Operation::ConnectionRetry => 102,
-        Operation::StreamAcquisition => 103,
-        Operation::RequestWrite => 104,
-        Operation::ResponseHeaderRead => 105,
-        Operation::ResponseBodyRead => 106,
-        Operation::TlsInitialization => 107,
-        Operation::EndpointInitialization => 108,
-        Operation::ConnectionInitialization => 109,
-        Operation::Handshake => 110,
-        Operation::StreamOpen => 111,
-        Operation::StreamWrite => 112,
-        Operation::StreamRead => 113,
-        _ => 0,
-    }
-}
-
-fn phase_code(operation: Operation) -> u32 {
-    match operation {
-        Operation::DnsResolution => FFI_PHASE_DNS_RESOLUTION,
-        Operation::ConnectionSetup => FFI_PHASE_CONNECTION_SETUP,
-        Operation::ConnectionRetry => FFI_PHASE_CONNECTION_RETRY,
-        Operation::StreamAcquisition => FFI_PHASE_STREAM_ACQUISITION,
-        Operation::RequestWrite => FFI_PHASE_REQUEST_WRITE,
-        Operation::ResponseHeaderRead => FFI_PHASE_RESPONSE_HEADER_READ,
-        Operation::ResponseBodyRead => FFI_PHASE_RESPONSE_BODY_READ,
-        Operation::TlsInitialization => FFI_PHASE_TLS_INITIALIZATION,
-        Operation::EndpointInitialization => FFI_PHASE_ENDPOINT_INITIALIZATION,
-        Operation::Handshake => FFI_PHASE_HANDSHAKE,
-        Operation::StreamOpen => FFI_PHASE_STREAM_OPEN,
-        Operation::StreamWrite => FFI_PHASE_STREAM_WRITE,
-        Operation::StreamRead => FFI_PHASE_STREAM_READ,
-        _ => 0,
-    }
-}
-
-fn backend_code(backend: Backend) -> u32 {
-    match backend {
-        Backend::Quinn => FFI_BACKEND_QUINN,
-        Backend::Compio => FFI_BACKEND_COMPIO,
-        _ => 0,
-    }
 }
 
 fn invalid_argument(message: impl Into<String>) -> Error {

@@ -171,6 +171,8 @@ const (
 	SmithyDefaultMaxInFlight = 256
 	// SmithyMutationIDBytes is the fixed width of a mutation idempotency token.
 	SmithyMutationIDBytes = 16
+	// SmithyMaxPreviousDataProtectionKeys bounds the retired key read/delete window.
+	SmithyMaxPreviousDataProtectionKeys = 8
 	// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
 	SmithyDefaultConnectTimeoutMilliseconds uint64 = 5000
 	// SmithyDefaultRequestTimeoutMilliseconds is the default complete request timeout.

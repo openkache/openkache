@@ -51,6 +51,7 @@ export interface Value_Format_Contract {
 export interface Client_Defaults_Contract {
   readonly connect_timeout_milliseconds: number
   readonly max_in_flight: number
+  readonly max_previous_data_protection_keys: number
   readonly mutation_id_bytes: number
   readonly request_timeout_milliseconds: number
   readonly retry_max_attempts: number
@@ -773,6 +774,12 @@ function client_defaults_contract(value: unknown): Client_Defaults_Contract {
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
     ),
+    max_previous_data_protection_keys: integer_member(
+      contract,
+      "maxPreviousDataProtectionKeys",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
     connect_timeout_milliseconds: integer_member(
       contract,
       "connectTimeoutMilliseconds",
@@ -1255,6 +1262,8 @@ pub const FFI_METRICS_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted
 pub const DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
 /// Fixed width of a mutation idempotency token.
 pub const MUTATION_ID_BYTES: usize = ${formatted_decimal(defaults.mutation_id_bytes)};
+/// Maximum number of retired data-protection keys retained for rotation.
+pub const MAX_PREVIOUS_DATA_PROTECTION_KEYS: usize = ${formatted_decimal(defaults.max_previous_data_protection_keys)};
 /// Default connection-establishment timeout in milliseconds.
 pub const DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: u64 = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
 /// Default complete-request timeout in milliseconds.
@@ -1470,6 +1479,7 @@ export function render_c_contract(contract: Client_Contract): string {
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
 #define OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT ${defaults.max_in_flight}u
 #define OPENKACHE_SMITHY_MUTATION_ID_BYTES ${defaults.mutation_id_bytes}u
+#define OPENKACHE_SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS ${defaults.max_previous_data_protection_keys}u
 #define OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS ${defaults.connect_timeout_milliseconds}u
 #define OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS ${defaults.request_timeout_milliseconds}u
 #define OPENKACHE_SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS ${defaults.retry_max_attempts}u
@@ -1576,12 +1586,17 @@ internal static partial class Protocol
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
     internal const int DefaultMaxInFlight = ${formatted_decimal(defaults.max_in_flight)};
     internal const int MutationIdBytes = ${formatted_decimal(defaults.mutation_id_bytes)};
+    internal const int MaxPreviousDataProtectionKeys = ${formatted_decimal(defaults.max_previous_data_protection_keys)};
     internal const long DefaultConnectTimeoutMilliseconds = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
     internal const long DefaultRequestTimeoutMilliseconds = ${formatted_decimal(defaults.request_timeout_milliseconds)};
     internal const int DefaultRetryMaxAttempts = ${formatted_decimal(defaults.retry_max_attempts)};
     internal const int DefaultZstandardLevel = ${formatted_decimal(defaults.zstandard_level)};
     internal const int DefaultZstandardMinimumInputBytes = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
     internal const int DefaultZstandardMinimumSavingsBytes = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
+    internal const int DefaultZstandardLevelMin = ${formatted_decimal(defaults.zstandard_level_min)};
+    internal const int DefaultZstandardLevelMax = ${formatted_decimal(defaults.zstandard_level_max)};
+    internal const string ClientCertificatePemType = ${JSON.stringify(defaults.certificate_pem_type)};
+    internal const int ClientMinimumPositiveValue = ${formatted_decimal(defaults.minimum_positive_value)};
     internal const uint FfiAbiVersion = ${formatted_decimal(ffi.abi_version)}u;
     internal const uint FfiOperationReconnect = ${formatted_decimal(ffi_operation_reconnect)}u;
     internal const uint FfiOperationGetJson = ${formatted_decimal(ffi_operation_get_json)}u;
@@ -1718,6 +1733,30 @@ ${members.join("\n")}
       `  /** Invokes the Smithy ${operation.name} operation. */
   ${snake_case(operation.name)}(input: ${typescript_api_name(operation.input)}): Promise<${typescript_api_name(operation.output)}>`,
   )
+  const constants = (prefix: string, entries: readonly Wire_Entry[]): string =>
+    entries
+      .map(
+        (entry) =>
+          `/** Smithy ${prefix.toLowerCase()} identifier for ${entry.name}. */
+export const SMITHY_${prefix}_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+      )
+      .join("\n")
+  const opcode_constants = constants("OPCODE", contract.opcodes)
+  const status_constants = constants("STATUS", contract.statuses)
+  const ffi_operation_constants = constants("FFI_OPERATION", contract.ffi.operations)
+  const ffi_result_constants = constants("FFI_RESULT", contract.ffi.result_kinds)
+  const ffi_set_condition_constants = constants(
+    "FFI_SET_CONDITION",
+    contract.ffi.set_conditions,
+  )
+  const ffi_connection_state_constants = constants(
+    "FFI_CONNECTION_STATE",
+    contract.ffi.connection_states,
+  )
+  const ffi_error_constants = constants("FFI_ERROR", contract.ffi.error_codes)
+  const ffi_phase_constants = constants("FFI_PHASE", contract.ffi.phases)
+  const ffi_backend_constants = constants("FFI_BACKEND", contract.ffi.backends)
+  const ffi_metrics_constants = constants("FFI_METRICS", contract.ffi.metrics)
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /** Exact number of bytes in a protocol item identifier. */
@@ -1728,6 +1767,8 @@ export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
 /** Fixed width of a mutation idempotency token. */
 export const SMITHY_MUTATION_ID_BYTES = ${contract.client_defaults.mutation_id_bytes}
+/** Maximum number of retired data-protection keys retained for rotation. */
+export const SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${contract.client_defaults.max_previous_data_protection_keys}
 /** Default connection-establishment timeout in milliseconds. */
 export const SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${contract.client_defaults.connect_timeout_milliseconds}
 /** Default complete-request timeout in milliseconds. */
@@ -1750,6 +1791,18 @@ export const SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(contract.clien
 export const SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(contract.client_defaults.certificate_pem_type)}
 /** Minimum positive setting value when zero selects a default. */
 export const SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${contract.client_defaults.minimum_positive_value}
+/** Version of the native client FFI contract. */
+export const SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+${opcode_constants}
+${status_constants}
+${ffi_operation_constants}
+${ffi_result_constants}
+${ffi_set_condition_constants}
+${ffi_connection_state_constants}
+${ffi_error_constants}
+${ffi_phase_constants}
+${ffi_backend_constants}
+${ffi_metrics_constants}
 
 ${[...enums, ...structures].join("\n\n")}
 
@@ -1950,6 +2003,8 @@ const (
 \tSmithyDefaultMaxInFlight = ${defaults.max_in_flight}
 \t// SmithyMutationIDBytes is the fixed width of a mutation idempotency token.
 \tSmithyMutationIDBytes = ${defaults.mutation_id_bytes}
+\t// SmithyMaxPreviousDataProtectionKeys bounds the retired key read/delete window.
+\tSmithyMaxPreviousDataProtectionKeys = ${defaults.max_previous_data_protection_keys}
 \t// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
 \tSmithyDefaultConnectTimeoutMilliseconds uint64 = ${defaults.connect_timeout_milliseconds}
 \t// SmithyDefaultRequestTimeoutMilliseconds is the default complete request timeout.
@@ -2069,8 +2124,10 @@ public final class SmithyContract {
 
     public static final int ITEM_ID_BYTES = ${contract.item_id_bytes};
     public static final int MUTATION_ID_BYTES = ${contract.mutation_id_bytes};
+    public static final int MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${defaults.max_previous_data_protection_keys};
     public static final int MAX_VALUE_BYTES = ${contract.max_value_bytes};
     public static final String ALPN = ${JSON.stringify(contract.v1.alpn)};
+    public static final String DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)};
     public static final int DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight};
     public static final long DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}L;
     public static final long DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}L;
@@ -2078,6 +2135,10 @@ public final class SmithyContract {
     public static final int DEFAULT_ZSTANDARD_LEVEL = ${defaults.zstandard_level};
     public static final int DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${defaults.zstandard_minimum_input_bytes};
     public static final int DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${defaults.zstandard_minimum_savings_bytes};
+    public static final int DEFAULT_ZSTANDARD_LEVEL_MIN = ${defaults.zstandard_level_min};
+    public static final int DEFAULT_ZSTANDARD_LEVEL_MAX = ${defaults.zstandard_level_max};
+    public static final String CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(defaults.certificate_pem_type)};
+    public static final int CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value};
     public static final int VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes};
     public static final int VALUE_FORMAT_ENCRYPTION_NONE = ${value.encryption_none};
     public static final int VALUE_FORMAT_ENCRYPTION_COMPACT = ${value.encryption_compact};
@@ -2173,12 +2234,21 @@ package io.openkache.client.generated
 object SmithyContract {
     const val ITEM_ID_BYTES: Int = ${contract.item_id_bytes}
     const val MUTATION_ID_BYTES: Int = ${contract.mutation_id_bytes}
+    const val MAX_PREVIOUS_DATA_PROTECTION_KEYS: Int = ${defaults.max_previous_data_protection_keys}
     const val MAX_VALUE_BYTES: Int = ${contract.max_value_bytes}
     const val ALPN: String = ${JSON.stringify(contract.v1.alpn)}
+    const val DEFAULT_SERVER_NAME: String = ${JSON.stringify(defaults.server_name)}
     const val DEFAULT_MAX_IN_FLIGHT: Int = ${defaults.max_in_flight}
     const val DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: Long = ${defaults.connect_timeout_milliseconds}L
     const val DEFAULT_REQUEST_TIMEOUT_MILLISECONDS: Long = ${defaults.request_timeout_milliseconds}L
     const val DEFAULT_RETRY_MAX_ATTEMPTS: Int = ${defaults.retry_max_attempts}
+    const val DEFAULT_ZSTANDARD_LEVEL: Int = ${defaults.zstandard_level}
+    const val DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES: Int = ${defaults.zstandard_minimum_input_bytes}
+    const val DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES: Int = ${defaults.zstandard_minimum_savings_bytes}
+    const val DEFAULT_ZSTANDARD_LEVEL_MIN: Int = ${defaults.zstandard_level_min}
+    const val DEFAULT_ZSTANDARD_LEVEL_MAX: Int = ${defaults.zstandard_level_max}
+    const val CLIENT_CERTIFICATE_PEM_TYPE: String = ${JSON.stringify(defaults.certificate_pem_type)}
+    const val CLIENT_MINIMUM_POSITIVE_VALUE: Int = ${defaults.minimum_positive_value}
     const val VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES: Int = ${value.data_protection_key_bytes}
     const val VALUE_FORMAT_ENCRYPTION_NONE: Int = ${value.encryption_none}
     const val VALUE_FORMAT_ENCRYPTION_COMPACT: Int = ${value.encryption_compact}
@@ -2268,16 +2338,25 @@ library;
 
 const int smithyItemIdBytes = ${contract.item_id_bytes};
 const int smithyMutationIdBytes = ${contract.mutation_id_bytes};
+const int smithyMaxPreviousDataProtectionKeys = ${defaults.max_previous_data_protection_keys};
 const int smithyMaxValueBytes = ${contract.max_value_bytes};
 const int smithyValueDataProtectionKeyBytes = ${contract.value_format.data_protection_key_bytes};
+const int smithyValueEncryptionNone = ${contract.value_format.encryption_none};
+const int smithyValueEncryptionCompact = ${contract.value_format.encryption_compact};
+const int smithyValueEncryptionRobust = ${contract.value_format.encryption_robust};
 const String smithyProtocolAlpn = ${JSON.stringify(contract.v1.alpn)};
 const int smithyDefaultMaxInFlight = ${defaults.max_in_flight};
+const String smithyDefaultServerName = ${JSON.stringify(defaults.server_name)};
 const int smithyDefaultConnectTimeoutMilliseconds = ${defaults.connect_timeout_milliseconds};
 const int smithyDefaultRequestTimeoutMilliseconds = ${defaults.request_timeout_milliseconds};
 const int smithyDefaultRetryMaxAttempts = ${defaults.retry_max_attempts};
 const int smithyDefaultZstandardLevel = ${defaults.zstandard_level};
 const int smithyDefaultZstandardMinimumInputBytes = ${defaults.zstandard_minimum_input_bytes};
 const int smithyDefaultZstandardMinimumSavingsBytes = ${defaults.zstandard_minimum_savings_bytes};
+const int smithyDefaultZstandardLevelMin = ${defaults.zstandard_level_min};
+const int smithyDefaultZstandardLevelMax = ${defaults.zstandard_level_max};
+const String smithyClientCertificatePemType = ${JSON.stringify(defaults.certificate_pem_type)};
+const int smithyClientMinimumPositiveValue = ${defaults.minimum_positive_value};
 const int smithyFfiAbiVersion = ${ffi.abi_version};
 
 ${entries("smithy_opcode", contract.opcodes)}
@@ -2480,6 +2559,7 @@ SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
 SMITHY_MUTATION_ID_BYTES = ${defaults.mutation_id_bytes}
+SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${defaults.max_previous_data_protection_keys}
 SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}
 SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}
 SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts}
@@ -2737,6 +2817,7 @@ public enum Smithy_Value_Format: Sendable {
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
   public static let defaultMaxInFlight: Int = ${contract.client_defaults.max_in_flight}
   public static let mutationIdBytes: Int = ${contract.client_defaults.mutation_id_bytes}
+  public static let maxPreviousDataProtectionKeys: Int = ${contract.client_defaults.max_previous_data_protection_keys}
   public static let defaultConnectTimeoutMilliseconds: Int = ${contract.client_defaults.connect_timeout_milliseconds}
   public static let defaultRequestTimeoutMilliseconds: Int = ${contract.client_defaults.request_timeout_milliseconds}
   public static let defaultRetryMaxAttempts: Int = ${contract.client_defaults.retry_max_attempts}

@@ -75,7 +75,7 @@ internal static class NativeMethods
         internal byte Ambiguous;
         internal byte MutationIdLength;
         internal byte Reserved;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = Protocol.MutationIdBytes)]
         internal byte[]? MutationId;
     }
 
@@ -102,18 +102,6 @@ internal static class NativeMethods
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr openkache_client_connect_with_options(
         ref ConnectOptions options);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_execute_raw(
-        IntPtr client,
-        uint operation,
-        IntPtr itemId,
-        nuint itemIdLength,
-        IntPtr value,
-        nuint valueLength,
-        uint setCondition,
-        byte ttlEnabled,
-        ulong ttlMilliseconds);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr openkache_client_execute_raw_with_request_id(
@@ -423,15 +411,7 @@ internal sealed class NativeClient : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            var handle = AcquireHandle();
-            try
-            {
-                NativeMethods.openkache_client_cancel(handle, requestId);
-            }
-            finally
-            {
-                ReleaseCall();
-            }
+            TryCancel(requestId);
             throw;
         }
     }
@@ -636,6 +616,30 @@ internal sealed class NativeClient : IAsyncDisposable
 
             _activeCalls += 1;
             return _handle;
+        }
+    }
+
+    private bool TryCancel(ulong requestId)
+    {
+        IntPtr handle;
+        lock (_gate)
+        {
+            if (_closed || _handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            _activeCalls += 1;
+            handle = _handle;
+        }
+
+        try
+        {
+            return NativeMethods.openkache_client_cancel(handle, requestId) != 0;
+        }
+        finally
+        {
+            ReleaseCall();
         }
     }
 

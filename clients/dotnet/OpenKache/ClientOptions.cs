@@ -14,7 +14,7 @@ public sealed class ClientOptions
     public byte[] DataProtectionKey { get; init; } = new byte[Protocol.ValueFormatDataProtectionKeyBytes];
 
     /// <summary>
-    /// Active key and up to eight retired keys used for read/delete rotation.
+    /// Active key and a bounded retired-key window used for read/delete rotation.
     /// </summary>
     public DataProtectionKeyRing? KeyRing { get; init; }
 
@@ -91,15 +91,17 @@ public sealed class DataProtectionKeyRing
     /// <summary>Key used for new writes.</summary>
     public required byte[] Active { get; init; }
 
-    /// <summary>Newest retired key first; at most eight are retained.</summary>
+    /// <summary>Newest retired key first; the Smithy contract bounds the window.</summary>
     public IReadOnlyList<byte[]> Previous { get; init; } = Array.Empty<byte[]>();
 
     internal void Validate()
     {
         ValidateKey(Active, nameof(Active));
-        if (Previous.Count > 8)
+        if (Previous.Count > Protocol.MaxPreviousDataProtectionKeys)
         {
-            throw new ArgumentException("At most eight previous keys may be retained.", nameof(Previous));
+            throw new ArgumentException(
+                $"At most {Protocol.MaxPreviousDataProtectionKeys} previous keys may be retained.",
+                nameof(Previous));
         }
         for (var index = 0; index < Previous.Count; index++)
         {

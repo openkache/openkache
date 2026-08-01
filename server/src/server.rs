@@ -914,6 +914,49 @@ async fn serve_connection<C: TransportConnection>(
     while streams.next().await.is_some() {}
 }
 
+struct PendingMutationGuard {
+    mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
+    mutation_id: openkache_protocol::MutationId,
+    fingerprint: [u8; 32],
+    armed: bool,
+}
+
+impl PendingMutationGuard {
+    fn new(
+        mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
+        mutation_id: openkache_protocol::MutationId,
+        fingerprint: [u8; 32],
+    ) -> Self {
+        Self {
+            mutation_dedupe,
+            mutation_id,
+            fingerprint,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingMutationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self
+            .mutation_dedupe
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_pending(
+                self.mutation_id,
+                self.fingerprint,
+                std::time::Instant::now(),
+            );
+    }
+}
+
 /// Reuses one QUIC stream as a sequential request lane until either peer closes it.
 #[allow(clippy::too_many_arguments)]
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
@@ -971,6 +1014,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let should_record = decision
                     .as_ref()
                     .is_some_and(|decision| matches!(decision, MutationDecision::New));
+                let mut reservation_guard = match (mutation_id, should_record) {
+                    (Some(mutation_id), true) => Some(PendingMutationGuard::new(
+                        Arc::clone(&mutation_dedupe),
+                        mutation_id,
+                        fingerprint,
+                    )),
+                    _ => None,
+                };
                 let response_permit = if request.opcode == Opcode::Get {
                     match request_budget
                         .acquire(max_item_bytes, request_timeout)
@@ -1043,6 +1094,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             response.payload.clone(),
                             std::time::Instant::now(),
                         );
+                    if let Some(guard) = reservation_guard.as_mut() {
+                        guard.disarm();
+                    }
                 }
                 (response, response_permit)
             }

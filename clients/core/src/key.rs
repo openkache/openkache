@@ -13,7 +13,7 @@ pub(crate) const PROTECTION_KEY_BYTES: usize =
 /// Bytes in an application-managed data protection key.
 pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Maximum number of retired keys retained for a rotation window.
-pub const MAX_PREVIOUS_DATA_PROTECTION_KEYS: usize = 8;
+pub use crate::contract::MAX_PREVIOUS_DATA_PROTECTION_KEYS;
 
 pub(crate) fn random_mutation_id() -> Result<MutationId> {
     let mut bytes = [0; openkache_protocol::MUTATION_ID_BYTES];
@@ -131,7 +131,7 @@ impl DataProtectionKeyRing {
         }
     }
 
-    /// Creates a ring from an active key and up to eight previous keys.
+    /// Creates a ring from an active key and the bounded previous-key window.
     pub fn with_previous(
         active: DataProtectionKey,
         previous: impl IntoIterator<Item = DataProtectionKey>,

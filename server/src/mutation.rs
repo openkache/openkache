@@ -136,6 +136,30 @@ impl MutationDedupeStore {
         );
     }
 
+    /// Releases an in-flight reservation when request execution is abandoned.
+    ///
+    /// Completed replay entries are never removed by this method. The
+    /// fingerprint check also prevents a stale guard from deleting a newer
+    /// reservation after the token's TTL has elapsed.
+    pub fn release_pending(
+        &mut self,
+        mutation_id: MutationId,
+        fingerprint: [u8; 32],
+        now: Instant,
+    ) -> bool {
+        self.purge(now);
+        let is_pending = self
+            .entries
+            .get(&mutation_id)
+            .is_some_and(|entry| entry.fingerprint == fingerprint && entry.result.is_none());
+        if !is_pending {
+            return false;
+        }
+        self.entries.remove(&mutation_id);
+        self.order.retain(|candidate| candidate != &mutation_id);
+        true
+    }
+
     /// Returns the configured capacity.
     #[allow(dead_code)]
     pub const fn capacity(&self) -> usize {

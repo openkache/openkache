@@ -21,21 +21,8 @@ typedef void *openkache_go_library_handle;
 #endif
 
 typedef uint32_t (*openkache_go_abi_fn)(void);
-typedef openkache_client_result *(*openkache_go_connect_fn)(
-    const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint8_t, int32_t, size_t, size_t, uint64_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
-    const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    uint8_t, int32_t, size_t, size_t, uint32_t, size_t, size_t, uint64_t, uint64_t);
 typedef openkache_client_result *(*openkache_go_connect_options_fn)(
     const openkache_client_connect_options_t *);
-typedef openkache_client_result *(*openkache_go_execute_fn)(
-    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_execute_raw_fn)(
-    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
 typedef openkache_client_result *(*openkache_go_execute_request_fn)(
     const openkache_client_handle *, uint64_t, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
@@ -61,11 +48,7 @@ typedef void (*openkache_go_client_free_fn)(openkache_client_handle *);
 typedef struct openkache_go_library {
     openkache_go_library_handle handle;
     openkache_go_abi_fn abi;
-    openkache_go_connect_fn connect;
-    openkache_go_connect_ex_fn connect_ex;
     openkache_go_connect_options_fn connect_options;
-    openkache_go_execute_fn execute;
-    openkache_go_execute_raw_fn execute_raw;
     openkache_go_execute_request_fn execute_request;
     openkache_go_execute_request_fn execute_raw_request;
     openkache_go_execute_mutation_fn execute_mutation;
@@ -171,11 +154,7 @@ openkache_go_library *openkache_go_library_load(
     openkache_go_assign(&library->field, sizeof(library->field), \
                         openkache_go_symbol(handle, symbol_name))
     OPENKACHE_GO_LOAD(abi, "openkache_client_abi_version");
-    OPENKACHE_GO_LOAD(connect, "openkache_client_connect");
-    OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
     OPENKACHE_GO_LOAD(connect_options, "openkache_client_connect_with_options");
-    OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
-    OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
     OPENKACHE_GO_LOAD(execute_request, "openkache_client_execute_with_request_id");
     OPENKACHE_GO_LOAD(execute_raw_request, "openkache_client_execute_raw_with_request_id");
     OPENKACHE_GO_LOAD(execute_mutation,
@@ -194,7 +173,8 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(client_free, "openkache_client_free");
 #undef OPENKACHE_GO_LOAD
 
-    if (library->abi == NULL || library->connect == NULL || library->execute == NULL ||
+    if (library->abi == NULL || library->connect_options == NULL ||
+        library->execute_request == NULL || library->execute_raw_request == NULL ||
         library->result_kind == NULL || library->result_data == NULL ||
         library->result_data_length == NULL || library->result_take_client == NULL ||
         library->result_free == NULL || library->client_free == NULL) {
@@ -218,18 +198,6 @@ void openkache_go_library_free(openkache_go_library *library) {
     free(library);
 }
 
-int openkache_go_has_connect_ex(const openkache_go_library *library) {
-    return library != NULL && library->connect_ex != NULL;
-}
-
-int openkache_go_has_connect_options(const openkache_go_library *library) {
-    return library != NULL && library->connect_options != NULL;
-}
-
-int openkache_go_has_execute_raw(const openkache_go_library *library) {
-    return library != NULL && library->execute_raw != NULL;
-}
-
 uint32_t openkache_go_connection_state(
     const openkache_go_library *library,
     const openkache_client_handle *client
@@ -240,76 +208,12 @@ uint32_t openkache_go_connection_state(
     return library->connection_state(client);
 }
 
-openkache_client_result *openkache_go_connect(
-    const openkache_go_library *library,
-    const uint8_t *address, size_t address_length,
-    const uint8_t *server_name, size_t server_name_length,
-    const uint8_t *certificate, size_t certificate_length,
-    const uint8_t *identity_certificate_chain, size_t identity_certificate_chain_length,
-    const uint8_t *identity_private_key, size_t identity_private_key_length,
-    const uint8_t *data_protection_key, size_t data_protection_key_length,
-    uint8_t compression_enabled, int32_t compression_level,
-    size_t minimum_input_size, size_t minimum_savings,
-    uint32_t encryption,
-    size_t retry_max_attempts, size_t max_in_flight,
-    uint64_t connect_timeout_ms, uint64_t request_timeout_ms,
-    uint8_t use_extended
-) {
-    if (library == NULL) return NULL;
-    if (use_extended != 0) {
-        if (library->connect_ex == NULL) return NULL;
-        return library->connect_ex(
-            address, address_length, server_name, server_name_length,
-            certificate, certificate_length, identity_certificate_chain,
-            identity_certificate_chain_length, identity_private_key,
-            identity_private_key_length, data_protection_key,
-            data_protection_key_length, compression_enabled, compression_level,
-            minimum_input_size, minimum_savings, encryption,
-            retry_max_attempts, max_in_flight, connect_timeout_ms,
-            request_timeout_ms);
-    }
-    return library->connect(
-        address, address_length, server_name, server_name_length,
-        certificate, certificate_length, data_protection_key,
-        data_protection_key_length, compression_enabled, compression_level,
-        minimum_input_size, minimum_savings, connect_timeout_ms,
-        request_timeout_ms);
-}
-
 openkache_client_result *openkache_go_connect_options(
     const openkache_go_library *library,
     const openkache_client_connect_options_t *options
 ) {
     if (library == NULL || library->connect_options == NULL) return NULL;
     return library->connect_options(options);
-}
-
-openkache_client_result *openkache_go_execute(
-    const openkache_go_library *library,
-    const openkache_client_handle *client,
-    uint32_t operation,
-    const uint8_t *application_key, size_t application_key_length,
-    const uint8_t *value, size_t value_length,
-    uint32_t set_condition, uint8_t ttl_enabled, uint64_t ttl_ms
-) {
-    if (library == NULL || library->execute == NULL) return NULL;
-    return library->execute(
-        client, operation, application_key, application_key_length, value,
-        value_length, set_condition, ttl_enabled, ttl_ms);
-}
-
-openkache_client_result *openkache_go_execute_raw(
-    const openkache_go_library *library,
-    const openkache_client_handle *client,
-    uint32_t operation,
-    const uint8_t *item_id, size_t item_id_length,
-    const uint8_t *value, size_t value_length,
-    uint32_t set_condition, uint8_t ttl_enabled, uint64_t ttl_ms
-) {
-    if (library == NULL || library->execute_raw == NULL) return NULL;
-    return library->execute_raw(
-        client, operation, item_id, item_id_length, value, value_length,
-        set_condition, ttl_enabled, ttl_ms);
 }
 
 openkache_client_result *openkache_go_execute_request(
@@ -438,7 +342,6 @@ type nativeLibrary struct {
 type nativeHandle struct {
 	library *nativeLibrary
 	client  *C.openkache_client_handle
-	raw     bool
 
 	mu            sync.Mutex
 	cond          *sync.Cond
@@ -501,83 +404,40 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	if minimumSavings == 0 {
 		minimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 	}
-	hasExtended := C.openkache_go_has_connect_ex(library) != 0
-	hasOptions := C.openkache_go_has_connect_options(library) != 0
-	useExtended := hasExtended
-	if !hasOptions && !hasExtended &&
-		(len(options.identityCertificate) != 0 ||
-			len(options.identityPrivateKey) != 0 ||
-			options.encryption != EncryptionRobust ||
-			options.retryAttempts != SmithyDefaultRetryMaxAttempts ||
-			options.maxInFlight != SmithyDefaultMaxInFlight ||
-			len(options.previousKeys) != 0) {
-		C.free(address)
-		C.free(serverName)
-		C.free(certificate)
-		C.free(identityCertificate)
-		C.free(identityPrivateKey)
-		C.free(dataProtectionKey)
-		C.free(previousKeys)
-		C.openkache_go_library_free(library)
-		return nil, &Error{
-			Operation: "connect",
-			Message:   "native library does not support the requested extended options",
-		}
-	}
-
 	type connectReply struct {
 		handle *nativeHandle
 		err    error
 	}
 	reply := make(chan connectReply)
 	go func() {
-		var result *C.openkache_client_result
-		if hasOptions {
-			connectOptions := C.openkache_client_connect_options_t{
-				address:                              (*C.uint8_t)(address),
-				address_length:                       C.size_t(len(options.address)),
-				server_name:                          (*C.uint8_t)(serverName),
-				server_name_length:                   C.size_t(len(options.serverName)),
-				certificate:                          (*C.uint8_t)(certificate),
-				certificate_length:                   C.size_t(len(options.certificate)),
-				client_certificate_chain:             (*C.uint8_t)(identityCertificate),
-				client_certificate_chain_length:      C.size_t(len(options.identityCertificate)),
-				client_private_key:                   (*C.uint8_t)(identityPrivateKey),
-				client_private_key_length:            C.size_t(len(options.identityPrivateKey)),
-				data_protection_key:                  (*C.uint8_t)(dataProtectionKey),
-				data_protection_key_length:           C.size_t(len(options.dataProtectionKey)),
-				previous_data_protection_keys:        (*C.uint8_t)(previousKeys),
-				previous_data_protection_keys_length: C.size_t(len(options.previousKeys)),
-				previous_data_protection_key_count: C.size_t(
-					len(options.previousKeys) / SmithyDataProtectionKeyBytes),
-				compression_enabled: C.uint8_t(boolByte(options.compression.Enabled)),
-				compression_level:   C.int32_t(compressionLevel),
-				minimum_input_size:  C.size_t(minimumInputSize),
-				minimum_savings:     C.size_t(minimumSavings),
-				encryption:          C.uint32_t(options.encryption),
-				connect_timeout_ms:  C.uint64_t(connectTimeout),
-				request_timeout_ms:  C.uint64_t(requestTimeout),
-				retry_max_attempts:  C.size_t(options.retryAttempts),
-				max_in_flight:       C.size_t(options.maxInFlight),
-			}
-			result = C.openkache_go_connect_options(library, &connectOptions)
-		} else {
-			result = C.openkache_go_connect(
-				library,
-				(*C.uint8_t)(address), C.size_t(len(options.address)),
-				(*C.uint8_t)(serverName), C.size_t(len(options.serverName)),
-				(*C.uint8_t)(certificate), C.size_t(len(options.certificate)),
-				(*C.uint8_t)(identityCertificate), C.size_t(len(options.identityCertificate)),
-				(*C.uint8_t)(identityPrivateKey), C.size_t(len(options.identityPrivateKey)),
-				(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
-				C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
-				C.size_t(minimumInputSize), C.size_t(minimumSavings),
-				C.uint32_t(options.encryption),
-				C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
-				C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
-				C.uint8_t(boolByte(useExtended)),
-			)
+		connectOptions := C.openkache_client_connect_options_t{
+			address:                              (*C.uint8_t)(address),
+			address_length:                       C.size_t(len(options.address)),
+			server_name:                          (*C.uint8_t)(serverName),
+			server_name_length:                   C.size_t(len(options.serverName)),
+			certificate:                          (*C.uint8_t)(certificate),
+			certificate_length:                   C.size_t(len(options.certificate)),
+			client_certificate_chain:             (*C.uint8_t)(identityCertificate),
+			client_certificate_chain_length:      C.size_t(len(options.identityCertificate)),
+			client_private_key:                   (*C.uint8_t)(identityPrivateKey),
+			client_private_key_length:            C.size_t(len(options.identityPrivateKey)),
+			data_protection_key:                  (*C.uint8_t)(dataProtectionKey),
+			data_protection_key_length:           C.size_t(len(options.dataProtectionKey)),
+			previous_data_protection_keys:        (*C.uint8_t)(previousKeys),
+			previous_data_protection_keys_length: C.size_t(len(options.previousKeys)),
+			previous_data_protection_key_count: C.size_t(
+				len(options.previousKeys) / SmithyDataProtectionKeyBytes),
+			compression_enabled: C.uint8_t(boolByte(options.compression.Enabled)),
+			compression_level:   C.int32_t(compressionLevel),
+			minimum_input_size:  C.size_t(minimumInputSize),
+			minimum_savings:     C.size_t(minimumSavings),
+			encryption:          C.uint32_t(options.encryption),
+			connect_timeout_ms:  C.uint64_t(connectTimeout),
+			request_timeout_ms:  C.uint64_t(requestTimeout),
+			retry_max_attempts:  C.size_t(options.retryAttempts),
+			max_in_flight:       C.size_t(options.maxInFlight),
 		}
+		result := C.openkache_go_connect_options(library, &connectOptions)
 		C.free(address)
 		C.free(serverName)
 		C.free(certificate)
@@ -641,7 +501,6 @@ func decodeConnectResult(
 	handle := &nativeHandle{
 		library: library,
 		client:  client,
-		raw:     C.openkache_go_has_execute_raw(library.ptr) != 0,
 	}
 	handle.cond = sync.NewCond(&handle.mu)
 	return handle, nil
@@ -663,12 +522,6 @@ func (h *nativeHandle) executeRaw(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
-	if !h.raw {
-		return nativeResult{}, &Error{
-			Operation: "execute raw",
-			Message:   "native library does not support exact-item-ID operations",
-		}
-	}
 	return h.executeNative(ctx, operation, itemID[:], value, options, true)
 }
 
@@ -742,11 +595,11 @@ func (h *nativeHandle) executeNative(
 		return result, nil
 	case <-ctx.Done():
 		C.openkache_go_cancel(h.library.ptr, client, C.uint64_t(requestID))
-		return nativeResult{}, contextNativeError(operation, ctx.Err())
+		return nativeResult{}, contextNativeError(operation, ctx.Err(), options.MutationID)
 	}
 }
 
-func contextNativeError(operation uint32, cause error) *Error {
+func contextNativeError(operation uint32, cause error, mutationID *MutationID) *Error {
 	code := uint32(SmithyFFIErrorCancelled)
 	message := "client operation canceled"
 	retryable := false
@@ -755,28 +608,32 @@ func contextNativeError(operation uint32, cause error) *Error {
 		message = "client operation timed out"
 		retryable = true
 	}
+	var mutationBytes []byte
+	ambiguous := false
+	if mutationID != nil {
+		// A caller-visible mutation token makes an interrupted mutation safe to
+		// retry, but the request may already have reached the server.
+		mutationBytes = append([]byte(nil), mutationID[:]...)
+		ambiguous = true
+		retryable = true
+	}
 	return &Error{
 		Message: message,
 		Cause:   cause,
 		Metadata: &ErrorMetadata{
-			Code:      code,
-			Operation: contextOperationCode(operation),
-			Retryable: retryable,
+			Code:       code,
+			Operation:  contextOperationCode(operation),
+			Retryable:  retryable,
+			Ambiguous:  ambiguous,
+			MutationID: mutationBytes,
 		},
 	}
 }
 
 func contextOperationCode(operation uint32) uint32 {
-	switch operation {
-	case SmithyFFIOperationGetJson:
-		return SmithyOpcodeGet
-	case SmithyFFIOperationSetJson:
-		return SmithyOpcodeSet
-	case SmithyFFIOperationReconnect:
-		return 102 // Core operation code for a replacement connection.
-	default:
-		return operation
-	}
+	// Metadata operation IDs are caller-facing FFI operations. Keep adapter
+	// operations such as GET_JSON and RECONNECT distinct from wire opcodes.
+	return operation
 }
 
 func (h *nativeHandle) state() uint32 {
