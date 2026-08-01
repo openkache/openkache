@@ -587,7 +587,7 @@ impl NativeClient {
     fn allocate_request_id(&self) -> u64 {
         let request_id = self
             .next_request_id
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
                 let current = (1..=MAX_SAFE_REQUEST_ID)
                     .contains(&current)
                     .then_some(current)
