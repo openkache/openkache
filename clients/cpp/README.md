@@ -24,8 +24,7 @@ cmake --build target/build
 
 For a shared build, use
 `-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
-The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
-single-library builds. If Bun or the Smithy CLI is not available, pass a
+If Bun or the Smithy CLI is not available, pass a
 previously generated header with
 `-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
 
@@ -48,11 +47,12 @@ Rust/C core is the native binary.
 
 Construct `openkache::Connect_Options` with the server address and 32-byte
 data-protection key, then call `openkache::Client::connect`. A DER/PEM trust
-certificate is optional; an empty buffer uses system roots. `get` returns
-`std::optional<Bytes>`, `set` returns `Set_Outcome`, and `remove` reports
-whether a value existed. `get_raw`, `set_raw`, and `remove_raw` expose exact
-32-byte item-ID operations without value protection. Transport and validation
-failures throw `openkache::Error`.
+certificate is optional; an empty buffer uses system roots. `get_json` and
+`set_json` exchange the canonical JSON representation, while `get` and `set`
+retain the protected byte API for callers that need opaque application values.
+`get_raw`, `set_raw`, and `remove_raw` expose exact 32-byte item-ID operations
+without value protection. Transport and validation failures throw
+`openkache::Error`.
 
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in

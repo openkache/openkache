@@ -6,9 +6,10 @@ core's C ABI.
 ## Purpose
 
 The package provides binary-safe cache operations over one authenticated QUIC
-connection owned by the shared core. It accepts exact 32-byte item IDs and
-plaintext values; framing, TLS, retries, stream lanes, and protocol validation
-remain in `clients/core`.
+connection owned by the shared core. Exact item-ID methods expose opaque Raw
+bytes, while application-key methods expose protected Raw and canonical JSON
+values; framing, TLS, retries, stream lanes, and protocol validation remain in
+`clients/core`.
 
 The [client status table](../README.md#sdk-status) describes this package's
 implementation and migration status.
@@ -46,11 +47,16 @@ using Smithy = OpenKache.Smithy;
 
 var certificate = await File.ReadAllBytesAsync(
     "target/openkache-local/certificate.local.der");
+var dataProtectionKey = Convert.FromBase64String(
+    Environment.GetEnvironmentVariable("OPENKACHE_DATA_PROTECTION_KEY")
+        ?? throw new InvalidOperationException(
+            "OPENKACHE_DATA_PROTECTION_KEY must contain the persistent key"));
 await using var client = await Client.ConnectAsync(
     "127.0.0.1",
     4433,
     "localhost",
-    certificate);
+    certificate,
+    new ClientOptions { DataProtectionKey = dataProtectionKey });
 
 await client.PingAsync();
 var itemId = new byte[32];
@@ -64,6 +70,10 @@ var outcome = await client.SetAsync(
         TimeToLive = TimeSpan.FromMinutes(5),
     });
 var value = await client.GetAsync(itemId);
+await client.SetJsonAsync(
+    "profile"u8.ToArray(),
+    """{"name":"Kim","visits":42}""");
+var profile = await client.GetJsonAsync("profile"u8.ToArray());
 var statisticsJson = await client.StatsAsync();
 await client.SyncAsync();
 var deleted = await client.DeleteAsync(itemId);
@@ -72,7 +82,9 @@ var deleted = await client.DeleteAsync(itemId);
 `SetAsync` returns `NotStored` when a condition fails and `Created` or
 `Replaced` after a write. `GetAsync` returns `null` for a missing item ID.
 `DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation
-requires exactly 32 bytes and sends them unchanged.
+requires exactly 32 bytes and sends them unchanged. `GetRawAsync`, `SetRawAsync`,
+`GetJsonAsync`, and `SetJsonAsync` derive protected values from non-empty
+application keys through the shared core.
 
 ## Protocol and configuration
 
@@ -81,8 +93,8 @@ contract is defined by [`protocol/SPEC.md`](../../protocol/SPEC.md).
 
 `ClientOptions` controls connection and request deadlines plus maximum reusable
 request lanes. Defaults come from the Smithy client-defaults contract: 5
-seconds, 2 seconds, and 256 lanes. `OperationTimeout` remains as a legacy
-compatibility alias for callers that need one deadline for both phases.
+seconds, 2 seconds, and 256 lanes. `KeyRing` accepts an active key plus up to
+eight retired keys for non-disruptive rotation.
 
 The generated Smithy operation, input, output, and enum types under
 `OpenKache.Smithy` are the canonical .NET API types. The
@@ -91,8 +103,6 @@ aliases for earlier callers, and their values have those generated types.
 `SetOptions.Condition` and `SetAsync` return types use the generated shapes
 directly.
 
-The package reads and writes plaintext values. It does not implement the
-[shared formatted value contract](../VALUE_FORMAT.md).
-
-The client exposes the raw Smithy API. Protected value handling remains in the
-shared Rust core and is not part of this package.
+All value protection and canonical JSON processing remains in the shared Rust
+core; the package does not duplicate the [shared formatted value
+contract](../VALUE_FORMAT.md).

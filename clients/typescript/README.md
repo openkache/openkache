@@ -28,9 +28,9 @@ bun run pack:check
 ```
 
 `build` requires Smithy CLI on `PATH` and generates the service API plus the
-cross-language value-format layout, identifiers, cryptographic metadata, and
-legacy envelope limits before compiling ignored JavaScript and declaration
-files under `dist/`. The generated values are not committed.
+cross-language value-format layout, identifiers, and cryptographic metadata
+before compiling ignored JavaScript and declaration files under `dist/`. The
+generated values are not committed.
 `pack:check` cross-compiles the Rust Node-API adapter and previews the complete
 npm package. Generated output is not committed.
 
@@ -74,14 +74,13 @@ await client.close()
 ```
 
 `set` accepts nested objects, dense arrays, strings, finite numbers, booleans,
-and null through the backwards-compatible TypeScript metadata envelope. Its
-optional generic parameter documents the expected result shape. Object
-properties whose value is `undefined` are omitted.
+and null through the shared canonical JSON value format. Its optional generic
+parameter documents the expected result shape. Object properties whose value
+is `undefined` are omitted.
 
-Use `set_json` and `get_json` for the cross-language value API. These methods
-delegate JSON conversion, canonical RFC 8785 serialization, compression, and
-authenticated encryption to the shared Rust core, so values written by the
-Rust client can be read without a TypeScript-specific envelope:
+The JSON methods delegate parsing, canonical RFC 8785 serialization,
+compression, and authenticated encryption to the shared Rust core, so values
+written by any language client can be read by this client:
 
 ```typescript
 await client.set_json("shared", { z: 1, a: ["core", true] })
@@ -100,13 +99,9 @@ Big integers should use an application-defined decimal string representation.
 Binary object fields should use an application-defined textual representation,
 such as Base64.
 
-Custom `Value_Codec` implementations can register Protobuf, FlatBuffers, or
-application formats. The codec registry is a package API, not the shared
-value-format registry. The
-[client status table](../README.md#sdk-status) tracks format migration.
-
-The runtime-neutral codec layer is available from
-`@openkache/client/value-codec`.
+Applications that already own a binary or independently serialized format
+should use `set_raw` and `get_raw`; those methods preserve exact bytes and do
+not add a package-specific envelope.
 
 ## Configuration
 
@@ -125,12 +120,13 @@ The runtime-neutral codec layer is available from
 - `max_in_flight` bounds concurrent request lanes on one connection.
 - `encryption` selects the shared core's `compact` or recommended `robust`
   authenticated-encryption profile.
-- `value_codecs` registers current package codecs.
+- `key_ring` optionally supplies an active key and up to eight previous keys
+  for read/delete rotation.
 - `native_path` overrides Node-API adapter discovery for custom packaging.
 
 Generate the data-protection key once with a cryptographically secure random
-source and store it as a secret. Rotating it makes existing protected entries
-unreachable.
+source and store it as a secret. A key ring lets new writes use the active key
+while previous keys remain readable and deletable during rotation.
 
 ## Runtime and lifecycle
 
@@ -139,8 +135,7 @@ Deno's Node compatibility layer with `--allow-ffi`. Release packages support
 Linux x64 and ARM64 (glibc 2.17 or newer) plus Apple Silicon macOS.
 
 The browser cannot load the native adapter or open the UDP-based QUIC
-transport. The `value-codec` subpath is runtime-neutral, but the client
-connection API is not a browser transport.
+transport.
 
 Every connection and cache method returns a Promise. The adapter runs native
 networking outside the JavaScript event loop and maintains one reusable

@@ -7,12 +7,21 @@ using System.Text;
 
 namespace OpenKache;
 
-internal readonly record struct NativeResult(uint Kind, byte[] Payload, IntPtr Client);
+internal readonly record struct NativeResult(
+    uint Kind,
+    byte[] Payload,
+    IntPtr Client,
+    ErrorMetadata? Metadata = null);
 
 internal sealed class NativeException : Exception
 {
-    internal NativeException(string message)
-        : base(message) {}
+    internal NativeException(string message, ErrorMetadata? metadata = null)
+        : base(message)
+    {
+        Metadata = metadata;
+    }
+
+    internal ErrorMetadata? Metadata { get; }
 }
 
 internal static class NativeMethods
@@ -41,6 +50,9 @@ internal static class NativeMethods
         internal nuint ClientPrivateKeyLength;
         internal IntPtr DataProtectionKey;
         internal nuint DataProtectionKeyLength;
+        internal IntPtr PreviousDataProtectionKeys;
+        internal nuint PreviousDataProtectionKeysLength;
+        internal nuint PreviousDataProtectionKeyCount;
         internal byte CompressionEnabled;
         internal int CompressionLevel;
         internal nuint MinimumInputSize;
@@ -52,6 +64,37 @@ internal static class NativeMethods
         internal nuint MaxInFlight;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NativeErrorMetadata
+    {
+        internal uint Code;
+        internal uint Operation;
+        internal uint Phase;
+        internal uint Backend;
+        internal byte Retryable;
+        internal byte Ambiguous;
+        internal byte MutationIdLength;
+        internal byte Reserved;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = Protocol.MutationIdBytes)]
+        internal byte[]? MutationId;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MetricsSnapshot
+    {
+        internal ulong Requests;
+        internal ulong Hits;
+        internal ulong Misses;
+        internal ulong Retries;
+        internal ulong Reconnects;
+        internal ulong Cancellations;
+        internal ulong TransportErrors;
+        internal ulong ProtocolErrors;
+        internal ulong BytesSent;
+        internal ulong BytesReceived;
+        internal ulong ActiveLanes;
+    }
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.U4)]
     internal static extern uint openkache_client_abi_version();
@@ -61,8 +104,9 @@ internal static class NativeMethods
         ref ConnectOptions options);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_execute_raw(
+    internal static extern IntPtr openkache_client_execute_raw_with_request_id(
         IntPtr client,
+        ulong requestId,
         uint operation,
         IntPtr itemId,
         nuint itemIdLength,
@@ -71,6 +115,49 @@ internal static class NativeMethods
         uint setCondition,
         byte ttlEnabled,
         ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_execute_with_request_id(
+        IntPtr client,
+        ulong requestId,
+        uint operation,
+        IntPtr applicationKey,
+        nuint applicationKeyLength,
+        IntPtr value,
+        nuint valueLength,
+        uint setCondition,
+        byte ttlEnabled,
+        ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_execute_with_request_id_and_mutation_id(
+        IntPtr client,
+        ulong requestId,
+        uint operation,
+        IntPtr applicationKey,
+        nuint applicationKeyLength,
+        IntPtr value,
+        nuint valueLength,
+        uint setCondition,
+        byte ttlEnabled,
+        ulong ttlMilliseconds,
+        IntPtr mutationId,
+        nuint mutationIdLength);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_execute_raw_with_request_id_and_mutation_id(
+        IntPtr client,
+        ulong requestId,
+        uint operation,
+        IntPtr itemId,
+        nuint itemIdLength,
+        IntPtr value,
+        nuint valueLength,
+        uint setCondition,
+        byte ttlEnabled,
+        ulong ttlMilliseconds,
+        IntPtr mutationId,
+        nuint mutationIdLength);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern uint openkache_client_connection_state(IntPtr client);
@@ -83,6 +170,22 @@ internal static class NativeMethods
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern nuint openkache_client_result_data_length(IntPtr result);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern byte openkache_client_result_error_metadata(
+        IntPtr result,
+        out NativeErrorMetadata metadata);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern byte openkache_client_cancel(IntPtr client, ulong requestId);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern byte openkache_client_metrics_snapshot(
+        IntPtr client,
+        out MetricsSnapshot snapshot);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr openkache_client_result_take_client(IntPtr result);
@@ -123,10 +226,27 @@ internal static class NativeMethods
 
             if (kind == Protocol.FfiResultError)
             {
+                OpenKache.ErrorMetadata? metadata = null;
+                if (openkache_client_result_error_metadata(result, out var nativeMetadata) != 0)
+                {
+                    metadata = new OpenKache.ErrorMetadata(
+                        nativeMetadata.Code,
+                        nativeMetadata.Operation,
+                        nativeMetadata.Phase,
+                        nativeMetadata.Backend,
+                        nativeMetadata.Retryable != 0,
+                        nativeMetadata.Ambiguous != 0,
+                        nativeMetadata.MutationId is null || nativeMetadata.MutationIdLength == 0
+                            ? null
+                            : nativeMetadata.MutationId[..Math.Min(
+                                nativeMetadata.MutationIdLength,
+                                nativeMetadata.MutationId.Length)]);
+                }
                 throw new NativeException(
                     payload.Length == 0
                         ? "native client operation failed"
-                        : Encoding.UTF8.GetString(payload));
+                        : Encoding.UTF8.GetString(payload),
+                    metadata);
             }
 
             var client = IntPtr.Zero;
@@ -171,6 +291,7 @@ internal static class NativeMethods
 internal sealed class NativeBuffer : IDisposable
 {
     private GCHandle _handle;
+    private byte[]? _copy;
 
     internal NativeBuffer(ReadOnlyMemory<byte> bytes)
     {
@@ -180,6 +301,7 @@ internal sealed class NativeBuffer : IDisposable
         }
 
         var copy = bytes.ToArray();
+        _copy = copy;
         _handle = GCHandle.Alloc(copy, GCHandleType.Pinned);
         Pointer = _handle.AddrOfPinnedObject();
         Length = (nuint)copy.Length;
@@ -193,6 +315,11 @@ internal sealed class NativeBuffer : IDisposable
     {
         if (_handle.IsAllocated)
         {
+            if (_copy is { } copy)
+            {
+                Array.Clear(copy, 0, copy.Length);
+            }
+            _copy = null;
             _handle.Free();
         }
     }
@@ -204,6 +331,7 @@ internal sealed class NativeClient : IAsyncDisposable
     private IntPtr _handle;
     private int _activeCalls;
     private bool _closed;
+    private long _nextRequestId = 1;
 
     private NativeClient(IntPtr handle)
     {
@@ -214,6 +342,8 @@ internal sealed class NativeClient : IAsyncDisposable
         string address,
         string serverName,
         ReadOnlyMemory<byte> certificate,
+        ReadOnlyMemory<byte> dataProtectionKey,
+        IReadOnlyList<ReadOnlyMemory<byte>> previousDataProtectionKeys,
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
         int maximumStreamLanes,
@@ -224,6 +354,8 @@ internal sealed class NativeClient : IAsyncDisposable
                 address,
                 serverName,
                 certificate,
+                dataProtectionKey,
+                previousDataProtectionKeys,
                 connectTimeout,
                 requestTimeout,
                 maximumStreamLanes),
@@ -251,23 +383,50 @@ internal sealed class NativeClient : IAsyncDisposable
 
     internal async ValueTask<NativeResult> ExecuteAsync(
         uint operation,
-        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> key,
         ReadOnlyMemory<byte> value,
         uint setCondition,
         bool ttlEnabled,
         ulong ttlMilliseconds,
+        ReadOnlyMemory<byte> mutationId,
+        bool raw,
         CancellationToken cancellationToken)
     {
+        var requestId = AllocateRequestId();
         var task = Task.Run(
             () => ExecuteNative(
+                requestId,
                 operation,
-                itemId,
+                key,
                 value,
                 setCondition,
                 ttlEnabled,
-                ttlMilliseconds),
+                ttlMilliseconds,
+                mutationId,
+                raw),
             CancellationToken.None);
-        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            TryCancel(requestId);
+            throw;
+        }
+    }
+
+    private ulong AllocateRequestId()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _nextRequestId);
+            var next = current <= 0 || current == long.MaxValue ? 1 : current + 1;
+            if (Interlocked.CompareExchange(ref _nextRequestId, next, current) == current)
+            {
+                return (ulong)(current > 0 ? current : 1);
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -310,10 +469,29 @@ internal sealed class NativeClient : IAsyncDisposable
         }
     }
 
+    internal NativeMethods.MetricsSnapshot Metrics()
+    {
+        var handle = AcquireHandle();
+        try
+        {
+            if (NativeMethods.openkache_client_metrics_snapshot(handle, out var snapshot) == 0)
+            {
+                throw new NativeException("native client did not return metrics");
+            }
+            return snapshot;
+        }
+        finally
+        {
+            ReleaseCall();
+        }
+    }
+
     private static NativeClient ConnectNative(
         string address,
         string serverName,
         ReadOnlyMemory<byte> certificate,
+        ReadOnlyMemory<byte> dataProtectionKey,
+        IReadOnlyList<ReadOnlyMemory<byte>> previousDataProtectionKeys,
         TimeSpan connectTimeout,
         TimeSpan requestTimeout,
         int maximumStreamLanes)
@@ -326,8 +504,12 @@ internal sealed class NativeClient : IAsyncDisposable
         using var addressBuffer = new NativeBuffer(Encoding.UTF8.GetBytes(address));
         using var serverNameBuffer = new NativeBuffer(Encoding.UTF8.GetBytes(serverName));
         using var certificateBuffer = new NativeBuffer(certificate);
-        using var dataProtectionKey = new NativeBuffer(
-            new byte[Protocol.ValueFormatDataProtectionKeyBytes]);
+        using var dataProtectionKeyBuffer = new NativeBuffer(dataProtectionKey);
+        var previousBytes = previousDataProtectionKeys
+            .SelectMany(static key => key.ToArray())
+            .ToArray();
+        using var previousDataProtectionKeysBuffer = new NativeBuffer(previousBytes);
+        Array.Clear(previousBytes, 0, previousBytes.Length);
         var options = new NativeMethods.ConnectOptions
         {
             Address = addressBuffer.Pointer,
@@ -336,8 +518,11 @@ internal sealed class NativeClient : IAsyncDisposable
             ServerNameLength = serverNameBuffer.Length,
             Certificate = certificateBuffer.Pointer,
             CertificateLength = certificateBuffer.Length,
-            DataProtectionKey = dataProtectionKey.Pointer,
-            DataProtectionKeyLength = dataProtectionKey.Length,
+            DataProtectionKey = dataProtectionKeyBuffer.Pointer,
+            DataProtectionKeyLength = dataProtectionKeyBuffer.Length,
+            PreviousDataProtectionKeys = previousDataProtectionKeysBuffer.Pointer,
+            PreviousDataProtectionKeysLength = previousDataProtectionKeysBuffer.Length,
+            PreviousDataProtectionKeyCount = (nuint)previousDataProtectionKeys.Count,
             CompressionEnabled = 0,
             CompressionLevel = Protocol.DefaultZstandardLevel,
             MinimumInputSize = (nuint)Protocol.DefaultZstandardMinimumInputBytes,
@@ -359,28 +544,73 @@ internal sealed class NativeClient : IAsyncDisposable
     }
 
     private NativeResult ExecuteNative(
+        ulong requestId,
         uint operation,
-        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> key,
         ReadOnlyMemory<byte> value,
         uint setCondition,
         bool ttlEnabled,
-        ulong ttlMilliseconds)
+        ulong ttlMilliseconds,
+        ReadOnlyMemory<byte> mutationId,
+        bool raw)
     {
         var handle = AcquireHandle();
         try
         {
-            using var itemIdBuffer = new NativeBuffer(itemId);
+            using var keyBuffer = new NativeBuffer(key);
             using var valueBuffer = new NativeBuffer(value);
-            var result = NativeMethods.openkache_client_execute_raw(
-                handle,
-                operation,
-                itemIdBuffer.Pointer,
-                itemIdBuffer.Length,
-                valueBuffer.Pointer,
-                valueBuffer.Length,
-                setCondition,
-                ttlEnabled ? (byte)1 : (byte)0,
-                ttlMilliseconds);
+            using var mutationBuffer = new NativeBuffer(mutationId);
+            var result = mutationId.IsEmpty
+                ? (raw
+                    ? NativeMethods.openkache_client_execute_raw_with_request_id(
+                        handle,
+                        requestId,
+                        operation,
+                        keyBuffer.Pointer,
+                        keyBuffer.Length,
+                        valueBuffer.Pointer,
+                        valueBuffer.Length,
+                        setCondition,
+                        ttlEnabled ? (byte)1 : (byte)0,
+                        ttlMilliseconds)
+                    : NativeMethods.openkache_client_execute_with_request_id(
+                        handle,
+                        requestId,
+                        operation,
+                        keyBuffer.Pointer,
+                        keyBuffer.Length,
+                        valueBuffer.Pointer,
+                        valueBuffer.Length,
+                        setCondition,
+                        ttlEnabled ? (byte)1 : (byte)0,
+                        ttlMilliseconds))
+                : (raw
+                    ? NativeMethods.openkache_client_execute_raw_with_request_id_and_mutation_id(
+                        handle,
+                        requestId,
+                        operation,
+                        keyBuffer.Pointer,
+                        keyBuffer.Length,
+                        valueBuffer.Pointer,
+                        valueBuffer.Length,
+                        setCondition,
+                        ttlEnabled ? (byte)1 : (byte)0,
+                        ttlMilliseconds,
+                        mutationBuffer.Pointer,
+                        mutationBuffer.Length)
+                    : NativeMethods.openkache_client_execute_with_request_id_and_mutation_id(
+                        handle,
+                        requestId,
+                        operation,
+                        keyBuffer.Pointer,
+                        keyBuffer.Length,
+                        valueBuffer.Pointer,
+                        valueBuffer.Length,
+                        setCondition,
+                        ttlEnabled ? (byte)1 : (byte)0,
+                        ttlMilliseconds,
+                        mutationBuffer.Pointer,
+                        mutationBuffer.Length));
             return NativeMethods.ReadResult(result);
         }
         finally
@@ -400,6 +630,30 @@ internal sealed class NativeClient : IAsyncDisposable
 
             _activeCalls += 1;
             return _handle;
+        }
+    }
+
+    private bool TryCancel(ulong requestId)
+    {
+        IntPtr handle;
+        lock (_gate)
+        {
+            if (_closed || _handle == IntPtr.Zero)
+            {
+                return false;
+            }
+
+            _activeCalls += 1;
+            handle = _handle;
+        }
+
+        try
+        {
+            return NativeMethods.openkache_client_cancel(handle, requestId) != 0;
+        }
+        finally
+        {
+            ReleaseCall();
         }
     }
 

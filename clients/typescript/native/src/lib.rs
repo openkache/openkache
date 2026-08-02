@@ -1,19 +1,34 @@
 //! Node-API adapter for the OpenKache client on Node.js, Bun, and Deno.
 
+use std::collections::{HashMap, VecDeque, hash_map::Entry};
+use std::future::Future;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use futures_util::future::{AbortHandle, Abortable};
 use napi::bindgen_prelude::Uint8Array;
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
+use openkache_client_core::contract::{
+    FFI_ERROR_AMBIGUOUS, FFI_ERROR_CANCELLED, FFI_ERROR_CLOSED, FFI_ERROR_CONFIGURATION,
+    FFI_ERROR_CONNECTION, FFI_ERROR_IO, FFI_ERROR_PROTOCOL, FFI_ERROR_RESPONSE_TOO_LARGE,
+    FFI_ERROR_RUNTIME, FFI_ERROR_SERVER, FFI_ERROR_TIMEOUT, FFI_ERROR_TLS, FFI_ERROR_TRANSPORT,
+    FFI_ERROR_UNEXPECTED_RESPONSE, FFI_ERROR_VALUE, FfiOperation,
+};
+use openkache_client_core::value::{
+    Compression, Encryption, JsonValue, Value, ZstandardOptions, canonical_json_bytes,
+};
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
-    DeleteOutcome, Endpoint, GetOutcome, ItemId, ItemValue, PrivateKey, ProtectedClient,
-    RetryPolicy, SetCondition, SetOptions, SetOutcome, value_envelope,
+    DataProtectionKeyRing, DeleteOutcome, Endpoint, Error as CoreError, GetOutcome, ItemId,
+    ItemValue, MAX_PREVIOUS_DATA_PROTECTION_KEYS, MutationId, PrivateKey, ProtectedClient,
+    RetryPolicy, ServerErrorCode, SetCondition, SetOptions, SetOutcome, random_mutation_id,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const MAX_SAFE_REQUEST_ID: u64 = 9_007_199_254_740_991;
+const MAX_PRE_CANCELLED_REQUESTS: usize = 65_536;
 
 /// Mutual TLS identity accepted from JavaScript.
 #[napi(object)]
@@ -34,6 +49,8 @@ pub struct NativeClientOptions {
     pub identity: Option<NativeIdentity>,
     #[napi(js_name = "data_protection_key")]
     pub data_protection_key: Uint8Array,
+    #[napi(js_name = "previous_data_protection_keys")]
+    pub previous_data_protection_keys: Option<Vec<Uint8Array>>,
     #[napi(js_name = "compression_enabled")]
     pub compression_enabled: bool,
     #[napi(js_name = "compression_level")]
@@ -53,92 +70,225 @@ pub struct NativeClientOptions {
     pub encryption: Option<String>,
 }
 
-/// Decoded components of a canonical OpenKache value envelope.
+/// Point-in-time native request and transport counters.
 #[napi(object)]
-pub struct NativeValueEnvelope {
-    pub encoding: String,
-    #[napi(js_name = "type_name")]
-    pub type_name: String,
-    pub payload: Uint8Array,
+pub struct NativeMetricsSnapshot {
+    pub requests: f64,
+    pub hits: f64,
+    pub misses: f64,
+    pub retries: f64,
+    pub reconnects: f64,
+    pub cancellations: f64,
+    #[napi(js_name = "transport_errors")]
+    pub transport_errors: f64,
+    #[napi(js_name = "protocol_errors")]
+    pub protocol_errors: f64,
+    #[napi(js_name = "bytes_sent")]
+    pub bytes_sent: f64,
+    #[napi(js_name = "bytes_received")]
+    pub bytes_received: f64,
+    #[napi(js_name = "active_lanes")]
+    pub active_lanes: f64,
+}
+
+#[derive(Default)]
+struct LocalMetrics {
+    requests: AtomicU64,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    cancellations: AtomicU64,
+    bytes_sent: AtomicU64,
+    bytes_received: AtomicU64,
+    active_lanes: AtomicUsize,
+}
+
+struct ActiveRequest<'a> {
+    metrics: &'a LocalMetrics,
+}
+
+impl LocalMetrics {
+    fn begin(&self, bytes_sent: usize) -> ActiveRequest<'_> {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(bytes_sent as u64, Ordering::Relaxed);
+        self.active_lanes.fetch_add(1, Ordering::AcqRel);
+        ActiveRequest { metrics: self }
+    }
+
+    fn record_get(&self, found: bool, bytes_received: usize) {
+        if found {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.bytes_received
+                .fetch_add(bytes_received as u64, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for ActiveRequest<'_> {
+    fn drop(&mut self) {
+        self.metrics.active_lanes.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Default)]
+struct RequestRegistry {
+    active: HashMap<u64, AbortHandle>,
+    pre_cancelled: HashMap<u64, u64>,
+    pre_cancelled_order: VecDeque<(u64, u64)>,
+    next_pre_cancel_generation: u64,
+}
+
+impl RequestRegistry {
+    fn reserve_pre_cancelled(&mut self, request_id: u64) -> bool {
+        if self.pre_cancelled.contains_key(&request_id) {
+            return false;
+        }
+        while self.pre_cancelled_order.len() >= MAX_PRE_CANCELLED_REQUESTS {
+            let Some((expired, generation)) = self.pre_cancelled_order.pop_front() else {
+                break;
+            };
+            if self.pre_cancelled.get(&expired).copied() == Some(generation) {
+                self.pre_cancelled.remove(&expired);
+            }
+        }
+        let generation = if self.next_pre_cancel_generation == 0 {
+            1
+        } else {
+            self.next_pre_cancel_generation
+        };
+        self.next_pre_cancel_generation = if generation == u64::MAX {
+            1
+        } else {
+            generation + 1
+        };
+        self.pre_cancelled.insert(request_id, generation);
+        self.pre_cancelled_order.push_back((request_id, generation));
+        true
+    }
+
+    fn consume_pre_cancelled(&mut self, request_id: u64) -> bool {
+        self.pre_cancelled.remove(&request_id).is_some()
+    }
 }
 
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
     client: RwLock<Option<Arc<ProtectedClient>>>,
+    metrics: LocalMetrics,
+    next_request_id: AtomicU64,
+    requests: std::sync::Mutex<RequestRegistry>,
 }
 
 #[napi]
 impl NativeClient {
+    /// Returns a fresh request ID safe to represent as a JavaScript number.
+    #[napi(js_name = "next_request_id")]
+    pub fn next_request_id_for_js(&self) -> f64 {
+        self.allocate_request_id() as f64
+    }
+
+    /// Aborts a queued or active native operation by request ID.
+    #[napi]
+    pub fn cancel(&self, request_id: f64) -> Result<bool> {
+        let request_id = parse_request_id(request_id)?;
+        let mut requests = self
+            .requests
+            .lock()
+            .map_err(|_| state_error("native request registry lock is poisoned"))?;
+        if let Some(request) = requests.active.get(&request_id) {
+            if request.is_aborted() {
+                return Ok(false);
+            }
+            request.abort();
+            self.metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        } else if requests.reserve_pre_cancelled(request_id) {
+            self.metrics.cancellations.fetch_add(1, Ordering::Relaxed);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Verifies that the server is reachable.
     #[napi]
-    pub async fn ping(&self) -> Result<()> {
-        self.active_client()?
-            .ping()
-            .await
-            .map(|_| ())
-            .map_err(native_error)
+    pub async fn ping(&self, request_id: Option<f64>) -> Result<()> {
+        let _request = self.metrics.begin(0);
+        let client = self.active_client()?;
+        self.run_request(FfiOperation::Ping, request_id, None, async move {
+            client
+                .ping()
+                .await
+                .map(|_| ())
+                .map_err(|error| native_core_error_for(error, FfiOperation::Ping))
+        })
+        .await
     }
 
     /// Retrieves exact decoded bytes or `null` when the key is absent.
     #[napi]
-    pub async fn get(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
-        self.active_client()?
-            .get(key.as_ref())
-            .await
-            .map(|value| value.into_option().map(Uint8Array::new))
-            .map_err(native_error)
-    }
-
-    /// Retrieves and decodes a canonical value envelope.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Exact application key bytes.
-    ///
-    /// # Returns
-    ///
-    /// Decoded codec metadata and payload, or `None` when the key is absent.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the client is closed, transport or value transformation fails, or
-    /// the stored bytes are not a supported value envelope.
-    #[napi(js_name = "get_value")]
-    pub async fn get_value(&self, key: Uint8Array) -> Result<Option<NativeValueEnvelope>> {
-        let GetOutcome::Found(bytes) = self
-            .active_client()?
-            .get(key.as_ref())
-            .await
-            .map_err(native_error)?
-        else {
-            return Ok(None);
-        };
-        let envelope = value_envelope::decode(&bytes).map_err(native_error)?;
-        Ok(Some(NativeValueEnvelope {
-            encoding: envelope.encoding.to_owned(),
-            type_name: envelope.type_name.to_owned(),
-            payload: Uint8Array::new(envelope.payload.to_vec()),
-        }))
+    pub async fn get(
+        &self,
+        key: Uint8Array,
+        request_id: Option<f64>,
+    ) -> Result<Option<Uint8Array>> {
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(key.len());
+        let key = key.to_vec();
+        let outcome = self
+            .run_request(FfiOperation::Get, request_id, None, async move {
+                client
+                    .get(&key)
+                    .await
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Get))
+            })
+            .await?;
+        let value = outcome.into_option().map(Uint8Array::new);
+        self.metrics.record_get(
+            value.is_some(),
+            value.as_ref().map_or(0, |value| value.len()),
+        );
+        Ok(value)
     }
 
     /// Retrieves a core-owned canonical JSON value.
     ///
     /// Raw-formatted values are rejected instead of being silently coerced.
     #[napi(js_name = "get_json")]
-    pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
+    pub async fn get_json(
+        &self,
+        key: Uint8Array,
+        request_id: Option<f64>,
+    ) -> Result<Option<String>> {
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(key.len());
+        let key = key.to_vec();
         let outcome = self
-            .active_client()?
-            .get_value(key.as_ref())
-            .await
-            .map_err(native_error)?;
+            .run_request(FfiOperation::GetJson, request_id, None, async move {
+                client
+                    .get_value(&key)
+                    .await
+                    .map_err(|error| native_core_error_for(error, FfiOperation::GetJson))
+            })
+            .await?;
         match outcome {
-            GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Json(value)) => serde_json::to_string(&value)
-                .map(Some)
-                .map_err(native_error),
-            GetOutcome::Found(Value::Raw(_)) => Err(native_error(
-                "stored value uses raw serialization, expected canonical JSON",
+            GetOutcome::NotFound => {
+                self.metrics.record_get(false, 0);
+                Ok(None)
+            }
+            GetOutcome::Found(Value::Json(value)) => {
+                let serialized = canonical_json_bytes(&value)
+                    .map_err(|error| native_core_error_for(error.into(), FfiOperation::GetJson))
+                    .and_then(|bytes| String::from_utf8(bytes).map_err(native_error))?;
+                self.metrics.record_get(true, serialized.len());
+                Ok(Some(serialized))
+            }
+            GetOutcome::Found(Value::Raw(_)) => Err(native_core_error_for(
+                openkache_client_core::value::Error::ExpectedRawValue.into(),
+                FfiOperation::GetJson,
             )),
         }
     }
@@ -151,43 +301,19 @@ impl NativeClient {
         value: Uint8Array,
         condition: Option<String>,
         ttl_ms: Option<f64>,
+        mutation_id: Option<Uint8Array>,
+        request_id: Option<f64>,
     ) -> Result<String> {
-        self.store(key.as_ref(), value.as_ref().to_vec(), condition, ttl_ms)
-            .await
-    }
-
-    /// Encodes and stores a canonical value envelope.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Exact application key bytes.
-    /// * `encoding` - Portable codec identifier.
-    /// * `type_name` - Codec-defined logical type name.
-    /// * `payload` - Exact codec-specific bytes.
-    /// * `condition` - Optional `if_absent` or `if_present` existence condition.
-    /// * `ttl_ms` - Optional positive relative lifetime in milliseconds.
-    ///
-    /// # Returns
-    ///
-    /// The server's created, replaced, or not-stored outcome.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when envelope metadata or options are invalid, the value is too large,
-    /// the client is closed, or the operation fails.
-    #[napi(js_name = "set_value")]
-    pub async fn set_value(
-        &self,
-        key: Uint8Array,
-        encoding: String,
-        type_name: String,
-        payload: Uint8Array,
-        condition: Option<String>,
-        ttl_ms: Option<f64>,
-    ) -> Result<String> {
-        let value = value_envelope::encode(&encoding, &type_name, payload.as_ref())
-            .map_err(native_error)?;
-        self.store(key.as_ref(), value, condition, ttl_ms).await
+        let _request = self.metrics.begin(key.len() + value.len());
+        self.store(
+            request_id,
+            key.as_ref(),
+            value.as_ref().to_vec(),
+            condition,
+            ttl_ms,
+            mutation_id.as_ref().map(Uint8Array::as_ref),
+        )
+        .await
     }
 
     /// Serializes and stores a core-owned canonical JSON value.
@@ -198,44 +324,118 @@ impl NativeClient {
         value: serde_json::Value,
         condition: Option<String>,
         ttl_ms: Option<f64>,
+        mutation_id: Option<Uint8Array>,
+        request_id: Option<f64>,
     ) -> Result<String> {
         let value = parse_json_value(value)?;
-        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
-        self.active_client()?
-            .set_value(key.as_ref(), Value::Json(value), options)
-            .await
-            .map(map_set_outcome)
-            .map_err(native_error)
+        let serialized_value = canonical_json_bytes(&value)
+            .map_err(|error| native_core_error_for(error.into(), FfiOperation::SetJson))?;
+        let options = parse_set_options(
+            condition.as_deref(),
+            ttl_ms,
+            mutation_id.as_ref().map(Uint8Array::as_ref),
+        )?;
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(key.len() + serialized_value.len());
+        let key = key.to_vec();
+        self.run_request(
+            FfiOperation::SetJson,
+            request_id,
+            options.mutation_id(),
+            async move {
+                client
+                    .set_value(&key, Value::Json(value), options)
+                    .await
+                    .map(map_set_outcome)
+                    .map_err(|error| native_core_error_for(error, FfiOperation::SetJson))
+            },
+        )
+        .await
     }
 
     /// Deletes a key and reports whether it existed.
     #[napi]
-    pub async fn delete(&self, key: Uint8Array) -> Result<bool> {
-        self.active_client()?
-            .delete(key.as_ref())
-            .await
-            .map(|outcome| outcome == DeleteOutcome::Deleted)
-            .map_err(native_error)
+    pub async fn delete(
+        &self,
+        key: Uint8Array,
+        mutation_id: Option<Uint8Array>,
+        request_id: Option<f64>,
+    ) -> Result<bool> {
+        let mutation_id = parse_mutation_id(mutation_id.as_ref().map(Uint8Array::as_ref))?
+            .unwrap_or(random_mutation_id().map_err(native_core_error)?);
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(key.len());
+        let key = key.to_vec();
+        let outcome = self
+            .run_request(
+                FfiOperation::Delete,
+                request_id,
+                Some(mutation_id),
+                async move {
+                    client
+                        .delete_with_mutation_id(&key, mutation_id)
+                        .await
+                        .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
+                },
+            )
+            .await?;
+        Ok(outcome == DeleteOutcome::Deleted)
+    }
+
+    /// Returns point-in-time native counters.
+    #[napi(js_name = "metrics_snapshot")]
+    pub fn metrics_snapshot(&self) -> Result<NativeMetricsSnapshot> {
+        let snapshot = self.active_client()?.metrics_snapshot();
+        Ok(NativeMetricsSnapshot {
+            requests: self.metrics.requests.load(Ordering::Relaxed) as f64,
+            hits: self.metrics.hits.load(Ordering::Relaxed) as f64,
+            misses: self.metrics.misses.load(Ordering::Relaxed) as f64,
+            retries: snapshot.retries as f64,
+            reconnects: snapshot.reconnects as f64,
+            cancellations: self.metrics.cancellations.load(Ordering::Relaxed) as f64,
+            transport_errors: snapshot.transport_errors as f64,
+            protocol_errors: snapshot.protocol_errors as f64,
+            bytes_sent: self.metrics.bytes_sent.load(Ordering::Relaxed) as f64,
+            bytes_received: self.metrics.bytes_received.load(Ordering::Relaxed) as f64,
+            active_lanes: self.metrics.active_lanes.load(Ordering::Acquire) as f64,
+        })
     }
 
     /// Returns the server's JSON statistics payload.
     #[napi]
-    pub async fn stats(&self) -> Result<String> {
-        self.active_client()?.stats().await.map_err(native_error)
+    pub async fn stats(&self, request_id: Option<f64>) -> Result<String> {
+        let _request = self.metrics.begin(0);
+        let client = self.active_client()?;
+        self.run_request(FfiOperation::Stats, request_id, None, async move {
+            client
+                .stats()
+                .await
+                .map_err(|error| native_core_error_for(error, FfiOperation::Stats))
+        })
+        .await
     }
 
     /// Requests a server durability barrier.
     #[napi]
-    pub async fn sync(&self) -> Result<()> {
-        self.active_client()?.sync().await.map_err(native_error)
+    pub async fn sync(&self, request_id: Option<f64>) -> Result<()> {
+        let _request = self.metrics.begin(0);
+        let client = self.active_client()?;
+        self.run_request(FfiOperation::Sync, request_id, None, async move {
+            client
+                .sync()
+                .await
+                .map_err(|error| native_core_error_for(error, FfiOperation::Sync))
+        })
+        .await
     }
 
     /// Closes the shared core client. Repeated calls are safe.
     #[napi]
     pub async fn close(&self) -> Result<()> {
+        self.abort_all_requests();
         let client = self.take_client()?;
         if let Some(client) = client {
-            client.close().await.map_err(native_error)?;
+            client.close().await.map_err(native_core_error)?;
         }
         Ok(())
     }
@@ -245,6 +445,7 @@ impl NativeClient {
     /// This is reserved for a JavaScript finalizer, where no promise can be observed.
     #[napi(js_name = "close_now")]
     pub fn close_now(&self) -> Result<()> {
+        self.abort_all_requests();
         self.take_client()?;
         Ok(())
     }
@@ -264,27 +465,45 @@ impl NativeClient {
 
     /// Reconnects the shared core without replaying a request.
     #[napi]
-    pub async fn reconnect(&self) -> Result<()> {
-        self.active_client()?
-            .reconnect()
-            .await
-            .map_err(native_error)
+    pub async fn reconnect(&self, request_id: Option<f64>) -> Result<()> {
+        let _request = self.metrics.begin(0);
+        let client = self.active_client()?;
+        self.run_request(FfiOperation::Reconnect, request_id, None, async move {
+            client
+                .reconnect()
+                .await
+                .map_err(|error| native_core_error_for(error, FfiOperation::Reconnect))
+        })
+        .await
     }
 
     /// Retrieves exact bytes for a fixed-size protocol item ID.
     #[napi(js_name = "raw_get")]
-    pub async fn raw_get(&self, item_id: Uint8Array) -> Result<Option<Uint8Array>> {
+    pub async fn raw_get(
+        &self,
+        item_id: Uint8Array,
+        request_id: Option<f64>,
+    ) -> Result<Option<Uint8Array>> {
         let item_id = parse_item_id(item_id.as_ref())?;
-        self.active_client()?
-            .raw()
-            .get(item_id)
-            .await
-            .map(|value| {
-                value
-                    .into_option()
-                    .map(|value| Uint8Array::new(value.into_bytes()))
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(item_id.as_bytes().len());
+        let outcome = self
+            .run_request(FfiOperation::Get, request_id, None, async move {
+                client
+                    .raw()
+                    .get(item_id)
+                    .await
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Get))
             })
-            .map_err(native_error)
+            .await?;
+        let value = outcome
+            .into_option()
+            .map(|value| Uint8Array::new(value.into_bytes()));
+        self.metrics.record_get(
+            value.is_some(),
+            value.as_ref().map_or(0, |value| value.len()),
+        );
+        Ok(value)
     }
 
     /// Stores exact bytes for a fixed-size protocol item ID.
@@ -295,45 +514,172 @@ impl NativeClient {
         value: Uint8Array,
         condition: Option<String>,
         ttl_ms: Option<f64>,
+        mutation_id: Option<Uint8Array>,
+        request_id: Option<f64>,
     ) -> Result<String> {
         let item_id = parse_item_id(item_id.as_ref())?;
-        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
-        self.active_client()?
-            .raw()
-            .set(item_id, ItemValue::new(value.as_ref().to_vec()), options)
-            .await
-            .map(map_set_outcome)
-            .map_err(native_error)
+        let options = parse_set_options(
+            condition.as_deref(),
+            ttl_ms,
+            mutation_id.as_ref().map(Uint8Array::as_ref),
+        )?;
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(item_id.as_bytes().len() + value.len());
+        let value = value.to_vec();
+        self.run_request(
+            FfiOperation::Set,
+            request_id,
+            options.mutation_id(),
+            async move {
+                client
+                    .raw()
+                    .set(item_id, ItemValue::new(value), options)
+                    .await
+                    .map(map_set_outcome)
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Set))
+            },
+        )
+        .await
     }
 
     /// Deletes a fixed-size protocol item ID.
     #[napi(js_name = "raw_delete")]
-    pub async fn raw_delete(&self, item_id: Uint8Array) -> Result<bool> {
+    pub async fn raw_delete(
+        &self,
+        item_id: Uint8Array,
+        mutation_id: Option<Uint8Array>,
+        request_id: Option<f64>,
+    ) -> Result<bool> {
         let item_id = parse_item_id(item_id.as_ref())?;
-        self.active_client()?
-            .raw()
-            .delete(item_id)
-            .await
-            .map(|outcome| outcome == DeleteOutcome::Deleted)
-            .map_err(native_error)
+        let mutation_id = parse_mutation_id(mutation_id.as_ref().map(Uint8Array::as_ref))?
+            .unwrap_or(random_mutation_id().map_err(native_core_error)?);
+        let client = self.active_client()?;
+        let _request = self.metrics.begin(item_id.as_bytes().len());
+        let outcome = self
+            .run_request(
+                FfiOperation::Delete,
+                request_id,
+                Some(mutation_id),
+                async move {
+                    client
+                        .raw()
+                        .delete_with_mutation_id(item_id, mutation_id)
+                        .await
+                        .map_err(|error| native_core_error_for(error, FfiOperation::Delete))
+                },
+            )
+            .await?;
+        Ok(outcome == DeleteOutcome::Deleted)
     }
 }
 
 impl NativeClient {
     async fn store(
         &self,
+        request_id: Option<f64>,
         key: &[u8],
         value: Vec<u8>,
         condition: Option<String>,
         ttl_ms: Option<f64>,
+        mutation_id: Option<&[u8]>,
     ) -> Result<String> {
-        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
+        let options = parse_set_options(condition.as_deref(), ttl_ms, mutation_id)?;
         let client = self.active_client()?;
-        client
-            .set(key, value, options)
-            .await
-            .map(map_set_outcome)
-            .map_err(native_error)
+        let key = key.to_vec();
+        self.run_request(
+            FfiOperation::Set,
+            request_id,
+            options.mutation_id(),
+            async move {
+                client
+                    .set(&key, value, options)
+                    .await
+                    .map(map_set_outcome)
+                    .map_err(|error| native_core_error_for(error, FfiOperation::Set))
+            },
+        )
+        .await
+    }
+
+    async fn run_request<T, F>(
+        &self,
+        operation: FfiOperation,
+        request_id: Option<f64>,
+        mutation_id: Option<MutationId>,
+        future: F,
+    ) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let request_id = request_id
+            .map(parse_request_id)
+            .transpose()?
+            .unwrap_or_else(|| self.allocate_request_id());
+        let (abort, registration) = AbortHandle::new_pair();
+        let pre_cancelled = {
+            let mut requests = self
+                .requests
+                .lock()
+                .map_err(|_| state_error("native request registry lock is poisoned"))?;
+            if requests.consume_pre_cancelled(request_id) {
+                true
+            } else {
+                match requests.active.entry(request_id) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(abort);
+                        false
+                    }
+                    Entry::Occupied(_) => {
+                        return Err(invalid_argument(format!(
+                            "request ID {request_id} is already active"
+                        )));
+                    }
+                }
+            }
+        };
+        if pre_cancelled {
+            return Err(native_cancelled_error(operation, mutation_id));
+        }
+        let result = Abortable::new(future, registration).await;
+        if let Ok(mut requests) = self.requests.lock() {
+            requests.active.remove(&request_id);
+        }
+        match result {
+            Ok(result) => result,
+            Err(_) => Err(native_cancelled_error(operation, mutation_id)),
+        }
+    }
+
+    fn allocate_request_id(&self) -> u64 {
+        let request_id = self
+            .next_request_id
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                let current = (1..=MAX_SAFE_REQUEST_ID)
+                    .contains(&current)
+                    .then_some(current)
+                    .unwrap_or(1);
+                Some(if current == MAX_SAFE_REQUEST_ID {
+                    1
+                } else {
+                    current + 1
+                })
+            })
+            .unwrap_or(1);
+        if (1..=MAX_SAFE_REQUEST_ID).contains(&request_id) {
+            request_id
+        } else {
+            1
+        }
+    }
+
+    fn abort_all_requests(&self) {
+        if let Ok(mut requests) = self.requests.lock() {
+            for (_, request) in requests.active.drain() {
+                request.abort();
+            }
+            requests.pre_cancelled.clear();
+            requests.pre_cancelled_order.clear();
+        }
     }
 
     fn take_client(&self) -> Result<Option<Arc<ProtectedClient>>> {
@@ -362,8 +708,8 @@ impl NativeClient {
 /// failures.
 #[napi]
 pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
-    let mut trusted_certificates =
-        Certificate::from_der_or_pem_chain(options.certificate.as_ref()).map_err(native_error)?;
+    let mut trusted_certificates = Certificate::from_der_or_pem_chain(options.certificate.as_ref())
+        .map_err(native_core_error)?;
     if trusted_certificates.len() != 1 {
         return Err(invalid_argument(format!(
             "certificate must contain exactly one DER or PEM certificate, got {}",
@@ -372,7 +718,17 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     }
 
     let data_protection_key = DataProtectionKey::from_slice(options.data_protection_key.as_ref())
-        .map_err(native_error)?;
+        .map_err(native_core_error)?;
+    let previous_keys = options.previous_data_protection_keys.unwrap_or_default();
+    if previous_keys.len() > MAX_PREVIOUS_DATA_PROTECTION_KEYS {
+        return Err(invalid_argument(format!(
+            "previous_data_protection_keys may contain at most {MAX_PREVIOUS_DATA_PROTECTION_KEYS} entries"
+        )));
+    }
+    let previous_keys = previous_keys
+        .into_iter()
+        .map(|key| DataProtectionKey::from_slice(key.as_ref()).map_err(native_core_error))
+        .collect::<Result<Vec<_>>>()?;
     let compression = if options.compression_enabled {
         let defaults = ZstandardOptions::default();
         Compression::Zstandard(ZstandardOptions {
@@ -402,13 +758,13 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
             Duration::from_millis(parse_u64(request_timeout_ms, "request_timeout_ms", false)?);
     }
 
-    let retry = RetryPolicy {
-        max_attempts: options
+    let retry = RetryPolicy::with_max_attempts(
+        options
             .retry_max_attempts
             .map(|value| parse_usize(value, "retry_max_attempts", false))
             .transpose()?
             .unwrap_or(RetryPolicy::default().max_attempts),
-    };
+    );
     let max_in_flight = options
         .max_in_flight
         .map(|value| parse_usize(value, "max_in_flight", false))
@@ -417,7 +773,9 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let encryption = parse_encryption(options.encryption.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
-    let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
+    let key_ring = DataProtectionKeyRing::with_previous(data_protection_key, previous_keys)
+        .map_err(native_core_error)?;
+    let mut builder = ProtectedClient::builder_with_key_ring(endpoint, key_ring)
         .trust_certificate(trusted_certificate)
         .compression(compression)
         .timeouts(timeouts)
@@ -427,9 +785,12 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
-    let client = builder.connect().await.map_err(native_error)?;
+    let client = builder.connect().await.map_err(native_core_error)?;
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
+        metrics: LocalMetrics::default(),
+        next_request_id: AtomicU64::new(1),
+        requests: std::sync::Mutex::new(RequestRegistry::default()),
     })
 }
 
@@ -440,7 +801,7 @@ fn parse_identity(identity: Option<NativeIdentity>) -> Result<Option<ClientIdent
     let mut certificate_chain = Vec::new();
     for certificate in identity.certificate_chain {
         certificate_chain.extend(
-            Certificate::from_der_or_pem_chain(certificate.as_ref()).map_err(native_error)?,
+            Certificate::from_der_or_pem_chain(certificate.as_ref()).map_err(native_core_error)?,
         );
     }
     if certificate_chain.is_empty() {
@@ -451,11 +812,11 @@ fn parse_identity(identity: Option<NativeIdentity>) -> Result<Option<ClientIdent
     let private_key = parse_private_key(identity.private_key.as_ref())?;
     ClientIdentity::new(certificate_chain, private_key)
         .map(Some)
-        .map_err(native_error)
+        .map_err(native_core_error)
 }
 
 fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey> {
-    PrivateKey::from_der_or_pem(bytes).map_err(native_error)
+    PrivateKey::from_der_or_pem(bytes).map_err(native_core_error)
 }
 
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
@@ -469,7 +830,11 @@ fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     }
 }
 
-fn parse_set_options(condition: Option<&str>, ttl_ms: Option<f64>) -> Result<SetOptions> {
+fn parse_set_options(
+    condition: Option<&str>,
+    ttl_ms: Option<f64>,
+    mutation_id: Option<&[u8]>,
+) -> Result<SetOptions> {
     let condition = parse_condition(condition)?;
     let ttl_ms = ttl_ms
         .map(|value| parse_u64(value, "ttl_ms", false))
@@ -482,11 +847,30 @@ fn parse_set_options(condition: Option<&str>, ttl_ms: Option<f64>) -> Result<Set
     if let Some(ttl_ms) = ttl_ms {
         options = options.expires_after_millis(ttl_ms);
     }
+    let mutation_id =
+        parse_mutation_id(mutation_id)?.unwrap_or(random_mutation_id().map_err(native_core_error)?);
+    options = options.with_mutation_id(mutation_id);
     Ok(options)
 }
 
+fn parse_mutation_id(bytes: Option<&[u8]>) -> Result<Option<MutationId>> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if bytes.len() != openkache_client_core::contract::MUTATION_ID_BYTES {
+        return Err(invalid_argument(format!(
+            "mutation_id must contain exactly {} bytes",
+            openkache_client_core::contract::MUTATION_ID_BYTES
+        )));
+    }
+    let bytes: [u8; openkache_client_core::contract::MUTATION_ID_BYTES] = bytes
+        .try_into()
+        .map_err(|_| invalid_argument("invalid mutation_id"))?;
+    Ok(Some(MutationId::new(bytes)))
+}
+
 fn parse_item_id(bytes: &[u8]) -> Result<ItemId> {
-    ItemId::from_slice(bytes).map_err(native_error)
+    ItemId::from_slice(bytes).map_err(native_core_error)
 }
 
 fn parse_json_value(value: serde_json::Value) -> Result<JsonValue> {
@@ -539,7 +923,7 @@ fn parse_endpoint(address: &str, server_name: &str) -> Result<Endpoint> {
     let address = address.parse().map_err(|error| {
         invalid_argument(format!("invalid server address {address:?}: {error}"))
     })?;
-    Endpoint::from_socket_addr(address, server_name).map_err(native_error)
+    Endpoint::from_socket_addr(address, server_name).map_err(native_core_error)
 }
 
 fn parse_encryption(encryption: Option<&str>) -> Result<Encryption> {
@@ -574,6 +958,15 @@ fn parse_u64(value: f64, name: &str, allow_zero: bool) -> Result<u64> {
     Ok(value as u64)
 }
 
+fn parse_request_id(value: f64) -> Result<u64> {
+    if !value.is_finite() || value.fract() != 0.0 || !(1.0..=MAX_SAFE_INTEGER).contains(&value) {
+        return Err(invalid_argument(
+            "request_id must be a positive safe integer",
+        ));
+    }
+    Ok(value as u64)
+}
+
 fn map_set_outcome(outcome: SetOutcome) -> String {
     match outcome {
         SetOutcome::Created => "created".to_string(),
@@ -584,6 +977,148 @@ fn map_set_outcome(outcome: SetOutcome) -> String {
 
 fn native_error(error: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, error.to_string())
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeErrorMetadata {
+    code: u32,
+    operation: u32,
+    phase: u32,
+    backend: u32,
+    retryable: bool,
+    ambiguous: bool,
+    mutation_id: Option<[u8; openkache_client_core::contract::MUTATION_ID_BYTES]>,
+}
+
+fn native_cancelled_error(operation: FfiOperation, mutation_id: Option<MutationId>) -> Error {
+    let has_mutation = mutation_id.is_some();
+    native_error_with_metadata(
+        "client operation canceled",
+        NativeErrorMetadata {
+            code: FFI_ERROR_CANCELLED,
+            operation: operation.code(),
+            retryable: has_mutation,
+            // This adapter aborts the native future directly and cannot
+            // observe whether a partial write reached the transport. A
+            // mutation token makes the conservative outcome reusable: the
+            // caller can retry it safely through the server dedupe store.
+            ambiguous: has_mutation,
+            mutation_id: mutation_id.map(MutationId::into_bytes),
+            ..NativeErrorMetadata::default()
+        },
+    )
+}
+
+fn native_error_with_metadata(message: impl Into<String>, metadata: NativeErrorMetadata) -> Error {
+    let reason = serde_json::json!({
+        "__openkache_native_error": true,
+        "message": message.into(),
+        "metadata": {
+            "code": metadata.code,
+            "operation": metadata.operation,
+            "phase": metadata.phase,
+            "backend": metadata.backend,
+            "retryable": metadata.retryable,
+            "ambiguous": metadata.ambiguous,
+            "mutation_id": metadata.mutation_id.map(|value| value.to_vec()),
+        },
+    });
+    Error::new(Status::GenericFailure, reason.to_string())
+}
+
+/// Encodes the core's structured error metadata into the message of a N-API error.
+///
+/// N-API's `Result<T>` conversion only exposes the status and reason fields of
+/// `napi::Error`.  A small, private JSON envelope keeps the public JavaScript
+/// error message stable while allowing the TypeScript adapter to recover the
+/// ABI-v3 metadata without a second native call.
+fn native_core_error(error: CoreError) -> Error {
+    let metadata = core_error_metadata(&error, None);
+    native_error_with_metadata(error.to_string(), metadata)
+}
+
+fn native_core_error_for(error: CoreError, operation: FfiOperation) -> Error {
+    let metadata = core_error_metadata(&error, Some(operation));
+    native_error_with_metadata(error.to_string(), metadata)
+}
+
+fn core_error_metadata(
+    error: &CoreError,
+    caller_operation: Option<FfiOperation>,
+) -> NativeErrorMetadata {
+    let mut metadata = NativeErrorMetadata {
+        operation: caller_operation.map_or(0, FfiOperation::code),
+        ..NativeErrorMetadata::default()
+    };
+    match error {
+        CoreError::Configuration { .. } => metadata.code = FFI_ERROR_CONFIGURATION,
+        CoreError::Connection(_) => {
+            metadata.code = FFI_ERROR_CONNECTION;
+            metadata.retryable = true;
+        }
+        CoreError::Timeout { operation } => {
+            metadata.code = FFI_ERROR_TIMEOUT;
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.phase = operation.ffi_phase_code();
+            metadata.retryable = true;
+        }
+        CoreError::Runtime { backend, .. } => {
+            metadata.code = FFI_ERROR_RUNTIME;
+            metadata.backend = backend.ffi_code();
+        }
+        CoreError::Transport {
+            backend, operation, ..
+        } => {
+            metadata.code = FFI_ERROR_TRANSPORT;
+            metadata.backend = backend.ffi_code();
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.phase = operation.ffi_phase_code();
+            metadata.retryable = true;
+        }
+        CoreError::Server { code, .. } => {
+            metadata.code = FFI_ERROR_SERVER;
+            metadata.retryable =
+                matches!(code, ServerErrorCode::Overloaded | ServerErrorCode::Timeout);
+        }
+        CoreError::UnexpectedResponse { operation, .. } => {
+            metadata.code = FFI_ERROR_UNEXPECTED_RESPONSE;
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.phase = operation.ffi_phase_code();
+        }
+        CoreError::ResponseTooLarge { .. } => metadata.code = FFI_ERROR_RESPONSE_TOO_LARGE,
+        CoreError::Tls(_) => metadata.code = FFI_ERROR_TLS,
+        CoreError::Protocol(_) => metadata.code = FFI_ERROR_PROTOCOL,
+        CoreError::Io(_) => {
+            metadata.code = FFI_ERROR_IO;
+            metadata.retryable = true;
+        }
+        CoreError::Value(_) => metadata.code = FFI_ERROR_VALUE,
+        CoreError::ClientClosed => metadata.code = FFI_ERROR_CLOSED,
+        CoreError::AmbiguousOutcome {
+            operation,
+            mutation_id,
+            cause,
+        } => {
+            metadata.code = FFI_ERROR_AMBIGUOUS;
+            if caller_operation.is_none() {
+                metadata.operation = operation.ffi_operation_code();
+            }
+            metadata.ambiguous = true;
+            metadata.retryable = true;
+            metadata.mutation_id = mutation_id.map(MutationId::into_bytes);
+            let nested = core_error_metadata(cause, caller_operation);
+            metadata.phase = nested.phase;
+            metadata.backend = nested.backend;
+        }
+        _ => {}
+    }
+    metadata
 }
 
 fn invalid_argument(message: impl Into<String>) -> Error {

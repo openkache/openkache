@@ -21,8 +21,7 @@ cmake --build target/build
 
 For a shared build, use
 `-DOPENKACHE_CLIENT_NATIVE_LIBRARY_SHARED=/path/to/libopenkache_client_core.so`.
-The legacy `OPENKACHE_CLIENT_NATIVE_LIBRARY` option remains accepted for
-single-library builds. If Bun or the Smithy CLI is not available, pass a
+If Bun or the Smithy CLI is not available, pass a
 previously generated header with
 `-DOPENKACHE_CLIENT_SMITHY_CONTRACT_HEADER=/path/to/smithy_contract.h`.
 
@@ -51,11 +50,10 @@ buffer-based protected and exact-item-ID calls. Result payloads are borrowed unt
 connected handle is transferred with `openkache_client_result_take_client` and
 released with `openkache_client_free`.
 
-`openkache_client_connect_ex` is the flat generated-binding entry point;
-`openkache_client_connect_with_options` is a named-field convenience wrapper.
-An empty trust buffer selects system roots. `openkache_client_execute` derives
-protected item IDs from application keys, while `openkache_client_execute_raw`
-requires a 32-byte item ID and sends opaque values unchanged.
+`openkache_client_connect_with_options` is the canonical named-field entry
+point. An empty trust buffer selects system roots. The request-ID operation
+entry points derive protected item IDs from application keys, while their
+`_raw` variants require a 32-byte item ID and send opaque values unchanged.
 
 Operation and value-format constants in the generated
 `openkache/smithy_contract.h` are sourced at build/package time from the client

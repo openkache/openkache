@@ -6,7 +6,7 @@ import asyncio
 import base64
 import json
 import math
-import socket
+import secrets
 import sys
 from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
@@ -37,9 +37,12 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
     SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
     SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
+    SMITHY_FFI_BACKEND_NONE,
     SMITHY_FFI_OPERATION_GET_JSON,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
+    SMITHY_FFI_ERROR_CANCELLED,
+    SMITHY_FFI_PHASE_UNKNOWN,
     SMITHY_FFI_RESULT_CREATED,
     SMITHY_FFI_RESULT_DELETED,
     SMITHY_FFI_RESULT_NOT_DELETED,
@@ -52,6 +55,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_SET_CONDITION_NONE,
     SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_MAX_IN_FLIGHT,
+    SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS,
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
     SMITHY_DEFAULT_ZSTANDARD_LEVEL,
@@ -63,6 +67,7 @@ from ._generated.smithy_contract import (
     SMITHY_CLIENT_DEFAULT_SERVER_NAME,
     SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE,
     SMITHY_ITEM_ID_BYTES,
+    SMITHY_MUTATION_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
     SMITHY_OPCODE_GET,
@@ -74,7 +79,12 @@ from ._generated.smithy_contract import (
     SMITHY_VALUE_ENCRYPTION_COMPACT,
     SMITHY_VALUE_ENCRYPTION_ROBUST,
 )
-from ._native import NativeClient as _NativeClient, NativeError
+from ._native import (
+    ErrorMetadata,
+    MetricsSnapshot,
+    NativeClient as _NativeClient,
+    NativeError,
+)
 
 
 _UINT64_MAX: Final = (1 << 64) - 1
@@ -85,6 +95,23 @@ _BINARY64_MAX_INTEGER_BITS: Final = 1024
 
 class OpenKacheError(RuntimeError):
     """Base error raised by the Python client."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        metadata: ErrorMetadata | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.metadata = metadata
+
+
+class OpenKacheCancelledError(asyncio.CancelledError):
+    """Cancellation carrying the caller operation and mutation retry metadata."""
+
+    def __init__(self, *, metadata: ErrorMetadata) -> None:
+        super().__init__("client operation canceled")
+        self.metadata = metadata
 
 
 class OpenKacheValueError(OpenKacheError, ValueError):
@@ -131,6 +158,27 @@ class ClientIdentity:
         object.__setattr__(self, "private_key", _as_bytes(private_key, "private_key"))
         if not self.private_key or not self.private_key.strip():
             raise OpenKacheValueError("private_key must contain key bytes")
+
+
+@dataclass(frozen=True, slots=True)
+class DataProtectionKeyRing:
+    """Active data-protection key plus a bounded retired-key window."""
+
+    active: bytes
+    previous: tuple[bytes, ...] = ()
+
+    def __post_init__(self) -> None:
+        active = _data_protection_key(self.active, "key_ring.active")
+        previous = tuple(
+            _data_protection_key(key, "key_ring.previous entry") for key in self.previous
+        )
+        if len(previous) > SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS:
+            raise OpenKacheValueError(
+                "key_ring.previous may contain at most "
+                f"{SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS} keys"
+            )
+        object.__setattr__(self, "active", active)
+        object.__setattr__(self, "previous", previous)
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +244,7 @@ class SetOptions:
 
     condition: SmithySetCondition | str | None = None
     ttl_ms: int | None = None
+    mutation_id: bytes | bytearray | memoryview | None = None
 
     def __post_init__(self) -> None:
         condition = self.condition
@@ -218,6 +267,13 @@ class SetOptions:
                 allow_zero=False,
                 maximum=_UINT64_MAX,
             )
+        if self.mutation_id is not None:
+            mutation_id = _as_bytes(self.mutation_id, "mutation_id")
+            if len(mutation_id) != SMITHY_MUTATION_ID_BYTES:
+                raise OpenKacheValueError(
+                    f"mutation_id must contain exactly {SMITHY_MUTATION_ID_BYTES} bytes"
+                )
+            object.__setattr__(self, "mutation_id", mutation_id)
 
     @property
     def _condition_code(self) -> int:
@@ -278,7 +334,7 @@ class OpenKacheClient:
         address: str,
         *,
         certificate: bytes | bytearray | memoryview | str | PathLike[str],
-        data_protection_key: bytes | bytearray | memoryview,
+        data_protection_key: bytes | bytearray | memoryview | None = None,
         server_name: str | None = None,
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
@@ -286,6 +342,7 @@ class OpenKacheClient:
         timeouts: ClientTimeouts | None = None,
         max_in_flight: int = SMITHY_DEFAULT_MAX_IN_FLIGHT,
         retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
+        key_ring: DataProtectionKeyRing | None = None,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         try:
@@ -294,6 +351,7 @@ class OpenKacheClient:
                 address,
                 certificate=certificate,
                 data_protection_key=data_protection_key,
+                key_ring=key_ring,
                 server_name=server_name,
                 identity=identity,
                 compression=compression,
@@ -304,7 +362,9 @@ class OpenKacheClient:
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
-        except (NativeError, OSError) as error:
+        except NativeError as error:
+            raise _map_native_error(error) from error
+        except OSError as error:
             raise OpenKacheError(str(error)) from error
         return cls(native)
 
@@ -368,10 +428,16 @@ class OpenKacheClient:
         )
 
     async def delete(
-        self, key: str | bytes | bytearray | memoryview
+        self,
+        key: str | bytes | bytearray | memoryview,
+        options: SetOptions | None = None,
     ) -> bool:
         self._assert_open()
-        kind, _ = await self._execute(SMITHY_OPCODE_DELETE, key=_key_bytes(key))
+        kind, _ = await self._execute(
+            SMITHY_OPCODE_DELETE,
+            key=_key_bytes(key),
+            options=options,
+        )
         return _delete_outcome(kind)
 
     async def stats(self) -> ServerStats:
@@ -409,6 +475,18 @@ class OpenKacheClient:
         except KeyError as error:
             raise OpenKacheError("native client returned an unknown connection state") from error
 
+    def metrics_snapshot(self) -> MetricsSnapshot:
+        """Returns the native request, retry, error, byte, and lane counters."""
+
+        self._assert_open()
+        return self._native.metrics_snapshot()
+
+    def cancel(self, request_id: int) -> bool:
+        """Cancels a native operation previously started with its request ID."""
+
+        self._assert_open()
+        return self._native.cancel(request_id)
+
     @property
     def raw(self) -> RawClient:
         """Smithy-shaped exact-item-ID API sharing this protected connection."""
@@ -435,6 +513,11 @@ class OpenKacheClient:
         if self._closed:
             raise OpenKacheError("client is closed")
 
+    async def _cancel_native(self, request_id: int) -> None:
+        """Deliver cancellation without blocking the asyncio event loop."""
+
+        await asyncio.to_thread(self._native.cancel, request_id)
+
     async def _execute(
         self,
         operation: int,
@@ -442,9 +525,12 @@ class OpenKacheClient:
         key: bytes = b"",
         value: bytes = b"",
         options: SetOptions | None = None,
+        request_id: int | None = None,
     ) -> tuple[int, bytes]:
         self._assert_open()
         selected = options or SetOptions()
+        selected = _mutation_options(operation, selected)
+        request_id = request_id if request_id is not None else self._native.next_request_id()
         try:
             return await asyncio.to_thread(
                 self._native.execute,
@@ -453,9 +539,24 @@ class OpenKacheClient:
                 value=value,
                 condition=selected._condition_code,
                 ttl_ms=selected.ttl_ms,
+                mutation_id=selected.mutation_id,
+                request_id=request_id,
             )
+        except asyncio.CancelledError:
+            await self._cancel_native(request_id)
+            raise OpenKacheCancelledError(
+                metadata=ErrorMetadata(
+                    code=SMITHY_FFI_ERROR_CANCELLED,
+                    operation=operation,
+                    phase=SMITHY_FFI_PHASE_UNKNOWN,
+                    backend=SMITHY_FFI_BACKEND_NONE,
+                    retryable=selected.mutation_id is not None,
+                    ambiguous=selected.mutation_id is not None,
+                    mutation_id=selected.mutation_id,
+                )
+            ) from None
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            raise _map_native_error(error) from error
 
     async def _value_operation(
         self,
@@ -479,9 +580,12 @@ class OpenKacheClient:
         item_id: bytes,
         value: bytes = b"",
         options: SetOptions | None = None,
+        request_id: int | None = None,
     ) -> tuple[int, bytes]:
         self._assert_open()
         selected = options or SetOptions()
+        selected = _mutation_options(operation, selected)
+        request_id = request_id if request_id is not None else self._native.next_request_id()
         try:
             return await asyncio.to_thread(
                 self._native.execute_raw,
@@ -490,9 +594,24 @@ class OpenKacheClient:
                 value=value,
                 condition=selected._condition_code,
                 ttl_ms=selected.ttl_ms,
+                mutation_id=selected.mutation_id,
+                request_id=request_id,
             )
+        except asyncio.CancelledError:
+            await self._cancel_native(request_id)
+            raise OpenKacheCancelledError(
+                metadata=ErrorMetadata(
+                    code=SMITHY_FFI_ERROR_CANCELLED,
+                    operation=operation,
+                    phase=SMITHY_FFI_PHASE_UNKNOWN,
+                    backend=SMITHY_FFI_BACKEND_NONE,
+                    retryable=selected.mutation_id is not None,
+                    ambiguous=selected.mutation_id is not None,
+                    mutation_id=selected.mutation_id,
+                )
+            ) from None
         except NativeError as error:
-            raise OpenKacheError(str(error)) from error
+            raise _map_native_error(error) from error
 
     async def _set_operation(
         self,
@@ -533,7 +652,11 @@ class RawClient(SmithyOpenKacheApi):
         return SmithyGetOutput(value=payload)
 
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
-        options = SetOptions(input.condition, input.ttl_milliseconds)
+        options = SetOptions(
+            input.condition,
+            input.ttl_milliseconds,
+            input.mutation_id,
+        )
         kind, _ = await self._owner._execute_raw(
             SMITHY_OPCODE_SET,
             item_id=_item_id(input.item_id),
@@ -544,7 +667,9 @@ class RawClient(SmithyOpenKacheApi):
 
     async def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
         kind, _ = await self._owner._execute_raw(
-            SMITHY_OPCODE_DELETE, item_id=_item_id(input.item_id)
+            SMITHY_OPCODE_DELETE,
+            item_id=_item_id(input.item_id),
+            options=SetOptions(mutation_id=input.mutation_id),
         )
         return SmithyDeleteOutput(deleted=_delete_outcome(kind))
 
@@ -564,11 +689,27 @@ class RawClient(SmithyOpenKacheApi):
 Client = OpenKacheClient
 
 
+def _mutation_options(operation: int, options: SetOptions) -> SetOptions:
+    """Adds one token to every mutation when the caller did not supply one."""
+
+    if (
+        operation not in (SMITHY_OPCODE_SET, SMITHY_OPCODE_DELETE, SMITHY_FFI_OPERATION_SET_JSON)
+        or options.mutation_id is not None
+    ):
+        return options
+    return SetOptions(
+        condition=options.condition,
+        ttl_ms=options.ttl_ms,
+        mutation_id=secrets.token_bytes(SMITHY_MUTATION_ID_BYTES),
+    )
+
+
 def _connection_settings(
     address: str,
     *,
     certificate: bytes | bytearray | memoryview | str | PathLike[str],
-    data_protection_key: bytes | bytearray | memoryview,
+    data_protection_key: bytes | bytearray | memoryview | None,
+    key_ring: DataProtectionKeyRing | None,
     server_name: str | None,
     identity: ClientIdentity | None,
     compression: CompressionOptions | None,
@@ -580,12 +721,21 @@ def _connection_settings(
 ) -> dict[str, Any]:
     native_address, host = _resolve_address(address)
     certificate_bytes = _as_file_or_bytes(certificate, "certificate")
-    protection_key = _as_bytes(data_protection_key, "data_protection_key")
-    if len(protection_key) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES:
+    if key_ring is not None and data_protection_key is not None:
         raise OpenKacheValueError(
-            "data_protection_key must contain exactly "
-            f"{SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes"
+            "provide either data_protection_key or key_ring, not both"
         )
+    if key_ring is None:
+        if data_protection_key is None:
+            raise OpenKacheValueError(
+                "data_protection_key or key_ring must be supplied"
+            )
+        protection_key = _as_bytes(data_protection_key, "data_protection_key")
+        protection_key = _data_protection_key(protection_key, "data_protection_key")
+        previous_keys: tuple[bytes, ...] = ()
+    else:
+        protection_key = key_ring.active
+        previous_keys = key_ring.previous
     compression = compression or CompressionOptions()
     timeouts = timeouts or ClientTimeouts()
     if not isinstance(encryption, Encryption):
@@ -627,6 +777,7 @@ def _connection_settings(
         "client_certificate_chain": identity_chain,
         "client_private_key": identity_key,
         "data_protection_key": protection_key,
+        "previous_data_protection_keys": previous_keys,
         "compression_enabled": compression.enabled,
         "compression_level": compression.level,
         "minimum_input_size": compression.minimum_input_size,
@@ -658,16 +809,10 @@ def _resolve_address(address: str) -> tuple[str, str]:
     port = int(port_text)
     if not 1 <= port <= 65_535:
         raise OpenKacheValueError("address port must be between 1 and 65535")
-    try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
-    except OSError as error:
-        raise OpenKacheError(f"address DNS resolution failed: {error}") from error
-    for family, _, _, _, sockaddr in infos:
-        if family == socket.AF_INET:
-            return f"{sockaddr[0]}:{sockaddr[1]}", host
-        if family == socket.AF_INET6:
-            return f"[{sockaddr[0]}]:{sockaddr[1]}", host
-    raise OpenKacheError(f"address did not resolve to a UDP endpoint: {address}")
+    # Keep the authority intact. The shared core resolves hostnames once and
+    # retains every address for reconnect rotation; resolving here would pin
+    # Python clients to whichever address the interpreter returned first.
+    return address, host
 
 
 def _as_file_or_bytes(
@@ -687,6 +832,17 @@ def _as_bytes(value: bytes | bytearray | memoryview, name: str) -> bytes:
     if isinstance(value, (bytearray, memoryview)):
         return bytes(value)
     raise OpenKacheValueError(f"{name} must be bytes-like")
+
+
+def _data_protection_key(value: bytes | bytearray | memoryview, name: str) -> bytes:
+    key = _as_bytes(value, name)
+    if len(key) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES:
+        raise OpenKacheValueError(
+            f"{name} must contain exactly {SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes"
+        )
+    if not any(key):
+        raise OpenKacheValueError(f"{name} must contain non-zero secret material")
+    return key
 
 
 def _value_bytes(value: bytes | bytearray | memoryview) -> bytes:
@@ -854,6 +1010,10 @@ def _delete_outcome(kind: int) -> bool:
     raise OpenKacheError(f"DELETE returned unexpected native result {kind}")
 
 
+def _map_native_error(error: NativeError) -> OpenKacheError:
+    return OpenKacheError(str(error), metadata=error.metadata)
+
+
 def _positive_or_zero(
     value: int,
     name: str,
@@ -877,7 +1037,11 @@ __all__ = [
     "ClientTimeouts",
     "CompressionOptions",
     "ConnectionState",
+    "DataProtectionKeyRing",
+    "ErrorMetadata",
+    "MetricsSnapshot",
     "OpenKacheClient",
+    "OpenKacheCancelledError",
     "OpenKacheError",
     "OpenKacheValueError",
     "RawClient",

@@ -9,6 +9,17 @@ namespace OpenKache;
 public sealed class ClientOptions
 {
     /// <summary>
+    /// Active 32-byte data-protection key. A random key must be supplied when
+    /// <see cref="KeyRing"/> is not used.
+    /// </summary>
+    public byte[] DataProtectionKey { get; init; } = Array.Empty<byte>();
+
+    /// <summary>
+    /// Active key and a bounded retired-key window used for read/delete rotation.
+    /// </summary>
+    public DataProtectionKeyRing? KeyRing { get; init; }
+
+    /// <summary>
     /// Maximum reusable bidirectional stream lanes opened on one connection.
     /// </summary>
     public int MaximumStreamLanes { get; init; } = Protocol.DefaultMaxInFlight;
@@ -38,10 +49,33 @@ public sealed class ClientOptions
 
     internal void Validate()
     {
+        if (KeyRing is null)
+        {
+            ValidateKey(DataProtectionKey, nameof(DataProtectionKey));
+        }
+        else
+        {
+            KeyRing.Validate();
+        }
         ArgumentOutOfRangeException.ThrowIfLessThan(MaximumStreamLanes, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(MaximumStreamLanes, 65_535);
         ValidateTimeout(nameof(ConnectTimeout), EffectiveConnectTimeout);
         ValidateTimeout(nameof(RequestTimeout), EffectiveRequestTimeout);
+    }
+
+    private static void ValidateKey(byte[] key, string name)
+    {
+        ArgumentNullException.ThrowIfNull(key, name);
+        if (key.Length != Protocol.ValueFormatDataProtectionKeyBytes)
+        {
+            throw new ArgumentException(
+                $"The key must contain exactly {Protocol.ValueFormatDataProtectionKeyBytes} bytes.",
+                name);
+        }
+        if (key.All(static value => value == 0))
+        {
+            throw new ArgumentException("The key must contain non-zero secret material.", name);
+        }
     }
 
     private static void ValidateTimeout(string name, TimeSpan timeout)
@@ -52,6 +86,46 @@ public sealed class ClientOptions
             throw new ArgumentOutOfRangeException(
                 name,
                 "The timeout must be finite and positive.");
+        }
+    }
+}
+
+/// <summary>Active data-protection key plus a bounded set of retired keys.</summary>
+public sealed class DataProtectionKeyRing
+{
+    /// <summary>Key used for new writes.</summary>
+    public required byte[] Active { get; init; }
+
+    /// <summary>Newest retired key first; the Smithy contract bounds the window.</summary>
+    public IReadOnlyList<byte[]> Previous { get; init; } = Array.Empty<byte[]>();
+
+    internal void Validate()
+    {
+        ValidateKey(Active, nameof(Active));
+        if (Previous.Count > Protocol.MaxPreviousDataProtectionKeys)
+        {
+            throw new ArgumentException(
+                $"At most {Protocol.MaxPreviousDataProtectionKeys} previous keys may be retained.",
+                nameof(Previous));
+        }
+        for (var index = 0; index < Previous.Count; index++)
+        {
+            ValidateKey(Previous[index], $"{nameof(Previous)}[{index}]");
+        }
+    }
+
+    private static void ValidateKey(byte[] key, string name)
+    {
+        ArgumentNullException.ThrowIfNull(key, name);
+        if (key.Length != Protocol.ValueFormatDataProtectionKeyBytes)
+        {
+            throw new ArgumentException(
+                $"The key must contain exactly {Protocol.ValueFormatDataProtectionKeyBytes} bytes.",
+                name);
+        }
+        if (key.All(static value => value == 0))
+        {
+            throw new ArgumentException("The key must contain non-zero secret material.", name);
         }
     }
 }

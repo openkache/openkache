@@ -16,6 +16,7 @@ export interface Native_Client_Options {
   readonly certificate: Uint8Array
   readonly identity?: Native_Identity
   readonly data_protection_key: Uint8Array
+  readonly previous_data_protection_keys?: readonly Uint8Array[]
   readonly compression_enabled: boolean
   readonly compression_level?: number
   readonly minimum_input_size?: number
@@ -27,52 +28,68 @@ export interface Native_Client_Options {
   readonly encryption?: "compact" | "robust"
 }
 
-interface Native_Value_Envelope {
-  readonly encoding: string
-  readonly type_name: string
-  readonly payload: Uint8Array
-}
-
 export interface Native_Client {
-  ping(): Promise<void>
-  get(key: Uint8Array): Promise<Uint8Array | null>
-  get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
-  get_json(key: Uint8Array): Promise<string | null>
+  next_request_id(): number
+  cancel(request_id: number): boolean
+  ping(request_id?: number): Promise<void>
+  get(key: Uint8Array, request_id?: number): Promise<Uint8Array | null>
+  get_json(key: Uint8Array, request_id?: number): Promise<string | null>
   set(
     key: Uint8Array,
     value: Uint8Array,
     condition?: "if_absent" | "if_present",
     ttl_ms?: number,
-  ): Promise<string>
-  set_value(
-    key: Uint8Array,
-    encoding: string,
-    type_name: string,
-    payload: Uint8Array,
-    condition?: "if_absent" | "if_present",
-    ttl_ms?: number,
+    mutation_id?: Uint8Array,
+    request_id?: number,
   ): Promise<string>
   set_json(
     key: Uint8Array,
     value: unknown,
     condition?: "if_absent" | "if_present",
     ttl_ms?: number,
+    mutation_id?: Uint8Array,
+    request_id?: number,
   ): Promise<string>
-  delete(key: Uint8Array): Promise<boolean>
-  stats(): Promise<string>
-  sync(): Promise<void>
+  delete(
+    key: Uint8Array,
+    mutation_id?: Uint8Array,
+    request_id?: number,
+  ): Promise<boolean>
+  stats(request_id?: number): Promise<string>
+  sync(request_id?: number): Promise<void>
   close(): Promise<void>
   close_now(): void
   connection_state(): string
-  reconnect(): Promise<void>
-  raw_get(item_id: Uint8Array): Promise<Uint8Array | null>
+  reconnect(request_id?: number): Promise<void>
+  raw_get(item_id: Uint8Array, request_id?: number): Promise<Uint8Array | null>
   raw_set(
     item_id: Uint8Array,
     value: Uint8Array,
     condition?: "if_absent" | "if_present",
     ttl_ms?: number,
+    mutation_id?: Uint8Array,
+    request_id?: number,
   ): Promise<string>
-  raw_delete(item_id: Uint8Array): Promise<boolean>
+  raw_delete(
+    item_id: Uint8Array,
+    mutation_id?: Uint8Array,
+    request_id?: number,
+  ): Promise<boolean>
+  metrics_snapshot(): Native_Metrics_Snapshot
+}
+
+export interface Native_Metrics_Snapshot {
+  readonly requests: number
+  readonly hits: number
+  readonly misses: number
+  readonly retries: number
+  readonly reconnects: number
+  readonly cancellations: number
+  readonly transport_errors: number
+  readonly protocol_errors: number
+  readonly bytes_sent: number
+  readonly bytes_received: number
+  readonly active_lanes: number
 }
 
 interface Native_Module {

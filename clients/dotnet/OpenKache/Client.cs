@@ -63,6 +63,11 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 address,
                 serverName,
                 trustedCertificateDer,
+                options.KeyRing?.Active ?? options.DataProtectionKey,
+                options.KeyRing?.Previous
+                    .Select(static key => (ReadOnlyMemory<byte>)key)
+                    .ToArray()
+                    ?? Array.Empty<ReadOnlyMemory<byte>>(),
                 options.EffectiveConnectTimeout,
                 options.EffectiveRequestTimeout,
                 options.MaximumStreamLanes,
@@ -101,7 +106,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     public async ValueTask PingAsync(CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync(
-            Protocol.Opcode.Ping,
+            (uint)Protocol.Opcode.Ping,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -117,7 +122,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync(
-            Protocol.Opcode.Get,
+            (uint)Protocol.Opcode.Get,
             ValidateItemId(itemId),
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -127,6 +132,56 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
             var kind when kind == Protocol.FfiResultNotFound => null,
             _ => throw UnexpectedKind("GET", result.Kind),
         };
+    }
+
+    /// <summary>
+    /// Retrieves opaque bytes stored under an application key through the protected value API.
+    /// </summary>
+    /// <param name="key">Non-empty application key. The core derives the protocol item ID.</param>
+    /// <param name="cancellationToken">Stops the pending native operation.</param>
+    /// <returns>The stored bytes, or <see langword="null"/> when the key is absent.</returns>
+    public async ValueTask<byte[]?> GetRawAsync(
+        ReadOnlyMemory<byte> key,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RequestAsync(
+            (uint)Protocol.Opcode.Get,
+            ValidateApplicationKey(key),
+            ReadOnlyMemory<byte>.Empty,
+            raw: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
+        {
+            var kind when kind == Protocol.FfiResultValue => result.Payload,
+            var kind when kind == Protocol.FfiResultNotFound => null,
+            _ => throw UnexpectedKind("GET_RAW", result.Kind),
+        };
+    }
+
+    /// <summary>Retrieves a canonical JSON document through the protected value API.</summary>
+    public async ValueTask<string?> GetJsonAsync(
+        ReadOnlyMemory<byte> key,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await RequestAsync(
+            Protocol.FfiOperationGetJson,
+            ValidateApplicationKey(key),
+            ReadOnlyMemory<byte>.Empty,
+            raw: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (result.Kind == Protocol.FfiResultNotFound) return null;
+        ExpectKind("GET_JSON", result, Protocol.FfiResultValue);
+        try
+        {
+            return new UTF8Encoding(false, true).GetString(result.Payload);
+        }
+        catch (DecoderFallbackException error)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "GET_JSON returned invalid UTF-8.",
+                error);
+        }
     }
 
     /// <summary>
@@ -158,18 +213,97 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         ArgumentNullException.ThrowIfNull(options);
         var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
         var result = await RequestAsync(
-            Protocol.Opcode.Set,
+            (uint)Protocol.Opcode.Set,
             ValidateItemId(itemId),
             ValidateValue(value),
             options.Condition,
             ttlMilliseconds,
-            cancellationToken).ConfigureAwait(false);
+            options.MutationId ?? CreateMutationId(),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.Kind switch
         {
             var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
             var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
             var kind when kind == Protocol.FfiResultNotStored => Smithy.SetOutcome.NotStored,
             _ => throw UnexpectedKind("SET", result.Kind),
+        };
+    }
+
+    /// <summary>Stores opaque bytes under an application key through the protected value API.</summary>
+    public ValueTask<Smithy.SetOutcome> SetRawAsync(
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> value,
+        CancellationToken cancellationToken = default)
+    {
+        return SetRawAsync(key, value, new SetOptions(), cancellationToken);
+    }
+
+    /// <summary>
+    /// Stores opaque bytes under an application key with optional expiration and condition.
+    /// </summary>
+    public async ValueTask<Smithy.SetOutcome> SetRawAsync(
+        ReadOnlyMemory<byte> key,
+        ReadOnlyMemory<byte> value,
+        SetOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
+        var result = await RequestAsync(
+            (uint)Protocol.Opcode.Set,
+            ValidateApplicationKey(key),
+            ValidateValue(value),
+            options.Condition,
+            ttlMilliseconds,
+            options.MutationId ?? CreateMutationId(),
+            raw: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
+        {
+            var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
+            var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
+            var kind when kind == Protocol.FfiResultNotStored => Smithy.SetOutcome.NotStored,
+            _ => throw UnexpectedKind("SET_RAW", result.Kind),
+        };
+    }
+
+    /// <summary>Stores a canonical JSON document under an application key.</summary>
+    public ValueTask<Smithy.SetOutcome> SetJsonAsync(
+        ReadOnlyMemory<byte> key,
+        string json,
+        CancellationToken cancellationToken = default)
+    {
+        return SetJsonAsync(key, json, new SetOptions(), cancellationToken);
+    }
+
+    /// <summary>
+    /// Stores a canonical JSON document under an application key with optional expiration and
+    /// condition. The shared core validates and canonicalizes the JSON representation.
+    /// </summary>
+    public async ValueTask<Smithy.SetOutcome> SetJsonAsync(
+        ReadOnlyMemory<byte> key,
+        string json,
+        SetOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(json);
+        ArgumentNullException.ThrowIfNull(options);
+        var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
+        var result = await RequestAsync(
+            Protocol.FfiOperationSetJson,
+            ValidateApplicationKey(key),
+            new UTF8Encoding(false, true).GetBytes(json),
+            options.Condition,
+            ttlMilliseconds,
+            options.MutationId ?? CreateMutationId(),
+            raw: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
+        {
+            var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
+            var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
+            var kind when kind == Protocol.FfiResultNotStored => Smithy.SetOutcome.NotStored,
+            _ => throw UnexpectedKind("SET_JSON", result.Kind),
         };
     }
 
@@ -181,16 +315,51 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         ReadOnlyMemory<byte> itemId,
         CancellationToken cancellationToken = default)
     {
+        return await DeleteAsync(itemId, new SetOptions(), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Deletes an item ID while reusing an optional idempotency token.</summary>
+    public async ValueTask<bool> DeleteAsync(
+        ReadOnlyMemory<byte> itemId,
+        SetOptions options,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _ = options.ValidateAndGetTtlMilliseconds();
         var result = await RequestAsync(
-            Protocol.Opcode.Delete,
+            (uint)Protocol.Opcode.Delete,
             ValidateItemId(itemId),
             ReadOnlyMemory<byte>.Empty,
+            mutationId: options.MutationId ?? CreateMutationId(),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         return result.Kind switch
         {
             var kind when kind == Protocol.FfiResultDeleted => true,
             var kind when kind == Protocol.FfiResultNotDeleted => false,
             _ => throw UnexpectedKind("DELETE", result.Kind),
+        };
+    }
+
+    /// <summary>Deletes the value associated with an application key.</summary>
+    public async ValueTask<bool> DeleteRawAsync(
+        ReadOnlyMemory<byte> key,
+        SetOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        options ??= new SetOptions();
+        _ = options.ValidateAndGetTtlMilliseconds();
+        var result = await RequestAsync(
+            (uint)Protocol.Opcode.Delete,
+            ValidateApplicationKey(key),
+            ReadOnlyMemory<byte>.Empty,
+            mutationId: options.MutationId ?? CreateMutationId(),
+            raw: false,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        return result.Kind switch
+        {
+            var kind when kind == Protocol.FfiResultDeleted => true,
+            var kind when kind == Protocol.FfiResultNotDeleted => false,
+            _ => throw UnexpectedKind("DELETE_RAW", result.Kind),
         };
     }
 
@@ -201,7 +370,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync(
-            Protocol.Opcode.Stats,
+            (uint)Protocol.Opcode.Stats,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -225,11 +394,30 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     public async ValueTask SyncAsync(CancellationToken cancellationToken = default)
     {
         var result = await RequestAsync(
-            Protocol.Opcode.Sync,
+            (uint)Protocol.Opcode.Sync,
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ExpectKind("SYNC", result, Protocol.FfiResultOk);
+    }
+
+    /// <summary>Returns a point-in-time native metrics snapshot.</summary>
+    public MetricsSnapshot MetricsSnapshot()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        var snapshot = _nativeClient.Metrics();
+        return new MetricsSnapshot(
+            snapshot.Requests,
+            snapshot.Hits,
+            snapshot.Misses,
+            snapshot.Retries,
+            snapshot.Reconnects,
+            snapshot.Cancellations,
+            snapshot.TransportErrors,
+            snapshot.ProtocolErrors,
+            snapshot.BytesSent,
+            snapshot.BytesReceived,
+            snapshot.ActiveLanes);
     }
 
     /// <summary>
@@ -279,6 +467,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
             {
                 Condition = input.Condition,
                 TimeToLive = timeToLive,
+                MutationId = input.MutationId,
             },
             cancellationToken).ConfigureAwait(false);
         return new Smithy.SetOutput
@@ -297,7 +486,10 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         ArgumentNullException.ThrowIfNull(input);
         return new Smithy.DeleteOutput
         {
-            Deleted = await DeleteAsync(input.ItemId, cancellationToken).ConfigureAwait(false),
+            Deleted = await DeleteAsync(
+                input.ItemId,
+                new SetOptions { MutationId = input.MutationId },
+                cancellationToken).ConfigureAwait(false),
         };
     }
 
@@ -341,11 +533,13 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     }
 
     private async ValueTask<NativeResult> RequestAsync(
-        Protocol.Opcode opcode,
+        uint opcode,
         ReadOnlyMemory<byte> itemId,
         ReadOnlyMemory<byte> value,
         Smithy.SetCondition? condition = null,
         ulong? ttlMilliseconds = null,
+        ReadOnlyMemory<byte> mutationId = default,
+        bool raw = true,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(
@@ -360,6 +554,8 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 NativeSetCondition(condition),
                 ttlMilliseconds.HasValue,
                 ttlMilliseconds.GetValueOrDefault(),
+                mutationId,
+                raw,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -384,6 +580,18 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         }
 
         return itemId;
+    }
+
+    private static ReadOnlyMemory<byte> ValidateApplicationKey(ReadOnlyMemory<byte> key)
+    {
+        if (key.IsEmpty)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "application key must not be empty.");
+        }
+
+        return key;
     }
 
     private static ReadOnlyMemory<byte> ValidateValue(ReadOnlyMemory<byte> value)
@@ -449,6 +657,13 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
             _ when normalized.Contains("INTERNAL", StringComparison.Ordinal) => "INTERNAL_ERROR",
             _ => fallbackCode,
         };
-        return new OpenKacheException(code, message, error);
+        return new OpenKacheException(code, message, error, error.Metadata);
+    }
+
+    private static byte[] CreateMutationId()
+    {
+        var mutationId = new byte[Protocol.MutationIdBytes];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(mutationId);
+        return mutationId;
     }
 }

@@ -3,6 +3,7 @@ package openkache
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -22,6 +23,8 @@ type Error struct {
 	Message string
 	// Cause is an optional underlying context or validation error.
 	Cause error
+	// Metadata contains the structured native error details, when available.
+	Metadata *ErrorMetadata
 }
 
 func (e *Error) Error() string {
@@ -32,6 +35,33 @@ func (e *Error) Error() string {
 		return "openkache " + e.Operation + " failed"
 	}
 	return "openkache " + e.Operation + " failed: " + e.Message
+}
+
+// ErrorMetadata is the stable structured-error contract exposed by the native ABI.
+type ErrorMetadata struct {
+	Code      uint32
+	Operation uint32
+	Phase     uint32
+	Backend   uint32
+	Retryable bool
+	Ambiguous bool
+	// MutationID is reusable when Ambiguous is true.
+	MutationID []byte
+}
+
+// MetricsSnapshot is a point-in-time native request and transport snapshot.
+type MetricsSnapshot struct {
+	Requests        uint64
+	Hits            uint64
+	Misses          uint64
+	Retries         uint64
+	Reconnects      uint64
+	Cancellations   uint64
+	TransportErrors uint64
+	ProtocolErrors  uint64
+	BytesSent       uint64
+	BytesReceived   uint64
+	ActiveLanes     uint64
 }
 
 func (e *Error) Unwrap() error {
@@ -45,6 +75,35 @@ func (e *Error) Unwrap() error {
 type Identity struct {
 	CertificateChain [][]byte
 	PrivateKey       []byte
+}
+
+// DataProtectionKeyRing keeps an active key and a bounded retired-key window.
+type DataProtectionKeyRing struct {
+	Active   []byte
+	Previous [][]byte
+}
+
+func (ring DataProtectionKeyRing) normalize() ([]byte, []byte, error) {
+	if err := validateDataProtectionKey(ring.Active, "key_ring.active"); err != nil {
+		return nil, nil, err
+	}
+	if len(ring.Previous) > SmithyMaxPreviousDataProtectionKeys {
+		return nil, nil, validationError(
+			"key_ring.previous",
+			fmt.Sprintf("may contain at most %d keys", SmithyMaxPreviousDataProtectionKeys),
+		)
+	}
+	previous := make([]byte, 0, len(ring.Previous)*SmithyDataProtectionKeyBytes)
+	for index, key := range ring.Previous {
+		if err := validateDataProtectionKey(
+			key,
+			fmt.Sprintf("key_ring.previous[%d]", index),
+		); err != nil {
+			return nil, nil, err
+		}
+		previous = append(previous, key...)
+	}
+	return append([]byte(nil), ring.Active...), previous, nil
 }
 
 // CompressionOptions controls optional Zstandard compression in the core.
@@ -101,6 +160,8 @@ type Options struct {
 	Identity *Identity
 	// DataProtectionKey is the persistent application data-protection secret.
 	DataProtectionKey []byte
+	// KeyRing optionally replaces DataProtectionKey with active/retired keys.
+	KeyRing *DataProtectionKeyRing
 	// Compression is applied before the core's authenticated encryption.
 	Compression CompressionOptions
 	// Encryption selects the shared-core value-protection profile. The zero
@@ -125,6 +186,7 @@ type normalizedOptions struct {
 	identityCertificate []byte
 	identityPrivateKey  []byte
 	dataProtectionKey   []byte
+	previousKeys        []byte
 	compression         CompressionOptions
 	encryption          Encryption
 	timeouts            TimeoutOptions
@@ -137,11 +199,28 @@ func (o Options) normalize() (normalizedOptions, error) {
 	if o.Address == "" {
 		return normalizedOptions{}, validationError("address", "must not be empty")
 	}
-	if len(o.DataProtectionKey) != SmithyDataProtectionKeyBytes {
+	var dataProtectionKey []byte
+	var previousKeys []byte
+	if o.KeyRing != nil {
+		if len(o.DataProtectionKey) != 0 {
+			return normalizedOptions{}, validationError("key_ring", "cannot be combined with data_protection_key")
+		}
+		var err error
+		dataProtectionKey, previousKeys, err = o.KeyRing.normalize()
+		if err != nil {
+			return normalizedOptions{}, err
+		}
+	} else {
+		dataProtectionKey = append([]byte(nil), o.DataProtectionKey...)
+	}
+	if len(dataProtectionKey) != SmithyDataProtectionKeyBytes {
 		return normalizedOptions{}, validationError(
 			"data_protection_key",
-			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyDataProtectionKeyBytes, len(o.DataProtectionKey)),
+			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyDataProtectionKeyBytes, len(dataProtectionKey)),
 		)
+	}
+	if err := validateDataProtectionKey(dataProtectionKey, "data_protection_key"); err != nil {
+		return normalizedOptions{}, err
 	}
 
 	serverName := o.ServerName
@@ -258,7 +337,8 @@ func (o Options) normalize() (normalizedOptions, error) {
 		certificate:         normalizedPEM(o.Certificate),
 		identityCertificate: identityCertificate,
 		identityPrivateKey:  identityPrivateKey,
-		dataProtectionKey:   append([]byte(nil), o.DataProtectionKey...),
+		dataProtectionKey:   dataProtectionKey,
+		previousKeys:        previousKeys,
 		compression:         compression,
 		encryption:          encryption,
 		timeouts:            TimeoutOptions{Connect: connectTimeout, Request: requestTimeout},
@@ -266,6 +346,21 @@ func (o Options) normalize() (normalizedOptions, error) {
 		maxInFlight:         maxInFlight,
 		nativeLibrary:       o.NativeLibrary,
 	}, nil
+}
+
+func validateDataProtectionKey(key []byte, name string) error {
+	if len(key) != SmithyDataProtectionKeyBytes {
+		return validationError(
+			name,
+			fmt.Sprintf("must contain exactly %d bytes", SmithyDataProtectionKeyBytes),
+		)
+	}
+	for _, value := range key {
+		if value != 0 {
+			return nil
+		}
+	}
+	return validationError(name, "must contain non-zero secret material")
 }
 
 func normalizedPEM(value []byte) []byte {
@@ -297,8 +392,21 @@ const (
 
 // SetOptions controls an individual SET operation.
 type SetOptions struct {
-	Condition SetCondition
-	TTLMillis uint64
+	Condition  SetCondition
+	TTLMillis  uint64
+	MutationID *MutationID
+}
+
+// MutationID is the fixed-width idempotency token carried by SET and DELETE.
+type MutationID [SmithyMutationIDBytes]byte
+
+// NewMutationID creates a cryptographically random mutation token.
+func NewMutationID() (MutationID, error) {
+	var mutationID MutationID
+	if _, err := rand.Read(mutationID[:]); err != nil {
+		return MutationID{}, err
+	}
+	return mutationID, nil
 }
 
 // ConnectionState is a best-effort snapshot of the native connection state.
@@ -371,14 +479,16 @@ const (
 )
 
 type nativeResult struct {
-	kind uint32
-	data []byte
+	kind     uint32
+	data     []byte
+	metadata *ErrorMetadata
 }
 
 type nativeClient interface {
 	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
 	executeRaw(context.Context, uint32, ItemID, []byte, SetOptions) (nativeResult, error)
 	state() uint32
+	metrics() MetricsSnapshot
 	close() error
 }
 
@@ -422,6 +532,11 @@ func (c *Client) invoke(
 	key, value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	var err error
+	options, err = withMutationID(operation, options)
+	if err != nil {
+		return nativeResult{}, err
+	}
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.execute(ctx, operation, key, value, options)
 	})
@@ -434,9 +549,33 @@ func (c *Client) invokeRaw(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	var err error
+	options, err = withMutationID(operation, options)
+	if err != nil {
+		return nativeResult{}, err
+	}
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.executeRaw(ctx, operation, itemID, value, options)
 	})
+}
+
+func withMutationID(operation uint32, options SetOptions) (SetOptions, error) {
+	if options.MutationID != nil ||
+		(operation != SmithyOpcodeSet &&
+			operation != SmithyOpcodeDelete &&
+			operation != SmithyFFIOperationSetJson) {
+		return options, nil
+	}
+	mutationID, err := NewMutationID()
+	if err != nil {
+		return options, &Error{
+			Operation: "mutation id",
+			Message:   "failed to generate a mutation token",
+			Cause:     err,
+		}
+	}
+	options.MutationID = &mutationID
+	return options, nil
 }
 
 func (c *Client) invokeNative(
@@ -456,6 +595,22 @@ func (c *Client) invokeNative(
 		return nativeResult{}, ErrClosed
 	}
 	return invoke(native)
+}
+
+// MetricsSnapshot returns a point-in-time native metrics snapshot.
+func (c *Client) MetricsSnapshot() MetricsSnapshot {
+	if c == nil {
+		return MetricsSnapshot{}
+	}
+	c.mu.RLock()
+	native := c.native
+	if native == nil {
+		c.mu.RUnlock()
+		return MetricsSnapshot{}
+	}
+	snapshot := native.metrics()
+	c.mu.RUnlock()
+	return snapshot
 }
 
 // Ping verifies the connection and the server's PONG response.
@@ -588,6 +743,22 @@ func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
 		return false, validationError("key", "must not be empty")
 	}
 	result, err := c.invoke(ctx, SmithyOpcodeDelete, key, nil, SetOptions{})
+	if err != nil {
+		return false, operationError("delete", err)
+	}
+	return deleteResult("delete", result)
+}
+
+// DeleteWithMutationID deletes a key while reusing the supplied idempotency token.
+func (c *Client) DeleteWithMutationID(
+	ctx context.Context,
+	key []byte,
+	mutationID MutationID,
+) (bool, error) {
+	if len(key) == 0 {
+		return false, validationError("key", "must not be empty")
+	}
+	result, err := c.invoke(ctx, SmithyOpcodeDelete, key, nil, SetOptions{MutationID: &mutationID})
 	if err != nil {
 		return false, operationError("delete", err)
 	}
