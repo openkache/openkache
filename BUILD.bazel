@@ -1,0 +1,33 @@
+"""Initial public Bazel aliases for the protocol and server packages."""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+alias(
+    name = "openkache_protocol",
+    actual = "//protocol:openkache_protocol",
+)
+
+alias(
+    name = "openkache_server",
+    actual = "//server:openkache_server",
+)
+
+alias(
+    name = "openkache_server_bin",
+    actual = "//server:openkache_server_bin",
+)
+
+alias(
+    name = "kvkache_v1_bin",
+    actual = "//server:kvkache_v1_bin",
+)
+
+filegroup(
+    name = "server_source_tree",
+    srcs = ["//server:server_source_tree"],
+)

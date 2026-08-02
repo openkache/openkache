@@ -1,0 +1,71 @@
+"""Bazel targets for the public server crate and binaries."""
+
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load(
+    "//bazel:openkache_defs.bzl",
+    "cargo_deps",
+    "crate_aliases",
+    "dedupe_labels",
+    "rust_metadata",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "server_source_tree",
+    srcs = glob(["src/**/*.rs"]),
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = glob([
+        "Cargo.toml",
+        "src/**",
+    ]),
+)
+
+rust_library(
+    name = "openkache_server",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+    aliases = crate_aliases("server"),
+    crate_features = [
+        "allocator-jemalloc",
+        "channel-crossfire",
+        "quic-noq",
+    ],
+    crate_name = "openkache",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache"),
+    deps = ["//protocol:openkache_protocol"] + cargo_deps("server"),
+)
+
+rust_binary(
+    name = "openkache_server_bin",
+    srcs = glob(["src/bin/openkache_server/**/*.rs"]) + [
+        "src/bin/openkache_server.rs",
+    ],
+    aliases = crate_aliases("server"),
+    crate_name = "openkache_server",
+    crate_root = "src/bin/openkache_server.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache"),
+    deps = dedupe_labels([":openkache_server"] + cargo_deps("server")),
+)
+
+rust_binary(
+    name = "kvkache_v1_bin",
+    srcs = ["src/bin/kvkache_v1.rs"],
+    aliases = crate_aliases("server"),
+    crate_name = "kvkache_v1",
+    crate_root = "src/bin/kvkache_v1.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache"),
+    deps = dedupe_labels([
+        "//protocol:openkache_protocol",
+        ":openkache_server",
+    ] + cargo_deps("server")),
+)

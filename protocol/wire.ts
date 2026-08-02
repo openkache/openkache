@@ -276,7 +276,8 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
 /** Loads the protocol Smithy AST from the model owned by this directory. */
 export function smithy_wire_ast(): unknown {
-  const result = Bun.spawnSync(["smithy", "ast", MODEL_DIRECTORY], {
+  const smithy = process.env.OPENKACHE_SMITHY_EXECUTABLE ?? "smithy"
+  const result = Bun.spawnSync([smithy, "ast", MODEL_DIRECTORY], {
     cwd: PROTOCOL_DIRECTORY,
     stderr: "pipe",
     stdout: "pipe",

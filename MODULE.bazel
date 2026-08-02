@@ -1,0 +1,113 @@
+"""Minimal Bazel module for the public Rust protocol and server graph."""
+
+module(
+    name = "openkache_public",
+    version = "0.1.0",
+)
+
+_http_archive = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:http.bzl",
+    "http_archive",
+)
+
+bazel_dep(name = "rules_rust", version = "0.73.0")
+bazel_dep(name = "platforms", version = "1.1.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(edition = "2024")
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+crate = use_extension(
+    "@rules_rust//crate_universe:extensions.bzl",
+    "crate",
+)
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:Cargo.Bazel.lock",
+    manifests = ["//:Cargo.toml"],
+    skip_cargo_lockfile_overwrite = True,
+)
+use_repo(crate, "crates")
+
+# The protocol build script invokes the checked-in Bun/Smithy generators.
+# Archives are fetched lazily for the selected host platform.
+_http_archive(
+    name = "openkache_bun_linux_x86_64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a",
+    strip_prefix = "bun-linux-x64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-x64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_linux_aarch64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "70bae41b3908b0a120e1e58c5c8af30e74afae3b8d11b0d3fdd8e787ddfb4b22",
+    strip_prefix = "bun-linux-aarch64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-linux-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_darwin_x86_64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "e5a6c8b64f419925232d111ecb13e25f0abf55e54f792341f987623fd0778009",
+    strip_prefix = "bun-darwin-x64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-x64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_darwin_aarch64",
+    build_file_content = """exports_files(["bun"], visibility = ["//visibility:public"])""",
+    sha256 = "5467e3f65dba526b9fea98f0cce04efafc0c63e169733ec27b876a3ad32da190",
+    strip_prefix = "bun-darwin-aarch64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-darwin-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_windows_x86_64",
+    build_file_content = """exports_files(["bun.exe"], visibility = ["//visibility:public"])""",
+    sha256 = "85b14f3e0584218e9b63407b3aa6b90c4835ec5c32435c1f12cb6fc13667c7c9",
+    strip_prefix = "bun-windows-x64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-x64.zip"],
+)
+
+_http_archive(
+    name = "openkache_bun_windows_aarch64",
+    build_file_content = """exports_files(["bun.exe"], visibility = ["//visibility:public"])""",
+    sha256 = "feaf3f2951c50104dc9a33c5c8af30e74afae3b8d11b0d3fdd8e787ddfb4b22",
+    strip_prefix = "bun-windows-aarch64",
+    urls = ["https://github.com/oven-sh/bun/releases/download/bun-v1.3.13/bun-windows-aarch64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_linux_x86_64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy"], visibility = ["//visibility:public"])
+""",
+    sha256 = "ee6e6d24416b53624ba7f323628b2ca8aa67a349fbe3b2e92e98172c3f3d6a45",
+    strip_prefix = "smithy-cli-linux-x86_64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-linux-x86_64.zip"],
+)
+
+_http_archive(
+    name = "openkache_smithy_linux_aarch64",
+    build_file_content = """
+filegroup(
+    name = "all_files",
+    srcs = glob(["**"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)
+exports_files(["bin/smithy"], visibility = ["//visibility:public"])
+""",
+    sha256 = "2bbed6177b0c4fc2f75c4266a5cf72571ca35ce66da8800a90d4cf03c6bb2d42",
+    strip_prefix = "smithy-cli-linux-aarch64",
+    urls = ["https://github.com/smithy-lang/smithy/releases/download/1.68.0/smithy-cli-linux-aarch64.zip"],
+)
