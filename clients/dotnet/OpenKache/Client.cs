@@ -564,6 +564,20 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 "TIMEOUT",
                 $"{opcode.ToString().ToUpperInvariant()} exceeded.");
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException(
+                "CANCELLED",
+                $"{opcode.ToString().ToUpperInvariant()} canceled.",
+                metadata: new ErrorMetadata(
+                    Protocol.FfiErrorCancelled,
+                    (uint)opcode,
+                    Protocol.FfiPhaseUnknown,
+                    Protocol.FfiBackendNone,
+                    Retryable: !mutationId.IsEmpty,
+                    Ambiguous: !mutationId.IsEmpty,
+                    MutationId: mutationId.IsEmpty ? null : mutationId.ToArray()));
+        }
         catch (NativeException error)
         {
             throw MapNativeError(error, "CONNECTION_FAILED");
