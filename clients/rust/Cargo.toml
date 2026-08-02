@@ -1,7 +1,7 @@
 [package]
 name = "openkache-client"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 description = "Ergonomic Rust client for the OpenKache cache server"
 license = "Apache-2.0"
 
