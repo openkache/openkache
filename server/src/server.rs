@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use compio::driver::ProactorBuilder;
@@ -504,6 +505,12 @@ impl KacheServer {
         let mut workers = Vec::with_capacity(network.worker_count);
         let mut launch_error = None;
         let request_budget = RequestBudget::new(network.max_inflight_value_mib * 1024 * 1024);
+        let mutation_task_budget = Arc::new(MutationTaskBudget::new(
+            network
+                .max_stream_lanes_per_connection
+                .saturating_mul(network.worker_count)
+                .max(1),
+        ));
 
         for (worker_id, socket) in sockets.into_iter().enumerate() {
             let (stop_tx, stop_rx) = channel::bounded_sync_async(1);
@@ -521,6 +528,7 @@ impl KacheServer {
                 request_budget: request_budget.clone(),
                 max_item_bytes,
                 mutation_dedupe: Arc::clone(&mutation_dedupe),
+                mutation_task_budget: Arc::clone(&mutation_task_budget),
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
             let role = QuicNetworkRole {
@@ -746,6 +754,55 @@ struct NetworkWorkerLimits {
     request_budget: RequestBudget,
     max_item_bytes: usize,
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
+    mutation_task_budget: Arc<MutationTaskBudget>,
+}
+
+/// Shared bound on timed-out mutation tasks across every connection.
+pub(crate) struct MutationTaskBudget {
+    active: AtomicUsize,
+    limit: usize,
+}
+
+impl MutationTaskBudget {
+    pub(crate) fn new(limit: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<MutationTaskPermit> {
+        let mut active = self.active.load(Ordering::Acquire);
+        loop {
+            if active >= self.limit {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(MutationTaskPermit {
+                        budget: Arc::clone(self),
+                    });
+                }
+                Err(next) => active = next,
+            }
+        }
+    }
+}
+
+pub(crate) struct MutationTaskPermit {
+    budget: Arc<MutationTaskBudget>,
+}
+
+impl Drop for MutationTaskPermit {
+    fn drop(&mut self) {
+        let previous = self.budget.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
 }
 
 async fn run_selected_endpoint(
@@ -784,6 +841,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         request_budget,
         max_item_bytes,
         mutation_dedupe,
+        mutation_task_budget,
     } = limits;
     let mut connections = FuturesUnordered::new();
     loop {
@@ -797,6 +855,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     connections.push(serve_incoming(
                         incoming, Arc::clone(&cache), access_policy, request_timeout, max_stream_lanes,
                         request_budget.clone(), max_item_bytes, Arc::clone(&mutation_dedupe),
+                        Arc::clone(&mutation_task_budget),
                     ));
                 }
                 _ = stopping => break,
@@ -812,6 +871,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     connections.push(serve_incoming(
                         incoming, Arc::clone(&cache), access_policy, request_timeout, max_stream_lanes,
                         request_budget.clone(), max_item_bytes, Arc::clone(&mutation_dedupe),
+                        Arc::clone(&mutation_task_budget),
                     ));
                 }
                 _ = completed => {}
@@ -835,6 +895,7 @@ async fn serve_incoming<I: TransportIncoming>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
+    mutation_task_budget: Arc<MutationTaskBudget>,
 ) {
     if let Ok(mut connection) = incoming.connect().await {
         let administrator =
@@ -848,6 +909,7 @@ async fn serve_incoming<I: TransportIncoming>(
             request_budget,
             max_item_bytes,
             mutation_dedupe,
+            mutation_task_budget,
         )
         .await;
     }
@@ -864,9 +926,9 @@ async fn serve_connection<C: TransportConnection>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
+    mutation_task_budget: Arc<MutationTaskBudget>,
 ) {
     let mut streams = FuturesUnordered::new();
-    let max_mutation_tasks = max_stream_lanes.clamp(1, crate::mutation::DEFAULT_CAPACITY);
     loop {
         if streams.len() >= max_stream_lanes {
             let _ = streams.next().await;
@@ -884,7 +946,7 @@ async fn serve_connection<C: TransportConnection>(
                         request_budget.clone(),
                         max_item_bytes,
                         Arc::clone(&mutation_dedupe),
-                        max_mutation_tasks,
+                        Arc::clone(&mutation_task_budget),
                     ));
                 }
                 Err(_) => break,
@@ -905,7 +967,7 @@ async fn serve_connection<C: TransportConnection>(
                             request_budget.clone(),
                             max_item_bytes,
                             Arc::clone(&mutation_dedupe),
-                            max_mutation_tasks,
+                            Arc::clone(&mutation_task_budget),
                         ));
                     }
                     Err(_) => break,
@@ -975,7 +1037,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_budget: RequestBudget,
     max_item_bytes: usize,
     mutation_dedupe: Arc<Mutex<MutationDedupeStore>>,
-    max_mutation_tasks: usize,
+    mutation_task_budget: Arc<MutationTaskBudget>,
 ) {
     let mut mutation_tasks = FuturesUnordered::new();
     loop {
@@ -1094,49 +1156,51 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                     Some(MutationDecision::Capacity) => {
                         response_bytes(Status::Overloaded, b"mutation replay store is at capacity")
                     }
-                    Some(MutationDecision::New) if mutation_tasks.len() >= max_mutation_tasks => {
-                        should_record = false;
-                        response_bytes(
-                            Status::Overloaded,
-                            b"mutation execution lanes are at capacity",
-                        )
-                    }
                     Some(MutationDecision::New) => {
-                        should_record = false;
-                        let mutation_cache = Arc::clone(&cache);
-                        let mutation_store = Arc::clone(&mutation_dedupe);
-                        let reservation = reservation_guard.take();
-                        let generation = reservation_generation
-                            .expect("new mutations carry a reservation generation");
-                        mutation_tasks.push(compio::runtime::spawn(async move {
-                            // Keep the request-budget reservation alive for
-                            // the decoded value while a timed-out mutation
-                            // finishes in the background.
-                            let _request_permit = request_permit;
-                            let response =
-                                execute_request(&mutation_cache, request, administrator).await;
-                            let _ = mutation_store
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .record_with_reservation(
-                                    mutation_id.expect("new mutations carry a token"),
-                                    fingerprint,
-                                    generation,
-                                    response.status as u8,
-                                    response.payload,
-                                    std::time::Instant::now(),
-                                );
-                            if let Some(mut reservation) = reservation {
-                                reservation.disarm();
-                            }
-                        }));
-                        wait_for_mutation_result(
-                            &mutation_dedupe,
-                            mutation_id.expect("new mutations carry a token"),
-                            fingerprint,
-                            deadline,
-                        )
-                        .await
+                        if let Some(task_permit) = mutation_task_budget.try_acquire() {
+                            should_record = false;
+                            let mutation_cache = Arc::clone(&cache);
+                            let mutation_store = Arc::clone(&mutation_dedupe);
+                            let reservation = reservation_guard.take();
+                            let generation = reservation_generation
+                                .expect("new mutations carry a reservation generation");
+                            mutation_tasks.push(compio::runtime::spawn(async move {
+                                // Keep the request-budget reservation alive for
+                                // the decoded value while a timed-out mutation
+                                // finishes in the background.
+                                let _request_permit = request_permit;
+                                let _task_permit = task_permit;
+                                let response =
+                                    execute_request(&mutation_cache, request, administrator).await;
+                                let _ = mutation_store
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .record_with_reservation(
+                                        mutation_id.expect("new mutations carry a token"),
+                                        fingerprint,
+                                        generation,
+                                        response.status as u8,
+                                        response.payload,
+                                        std::time::Instant::now(),
+                                    );
+                                if let Some(mut reservation) = reservation {
+                                    reservation.disarm();
+                                }
+                            }));
+                            wait_for_mutation_result(
+                                &mutation_dedupe,
+                                mutation_id.expect("new mutations carry a token"),
+                                fingerprint,
+                                deadline,
+                            )
+                            .await
+                        } else {
+                            should_record = false;
+                            response_bytes(
+                                Status::Overloaded,
+                                b"mutation execution lanes are at capacity",
+                            )
+                        }
                     }
                     None => match compio::runtime::time::timeout(
                         remaining(deadline),
