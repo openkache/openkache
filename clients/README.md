@@ -25,24 +25,21 @@ formats or protocol behavior.
 | Shared core | [`core/`](core/) | Protocol v1 raw and protected engine; value format v1 implementation |
 | Rust | [`rust/`](rust/) | Protocol v1 end-user SDK; byte APIs use v1 Raw serialization |
 | CLI | [`cli/`](cli/) | Bash-friendly one-shot and interactive client binary |
-| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK; canonical JSON uses the shared core and a legacy envelope remains available for compatibility |
-| C# / .NET | [`dotnet/`](dotnet/) | Shared-core C ABI adapter for the raw Smithy API |
+| TypeScript / JavaScript | [`typescript/`](typescript/) | Protocol v1 Node-API SDK with canonical JSON and opaque Raw APIs |
+| C# / .NET | [`dotnet/`](dotnet/) | Shared-core C ABI adapter with protected Raw and canonical JSON APIs |
 | Python | [`python/`](python/) | Async core-backed SDK; Smithy API and value constants generated from the canonical model |
 | Go | [`go/`](go/) | Context-aware protected and raw CGO binding over the shared native ABI |
-| Java | `java/` | Package scaffold |
-| Kotlin | `kotlin/` | Package scaffold |
+| Java | [`java/`](java/) | Async FFM client with generated Smithy API |
+| Kotlin | [`kotlin/`](kotlin/) | Coroutine client with generated Smithy API |
 | C | [`c/`](c/) | Protocol v1 protected C17 ABI over the shared core |
 | C++ | [`cpp/`](cpp/) | Protocol v1 C++20 RAII adapter over the C ABI |
 | Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
-| Dart | `dart/` | Package scaffold |
-
-Java, Kotlin, and Dart currently contain registry metadata and reserved source
-layouts only. They do not connect to OpenKache or expose cache operations yet.
+| Dart | [`dart/`](dart/) | Async `dart:ffi` client with generated contract |
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
-format v1. The core owns Raw and canonical JSON serialization. TypeScript's
-legacy metadata envelope remains a package-level compatibility detail; new
-cross-language values should use its `set_json`/`get_json` API.
+format v1. The core owns Raw and canonical JSON serialization. Every binding's
+formatted-value API uses that same canonical representation; Raw APIs preserve
+opaque bytes exactly.
 
 ## Binding architecture
 
@@ -61,32 +58,37 @@ Language adapters must not implement their own wire framing, retry semantics,
 key derivation, compression, encryption, or value containers. Extend the shared
 core when a binding needs shared behavior.
 
-The .NET package uses the shared native ABI for transport and protocol work.
-Its managed surface remains a raw Smithy adapter; protected value handling can
-be added without introducing a second protocol implementation.
+The .NET package uses the shared native ABI for transport, protocol work, and
+protected value operations. Its managed Raw and canonical JSON methods delegate
+value derivation and formatting to the shared core.
 
-## Scaffold commands and entry points
+## Package commands and entry points
 
-Run each command from the listed package directory. These commands validate
-package structure only.
+Run each command from the listed package directory.
 
 | Package | Validation command | Reserved package surface |
 |---|---|---|
 | C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
 | C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
-| Dart | `dart analyze` | `lib/openkache.dart` |
+| Dart | `dart analyze` | `lib/openkache.dart`, generated contract |
 | Go | `go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
-| Java | `mvn package` | `src/main/java/io/openkache/client/package-info.java` |
-| Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
+| Java | `mvn package` | `src/main/java/io/openkache/client/` |
+| Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/` |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift`, SwiftPM-generated Smithy API |
 
-Native linkage for C, C++, Python, and Swift is supplied by the shared `ffi`
-native library built from `clients/core`; see each package README for the
-package-specific linker or packaging configuration. Artifact distribution for
-the remaining scaffolds is intentionally undefined until those bindings are
-implemented.
+Native linkage for C, C++, Python, Swift, Java, Kotlin, and Dart is supplied by
+the shared `ffi` native library built from `clients/core`; see each package
+README for package-specific linker or packaging configuration. Artifact
+distribution for each binding is selected by its package build and release
+matrix.
+
+Go, Java, Kotlin, and Dart contract sources are generated build outputs and are
+intentionally ignored by Git. Go consumers run `go generate`; Maven and Gradle
+invoke the generator for Java and Kotlin, while Dart builds run
+`OPENKACHE_GENERATION_TARGET=dart ./generate.ts` first. Release workflows
+regenerate the same outputs.
 
 ## Shared configuration
 
