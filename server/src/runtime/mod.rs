@@ -395,7 +395,7 @@ impl ThreadedKvkache {
             storage_key,
             response,
         })? {
-            WorkerResponse::Value(value) => Ok(value.map(|value| value.bytes)),
+            WorkerResponse::Value(value) => Ok(value.map(StoredItemValue::into_bytes)),
             response => Err(KvError::Worker(format!(
                 "unexpected get response: {response:?}"
             ))),

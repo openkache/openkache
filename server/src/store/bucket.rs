@@ -52,6 +52,7 @@ impl Item {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn tombstone(storage_key: StorageKey) -> Self {
         Self {
             storage_key,
@@ -182,6 +183,55 @@ impl MutableSegment {
             sg_index: self.sg_index as u32,
             bucket_hash_index,
         })
+    }
+
+    pub(crate) fn replace(
+        &mut self,
+        table_location: TableLocation,
+        item: Item,
+        count_accepted: bool,
+    ) -> bool {
+        if table_location.sg_index != self.sg_index as u32 {
+            return false;
+        }
+        let bucket_index = bucket_hash(
+            &item.storage_key,
+            table_location.bucket_hash_index,
+            self.bytes.len() / BUCKET_BYTES,
+        );
+        let previous_used_bytes = bucket_used_bytes(self.bucket(bucket_index));
+        if !replace_item_in_bucket(self.bucket_mut(bucket_index), &item) {
+            return false;
+        }
+        self.used_bytes =
+            self.used_bytes - previous_used_bytes + bucket_used_bytes(self.bucket(bucket_index));
+        if count_accepted {
+            self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
+        }
+        true
+    }
+
+    pub(crate) fn remove(
+        &mut self,
+        table_location: TableLocation,
+        storage_key: &StorageKey,
+    ) -> bool {
+        if table_location.sg_index != self.sg_index as u32 {
+            return false;
+        }
+        let bucket_index = bucket_hash(
+            storage_key,
+            table_location.bucket_hash_index,
+            self.bytes.len() / BUCKET_BYTES,
+        );
+        let previous_used_bytes = bucket_used_bytes(self.bucket(bucket_index));
+        if !remove_item_from_bucket(self.bucket_mut(bucket_index), storage_key) {
+            return false;
+        }
+        self.used_bytes =
+            self.used_bytes - previous_used_bytes + bucket_used_bytes(self.bucket(bucket_index));
+        self.item_count = self.item_count.saturating_sub(1);
+        true
     }
 }
 
@@ -376,6 +426,21 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
     let count = bucket_item_count(bucket);
     let end = items_start(bucket, count);
     let start = end - item.encoded_len();
+    write_item_body(bucket, start, end, item);
+    write_item_offset(
+        bucket,
+        count,
+        ItemOffset {
+            key_prefix: item.storage_key.as_bytes()[0],
+            item_byte_offset: start,
+        },
+    );
+    bucket[0] = (count + 1) as u8;
+    true
+}
+
+fn write_item_body(bucket: &mut [u8], start: usize, end: usize, item: &Item) {
+    debug_assert_eq!(end - start, item.encoded_len());
     let storage_key_end = start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
     bucket[start..storage_key_end].copy_from_slice(&item.storage_key.as_bytes()[1..]);
     bucket[storage_key_end] = if item.is_tombstone {
@@ -392,15 +457,79 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
         value_start = expiration_end;
     }
     bucket[value_start..end].copy_from_slice(&item.value);
-    write_item_offset(
-        bucket,
-        count,
-        ItemOffset {
-            key_prefix: item.storage_key.as_bytes()[0],
-            item_byte_offset: start,
-        },
-    );
-    bucket[0] = (count + 1) as u8;
+}
+
+pub(crate) fn replace_item_in_bucket(bucket: &mut [u8], replacement: &Item) -> bool {
+    if bucket.len() != BUCKET_BYTES {
+        return false;
+    }
+    let Some(span) = find_item_span_in_bucket(bucket, &replacement.storage_key) else {
+        return false;
+    };
+    let previous_len = span.end - span.start;
+    let replacement_len = replacement.encoded_len();
+    if replacement_len == previous_len {
+        write_item_body(bucket, span.start, span.end, replacement);
+        return true;
+    }
+    if replacement_len < previous_len {
+        let reclaimed = previous_len - replacement_len;
+        let count = bucket_item_count(bucket);
+        let current_items_start = items_start(bucket, count);
+        bucket.copy_within(
+            current_items_start..span.start,
+            current_items_start + reclaimed,
+        );
+        bucket[current_items_start..current_items_start + reclaimed].fill(0);
+        for item_slot in span.item_slot + 1..count {
+            let mut offset =
+                item_offset(bucket, item_slot).expect("mutable Bucket offset is valid");
+            offset.item_byte_offset += reclaimed;
+            write_item_offset(bucket, item_slot, offset);
+        }
+        let start = span.end - replacement_len;
+        write_item_offset(
+            bucket,
+            span.item_slot,
+            ItemOffset {
+                key_prefix: replacement.storage_key.as_bytes()[0],
+                item_byte_offset: start,
+            },
+        );
+        write_item_body(bucket, start, span.end, replacement);
+        return true;
+    }
+
+    let mut scratch = [0u8; BUCKET_BYTES];
+    let replacement_slot = span.item_slot;
+    for (item_slot, item) in items(bucket).enumerate() {
+        let item = if item_slot == replacement_slot {
+            replacement
+        } else {
+            &item
+        };
+        if !append_item_to_bucket(&mut scratch, item) {
+            return false;
+        }
+    }
+    bucket.copy_from_slice(&scratch);
+    true
+}
+
+pub(crate) fn remove_item_from_bucket(bucket: &mut [u8], storage_key: &StorageKey) -> bool {
+    if bucket.len() != BUCKET_BYTES {
+        return false;
+    }
+    let Some(removed) = find_item_span_in_bucket(bucket, storage_key) else {
+        return false;
+    };
+    let mut scratch = [0u8; BUCKET_BYTES];
+    for (item_slot, item) in items(bucket).enumerate() {
+        if item_slot != removed.item_slot && !append_item_to_bucket(&mut scratch, &item) {
+            return false;
+        }
+    }
+    bucket.copy_from_slice(&scratch);
     true
 }
 

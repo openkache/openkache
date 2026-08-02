@@ -211,6 +211,20 @@ impl<T> WaitingSlab<T> {
         (value, next)
     }
 
+    fn get(&self, id: SlotId) -> &T {
+        let slot = self
+            .slots
+            .get(id.index as usize)
+            .expect("waiting SlotId index is valid");
+        assert_eq!(
+            slot.generation, id.generation,
+            "waiting SlotId generation is current"
+        );
+        slot.value
+            .as_ref()
+            .expect("waiting slot contains a command")
+    }
+
     fn slot_mut(&mut self, id: SlotId) -> &mut WaitingSlot<T> {
         let slot = self
             .slots
@@ -224,7 +238,7 @@ impl<T> WaitingSlab<T> {
     }
 }
 
-enum KeyedCommand {
+pub(super) enum KeyedCommand {
     Get {
         response: WorkerResponseSender,
     },
@@ -248,6 +262,103 @@ impl KeyedCommand {
                 response,
             } => (KeyedOperation::Set { value, options }, response),
             Self::Delete { response } => (KeyedOperation::Delete, response),
+        }
+    }
+
+    fn is_collapsible(&self, cache: &Kvkache) -> bool {
+        match self {
+            Self::Get { .. } | Self::Delete { .. } => true,
+            Self::Set { value, options, .. } => {
+                *options == SetOptions::NONE && cache.can_collapse_set(value)
+            }
+        }
+    }
+}
+
+pub(super) struct DeferredWorkerResponse {
+    pub(super) sender: WorkerResponseSender,
+    pub(super) value: WorkerResponse,
+}
+
+pub(super) struct CollapsedLaneBatch {
+    pub(super) operation: Option<KeyedOperation>,
+    pub(super) responses: Vec<DeferredWorkerResponse>,
+    pub(super) success_state: KeyedVisibleState,
+    pub(super) failure_state: KeyedVisibleState,
+}
+
+impl CollapsedLaneBatch {
+    pub(super) fn reduce(base: KeyedVisibleState, commands: Vec<KeyedCommand>) -> Self {
+        let base_present = matches!(base, KeyedVisibleState::Present(_));
+        let mut current = base.clone();
+        let mut responses = Vec::with_capacity(commands.len());
+        let mut mutated = false;
+
+        for command in commands {
+            let (sender, value) = match command {
+                KeyedCommand::Get { response } => {
+                    let value = match &current {
+                        KeyedVisibleState::Missing => None,
+                        KeyedVisibleState::Present(value) => Some(value.clone()),
+                    };
+                    (response, WorkerResponse::Value(value))
+                }
+                KeyedCommand::Set {
+                    value,
+                    options,
+                    response,
+                } => {
+                    debug_assert_eq!(options, SetOptions::NONE);
+                    let outcome = match current {
+                        KeyedVisibleState::Missing => SetOutcome::Created,
+                        KeyedVisibleState::Present(_) => SetOutcome::Replaced,
+                    };
+                    current = KeyedVisibleState::Present(value);
+                    mutated = true;
+                    (response, WorkerResponse::Set(outcome))
+                }
+                KeyedCommand::Delete { response } => {
+                    let deleted = matches!(current, KeyedVisibleState::Present(_));
+                    current = KeyedVisibleState::Missing;
+                    mutated = true;
+                    (response, WorkerResponse::Deleted(deleted))
+                }
+            };
+            responses.push(DeferredWorkerResponse { sender, value });
+        }
+
+        let operation = if mutated {
+            match &current {
+                KeyedVisibleState::Present(value) => Some(KeyedOperation::Set {
+                    value: value.clone(),
+                    options: SetOptions::NONE,
+                }),
+                KeyedVisibleState::Missing if base_present => Some(KeyedOperation::Delete),
+                KeyedVisibleState::Missing => None,
+            }
+        } else {
+            None
+        };
+
+        Self {
+            operation,
+            responses,
+            success_state: current,
+            failure_state: base,
+        }
+    }
+}
+
+struct SchedulerCompletion {
+    immediate: Vec<DeferredWorkerResponse>,
+    collapsed: Option<CollapsedLaneBatch>,
+}
+
+impl SchedulerCompletion {
+    fn empty() -> Self {
+        Self {
+            immediate: Vec::new(),
+            collapsed: None,
         }
     }
 }
@@ -331,12 +442,64 @@ impl KeyScheduler {
         let (operation, response) = command.into_parts();
         Some(RunningKeyedCommand {
             storage_key,
-            response,
+            completion: RunningCompletion::Direct(response),
             job: cache.prepare_keyed(storage_key, operation),
         })
     }
 
-    fn complete(&mut self, storage_key: StorageKey) {
+    fn complete(
+        &mut self,
+        cache: &Kvkache,
+        storage_key: StorageKey,
+        visible_state: Option<KeyedVisibleState>,
+    ) -> SchedulerCompletion {
+        if let Some(base) = visible_state {
+            let mut commands = Vec::new();
+            loop {
+                let head = self
+                    .lanes
+                    .get(&storage_key)
+                    .expect("completed key has a lane")
+                    .waiting_head;
+                let Some(head) = head else {
+                    break;
+                };
+                if !self.waiting.get(head).is_collapsible(cache) {
+                    break;
+                }
+                let (command, next) = self.waiting.take(head);
+                let lane = self
+                    .lanes
+                    .get_mut(&storage_key)
+                    .expect("completed key has a lane");
+                lane.waiting_head = next;
+                if next.is_none() {
+                    lane.waiting_tail = None;
+                }
+                commands.push(command);
+            }
+            if !commands.is_empty() {
+                let batch = CollapsedLaneBatch::reduce(base, commands);
+                if batch.operation.is_some() {
+                    return SchedulerCompletion {
+                        immediate: Vec::new(),
+                        collapsed: Some(batch),
+                    };
+                }
+                let immediate = batch.responses;
+                self.finish_running_lane(storage_key);
+                return SchedulerCompletion {
+                    immediate,
+                    collapsed: None,
+                };
+            }
+        }
+
+        self.finish_running_lane(storage_key);
+        SchedulerCompletion::empty()
+    }
+
+    fn finish_running_lane(&mut self, storage_key: StorageKey) {
         let ready_again = {
             let lane = self
                 .lanes
@@ -360,20 +523,29 @@ impl KeyScheduler {
 
 struct RunningKeyedCommand {
     storage_key: StorageKey,
-    response: WorkerResponseSender,
+    completion: RunningCompletion,
     job: KeyedJob,
+}
+
+enum RunningCompletion {
+    Direct(WorkerResponseSender),
+    Collapsed {
+        responses: Vec<DeferredWorkerResponse>,
+        success_state: KeyedVisibleState,
+        failure_state: KeyedVisibleState,
+    },
 }
 
 struct CompletedKeyedCommand {
     storage_key: StorageKey,
-    response: WorkerResponseSender,
+    completion: RunningCompletion,
     job: CompletedKeyedJob,
 }
 
 async fn run_keyed_command(running: RunningKeyedCommand) -> CompletedKeyedCommand {
     CompletedKeyedCommand {
         storage_key: running.storage_key,
-        response: running.response,
+        completion: running.completion,
         job: running.job.run().await,
     }
 }
@@ -384,19 +556,79 @@ enum WorkerEvent {
     Request(Option<WorkerRequest>),
 }
 
+struct DeferredLaneCompletion {
+    storage_key: StorageKey,
+    responses: Vec<DeferredWorkerResponse>,
+    success_state: Option<KeyedVisibleState>,
+    failure_state: Option<KeyedVisibleState>,
+}
+
+fn send_success(responses: Vec<DeferredWorkerResponse>) {
+    for response in responses {
+        response.sender.send(Ok(response.value));
+    }
+}
+
+fn send_failure(responses: Vec<DeferredWorkerResponse>, message: &str) {
+    for response in responses {
+        response
+            .sender
+            .send(Err(KvError::Worker(message.to_string())));
+    }
+}
+
+fn finish_scheduler_lane(
+    cache: &mut Kvkache,
+    scheduler: &mut KeyScheduler,
+    storage_key: StorageKey,
+    visible_state: Option<KeyedVisibleState>,
+) -> Option<RunningKeyedCommand> {
+    let completion = scheduler.complete(cache, storage_key, visible_state);
+    send_success(completion.immediate);
+    completion.collapsed.map(|batch| {
+        let CollapsedLaneBatch {
+            operation,
+            responses,
+            success_state,
+            failure_state,
+        } = batch;
+        let operation = operation.expect("collapsed storage batch has a final mutation");
+        RunningKeyedCommand {
+            storage_key,
+            completion: RunningCompletion::Collapsed {
+                responses,
+                success_state,
+                failure_state,
+            },
+            job: cache.prepare_keyed(storage_key, operation),
+        }
+    })
+}
+
+fn outcome_response(outcome: KeyedOutcome) -> WorkerResponse {
+    match outcome {
+        KeyedOutcome::Value(value) => WorkerResponse::Value(value),
+        KeyedOutcome::Set(outcome) => WorkerResponse::Set(outcome),
+        KeyedOutcome::Deleted(deleted) => WorkerResponse::Deleted(deleted),
+    }
+}
+
 pub(super) async fn worker_loop(
     mut cache: Kvkache,
     receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
     affinity_id: usize,
 ) -> Result<()> {
-    let waiting_capacity = io_config.max_inflight_per_worker;
+    let waiting_capacity = io_config
+        .batch_size
+        .saturating_mul(io_config.max_inflight_per_worker)
+        .max(io_config.max_inflight_per_worker);
     let mut scheduler = KeyScheduler::with_waiting_capacity(waiting_capacity);
     let mut inflight = FuturesUnordered::new();
     let mut barrier = None;
     let mut disconnected = false;
     let mut flush_requested = false;
-    let mut deferred_responses: Vec<(WorkerResponseSender, WorkerResponse)> = Vec::new();
+    let mut deferred_completions: Vec<DeferredLaneCompletion> = Vec::new();
 
     loop {
         if !flush_requested {
@@ -410,20 +642,36 @@ pub(super) async fn worker_loop(
 
         if inflight.is_empty() && flush_requested {
             let flush_result = cache.flush_capacity().await;
+            flush_requested = false;
             match flush_result {
                 Ok(()) => {
-                    for (response, value) in deferred_responses.drain(..) {
-                        response.send(Ok(value));
+                    for completion in deferred_completions.drain(..) {
+                        send_success(completion.responses);
+                        if let Some(running) = finish_scheduler_lane(
+                            &mut cache,
+                            &mut scheduler,
+                            completion.storage_key,
+                            completion.success_state,
+                        ) {
+                            inflight.push(run_keyed_command(running));
+                        }
                     }
                 }
                 Err(error) => {
                     let message = error.to_string();
-                    for (response, _) in deferred_responses.drain(..) {
-                        response.send(Err(KvError::Worker(message.clone())));
+                    for completion in deferred_completions.drain(..) {
+                        send_failure(completion.responses, &message);
+                        if let Some(running) = finish_scheduler_lane(
+                            &mut cache,
+                            &mut scheduler,
+                            completion.storage_key,
+                            completion.failure_state,
+                        ) {
+                            inflight.push(run_keyed_command(running));
+                        }
                     }
                 }
             }
-            flush_requested = false;
             continue;
         }
 
@@ -483,24 +731,73 @@ pub(super) async fn worker_loop(
                 result?;
             }
             WorkerEvent::Completed(completed) => {
-                let finished = cache.finish_keyed(completed.job);
-                match finished.outcome {
-                    Ok(outcome) => {
-                        let response = match outcome {
-                            KeyedOutcome::Value(value) => WorkerResponse::Value(value),
-                            KeyedOutcome::Set(outcome) => WorkerResponse::Set(outcome),
-                            KeyedOutcome::Deleted(deleted) => WorkerResponse::Deleted(deleted),
-                        };
-                        if finished.flush_required {
-                            flush_requested = true;
-                            deferred_responses.push((completed.response, response));
-                        } else {
-                            completed.response.send(Ok(response));
+                let KeyedFinish {
+                    outcome,
+                    visible_state,
+                    flush_required,
+                } = cache.finish_keyed(completed.job);
+                let (responses, success_state, failure_state) = match completed.completion {
+                    RunningCompletion::Direct(response) => match outcome {
+                        Ok(outcome) => (
+                            vec![DeferredWorkerResponse {
+                                sender: response,
+                                value: outcome_response(outcome),
+                            }],
+                            visible_state,
+                            None,
+                        ),
+                        Err(error) => {
+                            response.send(Err(error));
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                completed.storage_key,
+                                None,
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
+                            continue;
                         }
+                    },
+                    RunningCompletion::Collapsed {
+                        responses,
+                        success_state,
+                        failure_state,
+                    } => match outcome {
+                        Ok(_) => (responses, Some(success_state), Some(failure_state)),
+                        Err(error) => {
+                            send_failure(responses, &error.to_string());
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                completed.storage_key,
+                                Some(failure_state),
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
+                            continue;
+                        }
+                    },
+                };
+                if flush_required {
+                    flush_requested = true;
+                    deferred_completions.push(DeferredLaneCompletion {
+                        storage_key: completed.storage_key,
+                        responses,
+                        success_state,
+                        failure_state,
+                    });
+                } else {
+                    send_success(responses);
+                    if let Some(running) = finish_scheduler_lane(
+                        &mut cache,
+                        &mut scheduler,
+                        completed.storage_key,
+                        success_state,
+                    ) {
+                        inflight.push(run_keyed_command(running));
                     }
-                    Err(error) => completed.response.send(Err(error)),
                 }
-                scheduler.complete(completed.storage_key);
             }
             WorkerEvent::Request(Some(request)) => {
                 admit_worker_request(&mut scheduler, &mut barrier, request)?;

@@ -24,7 +24,7 @@ struct MutableGeneration {
     large_value_arena: BlobArena,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum MutableValueHandle {
     Blob {
         lane: usize,
@@ -36,6 +36,12 @@ enum MutableValueHandle {
         logical_sg_id: u32,
         handle: BlobHandle,
     },
+}
+
+struct MutablePlacement {
+    table_location: TableLocation,
+    mutable_value: Option<MutableValueHandle>,
+    in_place: bool,
 }
 
 struct LocatedItem {
@@ -60,8 +66,15 @@ pub(crate) enum KeyedOutcome {
     Deleted(bool),
 }
 
+#[derive(Clone)]
+pub(crate) enum KeyedVisibleState {
+    Missing,
+    Present(StoredItemValue),
+}
+
 pub(crate) struct KeyedFinish {
     pub(crate) outcome: Result<KeyedOutcome>,
+    pub(crate) visible_state: Option<KeyedVisibleState>,
     pub(crate) flush_required: bool,
 }
 
@@ -288,11 +301,6 @@ enum PendingKeyedMutation {
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
         previous_live: bool,
-    },
-    Delete {
-        storage_key: StorageKey,
-        previous: TableLocation,
-        previous_mutable_value: Option<MutableValueHandle>,
     },
 }
 
@@ -614,13 +622,18 @@ impl Kvkache {
             Err(error) => {
                 return KeyedFinish {
                     outcome: Err(error),
+                    visible_state: None,
                     flush_required: false,
                 };
             }
         };
-        let (outcome, flush_required) = match (completed.operation, observation) {
+        let (outcome, visible_state, flush_required) = match (completed.operation, observation) {
             (PreparedKeyedOperation::Get, KeyedObservation::Value(value)) => {
-                (Ok(KeyedOutcome::Value(value)), false)
+                let visible_state = Some(match &value {
+                    Some(value) => KeyedVisibleState::Present(value.clone()),
+                    None => KeyedVisibleState::Missing,
+                });
+                (Ok(KeyedOutcome::Value(value)), visible_state, false)
             }
             (
                 PreparedKeyedOperation::Set {
@@ -630,37 +643,60 @@ impl Kvkache {
                     expires_at_ms,
                 },
                 KeyedObservation::State(previous),
-            ) => match self.finish_keyed_set(
-                completed.storage_key,
-                value,
-                options,
-                evaluated_at_ms,
-                expires_at_ms,
-                previous,
-            ) {
-                Ok((outcome, flush_required)) => (Ok(KeyedOutcome::Set(outcome)), flush_required),
-                Err(error) => (Err(error), false),
-            },
+            ) => {
+                let visible_value = (options == SetOptions::NONE).then(|| value.clone());
+                match self.finish_keyed_set(
+                    completed.storage_key,
+                    value,
+                    options,
+                    evaluated_at_ms,
+                    expires_at_ms,
+                    previous,
+                ) {
+                    Ok((outcome, flush_required)) => {
+                        let visible_state = visible_value.and_then(|value| match outcome {
+                            SetOutcome::Created | SetOutcome::Replaced => {
+                                Some(KeyedVisibleState::Present(value))
+                            }
+                            SetOutcome::NotStored => None,
+                        });
+                        (
+                            Ok(KeyedOutcome::Set(outcome)),
+                            visible_state,
+                            flush_required,
+                        )
+                    }
+                    Err(error) => (Err(error), None, false),
+                }
+            }
             (
                 PreparedKeyedOperation::Delete { evaluated_at_ms },
                 KeyedObservation::State(previous),
             ) => match self.finish_keyed_delete(completed.storage_key, evaluated_at_ms, previous) {
-                Ok((deleted, flush_required)) => {
-                    (Ok(KeyedOutcome::Deleted(deleted)), flush_required)
-                }
-                Err(error) => (Err(error), false),
+                Ok((deleted, flush_required)) => (
+                    Ok(KeyedOutcome::Deleted(deleted)),
+                    Some(KeyedVisibleState::Missing),
+                    flush_required,
+                ),
+                Err(error) => (Err(error), None, false),
             },
             _ => (
                 Err(KvError::Worker(
                     "keyed operation completed with an incompatible observation".into(),
                 )),
+                None,
                 false,
             ),
         };
         KeyedFinish {
             outcome,
+            visible_state,
             flush_required,
         }
+    }
+
+    pub(crate) fn can_collapse_set(&self, value: &StoredItemValue) -> bool {
+        self.validate_value(&value.bytes, false).is_ok()
     }
 
     fn finish_keyed_set(
@@ -689,9 +725,15 @@ impl Kvkache {
             storage_key,
             &value.bytes,
             expires_at_ms,
+            previous_location,
             previous_mutable_value,
         )? {
-            self.publish_table_location(storage_key, previous_location, replacement)?;
+            self.publish_table_location(
+                storage_key,
+                previous_location,
+                previous_mutable_value,
+                replacement,
+            )?;
             if !previous_live {
                 self.live_keys += 1;
             }
@@ -721,18 +763,9 @@ impl Kvkache {
         if !item_state_is_live_at(previous.item_state, evaluated_at_ms) {
             return Ok((false, false));
         }
-        if let Some(replacement) = self.try_append_tombstone(storage_key, previous.mutable_value)? {
-            self.publish_table_location(storage_key, Some(previous.table_location), replacement)?;
-            self.live_keys = self.live_keys.saturating_sub(1);
-            return Ok((true, false));
-        }
-        self.pending_keyed_mutations
-            .push_back(PendingKeyedMutation::Delete {
-                storage_key,
-                previous: previous.table_location,
-                previous_mutable_value: previous.mutable_value,
-            });
-        Ok((true, true))
+        self.remove_table_location(storage_key, previous.table_location, previous.mutable_value)?;
+        self.live_keys = self.live_keys.saturating_sub(1);
+        Ok((true, false))
     }
 
     pub(crate) async fn flush_capacity(&mut self) -> Result<()> {
@@ -763,6 +796,7 @@ impl Kvkache {
                     storage_key,
                     &value.bytes,
                     expires_at_ms,
+                    previous,
                     previous_mutable_value,
                 )?
                 else {
@@ -775,27 +809,15 @@ impl Kvkache {
                         previous_live,
                     }));
                 };
-                self.publish_table_location(storage_key, previous, replacement)?;
+                self.publish_table_location(
+                    storage_key,
+                    previous,
+                    previous_mutable_value,
+                    replacement,
+                )?;
                 if !previous_live {
                     self.live_keys += 1;
                 }
-            }
-            PendingKeyedMutation::Delete {
-                storage_key,
-                previous,
-                previous_mutable_value,
-            } => {
-                let Some(replacement) =
-                    self.try_append_tombstone(storage_key, previous_mutable_value)?
-                else {
-                    return Ok(Some(PendingKeyedMutation::Delete {
-                        storage_key,
-                        previous,
-                        previous_mutable_value,
-                    }));
-                };
-                self.publish_table_location(storage_key, Some(previous), replacement)?;
-                self.live_keys = self.live_keys.saturating_sub(1);
             }
         }
         Ok(None)
@@ -806,7 +828,7 @@ impl Kvkache {
         Ok(self
             .get_encoded(storage_key)
             .await?
-            .map(|value| value.bytes))
+            .map(StoredItemValue::into_bytes))
     }
 
     pub(crate) async fn get_encoded(
@@ -888,6 +910,7 @@ impl Kvkache {
                 storage_key,
                 &value.bytes,
                 expires_at_ms,
+                previous_location,
                 previous_mutable_value,
             )? {
                 break location;
@@ -895,7 +918,12 @@ impl Kvkache {
             let lane = self.fullest_mutable_lane()?;
             self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
         };
-        self.publish_table_location(storage_key, previous_location, new_location)?;
+        self.publish_table_location(
+            storage_key,
+            previous_location,
+            previous_mutable_value,
+            new_location,
+        )?;
         match (previous_live, true) {
             (false, true) => self.live_keys += 1,
             (true, true) => {}
@@ -908,6 +936,7 @@ impl Kvkache {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) async fn delete(&mut self, storage_key: &StorageKey) -> Result<bool> {
         self.drive_background_once().await?;
         let now_ms = unix_time_ms();
@@ -920,16 +949,7 @@ impl Kvkache {
         }
         let previous_location = previous.table_location;
         let previous_mutable_value = self.mutable_value_handle(&previous);
-        let new_location = loop {
-            if let Some(location) =
-                self.try_append_tombstone(*storage_key, previous_mutable_value)?
-            {
-                break location;
-            }
-            let lane = self.fullest_mutable_lane()?;
-            self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
-        };
-        self.publish_table_location(*storage_key, Some(previous_location), new_location)?;
+        self.remove_table_location(*storage_key, previous_location, previous_mutable_value)?;
         self.live_keys = self.live_keys.saturating_sub(1);
         Ok(true)
     }
@@ -954,8 +974,9 @@ impl Kvkache {
         storage_key: StorageKey,
         value: &[u8],
         expires_at_ms: u64,
+        previous_location: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
-    ) -> Result<Option<TableLocation>> {
+    ) -> Result<Option<MutablePlacement>> {
         let large = value.len() > self.config.large_value_threshold
             || value.len() > self.config.blob_segment_size;
         let blob = !large && value.len() > BLOB_ITEM_THRESHOLD_BYTES;
@@ -977,6 +998,27 @@ impl Kvkache {
                     ITEM_EXPIRATION_BYTES
                 }
                 + encoded_len;
+            let previous_in_generation =
+                previous_location.filter(|location| location.sg_index == generation.logical_sg_id);
+            if let Some(previous_location) = previous_in_generation
+                && let InPlaceValue::Replaced(mutable_value) = try_replace_value_in_place(
+                    generation,
+                    lane,
+                    previous_location,
+                    storage_key,
+                    value,
+                    expires_at_ms,
+                    large,
+                    blob,
+                    previous_mutable_value,
+                )?
+            {
+                return Ok(Some(MutablePlacement {
+                    table_location: previous_location,
+                    mutable_value,
+                    in_place: true,
+                }));
+            }
             if generation
                 .segment
                 .choose_bucket(&storage_key, fixed_item_bytes)
@@ -984,85 +1026,25 @@ impl Kvkache {
             {
                 continue;
             }
-            let encoded = if large {
-                let handle = if let Some(MutableValueHandle::Large {
-                    lane: previous_lane,
-                    logical_sg_id,
-                    handle: previous,
-                }) = previous_mutable_value
-                    && previous_lane == lane
-                    && logical_sg_id == generation.logical_sg_id
-                {
-                    generation.large_value_arena.replace(previous, value)?
-                } else {
-                    match generation.large_value_arena.insert(value) {
-                        Ok(handle) => handle,
-                        Err(KvError::BlobSegmentFull { .. }) => continue,
-                        Err(error) => return Err(error),
-                    }
-                };
-                invalidate_mutable_value(generation, lane, previous_mutable_value, Some(true));
-                encode_large_value_handle(handle)
-            } else if blob {
-                let handle = if let Some(MutableValueHandle::Blob {
-                    lane: previous_lane,
-                    logical_sg_id,
-                    handle: previous,
-                }) = previous_mutable_value
-                    && previous_lane == lane
-                    && logical_sg_id == generation.logical_sg_id
-                {
-                    generation.blob_arena.replace(previous, value)?
-                } else {
-                    match generation.blob_arena.insert(value) {
-                        Ok(handle) => handle,
-                        Err(KvError::BlobSegmentFull { .. }) => continue,
-                        Err(error) => return Err(error),
-                    }
-                };
-                invalidate_mutable_value(generation, lane, previous_mutable_value, Some(false));
-                encode_blob_handle(handle)
-            } else {
-                invalidate_mutable_value(generation, lane, previous_mutable_value, None);
-                encode_inline_value(value)
+            let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
+                continue;
             };
-            let item = if expires_at_ms == 0 {
-                Item::live(storage_key, encoded)
-            } else {
-                Item::live_expiring(storage_key, encoded, expires_at_ms)
-            };
+            let item = live_item(storage_key, staged.encoded, expires_at_ms);
             let location = generation.segment.append(item, true).ok_or_else(|| {
                 KvError::Worker("chosen mutable SG Bucket rejected an Item".into())
             })?;
-            return Ok(Some(location));
-        }
-        Ok(None)
-    }
-
-    fn try_append_tombstone(
-        &mut self,
-        storage_key: StorageKey,
-        previous_mutable_value: Option<MutableValueHandle>,
-    ) -> Result<Option<TableLocation>> {
-        for lane in 0..self.mutable.len() {
-            let Some(generation) = self.mutable[lane].as_mut() else {
-                continue;
-            };
-            if generation
-                .segment
-                .choose_bucket(&storage_key, ITEM_FIXED_BYTES)
-                .is_none()
-            {
+            if previous_in_generation.is_some_and(|previous| {
+                same_physical_bucket(&storage_key, previous, location, self.config.bucket_count())
+            }) {
+                generation.segment.remove(location, &storage_key);
+                clear_mutable_value(generation, lane, staged.mutable_value);
                 continue;
             }
-            invalidate_mutable_value(generation, lane, previous_mutable_value, None);
-            return generation
-                .segment
-                .append(Item::tombstone(storage_key), true)
-                .map(Some)
-                .ok_or_else(|| {
-                    KvError::Worker("chosen mutable SG Bucket rejected a Tombstone".into())
-                });
+            return Ok(Some(MutablePlacement {
+                table_location: location,
+                mutable_value: staged.mutable_value,
+                in_place: false,
+            }));
         }
         Ok(None)
     }
@@ -1078,19 +1060,84 @@ impl Kvkache {
         &mut self,
         storage_key: StorageKey,
         previous: Option<TableLocation>,
-        replacement: TableLocation,
+        previous_mutable_value: Option<MutableValueHandle>,
+        replacement: MutablePlacement,
     ) -> Result<()> {
-        match previous {
-            Some(previous) if previous == replacement => Ok(()),
-            Some(previous)
-                if self
-                    .table
-                    .replace_location(&storage_key, previous, replacement) =>
-            {
-                Ok(())
-            }
-            Some(_) | None => self.table.insert(&storage_key, replacement),
+        if replacement.in_place {
+            debug_assert_eq!(previous, Some(replacement.table_location));
+            return Ok(());
         }
+        let published = match previous {
+            Some(previous) => {
+                self.table
+                    .replace_location(&storage_key, previous, replacement.table_location)
+            }
+            None => self
+                .table
+                .insert(&storage_key, replacement.table_location)
+                .is_ok(),
+        };
+        if !published {
+            self.rollback_mutable_placement(&storage_key, &replacement);
+            return Err(match previous {
+                Some(_) => KvError::Worker(
+                    "Table location changed before the mutable replacement was published".into(),
+                ),
+                None => KvError::TableFull,
+            });
+        }
+        if let Some(previous) = previous {
+            self.remove_previous_mutable_item(&storage_key, previous, previous_mutable_value);
+        }
+        Ok(())
+    }
+
+    fn rollback_mutable_placement(
+        &mut self,
+        storage_key: &StorageKey,
+        placement: &MutablePlacement,
+    ) {
+        let Some((lane, generation)) =
+            mutable_generation_for_location(&mut self.mutable, placement.table_location)
+        else {
+            return;
+        };
+        if generation
+            .segment
+            .remove(placement.table_location, storage_key)
+        {
+            clear_mutable_value(generation, lane, placement.mutable_value);
+        }
+    }
+
+    fn remove_previous_mutable_item(
+        &mut self,
+        storage_key: &StorageKey,
+        previous: TableLocation,
+        previous_mutable_value: Option<MutableValueHandle>,
+    ) {
+        let Some((lane, generation)) = mutable_generation_for_location(&mut self.mutable, previous)
+        else {
+            return;
+        };
+        if generation.segment.remove(previous, storage_key) {
+            clear_mutable_value(generation, lane, previous_mutable_value);
+        }
+    }
+
+    fn remove_table_location(
+        &mut self,
+        storage_key: StorageKey,
+        previous: TableLocation,
+        previous_mutable_value: Option<MutableValueHandle>,
+    ) -> Result<()> {
+        if !self.table.remove(&storage_key, previous) {
+            return Err(KvError::Worker(
+                "Table location changed before DELETE was published".into(),
+            ));
+        }
+        self.remove_previous_mutable_item(&storage_key, previous, previous_mutable_value);
+        Ok(())
     }
 
     fn fullest_mutable_lane(&self) -> Result<usize> {
@@ -1974,22 +2021,54 @@ async fn read_ssd_extent(
     Ok(bytes[prefix..prefix + value_ref.value_len as usize].to_vec())
 }
 
-fn invalidate_mutable_value(
+enum InPlaceValue {
+    Replaced(Option<MutableValueHandle>),
+    NotReplaced,
+}
+
+struct StagedMutableValue {
+    encoded: Vec<u8>,
+    mutable_value: Option<MutableValueHandle>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_replace_value_in_place(
     generation: &mut MutableGeneration,
     lane: usize,
+    previous_location: TableLocation,
+    storage_key: StorageKey,
+    value: &[u8],
+    expires_at_ms: u64,
+    large: bool,
+    blob: bool,
     previous: Option<MutableValueHandle>,
-    retained_large_tier: Option<bool>,
-) {
-    match previous {
+) -> Result<InPlaceValue> {
+    let value_len = u32::try_from(value.len())
+        .map_err(|_| KvError::Usage("mutable value length does not fit in u32".into()))?;
+    let same_slot = match previous {
         Some(MutableValueHandle::Blob {
             lane: previous_lane,
             logical_sg_id,
             handle,
         }) if previous_lane == lane
             && logical_sg_id == generation.logical_sg_id
-            && retained_large_tier != Some(false) =>
+            && blob
+            && generation.blob_arena.can_replace(handle, value.len()) =>
         {
-            generation.blob_arena.invalidate(handle);
+            Some((
+                MutableValueHandle::Blob {
+                    lane,
+                    logical_sg_id,
+                    handle: BlobHandle {
+                        slot: handle.slot,
+                        value_len,
+                    },
+                },
+                encode_blob_handle(BlobHandle {
+                    slot: handle.slot,
+                    value_len,
+                }),
+            ))
         }
         Some(MutableValueHandle::Large {
             lane: previous_lane,
@@ -1997,12 +2076,173 @@ fn invalidate_mutable_value(
             handle,
         }) if previous_lane == lane
             && logical_sg_id == generation.logical_sg_id
-            && retained_large_tier != Some(true) =>
+            && large
+            && generation
+                .large_value_arena
+                .can_replace(handle, value.len()) =>
         {
-            generation.large_value_arena.invalidate(handle);
+            Some((
+                MutableValueHandle::Large {
+                    lane,
+                    logical_sg_id,
+                    handle: BlobHandle {
+                        slot: handle.slot,
+                        value_len,
+                    },
+                },
+                encode_large_value_handle(BlobHandle {
+                    slot: handle.slot,
+                    value_len,
+                }),
+            ))
+        }
+        _ => None,
+    };
+    if let Some((mutable_value, encoded)) = same_slot {
+        let item = live_item(storage_key, encoded, expires_at_ms);
+        if generation.segment.replace(previous_location, item, true) {
+            match (previous, mutable_value) {
+                (
+                    Some(MutableValueHandle::Blob {
+                        handle: previous, ..
+                    }),
+                    MutableValueHandle::Blob { handle, .. },
+                ) => {
+                    let replaced = generation.blob_arena.replace(previous, value)?;
+                    debug_assert_eq!(replaced, handle);
+                }
+                (
+                    Some(MutableValueHandle::Large {
+                        handle: previous, ..
+                    }),
+                    MutableValueHandle::Large { handle, .. },
+                ) => {
+                    let replaced = generation.large_value_arena.replace(previous, value)?;
+                    debug_assert_eq!(replaced, handle);
+                }
+                _ => unreachable!("same-slot replacement preserves the mutable value tier"),
+            }
+            return Ok(InPlaceValue::Replaced(Some(mutable_value)));
+        }
+    }
+
+    let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
+        return Ok(InPlaceValue::NotReplaced);
+    };
+    let item = live_item(storage_key, staged.encoded, expires_at_ms);
+    if !generation.segment.replace(previous_location, item, true) {
+        clear_mutable_value(generation, lane, staged.mutable_value);
+        return Ok(InPlaceValue::NotReplaced);
+    }
+    clear_mutable_value(
+        generation,
+        lane,
+        previous.filter(|previous| Some(*previous) != staged.mutable_value),
+    );
+    Ok(InPlaceValue::Replaced(staged.mutable_value))
+}
+
+fn stage_mutable_value(
+    generation: &mut MutableGeneration,
+    lane: usize,
+    value: &[u8],
+    large: bool,
+    blob: bool,
+) -> Result<Option<StagedMutableValue>> {
+    if large {
+        let handle = match generation.large_value_arena.insert(value) {
+            Ok(handle) => handle,
+            Err(KvError::BlobSegmentFull { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mutable_value = MutableValueHandle::Large {
+            lane,
+            logical_sg_id: generation.logical_sg_id,
+            handle,
+        };
+        return Ok(Some(StagedMutableValue {
+            encoded: encode_large_value_handle(handle),
+            mutable_value: Some(mutable_value),
+        }));
+    }
+    if blob {
+        let handle = match generation.blob_arena.insert(value) {
+            Ok(handle) => handle,
+            Err(KvError::BlobSegmentFull { .. }) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mutable_value = MutableValueHandle::Blob {
+            lane,
+            logical_sg_id: generation.logical_sg_id,
+            handle,
+        };
+        return Ok(Some(StagedMutableValue {
+            encoded: encode_blob_handle(handle),
+            mutable_value: Some(mutable_value),
+        }));
+    }
+    Ok(Some(StagedMutableValue {
+        encoded: encode_inline_value(value),
+        mutable_value: None,
+    }))
+}
+
+fn clear_mutable_value(
+    generation: &mut MutableGeneration,
+    lane: usize,
+    mutable_value: Option<MutableValueHandle>,
+) {
+    match mutable_value {
+        Some(MutableValueHandle::Blob {
+            lane: value_lane,
+            logical_sg_id,
+            handle,
+        }) if value_lane == lane && logical_sg_id == generation.logical_sg_id => {
+            generation.blob_arena.remove(handle);
+        }
+        Some(MutableValueHandle::Large {
+            lane: value_lane,
+            logical_sg_id,
+            handle,
+        }) if value_lane == lane && logical_sg_id == generation.logical_sg_id => {
+            generation.large_value_arena.remove(handle);
         }
         _ => {}
     }
+}
+
+fn live_item(storage_key: StorageKey, encoded: Vec<u8>, expires_at_ms: u64) -> Item {
+    if expires_at_ms == 0 {
+        Item::live(storage_key, encoded)
+    } else {
+        Item::live_expiring(storage_key, encoded, expires_at_ms)
+    }
+}
+
+fn same_physical_bucket(
+    storage_key: &StorageKey,
+    first: TableLocation,
+    second: TableLocation,
+    bucket_count: usize,
+) -> bool {
+    first.sg_index == second.sg_index
+        && bucket_hash(storage_key, first.bucket_hash_index, bucket_count)
+            == bucket_hash(storage_key, second.bucket_hash_index, bucket_count)
+}
+
+fn mutable_generation_for_location(
+    mutable: &mut [Option<MutableGeneration>],
+    location: TableLocation,
+) -> Option<(usize, &mut MutableGeneration)> {
+    mutable
+        .iter_mut()
+        .enumerate()
+        .find_map(|(lane, generation)| {
+            generation
+                .as_mut()
+                .filter(|generation| generation.logical_sg_id == location.sg_index)
+                .map(|generation| (lane, generation))
+        })
 }
 
 fn direct_buffer_from_bytes(bytes: &[u8]) -> Result<Option<DirectIoBuffer>> {

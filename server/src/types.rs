@@ -1,5 +1,7 @@
 //! Shared byte-oriented types used across the KV cache.
 
+use std::sync::Arc;
+
 /// Number of bytes in every server-derived storage key.
 ///
 /// The storage key is the server-side representation of the protocol item ID,
@@ -62,12 +64,18 @@ impl From<&[u8]> for ItemValue {
 /// Opaque client value propagated without server-side decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoredItemValue {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: Arc<Vec<u8>>,
 }
 
 impl StoredItemValue {
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self {
+            bytes: Arc::new(bytes),
+        }
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        Arc::try_unwrap(self.bytes).unwrap_or_else(|bytes| (*bytes).clone())
     }
 }
 
