@@ -17,3 +17,4 @@ compio = { version = "*", default-features = false, features = ["io-uring", "run
 openkache-client = { path = "../rust", default-features = false }
 thiserror = "*"
 tokio = { version = "*", features = ["macros", "rt-multi-thread"], optional = true }
+zeroize = "*"

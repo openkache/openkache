@@ -988,12 +988,20 @@ fn serialize_value(value: Value) -> Result<Vec<u8>> {
     match value {
         Value::Raw(bytes) => prefix_vu128(VALUE_FORMAT_SERIALIZATION_RAW as u128, bytes),
         Value::Json(value) => {
-            validate_json_value(&value)?;
-            let payload = serde_json_canonicalizer::to_vec(&value)
-                .map_err(|error| Error::InvalidJson(error.to_string()))?;
+            let payload = canonical_json_bytes(&value)?;
             prefix_vu128(VALUE_FORMAT_SERIALIZATION_JSON as u128, payload)
         }
     }
+}
+
+/// Serializes one logical JSON value using the shared RFC 8785 representation.
+///
+/// Language adapters call this helper instead of carrying a second canonicalizer
+/// dependency. Validation and number/object-key rules therefore stay identical
+/// for every binding.
+pub fn canonical_json_bytes(value: &JsonValue) -> Result<Vec<u8>> {
+    validate_json_value(value)?;
+    serde_json_canonicalizer::to_vec(value).map_err(|error| Error::InvalidJson(error.to_string()))
 }
 
 fn deserialize_value(serialized: &[u8]) -> Result<Value> {

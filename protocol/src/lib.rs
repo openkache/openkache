@@ -33,10 +33,9 @@ include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 const MIN_VARUINT_BYTES: usize = 1;
 const MIN_REQUEST_FRAME_BYTES: usize = REQUEST_FIXED_BYTES + MIN_VARUINT_BYTES * 2;
 const MIN_RESPONSE_FRAME_BYTES: usize = RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES;
-const MAX_REQUEST_PREFIX_BYTES: usize = REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_ID_BYTES;
+const MAX_REQUEST_PREFIX_BYTES: usize =
+    REQUEST_FIXED_BYTES + MAX_VARUINT_BYTES * 3 + ITEM_ID_BYTES + MUTATION_ID_BYTES;
 const MAX_RESPONSE_PREFIX_BYTES: usize = RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES;
-const KNOWN_SET_FLAGS: u8 = SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG;
-
 /// Conservative maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize = MAX_REQUEST_PREFIX_BYTES + MAX_VALUE_BYTES;
 /// Conservative maximum complete response frame size.
@@ -77,6 +76,34 @@ impl AsRef<[u8]> for ItemId {
     }
 }
 
+/// Exact idempotency token carried by a mutating v1 request.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MutationId([u8; MUTATION_ID_BYTES]);
+
+impl MutationId {
+    /// Wraps an exact mutation token.
+    pub const fn new(bytes: [u8; MUTATION_ID_BYTES]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the complete mutation-token bytes.
+    pub const fn as_bytes(&self) -> &[u8; MUTATION_ID_BYTES] {
+        &self.0
+    }
+
+    /// Consumes the token and returns its bytes.
+    pub const fn into_bytes(self) -> [u8; MUTATION_ID_BYTES] {
+        self.0
+    }
+}
+
+impl AsRef<[u8]> for MutationId {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 /// Condition applied atomically by a `SET` request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SetCondition {
@@ -96,6 +123,8 @@ pub struct SetOptions {
     pub condition: SetCondition,
     /// Relative lifetime in milliseconds. `None` stores a persistent item.
     pub ttl_ms: Option<u64>,
+    /// Optional idempotency token for this mutation.
+    pub mutation_id: Option<MutationId>,
 }
 
 impl SetOptions {
@@ -103,11 +132,22 @@ impl SetOptions {
     pub const NONE: Self = Self {
         condition: SetCondition::None,
         ttl_ms: None,
+        mutation_id: None,
     };
 
     /// Creates options from an existence condition and optional positive TTL.
     pub const fn new(condition: SetCondition, ttl_ms: Option<u64>) -> Self {
-        Self { condition, ttl_ms }
+        Self {
+            condition,
+            ttl_ms,
+            mutation_id: None,
+        }
+    }
+
+    /// Adds an idempotency token to this mutation.
+    pub const fn with_mutation_id(mut self, mutation_id: MutationId) -> Self {
+        self.mutation_id = Some(mutation_id);
+        self
     }
 
     fn flags(self) -> u8 {
@@ -119,6 +159,11 @@ impl SetOptions {
         condition
             | if self.ttl_ms.is_some() {
                 SET_TTL_FLAG
+            } else {
+                0
+            }
+            | if self.mutation_id.is_some() {
+                SET_MUTATION_ID_FLAG
             } else {
                 0
             }
@@ -149,6 +194,7 @@ pub struct RequestHeader {
     value_len: usize,
     condition: SetCondition,
     has_ttl: bool,
+    has_mutation_id: bool,
 }
 
 impl RequestHeader {
@@ -177,6 +223,11 @@ impl RequestHeader {
         self.has_ttl
     }
 
+    /// Returns whether a fixed-size mutation token follows the item ID.
+    pub const fn has_mutation_id(self) -> bool {
+        self.has_mutation_id
+    }
+
     /// Reports the complete frame length once enough item ID and TTL prefix bytes are present.
     ///
     /// # Arguments
@@ -196,8 +247,18 @@ impl RequestHeader {
         if prefix.len() < item_id_end {
             return Ok(None);
         }
+        let mutation_end = item_id_end
+            .checked_add(if self.has_mutation_id {
+                MUTATION_ID_BYTES
+            } else {
+                0
+            })
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        if prefix.len() < mutation_end {
+            return Ok(None);
+        }
         let ttl_len = if self.has_ttl {
-            let Some((ttl_ms, encoded_len)) = decode_varuint(&prefix[item_id_end..], "SET TTL")?
+            let Some((ttl_ms, encoded_len)) = decode_varuint(&prefix[mutation_end..], "SET TTL")?
             else {
                 return Ok(None);
             };
@@ -208,7 +269,7 @@ impl RequestHeader {
         } else {
             0
         };
-        item_id_end
+        mutation_end
             .checked_add(ttl_len)
             .and_then(|size| size.checked_add(self.value_len))
             .map(Some)
@@ -228,6 +289,7 @@ pub struct Request {
     pub opcode: Opcode,
     pub item_id: Option<ItemId>,
     pub set_options: SetOptions,
+    pub mutation_id: Option<MutationId>,
     pub value: Vec<u8>,
 }
 
@@ -252,7 +314,7 @@ impl Request {
             return Ok(None);
         }
         let opcode = Opcode::try_from(prefix[0])?;
-        let (condition, has_ttl) = decode_request_flags(opcode, prefix[1])?;
+        let (condition, has_ttl, has_mutation_id) = decode_request_flags(opcode, prefix[1])?;
         let Some((item_id_len, item_id_len_bytes)) =
             decode_varuint(&prefix[REQUEST_FIXED_BYTES..], "request item ID length")?
         else {
@@ -270,10 +332,19 @@ impl Request {
             usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
         validate_item_id_length(opcode, item_id_len)?;
         validate_value_length(value_len)?;
+        let mut set_options = SetOptions::new(condition, None);
+        // The header does not contain the token bytes yet, but shape
+        // validation still needs to know whether the mutation flag is
+        // present. A zero token is only a validation marker; the complete
+        // decoder replaces it with the bytes from the frame.
+        if has_mutation_id {
+            set_options.mutation_id = Some(MutationId::new([0; MUTATION_ID_BYTES]));
+        }
         validate_request_shape(
             opcode,
             item_id_len != 0,
-            SetOptions::new(condition, None),
+            set_options,
+            has_mutation_id,
             value_len,
         )?;
         Ok(Some(RequestHeader {
@@ -283,6 +354,7 @@ impl Request {
             value_len,
             condition,
             has_ttl,
+            has_mutation_id,
         }))
     }
 
@@ -320,13 +392,32 @@ impl Request {
         value: Vec<u8>,
     ) -> Result<Self> {
         validate_value_length(value.len())?;
-        validate_request_shape(opcode, item_id.is_some(), set_options, value.len())?;
+        validate_request_shape(
+            opcode,
+            item_id.is_some(),
+            set_options,
+            set_options.mutation_id.is_some(),
+            value.len(),
+        )?;
         Ok(Self {
             opcode,
             item_id,
             set_options,
+            mutation_id: set_options.mutation_id,
             value,
         })
+    }
+
+    /// Creates and validates a request with an explicit mutation token.
+    pub fn new_with_mutation(
+        opcode: Opcode,
+        item_id: Option<ItemId>,
+        mutation_id: Option<MutationId>,
+        value: Vec<u8>,
+    ) -> Result<Self> {
+        let set_options =
+            mutation_id.map_or(SetOptions::NONE, |id| SetOptions::NONE.with_mutation_id(id));
+        Self::new_set(opcode, item_id, set_options, value)
     }
 
     /// Encodes this request into one complete stream frame.
@@ -349,10 +440,16 @@ impl Request {
 
     fn encode_prefix(&self) -> Result<RequestPrefix> {
         validate_value_length(self.value.len())?;
+        if self.set_options.mutation_id != self.mutation_id {
+            return Err(ProtocolError::InvalidSetOptions {
+                opcode: self.opcode,
+            });
+        }
         validate_request_shape(
             self.opcode,
             self.item_id.is_some(),
             self.set_options,
+            self.mutation_id.is_some(),
             self.value.len(),
         )?;
         let item_id_len = self.item_id.map_or(0, |_| ITEM_ID_BYTES);
@@ -362,8 +459,16 @@ impl Request {
             .set_options
             .ttl_ms
             .map_or(([0; MAX_VARUINT_BYTES], 0), encode_varuint);
-        let len =
-            REQUEST_FIXED_BYTES + item_id_len_bytes + value_len_bytes + item_id_len + ttl_bytes;
+        let mutation_bytes = self
+            .mutation_id
+            .map_or([0; MUTATION_ID_BYTES], MutationId::into_bytes);
+        let mutation_len = self.mutation_id.map_or(0, |_| MUTATION_ID_BYTES);
+        let len = REQUEST_FIXED_BYTES
+            + item_id_len_bytes
+            + value_len_bytes
+            + item_id_len
+            + mutation_len
+            + ttl_bytes;
         let mut bytes = [0; MAX_REQUEST_PREFIX_BYTES];
         bytes[0] = self.opcode as u8;
         bytes[1] = self.set_options.flags();
@@ -378,6 +483,8 @@ impl Request {
             bytes[offset..offset + item_id_len].copy_from_slice(item_id.as_bytes());
             offset += item_id_len;
         }
+        bytes[offset..offset + mutation_len].copy_from_slice(&mutation_bytes[..mutation_len]);
+        offset += mutation_len;
         bytes[offset..offset + ttl_bytes].copy_from_slice(&ttl_encoded[..ttl_bytes]);
         Ok(RequestPrefix { bytes, len })
     }
@@ -389,6 +496,7 @@ impl Request {
             opcode: decoded.opcode,
             item_id: decoded.item_id,
             set_options: decoded.set_options,
+            mutation_id: decoded.mutation_id,
             value: frame[decoded.value_start..].to_vec(),
         })
     }
@@ -402,6 +510,7 @@ impl Request {
             opcode: decoded.opcode,
             item_id: decoded.item_id,
             set_options: decoded.set_options,
+            mutation_id: decoded.mutation_id,
             value: frame,
         })
     }
@@ -422,6 +531,7 @@ struct DecodedRequestFrame {
     opcode: Opcode,
     item_id: Option<ItemId>,
     set_options: SetOptions,
+    mutation_id: Option<MutationId>,
     value_start: usize,
     value_len: usize,
 }
@@ -434,7 +544,14 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
     let expected = header
         .frame_len(frame)?
         .ok_or(ProtocolError::FrameTooShort {
-            expected: header.encoded_len + header.item_id_len + usize::from(header.has_ttl),
+            expected: header.encoded_len
+                + header.item_id_len
+                + if header.has_mutation_id {
+                    MUTATION_ID_BYTES
+                } else {
+                    0
+                }
+                + usize::from(header.has_ttl),
             actual: frame.len(),
         })?;
     if frame.len() != expected {
@@ -457,29 +574,52 @@ fn decode_request_frame(frame: &[u8]) -> Result<DecodedRequestFrame> {
                 })?,
         ))
     };
+    let mutation_start = item_id_end;
+    let mutation_end = mutation_start
+        + if header.has_mutation_id {
+            MUTATION_ID_BYTES
+        } else {
+            0
+        };
+    let mutation_id = if header.has_mutation_id {
+        Some(MutationId::new(
+            frame[mutation_start..mutation_end]
+                .try_into()
+                .map_err(|_| ProtocolError::InvalidMutationIdLength {
+                    opcode: header.opcode,
+                    expected: MUTATION_ID_BYTES,
+                    actual: mutation_end.saturating_sub(mutation_start),
+                })?,
+        ))
+    } else {
+        None
+    };
     let mut set_options = SetOptions::new(header.condition, None);
+    set_options.mutation_id = mutation_id;
     let value_start = if header.has_ttl {
-        let (ttl_ms, ttl_len) = decode_varuint(&frame[item_id_end..], "SET TTL")?.ok_or(
+        let (ttl_ms, ttl_len) = decode_varuint(&frame[mutation_end..], "SET TTL")?.ok_or(
             ProtocolError::FrameTooShort {
-                expected: item_id_end + MIN_VARUINT_BYTES,
+                expected: mutation_end + MIN_VARUINT_BYTES,
                 actual: frame.len(),
             },
         )?;
         set_options.ttl_ms = Some(ttl_ms);
-        item_id_end + ttl_len
+        mutation_end + ttl_len
     } else {
-        item_id_end
+        mutation_end
     };
     validate_request_shape(
         header.opcode,
         header.item_id_len != 0,
         set_options,
+        mutation_id.is_some(),
         header.value_len,
     )?;
     Ok(DecodedRequestFrame {
         opcode: header.opcode,
         item_id,
         set_options,
+        mutation_id,
         value_start,
         value_len: header.value_len,
     })
@@ -702,6 +842,14 @@ pub enum ProtocolError {
         expected: usize,
         actual: usize,
     },
+    #[error(
+        "{opcode:?} carries an invalid mutation ID length: expected {expected}, received {actual}"
+    )]
+    InvalidMutationIdLength {
+        opcode: Opcode,
+        expected: usize,
+        actual: usize,
+    },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
     #[error("{opcode:?} requires item_id_len={expected_item_id} and value_len={expected_value}")]
@@ -747,11 +895,23 @@ fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, us
     Ok(Some((value, encoded_len)))
 }
 
-fn decode_request_flags(opcode: Opcode, flags: u8) -> Result<(SetCondition, bool)> {
-    if flags & !KNOWN_SET_FLAGS != 0 {
-        return Err(ProtocolError::UnknownRequestFlags(flags & !KNOWN_SET_FLAGS));
+fn decode_request_flags(opcode: Opcode, flags: u8) -> Result<(SetCondition, bool, bool)> {
+    let spec = operation_spec(opcode);
+    let unsupported_flags = flags & !spec.allowed_flags;
+    // Known SET flags on a non-SET operation are a semantic option error,
+    // while bits outside the protocol's assigned flag set are malformed
+    // request flags. Keeping the distinction makes diagnostics stable for
+    // both callers and protocol conformance tests.
+    let known_set_flags =
+        SET_TTL_FLAG | SET_IF_ABSENT_FLAG | SET_IF_PRESENT_FLAG | SET_MUTATION_ID_FLAG;
+    if unsupported_flags & known_set_flags != 0 {
+        return Err(ProtocolError::InvalidSetOptions { opcode });
     }
-    if opcode != Opcode::Set && flags != 0 {
+    if unsupported_flags != 0 {
+        return Err(ProtocolError::UnknownRequestFlags(unsupported_flags));
+    }
+    let mutation_id = flags & SET_MUTATION_ID_FLAG != 0;
+    if flags & SET_TTL_FLAG != 0 && !spec.ttl_allowed {
         return Err(ProtocolError::InvalidSetOptions { opcode });
     }
     let condition = match (
@@ -763,7 +923,7 @@ fn decode_request_flags(opcode: Opcode, flags: u8) -> Result<(SetCondition, bool
         (false, true) => SetCondition::IfPresent,
         (true, true) => return Err(ProtocolError::ConflictingSetConditions),
     };
-    Ok((condition, flags & SET_TTL_FLAG != 0))
+    Ok((condition, flags & SET_TTL_FLAG != 0, mutation_id))
 }
 
 fn validate_value_length(value_len: usize) -> Result<()> {
@@ -777,10 +937,7 @@ fn validate_value_length(value_len: usize) -> Result<()> {
 }
 
 fn validate_item_id_length(opcode: Opcode, item_id_len: usize) -> Result<()> {
-    let expected = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => 0,
-        Opcode::Get | Opcode::Set | Opcode::Delete => ITEM_ID_BYTES,
-    };
+    let expected = operation_spec(opcode).item_id_bytes;
     if item_id_len == expected {
         Ok(())
     } else {
@@ -796,30 +953,35 @@ fn validate_request_shape(
     opcode: Opcode,
     has_item_id: bool,
     set_options: SetOptions,
+    has_mutation_id: bool,
     value_len: usize,
 ) -> Result<()> {
+    let spec = operation_spec(opcode);
     if set_options.ttl_ms == Some(0) {
         return Err(ProtocolError::InvalidSetTtl);
     }
-    if opcode != Opcode::Set && set_options != SetOptions::NONE {
+    if set_options.ttl_ms.is_some() && !spec.ttl_allowed {
         return Err(ProtocolError::InvalidSetOptions { opcode });
     }
-    let valid = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => !has_item_id && value_len == 0,
-        Opcode::Get | Opcode::Delete => has_item_id && value_len == 0,
-        Opcode::Set => has_item_id,
-    };
+    if set_options.condition != SetCondition::None && opcode != Opcode::Set {
+        return Err(ProtocolError::InvalidSetOptions { opcode });
+    }
+    if has_mutation_id != set_options.mutation_id.is_some() || (has_mutation_id && !spec.mutation) {
+        return Err(ProtocolError::InvalidSetOptions { opcode });
+    }
+    let valid = (has_item_id == (spec.item_id_bytes != 0))
+        && value_len >= spec.value_min_bytes
+        && value_len <= spec.value_max_bytes;
     if valid {
         return Ok(());
     }
-    let (expected_item_id, expected_value) = match opcode {
-        Opcode::Ping | Opcode::Stats | Opcode::Sync => (0, "0"),
-        Opcode::Get | Opcode::Delete => (ITEM_ID_BYTES, "0"),
-        Opcode::Set => (ITEM_ID_BYTES, "any"),
-    };
     Err(ProtocolError::InvalidRequestShape {
         opcode,
-        expected_item_id,
-        expected_value,
+        expected_item_id: spec.item_id_bytes,
+        expected_value: if spec.value_min_bytes == spec.value_max_bytes {
+            "0"
+        } else {
+            "any"
+        },
     })
 }

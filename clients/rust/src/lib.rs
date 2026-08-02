@@ -19,10 +19,11 @@ use std::time::Duration;
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
-    Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
-    GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, Operation, PrivateKey, Result, RetryPolicy,
-    ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value, value_envelope,
+    Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, CoreMetricsSnapshot,
+    DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DataProtectionKeyRing,
+    DeleteOutcome, Endpoint, Error, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, Operation,
+    PrivateKey, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions,
+    SetOutcome, value,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -195,6 +196,12 @@ macro_rules! builder_methods {
             /// This builder with the selected value protection profile.
             pub fn encryption(mut self, encryption: value::Encryption) -> Self {
                 self.inner = self.inner.encryption(encryption);
+                self
+            }
+
+            /// Uses the active key for writes and retained previous keys for reads/deletes.
+            pub fn key_ring(mut self, key_ring: DataProtectionKeyRing) -> Self {
+                self.inner = self.inner.key_ring(key_ring);
                 self
             }
         }

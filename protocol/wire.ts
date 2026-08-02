@@ -20,12 +20,27 @@ export interface Wire_V1_Contract {
   readonly set_ttl_flag: number
   readonly set_if_absent_flag: number
   readonly set_if_present_flag: number
+  readonly set_mutation_id_flag: number
+}
+
+/** Operation-specific framing, validation, and idempotency contract. */
+export interface Operation_Spec {
+  readonly opcode: number
+  readonly item_id_bytes: number
+  readonly value_min_bytes: number
+  readonly value_max_bytes: number
+  readonly allowed_flags: number
+  readonly ttl_allowed: boolean
+  readonly mutation: boolean
+  readonly success_status: number
 }
 
 /** Language-neutral server-visible subset of the OpenKache Smithy model. */
 export interface Wire_Contract {
   readonly item_id_bytes: number
+  readonly mutation_id_bytes: number
   readonly max_value_bytes: number
+  readonly operation_specs: readonly Operation_Spec[]
   readonly opcodes: readonly Wire_Entry[]
   readonly statuses: readonly Wire_Entry[]
   readonly v1: Wire_V1_Contract
@@ -38,7 +53,9 @@ const OPCODE_SHAPE_ID = "openkache.protocol#Opcode"
 const STATUS_SHAPE_ID = "openkache.protocol#Status"
 const WIRE_CONTRACT_TRAIT_ID = "openkache.protocol#wireContract"
 const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
+const WIRE_ENUM_OPCODE_TRAIT_ID = "openkache.protocol#wireEnumOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
+const OPERATION_SPEC_TRAIT_ID = "openkache.protocol#operationSpec"
 
 function object_value(value: unknown, location: string): Json_Object {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -65,6 +82,14 @@ function string_member(object: Json_Object, member: string, location: string): s
   const value = object[member]
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${location}.${member} must be a non-empty string`)
+  }
+  return value
+}
+
+function boolean_member(object: Json_Object, member: string, location: string): boolean {
+  const value = object[member]
+  if (typeof value !== "boolean") {
+    throw new Error(`${location}.${member} must be a boolean`)
   }
   return value
 }
@@ -154,6 +179,13 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
       0,
       0xff,
     ),
+    set_mutation_id_flag: integer_member(
+      contract,
+      "setMutationIdFlag",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
   } satisfies Wire_V1_Contract
   if (v1.alpn !== "openkache/1") {
     throw new Error(
@@ -174,6 +206,7 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
     { name: "SetTtl", value: v1.set_ttl_flag },
     { name: "SetIfAbsent", value: v1.set_if_absent_flag },
     { name: "SetIfPresent", value: v1.set_if_present_flag },
+    { name: "SetMutationId", value: v1.set_mutation_id_flag },
   ] as const
   unique_wire_values(flags, "SET flag")
   if (flags.some(({ value }) => value === 0 || (value & (value - 1)) !== 0)) {
@@ -253,10 +286,86 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
       : wire_enum_entries(
           shapes,
           OPCODE_SHAPE_ID,
-          WIRE_OPCODE_TRAIT_ID,
+          WIRE_ENUM_OPCODE_TRAIT_ID,
           "opcode",
         )
+  const operation_specs = array_member(service, "operations", SERVICE_SHAPE_ID)
+    .map((operation, index): Operation_Spec => {
+      const reference = object_value(operation, `${SERVICE_SHAPE_ID}.operations[${index}]`)
+      const target = string_member(
+        reference,
+        "target",
+        `${SERVICE_SHAPE_ID}.operations[${index}]`,
+      )
+      const operation_shape = object_member(shapes, target, "Smithy AST.shapes")
+      const opcode_trait = trait_value(
+        operation_shape,
+        WIRE_OPCODE_TRAIT_ID,
+        `Smithy AST.shapes.${target}`,
+      )
+      const spec = trait_value(
+        operation_shape,
+        OPERATION_SPEC_TRAIT_ID,
+        `Smithy AST.shapes.${target}`,
+      )
+      return {
+        opcode: integer_member(
+          opcode_trait,
+          "value",
+          `${target}.${WIRE_OPCODE_TRAIT_ID}`,
+          0,
+          0xff,
+        ),
+        item_id_bytes: integer_member(
+          spec,
+          "itemIdBytes",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          0,
+        ),
+        value_min_bytes: integer_member(
+          spec,
+          "valueMinBytes",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          0,
+        ),
+        value_max_bytes: integer_member(
+          spec,
+          "valueMaxBytes",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          0,
+        ),
+        allowed_flags: integer_member(
+          spec,
+          "allowedFlags",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          0,
+          0xff,
+        ),
+        ttl_allowed: boolean_member(
+          spec,
+          "ttlAllowed",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+        ),
+        mutation: boolean_member(
+          spec,
+          "mutation",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+        ),
+        success_status: integer_member(
+          spec,
+          "successStatus",
+          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          0,
+          0xff,
+        ),
+      }
+    })
+    .sort((left, right) => left.opcode - right.opcode)
   unique_wire_values(opcodes, "opcode")
+  unique_wire_values(
+    operation_specs.map((spec) => ({ name: `${spec.opcode}`, value: spec.opcode })),
+    "operation specification",
+  )
   if (opcodes.length === 0) throw new Error("opcode contract must define at least one entry")
   const statuses = wire_enum_entries(
     shapes,
@@ -267,7 +376,9 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
 
   return {
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
+    mutation_id_bytes: integer_member(contract_trait, "mutationIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
+    operation_specs,
     opcodes,
     statuses,
     v1: wire_v1_contract(contract_trait.v1),
@@ -335,6 +446,14 @@ ${variants}
 }`
 }
 
+function opcode_variant(contract: Wire_Contract, opcode: number): string {
+  const entry = contract.opcodes.find((candidate) => candidate.value === opcode)
+  if (entry === undefined) {
+    throw new Error(`operation specification references unknown opcode ${opcode}`)
+  }
+  return entry.name
+}
+
 /** Renders protocol v1 Rust definitions without client-only declarations. */
 export function render_rust_wire(contract: Wire_Contract): string {
   return `// Generated from the OpenKache Smithy wire contract. Do not edit.
@@ -349,15 +468,70 @@ pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(contract.v1.response
 pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v1.max_varuint_bytes)};
 /// Bytes in every canonical item ID carried by the protocol.
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
+/// Bytes in every idempotency token carried by mutating v1 requests.
+pub const MUTATION_ID_BYTES: usize = ${formatted_decimal(contract.mutation_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
 
 const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v1.set_ttl_flag)};
 const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v1.set_if_absent_flag)};
 const SET_IF_PRESENT_FLAG: u8 = ${formatted_byte(contract.v1.set_if_present_flag)};
+/// Mutating-request idempotency-token flag.
+pub const SET_MUTATION_ID_FLAG: u8 = ${formatted_byte(contract.v1.set_mutation_id_flag)};
+
+/// Smithy-generated operation framing and idempotency constraints.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationSpec {
+    /// Operation opcode represented by this specification.
+    pub opcode: u8,
+    /// Exact item-ID length accepted by the operation.
+    pub item_id_bytes: usize,
+    /// Inclusive minimum value length.
+    pub value_min_bytes: usize,
+    /// Inclusive maximum value length.
+    pub value_max_bytes: usize,
+    /// Operation-specific request flags accepted by the decoder.
+    pub allowed_flags: u8,
+    /// Whether the operation permits a TTL field.
+    pub ttl_allowed: bool,
+    /// Whether the operation is a mutating request.
+    pub mutation: bool,
+    /// Primary success status assigned by the contract.
+    pub success_status: u8,
+}
+
+/// Complete operation specification table in opcode order.
+pub const OPERATION_SPECS: &[OperationSpec] = &[
+${contract.operation_specs
+  .map(
+    (spec) => `    OperationSpec {
+        opcode: ${formatted_byte(spec.opcode)},
+        item_id_bytes: ${formatted_decimal(spec.item_id_bytes)},
+        value_min_bytes: ${formatted_decimal(spec.value_min_bytes)},
+        value_max_bytes: ${formatted_decimal(spec.value_max_bytes)},
+        allowed_flags: ${formatted_byte(spec.allowed_flags)},
+        ttl_allowed: ${spec.ttl_allowed},
+        mutation: ${spec.mutation},
+        success_status: ${formatted_byte(spec.success_status)},
+    },`,
+  )
+  .join("\n")}
+];
 
 ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 
 ${rust_wire_enum("Status", "Status returned in every protocol response.", contract.statuses, "UnknownStatus")}
+
+/// Returns the Smithy operation specification for one opcode.
+pub const fn operation_spec(opcode: Opcode) -> OperationSpec {
+    match opcode {
+${contract.operation_specs
+  .map(
+    (spec) =>
+      `        Opcode::${opcode_variant(contract, spec.opcode)} => OPERATION_SPECS[${contract.operation_specs.indexOf(spec)}],`,
+  )
+  .join("\n")}
+    }
+}
 `
 }

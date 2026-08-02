@@ -47,18 +47,11 @@ export interface Value_Format_Contract {
   readonly version: number
 }
 
-/** Legacy metadata envelope retained for the TypeScript adapter migration. */
-export interface Value_Envelope_Contract {
-  readonly json_encoding: string
-  readonly magic_and_version_hex: string
-  readonly max_encoding_bytes: number
-  readonly max_type_name_bytes: number
-}
-
 /** Defaults shared by the Rust client core and its native language adapters. */
 export interface Client_Defaults_Contract {
   readonly connect_timeout_milliseconds: number
   readonly max_in_flight: number
+  readonly max_previous_data_protection_keys: number
   readonly request_timeout_milliseconds: number
   readonly retry_max_attempts: number
   readonly zstandard_level: number
@@ -121,10 +114,64 @@ export interface Api_Contract {
 /** Native binding ABI identifiers shared by language-neutral adapters. */
 export interface Ffi_Contract {
   readonly abi_version: number
+  readonly backends: readonly Wire_Entry[]
   readonly connection_states: readonly Wire_Entry[]
+  readonly error_codes: readonly Wire_Entry[]
+  readonly metrics: readonly Wire_Entry[]
   readonly operations: readonly Wire_Entry[]
+  readonly phases: readonly Wire_Entry[]
   readonly result_kinds: readonly Wire_Entry[]
   readonly set_conditions: readonly Wire_Entry[]
+}
+
+/** Native C ABI structure sizes and byte offsets shared by raw FFI adapters. */
+export interface Ffi_Layout_Contract {
+  readonly connect_options_bytes: number
+  readonly connect_address_offset: number
+  readonly connect_address_length_offset: number
+  readonly connect_server_name_offset: number
+  readonly connect_server_name_length_offset: number
+  readonly connect_certificate_offset: number
+  readonly connect_certificate_length_offset: number
+  readonly connect_client_certificate_chain_offset: number
+  readonly connect_client_certificate_chain_length_offset: number
+  readonly connect_client_private_key_offset: number
+  readonly connect_client_private_key_length_offset: number
+  readonly connect_data_protection_key_offset: number
+  readonly connect_data_protection_key_length_offset: number
+  readonly connect_previous_data_protection_keys_offset: number
+  readonly connect_previous_data_protection_keys_length_offset: number
+  readonly connect_previous_data_protection_key_count_offset: number
+  readonly connect_compression_enabled_offset: number
+  readonly connect_compression_level_offset: number
+  readonly connect_minimum_input_size_offset: number
+  readonly connect_minimum_savings_offset: number
+  readonly connect_encryption_offset: number
+  readonly connect_timeout_offset: number
+  readonly connect_request_timeout_offset: number
+  readonly connect_retry_max_attempts_offset: number
+  readonly connect_max_in_flight_offset: number
+  readonly error_metadata_bytes: number
+  readonly error_metadata_code_offset: number
+  readonly error_metadata_operation_offset: number
+  readonly error_metadata_phase_offset: number
+  readonly error_metadata_backend_offset: number
+  readonly error_metadata_retryable_offset: number
+  readonly error_metadata_ambiguous_offset: number
+  readonly error_metadata_mutation_id_length_offset: number
+  readonly error_metadata_mutation_id_offset: number
+  readonly metrics_snapshot_bytes: number
+  readonly metrics_snapshot_requests_offset: number
+  readonly metrics_snapshot_hits_offset: number
+  readonly metrics_snapshot_misses_offset: number
+  readonly metrics_snapshot_retries_offset: number
+  readonly metrics_snapshot_reconnects_offset: number
+  readonly metrics_snapshot_cancellations_offset: number
+  readonly metrics_snapshot_transport_errors_offset: number
+  readonly metrics_snapshot_protocol_errors_offset: number
+  readonly metrics_snapshot_bytes_sent_offset: number
+  readonly metrics_snapshot_bytes_received_offset: number
+  readonly metrics_snapshot_active_lanes_offset: number
 }
 
 /** Wire contract combined with the client-owned Smithy model. */
@@ -132,7 +179,7 @@ export interface Client_Contract extends Wire_Contract {
   readonly api: Api_Contract
   readonly client_defaults: Client_Defaults_Contract
   readonly ffi: Ffi_Contract
-  readonly value_envelope: Value_Envelope_Contract
+  readonly ffi_layout: Ffi_Layout_Contract
   readonly value_format: Value_Format_Contract
 }
 
@@ -145,11 +192,63 @@ const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
-const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
+const FFI_LAYOUT_TRAIT_ID = "openkache.client#ffiLayout"
 const FFI_OPERATION_FIELDS = [
   { name: "GetJson", field: "operationGetJson" },
   { name: "SetJson", field: "operationSetJson" },
   { name: "Reconnect", field: "operationReconnect" },
+] as const
+const FFI_ERROR_FIELDS = [
+  { name: "Configuration", field: "errorConfiguration" },
+  { name: "Connection", field: "errorConnection" },
+  { name: "Timeout", field: "errorTimeout" },
+  { name: "Runtime", field: "errorRuntime" },
+  { name: "Transport", field: "errorTransport" },
+  { name: "Server", field: "errorServer" },
+  { name: "UnexpectedResponse", field: "errorUnexpectedResponse" },
+  { name: "ResponseTooLarge", field: "errorResponseTooLarge" },
+  { name: "Tls", field: "errorTls" },
+  { name: "Protocol", field: "errorProtocol" },
+  { name: "Io", field: "errorIo" },
+  { name: "Value", field: "errorValue" },
+  { name: "Closed", field: "errorClosed" },
+  { name: "Ambiguous", field: "errorAmbiguous" },
+  { name: "Cancelled", field: "errorCancelled" },
+] as const
+const FFI_PHASE_FIELDS = [
+  { name: "Unknown", field: "phaseUnknown" },
+  { name: "DnsResolution", field: "phaseDnsResolution" },
+  { name: "ConnectionSetup", field: "phaseConnectionSetup" },
+  { name: "ConnectionRetry", field: "phaseConnectionRetry" },
+  { name: "StreamAcquisition", field: "phaseStreamAcquisition" },
+  { name: "RequestWrite", field: "phaseRequestWrite" },
+  { name: "ResponseHeaderRead", field: "phaseResponseHeaderRead" },
+  { name: "ResponseBodyRead", field: "phaseResponseBodyRead" },
+  { name: "TlsInitialization", field: "phaseTlsInitialization" },
+  { name: "EndpointInitialization", field: "phaseEndpointInitialization" },
+  { name: "ConnectionInitialization", field: "phaseConnectionInitialization" },
+  { name: "Handshake", field: "phaseHandshake" },
+  { name: "StreamOpen", field: "phaseStreamOpen" },
+  { name: "StreamWrite", field: "phaseStreamWrite" },
+  { name: "StreamRead", field: "phaseStreamRead" },
+] as const
+const FFI_BACKEND_FIELDS = [
+  { name: "None", field: "backendNone" },
+  { name: "Quinn", field: "backendQuinn" },
+  { name: "Compio", field: "backendCompio" },
+] as const
+const FFI_METRICS_FIELDS = [
+  { name: "Requests", field: "metricsRequests" },
+  { name: "Hits", field: "metricsHits" },
+  { name: "Misses", field: "metricsMisses" },
+  { name: "Retries", field: "metricsRetries" },
+  { name: "Reconnects", field: "metricsReconnects" },
+  { name: "Cancellations", field: "metricsCancellations" },
+  { name: "TransportErrors", field: "metricsTransportErrors" },
+  { name: "ProtocolErrors", field: "metricsProtocolErrors" },
+  { name: "BytesSent", field: "metricsBytesSent" },
+  { name: "BytesReceived", field: "metricsBytesReceived" },
+  { name: "ActiveLanes", field: "metricsActiveLanes" },
 ] as const
 const FFI_RESULT_FIELDS = [
   { name: "Error", field: "resultError" },
@@ -194,9 +293,6 @@ const GENERATED_OUTPUTS = {
   typescript_value_format: generated_path(
     "clients/typescript/src/generated_local/smithy-value-format.ts",
   ),
-  typescript_value_envelope: generated_path(
-    "clients/typescript/src/generated_local/smithy-value-envelope.ts",
-  ),
   python_api: process.env.OPENKACHE_PYTHON_API_OUTPUT ??
     generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
   python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
@@ -207,6 +303,19 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/core/generated_local/smithy_contract.h"),
   go_api: generated_path("clients/go/smithy_api.go"),
   go_contract: generated_path("clients/go/smithy_contract.go"),
+  java_api: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated/SmithyApi.java",
+  ),
+  java_contract: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated/SmithyContract.java",
+  ),
+  kotlin_api: generated_path(
+    "clients/kotlin/src/main/kotlin/io/openkache/client/generated/SmithyApi.kt",
+  ),
+  kotlin_contract: generated_path(
+    "clients/kotlin/src/main/kotlin/io/openkache/client/generated/SmithyContract.kt",
+  ),
+  dart_contract: generated_path("clients/dart/lib/generated_contract.dart"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -271,7 +380,7 @@ function pascal_case(identifier: string): string {
   return identifier
     .split("_")
     .map((part) => {
-      const normalized = part.toLowerCase()
+      const normalized = part === part.toUpperCase() ? part.toLowerCase() : part
       return normalized.length === 0
         ? ""
         : `${normalized[0]?.toUpperCase()}${normalized.slice(1)}`
@@ -310,6 +419,7 @@ function shape_type(shape: Json_Object, location: string): string {
 function api_type(shapes: Json_Object, target: string): Api_Type {
   const prelude_types: Readonly<Record<string, Api_Type_Kind>> = {
     "smithy.api#Boolean": "boolean",
+    "smithy.api#Blob": "blob",
     "smithy.api#Long": "long",
     "smithy.api#String": "string",
   }
@@ -348,8 +458,7 @@ function api_structure(shapes: Json_Object, target: string): Api_Structure {
   }
 }
 
-function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enum {
-  const shape_id = `${namespace}#${name}`
+function api_enum(shapes: Json_Object, shape_id: string): Api_Enum {
   const shape = object_member(shapes, shape_id, "Smithy AST.shapes")
   if (shape_type(shape, `Smithy AST.shapes.${shape_id}`) !== "enum") {
     throw new Error(`${shape_id} must be an enum`)
@@ -359,30 +468,39 @@ function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enu
     ([member_name, value]): Api_Enum_Member => {
       const member = object_value(value, `${shape_id}.${member_name}`)
       const traits = object_member(member, "traits", `${shape_id}.${member_name}`)
+      const enum_value = string_member(
+        traits,
+        "smithy.api#enumValue",
+        `${shape_id}.${member_name}.traits`,
+      )
       return {
-        name: pascal_case(member_name),
-        value: string_member(
-          traits,
-          "smithy.api#enumValue",
-          `${shape_id}.${member_name}.traits`,
-        ),
+        // Smithy AST normalizes uppercase enum symbols inconsistently across
+        // versions (for example, `IF_ABSENT` may arrive as `IFABSENT`).
+        // The wire value is stable and already uses snake_case, so derive
+        // language enum identifiers from it instead of the parser spelling.
+        name: pascal_case(enum_value),
+        value: enum_value,
       }
     },
   )
   const member_names = new Set<string>()
   const member_values = new Set<string>()
   for (const member of enum_members) {
-    if (member_names.has(member.name)) {
-      throw new Error(`duplicate ${name} enum member name ${member.name}`)
-    }
     if (member_values.has(member.value)) {
-      throw new Error(`duplicate ${name} enum value ${member.value}`)
+      throw new Error(`duplicate ${shape_name(shape_id)} enum value ${member.value}`)
     }
-    member_names.add(member.name)
     member_values.add(member.value)
   }
+  for (const member of enum_members) {
+    if (member_names.has(member.name)) {
+      throw new Error(
+        `duplicate ${shape_name(shape_id)} enum member name ${member.name}`,
+      )
+    }
+    member_names.add(member.name)
+  }
   return {
-    name,
+    name: shape_name(shape_id),
     members: enum_members,
   }
 }
@@ -390,11 +508,10 @@ function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enu
 function api_contract(
   shapes: Json_Object,
   service_shape_id: string,
-  namespace: string,
 ): Api_Contract {
   const service = object_member(shapes, service_shape_id, "Smithy AST.shapes")
-  const operation_shapes = array_member(service, "operations", service_shape_id)
-    .map((operation, index): Api_Operation => {
+  const operation_details = array_member(service, "operations", service_shape_id)
+    .map((operation, index) => {
       const reference = object_value(operation, `${service_shape_id}.operations[${index}]`)
       const target = string_member(
         reference,
@@ -412,33 +529,40 @@ function api_contract(
         "target",
         `${target}.output`,
       )
-      return {
-        input: shape_name(input),
-        name: shape_name(target),
-        output: shape_name(output),
-      }
+      return { input, operation: target, output }
     })
+  const operation_shapes: Api_Operation[] = operation_details.map(
+    ({ input, operation, output }): Api_Operation => ({
+      input: shape_name(input),
+      name: shape_name(operation),
+      output: shape_name(output),
+    }),
+  )
 
-  const structure_names = new Set<string>()
-  for (const operation of operation_shapes) {
-    structure_names.add(operation.input)
-    structure_names.add(operation.output)
+  const structure_targets = new Set<string>()
+  for (const operation of operation_details) {
+    structure_targets.add(operation.input)
+    structure_targets.add(operation.output)
   }
-  const structures = [...structure_names]
-    .map((name) => api_structure(shapes, `${namespace}#${name}`))
+  const structures = [...structure_targets]
+    .map((target) => api_structure(shapes, target))
     .sort((left, right) => left.name.localeCompare(right.name))
-  const enum_names = new Set<string>()
-  for (const structure of structures) {
-    for (const member of structure.members) {
-      if (member.type.kind === "enum" && member.type.name !== undefined) {
-        enum_names.add(member.type.name)
+  const enum_targets = new Set<string>()
+  for (const target of structure_targets) {
+    const structure = object_member(shapes, target, "Smithy AST.shapes")
+    const members = object_member(structure, "members", target)
+    for (const value of Object.values(members)) {
+      const member = object_value(value, target)
+      const member_target = string_member(member, "target", target)
+      if (api_type(shapes, member_target).kind === "enum") {
+        enum_targets.add(member_target)
       }
     }
   }
 
   return {
-    enums: [...enum_names]
-      .map((name) => api_enum(shapes, namespace, name))
+    enums: [...enum_targets]
+      .map((target) => api_enum(shapes, target))
       .sort((left, right) => left.name.localeCompare(right.name)),
     operations: operation_shapes,
     structures,
@@ -489,12 +613,16 @@ function ffi_contract(value: unknown): Ffi_Contract {
       1,
       0xffff_ffff,
     ),
+    backends: ffi_entries(contract, FFI_BACKEND_FIELDS, "FFI backend"),
     connection_states: ffi_entries(
       contract,
       FFI_CONNECTION_STATE_FIELDS,
       "FFI connection state",
     ),
+    error_codes: ffi_entries(contract, FFI_ERROR_FIELDS, "FFI error code"),
+    metrics: ffi_entries(contract, FFI_METRICS_FIELDS, "FFI metric"),
     operations: ffi_entries(contract, FFI_OPERATION_FIELDS, "FFI operation"),
+    phases: ffi_entries(contract, FFI_PHASE_FIELDS, "FFI phase"),
     result_kinds: ffi_entries(contract, FFI_RESULT_FIELDS, "FFI result kind"),
     set_conditions: ffi_entries(
       contract,
@@ -502,6 +630,314 @@ function ffi_contract(value: unknown): Ffi_Contract {
       "FFI SET condition",
     ),
   }
+}
+
+function ffi_layout_member(
+  contract: Json_Object,
+  field: string,
+  minimum = 0,
+): number {
+  return integer_member(
+    contract,
+    field,
+    `${FFI_LAYOUT_TRAIT_ID}.${field}`,
+    minimum,
+    0xffff_ffff,
+  )
+}
+
+function ffi_layout_contract(
+  value: unknown,
+  mutation_id_bytes: number,
+): Ffi_Layout_Contract {
+  const contract = object_value(value, FFI_LAYOUT_TRAIT_ID)
+  const layout = {
+    connect_options_bytes: ffi_layout_member(contract, "connectOptionsBytes", 1),
+    connect_address_offset: ffi_layout_member(contract, "connectAddressOffset"),
+    connect_address_length_offset: ffi_layout_member(
+      contract,
+      "connectAddressLengthOffset",
+    ),
+    connect_server_name_offset: ffi_layout_member(contract, "connectServerNameOffset"),
+    connect_server_name_length_offset: ffi_layout_member(
+      contract,
+      "connectServerNameLengthOffset",
+    ),
+    connect_certificate_offset: ffi_layout_member(contract, "connectCertificateOffset"),
+    connect_certificate_length_offset: ffi_layout_member(
+      contract,
+      "connectCertificateLengthOffset",
+    ),
+    connect_client_certificate_chain_offset: ffi_layout_member(
+      contract,
+      "connectClientCertificateChainOffset",
+    ),
+    connect_client_certificate_chain_length_offset: ffi_layout_member(
+      contract,
+      "connectClientCertificateChainLengthOffset",
+    ),
+    connect_client_private_key_offset: ffi_layout_member(
+      contract,
+      "connectClientPrivateKeyOffset",
+    ),
+    connect_client_private_key_length_offset: ffi_layout_member(
+      contract,
+      "connectClientPrivateKeyLengthOffset",
+    ),
+    connect_data_protection_key_offset: ffi_layout_member(
+      contract,
+      "connectDataProtectionKeyOffset",
+    ),
+    connect_data_protection_key_length_offset: ffi_layout_member(
+      contract,
+      "connectDataProtectionKeyLengthOffset",
+    ),
+    connect_previous_data_protection_keys_offset: ffi_layout_member(
+      contract,
+      "connectPreviousDataProtectionKeysOffset",
+    ),
+    connect_previous_data_protection_keys_length_offset: ffi_layout_member(
+      contract,
+      "connectPreviousDataProtectionKeysLengthOffset",
+    ),
+    connect_previous_data_protection_key_count_offset: ffi_layout_member(
+      contract,
+      "connectPreviousDataProtectionKeyCountOffset",
+    ),
+    connect_compression_enabled_offset: ffi_layout_member(
+      contract,
+      "connectCompressionEnabledOffset",
+    ),
+    connect_compression_level_offset: ffi_layout_member(
+      contract,
+      "connectCompressionLevelOffset",
+    ),
+    connect_minimum_input_size_offset: ffi_layout_member(
+      contract,
+      "connectMinimumInputSizeOffset",
+    ),
+    connect_minimum_savings_offset: ffi_layout_member(
+      contract,
+      "connectMinimumSavingsOffset",
+    ),
+    connect_encryption_offset: ffi_layout_member(contract, "connectEncryptionOffset"),
+    connect_timeout_offset: ffi_layout_member(contract, "connectTimeoutOffset"),
+    connect_request_timeout_offset: ffi_layout_member(
+      contract,
+      "connectRequestTimeoutOffset",
+    ),
+    connect_retry_max_attempts_offset: ffi_layout_member(
+      contract,
+      "connectRetryMaxAttemptsOffset",
+    ),
+    connect_max_in_flight_offset: ffi_layout_member(
+      contract,
+      "connectMaxInFlightOffset",
+    ),
+    error_metadata_bytes: ffi_layout_member(contract, "errorMetadataBytes", 1),
+    error_metadata_code_offset: ffi_layout_member(
+      contract,
+      "errorMetadataCodeOffset",
+    ),
+    error_metadata_operation_offset: ffi_layout_member(
+      contract,
+      "errorMetadataOperationOffset",
+    ),
+    error_metadata_phase_offset: ffi_layout_member(
+      contract,
+      "errorMetadataPhaseOffset",
+    ),
+    error_metadata_backend_offset: ffi_layout_member(
+      contract,
+      "errorMetadataBackendOffset",
+    ),
+    error_metadata_retryable_offset: ffi_layout_member(
+      contract,
+      "errorMetadataRetryableOffset",
+    ),
+    error_metadata_ambiguous_offset: ffi_layout_member(
+      contract,
+      "errorMetadataAmbiguousOffset",
+    ),
+    error_metadata_mutation_id_length_offset: ffi_layout_member(
+      contract,
+      "errorMetadataMutationIdLengthOffset",
+    ),
+    error_metadata_mutation_id_offset: ffi_layout_member(
+      contract,
+      "errorMetadataMutationIdOffset",
+    ),
+    metrics_snapshot_bytes: ffi_layout_member(contract, "metricsSnapshotBytes", 1),
+    metrics_snapshot_requests_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotRequestsOffset",
+    ),
+    metrics_snapshot_hits_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotHitsOffset",
+    ),
+    metrics_snapshot_misses_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotMissesOffset",
+    ),
+    metrics_snapshot_retries_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotRetriesOffset",
+    ),
+    metrics_snapshot_reconnects_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotReconnectsOffset",
+    ),
+    metrics_snapshot_cancellations_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotCancellationsOffset",
+    ),
+    metrics_snapshot_transport_errors_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotTransportErrorsOffset",
+    ),
+    metrics_snapshot_protocol_errors_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotProtocolErrorsOffset",
+    ),
+    metrics_snapshot_bytes_sent_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotBytesSentOffset",
+    ),
+    metrics_snapshot_bytes_received_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotBytesReceivedOffset",
+    ),
+    metrics_snapshot_active_lanes_offset: ffi_layout_member(
+      contract,
+      "metricsSnapshotActiveLanesOffset",
+    ),
+  } satisfies Ffi_Layout_Contract
+
+  const bounded = [
+    ["connectAddressOffset", layout.connect_address_offset],
+    ["connectAddressLengthOffset", layout.connect_address_length_offset],
+    ["connectServerNameOffset", layout.connect_server_name_offset],
+    ["connectServerNameLengthOffset", layout.connect_server_name_length_offset],
+    ["connectCertificateOffset", layout.connect_certificate_offset],
+    ["connectCertificateLengthOffset", layout.connect_certificate_length_offset],
+    [
+      "connectClientCertificateChainOffset",
+      layout.connect_client_certificate_chain_offset,
+    ],
+    [
+      "connectClientCertificateChainLengthOffset",
+      layout.connect_client_certificate_chain_length_offset,
+    ],
+    ["connectClientPrivateKeyOffset", layout.connect_client_private_key_offset],
+    [
+      "connectClientPrivateKeyLengthOffset",
+      layout.connect_client_private_key_length_offset,
+    ],
+    ["connectDataProtectionKeyOffset", layout.connect_data_protection_key_offset],
+    [
+      "connectDataProtectionKeyLengthOffset",
+      layout.connect_data_protection_key_length_offset,
+    ],
+    [
+      "connectPreviousDataProtectionKeysOffset",
+      layout.connect_previous_data_protection_keys_offset,
+    ],
+    [
+      "connectPreviousDataProtectionKeysLengthOffset",
+      layout.connect_previous_data_protection_keys_length_offset,
+    ],
+    [
+      "connectPreviousDataProtectionKeyCountOffset",
+      layout.connect_previous_data_protection_key_count_offset,
+    ],
+    [
+      "connectCompressionEnabledOffset",
+      layout.connect_compression_enabled_offset,
+    ],
+    ["connectCompressionLevelOffset", layout.connect_compression_level_offset],
+    ["connectMinimumInputSizeOffset", layout.connect_minimum_input_size_offset],
+    ["connectMinimumSavingsOffset", layout.connect_minimum_savings_offset],
+    ["connectEncryptionOffset", layout.connect_encryption_offset],
+    ["connectTimeoutOffset", layout.connect_timeout_offset],
+    ["connectRequestTimeoutOffset", layout.connect_request_timeout_offset],
+    [
+      "connectRetryMaxAttemptsOffset",
+      layout.connect_retry_max_attempts_offset,
+    ],
+    ["connectMaxInFlightOffset", layout.connect_max_in_flight_offset],
+  ] as const
+  for (const [name, offset] of bounded) {
+    if (offset >= layout.connect_options_bytes) {
+      throw new Error(
+        `${FFI_LAYOUT_TRAIT_ID}.${name} must be smaller than connectOptionsBytes`,
+      )
+    }
+  }
+  const metadata_offsets = [
+    ["errorMetadataCodeOffset", layout.error_metadata_code_offset],
+    ["errorMetadataOperationOffset", layout.error_metadata_operation_offset],
+    ["errorMetadataPhaseOffset", layout.error_metadata_phase_offset],
+    ["errorMetadataBackendOffset", layout.error_metadata_backend_offset],
+    ["errorMetadataRetryableOffset", layout.error_metadata_retryable_offset],
+    ["errorMetadataAmbiguousOffset", layout.error_metadata_ambiguous_offset],
+    [
+      "errorMetadataMutationIdLengthOffset",
+      layout.error_metadata_mutation_id_length_offset,
+    ],
+    ["errorMetadataMutationIdOffset", layout.error_metadata_mutation_id_offset],
+  ] as const
+  for (const [name, offset] of metadata_offsets) {
+    if (offset >= layout.error_metadata_bytes) {
+      throw new Error(
+        `${FFI_LAYOUT_TRAIT_ID}.${name} must be smaller than errorMetadataBytes`,
+      )
+    }
+  }
+  if (
+    layout.error_metadata_mutation_id_offset + mutation_id_bytes >
+    layout.error_metadata_bytes
+  ) {
+    throw new Error(
+      `${FFI_LAYOUT_TRAIT_ID}.errorMetadataMutationIdOffset leaves no room for a mutation ID`,
+    )
+  }
+  const metrics_offsets = [
+    ["metricsSnapshotRequestsOffset", layout.metrics_snapshot_requests_offset],
+    ["metricsSnapshotHitsOffset", layout.metrics_snapshot_hits_offset],
+    ["metricsSnapshotMissesOffset", layout.metrics_snapshot_misses_offset],
+    ["metricsSnapshotRetriesOffset", layout.metrics_snapshot_retries_offset],
+    [
+      "metricsSnapshotReconnectsOffset",
+      layout.metrics_snapshot_reconnects_offset,
+    ],
+    [
+      "metricsSnapshotCancellationsOffset",
+      layout.metrics_snapshot_cancellations_offset,
+    ],
+    [
+      "metricsSnapshotTransportErrorsOffset",
+      layout.metrics_snapshot_transport_errors_offset,
+    ],
+    [
+      "metricsSnapshotProtocolErrorsOffset",
+      layout.metrics_snapshot_protocol_errors_offset,
+    ],
+    ["metricsSnapshotBytesSentOffset", layout.metrics_snapshot_bytes_sent_offset],
+    [
+      "metricsSnapshotBytesReceivedOffset",
+      layout.metrics_snapshot_bytes_received_offset,
+    ],
+    ["metricsSnapshotActiveLanesOffset", layout.metrics_snapshot_active_lanes_offset],
+  ] as const
+  for (const [name, offset] of metrics_offsets) {
+    if (offset + 8 > layout.metrics_snapshot_bytes) {
+      throw new Error(
+        `${FFI_LAYOUT_TRAIT_ID}.${name} exceeds metricsSnapshotBytes`,
+      )
+    }
+  }
+  return layout
 }
 
 function value_format_contract(value: unknown): Value_Format_Contract {
@@ -689,60 +1125,18 @@ function value_format_contract(value: unknown): Value_Format_Contract {
   return values
 }
 
-function value_envelope_contract(value: unknown): Value_Envelope_Contract {
-  const contract = object_value(value, VALUE_ENVELOPE_TRAIT_ID)
-  const magic_and_version_hex = string_member(
-    contract,
-    "magicAndVersionHex",
-    VALUE_ENVELOPE_TRAIT_ID,
-  ).toLowerCase()
-  if (
-    magic_and_version_hex.length === 0 ||
-    magic_and_version_hex.length % 2 !== 0 ||
-    magic_and_version_hex.length !== 8 ||
-    !/^[0-9a-f]+$/.test(magic_and_version_hex)
-  ) {
-    throw new Error(
-      "openkache.protocol#valueEnvelope.magicAndVersionHex must contain exactly four bytes of hexadecimal digits",
-    )
-  }
-  const max_encoding_bytes = integer_member(
-    contract,
-    "maxEncodingBytes",
-    VALUE_ENVELOPE_TRAIT_ID,
-    1,
-    0xffff,
-  )
-  const json_encoding = string_member(
-    contract,
-    "jsonEncoding",
-    VALUE_ENVELOPE_TRAIT_ID,
-  )
-  if (!valid_encoding_identifier(json_encoding, max_encoding_bytes)) {
-    throw new Error(
-      `${VALUE_ENVELOPE_TRAIT_ID}.jsonEncoding must match the portable lowercase encoding identifier grammar and fit maxEncodingBytes`,
-    )
-  }
-  return {
-    json_encoding,
-    magic_and_version_hex,
-    max_encoding_bytes,
-    max_type_name_bytes: integer_member(
-      contract,
-      "maxTypeNameBytes",
-      VALUE_ENVELOPE_TRAIT_ID,
-      1,
-      0xffff,
-    ),
-  }
-}
-
 function client_defaults_contract(value: unknown): Client_Defaults_Contract {
   const contract = object_value(value, CLIENT_DEFAULTS_TRAIT_ID)
   const defaults = {
     max_in_flight: integer_member(
       contract,
       "maxInFlight",
+      CLIENT_DEFAULTS_TRAIT_ID,
+      1,
+    ),
+    max_previous_data_protection_keys: integer_member(
+      contract,
+      "maxPreviousDataProtectionKeys",
       CLIENT_DEFAULTS_TRAIT_ID,
       1,
     ),
@@ -854,7 +1248,6 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const client_service_id = shapes[CLIENT_SERVICE_SHAPE_ID] === undefined
     ? SERVICE_SHAPE_ID
     : CLIENT_SERVICE_SHAPE_ID
-  const client_namespace = client_service_id.slice(0, client_service_id.lastIndexOf("#"))
   const service = object_member(shapes, client_service_id, "Smithy AST.shapes")
   const location = `Smithy AST.shapes.${client_service_id}`
   const trait_ids = (trait_id: string): readonly string[] =>
@@ -862,10 +1255,10 @@ export function extract_client_contract(ast: unknown): Client_Contract {
       ? [trait_id, trait_id.replace("openkache.client#", "openkache.protocol#")]
       : [trait_id]
   const value_format_trait = trait_value_any(service, trait_ids(VALUE_FORMAT_TRAIT_ID), location)
-  const value_envelope_trait = trait_value_any(service, trait_ids(VALUE_ENVELOPE_TRAIT_ID), location)
   const client_defaults_trait = trait_value_any(service, trait_ids(CLIENT_DEFAULTS_TRAIT_ID), location)
   const ffi_trait = trait_value_any(service, trait_ids(FFI_CONTRACT_TRAIT_ID), location)
-  const parsed_api = api_contract(shapes, client_service_id, client_namespace)
+  const ffi_layout_trait = trait_value_any(service, trait_ids(FFI_LAYOUT_TRAIT_ID), location)
+  const parsed_api = api_contract(shapes, client_service_id)
   const api = {
     ...parsed_api,
     // Smithy AST output is not required to preserve service-operation order.
@@ -886,6 +1279,11 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     }
   }
   const ffi = ffi_contract(ffi_trait)
+  const client_defaults = client_defaults_contract(client_defaults_trait)
+  const ffi_layout = ffi_layout_contract(
+    ffi_layout_trait,
+    wire.mutation_id_bytes,
+  )
   const opcode_values = new Set(wire.opcodes.map((entry) => entry.value))
   for (const entry of ffi.operations) {
     if (opcode_values.has(entry.value)) {
@@ -897,9 +1295,9 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   return {
     ...wire,
     api,
-    client_defaults: client_defaults_contract(client_defaults_trait),
+    client_defaults,
     ffi,
-    value_envelope: value_envelope_contract(value_envelope_trait),
+    ffi_layout,
     value_format: value_format_contract(value_format_trait),
   }
 }
@@ -1157,12 +1555,8 @@ ${display_arms}
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const layout = contract.ffi_layout
   const value_version_bytes = encode_vu128(value.version)
-  const envelope = contract.value_envelope
-  const envelope_magic = bytes_from_hex(
-    envelope.magic_and_version_hex,
-    "value envelope magic",
-  )
   const ffi = contract.ffi
   const ffi_operations = ffi.operations
     .map(
@@ -1192,6 +1586,34 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_error_codes = ffi.error_codes
+    .map(
+      (entry) =>
+        `/// Native FFI structured-error code for ${entry.name}.
+pub const FFI_ERROR_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_phases = ffi.phases
+    .map(
+      (entry) =>
+        `/// Native FFI error phase identifier for ${entry.name}.
+pub const FFI_PHASE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_backends = ffi.backends
+    .map(
+      (entry) =>
+        `/// Native FFI transport backend identifier for ${entry.name}.
+pub const FFI_BACKEND_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_metrics = ffi.metrics
+    .map(
+      (entry) =>
+        `/// Native FFI metrics field identifier for ${entry.name}.
+pub const FFI_METRICS_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_operation_entries = [...contract.opcodes, ...ffi.operations].sort(
     (left, right) => left.value - right.value,
   )
@@ -1199,6 +1621,10 @@ pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${for
 
 /// Default maximum number of concurrent request lanes.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = ${formatted_decimal(defaults.max_in_flight)};
+/// Fixed width of a mutation idempotency token.
+pub const MUTATION_ID_BYTES: usize = ${formatted_decimal(contract.mutation_id_bytes)};
+/// Maximum number of retired data-protection keys retained for rotation.
+pub const MAX_PREVIOUS_DATA_PROTECTION_KEYS: usize = ${formatted_decimal(defaults.max_previous_data_protection_keys)};
 /// Default connection-establishment timeout in milliseconds.
 pub const DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: u64 = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
 /// Default complete-request timeout in milliseconds.
@@ -1224,10 +1650,20 @@ pub const CLIENT_MINIMUM_POSITIVE_VALUE: usize = ${formatted_decimal(defaults.mi
 
 /// Version of the native client FFI contract.
 pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
+/// Size in bytes of the native FfiConnectOptions structure.
+pub const FFI_CONNECT_OPTIONS_BYTES: usize = ${formatted_decimal(layout.connect_options_bytes)};
+/// Size in bytes of the native FfiErrorMetadata structure.
+pub const FFI_ERROR_METADATA_BYTES: usize = ${formatted_decimal(layout.error_metadata_bytes)};
+/// Size in bytes of the native FfiMetricsSnapshot structure.
+pub const FFI_METRICS_SNAPSHOT_BYTES: usize = ${formatted_decimal(layout.metrics_snapshot_bytes)};
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${ffi_error_codes}
+${ffi_phases}
+${ffi_backends}
+${ffi_metrics}
 
 ${rust_ffi_enum(
   "FfiOperation",
@@ -1304,18 +1740,10 @@ pub const VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT: &str = ${rust_string_literal(
 /// BLAKE3 Robust AES-GCM-SIV key derivation context.
 pub const VALUE_FORMAT_ROBUST_CONTEXT: &str = ${rust_string_literal(value.robust_context)};
 
-/// Legacy metadata-envelope magic and version.
-pub const VALUE_ENVELOPE_MAGIC_AND_VERSION: [u8; ${envelope_magic.length}] = ${rust_byte_array_literal(envelope_magic)};
-/// Maximum UTF-8 byte length of a legacy metadata-envelope encoding identifier.
-pub const VALUE_ENVELOPE_MAX_ENCODING_BYTES: usize = ${formatted_decimal(envelope.max_encoding_bytes)};
-/// Maximum UTF-8 byte length of a legacy metadata-envelope logical type name.
-pub const VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES: usize = ${formatted_decimal(envelope.max_type_name_bytes)};
-/// Built-in canonical JSON codec identifier used by the legacy envelope adapter.
-pub const VALUE_ENVELOPE_JSON_ENCODING: &str = ${rust_string_literal(envelope.json_encoding)};
 `
 }
 
-/** Renders the combined Rust client contract for legacy generated consumers. */
+/** Renders the combined Rust wire and client contract for package generation. */
 export function render_rust(contract: Client_Contract): string {
   return `${render_protocol_rust_wire(contract)}\n${render_rust_client(contract)}`
 }
@@ -1361,10 +1789,26 @@ function c_contract_api_enum(
 export function render_c_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
-  const envelope = contract.value_envelope
   const ffi = contract.ffi
+  const layout = contract.ffi_layout
   const ffi_defines = [
     `#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${c_unsigned_literal(ffi.abi_version)}`,
+    ...ffi.error_codes.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_ERROR_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.phases.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_PHASE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.backends.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_BACKEND_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.metrics.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_METRICS_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
     ...ffi.operations.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
@@ -1402,6 +1846,8 @@ export function render_c_contract(contract: Client_Contract): string {
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
 #define OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT ${defaults.max_in_flight}u
+#define OPENKACHE_SMITHY_MUTATION_ID_BYTES ${contract.mutation_id_bytes}u
+#define OPENKACHE_SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS ${defaults.max_previous_data_protection_keys}u
 #define OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS ${defaults.connect_timeout_milliseconds}u
 #define OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS ${defaults.request_timeout_milliseconds}u
 #define OPENKACHE_SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS ${defaults.retry_max_attempts}u
@@ -1413,6 +1859,52 @@ export function render_c_contract(contract: Client_Contract): string {
 #define OPENKACHE_SMITHY_CLIENT_DEFAULT_SERVER_NAME ${c_string_literal(defaults.server_name)}
 #define OPENKACHE_SMITHY_CLIENT_CERTIFICATE_PEM_TYPE ${c_string_literal(defaults.certificate_pem_type)}
 #define OPENKACHE_SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE ${defaults.minimum_positive_value}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_OPTIONS_BYTES ${layout.connect_options_bytes}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_ADDRESS_OFFSET ${layout.connect_address_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_ADDRESS_LENGTH_OFFSET ${layout.connect_address_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_SERVER_NAME_OFFSET ${layout.connect_server_name_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET ${layout.connect_server_name_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CERTIFICATE_OFFSET ${layout.connect_certificate_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET ${layout.connect_certificate_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET ${layout.connect_client_certificate_chain_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET ${layout.connect_client_certificate_chain_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET ${layout.connect_client_private_key_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET ${layout.connect_client_private_key_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET ${layout.connect_data_protection_key_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET ${layout.connect_data_protection_key_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET ${layout.connect_previous_data_protection_keys_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET ${layout.connect_previous_data_protection_keys_length_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET ${layout.connect_previous_data_protection_key_count_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_COMPRESSION_ENABLED_OFFSET ${layout.connect_compression_enabled_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_COMPRESSION_LEVEL_OFFSET ${layout.connect_compression_level_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET ${layout.connect_minimum_input_size_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_MINIMUM_SAVINGS_OFFSET ${layout.connect_minimum_savings_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_ENCRYPTION_OFFSET ${layout.connect_encryption_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_TIMEOUT_OFFSET ${layout.connect_timeout_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_REQUEST_TIMEOUT_OFFSET ${layout.connect_request_timeout_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET ${layout.connect_retry_max_attempts_offset}u
+#define OPENKACHE_SMITHY_FFI_CONNECT_MAX_IN_FLIGHT_OFFSET ${layout.connect_max_in_flight_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_BYTES ${layout.error_metadata_bytes}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_CODE_OFFSET ${layout.error_metadata_code_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_OPERATION_OFFSET ${layout.error_metadata_operation_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_PHASE_OFFSET ${layout.error_metadata_phase_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_BACKEND_OFFSET ${layout.error_metadata_backend_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_RETRYABLE_OFFSET ${layout.error_metadata_retryable_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_AMBIGUOUS_OFFSET ${layout.error_metadata_ambiguous_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET ${layout.error_metadata_mutation_id_length_offset}u
+#define OPENKACHE_SMITHY_FFI_ERROR_METADATA_MUTATION_ID_OFFSET ${layout.error_metadata_mutation_id_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_BYTES ${layout.metrics_snapshot_bytes}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET ${layout.metrics_snapshot_requests_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_HITS_OFFSET ${layout.metrics_snapshot_hits_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_MISSES_OFFSET ${layout.metrics_snapshot_misses_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_RETRIES_OFFSET ${layout.metrics_snapshot_retries_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET ${layout.metrics_snapshot_reconnects_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET ${layout.metrics_snapshot_cancellations_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET ${layout.metrics_snapshot_transport_errors_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET ${layout.metrics_snapshot_protocol_errors_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET ${layout.metrics_snapshot_bytes_sent_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET ${layout.metrics_snapshot_bytes_received_offset}u
+#define OPENKACHE_SMITHY_FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET ${layout.metrics_snapshot_active_lanes_offset}u
 ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
@@ -1430,9 +1922,6 @@ ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_ROBUST_NONCE_BYTES ${value.robust_nonce_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ROBUST_TAG_BYTES ${value.robust_tag_bytes}u
 #define OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES ${value.data_protection_key_bytes}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES ${envelope.max_encoding_bytes}u
-#define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES ${envelope.max_type_name_bytes}u
-
 ${operation_enum}
 
 ${status_enum}
@@ -1481,6 +1970,16 @@ export function render_csharp(contract: Client_Contract): string {
     "Reconnect",
     "FFI operation",
   )
+  const ffi_operation_get_json = ffi_value(
+    ffi.operations,
+    "GetJson",
+    "FFI operation",
+  )
+  const ffi_operation_set_json = ffi_value(
+    ffi.operations,
+    "SetJson",
+    "FFI operation",
+  )
   const ffi_result = (name: string): number =>
     ffi_value(ffi.result_kinds, name, "FFI result")
   const ffi_connection = (name: string): number =>
@@ -1488,11 +1987,6 @@ export function render_csharp(contract: Client_Contract): string {
   const ffi_set_condition = (name: string): number =>
     ffi_value(ffi.set_conditions, name, "FFI SET condition")
   const version_bytes = encode_vu128(value.version)
-  const envelope = contract.value_envelope
-  const envelope_magic = bytes_from_hex(
-    envelope.magic_and_version_hex,
-    "value envelope magic",
-  )
   return `// SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1505,14 +1999,22 @@ internal static partial class Protocol
     internal const string ApplicationProtocol = ${JSON.stringify(contract.v1.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
     internal const int DefaultMaxInFlight = ${formatted_decimal(defaults.max_in_flight)};
+    internal const int MutationIdBytes = ${formatted_decimal(contract.mutation_id_bytes)};
+    internal const int MaxPreviousDataProtectionKeys = ${formatted_decimal(defaults.max_previous_data_protection_keys)};
     internal const long DefaultConnectTimeoutMilliseconds = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
     internal const long DefaultRequestTimeoutMilliseconds = ${formatted_decimal(defaults.request_timeout_milliseconds)};
     internal const int DefaultRetryMaxAttempts = ${formatted_decimal(defaults.retry_max_attempts)};
     internal const int DefaultZstandardLevel = ${formatted_decimal(defaults.zstandard_level)};
     internal const int DefaultZstandardMinimumInputBytes = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
     internal const int DefaultZstandardMinimumSavingsBytes = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
+    internal const int DefaultZstandardLevelMin = ${formatted_decimal(defaults.zstandard_level_min)};
+    internal const int DefaultZstandardLevelMax = ${formatted_decimal(defaults.zstandard_level_max)};
+    internal const string ClientCertificatePemType = ${JSON.stringify(defaults.certificate_pem_type)};
+    internal const int ClientMinimumPositiveValue = ${formatted_decimal(defaults.minimum_positive_value)};
     internal const uint FfiAbiVersion = ${formatted_decimal(ffi.abi_version)}u;
     internal const uint FfiOperationReconnect = ${formatted_decimal(ffi_operation_reconnect)}u;
+    internal const uint FfiOperationGetJson = ${formatted_decimal(ffi_operation_get_json)}u;
+    internal const uint FfiOperationSetJson = ${formatted_decimal(ffi_operation_set_json)}u;
     internal const uint FfiResultError = ${formatted_decimal(ffi_result("Error"))}u;
     internal const uint FfiResultOk = ${formatted_decimal(ffi_result("Ok"))}u;
     internal const uint FfiResultValue = ${formatted_decimal(ffi_result("Value"))}u;
@@ -1531,12 +2033,37 @@ internal static partial class Protocol
     internal const uint FfiSetConditionNone = ${formatted_decimal(ffi_set_condition("None"))}u;
     internal const uint FfiSetConditionIfAbsent = ${formatted_decimal(ffi_set_condition("IfAbsent"))}u;
     internal const uint FfiSetConditionIfPresent = ${formatted_decimal(ffi_set_condition("IfPresent"))}u;
+${ffi.error_codes
+  .map(
+    (entry) =>
+      `    internal const uint FfiError${pascal_case(entry.name)} = ${formatted_decimal(entry.value)}u;`,
+  )
+  .join("\n")}
+${ffi.phases
+  .map(
+    (entry) =>
+      `    internal const uint FfiPhase${pascal_case(entry.name)} = ${formatted_decimal(entry.value)}u;`,
+  )
+  .join("\n")}
+${ffi.backends
+  .map(
+    (entry) =>
+      `    internal const uint FfiBackend${pascal_case(entry.name)} = ${formatted_decimal(entry.value)}u;`,
+  )
+  .join("\n")}
+${ffi.metrics
+  .map(
+    (entry) =>
+      `    internal const uint FfiMetrics${pascal_case(entry.name)} = ${formatted_decimal(entry.value)}u;`,
+  )
+  .join("\n")}
 
     private const int MaximumVarUIntBytes = ${formatted_decimal(contract.v1.max_varuint_bytes)};
     internal const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
     private const byte SetTtlBit = ${formatted_byte(contract.v1.set_ttl_flag)};
     private const byte SetIfAbsentBit = ${formatted_byte(contract.v1.set_if_absent_flag)};
     private const byte SetIfPresentBit = ${formatted_byte(contract.v1.set_if_present_flag)};
+    private const byte SetMutationIdBit = ${formatted_byte(contract.v1.set_mutation_id_flag)};
 
     internal const uint ValueFormatVersion = ${formatted_decimal(value.version)}u;
     internal const int ValueFormatMaxVu128Bytes = ${formatted_decimal(value.max_vu128_bytes)};
@@ -1560,13 +2087,8 @@ internal static partial class Protocol
     internal const string ValueFormatCompactMacContext = ${JSON.stringify(value.compact_mac_context)};
     internal const string ValueFormatCompactEncryptionContext = ${JSON.stringify(value.compact_encryption_context)};
     internal const string ValueFormatRobustContext = ${JSON.stringify(value.robust_context)};
-    internal const int ValueEnvelopeMaxEncodingBytes = ${formatted_decimal(envelope.max_encoding_bytes)};
-    internal const int ValueEnvelopeMaxTypeNameBytes = ${formatted_decimal(envelope.max_type_name_bytes)};
-    internal const string ValueEnvelopeJsonEncoding = ${JSON.stringify(envelope.json_encoding)};
     internal static ReadOnlySpan<byte> ValueFormatVersionBytes =>
         [${version_bytes.map(formatted_byte).join(", ")}];
-    internal static ReadOnlySpan<byte> ValueEnvelopeMagicAndVersion =>
-        [${envelope_magic.map(formatted_byte).join(", ")}];
 
 ${csharp_wire_enum("Opcode", contract.opcodes)}
 
@@ -1625,6 +2147,30 @@ ${members.join("\n")}
       `  /** Invokes the Smithy ${operation.name} operation. */
   ${snake_case(operation.name)}(input: ${typescript_api_name(operation.input)}): Promise<${typescript_api_name(operation.output)}>`,
   )
+  const constants = (prefix: string, entries: readonly Wire_Entry[]): string =>
+    entries
+      .map(
+        (entry) =>
+          `/** Smithy ${prefix.toLowerCase()} identifier for ${entry.name}. */
+export const SMITHY_${prefix}_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+      )
+      .join("\n")
+  const opcode_constants = constants("OPCODE", contract.opcodes)
+  const status_constants = constants("STATUS", contract.statuses)
+  const ffi_operation_constants = constants("FFI_OPERATION", contract.ffi.operations)
+  const ffi_result_constants = constants("FFI_RESULT", contract.ffi.result_kinds)
+  const ffi_set_condition_constants = constants(
+    "FFI_SET_CONDITION",
+    contract.ffi.set_conditions,
+  )
+  const ffi_connection_state_constants = constants(
+    "FFI_CONNECTION_STATE",
+    contract.ffi.connection_states,
+  )
+  const ffi_error_constants = constants("FFI_ERROR", contract.ffi.error_codes)
+  const ffi_phase_constants = constants("FFI_PHASE", contract.ffi.phases)
+  const ffi_backend_constants = constants("FFI_BACKEND", contract.ffi.backends)
+  const ffi_metrics_constants = constants("FFI_METRICS", contract.ffi.metrics)
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /** Exact number of bytes in a protocol item identifier. */
@@ -1633,6 +2179,10 @@ export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 /** Default maximum number of concurrent request lanes. */
 export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
+/** Fixed width of a mutation idempotency token. */
+export const SMITHY_MUTATION_ID_BYTES = ${contract.mutation_id_bytes}
+/** Maximum number of retired data-protection keys retained for rotation. */
+export const SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${contract.client_defaults.max_previous_data_protection_keys}
 /** Default connection-establishment timeout in milliseconds. */
 export const SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${contract.client_defaults.connect_timeout_milliseconds}
 /** Default complete-request timeout in milliseconds. */
@@ -1655,6 +2205,18 @@ export const SMITHY_CLIENT_DEFAULT_SERVER_NAME = ${JSON.stringify(contract.clien
 export const SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(contract.client_defaults.certificate_pem_type)}
 /** Minimum positive setting value when zero selects a default. */
 export const SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${contract.client_defaults.minimum_positive_value}
+/** Version of the native client FFI contract. */
+export const SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+${opcode_constants}
+${status_constants}
+${ffi_operation_constants}
+${ffi_result_constants}
+${ffi_set_condition_constants}
+${ffi_connection_state_constants}
+${ffi_error_constants}
+${ffi_phase_constants}
+${ffi_backend_constants}
+${ffi_metrics_constants}
 
 ${[...enums, ...structures].join("\n\n")}
 
@@ -1819,12 +2381,44 @@ ${contract.ffi.connection_states
 \tSmithyFFIConnectionState${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
+${contract.ffi.error_codes
+  .map(
+    (entry) =>
+      `\t// SmithyFFIError${go_ffi_name(entry.name)} identifies a structured native error code.
+\tSmithyFFIError${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.phases
+  .map(
+    (entry) =>
+      `\t// SmithyFFIPhase${go_ffi_name(entry.name)} identifies a structured native error phase.
+\tSmithyFFIPhase${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.backends
+  .map(
+    (entry) =>
+      `\t// SmithyFFIBackend${go_ffi_name(entry.name)} identifies a native transport backend.
+\tSmithyFFIBackend${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.metrics
+  .map(
+    (entry) =>
+      `\t// SmithyFFIMetrics${go_ffi_name(entry.name)} identifies a metrics snapshot field.
+\tSmithyFFIMetrics${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
 )
 
 // Shared client defaults extracted from the Smithy service contract.
 const (
 \t// SmithyDefaultMaxInFlight is the default number of request lanes.
 \tSmithyDefaultMaxInFlight = ${defaults.max_in_flight}
+\t// SmithyMutationIDBytes is the fixed width of a mutation idempotency token.
+\tSmithyMutationIDBytes = ${contract.mutation_id_bytes}
+\t// SmithyMaxPreviousDataProtectionKeys bounds the retired key read/delete window.
+\tSmithyMaxPreviousDataProtectionKeys = ${defaults.max_previous_data_protection_keys}
 \t// SmithyDefaultConnectTimeoutMilliseconds is the default connection timeout.
 \tSmithyDefaultConnectTimeoutMilliseconds uint64 = ${defaults.connect_timeout_milliseconds}
 \t// SmithyDefaultRequestTimeoutMilliseconds is the default complete request timeout.
@@ -1861,6 +2455,527 @@ ${contract.api.enums
   )
   .join("\n")}
 )
+`
+}
+
+function java_api_name(identifier: string): string {
+  return pascal_case(snake_case(identifier))
+}
+
+function java_member_name(identifier: string): string {
+  const parts = snake_case(identifier).split("_")
+  return `${parts[0]}${parts.slice(1).map((part) => pascal_case(part)).join("")}`
+}
+
+function java_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "byte[]"
+      break
+    case "boolean":
+      rendered = required ? "boolean" : "Boolean"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = java_api_name(type.name)
+      break
+    case "long":
+      rendered = required ? "long" : "Long"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  return rendered
+}
+
+function kotlin_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "ByteArray"
+      break
+    case "boolean":
+      rendered = "Boolean"
+      break
+    case "enum":
+      if (type.name === undefined) throw new Error("enum API type has no name")
+      rendered = java_api_name(type.name)
+      break
+    case "long":
+      rendered = "Long"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  return required ? rendered : `${rendered}?`
+}
+
+function java_int_literal(value: number): string {
+  if (value <= 0x7fff_ffff) return `${value}`
+  return `0x${value.toString(16).padStart(8, "0")}`
+}
+
+/** Renders Java contract constants generated from the Smithy model. */
+export function render_java_contract(contract: Client_Contract): string {
+  const ffi = contract.ffi
+  const layout = contract.ffi_layout
+  const defaults = contract.client_defaults
+  const value = contract.value_format
+  const entries = (prefix: string, values: readonly Wire_Entry[]): string =>
+    values
+      .map(
+        (entry) =>
+          `    public static final int ${prefix}${pascal_case(entry.name)} = ${java_int_literal(entry.value)};`,
+      )
+      .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated;
+
+/** Stable wire, FFI, value-format, and client-default constants. */
+public final class SmithyContract {
+    private SmithyContract() {}
+
+    public static final int ITEM_ID_BYTES = ${contract.item_id_bytes};
+    public static final int MUTATION_ID_BYTES = ${contract.mutation_id_bytes};
+    public static final int MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${defaults.max_previous_data_protection_keys};
+    public static final int MAX_VALUE_BYTES = ${contract.max_value_bytes};
+    public static final String ALPN = ${JSON.stringify(contract.v1.alpn)};
+    public static final String DEFAULT_SERVER_NAME = ${JSON.stringify(defaults.server_name)};
+    public static final int DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight};
+    public static final long DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}L;
+    public static final long DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}L;
+    public static final int DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts};
+    public static final int DEFAULT_ZSTANDARD_LEVEL = ${defaults.zstandard_level};
+    public static final int DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${defaults.zstandard_minimum_input_bytes};
+    public static final int DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${defaults.zstandard_minimum_savings_bytes};
+    public static final int DEFAULT_ZSTANDARD_LEVEL_MIN = ${defaults.zstandard_level_min};
+    public static final int DEFAULT_ZSTANDARD_LEVEL_MAX = ${defaults.zstandard_level_max};
+    public static final String CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(defaults.certificate_pem_type)};
+    public static final int CLIENT_MINIMUM_POSITIVE_VALUE = ${defaults.minimum_positive_value};
+    public static final int VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES = ${value.data_protection_key_bytes};
+    public static final int VALUE_FORMAT_ENCRYPTION_NONE = ${value.encryption_none};
+    public static final int VALUE_FORMAT_ENCRYPTION_COMPACT = ${value.encryption_compact};
+    public static final int VALUE_FORMAT_ENCRYPTION_ROBUST = ${value.encryption_robust};
+    public static final int FFI_ABI_VERSION = ${ffi.abi_version};
+    public static final int FFI_CONNECT_OPTIONS_BYTES = ${layout.connect_options_bytes};
+    public static final int FFI_CONNECT_ADDRESS_OFFSET = ${layout.connect_address_offset};
+    public static final int FFI_CONNECT_ADDRESS_LENGTH_OFFSET = ${layout.connect_address_length_offset};
+    public static final int FFI_CONNECT_SERVER_NAME_OFFSET = ${layout.connect_server_name_offset};
+    public static final int FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET = ${layout.connect_server_name_length_offset};
+    public static final int FFI_CONNECT_CERTIFICATE_OFFSET = ${layout.connect_certificate_offset};
+    public static final int FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET = ${layout.connect_certificate_length_offset};
+    public static final int FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET = ${layout.connect_client_certificate_chain_offset};
+    public static final int FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET = ${layout.connect_client_certificate_chain_length_offset};
+    public static final int FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET = ${layout.connect_client_private_key_offset};
+    public static final int FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET = ${layout.connect_client_private_key_length_offset};
+    public static final int FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET = ${layout.connect_data_protection_key_offset};
+    public static final int FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET = ${layout.connect_data_protection_key_length_offset};
+    public static final int FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET = ${layout.connect_previous_data_protection_keys_offset};
+    public static final int FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET = ${layout.connect_previous_data_protection_keys_length_offset};
+    public static final int FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET = ${layout.connect_previous_data_protection_key_count_offset};
+    public static final int FFI_CONNECT_COMPRESSION_ENABLED_OFFSET = ${layout.connect_compression_enabled_offset};
+    public static final int FFI_CONNECT_COMPRESSION_LEVEL_OFFSET = ${layout.connect_compression_level_offset};
+    public static final int FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET = ${layout.connect_minimum_input_size_offset};
+    public static final int FFI_CONNECT_MINIMUM_SAVINGS_OFFSET = ${layout.connect_minimum_savings_offset};
+    public static final int FFI_CONNECT_ENCRYPTION_OFFSET = ${layout.connect_encryption_offset};
+    public static final int FFI_CONNECT_TIMEOUT_OFFSET = ${layout.connect_timeout_offset};
+    public static final int FFI_CONNECT_REQUEST_TIMEOUT_OFFSET = ${layout.connect_request_timeout_offset};
+    public static final int FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET = ${layout.connect_retry_max_attempts_offset};
+    public static final int FFI_CONNECT_MAX_IN_FLIGHT_OFFSET = ${layout.connect_max_in_flight_offset};
+    public static final int FFI_ERROR_METADATA_BYTES = ${layout.error_metadata_bytes};
+    public static final int FFI_ERROR_METADATA_CODE_OFFSET = ${layout.error_metadata_code_offset};
+    public static final int FFI_ERROR_METADATA_OPERATION_OFFSET = ${layout.error_metadata_operation_offset};
+    public static final int FFI_ERROR_METADATA_PHASE_OFFSET = ${layout.error_metadata_phase_offset};
+    public static final int FFI_ERROR_METADATA_BACKEND_OFFSET = ${layout.error_metadata_backend_offset};
+    public static final int FFI_ERROR_METADATA_RETRYABLE_OFFSET = ${layout.error_metadata_retryable_offset};
+    public static final int FFI_ERROR_METADATA_AMBIGUOUS_OFFSET = ${layout.error_metadata_ambiguous_offset};
+    public static final int FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET = ${layout.error_metadata_mutation_id_length_offset};
+    public static final int FFI_ERROR_METADATA_MUTATION_ID_OFFSET = ${layout.error_metadata_mutation_id_offset};
+    public static final int FFI_METRICS_SNAPSHOT_BYTES = ${layout.metrics_snapshot_bytes};
+    public static final int FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET = ${layout.metrics_snapshot_requests_offset};
+    public static final int FFI_METRICS_SNAPSHOT_HITS_OFFSET = ${layout.metrics_snapshot_hits_offset};
+    public static final int FFI_METRICS_SNAPSHOT_MISSES_OFFSET = ${layout.metrics_snapshot_misses_offset};
+    public static final int FFI_METRICS_SNAPSHOT_RETRIES_OFFSET = ${layout.metrics_snapshot_retries_offset};
+    public static final int FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET = ${layout.metrics_snapshot_reconnects_offset};
+    public static final int FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET = ${layout.metrics_snapshot_cancellations_offset};
+    public static final int FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET = ${layout.metrics_snapshot_transport_errors_offset};
+    public static final int FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET = ${layout.metrics_snapshot_protocol_errors_offset};
+    public static final int FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET = ${layout.metrics_snapshot_bytes_sent_offset};
+    public static final int FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET = ${layout.metrics_snapshot_bytes_received_offset};
+    public static final int FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET = ${layout.metrics_snapshot_active_lanes_offset};
+
+${entries("OPCODE_", contract.opcodes)}
+
+${entries("FFI_OPERATION_", ffi.operations)}
+
+${entries("FFI_RESULT_", ffi.result_kinds)}
+
+${entries("FFI_SET_CONDITION_", ffi.set_conditions)}
+
+${entries("FFI_CONNECTION_STATE_", ffi.connection_states)}
+
+${entries("FFI_ERROR_", ffi.error_codes)}
+
+${entries("FFI_PHASE_", ffi.phases)}
+
+${entries("FFI_BACKEND_", ffi.backends)}
+
+${entries("FFI_METRICS_", ffi.metrics)}
+}
+`
+}
+
+/** Renders Java Smithy operation records and a CompletionStage API interface. */
+export function render_java_api(contract: Client_Contract): string {
+  const enums = contract.api.enums
+    .map(
+      (enum_) =>
+        `    public enum ${java_api_name(enum_.name)} {
+${enum_.members.map((member) => `        ${member.name}(${JSON.stringify(member.value)})`).join(",\n")};
+        public final String value;
+        ${java_api_name(enum_.name)}(String value) { this.value = value; }
+    }`,
+    )
+    .join("\n\n")
+  const structures = contract.api.structures
+    .map((structure) => {
+      const members = structure.members
+        .map(
+          (member) =>
+            `        ${java_api_type(member.type, member.required)} ${java_member_name(member.name)}`,
+        )
+        .join(",\n")
+      return `    public record ${java_api_name(structure.name)}(
+${members}
+    ) {}`
+    })
+    .join("\n\n")
+  const operations = contract.api.operations
+    .map(
+      (operation) =>
+        `        java.util.concurrent.CompletionStage<${java_api_name(operation.output)}> ${java_member_name(operation.name)}(${java_api_name(operation.input)} input);`,
+    )
+    .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated;
+
+/** Smithy operation types for Java adapters. */
+public final class SmithyApi {
+    private SmithyApi() {}
+
+${enums}
+
+${structures}
+
+    public interface OpenKacheApi {
+${operations}
+    }
+}
+`
+}
+
+/** Renders Kotlin Smithy operation types and stable contract constants. */
+export function render_kotlin_contract(contract: Client_Contract): string {
+  const ffi = contract.ffi
+  const layout = contract.ffi_layout
+  const defaults = contract.client_defaults
+  const value = contract.value_format
+  const entries = (prefix: string, values: readonly Wire_Entry[]): string =>
+    values
+      .map(
+        (entry) =>
+          `    const val ${prefix}${pascal_case(entry.name)}: Int = ${java_int_literal(entry.value)}`,
+      )
+      .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated
+
+/** Stable wire, FFI, value-format, and client-default constants. */
+object SmithyContract {
+    const val ITEM_ID_BYTES: Int = ${contract.item_id_bytes}
+    const val MUTATION_ID_BYTES: Int = ${contract.mutation_id_bytes}
+    const val MAX_PREVIOUS_DATA_PROTECTION_KEYS: Int = ${defaults.max_previous_data_protection_keys}
+    const val MAX_VALUE_BYTES: Int = ${contract.max_value_bytes}
+    const val ALPN: String = ${JSON.stringify(contract.v1.alpn)}
+    const val DEFAULT_SERVER_NAME: String = ${JSON.stringify(defaults.server_name)}
+    const val DEFAULT_MAX_IN_FLIGHT: Int = ${defaults.max_in_flight}
+    const val DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: Long = ${defaults.connect_timeout_milliseconds}L
+    const val DEFAULT_REQUEST_TIMEOUT_MILLISECONDS: Long = ${defaults.request_timeout_milliseconds}L
+    const val DEFAULT_RETRY_MAX_ATTEMPTS: Int = ${defaults.retry_max_attempts}
+    const val DEFAULT_ZSTANDARD_LEVEL: Int = ${defaults.zstandard_level}
+    const val DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES: Int = ${defaults.zstandard_minimum_input_bytes}
+    const val DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES: Int = ${defaults.zstandard_minimum_savings_bytes}
+    const val DEFAULT_ZSTANDARD_LEVEL_MIN: Int = ${defaults.zstandard_level_min}
+    const val DEFAULT_ZSTANDARD_LEVEL_MAX: Int = ${defaults.zstandard_level_max}
+    const val CLIENT_CERTIFICATE_PEM_TYPE: String = ${JSON.stringify(defaults.certificate_pem_type)}
+    const val CLIENT_MINIMUM_POSITIVE_VALUE: Int = ${defaults.minimum_positive_value}
+    const val VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES: Int = ${value.data_protection_key_bytes}
+    const val VALUE_FORMAT_ENCRYPTION_NONE: Int = ${value.encryption_none}
+    const val VALUE_FORMAT_ENCRYPTION_COMPACT: Int = ${value.encryption_compact}
+    const val VALUE_FORMAT_ENCRYPTION_ROBUST: Int = ${value.encryption_robust}
+    const val FFI_ABI_VERSION: Int = ${ffi.abi_version}
+    const val FFI_CONNECT_OPTIONS_BYTES: Int = ${layout.connect_options_bytes}
+    const val FFI_CONNECT_ADDRESS_OFFSET: Int = ${layout.connect_address_offset}
+    const val FFI_CONNECT_ADDRESS_LENGTH_OFFSET: Int = ${layout.connect_address_length_offset}
+    const val FFI_CONNECT_SERVER_NAME_OFFSET: Int = ${layout.connect_server_name_offset}
+    const val FFI_CONNECT_SERVER_NAME_LENGTH_OFFSET: Int = ${layout.connect_server_name_length_offset}
+    const val FFI_CONNECT_CERTIFICATE_OFFSET: Int = ${layout.connect_certificate_offset}
+    const val FFI_CONNECT_CERTIFICATE_LENGTH_OFFSET: Int = ${layout.connect_certificate_length_offset}
+    const val FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_OFFSET: Int = ${layout.connect_client_certificate_chain_offset}
+    const val FFI_CONNECT_CLIENT_CERTIFICATE_CHAIN_LENGTH_OFFSET: Int = ${layout.connect_client_certificate_chain_length_offset}
+    const val FFI_CONNECT_CLIENT_PRIVATE_KEY_OFFSET: Int = ${layout.connect_client_private_key_offset}
+    const val FFI_CONNECT_CLIENT_PRIVATE_KEY_LENGTH_OFFSET: Int = ${layout.connect_client_private_key_length_offset}
+    const val FFI_CONNECT_DATA_PROTECTION_KEY_OFFSET: Int = ${layout.connect_data_protection_key_offset}
+    const val FFI_CONNECT_DATA_PROTECTION_KEY_LENGTH_OFFSET: Int = ${layout.connect_data_protection_key_length_offset}
+    const val FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_OFFSET: Int = ${layout.connect_previous_data_protection_keys_offset}
+    const val FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEYS_LENGTH_OFFSET: Int = ${layout.connect_previous_data_protection_keys_length_offset}
+    const val FFI_CONNECT_PREVIOUS_DATA_PROTECTION_KEY_COUNT_OFFSET: Int = ${layout.connect_previous_data_protection_key_count_offset}
+    const val FFI_CONNECT_COMPRESSION_ENABLED_OFFSET: Int = ${layout.connect_compression_enabled_offset}
+    const val FFI_CONNECT_COMPRESSION_LEVEL_OFFSET: Int = ${layout.connect_compression_level_offset}
+    const val FFI_CONNECT_MINIMUM_INPUT_SIZE_OFFSET: Int = ${layout.connect_minimum_input_size_offset}
+    const val FFI_CONNECT_MINIMUM_SAVINGS_OFFSET: Int = ${layout.connect_minimum_savings_offset}
+    const val FFI_CONNECT_ENCRYPTION_OFFSET: Int = ${layout.connect_encryption_offset}
+    const val FFI_CONNECT_TIMEOUT_OFFSET: Int = ${layout.connect_timeout_offset}
+    const val FFI_CONNECT_REQUEST_TIMEOUT_OFFSET: Int = ${layout.connect_request_timeout_offset}
+    const val FFI_CONNECT_RETRY_MAX_ATTEMPTS_OFFSET: Int = ${layout.connect_retry_max_attempts_offset}
+    const val FFI_CONNECT_MAX_IN_FLIGHT_OFFSET: Int = ${layout.connect_max_in_flight_offset}
+    const val FFI_ERROR_METADATA_BYTES: Int = ${layout.error_metadata_bytes}
+    const val FFI_ERROR_METADATA_CODE_OFFSET: Int = ${layout.error_metadata_code_offset}
+    const val FFI_ERROR_METADATA_OPERATION_OFFSET: Int = ${layout.error_metadata_operation_offset}
+    const val FFI_ERROR_METADATA_PHASE_OFFSET: Int = ${layout.error_metadata_phase_offset}
+    const val FFI_ERROR_METADATA_BACKEND_OFFSET: Int = ${layout.error_metadata_backend_offset}
+    const val FFI_ERROR_METADATA_RETRYABLE_OFFSET: Int = ${layout.error_metadata_retryable_offset}
+    const val FFI_ERROR_METADATA_AMBIGUOUS_OFFSET: Int = ${layout.error_metadata_ambiguous_offset}
+    const val FFI_ERROR_METADATA_MUTATION_ID_LENGTH_OFFSET: Int = ${layout.error_metadata_mutation_id_length_offset}
+    const val FFI_ERROR_METADATA_MUTATION_ID_OFFSET: Int = ${layout.error_metadata_mutation_id_offset}
+    const val FFI_METRICS_SNAPSHOT_BYTES: Int = ${layout.metrics_snapshot_bytes}
+    const val FFI_METRICS_SNAPSHOT_REQUESTS_OFFSET: Int = ${layout.metrics_snapshot_requests_offset}
+    const val FFI_METRICS_SNAPSHOT_HITS_OFFSET: Int = ${layout.metrics_snapshot_hits_offset}
+    const val FFI_METRICS_SNAPSHOT_MISSES_OFFSET: Int = ${layout.metrics_snapshot_misses_offset}
+    const val FFI_METRICS_SNAPSHOT_RETRIES_OFFSET: Int = ${layout.metrics_snapshot_retries_offset}
+    const val FFI_METRICS_SNAPSHOT_RECONNECTS_OFFSET: Int = ${layout.metrics_snapshot_reconnects_offset}
+    const val FFI_METRICS_SNAPSHOT_CANCELLATIONS_OFFSET: Int = ${layout.metrics_snapshot_cancellations_offset}
+    const val FFI_METRICS_SNAPSHOT_TRANSPORT_ERRORS_OFFSET: Int = ${layout.metrics_snapshot_transport_errors_offset}
+    const val FFI_METRICS_SNAPSHOT_PROTOCOL_ERRORS_OFFSET: Int = ${layout.metrics_snapshot_protocol_errors_offset}
+    const val FFI_METRICS_SNAPSHOT_BYTES_SENT_OFFSET: Int = ${layout.metrics_snapshot_bytes_sent_offset}
+    const val FFI_METRICS_SNAPSHOT_BYTES_RECEIVED_OFFSET: Int = ${layout.metrics_snapshot_bytes_received_offset}
+    const val FFI_METRICS_SNAPSHOT_ACTIVE_LANES_OFFSET: Int = ${layout.metrics_snapshot_active_lanes_offset}
+
+${entries("OPCODE_", contract.opcodes)}
+
+${entries("FFI_OPERATION_", ffi.operations)}
+
+${entries("FFI_RESULT_", ffi.result_kinds)}
+
+${entries("FFI_SET_CONDITION_", ffi.set_conditions)}
+
+${entries("FFI_CONNECTION_STATE_", ffi.connection_states)}
+
+${entries("FFI_ERROR_", ffi.error_codes)}
+
+${entries("FFI_PHASE_", ffi.phases)}
+
+${entries("FFI_BACKEND_", ffi.backends)}
+
+${entries("FFI_METRICS_", ffi.metrics)}
+}
+`
+}
+
+/** Renders Kotlin Smithy operation records and a suspend API interface. */
+export function render_kotlin_api(contract: Client_Contract): string {
+  const enums = contract.api.enums
+    .map(
+      (enum_) =>
+        `    enum class ${java_api_name(enum_.name)}(val value: String) {
+${enum_.members.map((member) => `        ${member.name}(${JSON.stringify(member.value)})`).join(",\n")}
+    }`,
+    )
+    .join("\n\n")
+  const structures = contract.api.structures
+    .map((structure) => {
+      const members = structure.members
+        .map(
+          (member) =>
+            `        val ${java_member_name(member.name)}: ${kotlin_api_type(member.type, member.required)}`,
+        )
+        .join(",\n")
+      if (members.length === 0) return `    class ${java_api_name(structure.name)}`
+      return `    data class ${java_api_name(structure.name)}(
+${members}
+    )`
+    })
+    .join("\n\n")
+  const operations = contract.api.operations
+    .map(
+      (operation) =>
+        `        suspend fun ${java_member_name(operation.name)}(input: ${java_api_name(operation.input)}): ${java_api_name(operation.output)}`,
+    )
+    .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated
+
+/** Smithy operation types for Kotlin adapters. */
+object SmithyApi {
+${enums}
+
+${structures}
+
+    interface OpenKacheApi {
+${operations}
+    }
+}
+`
+}
+
+/** Renders Dart Smithy contract constants consumed by the FFI facade. */
+export function render_dart_contract(contract: Client_Contract): string {
+  const ffi = contract.ffi
+  const defaults = contract.client_defaults
+  const entries = (prefix: string, values: readonly Wire_Entry[]): string =>
+    values
+      .map(
+        (entry) =>
+          `const int ${prefix}_${snake_case(entry.name)} = ${entry.value};`,
+      )
+      .join("\n")
+  const api_type = (type: Api_Type, required: boolean): string => {
+    let rendered: string
+    switch (type.kind) {
+      case "blob":
+        rendered = "Uint8List"
+        break
+      case "boolean":
+        rendered = "bool"
+        break
+      case "enum":
+        if (type.name === undefined) throw new Error("enum API type has no name")
+        rendered = `Smithy${pascal_case(snake_case(type.name))}`
+        break
+      case "long":
+        rendered = "int"
+        break
+      case "string":
+        rendered = "String"
+        break
+    }
+    return required ? rendered : `${rendered}?`
+  }
+  const api_name = (identifier: string): string =>
+    `Smithy${pascal_case(snake_case(identifier))}`
+  const api_member = (identifier: string): string => {
+    const name = pascal_case(snake_case(identifier))
+    return name.length === 0 ? name : `${name[0]?.toLowerCase()}${name.slice(1)}`
+  }
+  const api_enums = contract.api.enums
+    .map(
+      (enum_) =>
+        `/// Values defined by the Smithy ${enum_.name} shape.
+enum ${api_name(enum_.name)} {
+${enum_.members
+  .map((member) => `  ${api_member(member.name)}(${JSON.stringify(member.value)})`)
+  .join(",\n")};
+
+  const ${api_name(enum_.name)}(this.value);
+
+  final String value;
+}`,
+    )
+    .join("\n\n")
+  const api_structures = contract.api.structures
+    .map((structure) => {
+      const name = api_name(structure.name)
+      if (structure.members.length === 0) {
+        return `/// Smithy ${structure.name} structure.
+class ${name} {
+  const ${name}();
+}`
+      }
+      const fields = structure.members
+        .map(
+          (member) =>
+            `  final ${api_type(member.type, member.required)} ${api_member(member.name)};`,
+        )
+        .join("\n")
+      const parameters = structure.members
+        .map(
+          (member) =>
+            `    ${member.required ? "required " : ""}this.${api_member(member.name)},`,
+        )
+        .join("\n")
+      return `/// Smithy ${structure.name} structure.
+class ${name} {
+  const ${name}({
+${parameters}
+  });
+
+${fields}
+}`
+    })
+    .join("\n\n")
+  const api_operations = contract.api.operations
+    .map(
+      (operation) =>
+        `  /// Invokes the Smithy ${operation.name} operation.
+  Future<${api_name(operation.output)}> ${api_member(operation.name)}(${api_name(operation.input)} input);`,
+    )
+    .join("\n")
+  const api = `${[api_enums, api_structures].filter((value) => value.length > 0).join("\n\n")}
+
+/// Operations defined by the OpenKache Smithy service.
+abstract interface class SmithyOpenKacheApi {
+${api_operations}
+}`
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+library;
+
+import 'dart:typed_data';
+
+const int smithyItemIdBytes = ${contract.item_id_bytes};
+const int smithyMutationIdBytes = ${contract.mutation_id_bytes};
+const int smithyMaxPreviousDataProtectionKeys = ${defaults.max_previous_data_protection_keys};
+const int smithyMaxValueBytes = ${contract.max_value_bytes};
+const int smithyValueDataProtectionKeyBytes = ${contract.value_format.data_protection_key_bytes};
+const int smithyValueEncryptionNone = ${contract.value_format.encryption_none};
+const int smithyValueEncryptionCompact = ${contract.value_format.encryption_compact};
+const int smithyValueEncryptionRobust = ${contract.value_format.encryption_robust};
+const String smithyProtocolAlpn = ${JSON.stringify(contract.v1.alpn)};
+const int smithyDefaultMaxInFlight = ${defaults.max_in_flight};
+const String smithyDefaultServerName = ${JSON.stringify(defaults.server_name)};
+const int smithyDefaultConnectTimeoutMilliseconds = ${defaults.connect_timeout_milliseconds};
+const int smithyDefaultRequestTimeoutMilliseconds = ${defaults.request_timeout_milliseconds};
+const int smithyDefaultRetryMaxAttempts = ${defaults.retry_max_attempts};
+const int smithyDefaultZstandardLevel = ${defaults.zstandard_level};
+const int smithyDefaultZstandardMinimumInputBytes = ${defaults.zstandard_minimum_input_bytes};
+const int smithyDefaultZstandardMinimumSavingsBytes = ${defaults.zstandard_minimum_savings_bytes};
+const int smithyDefaultZstandardLevelMin = ${defaults.zstandard_level_min};
+const int smithyDefaultZstandardLevelMax = ${defaults.zstandard_level_max};
+const String smithyClientCertificatePemType = ${JSON.stringify(defaults.certificate_pem_type)};
+const int smithyClientMinimumPositiveValue = ${defaults.minimum_positive_value};
+const int smithyFfiAbiVersion = ${ffi.abi_version};
+
+${entries("smithy_opcode", contract.opcodes)}
+
+${entries("smithy_ffi_operation", ffi.operations)}
+
+${entries("smithy_ffi_result", ffi.result_kinds)}
+
+${entries("smithy_ffi_set_condition", ffi.set_conditions)}
+
+${entries("smithy_ffi_connection_state", ffi.connection_states)}
+
+${entries("smithy_ffi_error", ffi.error_codes)}
+
+${entries("smithy_ffi_phase", ffi.phases)}
+
+${entries("smithy_ffi_backend", ffi.backends)}
+
+${entries("smithy_ffi_metrics", ffi.metrics)}
+
+${api}
 `
 }
 
@@ -1979,9 +3094,7 @@ ${operations}
 export function render_python_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
-  const envelope = contract.value_envelope
   const version_bytes = encode_vu128(value.version)
-  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   const ffi_operations = contract.ffi.operations
     .map(
       (entry) =>
@@ -2006,6 +3119,30 @@ export function render_python_contract(contract: Client_Contract): string {
         `SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_error_codes = contract.ffi.error_codes
+    .map(
+      (entry) =>
+        `SMITHY_FFI_ERROR_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_phases = contract.ffi.phases
+    .map(
+      (entry) =>
+        `SMITHY_FFI_PHASE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_backends = contract.ffi.backends
+    .map(
+      (entry) =>
+        `SMITHY_FFI_BACKEND_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_metrics = contract.ffi.metrics
+    .map(
+      (entry) =>
+        `SMITHY_FFI_METRICS_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const opcodes = contract.opcodes
     .map((entry) => `SMITHY_OPCODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
     .join("\n")
@@ -2021,6 +3158,8 @@ SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
 SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
+SMITHY_MUTATION_ID_BYTES = ${contract.mutation_id_bytes}
+SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS = ${defaults.max_previous_data_protection_keys}
 SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}
 SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}
 SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS = ${defaults.retry_max_attempts}
@@ -2037,6 +3176,10 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${ffi_error_codes}
+${ffi_phases}
+${ffi_backends}
+${ffi_metrics}
 SMITHY_SET_TTL_FLAG = ${contract.v1.set_ttl_flag}
 SMITHY_SET_IF_ABSENT_FLAG = ${contract.v1.set_if_absent_flag}
 SMITHY_SET_IF_PRESENT_FLAG = ${contract.v1.set_if_present_flag}
@@ -2063,11 +3206,6 @@ SMITHY_VALUE_VALUE_ROOT_CONTEXT = ${JSON.stringify(value.value_root_context)}
 SMITHY_VALUE_COMPACT_MAC_CONTEXT = ${JSON.stringify(value.compact_mac_context)}
 SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT = ${JSON.stringify(value.compact_encryption_context)}
 SMITHY_VALUE_ROBUST_CONTEXT = ${JSON.stringify(value.robust_context)}
-SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION = bytes([${magic.join(", ")}])
-SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES = ${envelope.max_encoding_bytes}
-SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES = ${envelope.max_type_name_bytes}
-SMITHY_VALUE_ENVELOPE_JSON_ENCODING = ${JSON.stringify(envelope.json_encoding)}
-
 ${opcodes}
 ${statuses}
 `
@@ -2201,6 +3339,7 @@ ${assignments}
     .join("\n")
   const value = contract.value_format
   const ffi = contract.ffi
+  const layout = contract.ffi_layout
   const version_bytes = encode_vu128(value.version)
   const operation_get_json = swift_ffi_value(ffi.operations, "GetJson", "operation")
   const operation_set_json = swift_ffi_value(ffi.operations, "SetJson", "operation")
@@ -2232,6 +3371,30 @@ ${assignments}
         `  case ${swift_property_name(entry.name)} = ${entry.value}`,
     )
     .join("\n")
+  const error_codes = ffi.error_codes
+    .map(
+      (entry) =>
+        `  public static let error${typescript_name(entry.name)}: UInt32 = ${entry.value}`,
+    )
+    .join("\n")
+  const phases = ffi.phases
+    .map(
+      (entry) =>
+        `  public static let phase${typescript_name(entry.name)}: UInt32 = ${entry.value}`,
+    )
+    .join("\n")
+  const backends = ffi.backends
+    .map(
+      (entry) =>
+        `  public static let backend${typescript_name(entry.name)}: UInt32 = ${entry.value}`,
+    )
+    .join("\n")
+  const metrics = ffi.metrics
+    .map(
+      (entry) =>
+        `  public static let metrics${typescript_name(entry.name)}: UInt32 = ${entry.value}`,
+    )
+    .join("\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 import Foundation
@@ -2254,6 +3417,8 @@ public enum Smithy_Value_Format: Sendable {
   public static let itemIdBytes: Int = ${contract.item_id_bytes}
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
   public static let defaultMaxInFlight: Int = ${contract.client_defaults.max_in_flight}
+  public static let mutationIdBytes: Int = ${contract.mutation_id_bytes}
+  public static let maxPreviousDataProtectionKeys: Int = ${contract.client_defaults.max_previous_data_protection_keys}
   public static let defaultConnectTimeoutMilliseconds: Int = ${contract.client_defaults.connect_timeout_milliseconds}
   public static let defaultRequestTimeoutMilliseconds: Int = ${contract.client_defaults.request_timeout_milliseconds}
   public static let defaultRetryMaxAttempts: Int = ${contract.client_defaults.retry_max_attempts}
@@ -2273,6 +3438,7 @@ public enum Smithy_Value_Format: Sendable {
   public static let setTtlFlag: UInt8 = ${contract.v1.set_ttl_flag}
   public static let setIfAbsentFlag: UInt8 = ${contract.v1.set_if_absent_flag}
   public static let setIfPresentFlag: UInt8 = ${contract.v1.set_if_present_flag}
+  public static let setMutationIdFlag: UInt8 = ${contract.v1.set_mutation_id_flag}
   public static let formatCompressionMask: UInt8 = ${value.format_compression_mask}
   public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
   public static let serializationRaw: UInt8 = ${value.serialization_raw}
@@ -2302,6 +3468,52 @@ ${connection_states}
 /// Native ABI identifiers shared by every language adapter.
 public enum Smithy_Native_Contract: Sendable {
   public static let abiVersion: UInt32 = ${ffi.abi_version}
+  public static let connectOptionsBytes: Int = ${layout.connect_options_bytes}
+  public static let connectAddressOffset: Int = ${layout.connect_address_offset}
+  public static let connectAddressLengthOffset: Int = ${layout.connect_address_length_offset}
+  public static let connectServerNameOffset: Int = ${layout.connect_server_name_offset}
+  public static let connectServerNameLengthOffset: Int = ${layout.connect_server_name_length_offset}
+  public static let connectCertificateOffset: Int = ${layout.connect_certificate_offset}
+  public static let connectCertificateLengthOffset: Int = ${layout.connect_certificate_length_offset}
+  public static let connectClientCertificateChainOffset: Int = ${layout.connect_client_certificate_chain_offset}
+  public static let connectClientCertificateChainLengthOffset: Int = ${layout.connect_client_certificate_chain_length_offset}
+  public static let connectClientPrivateKeyOffset: Int = ${layout.connect_client_private_key_offset}
+  public static let connectClientPrivateKeyLengthOffset: Int = ${layout.connect_client_private_key_length_offset}
+  public static let connectDataProtectionKeyOffset: Int = ${layout.connect_data_protection_key_offset}
+  public static let connectDataProtectionKeyLengthOffset: Int = ${layout.connect_data_protection_key_length_offset}
+  public static let connectPreviousDataProtectionKeysOffset: Int = ${layout.connect_previous_data_protection_keys_offset}
+  public static let connectPreviousDataProtectionKeysLengthOffset: Int = ${layout.connect_previous_data_protection_keys_length_offset}
+  public static let connectPreviousDataProtectionKeyCountOffset: Int = ${layout.connect_previous_data_protection_key_count_offset}
+  public static let connectCompressionEnabledOffset: Int = ${layout.connect_compression_enabled_offset}
+  public static let connectCompressionLevelOffset: Int = ${layout.connect_compression_level_offset}
+  public static let connectMinimumInputSizeOffset: Int = ${layout.connect_minimum_input_size_offset}
+  public static let connectMinimumSavingsOffset: Int = ${layout.connect_minimum_savings_offset}
+  public static let connectEncryptionOffset: Int = ${layout.connect_encryption_offset}
+  public static let connectTimeoutOffset: Int = ${layout.connect_timeout_offset}
+  public static let connectRequestTimeoutOffset: Int = ${layout.connect_request_timeout_offset}
+  public static let connectRetryMaxAttemptsOffset: Int = ${layout.connect_retry_max_attempts_offset}
+  public static let connectMaxInFlightOffset: Int = ${layout.connect_max_in_flight_offset}
+  public static let errorMetadataBytes: Int = ${layout.error_metadata_bytes}
+  public static let errorMetadataCodeOffset: Int = ${layout.error_metadata_code_offset}
+  public static let errorMetadataOperationOffset: Int = ${layout.error_metadata_operation_offset}
+  public static let errorMetadataPhaseOffset: Int = ${layout.error_metadata_phase_offset}
+  public static let errorMetadataBackendOffset: Int = ${layout.error_metadata_backend_offset}
+  public static let errorMetadataRetryableOffset: Int = ${layout.error_metadata_retryable_offset}
+  public static let errorMetadataAmbiguousOffset: Int = ${layout.error_metadata_ambiguous_offset}
+  public static let errorMetadataMutationIdLengthOffset: Int = ${layout.error_metadata_mutation_id_length_offset}
+  public static let errorMetadataMutationIdOffset: Int = ${layout.error_metadata_mutation_id_offset}
+  public static let metricsSnapshotBytes: Int = ${layout.metrics_snapshot_bytes}
+  public static let metricsSnapshotRequestsOffset: Int = ${layout.metrics_snapshot_requests_offset}
+  public static let metricsSnapshotHitsOffset: Int = ${layout.metrics_snapshot_hits_offset}
+  public static let metricsSnapshotMissesOffset: Int = ${layout.metrics_snapshot_misses_offset}
+  public static let metricsSnapshotRetriesOffset: Int = ${layout.metrics_snapshot_retries_offset}
+  public static let metricsSnapshotReconnectsOffset: Int = ${layout.metrics_snapshot_reconnects_offset}
+  public static let metricsSnapshotCancellationsOffset: Int = ${layout.metrics_snapshot_cancellations_offset}
+  public static let metricsSnapshotTransportErrorsOffset: Int = ${layout.metrics_snapshot_transport_errors_offset}
+  public static let metricsSnapshotProtocolErrorsOffset: Int = ${layout.metrics_snapshot_protocol_errors_offset}
+  public static let metricsSnapshotBytesSentOffset: Int = ${layout.metrics_snapshot_bytes_sent_offset}
+  public static let metricsSnapshotBytesReceivedOffset: Int = ${layout.metrics_snapshot_bytes_received_offset}
+  public static let metricsSnapshotActiveLanesOffset: Int = ${layout.metrics_snapshot_active_lanes_offset}
   public static let operationGetJson: UInt32 = ${operation_get_json}
   public static let operationSetJson: UInt32 = ${operation_set_json}
   public static let operationReconnect: UInt32 = ${operation_reconnect}
@@ -2318,6 +3530,10 @@ public enum Smithy_Native_Contract: Sendable {
   public static let setConditionNone: UInt32 = ${set_condition_none}
   public static let setConditionIfAbsent: UInt32 = ${set_condition_if_absent}
   public static let setConditionIfPresent: UInt32 = ${set_condition_if_present}
+${error_codes}
+${phases}
+${backends}
+${metrics}
 }
 `
 }
@@ -2378,27 +3594,6 @@ export const SMITHY_VALUE_COMPACT_MAC_CONTEXT = ${JSON.stringify(value.compact_m
 export const SMITHY_VALUE_COMPACT_ENCRYPTION_CONTEXT = ${JSON.stringify(value.compact_encryption_context)}
 /** BLAKE3 Robust AES-GCM-SIV key derivation context. */
 export const SMITHY_VALUE_ROBUST_CONTEXT = ${JSON.stringify(value.robust_context)}
-`
-}
-
-/** Renders constants for the legacy TypeScript metadata envelope.
- *
- * @param contract - Validated language-neutral value-envelope contract.
- * @returns Deterministic TypeScript source with a trailing newline.
- */
-export function render_typescript_value_envelope(contract: Client_Contract): string {
-  const envelope = contract.value_envelope
-  const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
-  return `// Generated from the OpenKache Smithy contract. Do not edit.
-
-/** Legacy metadata-envelope magic and version. */
-export const SMITHY_VALUE_ENVELOPE_MAGIC_AND_VERSION = [${magic.join(", ")}] as const
-/** Maximum UTF-8 byte length of a legacy metadata-envelope encoding identifier. */
-export const SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES = ${envelope.max_encoding_bytes}
-/** Maximum UTF-8 byte length of a legacy metadata-envelope logical type name. */
-export const SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES = ${envelope.max_type_name_bytes}
-/** Built-in canonical JSON codec identifier used by the legacy envelope adapter. */
-export const SMITHY_VALUE_ENVELOPE_JSON_ENCODING = ${JSON.stringify(envelope.json_encoding)}
 `
 }
 
@@ -2596,7 +3791,10 @@ type Generation_Target =
   | "all"
   | "c-contract"
   | "dotnet"
+  | "dart"
   | "go"
+  | "java"
+  | "kotlin"
   | "python"
   | "rust-api"
   | "rust-client"
@@ -2614,8 +3812,14 @@ function generation_target(value: string | undefined): Generation_Target {
       return "c-contract"
     case "dotnet":
       return "dotnet"
+    case "dart":
+      return "dart"
     case "go":
       return "go"
+    case "java":
+      return "java"
+    case "kotlin":
+      return "kotlin"
     case "python":
       return "python"
     case "rust-api":
@@ -2660,14 +3864,17 @@ function expected_outputs(
         [GENERATED_OUTPUTS.typescript_api]: render_typescript_api(contract),
         [GENERATED_OUTPUTS.typescript_value_format]:
           render_typescript_value_format(contract),
-        [GENERATED_OUTPUTS.typescript_value_envelope]:
-          render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        [GENERATED_OUTPUTS.java_api]: render_java_api(contract),
+        [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+        [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
+        [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
+        [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
       }
     case "c-contract":
       return {
@@ -2678,10 +3885,24 @@ function expected_outputs(
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
       }
+    case "dart":
+      return {
+        [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
+      }
     case "go":
       return {
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+      }
+    case "java":
+      return {
+        [GENERATED_OUTPUTS.java_api]: render_java_api(contract),
+        [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+      }
+    case "kotlin":
+      return {
+        [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
+        [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
       }
     case "rust-api":
       return {
@@ -2700,8 +3921,6 @@ function expected_outputs(
         [GENERATED_OUTPUTS.typescript_api]: render_typescript_api(contract),
         [GENERATED_OUTPUTS.typescript_value_format]:
           render_typescript_value_format(contract),
-        [GENERATED_OUTPUTS.typescript_value_envelope]:
-          render_typescript_value_envelope(contract),
       }
     case "python":
       return {

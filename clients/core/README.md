@@ -52,16 +52,17 @@ cargo check --no-default-features --features ffi
 cargo fmt --check
 ```
 
-The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. It requires the platform's io_uring driver and exports
-`openkache_client_*` symbols from the native library crate outputs. The ABI
-supports protected application-key calls, exact-item-ID calls, mutual TLS,
-PEM/DER or system trust, compression, both value-encryption profiles, retries,
-reconnect, state snapshots, and bounded request lanes. CMake, Go, and Python
-package builds regenerate the scoped Smithy-derived client contract as needed.
-Reusable ABI
-declarations are in `include/openkache/client_abi.h` (with the
-`include/openkache_client.h` compatibility include); the generated Smithy
+The `ffi` feature builds a dedicated Tokio worker around `ProtectedClient`,
+using Quinn as the portable default on Linux, macOS, and Windows. The optional
+`quic-compio`/`ffi-compio` path retains the Linux io_uring fast path. Every
+variant exports `openkache_client_*` symbols from the native library crate
+outputs. The ABI supports protected application-key calls, exact-item-ID
+calls, mutual TLS, PEM/DER or system trust, compression, both value-encryption
+profiles, retries, reconnect, request cancellation, metrics snapshots, and
+bounded request lanes. CMake, Go, and Python package builds regenerate the
+scoped Smithy-derived client contract as needed. Reusable ABI declarations are
+in `include/openkache/client_abi.h` (with the
+`include/openkache_client.h` include-path alias); the generated Smithy
 contract header is supplied by each package build.
 
 ## Usage
@@ -131,12 +132,11 @@ does not provide one.
 - `src/protected.rs` composes protected operations for bindings.
 - `src/value.rs` owns canonical serialization, compression, and authenticated
   encryption.
-- `src/value_envelope.rs` contains the adapter-level TypeScript codec envelope
-  used by the Node-API adapter; a future thin logical-value adapter may replace it.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
   C++, Python, and other non-Rust bindings. It exposes both protected
   application-key operations and exact-item-ID raw operations, while the
-  worker owns one Compio runtime per native handle. The canonical declarations
+  worker owns one runtime per native handle. Tokio/Quinn is the portable
+  default and Compio/io_uring is an optional Linux fast path. The canonical declarations
   are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
   with [`include/openkache_client.h`](include/openkache_client.h) retained as
   a compatibility include. Generated ABI/protocol constants are emitted to

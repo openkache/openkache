@@ -9,6 +9,7 @@ license = "Apache-2.0"
 crate-type = ["cdylib"]
 
 [dependencies]
+futures-util = "*"
 napi = { version = "*", default-features = false, features = ["async", "napi8", "serde-json"] }
 napi-derive = "*"
 openkache-client-core = { path = "../../core", default-features = false, features = ["quic-quinn"] }

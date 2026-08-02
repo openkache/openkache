@@ -14,10 +14,9 @@ mod protected;
 mod protection;
 mod transport;
 pub mod value;
-pub mod value_envelope;
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -31,7 +30,11 @@ pub use config::{
     SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
-pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+pub use key::{
+    DATA_PROTECTION_KEY_BYTES, DataProtectionKey, DataProtectionKeyRing, ItemId,
+    MAX_PREVIOUS_DATA_PROTECTION_KEYS, random_mutation_id,
+};
+pub use openkache_protocol::MutationId;
 pub use openkache_protocol::{ITEM_ID_BYTES, SetCondition};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
@@ -59,6 +62,16 @@ impl std::fmt::Display for Backend {
             Self::Quinn => "quinn",
             Self::Compio => "compio",
         })
+    }
+}
+
+impl Backend {
+    /// Returns the Smithy-defined native backend discriminator.
+    pub const fn ffi_code(self) -> u32 {
+        match self {
+            Self::Quinn => contract::FFI_BACKEND_QUINN,
+            Self::Compio => contract::FFI_BACKEND_COMPIO,
+        }
     }
 }
 
@@ -135,6 +148,58 @@ impl std::fmt::Display for Operation {
     }
 }
 
+impl Operation {
+    /// Returns the caller-facing FFI operation discriminator when this value
+    /// identifies a protocol operation.
+    pub const fn ffi_operation_code(self) -> u32 {
+        match self {
+            Self::Ping => contract::FfiOperation::Ping.code(),
+            Self::Get => contract::FfiOperation::Get.code(),
+            Self::Set => contract::FfiOperation::Set.code(),
+            Self::Delete => contract::FfiOperation::Delete.code(),
+            Self::Stats => contract::FfiOperation::Stats.code(),
+            Self::Sync => contract::FfiOperation::Sync.code(),
+            Self::DnsResolution
+            | Self::ConnectionSetup
+            | Self::ConnectionRetry
+            | Self::StreamAcquisition
+            | Self::RequestWrite
+            | Self::ResponseHeaderRead
+            | Self::ResponseBodyRead
+            | Self::TlsInitialization
+            | Self::EndpointInitialization
+            | Self::ConnectionInitialization
+            | Self::Handshake
+            | Self::StreamOpen
+            | Self::StreamWrite
+            | Self::StreamRead => 0,
+        }
+    }
+
+    /// Returns the Smithy-defined phase discriminator for this operation.
+    pub const fn ffi_phase_code(self) -> u32 {
+        match self {
+            Self::DnsResolution => contract::FFI_PHASE_DNS_RESOLUTION,
+            Self::ConnectionSetup => contract::FFI_PHASE_CONNECTION_SETUP,
+            Self::ConnectionRetry => contract::FFI_PHASE_CONNECTION_RETRY,
+            Self::StreamAcquisition => contract::FFI_PHASE_STREAM_ACQUISITION,
+            Self::RequestWrite => contract::FFI_PHASE_REQUEST_WRITE,
+            Self::ResponseHeaderRead => contract::FFI_PHASE_RESPONSE_HEADER_READ,
+            Self::ResponseBodyRead => contract::FFI_PHASE_RESPONSE_BODY_READ,
+            Self::TlsInitialization => contract::FFI_PHASE_TLS_INITIALIZATION,
+            Self::EndpointInitialization => contract::FFI_PHASE_ENDPOINT_INITIALIZATION,
+            Self::ConnectionInitialization => contract::FFI_PHASE_CONNECTION_INITIALIZATION,
+            Self::Handshake => contract::FFI_PHASE_HANDSHAKE,
+            Self::StreamOpen => contract::FFI_PHASE_STREAM_OPEN,
+            Self::StreamWrite => contract::FFI_PHASE_STREAM_WRITE,
+            Self::StreamRead => contract::FFI_PHASE_STREAM_READ,
+            Self::Ping | Self::Get | Self::Set | Self::Delete | Self::Stats | Self::Sync => {
+                contract::FFI_PHASE_UNKNOWN
+            }
+        }
+    }
+}
+
 /// Programmatic category for a server-side failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -151,6 +216,8 @@ pub enum ServerErrorCode {
     Timeout,
     /// The authenticated identity is not authorized for the operation.
     Forbidden,
+    /// The mutation token was already used for a different request.
+    MutationConflict,
     /// The server encountered an internal failure.
     Internal,
 }
@@ -236,6 +303,11 @@ pub enum Error {
     AmbiguousOutcome {
         /// Mutation whose result is unknown.
         operation: Operation,
+        /// Token that can be reused to safely retry the mutation.
+        ///
+        /// Administrative `SYNC` requests retain the legacy ambiguous outcome
+        /// behavior and therefore have no mutation token.
+        mutation_id: Option<MutationId>,
         /// Structured client-owned failure that prevented confirmation.
         #[source]
         cause: Box<Error>,
@@ -327,10 +399,37 @@ pub enum DeleteOutcome {
     NotFound,
 }
 
+/// Transport and protocol counters collected by one core client connection.
+///
+/// The snapshot is intentionally independent of the native FFI counters so
+/// language adapters can expose the same retry/reconnect/error observations
+/// without reimplementing transport behavior.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CoreMetricsSnapshot {
+    /// Number of retry attempts after an initial request attempt.
+    pub retries: u64,
+    /// Number of replacement connections established.
+    pub reconnects: u64,
+    /// Number of transport failures observed while executing requests.
+    pub transport_errors: u64,
+    /// Number of protocol encoding/decoding failures observed while executing requests.
+    pub protocol_errors: u64,
+}
+
+#[derive(Default)]
+struct CoreMetrics {
+    retries: AtomicU64,
+    reconnects: AtomicU64,
+    transport_errors: AtomicU64,
+    protocol_errors: AtomicU64,
+}
+
 struct Core<C: ClientConnection> {
     connection: RwLock<Arc<C>>,
     reconnect: futures_util::lock::Mutex<()>,
-    address: SocketAddr,
+    addresses: Vec<SocketAddr>,
+    next_address: AtomicUsize,
+    reconnect_attempts: AtomicUsize,
     server_name: String,
     tls: rustls::ClientConfig,
     connect_timeout: Duration,
@@ -338,6 +437,7 @@ struct Core<C: ClientConnection> {
     retry: RetryPolicy,
     max_in_flight: usize,
     state: AtomicU32,
+    metrics: CoreMetrics,
 }
 
 struct RequestFailure {
@@ -368,7 +468,7 @@ impl RequestFailure {
 
 impl<C: ClientConnection> Core<C> {
     async fn connect(
-        address: SocketAddr,
+        addresses: Vec<SocketAddr>,
         server_name: String,
         tls: rustls::ClientConfig,
         timeouts: ClientTimeouts,
@@ -376,18 +476,39 @@ impl<C: ClientConnection> Core<C> {
         max_in_flight: usize,
         deadline: transport::Deadline,
     ) -> Result<Self> {
-        let connection = C::connect(
-            address,
-            &server_name,
-            tls.clone(),
-            deadline.remaining(Operation::ConnectionSetup)?,
-            max_in_flight,
-        )
-        .await?;
+        let mut last_error = None;
+        let mut connection = None;
+        let mut connected_address_index = None;
+        for (index, address) in addresses.iter().enumerate() {
+            match C::connect(
+                *address,
+                &server_name,
+                tls.clone(),
+                deadline.remaining(Operation::ConnectionSetup)?,
+                max_in_flight,
+            )
+            .await
+            {
+                Ok(value) => {
+                    connection = Some(value);
+                    connected_address_index = Some(index);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let connection = connection.ok_or_else(|| {
+            last_error.unwrap_or_else(|| Error::Connection("DNS returned no addresses".into()))
+        })?;
+        let next_address = connected_address_index
+            .map(|index| (index + 1) % addresses.len())
+            .unwrap_or(0);
         Ok(Self {
             connection: RwLock::new(Arc::new(connection)),
             reconnect: futures_util::lock::Mutex::new(()),
-            address,
+            addresses,
+            next_address: AtomicUsize::new(next_address),
+            reconnect_attempts: AtomicUsize::new(0),
             server_name,
             tls,
             connect_timeout: timeouts.connect,
@@ -395,7 +516,17 @@ impl<C: ClientConnection> Core<C> {
             retry,
             max_in_flight,
             state: AtomicU32::new(ConnectionState::Connected.code()),
+            metrics: CoreMetrics::default(),
         })
+    }
+
+    fn metrics_snapshot(&self) -> CoreMetricsSnapshot {
+        CoreMetricsSnapshot {
+            retries: self.metrics.retries.load(Ordering::Relaxed),
+            reconnects: self.metrics.reconnects.load(Ordering::Relaxed),
+            transport_errors: self.metrics.transport_errors.load(Ordering::Relaxed),
+            protocol_errors: self.metrics.protocol_errors.load(Ordering::Relaxed),
+        }
     }
 
     fn connection_state(&self) -> ConnectionState {
@@ -404,9 +535,16 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn ping(&self) -> Result<Duration> {
+        self.ping_with_transmission(None).await
+    }
+
+    async fn ping_with_transmission(&self, transmission: Option<&AtomicBool>) -> Result<Duration> {
         let started = Instant::now();
         let response = self
-            .request(Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?)
+            .request_with_transmission(
+                Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?,
+                transmission,
+            )
             .await?;
         expect_status(Operation::Ping, response.status, &[Status::Ok])?;
         if response.payload != b"PONG" {
@@ -419,10 +557,19 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
+        self.get_with_transmission(item_id, None).await
+    }
+
+    async fn get_with_transmission(
+        &self,
+        item_id: ItemId,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<GetOutcome<ItemValue>> {
         let response = self
-            .request(
+            .request_with_transmission(
                 Request::new(Opcode::Get, Some(item_id.into_protocol()), Vec::new())
                     .map_err(Error::protocol)?,
+                transmission,
             )
             .await?;
         match response.status {
@@ -438,14 +585,30 @@ impl<C: ClientConnection> Core<C> {
         value: ItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
+        self.set_with_transmission(item_id, value, options, None)
+            .await
+    }
+
+    async fn set_with_transmission(
+        &self,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<SetOutcome> {
+        let mutation_id = options.mutation_id().unwrap_or(random_mutation_id()?);
         let request = Request::new_set(
             Opcode::Set,
             Some(item_id.into_protocol()),
-            options.into_protocol()?,
+            options.into_protocol(mutation_id)?,
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
-        match self.request(request).await?.status {
+        match self
+            .request_with_transmission(request, transmission)
+            .await?
+            .status
+        {
             Status::Created => Ok(SetOutcome::Created),
             Status::Replaced => Ok(SetOutcome::Replaced),
             Status::NotStored => Ok(SetOutcome::NotStored),
@@ -454,10 +617,36 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
+        self.delete_with_transmission(item_id, random_mutation_id()?, None)
+            .await
+    }
+
+    async fn delete_with_transmission(
+        &self,
+        item_id: ItemId,
+        mutation_id: MutationId,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<DeleteOutcome> {
+        self.delete_with_mutation_id(item_id, mutation_id, transmission)
+            .await
+    }
+
+    async fn delete_with_mutation_id(
+        &self,
+        item_id: ItemId,
+        mutation_id: MutationId,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<DeleteOutcome> {
         let response = self
-            .request(
-                Request::new(Opcode::Delete, Some(item_id.into_protocol()), Vec::new())
-                    .map_err(Error::protocol)?,
+            .request_with_transmission(
+                Request::new_with_mutation(
+                    Opcode::Delete,
+                    Some(item_id.into_protocol()),
+                    Some(mutation_id),
+                    Vec::new(),
+                )
+                .map_err(Error::protocol)?,
+                transmission,
             )
             .await?;
         match response.status {
@@ -468,8 +657,15 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn stats(&self) -> Result<String> {
+        self.stats_with_transmission(None).await
+    }
+
+    async fn stats_with_transmission(&self, transmission: Option<&AtomicBool>) -> Result<String> {
         let response = self
-            .request(Request::new(Opcode::Stats, None, Vec::new()).map_err(Error::protocol)?)
+            .request_with_transmission(
+                Request::new(Opcode::Stats, None, Vec::new()).map_err(Error::protocol)?,
+                transmission,
+            )
             .await?;
         expect_status(Operation::Stats, response.status, &[Status::Ok])?;
         String::from_utf8(response.payload)
@@ -477,13 +673,24 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn sync(&self) -> Result<()> {
+        self.sync_with_transmission(None).await
+    }
+
+    async fn sync_with_transmission(&self, transmission: Option<&AtomicBool>) -> Result<()> {
         let response = self
-            .request(Request::new(Opcode::Sync, None, Vec::new()).map_err(Error::protocol)?)
+            .request_with_transmission(
+                Request::new(Opcode::Sync, None, Vec::new()).map_err(Error::protocol)?,
+                transmission,
+            )
             .await?;
         expect_status(Operation::Sync, response.status, &[Status::Ok])
     }
 
-    async fn request(&self, request: Request) -> Result<Response> {
+    async fn request_with_transmission(
+        &self,
+        request: Request,
+        transmission: Option<&AtomicBool>,
+    ) -> Result<Response> {
         if self.connection_state() == ConnectionState::Closed {
             return Err(Error::ClientClosed);
         }
@@ -492,7 +699,9 @@ impl<C: ClientConnection> Core<C> {
             self.reconnect_before(deadline).await?;
         }
         let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats);
-        let max_attempts = if response_safe {
+        let mutation_id = request.mutation_id;
+        let mutation = mutation_id.is_some();
+        let max_attempts = if response_safe || mutation {
             self.retry.max_attempts
         } else {
             1
@@ -500,6 +709,14 @@ impl<C: ClientConnection> Core<C> {
         let operation = operation(request.opcode);
         let mut request = Some(request);
         for attempt in 1..=max_attempts {
+            if attempt > 1 {
+                self.metrics.retries.fetch_add(1, Ordering::Relaxed);
+                let delay = self.retry.delay_before(attempt);
+                if delay > deadline.remaining(operation)? {
+                    return Err(Error::Timeout { operation });
+                }
+                C::sleep(delay).await;
+            }
             let connection = self.current_connection()?;
             let attempt_request = if attempt == max_attempts {
                 request.take()
@@ -512,27 +729,98 @@ impl<C: ClientConnection> Core<C> {
                 ));
             };
             match self
-                .request_once(&connection, attempt_request, deadline)
+                .request_once(
+                    &connection,
+                    attempt_request,
+                    deadline,
+                    transmission,
+                    // A retried request may be racing another retry on a
+                    // replacement connection. Discarding its stream after
+                    // the response prevents a remotely finished stream from
+                    // being returned to the idle pool and reused by the
+                    // other attempt.
+                    attempt == 1,
+                )
                 .await
             {
                 Ok(response) if response.status.is_error() => {
-                    return Err(Error::Server {
+                    let error = Error::Server {
                         code: server_error_code(response.status),
                         message: String::from_utf8_lossy(&response.payload).into_owned(),
-                    });
+                    };
+                    // A server-side timeout means execution may have
+                    // started before the response deadline. Preserve the
+                    // mutation token (and SYNC's legacy ambiguity) so the
+                    // caller can safely retry or reconcile the outcome.
+                    if (mutation || operation == Operation::Sync)
+                        && response.status == Status::Timeout
+                    {
+                        return Err(Error::AmbiguousOutcome {
+                            operation,
+                            mutation_id,
+                            cause: Box::new(error),
+                        });
+                    }
+                    return Err(error);
                 }
                 Ok(response) => return Ok(response),
                 Err(failure) => {
+                    match &failure.error {
+                        Error::Transport { .. } | Error::Connection(_) | Error::Io(_) => {
+                            self.metrics
+                                .transport_errors
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Error::Protocol(_) => {
+                            self.metrics.protocol_errors.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
                     if failure.invalidates_connection {
                         self.mark_disconnected(&connection);
                     }
-                    if response_safe && failure.invalidates_connection && attempt < max_attempts {
-                        self.reconnect_failed(&connection, deadline).await?;
+                    if (response_safe || mutation)
+                        && failure.invalidates_connection
+                        && attempt < max_attempts
+                    {
+                        // A caller may close the client while a mutation is
+                        // waiting for its response. The request was already
+                        // transmitted, so reconnecting would both violate
+                        // the terminal close contract and lose the token's
+                        // useful ambiguity information.
+                        if self.connection_state() == ConnectionState::Closed {
+                            if (mutation || operation == Operation::Sync)
+                                && failure.may_have_reached_server
+                            {
+                                return Err(Error::AmbiguousOutcome {
+                                    operation,
+                                    mutation_id,
+                                    cause: Box::new(failure.error),
+                                });
+                            }
+                            return Err(failure.error);
+                        }
+                        if let Err(reconnect_error) =
+                            self.reconnect_failed(&connection, deadline).await
+                        {
+                            if (mutation || operation == Operation::Sync)
+                                && failure.may_have_reached_server
+                            {
+                                return Err(Error::AmbiguousOutcome {
+                                    operation,
+                                    mutation_id,
+                                    cause: Box::new(reconnect_error),
+                                });
+                            }
+                            return Err(reconnect_error);
+                        }
                         continue;
                     }
-                    if !response_safe && failure.may_have_reached_server {
+                    if (mutation || operation == Operation::Sync) && failure.may_have_reached_server
+                    {
                         return Err(Error::AmbiguousOutcome {
                             operation,
+                            mutation_id,
                             cause: Box::new(failure.error),
                         });
                     }
@@ -550,6 +838,8 @@ impl<C: ClientConnection> Core<C> {
         connection: &C,
         request: Request,
         deadline: transport::Deadline,
+        transmission: Option<&AtomicBool>,
+        reuse_lane: bool,
     ) -> std::result::Result<Response, RequestFailure> {
         let mut stream = connection
             .acquire_lane(deadline)
@@ -562,6 +852,13 @@ impl<C: ClientConnection> Core<C> {
         let write_timeout = deadline
             .remaining(Operation::RequestWrite)
             .map_err(RequestFailure::before_send)?;
+        // A write can be interrupted after only part of the frame reached
+        // the transport. Mark the request as potentially transmitted before
+        // starting it so cancellation and write-timeout errors retain the
+        // mutation token needed for a safe retry.
+        if let Some(transmission) = transmission {
+            transmission.store(true, Ordering::Release);
+        }
         stream
             .write_request(frame, write_timeout)
             .await
@@ -573,7 +870,9 @@ impl<C: ClientConnection> Core<C> {
         let response = Response::decode_owned(frame)
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
-        stream.release();
+        if reuse_lane {
+            stream.release();
+        }
         Ok(response)
     }
 
@@ -634,22 +933,51 @@ impl<C: ClientConnection> Core<C> {
             return Ok(());
         }
         self.set_state_unless_closed(ConnectionState::Reconnecting)?;
-        let timeout = deadline
-            .remaining(Operation::ConnectionRetry)?
-            .min(self.connect_timeout);
-        let replacement = match C::connect(
-            self.address,
-            &self.server_name,
-            self.tls.clone(),
-            timeout,
-            self.max_in_flight,
-        )
-        .await
-        {
-            Ok(connection) => connection,
-            Err(error) => {
+        let reconnect_attempt = self.reconnect_attempts.fetch_add(1, Ordering::Relaxed) + 1;
+        let backoff = self.retry.delay_before(reconnect_attempt.saturating_add(1));
+        let remaining = deadline
+            .remaining(Operation::ConnectionRetry)
+            .inspect_err(|_| self.mark_disconnected(failed))?;
+        if backoff > remaining {
+            self.mark_disconnected(failed);
+            return Err(Error::Timeout {
+                operation: Operation::ConnectionRetry,
+            });
+        }
+        if !backoff.is_zero() {
+            C::sleep(backoff).await;
+        }
+        let start = self.next_address.fetch_add(1, Ordering::Relaxed);
+        let mut replacement = None;
+        let mut last_error = None;
+        for offset in 0..self.addresses.len() {
+            let address = self.addresses[(start + offset) % self.addresses.len()];
+            let timeout = deadline
+                .remaining(Operation::ConnectionRetry)
+                .inspect_err(|_| self.mark_disconnected(failed))?
+                .min(self.connect_timeout);
+            match C::connect(
+                address,
+                &self.server_name,
+                self.tls.clone(),
+                timeout,
+                self.max_in_flight,
+            )
+            .await
+            {
+                Ok(connection) => {
+                    replacement = Some(connection);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let replacement = match replacement {
+            Some(connection) => connection,
+            None => {
                 self.mark_disconnected(failed);
-                return Err(error);
+                return Err(last_error
+                    .unwrap_or_else(|| Error::Connection("all resolved addresses failed".into())));
             }
         };
         let mut connection = self
@@ -666,6 +994,8 @@ impl<C: ClientConnection> Core<C> {
         }
         failed.close();
         *connection = Arc::new(replacement);
+        self.metrics.reconnects.fetch_add(1, Ordering::Relaxed);
+        self.reconnect_attempts.store(0, Ordering::Relaxed);
         self.set_state_unless_closed(ConnectionState::Connected)?;
         Ok(())
     }
@@ -838,9 +1168,45 @@ macro_rules! raw_client_methods {
                 self.0.set(item_id, value, options).await
             }
 
+            #[allow(dead_code)]
+            pub(crate) async fn set_with_transmission(
+                &self,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+                transmission: &AtomicBool,
+            ) -> Result<SetOutcome> {
+                self.0
+                    .set_with_transmission(item_id, value, options, Some(transmission))
+                    .await
+            }
+
             /// Deletes a fixed-size item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
+            }
+
+            /// Deletes an item while reusing the supplied idempotency token.
+            pub async fn delete_with_mutation_id(
+                &self,
+                item_id: ItemId,
+                mutation_id: MutationId,
+            ) -> Result<DeleteOutcome> {
+                self.0
+                    .delete_with_mutation_id(item_id, mutation_id, None)
+                    .await
+            }
+
+            #[allow(dead_code)]
+            pub(crate) async fn delete_with_mutation_id_with_transmission(
+                &self,
+                item_id: ItemId,
+                mutation_id: MutationId,
+                transmission: &AtomicBool,
+            ) -> Result<DeleteOutcome> {
+                self.0
+                    .delete_with_mutation_id(item_id, mutation_id, Some(transmission))
+                    .await
             }
 
             /// Returns server statistics as their JSON text.
@@ -856,6 +1222,12 @@ macro_rules! raw_client_methods {
             /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
             pub fn connection_state(&self) -> ConnectionState {
                 self.0.connection_state()
+            }
+
+            /// Returns a point-in-time snapshot of retry, reconnect, and
+            /// transport/protocol error counters.
+            pub fn metrics_snapshot(&self) -> CoreMetricsSnapshot {
+                self.0.metrics_snapshot()
             }
 
             /// Explicitly replaces the current connection without replaying an operation.
@@ -958,13 +1330,13 @@ async fn connect_quinn(
     settings: ConnectionSettings,
 ) -> Result<Arc<Core<transport::QuinnConnection>>> {
     let deadline = transport::Deadline::after(settings.timeouts.connect)?;
-    let address = resolve_quinn(
+    let addresses = resolve_quinn(
         &settings.endpoint,
         deadline.remaining(Operation::DnsResolution)?,
     )
     .await?;
     Core::connect(
-        address,
+        addresses,
         settings.endpoint.server_name().to_owned(),
         settings.tls,
         settings.timeouts,
@@ -981,13 +1353,13 @@ async fn connect_compio(
     settings: ConnectionSettings,
 ) -> Result<Arc<Core<transport::CompioConnection>>> {
     let deadline = transport::Deadline::after(settings.timeouts.connect)?;
-    let address = resolve_compio(
+    let addresses = resolve_compio(
         &settings.endpoint,
         deadline.remaining(Operation::DnsResolution)?,
     )
     .await?;
     Core::connect(
-        address,
+        addresses,
         settings.endpoint.server_name().to_owned(),
         settings.tls,
         settings.timeouts,
@@ -1000,7 +1372,7 @@ async fn connect_compio(
 }
 
 #[cfg(feature = "quic-quinn")]
-async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<Vec<SocketAddr>> {
     if tokio::runtime::Handle::try_current().is_err() {
         return Err(Error::Runtime {
             backend: Backend::Quinn,
@@ -1008,7 +1380,7 @@ async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketA
         });
     }
     if let Some(address) = endpoint.resolved_address() {
-        return Ok(address);
+        return Ok(vec![address]);
     }
     let addresses = tokio::time::timeout(
         timeout,
@@ -1019,7 +1391,8 @@ async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketA
         operation: Operation::DnsResolution,
     })?
     .map_err(Error::io)?;
-    addresses.into_iter().next().ok_or_else(|| {
+    let addresses = addresses.collect::<Vec<_>>();
+    (!addresses.is_empty()).then_some(addresses).ok_or_else(|| {
         Error::Connection(format!(
             "{}:{} resolved to no addresses",
             endpoint.host(),
@@ -1029,7 +1402,7 @@ async fn resolve_quinn(endpoint: &Endpoint, timeout: Duration) -> Result<SocketA
 }
 
 #[cfg(feature = "quic-compio")]
-async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<SocketAddr> {
+async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<Vec<SocketAddr>> {
     if compio::runtime::Runtime::try_current().is_none() {
         return Err(Error::Runtime {
             backend: Backend::Compio,
@@ -1037,7 +1410,7 @@ async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<Socket
         });
     }
     if let Some(address) = endpoint.resolved_address() {
-        return Ok(address);
+        return Ok(vec![address]);
     }
     let target = (endpoint.host(), endpoint.port());
     let addresses = compio::runtime::time::timeout(timeout, target.to_socket_addrs_async())
@@ -1046,7 +1419,8 @@ async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<Socket
             operation: Operation::DnsResolution,
         })?
         .map_err(Error::io)?;
-    addresses.into_iter().next().ok_or_else(|| {
+    let addresses = addresses.into_iter().collect::<Vec<_>>();
+    (!addresses.is_empty()).then_some(addresses).ok_or_else(|| {
         Error::Connection(format!(
             "{}:{} resolved to no addresses",
             endpoint.host(),
@@ -1130,6 +1504,7 @@ fn server_error_code(status: Status) -> ServerErrorCode {
         Status::Overloaded => ServerErrorCode::Overloaded,
         Status::Timeout => ServerErrorCode::Timeout,
         Status::Forbidden => ServerErrorCode::Forbidden,
+        Status::MutationConflict => ServerErrorCode::MutationConflict,
         Status::InternalError => ServerErrorCode::Internal,
         _ => ServerErrorCode::Internal,
     }

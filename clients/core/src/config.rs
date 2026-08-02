@@ -3,12 +3,13 @@
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
+use zeroize::Zeroize;
 
 use openkache_protocol::SetCondition;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use crate::{Error, Result};
+use crate::{Error, MutationId, Result};
 
 /// Network destination and TLS identity of one OpenKache server.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -276,6 +277,12 @@ fn pem_bytes(bytes: &[u8]) -> Option<&[u8]> {
 #[derive(Debug)]
 pub struct PrivateKey(PrivateKeyDer<'static>);
 
+impl Drop for PrivateKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 impl PrivateKey {
     /// Parses one DER-encoded private key.
     ///
@@ -353,7 +360,9 @@ impl PrivateKey {
     }
 
     pub(crate) fn into_der(self) -> PrivateKeyDer<'static> {
-        self.0
+        // `PrivateKey` owns a zeroizing drop guard, so clone the DER into the
+        // rustls-owned value and let the original guard wipe its storage.
+        self.0.clone_key()
     }
 }
 
@@ -439,13 +448,61 @@ impl Default for ClientTimeouts {
 pub struct RetryPolicy {
     /// Maximum total attempts, including the initial request.
     pub max_attempts: usize,
+    /// Base delay before the second and subsequent attempts.
+    ///
+    /// Each retry doubles this delay until [`Self::max_backoff`] is reached.
+    pub backoff_base: Duration,
+    /// Upper bound for exponential retry delay before jitter is added.
+    pub max_backoff: Duration,
+    /// Maximum uniformly distributed positive jitter added to each retry delay.
+    pub jitter: Duration,
 }
 
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             max_attempts: crate::contract::DEFAULT_RETRY_MAX_ATTEMPTS,
+            backoff_base: Duration::from_millis(25),
+            max_backoff: Duration::from_millis(1_000),
+            jitter: Duration::from_millis(25),
         }
+    }
+}
+
+impl RetryPolicy {
+    /// Creates a policy with the shared backoff defaults.
+    pub fn with_max_attempts(max_attempts: usize) -> Self {
+        Self {
+            max_attempts,
+            ..Self::default()
+        }
+    }
+
+    /// Returns the delay before `attempt`, where the initial request is attempt one.
+    pub(crate) fn delay_before(&self, attempt: usize) -> Duration {
+        if attempt <= 1 || self.backoff_base.is_zero() {
+            return Duration::ZERO;
+        }
+        let exponent = attempt.saturating_sub(2).min(31) as u32;
+        let multiplier = 1_u32.checked_shl(exponent).unwrap_or(u32::MAX);
+        let exponential = self
+            .backoff_base
+            .checked_mul(multiplier)
+            .unwrap_or(self.max_backoff)
+            .min(self.max_backoff);
+        if self.jitter.is_zero() {
+            return exponential;
+        }
+        let jitter_nanos = self.jitter.as_nanos().min(u64::MAX as u128) as u64;
+        if jitter_nanos == 0 {
+            return exponential;
+        }
+        let mut random = [0_u8; 8];
+        if getrandom::fill(&mut random).is_err() {
+            return exponential;
+        }
+        let offset = u64::from_le_bytes(random) % (jitter_nanos.saturating_add(1));
+        exponential.saturating_add(Duration::from_nanos(offset))
     }
 }
 
@@ -454,6 +511,7 @@ impl Default for RetryPolicy {
 pub struct SetOptions {
     condition: SetCondition,
     time_to_live_ms: Option<u64>,
+    mutation_id: Option<MutationId>,
 }
 
 impl SetOptions {
@@ -462,6 +520,7 @@ impl SetOptions {
         Self {
             condition: SetCondition::None,
             time_to_live_ms: None,
+            mutation_id: None,
         }
     }
 
@@ -483,6 +542,17 @@ impl SetOptions {
         self
     }
 
+    /// Reuses a caller-selected idempotency token across retries or calls.
+    pub const fn with_mutation_id(mut self, mutation_id: MutationId) -> Self {
+        self.mutation_id = Some(mutation_id);
+        self
+    }
+
+    /// Returns the caller-selected idempotency token, when one was supplied.
+    pub const fn mutation_id(self) -> Option<MutationId> {
+        self.mutation_id
+    }
+
     /// Returns the configured existence condition.
     pub const fn condition(self) -> SetCondition {
         self.condition
@@ -493,16 +563,19 @@ impl SetOptions {
         self.time_to_live_ms
     }
 
-    pub(crate) fn into_protocol(self) -> Result<openkache_protocol::SetOptions> {
+    pub(crate) fn into_protocol(
+        self,
+        mutation_id: MutationId,
+    ) -> Result<openkache_protocol::SetOptions> {
         if self.time_to_live_ms == Some(0) {
             return Err(Error::configuration(
                 "set.time_to_live_ms",
                 "must be greater than zero",
             ));
         }
-        Ok(openkache_protocol::SetOptions::new(
-            self.condition,
-            self.time_to_live_ms,
-        ))
+        Ok(
+            openkache_protocol::SetOptions::new(self.condition, self.time_to_live_ms)
+                .with_mutation_id(mutation_id),
+        )
     }
 }

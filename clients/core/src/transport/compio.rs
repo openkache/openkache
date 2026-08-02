@@ -64,6 +64,10 @@ pub(super) async fn connect(
     .map_err(|_| TransportError::timeout(BACKEND, Operation::ConnectionSetup, timeout))?
 }
 
+pub(super) async fn sleep(duration: Duration) {
+    compio::runtime::time::sleep(duration).await;
+}
+
 impl BackendConnection for Connection {
     type Stream = Stream;
 
@@ -100,6 +104,18 @@ impl BackendStream for Stream {
         )
         .await
         .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?;
+        result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
+        Ok(bytes)
+    }
+
+    async fn read_exact_fixed<const N: usize>(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<[u8; N], TransportError> {
+        let BufResult(result, bytes) =
+            compio::runtime::time::timeout(timeout, self.receive.read_exact([0_u8; N]))
+                .await
+                .map_err(|_| TransportError::timeout(BACKEND, Operation::StreamRead, timeout))?;
         result.map_err(|error| TransportError::backend(BACKEND, Operation::StreamRead, error))?;
         Ok(bytes)
     }

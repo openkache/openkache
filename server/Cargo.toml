@@ -53,3 +53,4 @@ thiserror = "*"
 tikv-jemallocator = { version = "*", optional = true }
 time = "*"
 toml = "*"
+zeroize = "*"

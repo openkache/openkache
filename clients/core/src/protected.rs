@@ -1,23 +1,25 @@
 //! Shared application-key and plaintext-value clients for language bindings.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, Result, RetryPolicy, ServerTrust,
-    SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, CoreMetricsSnapshot,
+    DataProtection, DataProtectionKey, DataProtectionKeyRing, DeleteOutcome, Endpoint, Error,
+    GetOutcome, MutationId, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
 #[cfg(feature = "quic-quinn")]
 use crate::{RawClient, RawClientBuilder};
+use crate::{key::random_mutation_id, key::scoped_mutation_id};
 
 struct ProtectionSettings {
     compression: Compression,
     encryption: Encryption,
-    key: DataProtectionKey,
+    key_ring: DataProtectionKeyRing,
 }
 
 impl ProtectionSettings {
@@ -25,12 +27,13 @@ impl ProtectionSettings {
         Self {
             compression: Compression::Disabled,
             encryption: Encryption::Robust,
-            key,
+            key_ring: DataProtectionKeyRing::new(key),
         }
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
-        DataProtection::with_profile(self.key, self.compression, self.encryption).map(Arc::new)
+        DataProtection::with_key_ring(self.key_ring, self.compression, self.encryption)
+            .map(Arc::new)
     }
 }
 
@@ -92,6 +95,12 @@ macro_rules! protected_builder_methods {
                 self.protection.encryption = encryption;
                 self
             }
+
+            /// Uses an active key plus a bounded set of previous keys for rotation.
+            pub fn key_ring(mut self, key_ring: DataProtectionKeyRing) -> Self {
+                self.protection.key_ring = key_ring;
+                self
+            }
         }
     };
 }
@@ -137,14 +146,18 @@ macro_rules! protected_client_methods {
             &self,
             application_key: impl AsRef<[u8]>,
         ) -> Result<GetOutcome<Value>> {
-            let item_id = self.protection.item_id(application_key);
-            match self.raw.get(item_id).await? {
-                GetOutcome::Found(value) => self
-                    .protection
-                    .decode(item_id, value)
-                    .map(GetOutcome::Found),
-                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            for item_id in self.protection.item_ids(application_key.as_ref()) {
+                match self.raw.get(item_id).await? {
+                    GetOutcome::Found(value) => {
+                        return self
+                            .protection
+                            .decode(item_id, value)
+                            .map(GetOutcome::Found);
+                    }
+                    GetOutcome::NotFound => {}
+                }
             }
+            Ok(GetOutcome::NotFound)
         }
 
         /// Protects and stores plaintext bytes for arbitrary application key bytes.
@@ -156,6 +169,23 @@ macro_rules! protected_client_methods {
         ) -> Result<SetOutcome> {
             self.set_value(application_key, Value::Raw(plaintext), options)
                 .await
+        }
+
+        #[allow(dead_code)]
+        pub(crate) async fn set_with_transmission(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            plaintext: Vec<u8>,
+            options: SetOptions,
+            transmission: &AtomicBool,
+        ) -> Result<SetOutcome> {
+            self.set_value_with_transmission(
+                application_key,
+                Value::Raw(plaintext),
+                options,
+                transmission,
+            )
+            .await
         }
 
         /// Serializes, protects, and stores a core logical value.
@@ -185,11 +215,84 @@ macro_rules! protected_client_methods {
             self.raw.set(item_id, value, options).await
         }
 
+        #[allow(dead_code)]
+        pub(crate) async fn set_value_with_transmission(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            value: Value,
+            options: SetOptions,
+            transmission: &AtomicBool,
+        ) -> Result<SetOutcome> {
+            let item_id = self.protection.item_id(application_key);
+            let value = self.protection.encode(item_id, value)?;
+            self.raw
+                .set_with_transmission(item_id, value, options, transmission)
+                .await
+        }
+
         /// Deletes a value for arbitrary application key bytes.
         pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
-            self.raw
-                .delete(self.protection.item_id(application_key))
+            self.delete_with_mutation_id(application_key, random_mutation_id()?)
                 .await
+        }
+
+        /// Deletes an application key while reusing an idempotency token.
+        pub async fn delete_with_mutation_id(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            mutation_id: MutationId,
+        ) -> Result<DeleteOutcome> {
+            self.delete_with_mutation_id_with_transmission(application_key, mutation_id, None)
+                .await
+        }
+
+        #[allow(dead_code)]
+        pub(crate) async fn delete_with_mutation_id_with_transmission(
+            &self,
+            application_key: impl AsRef<[u8]>,
+            mutation_id: MutationId,
+            transmission: Option<&AtomicBool>,
+        ) -> Result<DeleteOutcome> {
+            for item_id in self.protection.item_ids(application_key.as_ref()) {
+                let scoped_mutation_id = scoped_mutation_id(mutation_id, item_id);
+                let result = match transmission {
+                    Some(transmission) => {
+                        self.raw
+                            .delete_with_mutation_id_with_transmission(
+                                item_id,
+                                scoped_mutation_id,
+                                transmission,
+                            )
+                            .await
+                    }
+                    None => {
+                        self.raw
+                            .delete_with_mutation_id(item_id, scoped_mutation_id)
+                            .await
+                    }
+                };
+                let result = result.map_err(|error| match error {
+                    Error::AmbiguousOutcome {
+                        operation, cause, ..
+                    } => {
+                        // The wire request uses a token scoped to this
+                        // physical item ID, but callers retry the logical
+                        // protected mutation. Keep the logical token in the
+                        // public error so a retry derives the same scoped ID.
+                        Error::AmbiguousOutcome {
+                            operation,
+                            mutation_id: Some(mutation_id),
+                            cause,
+                        }
+                    }
+                    error => error,
+                })?;
+                match result {
+                    DeleteOutcome::Deleted => return Ok(DeleteOutcome::Deleted),
+                    DeleteOutcome::NotFound => {}
+                }
+            }
+            Ok(DeleteOutcome::NotFound)
         }
 
         /// Returns server statistics as their JSON text.
@@ -205,6 +308,12 @@ macro_rules! protected_client_methods {
         /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
         pub fn connection_state(&self) -> ConnectionState {
             self.raw.connection_state()
+        }
+
+        /// Returns retry, reconnect, and transport/protocol error counters
+        /// collected by the shared core.
+        pub fn metrics_snapshot(&self) -> CoreMetricsSnapshot {
+            self.raw.metrics_snapshot()
         }
 
         /// Explicitly replaces the current connection without replaying an operation.
@@ -262,6 +371,21 @@ impl ProtectedClient {
         }
     }
 
+    /// Starts a builder using an active key and a bounded read/delete rotation window.
+    pub fn builder_with_key_ring(
+        endpoint: Endpoint,
+        key_ring: DataProtectionKeyRing,
+    ) -> ProtectedClientBuilder {
+        ProtectedClientBuilder {
+            raw: RawClient::builder(endpoint),
+            protection: ProtectionSettings {
+                compression: Compression::Disabled,
+                encryption: Encryption::Robust,
+                key_ring,
+            },
+        }
+    }
+
     protected_client_methods!(RawClient);
 }
 
@@ -305,6 +429,21 @@ impl LocalProtectedClient {
         LocalProtectedClientBuilder {
             raw: LocalRawClient::builder(endpoint),
             protection: ProtectionSettings::new(key),
+        }
+    }
+
+    /// Starts a builder using an active key and a bounded read/delete rotation window.
+    pub fn builder_with_key_ring(
+        endpoint: Endpoint,
+        key_ring: DataProtectionKeyRing,
+    ) -> LocalProtectedClientBuilder {
+        LocalProtectedClientBuilder {
+            raw: LocalRawClient::builder(endpoint),
+            protection: ProtectionSettings {
+                compression: Compression::Disabled,
+                encryption: Encryption::Robust,
+                key_ring,
+            },
         }
     }
 
