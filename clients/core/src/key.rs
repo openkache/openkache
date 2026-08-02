@@ -178,8 +178,18 @@ impl DataProtectionKeyRing {
 
 impl DataProtectionKey {
     /// Creates a data protection key from exact random bytes.
-    pub fn from_bytes(bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
-        let bytes = Zeroizing::new(bytes);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `bytes` contains no non-zero secret material.
+    pub fn from_bytes(mut bytes: [u8; DATA_PROTECTION_KEY_BYTES]) -> Result<Self> {
+        let result = Self::from_slice(&bytes);
+        bytes.zeroize();
+        result
+    }
+
+    fn from_nonzero_bytes(bytes: &[u8; DATA_PROTECTION_KEY_BYTES]) -> Self {
+        let bytes = Zeroizing::new(*bytes);
         let item_id_root = blake3::derive_key(
             crate::contract::VALUE_FORMAT_ITEM_ID_ROOT_CONTEXT,
             &bytes[..],
@@ -205,7 +215,7 @@ impl DataProtectionKey {
     ///
     /// # Errors
     ///
-    /// Returns an error when `bytes` does not contain exactly 32 bytes.
+    /// Returns an error when `bytes` does not contain exactly 32 bytes or only contains zeroes.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
         let exact: &[u8; DATA_PROTECTION_KEY_BYTES] = bytes.try_into().map_err(|_| {
             Error::configuration(
@@ -222,7 +232,7 @@ impl DataProtectionKey {
                 "must contain non-zero secret material",
             ));
         }
-        Ok(Self::from_bytes(*exact))
+        Ok(Self::from_nonzero_bytes(exact))
     }
 
     /// Decodes a Base64-encoded 32-byte random secret.
@@ -237,7 +247,8 @@ impl DataProtectionKey {
     ///
     /// # Errors
     ///
-    /// Returns an error when Base64 decoding fails or does not produce exactly 32 bytes.
+    /// Returns an error when Base64 decoding fails, does not produce exactly 32 bytes, or only
+    /// contains zeroes.
     pub fn from_base64(encoded: &str) -> Result<Self> {
         let engine = if encoded.ends_with('=') {
             &STANDARD

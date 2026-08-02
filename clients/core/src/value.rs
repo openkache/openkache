@@ -485,12 +485,13 @@ impl ValueCodec {
     ///
     /// # Errors
     ///
-    /// Returns an error when the compression level is unsupported.
+    /// Returns an error when the key is all zeroes or the compression level is unsupported.
     pub fn encrypted(
         mut key: [u8; ENCRYPTION_KEY_BYTES],
         compression: Compression,
     ) -> Result<Self> {
-        let protection_key = DataProtectionKey::from_bytes(key);
+        let protection_key = DataProtectionKey::from_bytes(key)
+            .map_err(|error| Error::InvalidDataProtectionKey(error.to_string()))?;
         key.zeroize();
         Self::protected(&protection_key, compression)
     }
@@ -509,13 +510,15 @@ impl ValueCodec {
     ///
     /// # Errors
     ///
-    /// Returns an error for unprotected encryption or an unsupported compression level.
+    /// Returns an error for an all-zero key, unprotected encryption, or an unsupported compression
+    /// level.
     pub fn encrypted_with_profile(
         mut key: [u8; ENCRYPTION_KEY_BYTES],
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        let protection_key = DataProtectionKey::from_bytes(key);
+        let protection_key = DataProtectionKey::from_bytes(key)
+            .map_err(|error| Error::InvalidDataProtectionKey(error.to_string()))?;
         key.zeroize();
         Self::protected_with_profile(&protection_key, compression, encryption)
     }
@@ -882,6 +885,9 @@ pub enum Error {
     /// An unprotected profile was passed to a protected constructor.
     #[error("protected value codecs require Compact or Robust encryption")]
     InvalidEncryptionConfiguration,
+    /// The supplied data-protection key was invalid.
+    #[error("invalid data-protection key: {0}")]
+    InvalidDataProtectionKey(String),
     /// The decoded serialized value exceeded its limit.
     #[error("decoded value is too large: {size} bytes exceeds {maximum}")]
     DecodedValueTooLarge {
