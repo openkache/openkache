@@ -1,0 +1,10 @@
+# Bun installs a linked package tree for the TypeScript client tests.
+clients/typescript/node_modules
+
+# Package-native build outputs are not Bazel source inputs. Bazel generators
+# recreate their contract files under bazel-bin when a target needs them.
+clients/python/src/openkache/_generated
+clients/swift/.build
+clients/typescript/dist
+clients/typescript/src/generated_local
+target
