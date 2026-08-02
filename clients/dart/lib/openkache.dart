@@ -1067,6 +1067,9 @@ void _validateKey(Uint8List key, String name) {
   if (key.length != _keyBytes) {
     throw ArgumentError.value(key, name, 'must contain exactly $_keyBytes bytes');
   }
+  if (key.every((byte) => byte == 0)) {
+    throw ArgumentError.value(key, name, 'must contain non-zero secret material');
+  }
 }
 
 void _validateItemId(Uint8List itemId) {

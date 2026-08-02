@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -148,6 +149,22 @@ public:
             [](Byte value) { return value == 0; });
         if (key_is_zero) {
             throw Error("data_protection_key must contain non-zero secret material");
+        }
+        if (options.previous_data_protection_keys.size() %
+                OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES
+            != 0) {
+            throw Error("previous_data_protection_keys length must be a key multiple");
+        }
+        for (std::size_t offset = 0;
+             offset < options.previous_data_protection_keys.size();
+             offset += OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES) {
+            const auto begin = options.previous_data_protection_keys.begin() +
+                static_cast<std::ptrdiff_t>(offset);
+            const auto end = begin + OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES;
+            if (std::all_of(begin, end, [](Byte value) { return value == 0; })) {
+                throw Error(
+                    "previous_data_protection_keys must contain non-zero secret material");
+            }
         }
         const auto* certificate = options.certificate.empty()
             ? nullptr

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
@@ -27,7 +27,7 @@ use crate::mutation::{MutationDecision, MutationDedupeStore};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
-    ServerTlsConfig, StreamReadError, TransportError,
+    ServerTlsConfig, StreamReadError, TransportError, deadline_after, remaining,
 };
 use crate::{
     AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache, TlsConfig,
@@ -983,8 +983,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         // result can be replayed. Reap completed tasks while the stream
         // remains active, and join the remaining bounded tasks on exit.
         while let Some(Some(_)) = mutation_tasks.next().now_or_never() {}
-        let mut frame = match receive
-            .read_request(MAX_REQUEST_FRAME_BYTES, request_timeout, &request_budget)
+        let deadline = deadline_after(request_timeout);
+        let frame = match receive
+            .read_request(MAX_REQUEST_FRAME_BYTES, deadline, &request_budget)
             .await
         {
             Ok(frame) => frame,
@@ -992,7 +993,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let _ = write_response(
                     &mut send,
                     response_bytes(Status::Timeout, b"request read timed out"),
-                    request_timeout,
+                    deadline_after(request_timeout),
                 )
                 .await;
                 break;
@@ -1001,19 +1002,18 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let _ = write_response(
                     &mut send,
                     response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
-                    request_timeout,
+                    deadline,
                 )
                 .await;
                 break;
             }
             Err(StreamReadError::Protocol(error)) => {
-                let _ = write_response(&mut send, protocol_error_response(error), request_timeout)
-                    .await;
+                let _ = write_response(&mut send, protocol_error_response(error), deadline).await;
                 break;
             }
             Err(StreamReadError::Transport(_)) => break,
         };
-        let request_bytes = std::mem::take(&mut frame.bytes);
+        let (request_bytes, request_permit) = frame.into_parts();
         let fingerprint: [u8; 32] = Sha256::digest(&request_bytes).into();
         let (response, _response_permit) = match Request::decode_owned(request_bytes) {
             Ok(request) => {
@@ -1043,7 +1043,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 };
                 let response_permit = if request.opcode == Opcode::Get {
                     match request_budget
-                        .acquire(max_item_bytes, request_timeout)
+                        .acquire(max_item_bytes, remaining(deadline))
                         .await
                     {
                         Ok(permit) => Some(permit),
@@ -1052,7 +1052,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Timeout,
                                 b"response memory budget timed out",
                             );
-                            if !write_response(&mut send, response, request_timeout).await {
+                            if !write_response(&mut send, response, deadline_after(request_timeout))
+                                .await
+                            {
                                 break;
                             }
                             continue;
@@ -1062,7 +1064,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Overloaded,
                                 b"response exceeds the server memory budget",
                             );
-                            if !write_response(&mut send, response, request_timeout).await {
+                            if !write_response(&mut send, response, deadline).await {
                                 break;
                             }
                             continue;
@@ -1081,7 +1083,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             &mutation_dedupe,
                             mutation_id.expect("pending mutations carry a token"),
                             fingerprint,
-                            request_timeout,
+                            deadline,
                         )
                         .await
                     }
@@ -1107,6 +1109,10 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         let generation = reservation_generation
                             .expect("new mutations carry a reservation generation");
                         mutation_tasks.push(compio::runtime::spawn(async move {
+                            // Keep the request-budget reservation alive for
+                            // the decoded value while a timed-out mutation
+                            // finishes in the background.
+                            let _request_permit = request_permit;
                             let response =
                                 execute_request(&mutation_cache, request, administrator).await;
                             let _ = mutation_store
@@ -1128,12 +1134,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             &mutation_dedupe,
                             mutation_id.expect("new mutations carry a token"),
                             fingerprint,
-                            request_timeout,
+                            deadline,
                         )
                         .await
                     }
                     None => match compio::runtime::time::timeout(
-                        request_timeout,
+                        remaining(deadline),
                         execute_request(&cache, request, administrator),
                     )
                     .await
@@ -1161,7 +1167,16 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(error) => (protocol_error_response(error), None),
         };
-        if !write_response(&mut send, response, request_timeout).await {
+        let response_deadline = if response.status == Status::Timeout {
+            // A timeout response is an explicit terminal result. Give the
+            // peer a bounded grace window to receive it after the operation
+            // deadline has elapsed; successful responses remain bound by the
+            // original complete-request deadline.
+            deadline_after(request_timeout)
+        } else {
+            deadline
+        };
+        if !write_response(&mut send, response, response_deadline).await {
             break;
         }
     }
@@ -1172,11 +1187,8 @@ async fn wait_for_mutation_result(
     mutation_dedupe: &Arc<Mutex<MutationDedupeStore>>,
     mutation_id: openkache_protocol::MutationId,
     fingerprint: [u8; 32],
-    request_timeout: Duration,
+    deadline: Instant,
 ) -> Response {
-    let deadline = std::time::Instant::now()
-        .checked_add(request_timeout)
-        .unwrap_or_else(std::time::Instant::now);
     loop {
         let decision = mutation_dedupe
             .lock()
@@ -1207,7 +1219,7 @@ async fn wait_for_mutation_result(
             MutationDecision::Pending => {}
         }
 
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let remaining = remaining(deadline);
         if remaining.is_zero() {
             return response_bytes(Status::Timeout, b"mutation replay timed out");
         }
@@ -1218,12 +1230,12 @@ async fn wait_for_mutation_result(
 async fn write_response<S: SendStream>(
     send: &mut S,
     response: Response,
-    request_timeout: Duration,
+    deadline: Instant,
 ) -> bool {
     let Ok(frame) = response.into_encoded() else {
         return false;
     };
-    send.write_response(frame, request_timeout).await.is_ok()
+    send.write_response(frame, deadline).await.is_ok()
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.

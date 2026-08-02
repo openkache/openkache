@@ -466,6 +466,9 @@ private enum NativeBridge {
                 "dataProtectionKey must contain exactly \(Smithy_Value_Format.dataProtectionKeyBytes) bytes"
             )
         }
+        guard activeKey.contains(where: { $0 != 0 }) else {
+            throw OpenKacheError("dataProtectionKey must contain non-zero secret material")
+        }
         guard previousKeys.count <= Smithy_Value_Format.maxPreviousDataProtectionKeys else {
             throw OpenKacheError(
                 "keyRing.previous may contain at most "
@@ -477,6 +480,11 @@ private enum NativeBridge {
                 throw OpenKacheError(
                     "keyRing.previous[\(index)] must contain exactly "
                         + "\(Smithy_Value_Format.dataProtectionKeyBytes) bytes"
+                )
+            }
+            guard key.contains(where: { $0 != 0 }) else {
+                throw OpenKacheError(
+                    "keyRing.previous[\(index)] must contain non-zero secret material"
                 )
             }
         }

@@ -147,7 +147,28 @@ data class Options(
 data class DataProtectionKeyRing(
     val active: ByteArray,
     val previous: Array<ByteArray> = emptyArray(),
-)
+) {
+    init {
+        validateDataProtectionKey(active, "keyRing.active")
+        require(previous.size <= SmithyContract.MAX_PREVIOUS_DATA_PROTECTION_KEYS) {
+            "keyRing.previous may contain at most " +
+                "${SmithyContract.MAX_PREVIOUS_DATA_PROTECTION_KEYS} keys"
+        }
+        previous.forEachIndexed { index, key ->
+            validateDataProtectionKey(key, "keyRing.previous[$index]")
+        }
+    }
+}
+
+private fun validateDataProtectionKey(key: ByteArray, name: String) {
+    require(key.size == SmithyContract.VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
+        "$name must contain exactly " +
+            "${SmithyContract.VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES} bytes"
+    }
+    require(key.any { it.toInt() != 0 }) {
+        "$name must contain non-zero secret material"
+    }
+}
 
 /** Kotlin mutation options matching the shared Smithy condition and token contract. */
 data class SetOptions(

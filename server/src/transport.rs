@@ -8,7 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use compio::BufResult;
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
@@ -167,7 +167,7 @@ pub(super) trait ReceiveStream {
     fn read_request(
         &mut self,
         maximum: usize,
-        timeout: Duration,
+        deadline: Instant,
         budget: &RequestBudget,
     ) -> impl Future<Output = Result<RequestFrame, StreamReadError>>;
 }
@@ -177,8 +177,20 @@ pub(super) trait SendStream {
     fn write_response(
         &mut self,
         frame: Vec<u8>,
-        timeout: Duration,
+        deadline: Instant,
     ) -> impl Future<Output = Result<(), TransportError>>;
+}
+
+/// Returns the absolute deadline used for one complete request exchange.
+pub(super) fn deadline_after(timeout: Duration) -> Instant {
+    Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now)
+}
+
+/// Returns the remaining duration without allowing a clock overrun to panic.
+pub(super) fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }
 
 /// Failure while receiving a request frame.
@@ -206,6 +218,15 @@ impl RequestFrame {
             bytes,
             _permit: permit,
         }
+    }
+
+    /// Moves the frame bytes and their budget reservation together.
+    ///
+    /// A timed-out mutation may continue in a background task after the
+    /// response deadline. That task must retain the reservation for its
+    /// decoded value until it releases the value allocation.
+    pub(super) fn into_parts(self) -> (Vec<u8>, RequestBudgetPermit) {
+        (self.bytes, self._permit)
     }
 }
 
@@ -357,18 +378,18 @@ async fn read_buffered_request(
     stream: &mut impl AsyncRead,
     backend: &'static str,
     maximum: usize,
-    timeout: Duration,
+    deadline: Instant,
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
     let header = Vec::with_capacity(1).slice(..1);
     let BufResult(result, header) =
-        compio::runtime::time::timeout(timeout, stream.read_exact(header))
+        compio::runtime::time::timeout(remaining(deadline), stream.read_exact(header))
             .await
             .map_err(|_| StreamReadError::Timeout)?;
     result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
 
     let frame = header.into_inner();
-    let (frame, header) = compio::runtime::time::timeout(timeout, async {
+    let (frame, header) = compio::runtime::time::timeout(remaining(deadline), async {
         let mut frame = frame;
         loop {
             if let Some(header) = Request::decode_header(&frame)? {
@@ -384,7 +405,7 @@ async fn read_buffered_request(
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
-    let (mut frame, frame_len) = compio::runtime::time::timeout(timeout, async {
+    let (mut frame, frame_len) = compio::runtime::time::timeout(remaining(deadline), async {
         let mut frame = frame;
         loop {
             if let Some(frame_len) = header.frame_len(&frame)? {
@@ -403,7 +424,9 @@ async fn read_buffered_request(
     if frame_len > maximum {
         return Err(StreamReadError::TooLarge);
     }
-    let permit = budget.acquire(header.value_len(), timeout).await?;
+    let permit = budget
+        .acquire(header.value_len(), remaining(deadline))
+        .await?;
     let body_start = frame.len();
     if body_start == frame_len {
         return Ok(RequestFrame::new(frame, permit));
@@ -411,7 +434,7 @@ async fn read_buffered_request(
 
     frame.reserve(frame_len - body_start);
     let BufResult(result, body) = compio::runtime::time::timeout(
-        timeout,
+        remaining(deadline),
         stream.read_exact(frame.slice(body_start..frame_len)),
     )
     .await
@@ -589,10 +612,10 @@ mod quinn_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
-            timeout: Duration,
+            deadline: Instant,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
+            read_buffered_request(&mut self.0, NAME, maximum, deadline, budget).await
         }
     }
 
@@ -602,10 +625,10 @@ mod quinn_backend {
         async fn write_response(
             &mut self,
             frame: Vec<u8>,
-            timeout: Duration,
+            deadline: Instant,
         ) -> Result<(), TransportError> {
             let BufResult(result, _) =
-                compio::runtime::time::timeout(timeout, self.0.write_all(frame))
+                compio::runtime::time::timeout(remaining(deadline), self.0.write_all(frame))
                     .await
                     .map_err(|error| {
                         TransportError::backend(NAME, "stream write timeout", error)
@@ -718,10 +741,10 @@ mod noq_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
-            timeout: Duration,
+            deadline: Instant,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
+            read_buffered_request(&mut self.0, NAME, maximum, deadline, budget).await
         }
     }
 
@@ -731,10 +754,10 @@ mod noq_backend {
         async fn write_response(
             &mut self,
             frame: Vec<u8>,
-            timeout: Duration,
+            deadline: Instant,
         ) -> Result<(), TransportError> {
             let BufResult(result, _) =
-                compio::runtime::time::timeout(timeout, self.0.write_all(frame))
+                compio::runtime::time::timeout(remaining(deadline), self.0.write_all(frame))
                     .await
                     .map_err(|error| {
                         TransportError::backend(NAME, "stream write timeout", error)
@@ -920,17 +943,19 @@ mod quiche_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
-            timeout: Duration,
+            deadline: Instant,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
             while self.buffered.is_empty() {
-                self.buffered =
-                    compio::runtime::time::timeout(timeout, self.next_chunk("stream header read"))
-                        .await
-                        .map_err(|_| StreamReadError::Timeout)?
-                        .map_err(StreamReadError::Transport)?;
+                self.buffered = compio::runtime::time::timeout(
+                    remaining(deadline),
+                    self.next_chunk("stream header read"),
+                )
+                .await
+                .map_err(|_| StreamReadError::Timeout)?
+                .map_err(StreamReadError::Transport)?;
             }
-            let header = compio::runtime::time::timeout(timeout, async {
+            let header = compio::runtime::time::timeout(remaining(deadline), async {
                 loop {
                     if let Some(header) = Request::decode_header(&self.buffered)? {
                         break Ok::<_, StreamReadError>(header);
@@ -941,7 +966,7 @@ mod quiche_backend {
             })
             .await
             .map_err(|_| StreamReadError::Timeout)??;
-            let frame_len = compio::runtime::time::timeout(timeout, async {
+            let frame_len = compio::runtime::time::timeout(remaining(deadline), async {
                 loop {
                     if let Some(frame_len) = header.frame_len(&self.buffered)? {
                         break Ok::<_, StreamReadError>(frame_len);
@@ -955,8 +980,10 @@ mod quiche_backend {
             if frame_len > maximum {
                 return Err(StreamReadError::TooLarge);
             }
-            let permit = budget.acquire(header.value_len(), timeout).await?;
-            compio::runtime::time::timeout(timeout, async {
+            let permit = budget
+                .acquire(header.value_len(), remaining(deadline))
+                .await?;
+            compio::runtime::time::timeout(remaining(deadline), async {
                 while self.buffered.len() < frame_len {
                     let chunk = self.next_chunk("stream body read").await?;
                     self.buffered.extend_from_slice(&chunk);
@@ -994,19 +1021,22 @@ mod quiche_backend {
         async fn write_response(
             &mut self,
             frame: Vec<u8>,
-            timeout: Duration,
+            deadline: Instant,
         ) -> Result<(), TransportError> {
             let (reply, response) = channel::bounded_sync_async(1);
-            self.commands
-                .send_async(Command::SendResponse {
+            compio::runtime::time::timeout(
+                remaining(deadline),
+                self.commands.send_async(Command::SendResponse {
                     connection_id: self.connection_id.clone(),
                     stream_id: self.stream_id,
                     frame,
                     reply,
-                })
-                .await
-                .map_err(|error| TransportError::backend(NAME, "stream write", error))?;
-            let result = compio::runtime::time::timeout(timeout, response.recv_async())
+                }),
+            )
+            .await
+            .map_err(|_| TransportError::backend(NAME, "stream write timeout", "deadline elapsed"))?
+            .map_err(|error| TransportError::backend(NAME, "stream write", error))?;
+            let result = compio::runtime::time::timeout(remaining(deadline), response.recv_async())
                 .await
                 .map_err(|error| TransportError::backend(NAME, "stream write timeout", error))?
                 .map_err(|error| TransportError::backend(NAME, "stream write", error))?;

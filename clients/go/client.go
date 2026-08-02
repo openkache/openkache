@@ -84,11 +84,8 @@ type DataProtectionKeyRing struct {
 }
 
 func (ring DataProtectionKeyRing) normalize() ([]byte, []byte, error) {
-	if len(ring.Active) != SmithyDataProtectionKeyBytes {
-		return nil, nil, validationError(
-			"key_ring.active",
-			fmt.Sprintf("must contain exactly %d bytes", SmithyDataProtectionKeyBytes),
-		)
+	if err := validateDataProtectionKey(ring.Active, "key_ring.active"); err != nil {
+		return nil, nil, err
 	}
 	if len(ring.Previous) > SmithyMaxPreviousDataProtectionKeys {
 		return nil, nil, validationError(
@@ -98,11 +95,11 @@ func (ring DataProtectionKeyRing) normalize() ([]byte, []byte, error) {
 	}
 	previous := make([]byte, 0, len(ring.Previous)*SmithyDataProtectionKeyBytes)
 	for index, key := range ring.Previous {
-		if len(key) != SmithyDataProtectionKeyBytes {
-			return nil, nil, validationError(
-				"key_ring.previous",
-				fmt.Sprintf("key %d must contain exactly %d bytes", index, SmithyDataProtectionKeyBytes),
-			)
+		if err := validateDataProtectionKey(
+			key,
+			fmt.Sprintf("key_ring.previous[%d]", index),
+		); err != nil {
+			return nil, nil, err
 		}
 		previous = append(previous, key...)
 	}
@@ -221,6 +218,9 @@ func (o Options) normalize() (normalizedOptions, error) {
 			"data_protection_key",
 			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyDataProtectionKeyBytes, len(dataProtectionKey)),
 		)
+	}
+	if err := validateDataProtectionKey(dataProtectionKey, "data_protection_key"); err != nil {
+		return normalizedOptions{}, err
 	}
 
 	serverName := o.ServerName
@@ -346,6 +346,21 @@ func (o Options) normalize() (normalizedOptions, error) {
 		maxInFlight:         maxInFlight,
 		nativeLibrary:       o.NativeLibrary,
 	}, nil
+}
+
+func validateDataProtectionKey(key []byte, name string) error {
+	if len(key) != SmithyDataProtectionKeyBytes {
+		return validationError(
+			name,
+			fmt.Sprintf("must contain exactly %d bytes", SmithyDataProtectionKeyBytes),
+		)
+	}
+	for _, value := range key {
+		if value != 0 {
+			return nil
+		}
+	}
+	return validationError(name, "must contain non-zero secret material")
 }
 
 func normalizedPEM(value []byte) []byte {

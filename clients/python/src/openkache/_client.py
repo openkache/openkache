@@ -168,24 +168,14 @@ class DataProtectionKeyRing:
     previous: tuple[bytes, ...] = ()
 
     def __post_init__(self) -> None:
-        active = _as_bytes(self.active, "key_ring.active")
-        if len(active) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES:
-            raise OpenKacheValueError(
-                "key_ring.active must contain exactly "
-                f"{SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes"
-            )
+        active = _data_protection_key(self.active, "key_ring.active")
         previous = tuple(
-            _as_bytes(key, "key_ring.previous entry") for key in self.previous
+            _data_protection_key(key, "key_ring.previous entry") for key in self.previous
         )
         if len(previous) > SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS:
             raise OpenKacheValueError(
                 "key_ring.previous may contain at most "
                 f"{SMITHY_MAX_PREVIOUS_DATA_PROTECTION_KEYS} keys"
-            )
-        if any(len(key) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES for key in previous):
-            raise OpenKacheValueError(
-                "each key_ring.previous entry must contain exactly "
-                f"{SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes"
             )
         object.__setattr__(self, "active", active)
         object.__setattr__(self, "previous", previous)
@@ -741,11 +731,7 @@ def _connection_settings(
                 "data_protection_key or key_ring must be supplied"
             )
         protection_key = _as_bytes(data_protection_key, "data_protection_key")
-        if len(protection_key) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES:
-            raise OpenKacheValueError(
-                "data_protection_key must contain exactly "
-                f"{SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes"
-            )
+        protection_key = _data_protection_key(protection_key, "data_protection_key")
         previous_keys: tuple[bytes, ...] = ()
     else:
         protection_key = key_ring.active
@@ -846,6 +832,17 @@ def _as_bytes(value: bytes | bytearray | memoryview, name: str) -> bytes:
     if isinstance(value, (bytearray, memoryview)):
         return bytes(value)
     raise OpenKacheValueError(f"{name} must be bytes-like")
+
+
+def _data_protection_key(value: bytes | bytearray | memoryview, name: str) -> bytes:
+    key = _as_bytes(value, name)
+    if len(key) != SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES:
+        raise OpenKacheValueError(
+            f"{name} must contain exactly {SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes"
+        )
+    if not any(key):
+        raise OpenKacheValueError(f"{name} must contain non-zero secret material")
+    return key
 
 
 def _value_bytes(value: bytes | bytearray | memoryview) -> bytes:

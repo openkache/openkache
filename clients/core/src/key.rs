@@ -216,6 +216,12 @@ impl DataProtectionKey {
                 ),
             )
         })?;
+        if exact.iter().all(|byte| *byte == 0) {
+            return Err(Error::configuration(
+                "data_protection_key",
+                "must contain non-zero secret material",
+            ));
+        }
         Ok(Self::from_bytes(*exact))
     }
 
@@ -252,9 +258,7 @@ impl DataProtectionKey {
                 ),
             ));
         }
-        let mut bytes = [0; DATA_PROTECTION_KEY_BYTES];
-        bytes.copy_from_slice(&decoded);
-        Ok(Self::from_bytes(bytes))
+        Self::from_slice(&decoded)
     }
 
     /// Returns the canonical padded Base64 representation for secret storage.

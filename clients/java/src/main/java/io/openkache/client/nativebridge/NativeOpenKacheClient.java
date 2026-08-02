@@ -76,6 +76,25 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             io.openkache.client.generated.SmithyContract.FFI_METRICS_SNAPSHOT_BYTES;
     private static final SecureRandom RANDOM = new SecureRandom();
 
+    private static void validateDataProtectionKey(byte[] key, String name) {
+        if (key.length
+                != io.openkache.client.generated.SmithyContract
+                        .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
+            throw new IllegalArgumentException(
+                    name
+                            + " must contain "
+                            + io.openkache.client.generated.SmithyContract
+                                    .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
+                            + " bytes");
+        }
+        for (byte value : key) {
+            if (value != 0) {
+                return;
+            }
+        }
+        throw new IllegalArgumentException(name + " must contain non-zero secret material");
+    }
+
     /*
      * FfiConnectOptions is a C repr(C) structure. OpenKache's supported
      * native artifacts use a 64-bit size_t, so the Java FFM layout uses
@@ -1200,15 +1219,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
         public DataProtectionKeyRing {
             active = active == null ? new byte[0] : active.clone();
             previous = Options.deepCopy(previous == null ? new byte[0][] : previous);
-            if (active.length
-                    != io.openkache.client.generated.SmithyContract
-                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
-                throw new IllegalArgumentException(
-                        "active key must contain "
-                                + io.openkache.client.generated.SmithyContract
-                                        .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
-                                + " bytes");
-            }
+            validateDataProtectionKey(active, "active key");
             if (previous.length
                     > io.openkache.client.generated.SmithyContract
                             .MAX_PREVIOUS_DATA_PROTECTION_KEYS) {
@@ -1219,15 +1230,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                                 + " entries");
             }
             for (byte[] key : previous) {
-                if (key.length
-                        != io.openkache.client.generated.SmithyContract
-                                .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
-                    throw new IllegalArgumentException(
-                            "each previous key must contain "
-                                    + io.openkache.client.generated.SmithyContract
-                                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
-                                    + " bytes");
-                }
+                validateDataProtectionKey(key, "each previous key");
             }
         }
 
@@ -1361,15 +1364,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
             if (serverName == null) {
                 throw new IllegalArgumentException("serverName");
             }
-            if (dataProtectionKey.length
-                    != io.openkache.client.generated.SmithyContract
-                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
-                throw new IllegalArgumentException(
-                        "dataProtectionKey must contain "
-                                + io.openkache.client.generated.SmithyContract
-                                        .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
-                                + " bytes");
-            }
+            validateDataProtectionKey(dataProtectionKey, "dataProtectionKey");
             if (previousDataProtectionKeys.length
                     > io.openkache.client.generated.SmithyContract
                             .MAX_PREVIOUS_DATA_PROTECTION_KEYS) {
@@ -1380,15 +1375,7 @@ public final class NativeOpenKacheClient implements AutoCloseable {
                                 + " keys");
             }
             for (byte[] key : previousDataProtectionKeys) {
-                if (key.length
-                        != io.openkache.client.generated.SmithyContract
-                                .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES) {
-                    throw new IllegalArgumentException(
-                            "each previous data-protection key must contain "
-                                    + io.openkache.client.generated.SmithyContract
-                                            .VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES
-                                    + " bytes");
-                }
+                validateDataProtectionKey(key, "each previous data-protection key");
             }
             if (connectTimeoutMillis
                             < io.openkache.client.generated.SmithyContract

@@ -206,6 +206,12 @@ enum Command {
     },
     Cancel {
         request_id: u64,
+        /// Generation of a pre-cancel tombstone, when this cancellation was
+        /// issued before the matching Execute command was registered.
+        ///
+        /// Keeping the generation on the command prevents an old queued
+        /// cancellation from applying to a newer use of the same request ID.
+        pre_cancel_generation: Option<u64>,
     },
     Shutdown,
 }
@@ -262,7 +268,7 @@ enum RequestCancellation {
     /// Cancellation for a request already reserved by an adapter.
     Existing,
     /// Cancellation recorded before the matching execute command arrived.
-    PreCancelled,
+    PreCancelled { generation: u64 },
 }
 
 #[derive(Debug, Default)]
@@ -340,6 +346,10 @@ impl FfiResult {
             ..FfiErrorMetadata::default()
         };
         attach_mutation_metadata(&mut metadata, mutation_id, ambiguous);
+        // A tokenized request that was canceled before transmission is safe
+        // to submit again even though it is not ambiguous. Keep that
+        // distinction separate from the metadata's `ambiguous` bit.
+        metadata.retryable = u8::from(mutation_id.is_some() || ambiguous);
         Self {
             kind: FfiResultKind::Error,
             payload: b"client operation canceled".to_vec(),
@@ -359,6 +369,10 @@ impl FfiResult {
             ..FfiErrorMetadata::default()
         };
         attach_mutation_metadata(&mut metadata, mutation_id, ambiguous);
+        // A timeout before the write still leaves a tokenized mutation safe
+        // to retry; only `ambiguous` indicates that the server may already
+        // have applied it.
+        metadata.retryable = u8::from(mutation_id.is_some() || ambiguous);
         Self {
             kind: FfiResultKind::Error,
             payload: format!("client operation timed out during {operation:?}").into_bytes(),
@@ -393,7 +407,9 @@ fn attach_mutation_metadata(
     ambiguous: bool,
 ) {
     if let Some(mutation_id) = mutation_id {
-        metadata.retryable = 1;
+        if ambiguous {
+            metadata.retryable = 1;
+        }
         metadata.ambiguous = u8::from(ambiguous);
         metadata.mutation_id_length = MUTATION_ID_BYTES as u8;
         metadata.mutation_id = mutation_id.into_bytes();
@@ -678,9 +694,19 @@ impl FfiClient {
         // worker observes Execute first, it will still turn that request into
         // a cancellation result; if it observes Cancel first, the intent is
         // retained until Execute arrives.
+        let pre_cancel_generation = match registration {
+            RequestCancellation::Existing => None,
+            RequestCancellation::PreCancelled { generation } => Some(generation),
+        };
         if self
             .commands
-            .send_timeout(Command::Cancel { request_id }, timeout)
+            .send_timeout(
+                Command::Cancel {
+                    request_id,
+                    pre_cancel_generation,
+                },
+                timeout,
+            )
             .is_err()
         {
             // A disconnected or full channel did not accept the command.
@@ -690,7 +716,7 @@ impl FfiClient {
             // already queued/active request must retain its cancellation
             // state until the worker reaps the lane; otherwise a caller
             // could reuse the ID while the old future is still in flight.
-            if registration == RequestCancellation::PreCancelled {
+            if matches!(registration, RequestCancellation::PreCancelled { .. }) {
                 self.clear_pre_cancelled_request(request_id);
             }
             return false;
@@ -772,7 +798,7 @@ impl FfiClient {
         requests
             .pre_cancelled_order
             .push_back((request_id, generation));
-        Some(RequestCancellation::PreCancelled)
+        Some(RequestCancellation::PreCancelled { generation })
     }
 
     fn clear_pre_cancelled_request(&self, request_id: u64) {
@@ -999,8 +1025,21 @@ async fn run_worker_loop(
                     Some(Err(error)) if error.is_cancelled() => {
                         // An explicit request cancellation aborts only that
                         // task. Its response was already completed by the
-                        // cancellation command, so keep serving the other
-                        // queued and active requests.
+                        // cancellation command, but the request registry and
+                        // in-flight slot must stay occupied until this
+                        // JoinHandle is reaped. Otherwise a caller can reuse
+                        // the request ID while the old task is still present
+                        // in `active`, and the old completion can remove the
+                        // new request's bookkeeping.
+                        if let Some(request_id) = active_requests.iter().find_map(
+                            |(request_id, (abort, _, _, _, _))| {
+                                (abort.id() == error.id()).then_some(*request_id)
+                            },
+                        ) {
+                            active_requests.remove(&request_id);
+                            remove_request(&requests, request_id);
+                            release_slot(&in_flight);
+                        }
                     }
                     Some(Err(error)) => {
                         let message = format!("native client worker task failed: {error}");
@@ -1088,23 +1127,38 @@ async fn run_worker_loop(
                             }
                         }
                     }
-                    Ok(Command::Cancel { request_id }) => {
+                    Ok(Command::Cancel {
+                        request_id,
+                        pre_cancel_generation,
+                    }) => {
+                        // A pre-cancel command can remain queued after its
+                        // tombstone was consumed by Execute. Ignore it when
+                        // the request ID has since been reused; otherwise an
+                        // old cancellation could abort the new request.
+                        if let Some(generation) = pre_cancel_generation
+                            && !pre_cancel_matches(&requests, request_id, generation)
+                        {
+                            continue;
+                        }
                         if let Some((
                             abort,
                             original_response,
                             operation,
                             mutation_id,
                             transmission,
-                        )) =
-                            active_requests.remove(&request_id)
+                        )) = active_requests.get(&request_id)
                         {
-                            remove_request(&requests, request_id);
+                            // Keep the active entry, request registry state,
+                            // and slot reservation until the aborted
+                            // JoinHandle is observed above. The cancellation
+                            // result is sent immediately so the synchronous
+                            // ABI caller can return, while the worker still
+                            // owns the task identity and lane cleanup.
                             abort.abort();
-                            release_slot(&in_flight);
                             metrics.cancellations.fetch_add(1, Ordering::Relaxed);
                             let _ = original_response.send(FfiResult::cancelled(
-                                Some(operation),
-                                mutation_id,
+                                Some(*operation),
+                                *mutation_id,
                                 transmission.load(Ordering::Acquire),
                             ));
                         } else if let Some((
@@ -1253,6 +1307,16 @@ fn request_state(requests: &RequestRegistry, request_id: u64) -> Option<RequestS
         .states
         .get(&request_id)
         .copied()
+}
+
+fn pre_cancel_matches(requests: &RequestRegistry, request_id: u64, generation: u64) -> bool {
+    requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pre_cancelled
+        .get(&request_id)
+        .copied()
+        == Some(generation)
 }
 
 fn claim_request(requests: &RequestRegistry, request_id: u64) -> RequestClaim {

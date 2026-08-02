@@ -1165,14 +1165,8 @@ function validate_options(options: Client_Options): void {
       "provide exactly one of data_protection_key or key_ring",
     )
   }
-  if (
-    has_legacy_key &&
-    (!(options.data_protection_key instanceof Uint8Array) ||
-      options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES)
-  ) {
-    throw new OpenKache_Error(
-      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
-    )
+  if (has_legacy_key) {
+    validate_data_protection_key(options.data_protection_key, "data_protection_key")
   }
   if (has_key_ring) validate_key_ring(options.key_ring)
   if (
@@ -1313,14 +1307,7 @@ function validate_key_ring(key_ring: Data_Protection_Key_Ring | undefined): void
   if (key_ring === undefined || !is_regular_object(key_ring)) {
     throw new OpenKache_Error("key_ring must be a regular object")
   }
-  if (
-    !(key_ring.active instanceof Uint8Array) ||
-    key_ring.active.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
-  ) {
-    throw new OpenKache_Error(
-      `key_ring.active must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
-    )
-  }
+  validate_data_protection_key(key_ring.active, "key_ring.active")
   const previous = key_ring.previous ?? []
   if (
     !Array.isArray(previous) ||
@@ -1331,14 +1318,21 @@ function validate_key_ring(key_ring: Data_Protection_Key_Ring | undefined): void
     )
   }
   for (const key of previous) {
-    if (
-      !(key instanceof Uint8Array) ||
-      key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
-    ) {
-      throw new OpenKache_Error(
-        `key_ring.previous entries must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
-      )
-    }
+    validate_data_protection_key(key, "key_ring.previous entry")
+  }
+}
+
+function validate_data_protection_key(value: unknown, name: string): asserts value is Uint8Array {
+  if (
+    !(value instanceof Uint8Array) ||
+    value.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
+  ) {
+    throw new OpenKache_Error(
+      `${name} must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
+    )
+  }
+  if (value.every((byte): boolean => byte === 0)) {
+    throw new OpenKache_Error(`${name} must contain non-zero secret material`)
   }
 }
 
