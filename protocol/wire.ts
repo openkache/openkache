@@ -254,43 +254,20 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     WIRE_CONTRACT_TRAIT_ID,
     `Smithy AST.shapes.${SERVICE_SHAPE_ID}`,
   )
-  const opcode_shape = shapes[OPCODE_SHAPE_ID]
-  const opcodes =
-    opcode_shape === undefined
-      ? array_member(service, "operations", SERVICE_SHAPE_ID)
-          .map((operation, index): Wire_Entry => {
-            const reference = object_value(operation, `${SERVICE_SHAPE_ID}.operations[${index}]`)
-            const target = string_member(
-              reference,
-              "target",
-              `${SERVICE_SHAPE_ID}.operations[${index}]`,
-            )
-            const operation_shape = object_member(shapes, target, "Smithy AST.shapes")
-            const trait = trait_value(
-              operation_shape,
-              WIRE_OPCODE_TRAIT_ID,
-              `Smithy AST.shapes.${target}`,
-            )
-            return {
-              name: pascal_case(shape_name(target)),
-              value: integer_member(
-                trait,
-                "value",
-                `${target}.${WIRE_OPCODE_TRAIT_ID}`,
-                0,
-                0xff,
-              ),
-            }
-          })
-          .sort((left, right) => left.value - right.value)
-      : wire_enum_entries(
-          shapes,
-          OPCODE_SHAPE_ID,
-          WIRE_ENUM_OPCODE_TRAIT_ID,
-          "opcode",
-        )
-  const operation_specs = array_member(service, "operations", SERVICE_SHAPE_ID)
-    .map((operation, index): Operation_Spec => {
+  const item_id_bytes = integer_member(contract_trait, "itemIdBytes", "wireContract", 1)
+  const mutation_id_bytes = integer_member(
+    contract_trait,
+    "mutationIdBytes",
+    "wireContract",
+    1,
+  )
+  const max_value_bytes = integer_member(contract_trait, "maxValueBytes", "wireContract", 1)
+  if (mutation_id_bytes !== 16) {
+    throw new Error("wireContract.mutationIdBytes must be 16 for protocol v1")
+  }
+  const v1 = wire_v1_contract(contract_trait.v1)
+  const service_operations = array_member(service, "operations", SERVICE_SHAPE_ID).map(
+    (operation, index) => {
       const reference = object_value(operation, `${SERVICE_SHAPE_ID}.operations[${index}]`)
       const target = string_member(
         reference,
@@ -303,12 +280,9 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
         WIRE_OPCODE_TRAIT_ID,
         `Smithy AST.shapes.${target}`,
       )
-      const spec = trait_value(
-        operation_shape,
-        OPERATION_SPEC_TRAIT_ID,
-        `Smithy AST.shapes.${target}`,
-      )
       return {
+        name: pascal_case(shape_name(target)),
+        target,
         opcode: integer_member(
           opcode_trait,
           "value",
@@ -316,51 +290,92 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
           0,
           0xff,
         ),
+        operation_shape,
+      }
+    },
+  )
+  const service_operation_names = new Set<string>()
+  for (const operation of service_operations) {
+    if (service_operation_names.has(operation.name)) {
+      throw new Error(`duplicate service operation name ${operation.name}`)
+    }
+    service_operation_names.add(operation.name)
+  }
+  const opcode_shape = shapes[OPCODE_SHAPE_ID]
+  const opcodes =
+    opcode_shape === undefined
+      ? service_operations
+          .map(
+            (operation): Wire_Entry => ({
+              name: operation.name,
+              value: operation.opcode,
+            }),
+          )
+          .sort((left, right) => left.value - right.value)
+      : wire_enum_entries(
+          shapes,
+          OPCODE_SHAPE_ID,
+          WIRE_ENUM_OPCODE_TRAIT_ID,
+          "opcode",
+        )
+  const operation_specs_with_names = service_operations.map(
+    (operation): Operation_Spec & { readonly operation_name: string } => {
+      const spec = trait_value(
+        operation.operation_shape,
+        OPERATION_SPEC_TRAIT_ID,
+        `Smithy AST.shapes.${operation.target}`,
+      )
+      return {
+        operation_name: operation.name,
+        opcode: operation.opcode,
         item_id_bytes: integer_member(
           spec,
           "itemIdBytes",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
         ),
         value_min_bytes: integer_member(
           spec,
           "valueMinBytes",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
         ),
         value_max_bytes: integer_member(
           spec,
           "valueMaxBytes",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
         ),
         allowed_flags: integer_member(
           spec,
           "allowedFlags",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
           0xff,
         ),
         ttl_allowed: boolean_member(
           spec,
           "ttlAllowed",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
         ),
         mutation: boolean_member(
           spec,
           "mutation",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
         ),
         success_status: integer_member(
           spec,
           "successStatus",
-          `${target}.${OPERATION_SPEC_TRAIT_ID}`,
+          `${operation.target}.${OPERATION_SPEC_TRAIT_ID}`,
           0,
           0xff,
         ),
       }
     })
     .sort((left, right) => left.opcode - right.opcode)
+  const operation_specs = operation_specs_with_names.map(
+    ({ operation_name: _operation_name, ...spec }): Operation_Spec => spec,
+  )
   unique_wire_values(opcodes, "opcode")
   unique_wire_values(
     operation_specs.map((spec) => ({ name: `${spec.opcode}`, value: spec.opcode })),
@@ -373,15 +388,95 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     WIRE_STATUS_TRAIT_ID,
     "status",
   )
+  const opcode_by_name = new Map(opcodes.map((entry) => [entry.name, entry.value]))
+  for (const operation of service_operations) {
+    const enum_entry_value = opcode_by_name.get(operation.name)
+    if (enum_entry_value === undefined) {
+      throw new Error(
+        `opcode enum is missing service operation ${operation.name} (${operation.target})`,
+      )
+    }
+    if (enum_entry_value !== operation.opcode) {
+      throw new Error(
+        `${operation.target} wire opcode ${operation.opcode} does not match ` +
+          `Opcode.${operation.name} value ${enum_entry_value}`,
+      )
+    }
+  }
+  for (const opcode of opcodes) {
+    if (!service_operation_names.has(opcode.name)) {
+      throw new Error(`opcode enum member ${opcode.name} has no service operation`)
+    }
+  }
+  const status_values = new Set(statuses.map((status) => status.value))
+  const known_flags =
+    v1.set_ttl_flag |
+    v1.set_if_absent_flag |
+    v1.set_if_present_flag |
+    v1.set_mutation_id_flag
+  for (const operation of operation_specs_with_names) {
+    if (operation.item_id_bytes !== 0 && operation.item_id_bytes !== item_id_bytes) {
+      throw new Error(
+        `${operation.operation_name} itemIdBytes ${operation.item_id_bytes} ` +
+          `must be 0 or the service value ${item_id_bytes}`,
+      )
+    }
+    if (operation.value_min_bytes > operation.value_max_bytes) {
+      throw new Error(
+        `${operation.operation_name} valueMinBytes ${operation.value_min_bytes} ` +
+          `exceeds valueMaxBytes ${operation.value_max_bytes}`,
+      )
+    }
+    if (operation.value_max_bytes > max_value_bytes) {
+      throw new Error(
+        `${operation.operation_name} valueMaxBytes ${operation.value_max_bytes} ` +
+          `exceeds service maxValueBytes ${max_value_bytes}`,
+      )
+    }
+    if ((operation.allowed_flags & ~known_flags) !== 0) {
+      throw new Error(
+        `${operation.operation_name} allowedFlags ${operation.allowed_flags} ` +
+          `contains an unknown SET flag`,
+      )
+    }
+    const mutation_flag_allowed =
+      (operation.allowed_flags & v1.set_mutation_id_flag) !== 0
+    if (mutation_flag_allowed !== operation.mutation) {
+      throw new Error(
+        `${operation.operation_name} mutation and setMutationIdFlag must agree`,
+      )
+    }
+    const ttl_flag_allowed = (operation.allowed_flags & v1.set_ttl_flag) !== 0
+    if (ttl_flag_allowed !== operation.ttl_allowed) {
+      throw new Error(`${operation.operation_name} ttlAllowed and setTtlFlag must agree`)
+    }
+    if (operation.ttl_allowed && !operation.mutation) {
+      throw new Error(`${operation.operation_name} ttlAllowed requires mutation`)
+    }
+    if (!operation.mutation && operation.allowed_flags !== 0) {
+      throw new Error(
+        `${operation.operation_name} non-mutating operations cannot allow SET flags`,
+      )
+    }
+    if (operation.mutation && operation.item_id_bytes === 0) {
+      throw new Error(`${operation.operation_name} mutations require an item ID`)
+    }
+    if (!status_values.has(operation.success_status)) {
+      throw new Error(
+        `${operation.operation_name} successStatus ${operation.success_status} ` +
+          "is not defined by the Status enum",
+      )
+    }
+  }
 
   return {
-    item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
-    mutation_id_bytes: integer_member(contract_trait, "mutationIdBytes", "wireContract", 1),
-    max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
+    item_id_bytes,
+    mutation_id_bytes,
+    max_value_bytes,
     operation_specs,
     opcodes,
     statuses,
-    v1: wire_v1_contract(contract_trait.v1),
+    v1,
   }
 }
 
