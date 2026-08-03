@@ -49,6 +49,21 @@ alias(
 )
 
 alias(
+    name = "openkache_client_typescript_native",
+    actual = "//clients/typescript/native:openkache_client_typescript_native",
+)
+
+alias(
+    name = "openkache_client_python_native",
+    actual = "//clients/python/native:openkache_client_python_native",
+)
+
+alias(
+    name = "openkache_client_dotnet_native",
+    actual = "//clients/core:openkache_client_core_ffi",
+)
+
+alias(
     name = "openkache_cli",
     actual = "//clients/cli:openkache_cli",
 )
@@ -66,6 +81,16 @@ filegroup(
 filegroup(
     name = "client_source_tree",
     srcs = ["//clients:client_source_tree"],
+)
+
+filegroup(
+    name = "client_native_sources",
+    srcs = ["//clients:client_native_sources"],
+)
+
+filegroup(
+    name = "native_adapter_artifacts",
+    srcs = ["//clients:native_adapter_artifacts"],
 )
 
 alias(

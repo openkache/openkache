@@ -3,11 +3,29 @@
 package(default_visibility = ["//visibility:public"])
 
 filegroup(
+    name = "client_generator",
+    srcs = ["generate.ts"],
+)
+
+filegroup(
     name = "client_generator_inputs",
     srcs = glob([
-        "generate.ts",
         "model/**",
-    ]) + ["//protocol:generator_inputs"],
+    ]) + [
+        ":client_generator",
+        "//protocol:generator_inputs",
+    ],
+)
+
+# Checked-in Go outputs are part of the contract's source-level API. Expose
+# them explicitly so private Bazel checks can compare generated output without
+# reading undeclared files from the public checkout.
+filegroup(
+    name = "client_contract_outputs",
+    srcs = [
+        "go/smithy_api.go",
+        "go/smithy_contract.go",
+    ],
 )
 
 filegroup(
@@ -23,6 +41,30 @@ filegroup(
 filegroup(
     name = "client_cli_sources",
     srcs = ["//clients/cli:source_tree"],
+)
+
+filegroup(
+    name = "client_typescript_native_sources",
+    srcs = ["//clients/typescript/native:source_tree"],
+)
+
+filegroup(
+    name = "client_python_native_sources",
+    srcs = ["//clients/python/native:source_tree"],
+)
+
+filegroup(
+    name = "client_dotnet_sources",
+    srcs = ["//clients/dotnet/OpenKache:source_tree"],
+)
+
+filegroup(
+    name = "client_native_sources",
+    srcs = [
+        ":client_dotnet_sources",
+        ":client_python_native_sources",
+        ":client_typescript_native_sources",
+    ],
 )
 
 filegroup(
@@ -73,6 +115,7 @@ filegroup(
     srcs = [
         "README.md",
         ":client_generator_inputs",
+        ":client_native_sources",
         ":client_source_tree",
         ":language_client_sources",
         "//clients/cli:README.md",
@@ -81,5 +124,14 @@ filegroup(
         "//clients/core:runtime_sources",
         "//clients/rust:README.md",
         "//clients/rust:runtime_sources",
+    ],
+)
+
+filegroup(
+    name = "native_adapter_artifacts",
+    srcs = [
+        "//clients/core:openkache_client_core_ffi",
+        "//clients/python/native:openkache_client_python_native",
+        "//clients/typescript/native:openkache_client_typescript_native",
     ],
 )

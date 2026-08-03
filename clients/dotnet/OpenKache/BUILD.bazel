@@ -1,0 +1,16 @@
+"""Bazel source target for the managed client adapter."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "source_tree",
+    srcs = glob([
+        "*.cs",
+        "*.csproj",
+    ]),
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = [":source_tree"],
+)

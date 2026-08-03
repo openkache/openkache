@@ -34,6 +34,26 @@ crate.from_cargo(
     manifests = ["//:Cargo.toml"],
     skip_cargo_lockfile_overwrite = True,
 )
+# Keep optional server feature variants available to the Bazel graph. Cargo's
+# default workspace selection omits these crates even though the locked
+# production feature matrix references them.
+crate.spec(package = "boring", version = "4.22.0")
+crate.spec(package = "event-listener", version = "5.4.1")
+crate.spec(package = "flume", version = "0.12.0")
+crate.spec(package = "kanal", version = "0.1.1")
+crate.spec(package = "mimalloc", version = "0.1.52")
+crate.spec(
+    default_features = False,
+    features = ["boringssl-boring-crate"],
+    package = "quiche",
+    version = "0.29.3",
+)
+crate.spec(
+    default_features = False,
+    features = ["build_cc", "usewait-on-address"],
+    package = "snmalloc-rs",
+    version = "0.7.4",
+)
 use_repo(crate, "crates")
 
 # The protocol build script invokes the checked-in Bun/Smithy generators.
