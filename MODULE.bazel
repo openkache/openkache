@@ -38,7 +38,7 @@ crate.from_cargo(
 # default workspace selection omits these crates even though the locked
 # production feature matrix references them.
 crate.spec(package = "boring", version = "4.22.0")
-crate.spec(package = "event-listener", version = "5.4.1")
+crate.spec(package = "event-listener", version = "5.4.2")
 crate.spec(package = "flume", version = "0.12.0")
 crate.spec(package = "kanal", version = "0.1.1")
 crate.spec(package = "mimalloc", version = "0.1.52")

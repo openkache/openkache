@@ -37,6 +37,11 @@ alias(
 )
 
 alias(
+    name = "server_optional_crossfire",
+    actual = "@crates//crossfire",
+)
+
+alias(
     name = "server_optional_event_listener",
     actual = "@crates//event-listener",
 )
@@ -88,9 +93,9 @@ rust_library(
     edition = "2024",
     rustc_env = rust_metadata("openkache"),
     deps = [
-        "//protocol:openkache_protocol",
         ":server_optional_event_listener",
         ":server_optional_kanal",
+        "//protocol:openkache_protocol",
     ] + cargo_deps("server"),
 )
 

@@ -1,5 +1,5 @@
 {
-  "checksum": "1efe5ff75b7087d9190dcf7ca3057fe97c41eb359678580089f8fa57bb856475",
+  "checksum": "fd6821e8ac9c8d2acbb04acd32a8c96cc0cabf89f30c203f524d283cd57ccbe6",
   "crates": {
     "aead 0.5.2": {
       "name": "aead",
@@ -1148,7 +1148,7 @@
         "deps": {
           "common": [
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -2964,7 +2964,7 @@
               "target": "compio_log"
             },
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -4441,12 +4441,6 @@
         "compile_data_glob": [
           "**"
         ],
-        "crate_features": {
-          "common": [
-            "std"
-          ],
-          "selects": {}
-        },
         "deps": {
           "common": [
             {
@@ -6199,7 +6193,7 @@
               "target": "boring"
             },
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -6230,7 +6224,7 @@
       },
       "license": null,
       "license_ids": [],
-      "license_file": "LICENSE"
+      "license_file": null
     },
     "displaydoc 0.2.6": {
       "name": "displaydoc",
@@ -6570,14 +6564,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "event-listener 5.4.1": {
+    "event-listener 5.4.2": {
       "name": "event-listener",
-      "version": "5.4.1",
+      "version": "5.4.2",
       "package_url": "https://github.com/smol-rs/event-listener",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/event-listener/5.4.1/download",
-          "sha256": "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+          "url": "https://static.crates.io/crates/event-listener/5.4.2/download",
+          "sha256": "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
         }
       },
       "targets": [
@@ -6609,10 +6603,6 @@
         },
         "deps": {
           "common": [
-            {
-              "id": "concurrent-queue 2.5.0",
-              "target": "concurrent_queue"
-            },
             {
               "id": "pin-project-lite 0.2.17",
               "target": "pin_project_lite"
@@ -6652,7 +6642,7 @@
           }
         },
         "edition": "2021",
-        "version": "5.4.1"
+        "version": "5.4.2"
       },
       "license": "Apache-2.0 OR MIT",
       "license_ids": [
@@ -6700,7 +6690,7 @@
         "deps": {
           "common": [
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -11491,7 +11481,7 @@
         "crate_features": {
           "common": [
             "allocator-jemalloc",
-            "channel-crossfire",
+            "channel-kanal",
             "default",
             "quic-noq"
           ],
@@ -11520,12 +11510,16 @@
               "target": "crc32fast"
             },
             {
-              "id": "crossfire 3.1.19",
-              "target": "crossfire"
+              "id": "event-listener 5.4.2",
+              "target": "event_listener"
             },
             {
               "id": "futures-util 0.3.33",
               "target": "futures_util"
+            },
+            {
+              "id": "kanal 0.1.1",
+              "target": "kanal"
             },
             {
               "id": "libc 0.2.189",
@@ -12052,7 +12046,7 @@
       "license_ids": [
         "Apache-2.0"
       ],
-      "license_file": "LICENSE"
+      "license_file": null
     },
     "openssl-macros 0.1.1": {
       "name": "openssl-macros",
@@ -16588,7 +16582,7 @@
         "deps": {
           "common": [
             {
-              "id": "event-listener 5.4.1",
+              "id": "event-listener 5.4.2",
               "target": "event_listener"
             },
             {
@@ -20796,7 +20790,7 @@
     "compio-quic 0.8.0",
     "crc32fast 1.5.0",
     "crossfire 3.1.19",
-    "event-listener 5.4.1",
+    "event-listener 5.4.2",
     "flume 0.12.0",
     "futures-util 0.3.33",
     "getrandom 0.4.3",
