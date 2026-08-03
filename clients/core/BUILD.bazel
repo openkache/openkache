@@ -4,6 +4,7 @@ load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library")
 load(
     "//bazel:openkache_defs.bzl",
+    "RUST_EDITION",
     "cargo_deps",
     "crate_aliases",
     "rust_metadata",
@@ -44,7 +45,7 @@ cargo_build_script(
         "Cargo.toml",
         "//clients:client_generator_inputs",
     ],
-    edition = "2024",
+    edition = RUST_EDITION,
     tools = [
         "//bazel:bun",
         "//bazel:smithy",
@@ -62,7 +63,7 @@ rust_library(
     ],
     crate_name = "openkache_client_core",
     crate_root = "src/lib.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-client-core"),
     deps = [
         ":openkache_client_core_build_script",
@@ -82,7 +83,7 @@ rust_library(
     ],
     crate_name = "openkache_client_core",
     crate_root = "src/lib.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-client-core"),
     deps = [
         ":openkache_client_core_build_script",
@@ -102,7 +103,7 @@ rust_shared_library(
     ],
     crate_name = "openkache_client_core",
     crate_root = "src/lib.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-client-core"),
     deps = [
         ":openkache_client_core_build_script",

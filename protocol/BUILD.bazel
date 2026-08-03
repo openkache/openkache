@@ -2,7 +2,13 @@
 
 load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_library")
-load("//bazel:openkache_defs.bzl", "cargo_deps", "crate_aliases", "rust_metadata")
+load(
+    "//bazel:openkache_defs.bzl",
+    "RUST_EDITION",
+    "cargo_deps",
+    "crate_aliases",
+    "rust_metadata",
+)
 
 package(default_visibility = ["//visibility:public"])
 
@@ -39,7 +45,7 @@ cargo_build_script(
     crate_name = "openkache_protocol_build_script",
     crate_root = "build.rs",
     data = [":generator_inputs"],
-    edition = "2024",
+    edition = RUST_EDITION,
     tools = [
         "//bazel:bun",
         "//bazel:smithy",
@@ -53,7 +59,7 @@ rust_library(
     aliases = crate_aliases("protocol"),
     crate_name = "openkache_protocol",
     crate_root = "src/lib.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-protocol"),
     deps = [":openkache_protocol_build_script"] + cargo_deps("protocol"),
 )
