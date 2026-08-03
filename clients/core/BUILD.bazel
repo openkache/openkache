@@ -37,7 +37,12 @@ cargo_build_script(
     },
     crate_name = "openkache_client_core_build_script",
     crate_root = "build.rs",
-    data = ["//clients:client_generator_inputs"],
+    # The build script reads Cargo.toml through CARGO_MANIFEST_DIR to keep its
+    # direct-dependency gate active under both Cargo and Bazel.
+    data = [
+        "Cargo.toml",
+        "//clients:client_generator_inputs",
+    ],
     edition = "2024",
     tools = [
         "//bazel:bun",

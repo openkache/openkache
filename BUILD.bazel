@@ -5,6 +5,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
+    ".gitignore",
 ])
 
 alias(
@@ -75,6 +76,7 @@ alias(
 filegroup(
     name = "workspace_runtime_sources",
     srcs = [
+        ".gitignore",
         "Cargo.lock",
         "Cargo.toml",
         "//clients:runtime_sources",
