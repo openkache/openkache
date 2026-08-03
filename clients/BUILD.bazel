@@ -26,6 +26,30 @@ filegroup(
 )
 
 filegroup(
+    name = "client_typescript_native_sources",
+    srcs = ["//clients/typescript/native:source_tree"],
+)
+
+filegroup(
+    name = "client_python_native_sources",
+    srcs = ["//clients/python/native:source_tree"],
+)
+
+filegroup(
+    name = "client_dotnet_sources",
+    srcs = ["//clients/dotnet/OpenKache:source_tree"],
+)
+
+filegroup(
+    name = "client_native_sources",
+    srcs = [
+        ":client_dotnet_sources",
+        ":client_python_native_sources",
+        ":client_typescript_native_sources",
+    ],
+)
+
+filegroup(
     name = "client_source_tree",
     srcs = [
         ":client_cli_sources",
@@ -46,6 +70,7 @@ filegroup(
     srcs = [
         "README.md",
         ":client_generator_inputs",
+        ":client_native_sources",
         ":client_source_tree",
         "//clients/cli:README.md",
         "//clients/cli:runtime_sources",
@@ -53,5 +78,14 @@ filegroup(
         "//clients/core:runtime_sources",
         "//clients/rust:README.md",
         "//clients/rust:runtime_sources",
+    ],
+)
+
+filegroup(
+    name = "native_adapter_artifacts",
+    srcs = [
+        "//clients/core:openkache_client_core_ffi",
+        "//clients/python/native:openkache_client_python_native",
+        "//clients/typescript/native:openkache_client_typescript_native",
     ],
 )
