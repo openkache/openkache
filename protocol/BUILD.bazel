@@ -21,10 +21,10 @@ filegroup(
         "README.md",
         "build.rs",
         "generate.ts",
-        "src/**",
         "wire.ts",
     ] + glob([
         "model/**",
+        "src/**",
     ]),
 )
 
