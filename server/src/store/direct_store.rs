@@ -16,6 +16,8 @@ use openkache_protocol::{SetCondition, SetOptions};
 use super::*;
 use crate::types::StoredItemValue;
 
+const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
+
 struct MutableGeneration {
     logical_sg_id: u32,
     sequence: u64,
@@ -162,6 +164,11 @@ struct PreparedReadCandidate {
 enum ObservedValue {
     None,
     Encoded(Vec<u8>),
+    OwnedInline(Vec<u8>),
+    DirectInline {
+        buffer: DirectIoBufferLease,
+        range: std::ops::Range<usize>,
+    },
     RamInline {
         segment: Arc<DirectIoBuffer>,
         range: std::ops::Range<usize>,
@@ -295,7 +302,7 @@ impl PreparedReadCandidate {
                 );
                 let bytes = read_exact_direct(
                     data,
-                    DirectIoBuffer::for_read(BUCKET_BYTES),
+                    io.bucket_read_pool.take_bucket().await,
                     backing.location.sg_base + (bucket_index * BUCKET_BYTES) as u64,
                     BUCKET_BYTES,
                     config.read_max_time_us,
@@ -303,15 +310,32 @@ impl PreparedReadCandidate {
                 )
                 .await?;
                 io.data_read.set(io.data_read.get() + BUCKET_BYTES as u64);
-                let Some((state, range)) = find_item_state_and_value_range(&bytes, &storage_key)
-                else {
-                    return Ok(None);
-                };
-                let value = match purpose {
-                    ReadPurpose::State => ObservedValue::None,
-                    ReadPurpose::Value => ObservedValue::Encoded(bytes[range].to_vec()),
-                };
-                Ok(Some(ObservedItem { state, value }))
+                let observed =
+                    find_item_state_and_value_range(&bytes, &storage_key).map(|(state, range)| {
+                        let value = match purpose {
+                            ReadPurpose::State => ObservedValue::None,
+                            ReadPurpose::Value
+                                if config.lease_ssd_read_buffer
+                                    && bytes.get(range.start) == Some(&INLINE_VALUE_TAG) =>
+                            {
+                                ObservedValue::DirectInline {
+                                    buffer: bytes,
+                                    range: range.start + STORED_VALUE_TAG_BYTES..range.end,
+                                }
+                            }
+                            ReadPurpose::Value
+                                if config.copy_ssd_inline_value_once
+                                    && bytes.get(range.start) == Some(&INLINE_VALUE_TAG) =>
+                            {
+                                ObservedValue::OwnedInline(
+                                    bytes[range.start + STORED_VALUE_TAG_BYTES..range.end].to_vec(),
+                                )
+                            }
+                            ReadPurpose::Value => ObservedValue::Encoded(bytes[range].to_vec()),
+                        };
+                        ObservedItem { state, value }
+                    });
+                Ok(observed)
             }
         }
     }
@@ -343,20 +367,28 @@ impl PreparedReadCandidate {
                     let bytes = read_ram_value(encoded, &backing)?;
                     Ok(StoredItemValue::new(bytes))
                 }
+                ObservedValue::OwnedInline(_) => Err(KvError::Worker(
+                    "RAM keyed read has an incompatible owned inline snapshot".into(),
+                )),
+                ObservedValue::DirectInline { .. } => Err(KvError::Worker(
+                    "RAM keyed read has an incompatible direct-read snapshot".into(),
+                )),
                 ObservedValue::None => Err(KvError::Worker(
                     "RAM keyed read has no value snapshot".into(),
                 )),
             },
-            PreparedReadBacking::Ssd(backing) => {
-                let ObservedValue::Encoded(mut encoded) = value else {
-                    return Err(KvError::Worker(
-                        "SSD keyed read has no encoded value snapshot".into(),
-                    ));
-                };
-                let bytes =
-                    read_ssd_value(data, large_values, config, &backing, &mut encoded, io).await?;
-                Ok(StoredItemValue::new(bytes))
-            }
+            PreparedReadBacking::Ssd(backing) => match value {
+                ObservedValue::OwnedInline(bytes) => Ok(StoredItemValue::new(bytes)),
+                ObservedValue::DirectInline { buffer, range } => {
+                    Ok(StoredItemValue::from_direct_read(buffer, range))
+                }
+                ObservedValue::Encoded(mut encoded) => {
+                    read_ssd_value(data, large_values, config, &backing, &mut encoded, io).await
+                }
+                ObservedValue::None | ObservedValue::RamInline { .. } => Err(KvError::Worker(
+                    "SSD keyed read has no value snapshot".into(),
+                )),
+            },
         }
     }
 }
@@ -372,10 +404,28 @@ enum PendingKeyedMutation {
     },
 }
 
-#[derive(Default)]
 struct DirectStoreIo {
     data_written: Cell<u64>,
     data_read: Cell<u64>,
+    bucket_read_pool: DirectIoBufferPool,
+    value_read_pool: DirectIoBufferPool,
+}
+
+impl DirectStoreIo {
+    fn new(bucket_read_pool_capacity: usize, lease_ssd_read_buffer: bool) -> Self {
+        let value_read_pool_capacity = lease_ssd_read_buffer
+            .then_some(bucket_read_pool_capacity)
+            .unwrap_or(0);
+        Self {
+            data_written: Cell::new(0),
+            data_read: Cell::new(0),
+            bucket_read_pool: DirectIoBufferPool::with_capacity(bucket_read_pool_capacity),
+            value_read_pool: DirectIoBufferPool::with_capacity_and_buffer_bytes(
+                value_read_pool_capacity,
+                MAX_LEASED_SSD_VALUE_READ_BYTES,
+            ),
+        }
+    }
 }
 
 struct FlushCompletion {
@@ -448,7 +498,6 @@ pub(crate) struct Kvkache {
     resource_guard: Arc<ResourceGuard>,
     next_memory_capacity_check: Instant,
     io: Rc<DirectStoreIo>,
-    bucket_read_pool: DirectIoBufferPool,
     pub(crate) segment_flushes: u64,
     pub(crate) segment_capacity_flushes: u64,
     pub(crate) segment_sync_flushes: u64,
@@ -529,6 +578,8 @@ impl Kvkache {
             .map_err(|error| storage_io_error(&resource_guard, error))?;
         resource_guard.observe_storage_reservation()?;
         let large_value_log = LargeValueLog::new(config.large_value_capacity)?;
+        let bucket_read_pool_capacity = config.bucket_read_pool_capacity;
+        let lease_ssd_read_buffer = config.lease_ssd_read_buffer;
         Ok(Self {
             config,
             data,
@@ -548,8 +599,10 @@ impl Kvkache {
             live_keys: 0,
             resource_guard,
             next_memory_capacity_check: Instant::now(),
-            io: Rc::new(DirectStoreIo::default()),
-            bucket_read_pool: DirectIoBufferPool::default(),
+            io: Rc::new(DirectStoreIo::new(
+                bucket_read_pool_capacity,
+                lease_ssd_read_buffer,
+            )),
             segment_flushes: 0,
             segment_capacity_flushes: 0,
             segment_sync_flushes: 0,
@@ -708,7 +761,11 @@ impl Kvkache {
         )
     }
 
-    pub(crate) fn finish_keyed(&mut self, completed: CompletedKeyedJob) -> KeyedFinish {
+    pub(crate) fn finish_keyed(
+        &mut self,
+        completed: CompletedKeyedJob,
+        include_visible_state: bool,
+    ) -> KeyedFinish {
         let observation = match completed.observation {
             Ok(observation) => observation,
             Err(error) => {
@@ -720,9 +777,9 @@ impl Kvkache {
             }
         };
         let (outcome, visible_state, flush_required) = match (completed.operation, observation) {
-            (PreparedKeyedOperation::Get, KeyedObservation::Value(value)) => {
-                let visible_state = Some(match &value {
-                    Some(value) => KeyedVisibleState::Present(value.clone()),
+            (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
+                let visible_state = include_visible_state.then(|| match &mut value {
+                    Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
                     None => KeyedVisibleState::Missing,
                 });
                 (Ok(KeyedOutcome::Value(value)), visible_state, false)
@@ -1788,7 +1845,7 @@ impl Kvkache {
             ReadBacking::Ssd(backing) => {
                 let bytes = read_exact_direct(
                     &self.data,
-                    self.bucket_read_pool.take_bucket(),
+                    self.io.bucket_read_pool.take_bucket().await,
                     backing.location.sg_base + (bucket_index * BUCKET_BYTES) as u64,
                     BUCKET_BYTES,
                     self.config.read_max_time_us,
@@ -1799,7 +1856,6 @@ impl Kvkache {
                     .data_read
                     .set(self.io.data_read.get() + BUCKET_BYTES as u64);
                 let item = find_item_in_bucket(&bytes, storage_key);
-                self.bucket_read_pool.recycle_bucket(bytes);
                 Ok(item)
             }
         }
@@ -1989,7 +2045,7 @@ impl Kvkache {
             .map(|generation| generation.large_value_arena.live_bytes())
             .sum::<usize>();
         format!(
-            "keys={} stable_keys={} pending_items=0 pending_value_bytes=0 mutable_sgs={} inflight_flushes={} max_flushes_in_flight={} blob_staging_live_bytes={} large_value_staging_live_bytes={} table_load={:.2}% table_memory={:.2}MiB modeled_resident={:.2}MiB flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} eviction_read_timeouts={} generation_fill_percent={:.3}% generation_fill_used_bytes={} generation_fill_capacity_bytes={} memory_stop_writes={} storage_stop_writes={} rejected_writes={} data_read={} data_written={} blob_data_read={} blob_data_written=0",
+            "keys={} stable_keys={} pending_items=0 pending_value_bytes=0 mutable_sgs={} inflight_flushes={} max_flushes_in_flight={} blob_staging_live_bytes={} large_value_staging_live_bytes={} table_load={:.2}% table_memory={:.2}MiB modeled_resident={:.2}MiB flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} eviction_read_timeouts={} generation_fill_percent={:.3}% generation_fill_used_bytes={} generation_fill_capacity_bytes={} memory_stop_writes={} storage_stop_writes={} rejected_writes={} data_read={} data_written={} blob_data_read={} blob_data_written=0 bucket_read_pool_capacity={} bucket_read_pool_allocations={} bucket_read_pool_reuses={} bucket_read_pool_idle={} bucket_read_pool_high_water={} value_read_pool_capacity={} value_read_pool_allocations={} value_read_pool_reuses={} value_read_pool_idle={} value_read_pool_high_water={}",
             self.live_keys,
             self.live_keys,
             self.mutable.len(),
@@ -2014,6 +2070,16 @@ impl Kvkache {
             self.io.data_read.get(),
             self.io.data_written.get(),
             self.io.data_read.get(),
+            self.io.bucket_read_pool.capacity(),
+            self.io.bucket_read_pool.allocations(),
+            self.io.bucket_read_pool.reuses(),
+            self.io.bucket_read_pool.idle(),
+            self.io.bucket_read_pool.high_water(),
+            self.io.value_read_pool.capacity(),
+            self.io.value_read_pool.allocations(),
+            self.io.value_read_pool.reuses(),
+            self.io.value_read_pool.idle(),
+            self.io.value_read_pool.high_water(),
         )
     }
 
@@ -2131,9 +2197,9 @@ async fn read_ssd_value(
     backing: &SsdBacking,
     encoded: &mut Vec<u8>,
     io: &DirectStoreIo,
-) -> Result<Vec<u8>> {
+) -> Result<StoredItemValue> {
     match decode_stored_value(encoded)? {
-        StoredValue::Inline(value) => Ok(value.to_vec()),
+        StoredValue::Inline(value) => Ok(StoredItemValue::new(value.to_vec())),
         StoredValue::Blob(blob_ref) => {
             let logical_end = u64::from(blob_ref.value_offset)
                 .checked_add(u64::from(blob_ref.value_len))
@@ -2150,6 +2216,7 @@ async fn read_ssd_value(
                 config.read_max_time_us,
                 "generation Blob read",
                 io,
+                config.lease_ssd_read_buffer,
             )
             .await
         }
@@ -2173,6 +2240,7 @@ async fn read_ssd_value(
                 config.read_max_time_us,
                 "large-value read",
                 io,
+                config.lease_ssd_read_buffer,
             )
             .await
         }
@@ -2186,9 +2254,10 @@ async fn read_ssd_extent(
     read_max_time_us: u64,
     operation: &'static str,
     io: &DirectStoreIo,
-) -> Result<Vec<u8>> {
+    lease_response: bool,
+) -> Result<StoredItemValue> {
     if value_ref.value_len == 0 {
-        return Ok(Vec::new());
+        return Ok(StoredItemValue::new(Vec::new()));
     }
     let absolute = record_start + u64::from(value_ref.value_offset);
     let aligned_start = absolute / BUCKET_BYTES as u64 * BUCKET_BYTES as u64;
@@ -2197,6 +2266,22 @@ async fn read_ssd_extent(
         .checked_add(value_ref.value_len as usize)
         .and_then(|len| len.checked_next_multiple_of(BUCKET_BYTES))
         .ok_or_else(|| KvError::Worker("direct-read extent overflowed".into()))?;
+    if lease_response && read_len <= MAX_LEASED_SSD_VALUE_READ_BYTES {
+        let bytes = read_exact_direct(
+            file,
+            io.value_read_pool.take_buffer(read_len).await,
+            aligned_start,
+            read_len,
+            read_max_time_us,
+            operation,
+        )
+        .await?;
+        io.data_read.set(io.data_read.get() + read_len as u64);
+        return Ok(StoredItemValue::from_direct_read(
+            bytes,
+            prefix..prefix + value_ref.value_len as usize,
+        ));
+    }
     let bytes = read_exact_direct(
         file,
         DirectIoBuffer::for_read(read_len),
@@ -2207,7 +2292,9 @@ async fn read_ssd_extent(
     )
     .await?;
     io.data_read.set(io.data_read.get() + read_len as u64);
-    Ok(bytes[prefix..prefix + value_ref.value_len as usize].to_vec())
+    Ok(StoredItemValue::new(
+        bytes[prefix..prefix + value_ref.value_len as usize].to_vec(),
+    ))
 }
 
 enum InPlaceValue {
