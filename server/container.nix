@@ -33,24 +33,34 @@ let
     targets = [ target ];
   };
   target-cc = if target == "x86_64-unknown-linux-musl"
-    then "x86_64-unknown-linux-musl-gcc"
+    then "x86_64-unknown-linux-musl-clang"
     else if target == "aarch64-unknown-linux-musl"
-    then "aarch64-unknown-linux-musl-gcc"
+    then "aarch64-unknown-linux-musl-clang"
     else throw "unsupported OpenKache container target: ${target}";
   target-env = builtins.replaceStrings ["-" "."] ["_" "_"] (pkgs.lib.toUpper target);
 in
-pkgs.mkShell {
+pkgs.mkShell.override { stdenv = pkgs.clangStdenv; } {
   packages = [
     rust
     pkgs.bun
     pkgs.smithy-cli
     pkgs.gnumake
-    pkgs.pkgsStatic.stdenv.cc
+    pkgs.pkgsStatic.clangStdenv.cc
+    pkgs.llvmPackages.llvm
+    pkgs.mold
   ];
 
   shellHook = ''
     export CARGO_BUILD_TARGET=${target}
-    export CARGO_TARGET_${target-env}_LINKER=${pkgs.pkgsStatic.stdenv.cc}/bin/${target-cc}
-    export CC_${target-env}=${pkgs.pkgsStatic.stdenv.cc}/bin/${target-cc}
+    export CARGO_TARGET_${target-env}_LINKER=${pkgs.pkgsStatic.clangStdenv.cc}/bin/${target-cc}
+    export CC=clang
+    export CXX=clang++
+    export AR=llvm-ar
+    export RANLIB=llvm-ranlib
+    export CC_${target-env}=${pkgs.pkgsStatic.clangStdenv.cc}/bin/${target-cc}
+    export CXX_${target-env}=${pkgs.pkgsStatic.clangStdenv.cc}/bin/${target-cc}++
+    export AR_${target-env}=${pkgs.pkgsStatic.clangStdenv.cc}/bin/${target}-ar
+    export RANLIB_${target-env}=${pkgs.pkgsStatic.clangStdenv.cc}/bin/${target}-ranlib
+    export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
   '';
 }
