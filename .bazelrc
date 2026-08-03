@@ -19,14 +19,12 @@ common --repository_cache=~/.cache/openkache/bazel/repository-cache
 build --jobs=8
 build --local_resources=cpu=8
 build --local_resources=memory=32768
-build --local_ram_resources=32768
 build --experimental_sandbox_memory_limit_mb=3072
 build --experimental_worker_memory_limit_mb=2048
 build --experimental_total_worker_memory_limit_mb=2048
 test --jobs=8
 test --local_resources=cpu=8
 test --local_resources=memory=32768
-test --local_ram_resources=32768
 test --local_test_jobs=1
 test --experimental_sandbox_memory_limit_mb=3072
 test --experimental_worker_memory_limit_mb=2048
@@ -34,7 +32,6 @@ test --experimental_total_worker_memory_limit_mb=2048
 run --jobs=8
 run --local_resources=cpu=8
 run --local_resources=memory=32768
-run --local_ram_resources=32768
 run --experimental_sandbox_memory_limit_mb=3072
 run --experimental_worker_memory_limit_mb=2048
 run --experimental_total_worker_memory_limit_mb=2048
