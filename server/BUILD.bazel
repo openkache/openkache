@@ -68,10 +68,7 @@ alias(
 
 filegroup(
     name = "runtime_sources",
-    srcs = glob([
-        "Cargo.toml",
-        "src/**",
-    ]),
+    srcs = ["Cargo.toml"] + glob(["src/**"]),
 )
 
 rust_library(
