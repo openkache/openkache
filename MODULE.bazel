@@ -14,7 +14,14 @@ bazel_dep(name = "rules_rust", version = "0.73.0")
 bazel_dep(name = "platforms", version = "1.1.0")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
-rust.toolchain(edition = "2024")
+
+# Keep standalone public Bazel builds on the same bounded compiler contract as
+# the private monorepo. Cargo and IDE commands continue to use Nix separately.
+rust.toolchain(
+    edition = "2024",
+    extra_target_triples = [],
+    versions = ["1.97.1"],
+)
 use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
