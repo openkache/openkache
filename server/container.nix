@@ -38,14 +38,16 @@ let
     then "aarch64-unknown-linux-musl-clang"
     else throw "unsupported OpenKache container target: ${target}";
   target-env = builtins.replaceStrings ["-" "."] ["_" "_"] (pkgs.lib.toUpper target);
+  native-clang-stdenv = pkgs.stdenvAdapters.useMoldLinker pkgs.clangStdenv;
+  static-clang-stdenv = pkgs.pkgsStatic.stdenvAdapters.useMoldLinker pkgs.pkgsStatic.clangStdenv;
 in
-pkgs.mkShell.override { stdenv = pkgs.clangStdenv; } {
+pkgs.mkShell.override { stdenv = native-clang-stdenv; } {
   packages = [
     rust
     pkgs.bun
     pkgs.smithy-cli
     pkgs.gnumake
-    pkgs.pkgsStatic.clangStdenv.cc
+    static-clang-stdenv.cc
     pkgs.llvmPackages.llvm
     pkgs.mold
   ];
