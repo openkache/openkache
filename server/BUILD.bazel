@@ -80,14 +80,18 @@ rust_library(
     aliases = crate_aliases("server"),
     crate_features = [
         "allocator-jemalloc",
-        "channel-crossfire",
+        "channel-kanal",
         "quic-noq",
     ],
     crate_name = "openkache",
     crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = rust_metadata("openkache"),
-    deps = ["//protocol:openkache_protocol"] + cargo_deps("server"),
+    deps = [
+        "//protocol:openkache_protocol",
+        ":server_optional_event_listener",
+        ":server_optional_kanal",
+    ] + cargo_deps("server"),
 )
 
 rust_binary(
