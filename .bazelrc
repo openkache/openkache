@@ -1,3 +1,11 @@
+# Bound the Bazel client daemon so parallel public worktrees do not retain
+# host-sized heaps or stay alive indefinitely after an agent session ends.
+startup --max_idle_secs=300
+startup --shutdown_on_low_sys_mem
+startup --host_jvm_args=-Xms256m
+startup --host_jvm_args=-Xmx1024m
+startup --host_jvm_args=-XX:ActiveProcessorCount=2
+
 # Keep Bazel's install/repository/action caches outside a worktree. The `~`
 # form is expanded by Bazel, so equivalent checkouts share downloads and
 # action results without embedding a machine-specific path.
