@@ -17,6 +17,56 @@ filegroup(
 )
 
 filegroup(
+    name = "server_library_sources",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+)
+
+filegroup(
+    name = "server_binary_sources",
+    srcs = glob(["src/bin/openkache_server/**/*.rs"]) + [
+        "src/bin/openkache_server.rs",
+    ],
+)
+
+alias(
+    name = "server_optional_boring",
+    actual = "@crates//boring",
+)
+
+alias(
+    name = "server_optional_event_listener",
+    actual = "@crates//event-listener",
+)
+
+alias(
+    name = "server_optional_flume",
+    actual = "@crates//flume",
+)
+
+alias(
+    name = "server_optional_kanal",
+    actual = "@crates//kanal",
+)
+
+alias(
+    name = "server_optional_mimalloc",
+    actual = "@crates//mimalloc",
+)
+
+alias(
+    name = "server_optional_quiche",
+    actual = "@crates//quiche",
+)
+
+alias(
+    name = "server_optional_snmalloc_rs",
+    actual = "@crates//snmalloc-rs",
+)
+
+filegroup(
     name = "runtime_sources",
     srcs = glob([
         "Cargo.toml",
