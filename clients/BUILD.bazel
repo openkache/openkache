@@ -3,11 +3,29 @@
 package(default_visibility = ["//visibility:public"])
 
 filegroup(
+    name = "client_generator",
+    srcs = ["generate.ts"],
+)
+
+filegroup(
     name = "client_generator_inputs",
     srcs = glob([
-        "generate.ts",
         "model/**",
-    ]) + ["//protocol:generator_inputs"],
+    ]) + [
+        ":client_generator",
+        "//protocol:generator_inputs",
+    ],
+)
+
+# Checked-in Go outputs are part of the contract's source-level API. Expose
+# them explicitly so private Bazel checks can compare generated output without
+# reading undeclared files from the public checkout.
+filegroup(
+    name = "client_contract_outputs",
+    srcs = [
+        "go/smithy_api.go",
+        "go/smithy_contract.go",
+    ],
 )
 
 filegroup(
