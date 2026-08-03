@@ -1,5 +1,10 @@
 //! Shared byte-oriented types used across the KV cache.
 
+use std::ops::{Deref, Range};
+use std::sync::Arc;
+
+use crate::store::DirectIoBuffer;
+
 /// Number of bytes in every server-derived storage key.
 ///
 /// The storage key is the server-side representation of the protocol item ID,
@@ -61,17 +66,61 @@ impl From<&[u8]> for ItemValue {
 
 /// Opaque client value propagated without server-side decoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum StoredItemBytes {
+    Owned(Arc<Vec<u8>>),
+    Segment {
+        segment: Arc<DirectIoBuffer>,
+        range: Range<usize>,
+    },
+}
+
+impl StoredItemBytes {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Segment { segment, range } => &segment[range.clone()],
+        }
+    }
+}
+
+impl Deref for StoredItemBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StoredItemValue {
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: StoredItemBytes,
 }
 
 impl StoredItemValue {
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
-        Self { bytes }
+        Self {
+            bytes: StoredItemBytes::Owned(Arc::new(bytes)),
+        }
+    }
+
+    pub(crate) fn from_segment(segment: Arc<DirectIoBuffer>, range: Range<usize>) -> Self {
+        debug_assert!(range.start <= range.end && range.end <= segment.len());
+        Self {
+            bytes: StoredItemBytes::Segment { segment, range },
+        }
+    }
+
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        match self.bytes {
+            StoredItemBytes::Owned(bytes) => {
+                Arc::try_unwrap(bytes).unwrap_or_else(|bytes| (*bytes).clone())
+            }
+            StoredItemBytes::Segment { segment, range } => segment[range].to_vec(),
+        }
     }
 }
 
-impl std::ops::Deref for StoredItemValue {
+impl Deref for StoredItemValue {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {

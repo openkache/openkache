@@ -1,8 +1,10 @@
-//! Per-worker request/response types, the worker event loop ([`worker_loop`]),
-//! batch processing ([`process_worker_batch`]), and benchmark support types
-//! ([`BenchmarkOperation`], [`BenchmarkBatchStats`]).
+//! Per-worker request/response types, the rolling keyed event loop
+//! ([`worker_loop`]), and benchmark support types ([`BenchmarkOperation`],
+//! [`BenchmarkBatchStats`]).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use std::future::{Future, poll_fn};
+use std::task::Poll;
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -138,153 +140,793 @@ pub(super) struct PendingBenchmarkRequest {
     pub(super) started: std::time::Instant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SlotId {
+    index: u32,
+    generation: u32,
+}
+
+struct WaitingSlot<T> {
+    generation: u32,
+    value: Option<T>,
+    next: Option<SlotId>,
+}
+
+pub(super) struct WaitingSlab<T> {
+    slots: Vec<WaitingSlot<T>>,
+    free: Vec<u32>,
+    capacity: usize,
+}
+
+impl<T> WaitingSlab<T> {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+            free: Vec::new(),
+            capacity,
+        }
+    }
+
+    pub(super) fn has_capacity(&self) -> bool {
+        self.slots.len() < self.capacity || !self.free.is_empty()
+    }
+
+    pub(super) fn insert(&mut self, value: T) -> Option<SlotId> {
+        let index = if let Some(index) = self.free.pop() {
+            index
+        } else {
+            if self.slots.len() == self.capacity {
+                return None;
+            }
+            let index = u32::try_from(self.slots.len()).ok()?;
+            self.slots.push(WaitingSlot {
+                generation: 0,
+                value: None,
+                next: None,
+            });
+            index
+        };
+        let slot = &mut self.slots[index as usize];
+        debug_assert!(slot.value.is_none());
+        slot.value = Some(value);
+        slot.next = None;
+        Some(SlotId {
+            index,
+            generation: slot.generation,
+        })
+    }
+
+    pub(super) fn link(&mut self, tail: SlotId, next: SlotId) {
+        let slot = self.slot_mut(tail);
+        debug_assert!(slot.next.is_none());
+        slot.next = Some(next);
+    }
+
+    pub(super) fn take(&mut self, id: SlotId) -> (T, Option<SlotId>) {
+        let slot = self.slot_mut(id);
+        let value = slot.value.take().expect("waiting slot contains a command");
+        let next = slot.next.take();
+        slot.generation = slot.generation.wrapping_add(1);
+        self.free.push(id.index);
+        (value, next)
+    }
+
+    fn get(&self, id: SlotId) -> &T {
+        let slot = self
+            .slots
+            .get(id.index as usize)
+            .expect("waiting SlotId index is valid");
+        assert_eq!(
+            slot.generation, id.generation,
+            "waiting SlotId generation is current"
+        );
+        slot.value
+            .as_ref()
+            .expect("waiting slot contains a command")
+    }
+
+    fn slot_mut(&mut self, id: SlotId) -> &mut WaitingSlot<T> {
+        let slot = self
+            .slots
+            .get_mut(id.index as usize)
+            .expect("waiting SlotId index is valid");
+        assert_eq!(
+            slot.generation, id.generation,
+            "waiting SlotId generation is current"
+        );
+        slot
+    }
+}
+
+pub(super) enum KeyedCommand {
+    Get {
+        response: WorkerResponseSender,
+    },
+    Set {
+        value: StoredItemValue,
+        options: SetOptions,
+        response: WorkerResponseSender,
+    },
+    Delete {
+        response: WorkerResponseSender,
+    },
+}
+
+impl KeyedCommand {
+    fn into_parts(self) -> (KeyedOperation, WorkerResponseSender) {
+        match self {
+            Self::Get { response } => (KeyedOperation::Get, response),
+            Self::Set {
+                value,
+                options,
+                response,
+            } => (KeyedOperation::Set { value, options }, response),
+            Self::Delete { response } => (KeyedOperation::Delete, response),
+        }
+    }
+
+    fn is_collapsible(&self, cache: &Kvkache) -> bool {
+        match self {
+            Self::Get { .. } | Self::Delete { .. } => true,
+            Self::Set { value, options, .. } => {
+                *options == SetOptions::NONE && cache.can_collapse_set(value)
+            }
+        }
+    }
+}
+
+pub(super) struct DeferredWorkerResponse {
+    pub(super) sender: WorkerResponseSender,
+    pub(super) value: WorkerResponse,
+}
+
+pub(super) struct CollapsedLaneBatch {
+    pub(super) operation: Option<KeyedOperation>,
+    pub(super) responses: Vec<DeferredWorkerResponse>,
+    pub(super) success_state: KeyedVisibleState,
+    pub(super) failure_state: KeyedVisibleState,
+}
+
+impl CollapsedLaneBatch {
+    pub(super) fn reduce(base: KeyedVisibleState, commands: Vec<KeyedCommand>) -> Self {
+        let base_present = matches!(base, KeyedVisibleState::Present(_));
+        let mut current = base.clone();
+        let mut responses = Vec::with_capacity(commands.len());
+        let mut mutated = false;
+
+        for command in commands {
+            let (sender, value) = match command {
+                KeyedCommand::Get { response } => {
+                    let value = match &current {
+                        KeyedVisibleState::Missing => None,
+                        KeyedVisibleState::Present(value) => Some(value.clone()),
+                    };
+                    (response, WorkerResponse::Value(value))
+                }
+                KeyedCommand::Set {
+                    value,
+                    options,
+                    response,
+                } => {
+                    debug_assert_eq!(options, SetOptions::NONE);
+                    let outcome = match current {
+                        KeyedVisibleState::Missing => SetOutcome::Created,
+                        KeyedVisibleState::Present(_) => SetOutcome::Replaced,
+                    };
+                    current = KeyedVisibleState::Present(value);
+                    mutated = true;
+                    (response, WorkerResponse::Set(outcome))
+                }
+                KeyedCommand::Delete { response } => {
+                    let deleted = matches!(current, KeyedVisibleState::Present(_));
+                    current = KeyedVisibleState::Missing;
+                    mutated = true;
+                    (response, WorkerResponse::Deleted(deleted))
+                }
+            };
+            responses.push(DeferredWorkerResponse { sender, value });
+        }
+
+        let operation = if mutated {
+            match &current {
+                KeyedVisibleState::Present(value) => Some(KeyedOperation::Set {
+                    value: value.clone(),
+                    options: SetOptions::NONE,
+                }),
+                KeyedVisibleState::Missing if base_present => Some(KeyedOperation::Delete),
+                KeyedVisibleState::Missing => None,
+            }
+        } else {
+            None
+        };
+
+        Self {
+            operation,
+            responses,
+            success_state: current,
+            failure_state: base,
+        }
+    }
+}
+
+struct SchedulerCompletion {
+    immediate: Vec<DeferredWorkerResponse>,
+    collapsed: Option<CollapsedLaneBatch>,
+}
+
+impl SchedulerCompletion {
+    fn empty() -> Self {
+        Self {
+            immediate: Vec::new(),
+            collapsed: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaneState {
+    Ready,
+    Running,
+}
+
+struct KeyLane {
+    state: LaneState,
+    waiting_head: Option<SlotId>,
+    waiting_tail: Option<SlotId>,
+}
+
+struct KeyScheduler {
+    lanes: HashMap<StorageKey, KeyLane>,
+    ready: VecDeque<StorageKey>,
+    waiting: WaitingSlab<KeyedCommand>,
+}
+
+impl KeyScheduler {
+    fn with_waiting_capacity(capacity: usize) -> Self {
+        Self {
+            lanes: HashMap::with_capacity(capacity.saturating_mul(2)),
+            ready: VecDeque::with_capacity(capacity),
+            waiting: WaitingSlab::with_capacity(capacity),
+        }
+    }
+
+    fn has_waiting_capacity(&self) -> bool {
+        self.waiting.has_capacity()
+    }
+
+    fn is_idle(&self) -> bool {
+        self.lanes.is_empty()
+    }
+
+    fn enqueue(&mut self, storage_key: StorageKey, command: KeyedCommand) -> Result<()> {
+        let slot = self
+            .waiting
+            .insert(command)
+            .ok_or_else(|| KvError::Worker("waiting-command slab is full".into()))?;
+        if let Some(lane) = self.lanes.get_mut(&storage_key) {
+            if let Some(tail) = lane.waiting_tail {
+                self.waiting.link(tail, slot);
+            } else {
+                debug_assert!(lane.waiting_head.is_none());
+                lane.waiting_head = Some(slot);
+            }
+            lane.waiting_tail = Some(slot);
+            return Ok(());
+        }
+        self.lanes.insert(
+            storage_key,
+            KeyLane {
+                state: LaneState::Ready,
+                waiting_head: Some(slot),
+                waiting_tail: Some(slot),
+            },
+        );
+        self.ready.push_back(storage_key);
+        Ok(())
+    }
+
+    fn start_ready(&mut self, cache: &mut Kvkache) -> Option<RunningKeyedCommand> {
+        let storage_key = self.ready.pop_front()?;
+        let lane = self
+            .lanes
+            .get_mut(&storage_key)
+            .expect("ready key has a lane");
+        debug_assert_eq!(lane.state, LaneState::Ready);
+        let head = lane.waiting_head.expect("ready lane has a waiting command");
+        let (command, next) = self.waiting.take(head);
+        lane.waiting_head = next;
+        if next.is_none() {
+            lane.waiting_tail = None;
+        }
+        lane.state = LaneState::Running;
+        let (operation, response) = command.into_parts();
+        Some(RunningKeyedCommand {
+            storage_key,
+            completion: RunningCompletion::Direct(response),
+            job: cache.prepare_keyed(storage_key, operation),
+        })
+    }
+
+    fn complete(
+        &mut self,
+        cache: &Kvkache,
+        storage_key: StorageKey,
+        visible_state: Option<KeyedVisibleState>,
+    ) -> SchedulerCompletion {
+        if let Some(base) = visible_state {
+            let mut commands = Vec::new();
+            loop {
+                let head = self
+                    .lanes
+                    .get(&storage_key)
+                    .expect("completed key has a lane")
+                    .waiting_head;
+                let Some(head) = head else {
+                    break;
+                };
+                if !self.waiting.get(head).is_collapsible(cache) {
+                    break;
+                }
+                let (command, next) = self.waiting.take(head);
+                let lane = self
+                    .lanes
+                    .get_mut(&storage_key)
+                    .expect("completed key has a lane");
+                lane.waiting_head = next;
+                if next.is_none() {
+                    lane.waiting_tail = None;
+                }
+                commands.push(command);
+            }
+            if !commands.is_empty() {
+                let batch = CollapsedLaneBatch::reduce(base, commands);
+                if batch.operation.is_some() {
+                    return SchedulerCompletion {
+                        immediate: Vec::new(),
+                        collapsed: Some(batch),
+                    };
+                }
+                let immediate = batch.responses;
+                self.finish_running_lane(storage_key);
+                return SchedulerCompletion {
+                    immediate,
+                    collapsed: None,
+                };
+            }
+        }
+
+        self.finish_running_lane(storage_key);
+        SchedulerCompletion::empty()
+    }
+
+    fn finish_running_lane(&mut self, storage_key: StorageKey) {
+        let ready_again = {
+            let lane = self
+                .lanes
+                .get_mut(&storage_key)
+                .expect("completed key has a lane");
+            debug_assert_eq!(lane.state, LaneState::Running);
+            if lane.waiting_head.is_some() {
+                lane.state = LaneState::Ready;
+                true
+            } else {
+                false
+            }
+        };
+        if ready_again {
+            self.ready.push_back(storage_key);
+        } else {
+            self.lanes.remove(&storage_key);
+        }
+    }
+}
+
+struct RunningKeyedCommand {
+    storage_key: StorageKey,
+    completion: RunningCompletion,
+    job: KeyedJob,
+}
+
+enum RunningCompletion {
+    Direct(WorkerResponseSender),
+    Collapsed {
+        responses: Vec<DeferredWorkerResponse>,
+        success_state: KeyedVisibleState,
+        failure_state: KeyedVisibleState,
+    },
+}
+
+struct CompletedKeyedCommand {
+    storage_key: StorageKey,
+    completion: RunningCompletion,
+    job: CompletedKeyedJob,
+}
+
+async fn run_keyed_command(running: RunningKeyedCommand) -> CompletedKeyedCommand {
+    CompletedKeyedCommand {
+        storage_key: running.storage_key,
+        completion: running.completion,
+        job: running.job.run().await,
+    }
+}
+
+enum WorkerEvent {
+    Background(Result<bool>),
+    Completed(CompletedKeyedCommand),
+    Request(Option<WorkerRequest>),
+}
+
+struct DeferredLaneCompletion {
+    storage_key: StorageKey,
+    responses: Vec<DeferredWorkerResponse>,
+    success_state: Option<KeyedVisibleState>,
+    failure_state: Option<KeyedVisibleState>,
+}
+
+fn send_success(responses: Vec<DeferredWorkerResponse>) {
+    for response in responses {
+        response.sender.send(Ok(response.value));
+    }
+}
+
+fn send_failure(responses: Vec<DeferredWorkerResponse>, message: &str) {
+    for response in responses {
+        response
+            .sender
+            .send(Err(KvError::Worker(message.to_string())));
+    }
+}
+
+fn finish_scheduler_lane(
+    cache: &mut Kvkache,
+    scheduler: &mut KeyScheduler,
+    storage_key: StorageKey,
+    visible_state: Option<KeyedVisibleState>,
+) -> Option<RunningKeyedCommand> {
+    let completion = scheduler.complete(cache, storage_key, visible_state);
+    send_success(completion.immediate);
+    completion.collapsed.map(|batch| {
+        let CollapsedLaneBatch {
+            operation,
+            responses,
+            success_state,
+            failure_state,
+        } = batch;
+        let operation = operation.expect("collapsed storage batch has a final mutation");
+        RunningKeyedCommand {
+            storage_key,
+            completion: RunningCompletion::Collapsed {
+                responses,
+                success_state,
+                failure_state,
+            },
+            job: cache.prepare_keyed(storage_key, operation),
+        }
+    })
+}
+
+fn outcome_response(outcome: KeyedOutcome) -> WorkerResponse {
+    match outcome {
+        KeyedOutcome::Value(value) => WorkerResponse::Value(value),
+        KeyedOutcome::Set(outcome) => WorkerResponse::Set(outcome),
+        KeyedOutcome::Deleted(deleted) => WorkerResponse::Deleted(deleted),
+    }
+}
+
 pub(super) async fn worker_loop(
     mut cache: Kvkache,
     receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
     affinity_id: usize,
 ) -> Result<()> {
-    let mut batch = VecDeque::with_capacity(io_config.batch_size);
-    loop {
-        let first = receiver
-            .recv_async()
-            .await
-            .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
-        let wait_us = io_config.batch_max_wait_us;
-        batch.push_back(first);
+    let waiting_capacity = io_config
+        .batch_size
+        .saturating_mul(io_config.max_inflight_per_worker)
+        .max(io_config.max_inflight_per_worker);
+    let mut scheduler = KeyScheduler::with_waiting_capacity(waiting_capacity);
+    let mut inflight = FuturesUnordered::new();
+    let mut barrier = None;
+    let mut disconnected = false;
+    let mut deferred_completions: Vec<DeferredLaneCompletion> = Vec::new();
 
-        if batch.len() < io_config.batch_size
-            && wait_us > 0
-            && let Ok(Ok(request)) = compio::runtime::time::timeout(
-                Duration::from_micros(wait_us),
-                receiver.recv_async(),
-            )
-            .await
-        {
-            batch.push_back(request);
-        }
-        while batch.len() < io_config.batch_size {
-            match receiver.try_recv() {
-                Ok(request) => batch.push_back(request),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+    loop {
+        if !deferred_completions.is_empty() {
+            match cache.progress_capacity() {
+                Ok(true) => {
+                    for completion in deferred_completions.drain(..) {
+                        send_success(completion.responses);
+                        if let Some(running) = finish_scheduler_lane(
+                            &mut cache,
+                            &mut scheduler,
+                            completion.storage_key,
+                            completion.success_state,
+                        ) {
+                            inflight.push(run_keyed_command(running));
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    for completion in deferred_completions.drain(..) {
+                        send_failure(completion.responses, &message);
+                        if let Some(running) = finish_scheduler_lane(
+                            &mut cache,
+                            &mut scheduler,
+                            completion.storage_key,
+                            completion.failure_state,
+                        ) {
+                            inflight.push(run_keyed_command(running));
+                        }
+                    }
+                }
+                Ok(false) => {}
             }
         }
 
-        if process_worker_batch(
-            &mut cache,
-            &mut batch,
-            io_config.max_inflight_per_worker,
-            affinity_id,
-        )
-        .await?
-        {
-            return Ok(());
+        while inflight.len() < io_config.max_inflight_per_worker {
+            let Some(running) = scheduler.start_ready(&mut cache) else {
+                break;
+            };
+            inflight.push(run_keyed_command(running));
+        }
+
+        if inflight.is_empty() && scheduler.is_idle() {
+            if let Some(request) = barrier.take() {
+                if process_worker_barrier(&mut cache, request, affinity_id).await? {
+                    return Ok(());
+                }
+                continue;
+            }
+            if disconnected {
+                return Err(KvError::Worker("request queue disconnected".into()));
+            }
+        }
+
+        let can_receive = barrier.is_none() && !disconnected && scheduler.has_waiting_capacity();
+        let idle_before_event = inflight.is_empty() && scheduler.is_idle();
+        let event = if can_receive {
+            let mut incoming = std::pin::pin!(receiver.recv_async());
+            poll_fn(|context| {
+                if cache.has_background_work()
+                    && let Poll::Ready(result) = cache.poll_background(context)
+                {
+                    return Poll::Ready(WorkerEvent::Background(result));
+                }
+                if let Poll::Ready(Some(completed)) = inflight.poll_next_unpin(context) {
+                    return Poll::Ready(WorkerEvent::Completed(completed));
+                }
+                match incoming.as_mut().poll(context) {
+                    Poll::Ready(Ok(request)) => Poll::Ready(WorkerEvent::Request(Some(request))),
+                    Poll::Ready(Err(_)) => Poll::Ready(WorkerEvent::Request(None)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await
+        } else {
+            poll_fn(|context| {
+                if cache.has_background_work()
+                    && let Poll::Ready(result) = cache.poll_background(context)
+                {
+                    return Poll::Ready(WorkerEvent::Background(result));
+                }
+                if inflight.is_empty() {
+                    Poll::Pending
+                } else {
+                    inflight.poll_next_unpin(context).map(|completed| {
+                        WorkerEvent::Completed(
+                            completed.expect("in-flight keyed command disappeared"),
+                        )
+                    })
+                }
+            })
+            .await
+        };
+
+        match event {
+            WorkerEvent::Background(result) => {
+                result?;
+            }
+            WorkerEvent::Completed(completed) => {
+                let KeyedFinish {
+                    outcome,
+                    visible_state,
+                    flush_required,
+                } = cache.finish_keyed(completed.job);
+                let (responses, success_state, failure_state) = match completed.completion {
+                    RunningCompletion::Direct(response) => match outcome {
+                        Ok(outcome) if !flush_required => {
+                            response.send(Ok(outcome_response(outcome)));
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                completed.storage_key,
+                                visible_state,
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
+                            continue;
+                        }
+                        Ok(outcome) => (
+                            vec![DeferredWorkerResponse {
+                                sender: response,
+                                value: outcome_response(outcome),
+                            }],
+                            visible_state,
+                            None,
+                        ),
+                        Err(error) => {
+                            response.send(Err(error));
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                completed.storage_key,
+                                None,
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
+                            continue;
+                        }
+                    },
+                    RunningCompletion::Collapsed {
+                        responses,
+                        success_state,
+                        failure_state,
+                    } => match outcome {
+                        Ok(_) => (responses, Some(success_state), Some(failure_state)),
+                        Err(error) => {
+                            send_failure(responses, &error.to_string());
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                completed.storage_key,
+                                Some(failure_state),
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
+                            continue;
+                        }
+                    },
+                };
+                if flush_required {
+                    deferred_completions.push(DeferredLaneCompletion {
+                        storage_key: completed.storage_key,
+                        responses,
+                        success_state,
+                        failure_state,
+                    });
+                } else {
+                    send_success(responses);
+                    if let Some(running) = finish_scheduler_lane(
+                        &mut cache,
+                        &mut scheduler,
+                        completed.storage_key,
+                        success_state,
+                    ) {
+                        inflight.push(run_keyed_command(running));
+                    }
+                }
+            }
+            WorkerEvent::Request(Some(request)) => {
+                admit_worker_request(&mut scheduler, &mut barrier, request)?;
+                let mut admitted = 1;
+                if idle_before_event
+                    && admitted < io_config.batch_size
+                    && barrier.is_none()
+                    && scheduler.has_waiting_capacity()
+                    && io_config.batch_max_wait_us > 0
+                {
+                    match compio::runtime::time::timeout(
+                        Duration::from_micros(io_config.batch_max_wait_us),
+                        receiver.recv_async(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(request)) => {
+                            admit_worker_request(&mut scheduler, &mut barrier, request)?;
+                            admitted += 1;
+                        }
+                        Ok(Err(_)) => disconnected = true,
+                        Err(_) => {}
+                    }
+                }
+                while admitted < io_config.batch_size
+                    && barrier.is_none()
+                    && scheduler.has_waiting_capacity()
+                {
+                    match receiver.try_recv() {
+                        Ok(request) => {
+                            admit_worker_request(&mut scheduler, &mut barrier, request)?;
+                            admitted += 1;
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            WorkerEvent::Request(None) => {
+                disconnected = true;
+            }
         }
     }
 }
 
-async fn process_worker_batch(
-    cache: &mut Kvkache,
-    batch: &mut VecDeque<WorkerRequest>,
-    max_inflight: usize,
-    affinity_id: usize,
-) -> Result<bool> {
-    let mut shutdown_response = None;
-
-    while let Some(request) = batch.pop_front() {
-        match request {
-            WorkerRequest::Get {
-                storage_key,
-                response,
-            } => {
-                let mut pending = FuturesUnordered::new();
-                let cache_ref = &*cache;
-                let get = |storage_key, response| async move {
-                    (response, cache_ref.get_encoded(&storage_key).await)
-                };
-                pending.push(get(storage_key, response));
-                while pending.len() < max_inflight {
-                    let Some(WorkerRequest::Get { .. }) = batch.front() else {
-                        break;
-                    };
-                    let WorkerRequest::Get {
-                        storage_key,
-                        response,
-                    } = batch.pop_front().unwrap()
-                    else {
-                        unreachable!()
-                    };
-                    pending.push(get(storage_key, response));
-                }
-                while let Some((response, result)) = pending.next().await {
-                    response.send(result.map(WorkerResponse::Value));
-                }
-            }
-            WorkerRequest::Set {
-                storage_key,
+fn admit_worker_request(
+    scheduler: &mut KeyScheduler,
+    barrier: &mut Option<WorkerRequest>,
+    request: WorkerRequest,
+) -> Result<()> {
+    match request {
+        WorkerRequest::Get {
+            storage_key,
+            response,
+        } => scheduler.enqueue(storage_key, KeyedCommand::Get { response }),
+        WorkerRequest::Set {
+            storage_key,
+            value,
+            options,
+            response,
+        } => scheduler.enqueue(
+            storage_key,
+            KeyedCommand::Set {
                 value,
                 options,
                 response,
-            } => match cache
-                .set_encoded_with_options(storage_key, value, options)
-                .await
-            {
-                Ok(outcome) => {
-                    response.send(Ok(WorkerResponse::Set(outcome)));
-                }
-                Err(error) => {
-                    response.send(Err(error));
-                }
             },
-            WorkerRequest::Delete {
-                storage_key,
-                response,
-            } => match cache.delete(&storage_key).await {
-                Ok(deleted) => {
-                    response.send(Ok(WorkerResponse::Deleted(deleted)));
-                }
-                Err(error) => {
-                    response.send(Err(error));
-                }
-            },
-            WorkerRequest::Stats { response } => {
-                response.send(Ok(WorkerResponse::Stats(format!(
-                    "{} {}",
-                    crate::platform::cpu_diagnostic(affinity_id),
-                    cache.stats()
-                ))));
-            }
-            WorkerRequest::Sync { response } => {
-                let result = cache.sync().await.map(|()| WorkerResponse::Synced);
-                response.send(result);
-            }
-            WorkerRequest::Shutdown { response } => {
-                shutdown_response = Some(response);
-                break;
-            }
+        ),
+        WorkerRequest::Delete {
+            storage_key,
+            response,
+        } => scheduler.enqueue(storage_key, KeyedCommand::Delete { response }),
+        request => {
+            *barrier = Some(request);
+            Ok(())
         }
     }
+}
 
-    if shutdown_response.is_some() {
-        let result = match cache.sync().await {
-            Ok(()) => cache.checkpoint().await,
-            Err(error) => Err(error),
-        };
-        match result {
-            Ok(()) => {}
-            Err(error) => {
-                let message = error.to_string();
-                if let Some(response) = shutdown_response {
+async fn process_worker_barrier(
+    cache: &mut Kvkache,
+    request: WorkerRequest,
+    affinity_id: usize,
+) -> Result<bool> {
+    match request {
+        WorkerRequest::Stats { response } => {
+            response.send(Ok(WorkerResponse::Stats(format!(
+                "{} {}",
+                crate::platform::cpu_diagnostic(affinity_id),
+                cache.stats()
+            ))));
+            Ok(false)
+        }
+        WorkerRequest::Sync { response } => {
+            let result = cache.sync().await.map(|()| WorkerResponse::Synced);
+            response.send(result);
+            Ok(false)
+        }
+        WorkerRequest::Shutdown { response } => {
+            let result = match cache.sync().await {
+                Ok(()) => cache.checkpoint().await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => {
+                    response.send(Ok(WorkerResponse::Shutdown));
+                    Ok(true)
+                }
+                Err(error) => {
+                    let message = error.to_string();
                     response.send(Err(KvError::Worker(message.clone())));
+                    Err(KvError::Worker(message))
                 }
-                return Err(KvError::Worker(message));
             }
         }
+        WorkerRequest::Get { .. } | WorkerRequest::Set { .. } | WorkerRequest::Delete { .. } => {
+            Err(KvError::Worker(
+                "keyed request reached the worker barrier path".into(),
+            ))
+        }
     }
-
-    if let Some(response) = shutdown_response {
-        response.send(Ok(WorkerResponse::Shutdown));
-        return Ok(true);
-    }
-    Ok(false)
 }

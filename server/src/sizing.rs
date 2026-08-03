@@ -1,8 +1,9 @@
 //! Resource-budget sizing for common cache value distributions.
 //!
 //! The planner deliberately favors predictable headroom over exhaustive hardware
-//! tuning. It selects power-of-two SG counts, limits the Table to half of the
-//! process RAM budget, and leaves five percent of the SSD budget unassigned.
+//! tuning. It selects the largest supported SG count that fits, limits the Table
+//! to half of the process RAM budget, and leaves five percent of the SSD budget
+//! unassigned.
 //! Automatic RAM discovery also leaves at least twenty percent of currently
 //! available memory outside the process budget. Budgets are advisory inputs.
 //! Discovery recognizes common Linux cgroup memory limits, macOS Mach VM
@@ -30,6 +31,7 @@ const MEMORY_RESERVE_TOTAL_PERCENT: u64 = 5;
 const STORAGE_USE_PERCENT: u64 = 95;
 const TABLE_RAM_PERCENT: u64 = 50;
 const LIVE_KEY_PERCENT: u64 = 75;
+const MAX_SEGMENTS_PER_THREAD: usize = 1 << 16;
 
 /// A coarse value-size distribution used to choose the SG and Blob layout.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -41,6 +43,8 @@ pub enum SizingProfile {
     Balanced,
     /// Predominantly 2 KiB values stored densely in Blob Segments.
     Heavy,
+    /// Predominantly 16 KiB values stored in per-SG Blob staging.
+    Blob,
 }
 
 impl SizingProfile {
@@ -54,6 +58,7 @@ impl SizingProfile {
             Self::Light => "light",
             Self::Balanced => "balanced",
             Self::Heavy => "heavy",
+            Self::Blob => "blob",
         }
     }
 
@@ -67,12 +72,13 @@ impl SizingProfile {
             Self::Light => 100,
             Self::Balanced => 1024,
             Self::Heavy => 2048,
+            Self::Blob => 16 * 1024,
         }
     }
 
     const fn segment_size_mib(self) -> usize {
         match self {
-            Self::Light | Self::Balanced => 16,
+            Self::Light | Self::Balanced | Self::Blob => 16,
             Self::Heavy => 2,
         }
     }
@@ -80,7 +86,7 @@ impl SizingProfile {
     const fn blob_segment_size_mib(self) -> usize {
         match self {
             Self::Light | Self::Balanced => 1,
-            Self::Heavy => 64,
+            Self::Heavy | Self::Blob => 64,
         }
     }
 }
@@ -131,8 +137,8 @@ impl SizingRequest {
     ///
     /// # Returns
     ///
-    /// A plan using permitted CPU IDs and the largest power-of-two SG count that
-    /// stays within the SSD and Table-memory budgets.
+    /// A plan using permitted CPU IDs and the largest SG count that stays within
+    /// the SSD and Table-memory budgets.
     ///
     /// # Errors
     ///
@@ -185,61 +191,38 @@ impl SizingRequest {
         config.storage.segment_size_mib = self.profile.segment_size_mib();
         config.storage.blob_segment_size_mib = self.profile.blob_segment_size_mib();
         config.storage.max_item_size_mib = config.storage.blob_segment_size_mib.min(16);
+        config.storage.large_value_capacity_mib_per_thread = config.storage.max_item_size_mib;
 
-        for exponent in (0..=16).rev() {
-            let segments_per_thread = 1usize << exponent;
-            config.storage.segments_per_thread = segments_per_thread;
-            let keys_per_segment = keys_per_segment(self.profile)?;
-            let raw_key_capacity = checked_product(
-                [
-                    storage_worker_count as u64,
-                    segments_per_thread as u64,
-                    keys_per_segment,
-                ],
-                "raw key capacity",
-            )?;
-            let planned_key_capacity =
-                percent_of(raw_key_capacity, LIVE_KEY_PERCENT, "planned key capacity")?;
-            let capacity_per_thread_u64 =
-                planned_key_capacity.div_ceil(storage_worker_count as u64);
-            let Ok(capacity_per_thread) = usize::try_from(capacity_per_thread_u64) else {
-                continue;
-            };
-            config.table.capacity_per_thread = capacity_per_thread.max(1);
-
-            let storage_file_bytes = storage_file_bytes(&config)?;
-            if storage_file_bytes > storage_budget_bytes {
-                continue;
-            }
-            let worker_config = config.worker_config(0);
-            worker_config.validate()?;
-            let table_memory_bytes = (Table::modeled_memory_bytes(&worker_config)? as u64)
-                .checked_mul(storage_worker_count as u64)
-                .ok_or_else(|| {
-                    KvError::InvalidConfig("modeled Table memory size overflowed".into())
-                })?;
-            if table_memory_bytes > table_memory_budget_bytes {
-                continue;
-            }
-
-            return Ok(SizingPlan {
-                config,
-                profile: self.profile,
-                value_bytes: self.profile.value_bytes(),
-                process_memory_budget_bytes: self.memory_bytes,
-                sg_index_bits: bits_for_count(segments_per_thread),
-                raw_key_capacity,
-                planned_key_capacity,
-                table_memory_bytes,
+        let mut smallest = 1;
+        let mut largest = MAX_SEGMENTS_PER_THREAD;
+        let mut best = None;
+        while smallest <= largest {
+            let segments_per_thread = smallest + (largest - smallest) / 2;
+            match sizing_plan_for_segments(
+                config.clone(),
+                self.profile,
+                self.memory_bytes,
+                storage_worker_count,
+                segments_per_thread,
                 table_memory_budget_bytes,
-                storage_file_bytes,
                 storage_budget_bytes,
-            });
+            )? {
+                Some(plan) => {
+                    best = Some(plan);
+                    smallest = segments_per_thread + 1;
+                }
+                None => {
+                    largest = segments_per_thread - 1;
+                }
+            }
         }
 
-        Err(KvError::InvalidConfig(
-            "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD".into(),
-        ))
+        best.ok_or_else(|| {
+            KvError::InvalidConfig(
+                "resource budgets cannot fit one SG and its modeled Table; increase RAM or SSD"
+                    .into(),
+            )
+        })
     }
 }
 
@@ -557,6 +540,60 @@ pub struct SizingPlan {
     pub storage_budget_bytes: u64,
 }
 
+fn sizing_plan_for_segments(
+    mut config: AppConfig,
+    profile: SizingProfile,
+    process_memory_budget_bytes: u64,
+    storage_worker_count: usize,
+    segments_per_thread: usize,
+    table_memory_budget_bytes: u64,
+    storage_budget_bytes: u64,
+) -> Result<Option<SizingPlan>> {
+    config.storage.segments_per_thread = segments_per_thread;
+    let raw_key_capacity = checked_product(
+        [
+            storage_worker_count as u64,
+            segments_per_thread as u64,
+            keys_per_segment(profile)?,
+        ],
+        "raw key capacity",
+    )?;
+    let planned_key_capacity =
+        percent_of(raw_key_capacity, LIVE_KEY_PERCENT, "planned key capacity")?;
+    let capacity_per_thread_u64 = planned_key_capacity.div_ceil(storage_worker_count as u64);
+    let Ok(capacity_per_thread) = usize::try_from(capacity_per_thread_u64) else {
+        return Ok(None);
+    };
+    config.table.capacity_per_thread = capacity_per_thread.max(1);
+
+    let storage_file_bytes = storage_file_bytes(&config)?;
+    if storage_file_bytes > storage_budget_bytes {
+        return Ok(None);
+    }
+    let worker_config = config.worker_config(0);
+    worker_config.validate()?;
+    let table_memory_bytes = (Table::modeled_memory_bytes(&worker_config)? as u64)
+        .checked_mul(storage_worker_count as u64)
+        .ok_or_else(|| KvError::InvalidConfig("modeled Table memory size overflowed".into()))?;
+    if table_memory_bytes > table_memory_budget_bytes {
+        return Ok(None);
+    }
+
+    Ok(Some(SizingPlan {
+        config,
+        profile,
+        value_bytes: profile.value_bytes(),
+        process_memory_budget_bytes,
+        sg_index_bits: bits_for_count(segments_per_thread),
+        raw_key_capacity,
+        planned_key_capacity,
+        table_memory_bytes,
+        table_memory_budget_bytes,
+        storage_file_bytes,
+        storage_budget_bytes,
+    }))
+}
+
 fn percent_of(value: u64, percent: u64, name: &str) -> Result<u64> {
     value
         .checked_mul(percent)
@@ -575,9 +612,10 @@ fn checked_product<const N: usize>(values: [u64; N], name: &str) -> Result<u64> 
 fn storage_file_bytes(config: &AppConfig) -> Result<u64> {
     let per_worker = config.worker_config(0);
     per_worker
-        .segment_file_bytes()?
-        .checked_add(per_worker.blob_bytes())
-        .and_then(|bytes| bytes.checked_mul(config.runtime.thread_count as u64))
+        .generation_file_bytes()?
+        .checked_add(per_worker.large_value_capacity as u64)
+        .ok_or_else(|| KvError::InvalidConfig("sized per-worker storage length overflowed".into()))?
+        .checked_mul(config.runtime.thread_count as u64)
         .ok_or_else(|| KvError::InvalidConfig("sized storage file length overflowed".into()))
 }
 

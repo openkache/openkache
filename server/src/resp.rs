@@ -319,15 +319,9 @@ async fn serve_resp_connection(
     loop {
         let read_start = pending.len();
         pending.reserve(READ_BUFFER_BYTES);
-        let read = compio::runtime::time::timeout(
-            request_timeout,
-            stream.read(pending.slice(read_start..read_start + READ_BUFFER_BYTES)),
-        )
-        .await;
-        let BufResult(result, input) = match read {
-            Ok(read) => read,
-            Err(_) => return Ok(()),
-        };
+        let BufResult(result, input) = stream
+            .read(pending.slice(read_start..read_start + READ_BUFFER_BYTES))
+            .await;
         let bytes_read = result?;
         pending = input.into_inner();
         if bytes_read == 0 {
@@ -364,7 +358,9 @@ async fn serve_resp_connection(
                 }
             }
         }
-        if consumed > 0 {
+        if consumed == pending.len() {
+            pending.clear();
+        } else if consumed > 0 {
             pending.drain(..consumed);
         }
         if !responses.is_empty() {
@@ -441,6 +437,23 @@ async fn execute_command(
                 integer(response, deleted);
             }
         }
+        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") => match command {
+            [_] => match cache.stats_async().await {
+                Ok(stats) => {
+                    let stats = stats.join("\n");
+                    bulk(response, Some(stats.as_bytes()));
+                }
+                Err(cache_error) => resp_cache_error(response, cache_error),
+            },
+            _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
+        },
+        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") => match command {
+            [_] => match cache.sync_async().await {
+                Ok(()) => simple(response, "OK"),
+                Err(cache_error) => resp_cache_error(response, cache_error),
+            },
+            _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),
+        },
         Some(name)
             if name.eq_ignore_ascii_case(b"SELECT") || name.eq_ignore_ascii_case(b"CLIENT") =>
         {

@@ -24,6 +24,14 @@ pub struct Cli {
     #[arg(long, value_name = "N")]
     pub io_uring_entries: Option<u32>,
 
+    /// Enables storage io_uring SQPOLL; optionally combine with --sqpoll-cpu-ids.
+    #[arg(long)]
+    pub sqpoll: bool,
+
+    /// Worker-indexed SQPOLL kernel-thread CPU affinities.
+    #[arg(long, value_name = "LIST")]
+    pub sqpoll_cpu_ids: Option<String>,
+
     #[arg(long, value_name = "N")]
     pub max_inflight: Option<usize>,
 
@@ -98,12 +106,16 @@ pub enum CliCommand {
 }
 
 pub(crate) fn parse_cpu_ids(value: &str) -> Result<Vec<usize>> {
+    parse_cpu_list(value, "--cpu-ids")
+}
+
+fn parse_cpu_list(value: &str, option: &str) -> Result<Vec<usize>> {
     value
         .split(',')
         .map(|cpu| {
             cpu.trim()
                 .parse()
-                .map_err(|_| KvError::Usage("--cpu-ids: expected comma-separated integers".into()))
+                .map_err(|_| KvError::Usage(format!("{option}: expected comma-separated integers")))
         })
         .collect()
 }
@@ -142,6 +154,12 @@ impl AppConfig {
         }
         if let Some(v) = cli.io_uring_entries {
             config.io_uring.entries_per_worker = v;
+        }
+        if cli.sqpoll {
+            config.io_uring.sqpoll = true;
+        }
+        if let Some(v) = cli.sqpoll_cpu_ids {
+            config.io_uring.sqpoll_cpu_ids = parse_cpu_list(&v, "--sqpoll-cpu-ids")?;
         }
         if let Some(v) = cli.max_inflight {
             config.io_uring.max_inflight_per_worker = v;

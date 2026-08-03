@@ -35,6 +35,7 @@ const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
 const SERVER_KEY_VERSION: u32 = 1;
 const SERVER_KEY_FILE_BYTES: usize = 64;
 const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
+const SQPOLL_IDLE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -128,7 +129,7 @@ impl ThreadedKvkache {
         fs::create_dir_all(&config.storage.directory)?;
         let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
             let worker = config.worker_config(thread_id);
-            worker.data_path.exists() || worker.blob_path().exists()
+            worker.data_path.exists()
         });
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
@@ -206,6 +207,16 @@ impl ThreadedKvkache {
                 .spawn(move || {
                     let mut proactor = ProactorBuilder::new();
                     proactor.capacity(entries);
+                    if io_config.sqpoll {
+                        proactor.sqpoll_idle(SQPOLL_IDLE);
+                        if let Some(cpu_id) = io_config.sqpoll_cpu_ids.get(thread_id) {
+                            proactor.sqpoll_cpu(
+                                (*cpu_id)
+                                    .try_into()
+                                    .expect("SQPOLL CPU identifier was validated"),
+                            );
+                        }
+                    }
                     let cpus = HashSet::from([cpu_id]);
                     let runtime = RuntimeBuilder::new()
                         .with_proactor(proactor)
@@ -395,7 +406,7 @@ impl ThreadedKvkache {
             storage_key,
             response,
         })? {
-            WorkerResponse::Value(value) => Ok(value.map(|value| value.bytes)),
+            WorkerResponse::Value(value) => Ok(value.map(StoredItemValue::into_bytes)),
             response => Err(KvError::Worker(format!(
                 "unexpected get response: {response:?}"
             ))),

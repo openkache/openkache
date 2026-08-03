@@ -1019,7 +1019,7 @@ async fn execute_request(
             .get_async(item_id.expect("GET requests have a validated item ID"))
             .await
             .map(|value| match value {
-                Some(value) => response(Status::Ok, value.bytes),
+                Some(value) => response(Status::Ok, value.into_bytes()),
                 None => response(Status::NotFound, Vec::new()),
             }),
         Opcode::Set => cache
