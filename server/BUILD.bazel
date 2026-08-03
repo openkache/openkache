@@ -3,6 +3,7 @@
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 load(
     "//bazel:openkache_defs.bzl",
+    "RUST_EDITION",
     "cargo_deps",
     "crate_aliases",
     "dedupe_labels",
@@ -90,7 +91,7 @@ rust_library(
     ],
     crate_name = "openkache",
     crate_root = "src/lib.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = [
         ":server_optional_event_listener",
@@ -107,7 +108,7 @@ rust_binary(
     aliases = crate_aliases("server"),
     crate_name = "openkache_server",
     crate_root = "src/bin/openkache_server.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = dedupe_labels([":openkache_server"] + cargo_deps("server")),
 )
@@ -118,7 +119,7 @@ rust_binary(
     aliases = crate_aliases("server"),
     crate_name = "kvkache_v1",
     crate_root = "src/bin/kvkache_v1.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = dedupe_labels([
         "//protocol:openkache_protocol",

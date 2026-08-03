@@ -3,6 +3,7 @@
 load("@rules_rust//rust:defs.bzl", "rust_shared_library")
 load(
     "//bazel:openkache_defs.bzl",
+    "RUST_EDITION",
     "crate_aliases",
     "normal_cargo_deps",
     "rust_metadata",
@@ -29,7 +30,7 @@ rust_shared_library(
     aliases = crate_aliases("clients/core"),
     crate_name = "openkache_client_python_native",
     crate_root = "src/lib.rs",
-    edition = "2024",
+    edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache-client-python-native"),
     deps = [
         "//clients/core:openkache_client_core_ffi_library",

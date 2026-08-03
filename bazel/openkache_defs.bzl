@@ -2,6 +2,8 @@
 
 load("@crates//:defs.bzl", "aliases", "all_crate_deps", "crate_deps")
 
+RUST_EDITION = "2024"
+
 def cargo_deps(package_name):
     """Return normal and proc-macro dependencies for a Cargo package."""
     return all_crate_deps(
