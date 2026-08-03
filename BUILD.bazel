@@ -1,10 +1,11 @@
-"""Initial public Bazel aliases for the protocol and server packages."""
+"""Public Bazel aliases and source groups for production packages."""
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "Cargo.lock",
     "Cargo.toml",
+    ".gitignore",
 ])
 
 alias(
@@ -27,7 +28,84 @@ alias(
     actual = "//server:kvkache_v1_bin",
 )
 
+alias(
+    name = "openkache_client_core",
+    actual = "//clients/core:openkache_client_core",
+)
+
+alias(
+    name = "openkache_client_core_ffi",
+    actual = "//clients/core:openkache_client_core_ffi",
+)
+
+alias(
+    name = "openkache_client",
+    actual = "//clients/rust:openkache_client",
+)
+
+alias(
+    name = "openkache_client_ffi",
+    actual = "//clients/rust:openkache_client_ffi",
+)
+
+alias(
+    name = "openkache_client_typescript_native",
+    actual = "//clients/typescript/native:openkache_client_typescript_native",
+)
+
+alias(
+    name = "openkache_client_python_native",
+    actual = "//clients/python/native:openkache_client_python_native",
+)
+
+alias(
+    name = "openkache_client_dotnet_native",
+    actual = "//clients/core:openkache_client_core_ffi",
+)
+
+alias(
+    name = "openkache_cli",
+    actual = "//clients/cli:openkache_cli",
+)
+
+alias(
+    name = "openkache_cli_bin",
+    actual = "//clients/cli:openkache_cli_bin",
+)
+
 filegroup(
     name = "server_source_tree",
     srcs = ["//server:server_source_tree"],
+)
+
+filegroup(
+    name = "client_source_tree",
+    srcs = ["//clients:client_source_tree"],
+)
+
+filegroup(
+    name = "client_native_sources",
+    srcs = ["//clients:client_native_sources"],
+)
+
+filegroup(
+    name = "native_adapter_artifacts",
+    srcs = ["//clients:native_adapter_artifacts"],
+)
+
+alias(
+    name = "client_language_sources",
+    actual = "//clients:client_language_sources",
+)
+
+filegroup(
+    name = "workspace_runtime_sources",
+    srcs = [
+        ".gitignore",
+        "Cargo.lock",
+        "Cargo.toml",
+        "//clients:runtime_sources",
+        "//protocol:runtime_sources",
+        "//server:runtime_sources",
+    ],
 )

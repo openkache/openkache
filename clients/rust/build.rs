@@ -20,7 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", model.display());
     println!("cargo:rerun-if-changed={}", protocol_model.display());
 
-    let status = Command::new("bun")
+    let bun = std::env::var_os("OPENKACHE_BUN_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("bun"));
+    let status = Command::new(bun)
         .arg(&generator)
         .env("OPENKACHE_GENERATION_TARGET", "rust-api")
         .env("OPENKACHE_RUST_API_OUTPUT", &output)

@@ -16,6 +16,9 @@ default-members = [
     "clients/cli",
 ]
 
+[workspace.package]
+edition = "2024"
+
 [profile.dev.package.tikv-jemalloc-sys]
 # Nix fortify rejects jemalloc's configure probes at the default -O0.
 opt-level = 1
