@@ -1,0 +1,57 @@
+"""Shared source and generator inputs for the public Rust clients."""
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "client_generator_inputs",
+    srcs = glob([
+        "generate.ts",
+        "model/**",
+    ]) + ["//protocol:generator_inputs"],
+)
+
+filegroup(
+    name = "client_core_sources",
+    srcs = ["//clients/core:source_tree"],
+)
+
+filegroup(
+    name = "client_rust_sources",
+    srcs = ["//clients/rust:source_tree"],
+)
+
+filegroup(
+    name = "client_cli_sources",
+    srcs = ["//clients/cli:source_tree"],
+)
+
+filegroup(
+    name = "client_source_tree",
+    srcs = [
+        ":client_cli_sources",
+        ":client_core_sources",
+        ":client_rust_sources",
+    ],
+)
+
+# Keep this stable name for private integration graphs that consume the
+# language-facing source surface without depending on package internals.
+alias(
+    name = "client_language_sources",
+    actual = ":client_source_tree",
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = [
+        "README.md",
+        ":client_generator_inputs",
+        ":client_source_tree",
+        "//clients/cli:README.md",
+        "//clients/cli:runtime_sources",
+        "//clients/core:README.md",
+        "//clients/core:runtime_sources",
+        "//clients/rust:README.md",
+        "//clients/rust:runtime_sources",
+    ],
+)

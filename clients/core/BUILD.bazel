@@ -1,0 +1,105 @@
+"""Bazel targets for the shared public Rust client core."""
+
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library")
+load(
+    "//bazel:openkache_defs.bzl",
+    "cargo_deps",
+    "crate_aliases",
+    "rust_metadata",
+)
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "source_tree",
+    srcs = glob([
+        "Cargo.toml",
+        "README.md",
+        "build.rs",
+        "include/**",
+        "src/**",
+    ]),
+)
+
+filegroup(
+    name = "runtime_sources",
+    srcs = [":source_tree"],
+)
+
+cargo_build_script(
+    name = "openkache_client_core_build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "OPENKACHE_BUN_EXECUTABLE": "$(execpath //bazel:bun)",
+        "OPENKACHE_SMITHY_EXECUTABLE": "$(execpath //bazel:smithy)",
+        "OPENKACHE_SMITHY_USE_SHELL": "1",
+    },
+    crate_name = "openkache_client_core_build_script",
+    crate_root = "build.rs",
+    data = ["//clients:client_generator_inputs"],
+    edition = "2024",
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
+)
+
+rust_library(
+    name = "openkache_client_core",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/core"),
+    crate_features = [
+        "quic-compio",
+        "quic-quinn",
+    ],
+    crate_name = "openkache_client_core",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-core"),
+    deps = [
+        ":openkache_client_core_build_script",
+        "//protocol:openkache_protocol",
+    ] + cargo_deps("clients/core"),
+)
+
+# Keep an rlib variant for Rust adapters that opt into the C ABI feature.
+# rules_rust does not expose a shared-library target as a Rust dependency.
+rust_library(
+    name = "openkache_client_core_ffi_library",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/core"),
+    crate_features = [
+        "ffi",
+        "quic-compio",
+    ],
+    crate_name = "openkache_client_core",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-core"),
+    deps = [
+        ":openkache_client_core_build_script",
+        "//protocol:openkache_protocol",
+    ] + cargo_deps("clients/core"),
+)
+
+# This is the installable C ABI artifact consumed by native language
+# adapters. The checked-in headers remain available through source_tree.
+rust_shared_library(
+    name = "openkache_client_core_ffi",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = crate_aliases("clients/core"),
+    crate_features = [
+        "ffi",
+        "quic-compio",
+    ],
+    crate_name = "openkache_client_core",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    rustc_env = rust_metadata("openkache-client-core"),
+    deps = [
+        ":openkache_client_core_build_script",
+        "//protocol:openkache_protocol",
+    ] + cargo_deps("clients/core"),
+)

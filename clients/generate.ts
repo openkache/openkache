@@ -2,6 +2,7 @@
 /** Generates client-owned Smithy contracts and their generated language bindings. */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -140,6 +141,8 @@ const CLIENTS_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_ROOT = dirname(CLIENTS_DIRECTORY)
 const PROTOCOL_DIRECTORY = join(PUBLIC_ROOT, "protocol")
 const MODEL_DIRECTORY = "model"
+const SMITHY_EXECUTABLE = process.env.OPENKACHE_SMITHY_EXECUTABLE ?? "smithy"
+const SMITHY_USE_SHELL = process.env.OPENKACHE_SMITHY_USE_SHELL === "1"
 const SERVICE_SHAPE_ID = "openkache.protocol#OpenKache"
 const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
@@ -180,6 +183,30 @@ const GENERATED_OUTPUT_ROOT = resolve(
 )
 function generated_path(...segments: string[]): string {
   return join(GENERATED_OUTPUT_ROOT, ...segments)
+}
+
+function resolve_smithy_executable(): string {
+  if (
+    SMITHY_EXECUTABLE.length === 0 ||
+    !SMITHY_EXECUTABLE.includes("/") ||
+    SMITHY_EXECUTABLE.startsWith("/")
+  ) {
+    return SMITHY_EXECUTABLE
+  }
+  let directory = resolve(process.cwd())
+  for (;;) {
+    if (
+      SMITHY_EXECUTABLE.startsWith("external/") &&
+      existsSync(resolve(directory, "external"))
+    ) {
+      return resolve(directory, SMITHY_EXECUTABLE)
+    }
+    const candidate = resolve(directory, SMITHY_EXECUTABLE)
+    if (existsSync(candidate)) return candidate
+    const parent = dirname(directory)
+    if (parent === directory) return SMITHY_EXECUTABLE
+    directory = parent
+  }
 }
 const GENERATED_OUTPUTS = {
   csharp_api: generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
@@ -2572,7 +2599,12 @@ function smithy_ast(client_model: boolean): unknown {
   const models = client_model
     ? [join("..", "protocol", MODEL_DIRECTORY), MODEL_DIRECTORY]
     : [MODEL_DIRECTORY]
-  const result = Bun.spawnSync(["smithy", "ast", ...models], {
+  const smithy_executable = resolve_smithy_executable()
+  const smithy_command =
+    SMITHY_USE_SHELL && process.platform !== "win32"
+      ? ["sh", smithy_executable, "ast", ...models]
+      : [smithy_executable, "ast", ...models]
+  const result = Bun.spawnSync(smithy_command, {
     cwd,
     stderr: "pipe",
     stdout: "pipe",
