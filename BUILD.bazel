@@ -39,6 +39,11 @@ alias(
 )
 
 alias(
+    name = "openkache_client_napi",
+    actual = "//clients/typescript/native:openkache_client_napi",
+)
+
+alias(
     name = "openkache_client",
     actual = "//clients/rust:openkache_client",
 )
