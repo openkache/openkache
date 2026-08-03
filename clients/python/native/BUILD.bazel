@@ -12,11 +12,10 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "source_tree",
-    srcs = glob([
+    srcs = [
         "Cargo.lock",
         "Cargo.toml",
-        "src/**",
-    ]),
+    ] + glob(["src/**"]),
 )
 
 filegroup(

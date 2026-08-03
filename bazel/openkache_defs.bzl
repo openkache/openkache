@@ -45,14 +45,28 @@ def crate_aliases(package_name):
     )
 
 def crate_aliases_for(package_names):
-    """Merge aliases for several public Cargo packages."""
+    """Merge aliases for several public Cargo packages.
+
+    Args:
+      package_names: Cargo package names to combine.
+
+    Returns:
+      A map of crate names to Bazel labels.
+    """
     merged = {}
     for package_name in package_names:
         merged.update(crate_aliases(package_name))
     return merged
 
 def dedupe_labels(labels):
-    """Preserve order while removing duplicate dependency labels."""
+    """Preserve order while removing duplicate dependency labels.
+
+    Args:
+      labels: Dependency labels that may contain duplicates.
+
+    Returns:
+      The labels in their original order with duplicates removed.
+    """
     seen = {}
     result = []
     for label in labels:
