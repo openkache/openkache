@@ -1,13 +1,15 @@
 //! Logical SG identity and backing lifetime transitions.
 
+use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::*;
 
 #[derive(Debug)]
 pub(crate) struct RamBacking {
     pub(crate) sequence: u64,
-    pub(crate) segment: DirectIoBuffer,
+    pub(crate) segment: Arc<DirectIoBuffer>,
     pub(crate) blob_arena: BlobArena,
     pub(crate) large_value_arena: BlobArena,
 }
@@ -19,25 +21,60 @@ pub(crate) struct SsdBacking {
     pub(crate) large_value_location: Option<LargeValueLocation>,
 }
 
+#[derive(Debug)]
+pub(crate) struct JobPin {
+    count: Rc<Cell<usize>>,
+}
+
+impl JobPin {
+    fn acquire(count: &Rc<Cell<usize>>) -> Self {
+        count.set(count.get() + 1);
+        Self {
+            count: Rc::clone(count),
+        }
+    }
+}
+
+impl Drop for JobPin {
+    fn drop(&mut self) {
+        let count = self.count.get();
+        debug_assert!(count != 0, "an SG job pin was released twice");
+        self.count.set(count.saturating_sub(1));
+    }
+}
+
 pub(crate) enum DirectoryEntry {
     Free,
     Mutable {
         lane: usize,
+        job_pins: Rc<Cell<usize>>,
     },
-    Sealed(Rc<RamBacking>),
+    Closing {
+        readable: Rc<RamBacking>,
+        job_pins: Rc<Cell<usize>>,
+    },
     InFlight {
         readable: Rc<RamBacking>,
         location: GenerationLocation,
         large_value_location: Option<LargeValueLocation>,
     },
-    Stable(Rc<SsdBacking>),
+    Stable {
+        backing: Rc<SsdBacking>,
+        readable: Option<Rc<RamBacking>>,
+    },
     Evicting(Rc<SsdBacking>),
     Retiring(Rc<SsdBacking>),
 }
 
 pub(crate) enum ReadBacking {
-    Mutable { lane: usize },
-    Ram(Rc<RamBacking>),
+    Mutable {
+        lane: usize,
+        _job_pin: JobPin,
+    },
+    Ram {
+        backing: Rc<RamBacking>,
+        retirement_guard: Option<Rc<SsdBacking>>,
+    },
     Ssd(Rc<SsdBacking>),
 }
 
@@ -66,30 +103,64 @@ impl SgDirectory {
             .free_ids
             .pop()
             .ok_or_else(|| KvError::Worker("logical SG directory is exhausted".into()))?;
-        self.entries[logical_sg_id as usize] = DirectoryEntry::Mutable { lane };
+        self.entries[logical_sg_id as usize] = DirectoryEntry::Mutable {
+            lane,
+            job_pins: Rc::new(Cell::new(0)),
+        };
         Ok(logical_sg_id)
     }
 
     pub(crate) fn read_backing(&self, logical_sg_id: u32) -> Option<ReadBacking> {
         match self.entries.get(logical_sg_id as usize)? {
-            DirectoryEntry::Mutable { lane } => Some(ReadBacking::Mutable { lane: *lane }),
-            DirectoryEntry::Sealed(readable) | DirectoryEntry::InFlight { readable, .. } => {
-                Some(ReadBacking::Ram(Rc::clone(readable)))
+            DirectoryEntry::Mutable { lane, job_pins } => Some(ReadBacking::Mutable {
+                lane: *lane,
+                _job_pin: JobPin::acquire(job_pins),
+            }),
+            DirectoryEntry::Closing { readable, .. }
+            | DirectoryEntry::InFlight { readable, .. } => Some(ReadBacking::Ram {
+                backing: Rc::clone(readable),
+                retirement_guard: None,
+            }),
+            DirectoryEntry::Stable {
+                backing,
+                readable: Some(readable),
+            } => Some(ReadBacking::Ram {
+                backing: Rc::clone(readable),
+                retirement_guard: Some(Rc::clone(backing)),
+            }),
+            DirectoryEntry::Stable {
+                backing,
+                readable: None,
             }
-            DirectoryEntry::Stable(backing) | DirectoryEntry::Evicting(backing) => {
-                Some(ReadBacking::Ssd(Rc::clone(backing)))
-            }
+            | DirectoryEntry::Evicting(backing) => Some(ReadBacking::Ssd(Rc::clone(backing))),
             DirectoryEntry::Free | DirectoryEntry::Retiring(_) => None,
         }
     }
 
-    pub(crate) fn seal(&mut self, logical_sg_id: u32, backing: RamBacking) -> Result<()> {
+    pub(crate) fn close(&mut self, logical_sg_id: u32, backing: RamBacking) -> Result<()> {
         let entry = self.entry_mut(logical_sg_id)?;
-        if !matches!(entry, DirectoryEntry::Mutable { .. }) {
-            return Err(invalid_transition(logical_sg_id, "Mutable", "Sealed"));
-        }
-        *entry = DirectoryEntry::Sealed(Rc::new(backing));
+        let DirectoryEntry::Mutable { job_pins, .. } = entry else {
+            return Err(invalid_transition(logical_sg_id, "Mutable", "Closing"));
+        };
+        let job_pins = Rc::clone(job_pins);
+        *entry = DirectoryEntry::Closing {
+            readable: Rc::new(backing),
+            job_pins,
+        };
         Ok(())
+    }
+
+    pub(crate) fn closing_backing_if_ready(
+        &self,
+        logical_sg_id: u32,
+    ) -> Result<Option<Rc<RamBacking>>> {
+        let entry = self.entries.get(logical_sg_id as usize).ok_or_else(|| {
+            KvError::Worker(format!("logical SG {logical_sg_id} is out of range"))
+        })?;
+        let DirectoryEntry::Closing { readable, job_pins } = entry else {
+            return Err(invalid_transition(logical_sg_id, "Closing", "InFlight"));
+        };
+        Ok((job_pins.get() == 0).then(|| Rc::clone(readable)))
     }
 
     pub(crate) fn publish_inflight(
@@ -99,9 +170,14 @@ impl SgDirectory {
         large_value_location: Option<LargeValueLocation>,
     ) -> Result<Rc<RamBacking>> {
         let entry = self.entry_mut(logical_sg_id)?;
-        let DirectoryEntry::Sealed(readable) = entry else {
-            return Err(invalid_transition(logical_sg_id, "Sealed", "InFlight"));
+        let DirectoryEntry::Closing { readable, job_pins } = entry else {
+            return Err(invalid_transition(logical_sg_id, "Closing", "InFlight"));
         };
+        if job_pins.get() != 0 {
+            return Err(KvError::Worker(format!(
+                "logical SG {logical_sg_id} still has active job pins"
+            )));
+        }
         let readable = Rc::clone(readable);
         *entry = DirectoryEntry::InFlight {
             readable: Rc::clone(&readable),
@@ -116,6 +192,7 @@ impl SgDirectory {
         logical_sg_id: u32,
         location: GenerationLocation,
         large_value_location: Option<LargeValueLocation>,
+        retain_ram: bool,
     ) -> Result<()> {
         let entry = self.entry_mut(logical_sg_id)?;
         let DirectoryEntry::InFlight {
@@ -136,17 +213,28 @@ impl SgDirectory {
                 "logical SG {logical_sg_id} completed a different large-value reservation"
             )));
         }
-        *entry = DirectoryEntry::Stable(Rc::new(SsdBacking {
-            sequence: readable.sequence,
-            location,
-            large_value_location,
-        }));
+        *entry = DirectoryEntry::Stable {
+            backing: Rc::new(SsdBacking {
+                sequence: readable.sequence,
+                location,
+                large_value_location,
+            }),
+            readable: retain_ram.then(|| Rc::clone(readable)),
+        };
         Ok(())
+    }
+
+    pub(crate) fn drop_stable_ram(&mut self, logical_sg_id: u32) -> Result<bool> {
+        let entry = self.entry_mut(logical_sg_id)?;
+        let DirectoryEntry::Stable { readable, .. } = entry else {
+            return Ok(false);
+        };
+        Ok(readable.take().is_some())
     }
 
     pub(crate) fn begin_eviction(&mut self, logical_sg_id: u32) -> Result<Rc<SsdBacking>> {
         let entry = self.entry_mut(logical_sg_id)?;
-        let DirectoryEntry::Stable(backing) = entry else {
+        let DirectoryEntry::Stable { backing, .. } = entry else {
             return Err(invalid_transition(logical_sg_id, "Stable", "Evicting"));
         };
         let backing = Rc::clone(backing);
@@ -185,8 +273,32 @@ impl SgDirectory {
     pub(crate) fn is_stable(&self, logical_sg_id: u32) -> bool {
         matches!(
             self.entries.get(logical_sg_id as usize),
-            Some(DirectoryEntry::Stable(_))
+            Some(DirectoryEntry::Stable { .. })
         )
+    }
+
+    pub(crate) fn ram_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                DirectoryEntry::Closing {
+                    readable: backing, ..
+                }
+                | DirectoryEntry::InFlight {
+                    readable: backing, ..
+                } => Some(backing),
+                DirectoryEntry::Stable {
+                    readable: Some(backing),
+                    ..
+                } => Some(backing),
+                _ => None,
+            })
+            .map(|backing| {
+                backing.segment.capacity()
+                    + backing.blob_arena.allocated_bytes()
+                    + backing.large_value_arena.allocated_bytes()
+            })
+            .sum()
     }
 
     fn entry_mut(&mut self, logical_sg_id: u32) -> Result<&mut DirectoryEntry> {

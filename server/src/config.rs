@@ -128,6 +128,7 @@ pub struct Config {
     pub large_value_capacity: usize,
     pub mutable_segment_count: usize,
     pub max_flushes_in_flight: usize,
+    pub stable_ram_segment_count: usize,
     pub large_value_threshold: usize,
     pub max_item_bytes: usize,
     pub segment_count: usize,
@@ -154,6 +155,7 @@ impl Default for Config {
             large_value_capacity: 64 * 1024 * 1024,
             mutable_segment_count: 3,
             max_flushes_in_flight: 2,
+            stable_ram_segment_count: 2,
             large_value_threshold: 20 * 1024,
             max_item_bytes: DEFAULT_MAX_ITEM_BYTES,
             segment_count: 64,
@@ -211,6 +213,11 @@ impl Config {
         if self.max_flushes_in_flight != 2 {
             return Err(KvError::InvalidConfig(
                 "maximum flushes in flight must be 2".into(),
+            ));
+        }
+        if self.stable_ram_segment_count > self.segment_count {
+            return Err(KvError::InvalidConfig(
+                "stable RAM Segment count cannot exceed physical Segment count".into(),
             ));
         }
         if self.large_value_threshold == 0 {
@@ -512,6 +519,8 @@ impl RuntimeConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct IoUringConfig {
     pub sqpoll: bool,
+    /// Optional worker-indexed CPU affinity for storage SQPOLL kernel threads.
+    pub sqpoll_cpu_ids: Vec<usize>,
     pub iopoll: bool,
     pub entries_per_worker: u32,
     pub max_inflight_per_worker: usize,
@@ -523,6 +532,7 @@ impl Default for IoUringConfig {
     fn default() -> Self {
         Self {
             sqpoll: false,
+            sqpoll_cpu_ids: Vec::new(),
             iopoll: false,
             entries_per_worker: 256,
             max_inflight_per_worker: 64,
@@ -567,6 +577,8 @@ pub struct StorageConfig {
     pub mutable_segments_per_thread: usize,
     /// Concurrent generation flushes admitted by each storage worker.
     pub max_flushes_in_flight_per_thread: usize,
+    /// Recently flushed read-only SGs retained in RAM by each storage worker.
+    pub stable_ram_segments_per_thread: usize,
     /// Values larger than this threshold use the large-value tier.
     pub large_value_threshold_kib: usize,
     /// Preallocated worker-local large-value circular file capacity.
@@ -586,6 +598,7 @@ impl Default for StorageConfig {
             blob_segment_size_mib: 64,
             mutable_segments_per_thread: 3,
             max_flushes_in_flight_per_thread: 2,
+            stable_ram_segments_per_thread: 2,
             large_value_threshold_kib: 20,
             large_value_capacity_mib_per_thread: 64,
             max_item_size_mib: DEFAULT_MAX_ITEM_BYTES / (1024 * 1024),
@@ -710,9 +723,33 @@ impl AppConfig {
                 "runtime.event_interval must be non-zero".into(),
             ));
         }
-        if self.io_uring.sqpoll || self.io_uring.iopoll {
+        if self.io_uring.iopoll {
             return Err(KvError::InvalidConfig(
-                "io_uring SQPOLL and IOPOLL must remain false".into(),
+                "io_uring IOPOLL must remain false".into(),
+            ));
+        }
+        if self.io_uring.sqpoll {
+            if !self.io_uring.sqpoll_cpu_ids.is_empty()
+                && self.io_uring.sqpoll_cpu_ids.len() != self.runtime.thread_count
+            {
+                return Err(KvError::InvalidConfig(
+                    "io_uring.sqpoll_cpu_ids length must equal runtime.thread_count when provided"
+                        .into(),
+                ));
+            }
+            if let Some(cpu) = self
+                .io_uring
+                .sqpoll_cpu_ids
+                .iter()
+                .find(|cpu| !allowed.contains(cpu) || u32::try_from(**cpu).is_err())
+            {
+                return Err(KvError::InvalidConfig(format!(
+                    "SQPOLL CPU {cpu} is not an allowed io_uring CPU"
+                )));
+            }
+        } else if !self.io_uring.sqpoll_cpu_ids.is_empty() {
+            return Err(KvError::InvalidConfig(
+                "io_uring.sqpoll_cpu_ids requires io_uring.sqpoll=true".into(),
             ));
         }
         if self.io_uring.entries_per_worker == 0
@@ -864,6 +901,7 @@ impl AppConfig {
                 blob_segment_size_mib: 64,
                 mutable_segments_per_thread: 3,
                 max_flushes_in_flight_per_thread: 2,
+                stable_ram_segments_per_thread: 2,
                 large_value_threshold_kib: 20,
                 large_value_capacity_mib_per_thread: 64,
                 max_item_size_mib: 16,
@@ -899,6 +937,7 @@ impl AppConfig {
             large_value_capacity: self.storage.large_value_capacity_mib_per_thread * 1024 * 1024,
             mutable_segment_count: self.storage.mutable_segments_per_thread,
             max_flushes_in_flight: self.storage.max_flushes_in_flight_per_thread,
+            stable_ram_segment_count: self.storage.stable_ram_segments_per_thread,
             large_value_threshold: self.storage.large_value_threshold_kib * 1024,
             max_item_bytes: self.storage.max_item_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,

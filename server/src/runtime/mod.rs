@@ -35,6 +35,7 @@ const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
 const SERVER_KEY_VERSION: u32 = 1;
 const SERVER_KEY_FILE_BYTES: usize = 64;
 const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
+const SQPOLL_IDLE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -206,6 +207,16 @@ impl ThreadedKvkache {
                 .spawn(move || {
                     let mut proactor = ProactorBuilder::new();
                     proactor.capacity(entries);
+                    if io_config.sqpoll {
+                        proactor.sqpoll_idle(SQPOLL_IDLE);
+                        if let Some(cpu_id) = io_config.sqpoll_cpu_ids.get(thread_id) {
+                            proactor.sqpoll_cpu(
+                                (*cpu_id)
+                                    .try_into()
+                                    .expect("SQPOLL CPU identifier was validated"),
+                            );
+                        }
+                    }
                     let cpus = HashSet::from([cpu_id]);
                     let runtime = RuntimeBuilder::new()
                         .with_proactor(proactor)

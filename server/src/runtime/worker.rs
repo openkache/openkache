@@ -627,24 +627,12 @@ pub(super) async fn worker_loop(
     let mut inflight = FuturesUnordered::new();
     let mut barrier = None;
     let mut disconnected = false;
-    let mut flush_requested = false;
     let mut deferred_completions: Vec<DeferredLaneCompletion> = Vec::new();
 
     loop {
-        if !flush_requested {
-            while inflight.len() < io_config.max_inflight_per_worker {
-                let Some(running) = scheduler.start_ready(&mut cache) else {
-                    break;
-                };
-                inflight.push(run_keyed_command(running));
-            }
-        }
-
-        if inflight.is_empty() && flush_requested {
-            let flush_result = cache.flush_capacity().await;
-            flush_requested = false;
-            match flush_result {
-                Ok(()) => {
+        if !deferred_completions.is_empty() {
+            match cache.progress_capacity() {
+                Ok(true) => {
                     for completion in deferred_completions.drain(..) {
                         send_success(completion.responses);
                         if let Some(running) = finish_scheduler_lane(
@@ -671,8 +659,15 @@ pub(super) async fn worker_loop(
                         }
                     }
                 }
+                Ok(false) => {}
             }
-            continue;
+        }
+
+        while inflight.len() < io_config.max_inflight_per_worker {
+            let Some(running) = scheduler.start_ready(&mut cache) else {
+                break;
+            };
+            inflight.push(run_keyed_command(running));
         }
 
         if inflight.is_empty() && scheduler.is_idle() {
@@ -687,10 +682,7 @@ pub(super) async fn worker_loop(
             }
         }
 
-        let can_receive = barrier.is_none()
-            && !disconnected
-            && scheduler.has_waiting_capacity()
-            && !flush_requested;
+        let can_receive = barrier.is_none() && !disconnected && scheduler.has_waiting_capacity();
         let idle_before_event = inflight.is_empty() && scheduler.is_idle();
         let event = if can_receive {
             let mut incoming = std::pin::pin!(receiver.recv_async());
@@ -717,11 +709,15 @@ pub(super) async fn worker_loop(
                 {
                     return Poll::Ready(WorkerEvent::Background(result));
                 }
-                inflight.poll_next_unpin(context).map(|completed| {
-                    WorkerEvent::Completed(
-                        completed.expect("blocked admission has an in-flight keyed command"),
-                    )
-                })
+                if inflight.is_empty() {
+                    Poll::Pending
+                } else {
+                    inflight.poll_next_unpin(context).map(|completed| {
+                        WorkerEvent::Completed(
+                            completed.expect("in-flight keyed command disappeared"),
+                        )
+                    })
+                }
             })
             .await
         };
@@ -738,6 +734,18 @@ pub(super) async fn worker_loop(
                 } = cache.finish_keyed(completed.job);
                 let (responses, success_state, failure_state) = match completed.completion {
                     RunningCompletion::Direct(response) => match outcome {
+                        Ok(outcome) if !flush_required => {
+                            response.send(Ok(outcome_response(outcome)));
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                completed.storage_key,
+                                visible_state,
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
+                            continue;
+                        }
                         Ok(outcome) => (
                             vec![DeferredWorkerResponse {
                                 sender: response,
@@ -780,7 +788,6 @@ pub(super) async fn worker_loop(
                     },
                 };
                 if flush_required {
-                    flush_requested = true;
                     deferred_completions.push(DeferredLaneCompletion {
                         storage_key: completed.storage_key,
                         responses,

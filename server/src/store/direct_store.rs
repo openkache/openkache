@@ -146,7 +146,10 @@ enum PreparedReadBacking {
         value: Option<Result<StoredItemValue>>,
         mutable_value: Option<MutableValueHandle>,
     },
-    Ram(Rc<RamBacking>),
+    Ram {
+        backing: Rc<RamBacking>,
+        _retirement_guard: Option<Rc<SsdBacking>>,
+    },
     Ssd(Rc<SsdBacking>),
 }
 
@@ -156,6 +159,20 @@ struct PreparedReadCandidate {
     backing: PreparedReadBacking,
 }
 
+enum ObservedValue {
+    None,
+    Encoded(Vec<u8>),
+    RamInline {
+        segment: Arc<DirectIoBuffer>,
+        range: std::ops::Range<usize>,
+    },
+}
+
+struct ObservedItem {
+    state: ItemState,
+    value: ObservedValue,
+}
+
 struct DirectReadPlan {
     data: File,
     large_values: File,
@@ -163,6 +180,7 @@ struct DirectReadPlan {
     storage_key: StorageKey,
     candidates: Vec<PreparedReadCandidate>,
     io: Rc<DirectStoreIo>,
+    _job_pins: Vec<JobPin>,
 }
 
 impl DirectReadPlan {
@@ -170,14 +188,20 @@ impl DirectReadPlan {
         let mut newest = None;
         for candidate in self.candidates {
             let item = candidate
-                .read_item(&self.data, &self.config, self.storage_key, &self.io)
+                .read_item(
+                    &self.data,
+                    &self.config,
+                    self.storage_key,
+                    purpose,
+                    &self.io,
+                )
                 .await?;
             let Some(item) = item else {
                 continue;
             };
             if newest
                 .as_ref()
-                .is_none_or(|(current, _): &(PreparedReadCandidate, Item)| {
+                .is_none_or(|(current, _): &(PreparedReadCandidate, ObservedItem)| {
                     candidate.sequence > current.sequence
                 })
             {
@@ -192,7 +216,7 @@ impl DirectReadPlan {
         };
         match purpose {
             ReadPurpose::Value => {
-                if !item.is_live_at(unix_time_ms()) {
+                if !item_state_is_live_now(item.state) {
                     return Ok(KeyedObservation::Value(None));
                 }
                 candidate
@@ -208,10 +232,7 @@ impl DirectReadPlan {
             }
             ReadPurpose::State => Ok(KeyedObservation::State(Some(LocatedKeyState {
                 table_location: candidate.table_location,
-                item_state: ItemState {
-                    is_tombstone: item.is_tombstone,
-                    expires_at_ms: item.expires_at_ms,
-                },
+                item_state: item.state,
                 mutable_value: candidate.mutable_value(),
             }))),
         }
@@ -224,21 +245,47 @@ impl PreparedReadCandidate {
         data: &File,
         config: &Config,
         storage_key: StorageKey,
+        purpose: ReadPurpose,
         io: &DirectStoreIo,
-    ) -> Result<Option<Item>> {
+    ) -> Result<Option<ObservedItem>> {
         match &self.backing {
-            PreparedReadBacking::Mutable { item, .. } => Ok(item.clone()),
-            PreparedReadBacking::Ram(backing) => {
+            PreparedReadBacking::Mutable { item, .. } => {
+                Ok(item.as_ref().map(|item| ObservedItem {
+                    state: ItemState {
+                        is_tombstone: item.is_tombstone,
+                        expires_at_ms: item.expires_at_ms,
+                    },
+                    value: ObservedValue::None,
+                }))
+            }
+            PreparedReadBacking::Ram { backing, .. } => {
                 let bucket_index = bucket_hash(
                     &storage_key,
                     self.table_location.bucket_hash_index,
                     config.bucket_count(),
                 );
                 let start = bucket_index * BUCKET_BYTES;
-                Ok(find_item_in_bucket(
-                    &backing.segment[start..start + BUCKET_BYTES],
-                    &storage_key,
-                ))
+                let bucket = &backing.segment[start..start + BUCKET_BYTES];
+                let Some((state, range)) = find_item_state_and_value_range(bucket, &storage_key)
+                else {
+                    return Ok(None);
+                };
+                let range = start + range.start..start + range.end;
+                let value = match purpose {
+                    ReadPurpose::State => ObservedValue::None,
+                    ReadPurpose::Value => {
+                        match decode_stored_value(&backing.segment[range.clone()])? {
+                            StoredValue::Inline(_) => ObservedValue::RamInline {
+                                segment: Arc::clone(&backing.segment),
+                                range: range.start + STORED_VALUE_TAG_BYTES..range.end,
+                            },
+                            StoredValue::Blob(_) | StoredValue::Large(_) => {
+                                ObservedValue::Encoded(backing.segment[range].to_vec())
+                            }
+                        }
+                    }
+                };
+                Ok(Some(ObservedItem { state, value }))
             }
             PreparedReadBacking::Ssd(backing) => {
                 let bucket_index = bucket_hash(
@@ -256,7 +303,15 @@ impl PreparedReadCandidate {
                 )
                 .await?;
                 io.data_read.set(io.data_read.get() + BUCKET_BYTES as u64);
-                Ok(find_item_in_bucket(&bytes, &storage_key))
+                let Some((state, range)) = find_item_state_and_value_range(&bytes, &storage_key)
+                else {
+                    return Ok(None);
+                };
+                let value = match purpose {
+                    ReadPurpose::State => ObservedValue::None,
+                    ReadPurpose::Value => ObservedValue::Encoded(bytes[range].to_vec()),
+                };
+                Ok(Some(ObservedItem { state, value }))
             }
         }
     }
@@ -264,7 +319,7 @@ impl PreparedReadCandidate {
     fn mutable_value(&self) -> Option<MutableValueHandle> {
         match &self.backing {
             PreparedReadBacking::Mutable { mutable_value, .. } => *mutable_value,
-            PreparedReadBacking::Ram(_) | PreparedReadBacking::Ssd(_) => None,
+            PreparedReadBacking::Ram { .. } | PreparedReadBacking::Ssd(_) => None,
         }
     }
 
@@ -273,18 +328,31 @@ impl PreparedReadCandidate {
         data: &File,
         large_values: &File,
         config: &Config,
-        mut encoded: Vec<u8>,
+        value: ObservedValue,
         io: &DirectStoreIo,
     ) -> Result<StoredItemValue> {
         match self.backing {
             PreparedReadBacking::Mutable { value, .. } => value.ok_or_else(|| {
                 KvError::Worker("mutable keyed read has no value snapshot".into())
             })?,
-            PreparedReadBacking::Ram(backing) => {
-                let bytes = read_ram_value(encoded, &backing)?;
-                Ok(StoredItemValue::new(bytes))
-            }
+            PreparedReadBacking::Ram { backing, .. } => match value {
+                ObservedValue::RamInline { segment, range } => {
+                    Ok(StoredItemValue::from_segment(segment, range))
+                }
+                ObservedValue::Encoded(encoded) => {
+                    let bytes = read_ram_value(encoded, &backing)?;
+                    Ok(StoredItemValue::new(bytes))
+                }
+                ObservedValue::None => Err(KvError::Worker(
+                    "RAM keyed read has no value snapshot".into(),
+                )),
+            },
             PreparedReadBacking::Ssd(backing) => {
+                let ObservedValue::Encoded(mut encoded) = value else {
+                    return Err(KvError::Worker(
+                        "SSD keyed read has no encoded value snapshot".into(),
+                    ));
+                };
                 let bytes =
                     read_ssd_value(data, large_values, config, &backing, &mut encoded, io).await?;
                 Ok(StoredItemValue::new(bytes))
@@ -336,6 +404,12 @@ struct PreparedFlush {
     segment_write: DirectIoBuffer,
 }
 
+struct ClosingFlush {
+    logical_sg_id: u32,
+    reason: SegmentFlushReason,
+    fill_used_bytes: u64,
+}
+
 struct EvictionExtent {
     offset: usize,
     buffer: DirectIoBuffer,
@@ -364,8 +438,10 @@ pub(crate) struct Kvkache {
     generation_log: GenerationLog,
     large_value_log: LargeValueLog,
     pending_keyed_mutations: VecDeque<PendingKeyedMutation>,
+    closing_flushes: VecDeque<ClosingFlush>,
     sealed_flushes: VecDeque<PreparedFlush>,
     inflight_flushes: FuturesUnordered<FlushFuture>,
+    stable_ram_segments: VecDeque<u32>,
     eviction: Option<EvictionWork>,
     next_sequence: u64,
     live_keys: usize,
@@ -377,6 +453,7 @@ pub(crate) struct Kvkache {
     pub(crate) segment_capacity_flushes: u64,
     pub(crate) segment_sync_flushes: u64,
     pub(crate) segment_reuses: u64,
+    pub(crate) eviction_read_timeouts: u64,
     pub(crate) generation_fill_used_bytes: u64,
     pub(crate) generation_fill_capacity_bytes: u64,
 }
@@ -462,8 +539,10 @@ impl Kvkache {
             generation_log,
             large_value_log,
             pending_keyed_mutations: VecDeque::new(),
+            closing_flushes: VecDeque::new(),
             sealed_flushes: VecDeque::new(),
             inflight_flushes: FuturesUnordered::new(),
+            stable_ram_segments: VecDeque::new(),
             eviction: None,
             next_sequence,
             live_keys: 0,
@@ -475,6 +554,7 @@ impl Kvkache {
             segment_capacity_flushes: 0,
             segment_sync_flushes: 0,
             segment_reuses: 0,
+            eviction_read_timeouts: 0,
             generation_fill_used_bytes: 0,
             generation_fill_capacity_bytes: 0,
         })
@@ -556,12 +636,14 @@ impl Kvkache {
         purpose: ReadPurpose,
     ) -> KeyedObservationPlan {
         let mut candidates = Vec::new();
+        let mut job_pins = Vec::new();
         for table_location in self.table.candidate_locations(&storage_key) {
             let Some(backing) = self.directory.read_backing(table_location.sg_index) else {
                 continue;
             };
             let (sequence, backing) = match backing {
-                ReadBacking::Mutable { lane } => {
+                ReadBacking::Mutable { lane, _job_pin } => {
+                    job_pins.push(_job_pin);
                     let Some(generation) = self.mutable[lane].as_ref() else {
                         continue;
                     };
@@ -594,7 +676,16 @@ impl Kvkache {
                         },
                     )
                 }
-                ReadBacking::Ram(backing) => (backing.sequence, PreparedReadBacking::Ram(backing)),
+                ReadBacking::Ram {
+                    backing,
+                    retirement_guard,
+                } => (
+                    backing.sequence,
+                    PreparedReadBacking::Ram {
+                        backing,
+                        _retirement_guard: retirement_guard,
+                    },
+                ),
                 ReadBacking::Ssd(backing) => (backing.sequence, PreparedReadBacking::Ssd(backing)),
             };
             candidates.push(PreparedReadCandidate {
@@ -611,6 +702,7 @@ impl Kvkache {
                 storage_key,
                 candidates,
                 io: Rc::clone(&self.io),
+                _job_pins: job_pins,
             },
             purpose,
         )
@@ -728,13 +820,13 @@ impl Kvkache {
             previous_location,
             previous_mutable_value,
         )? {
-            self.publish_table_location(
+            let previous_disappeared = self.publish_table_location(
                 storage_key,
                 previous_location,
                 previous_mutable_value,
                 replacement,
             )?;
-            if !previous_live {
+            if !previous_live || previous_disappeared {
                 self.live_keys += 1;
             }
             return Ok((outcome, false));
@@ -768,15 +860,22 @@ impl Kvkache {
         Ok((true, false))
     }
 
-    pub(crate) async fn flush_capacity(&mut self) -> Result<()> {
+    pub(crate) fn progress_capacity(&mut self) -> Result<bool> {
+        self.advance_closings()?;
+        self.advance_flushes()?;
         while let Some(mutation) = self.pending_keyed_mutations.pop_front() {
             if let Some(mutation) = self.try_apply_pending_keyed_mutation(mutation)? {
                 self.pending_keyed_mutations.push_front(mutation);
+                if self.active_flush_count() >= self.config.max_flushes_in_flight {
+                    return Ok(false);
+                }
                 let lane = self.fullest_mutable_lane()?;
-                self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
+                self.close_lane(lane, SegmentFlushReason::Capacity)?;
+                self.advance_closings()?;
+                self.advance_flushes()?;
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn try_apply_pending_keyed_mutation(
@@ -809,13 +908,13 @@ impl Kvkache {
                         previous_live,
                     }));
                 };
-                self.publish_table_location(
+                let previous_disappeared = self.publish_table_location(
                     storage_key,
                     previous,
                     previous_mutable_value,
                     replacement,
                 )?;
-                if !previous_live {
+                if !previous_live || previous_disappeared {
                     self.live_keys += 1;
                 }
             }
@@ -838,7 +937,7 @@ impl Kvkache {
         let Some(located) = self.locate_item(storage_key).await? else {
             return Ok(None);
         };
-        if !located.item.is_live_at(unix_time_ms()) {
+        if !item_is_live_now(&located.item) {
             return Ok(None);
         }
         let bytes = self.read_value(located.item.value, located.backing).await?;
@@ -918,7 +1017,7 @@ impl Kvkache {
             let lane = self.fullest_mutable_lane()?;
             self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
         };
-        self.publish_table_location(
+        let previous_disappeared = self.publish_table_location(
             storage_key,
             previous_location,
             previous_mutable_value,
@@ -928,6 +1027,9 @@ impl Kvkache {
             (false, true) => self.live_keys += 1,
             (true, true) => {}
             _ => unreachable!(),
+        }
+        if previous_live && previous_disappeared {
+            self.live_keys += 1;
         }
         Ok(if previous_live {
             SetOutcome::Replaced
@@ -1050,7 +1152,7 @@ impl Kvkache {
     }
 
     fn mutable_value_handle(&self, located: &LocatedItem) -> Option<MutableValueHandle> {
-        let ReadBacking::Mutable { lane } = &located.backing else {
+        let ReadBacking::Mutable { lane, .. } = &located.backing else {
             return None;
         };
         mutable_value_handle_for(*lane, located.table_location.sg_index, &located.item.value)
@@ -1062,34 +1164,51 @@ impl Kvkache {
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
         replacement: MutablePlacement,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if replacement.in_place {
             debug_assert_eq!(previous, Some(replacement.table_location));
-            return Ok(());
+            return Ok(false);
         }
-        let published = match previous {
-            Some(previous) => {
-                self.table
-                    .replace_location(&storage_key, previous, replacement.table_location)
+        let previous_disappeared = match previous {
+            Some(previous)
+                if self.table.replace_location(
+                    &storage_key,
+                    previous,
+                    replacement.table_location,
+                ) =>
+            {
+                false
             }
-            None => self
-                .table
-                .insert(&storage_key, replacement.table_location)
-                .is_ok(),
+            Some(previous) => {
+                if self
+                    .table
+                    .candidate_locations(&storage_key)
+                    .contains(&previous)
+                {
+                    self.rollback_mutable_placement(&storage_key, &replacement);
+                    return Err(KvError::Worker(
+                        "Table location changed before the mutable replacement was published"
+                            .into(),
+                    ));
+                }
+                if let Err(error) = self.table.insert(&storage_key, replacement.table_location) {
+                    self.rollback_mutable_placement(&storage_key, &replacement);
+                    return Err(error);
+                }
+                true
+            }
+            None => {
+                if let Err(error) = self.table.insert(&storage_key, replacement.table_location) {
+                    self.rollback_mutable_placement(&storage_key, &replacement);
+                    return Err(error);
+                }
+                false
+            }
         };
-        if !published {
-            self.rollback_mutable_placement(&storage_key, &replacement);
-            return Err(match previous {
-                Some(_) => KvError::Worker(
-                    "Table location changed before the mutable replacement was published".into(),
-                ),
-                None => KvError::TableFull,
-            });
-        }
         if let Some(previous) = previous {
             self.remove_previous_mutable_item(&storage_key, previous, previous_mutable_value);
         }
-        Ok(())
+        Ok(previous_disappeared)
     }
 
     fn rollback_mutable_placement(
@@ -1160,11 +1279,17 @@ impl Kvkache {
     }
 
     async fn flush_lane(&mut self, lane: usize, reason: SegmentFlushReason) -> Result<()> {
-        while self.active_flush_count() >= self.config.max_flushes_in_flight
-            || !self.sealed_flushes.is_empty()
-        {
+        while self.active_flush_count() >= self.config.max_flushes_in_flight {
             self.wait_for_background_progress().await?;
         }
+        self.close_lane(lane, reason)?;
+        self.advance_closings()?;
+        self.advance_flushes()?;
+        self.drive_background_once().await?;
+        Ok(())
+    }
+
+    fn close_lane(&mut self, lane: usize, reason: SegmentFlushReason) -> Result<()> {
         let generation = self
             .mutable
             .get_mut(lane)
@@ -1172,25 +1297,54 @@ impl Kvkache {
             .ok_or_else(|| KvError::Worker(format!("mutable SG lane {lane} is unavailable")))?;
         let logical_sg_id = generation.logical_sg_id;
         let fill_used_bytes = generation.segment.used_bytes() as u64;
-        self.directory.seal(
+        self.directory.close(
             logical_sg_id,
             RamBacking {
                 sequence: generation.sequence,
-                segment: generation.segment.bytes,
+                segment: Arc::new(generation.segment.bytes),
                 blob_arena: generation.blob_arena,
                 large_value_arena: generation.large_value_arena,
             },
         )?;
-        let ReadBacking::Ram(readable) = self
-            .directory
-            .read_backing(logical_sg_id)
-            .ok_or_else(|| KvError::Worker("sealed SG lost its RAM backing".into()))?
-        else {
-            unreachable!("a sealed SG is RAM-backed")
+        self.closing_flushes.push_back(ClosingFlush {
+            logical_sg_id,
+            reason,
+            fill_used_bytes,
+        });
+        let new_logical_sg_id = self.directory.allocate_mutable(lane)?;
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.mutable[lane] = Some(MutableGeneration {
+            logical_sg_id: new_logical_sg_id,
+            sequence,
+            segment: MutableSegment::new(&self.config, new_logical_sg_id as usize),
+            blob_arena: BlobArena::new(self.config.blob_segment_size),
+            large_value_arena: BlobArena::new(self.config.large_value_capacity),
+        });
+        Ok(())
+    }
+
+    fn advance_closings(&mut self) -> Result<bool> {
+        let mut ready = None;
+        for (index, closing) in self.closing_flushes.iter().enumerate() {
+            if let Some(readable) = self
+                .directory
+                .closing_backing_if_ready(closing.logical_sg_id)?
+            {
+                ready = Some((index, readable));
+                break;
+            }
+        }
+        let Some((index, readable)) = ready else {
+            return Ok(false);
         };
+        let closing = self
+            .closing_flushes
+            .remove(index)
+            .expect("the ready Closing SG was inspected above");
         let packed = readable.blob_arena.pack()?;
         let packed_large_values = readable.large_value_arena.pack()?;
-        let mut segment_write = readable.segment.clone();
+        let mut segment_write = readable.segment.as_ref().clone();
         rewrite_segment_values(&mut segment_write, |encoded| {
             match decode_stored_value(encoded)? {
                 StoredValue::Inline(_) => Ok(None),
@@ -1227,9 +1381,9 @@ impl Kvkache {
             .as_ref()
             .map_or(0, DirectIoBuffer::capacity);
         self.sealed_flushes.push_back(PreparedFlush {
-            logical_sg_id,
-            reason,
-            fill_used_bytes,
+            logical_sg_id: closing.logical_sg_id,
+            reason: closing.reason,
+            fill_used_bytes: closing.fill_used_bytes,
             blob_logical_len,
             blob_write,
             blob_physical_len,
@@ -1238,19 +1392,7 @@ impl Kvkache {
             large_value_physical_len,
             segment_write,
         });
-        let new_logical_sg_id = self.directory.allocate_mutable(lane)?;
-        let sequence = self.next_sequence;
-        self.next_sequence = self.next_sequence.wrapping_add(1);
-        self.mutable[lane] = Some(MutableGeneration {
-            logical_sg_id: new_logical_sg_id,
-            sequence,
-            segment: MutableSegment::new(&self.config, new_logical_sg_id as usize),
-            blob_arena: BlobArena::new(self.config.blob_segment_size),
-            large_value_arena: BlobArena::new(self.config.large_value_capacity),
-        });
-        self.advance_flushes()?;
-        self.drive_background_once().await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn drive_background_once(&mut self) -> Result<()> {
@@ -1276,11 +1418,23 @@ impl Kvkache {
         self.io
             .data_written
             .set(self.io.data_written.get() + physical_bytes);
+        let retain_ram = self.config.stable_ram_segment_count != 0;
         self.directory.publish_stable(
             completion.logical_sg_id,
             completion.location,
             completion.large_value_location,
+            retain_ram,
         )?;
+        if retain_ram {
+            self.stable_ram_segments.push_back(completion.logical_sg_id);
+            while self.stable_ram_segments.len() > self.config.stable_ram_segment_count {
+                let logical_sg_id = self
+                    .stable_ram_segments
+                    .pop_front()
+                    .expect("the stable RAM cache exceeded its configured capacity");
+                self.directory.drop_stable_ram(logical_sg_id)?;
+            }
+        }
         self.segment_flushes += 1;
         match completion.reason {
             SegmentFlushReason::Capacity => self.segment_capacity_flushes += 1,
@@ -1299,7 +1453,8 @@ impl Kvkache {
     }
 
     pub(crate) fn has_background_work(&self) -> bool {
-        !self.sealed_flushes.is_empty()
+        !self.closing_flushes.is_empty()
+            || !self.sealed_flushes.is_empty()
             || !self.inflight_flushes.is_empty()
             || self.eviction.is_some()
     }
@@ -1317,6 +1472,10 @@ impl Kvkache {
             Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
             Poll::Pending => {}
         }
+        match self.advance_closings() {
+            Ok(closing_progress) => progressed |= closing_progress,
+            Err(error) => return Poll::Ready(Err(error)),
+        }
         match self.advance_flushes() {
             Ok(flush_progress) => progressed |= flush_progress,
             Err(error) => return Poll::Ready(Err(error)),
@@ -1329,7 +1488,7 @@ impl Kvkache {
     }
 
     fn active_flush_count(&self) -> usize {
-        self.sealed_flushes.len() + self.inflight_flushes.len()
+        self.closing_flushes.len() + self.sealed_flushes.len() + self.inflight_flushes.len()
     }
 
     fn advance_flushes(&mut self) -> Result<bool> {
@@ -1415,6 +1574,8 @@ impl Kvkache {
 
     fn start_eviction(&mut self, victim: GenerationLocation) -> Result<()> {
         let logical_sg_id = victim.logical_sg_id;
+        self.stable_ram_segments
+            .retain(|cached| *cached != logical_sg_id);
         let guard = self.directory.begin_eviction(logical_sg_id)?;
         let has_large_value_extent = guard.large_value_location.is_some();
         let mut eviction = EvictionWork {
@@ -1459,8 +1620,21 @@ impl Kvkache {
         if let Some(read) = eviction.read.as_mut()
             && let Poll::Ready((offset, result)) = read.as_mut().poll(context)
         {
-            let buffer =
-                result.map_err(|error| storage_operation_error(&self.resource_guard, error))?;
+            let buffer = match result {
+                Ok(buffer) => buffer,
+                Err(KvError::Timeout(_)) => {
+                    eviction.read = None;
+                    eviction.next_read_offset = offset;
+                    self.eviction_read_timeouts += 1;
+                    schedule_eviction_read(&self.data, &self.config, &mut eviction);
+                    self.eviction = Some(eviction);
+                    context.waker().wake_by_ref();
+                    return Poll::Ready(Ok(true));
+                }
+                Err(error) => {
+                    return Poll::Ready(Err(storage_operation_error(&self.resource_guard, error)));
+                }
+            };
             self.io
                 .data_read
                 .set(self.io.data_read.get() + buffer.len() as u64);
@@ -1539,8 +1713,10 @@ impl Kvkache {
                 sg_index: logical_sg_id,
                 bucket_hash_index,
             };
-            if self.table.remove(&item.storage_key, location) && item.is_live_at(now_ms) {
-                self.live_keys = self.live_keys.saturating_sub(1);
+            if self.table.remove(&item.storage_key, location) {
+                if item.is_live_at(now_ms) {
+                    self.live_keys = self.live_keys.saturating_sub(1);
+                }
             }
         }
         Ok(())
@@ -1553,10 +1729,10 @@ impl Kvkache {
                 continue;
             };
             let sequence = match &backing {
-                ReadBacking::Mutable { lane } => self.mutable[*lane]
+                ReadBacking::Mutable { lane, .. } => self.mutable[*lane]
                     .as_ref()
                     .map_or(0, |generation| generation.sequence),
-                ReadBacking::Ram(backing) => backing.sequence,
+                ReadBacking::Ram { backing, .. } => backing.sequence,
                 ReadBacking::Ssd(backing) => backing.sequence,
             };
             let Some(item) = self
@@ -1592,7 +1768,7 @@ impl Kvkache {
             self.config.bucket_count(),
         );
         match backing {
-            ReadBacking::Mutable { lane } => {
+            ReadBacking::Mutable { lane, .. } => {
                 let Some(generation) = self.mutable[*lane].as_ref() else {
                     return Ok(None);
                 };
@@ -1602,7 +1778,7 @@ impl Kvkache {
                     storage_key,
                 ))
             }
-            ReadBacking::Ram(backing) => {
+            ReadBacking::Ram { backing, .. } => {
                 let start = bucket_index * BUCKET_BYTES;
                 Ok(find_item_in_bucket(
                     &backing.segment[start..start + BUCKET_BYTES],
@@ -1631,7 +1807,7 @@ impl Kvkache {
 
     async fn read_value(&self, mut encoded: Vec<u8>, backing: ReadBacking) -> Result<Vec<u8>> {
         match backing {
-            ReadBacking::Mutable { lane } => match decode_stored_value(&encoded)? {
+            ReadBacking::Mutable { lane, .. } => match decode_stored_value(&encoded)? {
                 StoredValue::Inline(_) => {
                     remove_stored_value_tag(&mut encoded);
                     Ok(encoded)
@@ -1657,7 +1833,7 @@ impl Kvkache {
                     .map(ToOwned::to_owned)
                     .ok_or_else(|| KvError::Worker("mutable large-value handle is invalid".into())),
             },
-            ReadBacking::Ram(backing) => match decode_stored_value(&encoded)? {
+            ReadBacking::Ram { backing, .. } => match decode_stored_value(&encoded)? {
                 StoredValue::Inline(_) => {
                     remove_stored_value_tag(&mut encoded);
                     Ok(encoded)
@@ -1813,7 +1989,7 @@ impl Kvkache {
             .map(|generation| generation.large_value_arena.live_bytes())
             .sum::<usize>();
         format!(
-            "keys={} stable_keys={} pending_items=0 pending_value_bytes=0 mutable_sgs={} inflight_flushes={} max_flushes_in_flight={} blob_staging_live_bytes={} large_value_staging_live_bytes={} table_load={:.2}% table_memory={:.2}MiB modeled_resident={:.2}MiB flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} generation_fill_percent={:.3}% generation_fill_used_bytes={} generation_fill_capacity_bytes={} memory_stop_writes={} storage_stop_writes={} rejected_writes={} data_read={} data_written={} blob_data_read={} blob_data_written=0",
+            "keys={} stable_keys={} pending_items=0 pending_value_bytes=0 mutable_sgs={} inflight_flushes={} max_flushes_in_flight={} blob_staging_live_bytes={} large_value_staging_live_bytes={} table_load={:.2}% table_memory={:.2}MiB modeled_resident={:.2}MiB flushes={} capacity_flushes={} sync_flushes={} segment_reuses={} eviction_read_timeouts={} generation_fill_percent={:.3}% generation_fill_used_bytes={} generation_fill_capacity_bytes={} memory_stop_writes={} storage_stop_writes={} rejected_writes={} data_read={} data_written={} blob_data_read={} blob_data_written=0",
             self.live_keys,
             self.live_keys,
             self.mutable.len(),
@@ -1828,6 +2004,7 @@ impl Kvkache {
             self.segment_capacity_flushes,
             self.segment_sync_flushes,
             self.segment_reuses,
+            self.eviction_read_timeouts,
             fill,
             self.generation_fill_used_bytes,
             self.generation_fill_capacity_bytes,
@@ -1842,6 +2019,7 @@ impl Kvkache {
 
     pub(super) fn memory_bytes(&self) -> usize {
         self.table.memory_bytes()
+            + self.directory.ram_bytes()
             + self
                 .mutable
                 .iter()
@@ -1857,6 +2035,17 @@ impl Kvkache {
 
 fn item_state_is_live_at(state: ItemState, now_ms: u64) -> bool {
     !state.is_tombstone && (state.expires_at_ms == 0 || state.expires_at_ms > now_ms)
+}
+
+fn item_state_is_live_now(state: ItemState) -> bool {
+    !state.is_tombstone && (state.expires_at_ms == 0 || state.expires_at_ms > unix_time_ms())
+}
+
+fn item_is_live_now(item: &Item) -> bool {
+    item_state_is_live_now(ItemState {
+        is_tombstone: item.is_tombstone,
+        expires_at_ms: item.expires_at_ms,
+    })
 }
 
 fn mutable_value_handle_for(
@@ -2271,7 +2460,7 @@ fn schedule_eviction_read(data: &File, config: &Config, eviction: &mut EvictionW
     eviction.next_read_offset += len;
     let file = data.clone();
     let file_offset = eviction.victim.sg_base + offset as u64;
-    let read_max_time_us = config.read_max_time_us;
+    let read_max_time_us = config.read_max_time_us.max(config.write_max_time_us);
     eviction.read = Some(
         async move {
             let result = read_exact_direct(

@@ -557,6 +557,15 @@ pub(crate) fn find_item_in_bucket(bucket: &[u8], storage_key: &StorageKey) -> Op
     item_at(bucket, span.item_slot)
 }
 
+pub(crate) fn find_item_state_and_value_range(
+    bucket: &[u8],
+    storage_key: &StorageKey,
+) -> Option<(ItemState, std::ops::Range<usize>)> {
+    let span = find_item_span_in_bucket(bucket, storage_key)?;
+    let (state, value_start) = item_state_at(bucket, span)?;
+    Some((state, value_start..span.end))
+}
+
 fn matching_item_span(
     bucket: &[u8],
     storage_key: &[u8; STORAGE_KEY_BYTES],

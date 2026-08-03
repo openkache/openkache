@@ -5,7 +5,7 @@ edition = "2024"
 license = "AGPL-3.0-or-later"
 
 [features]
-default = ["allocator-jemalloc", "channel-crossfire", "quic-noq"]
+default = ["allocator-jemalloc", "channel-kanal", "quic-noq"]
 # Forces the portable lookup paths for cross-architecture benchmarking.
 force-scalar = []
 allocator-system = []
