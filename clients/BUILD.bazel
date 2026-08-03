@@ -58,6 +58,33 @@ filegroup(
     ],
 )
 
+# Keep the non-Rust client adapters and their package metadata available to
+# Bazel consumers without copying generated distributions or build outputs.
+filegroup(
+    name = "language_client_sources",
+    srcs = glob(
+        [
+            "c/**",
+            "cpp/**",
+            "dart/**",
+            "dotnet/**",
+            "go/**",
+            "java/**",
+            "kotlin/**",
+            "python/**",
+            "swift/**",
+            "typescript/**",
+        ],
+        exclude = [
+            "**/.build/**",
+            "**/dist/**",
+            "**/generated_local/**",
+            "**/node_modules/**",
+            "**/target/**",
+        ],
+    ),
+)
+
 # Keep this stable name for private integration graphs that consume the
 # language-facing source surface without depending on package internals.
 alias(
@@ -72,6 +99,7 @@ filegroup(
         ":client_generator_inputs",
         ":client_native_sources",
         ":client_source_tree",
+        ":language_client_sources",
         "//clients/cli:README.md",
         "//clients/cli:runtime_sources",
         "//clients/core:README.md",
