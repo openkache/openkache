@@ -95,12 +95,37 @@ filegroup(
         ],
         exclude = [
             "**/.build/**",
+            "**/.dart_tool/**",
+            "**/.direnv/**",
+            "**/.gradle/**",
+            "**/*.local.*",
+            "**/.swiftpm/**",
+            "**/__pycache__/**",
+            "**/*.dylib",
+            "**/*.dll",
+            "**/*.egg-info/**",
+            "**/*.pyd",
+            "**/*.pyc",
+            "**/*.pyo",
+            "**/*.so",
+            "**/Generated/**",
+            "**/*_local/**",
+            "**/build/**",
+            "**/bin/**",
             "**/dist/**",
+            "**/generated/**",
             "**/generated_local/**",
             "**/node_modules/**",
+            "**/obj/**",
+            "**/papers/**",
             "**/target/**",
+            "**/_generated/**",
         ],
-    ),
+    ) + [
+        # This package re-export is handwritten and tracked; generated
+        # Smithy modules in the same directory remain excluded above.
+        "python/src/openkache/_generated/__init__.py",
+    ],
 )
 
 # Keep this stable name for private integration graphs that consume the

@@ -11,6 +11,9 @@ startup --host_jvm_args=-XX:ActiveProcessorCount=2
 # action results without embedding a machine-specific path.
 startup --output_user_root=~/.cache/openkache/bazel/output-user-root
 common --repository_cache=~/.cache/openkache/bazel/repository-cache
+# Standalone builds must consume the checked-in module and Cargo rendering
+# locks. Repinning remains an explicit command-line operation.
+common --lockfile_mode=error
 
 # Keep each Bazel invocation inside a conservative 32 GiB memory budget. The
 # sandbox and worker limits apply where the host supports Bazel's resource
