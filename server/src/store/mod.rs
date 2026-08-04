@@ -1,8 +1,11 @@
 //! Direct mutable SG cache with worker-local variable generation files.
 
 use std::fs;
+#[cfg(feature = "storage-runtime-compio")]
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
+#[cfg(not(feature = "storage-runtime-kimojio"))]
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -11,11 +14,10 @@ use std::time::{Duration, Instant};
 
 use crate::channel::{AsyncReceiver, Sender, TrySendError};
 use crate::*;
-use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
-use compio::driver::AsRawFd;
-use compio::fs::{File, OpenOptions};
-use compio::io::{AsyncReadAt, AsyncWriteAt};
+#[cfg(feature = "storage-runtime-compio")]
+use compio::buf::{IoBuf, IoBufMut, SetLen};
+
+use crate::storage_runtime::{self, File};
 
 mod blob;
 mod blob_arena;
@@ -106,12 +108,14 @@ impl DerefMut for DirectIoBuffer {
     }
 }
 
+#[cfg(feature = "storage-runtime-compio")]
 impl IoBuf for DirectIoBuffer {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
+#[cfg(feature = "storage-runtime-compio")]
 impl IoBufMut for DirectIoBuffer {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let capacity = self.capacity();
@@ -123,6 +127,7 @@ impl IoBufMut for DirectIoBuffer {
     }
 }
 
+#[cfg(feature = "storage-runtime-compio")]
 impl SetLen for DirectIoBuffer {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.capacity());
@@ -212,22 +217,119 @@ impl DerefMut for DirectIoBufferLease {
     }
 }
 
+#[cfg(feature = "storage-runtime-kimojio")]
+impl storage_runtime::ReadBuffer for DirectIoBuffer {
+    fn read_capacity_mut(&mut self) -> &mut [u8] {
+        let capacity = self.capacity();
+        // SAFETY: the contiguous page allocation contains `capacity` initialized bytes.
+        unsafe { std::slice::from_raw_parts_mut(self.as_mut_ptr(), capacity) }
+    }
+
+    fn set_read_len(&mut self, initialized_len: usize) {
+        debug_assert!(initialized_len <= self.capacity());
+        self.initialized_len = self.initialized_len.max(initialized_len);
+    }
+}
+
+#[cfg(feature = "storage-runtime-kimojio")]
+impl storage_runtime::WriteBuffer for DirectIoBuffer {
+    fn initialized(&self) -> &[u8] {
+        self
+    }
+}
+
+#[cfg(feature = "storage-runtime-kimojio")]
+impl storage_runtime::ReadBuffer for DirectIoBufferLease {
+    fn read_capacity_mut(&mut self) -> &mut [u8] {
+        self.buffer_mut().read_capacity_mut()
+    }
+
+    fn set_read_len(&mut self, initialized_len: usize) {
+        self.buffer_mut().set_read_len(initialized_len);
+    }
+}
+
+#[cfg(feature = "storage-runtime-kimojio")]
+impl storage_runtime::WriteBuffer for DirectIoBufferLease {
+    fn initialized(&self) -> &[u8] {
+        self
+    }
+}
+
+#[cfg(feature = "storage-runtime-compio")]
 impl IoBuf for DirectIoBufferLease {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
+#[cfg(feature = "storage-runtime-compio")]
 impl IoBufMut for DirectIoBufferLease {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         self.buffer_mut().as_uninit()
     }
 }
 
+#[cfg(feature = "storage-runtime-compio")]
 impl SetLen for DirectIoBufferLease {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY: the caller upholds `SetLen`'s initialization contract.
         unsafe { self.buffer_mut().set_len(len) };
+    }
+}
+
+#[cfg(feature = "storage-runtime-monoio")]
+unsafe impl monoio::buf::IoBuf for DirectIoBuffer {
+    fn read_ptr(&self) -> *const u8 {
+        self.as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.initialized_len
+    }
+}
+
+#[cfg(feature = "storage-runtime-monoio")]
+unsafe impl monoio::buf::IoBufMut for DirectIoBuffer {
+    fn write_ptr(&mut self) -> *mut u8 {
+        self.as_mut_ptr()
+    }
+
+    fn bytes_total(&mut self) -> usize {
+        self.capacity()
+    }
+
+    unsafe fn set_init(&mut self, initialized_len: usize) {
+        debug_assert!(initialized_len <= self.capacity());
+        self.initialized_len = self.initialized_len.max(initialized_len);
+    }
+}
+
+#[cfg(feature = "storage-runtime-monoio")]
+unsafe impl monoio::buf::IoBuf for DirectIoBufferLease {
+    fn read_ptr(&self) -> *const u8 {
+        self.buffer().as_ptr()
+    }
+
+    fn bytes_init(&self) -> usize {
+        self.buffer().initialized_len
+    }
+}
+
+#[cfg(feature = "storage-runtime-monoio")]
+unsafe impl monoio::buf::IoBufMut for DirectIoBufferLease {
+    fn write_ptr(&mut self) -> *mut u8 {
+        self.buffer_mut().as_mut_ptr()
+    }
+
+    fn bytes_total(&mut self) -> usize {
+        self.buffer_mut().capacity()
+    }
+
+    unsafe fn set_init(&mut self, initialized_len: usize) {
+        let buffer = self.buffer_mut();
+        debug_assert!(initialized_len <= buffer.capacity());
+        buffer.initialized_len = buffer.initialized_len.max(initialized_len);
     }
 }
 
@@ -290,7 +392,7 @@ impl DirectIoBufferPool {
             return DirectIoBufferLease::unpooled(DirectIoBuffer::for_read(read_len));
         };
         let buffer = available
-            .recv_async()
+            .recv_async_storage()
             .await
             .expect("direct-I/O pool sender remains owned by the pool");
         debug_assert!(buffer.capacity() >= read_len);
@@ -342,15 +444,9 @@ async fn open_direct_file_with_flags(
     write: bool,
     flags: i32,
 ) -> std::io::Result<File> {
-    let file = OpenOptions::new()
-        .create(create)
-        .truncate(false)
-        .read(true)
-        .write(write)
-        .custom_flags(flags | direct_io_open_flag())
-        .open(path)
-        .await?;
-    configure_direct_io(file.as_raw_fd())?;
+    let file =
+        storage_runtime::open_file(path, create, write, flags | direct_io_open_flag()).await?;
+    configure_direct_io(file.raw_fd())?;
     Ok(file)
 }
 
@@ -578,6 +674,7 @@ fn allocated_file_bytes(path: &Path) -> Result<u64> {
     }
 }
 
+#[cfg(not(feature = "storage-runtime-kimojio"))]
 pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
     if len == 0 {
         return Ok(());
@@ -591,8 +688,8 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
     // Blocking tasks continue after their join handle is dropped, so retain an
     // independently owned descriptor in case the awaiting operation is cancelled.
     let file_descriptor =
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(file.as_raw_fd()) }.try_clone_to_owned()?;
-    compio::runtime::spawn_blocking(move || {
+        unsafe { std::os::fd::BorrowedFd::borrow_raw(file.raw_fd()) }.try_clone_to_owned()?;
+    storage_runtime::spawn_blocking(move || {
         reserve_with_transient_retry(
             || reserve_file_range_once(file_descriptor.as_raw_fd(), offset, len),
             std::thread::sleep,
@@ -602,7 +699,22 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
     .map_err(std::io::Error::from)?
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "storage-runtime-kimojio")]
+pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
+    if len == 0 {
+        return Ok(());
+    }
+    for delay in FILE_RESERVATION_RETRY_DELAYS {
+        match file.reserve_range(offset, len).await {
+            Ok(()) => return Ok(()),
+            Err(error) if is_transient_io_error(&error) => storage_runtime::sleep(delay).await?,
+            Err(error) => return Err(error),
+        }
+    }
+    file.reserve_range(offset, len).await
+}
+
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-kimojio")))]
 fn reserve_file_range_once(file_descriptor: i32, offset: i64, len: i64) -> i32 {
     unsafe { libc::posix_fallocate(file_descriptor, offset, len) }
 }
@@ -631,6 +743,7 @@ fn reserve_file_range_once(file_descriptor: i32, _offset: i64, len: i64) -> i32 
     }
 }
 
+#[cfg(not(feature = "storage-runtime-kimojio"))]
 pub(crate) fn reserve_with_transient_retry(
     mut reserve: impl FnMut() -> i32,
     mut wait: impl FnMut(Duration),
@@ -716,7 +829,7 @@ pub(crate) async fn read_exact_direct<B>(
     operation: &'static str,
 ) -> Result<B>
 where
-    B: IoBufMut + SetLen + 'static,
+    B: storage_runtime::ReadBuffer,
 {
     let timeout = Duration::from_micros(timeout_us);
     let started = Instant::now();
@@ -725,28 +838,29 @@ where
         let read_offset = offset
             .checked_add(completed as u64)
             .ok_or_else(|| KvError::Worker(format!("{operation} offset overflowed")))?;
-        let read = file.read_at(buffer.slice(completed..len), read_offset);
-        let BufResult(result, returned) =
-            compio::runtime::time::timeout(direct_io_timeout(started, timeout, operation)?, read)
-                .await
-                .map_err(|_| KvError::Timeout(operation))?;
+        let (result, returned) = storage_runtime::timeout(
+            direct_io_timeout(started, timeout, operation)?,
+            file.read_at(buffer, completed..len, read_offset),
+        )
+        .await
+        .map_err(|_| KvError::Timeout(operation))?;
         let read_bytes = match result {
             Ok(read_bytes) => read_bytes,
             Err(error) if is_transient_io_error(&error) => {
-                buffer = returned.into_inner();
+                buffer = returned;
                 continue;
             }
             Err(error) => return Err(error.into()),
         };
         validate_direct_io_progress(operation, read_bytes, len - completed)?;
         completed += read_bytes;
-        buffer = returned.into_inner();
+        buffer = returned;
     }
     Ok(buffer)
 }
 
 pub(crate) async fn write_all_direct(
-    mut file: &File,
+    file: &File,
     mut buffer: DirectIoBuffer,
     offset: u64,
     len: usize,
@@ -760,22 +874,23 @@ pub(crate) async fn write_all_direct(
         let write_offset = offset
             .checked_add(completed as u64)
             .ok_or_else(|| KvError::Worker(format!("{operation} offset overflowed")))?;
-        let write = file.write_at(buffer.slice(completed..len), write_offset);
-        let BufResult(result, returned) =
-            compio::runtime::time::timeout(direct_io_timeout(started, timeout, operation)?, write)
-                .await
-                .map_err(|_| KvError::Timeout(operation))?;
+        let (result, returned) = storage_runtime::timeout(
+            direct_io_timeout(started, timeout, operation)?,
+            file.write_at(buffer, completed..len, write_offset),
+        )
+        .await
+        .map_err(|_| KvError::Timeout(operation))?;
         let written = match result {
             Ok(written) => written,
             Err(error) if is_transient_io_error(&error) => {
-                buffer = returned.into_inner();
+                buffer = returned;
                 continue;
             }
             Err(error) => return Err(error.into()),
         };
         validate_direct_io_progress(operation, written, len - completed)?;
         completed += written;
-        buffer = returned.into_inner();
+        buffer = returned;
     }
     Ok(buffer)
 }

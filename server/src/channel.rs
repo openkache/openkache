@@ -11,6 +11,13 @@ fn assert_bounded_capacity(capacity: usize) {
     assert!(capacity > 0, "bounded channel capacity must be positive");
 }
 
+#[cfg(feature = "storage-runtime-kimojio")]
+async fn wait_for_storage_channel_poll() -> Result<(), RecvError> {
+    crate::storage_runtime::sleep(Duration::from_micros(10))
+        .await
+        .map_err(|_| RecvError)
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("sending on a disconnected channel")]
 pub(crate) struct SendError;
@@ -254,6 +261,20 @@ mod backend {
             }
         }
 
+        pub(crate) async fn recv_async_storage(&self) -> Result<T, RecvError> {
+            #[cfg(not(feature = "storage-runtime-kimojio"))]
+            return self.recv_async().await;
+
+            #[cfg(feature = "storage-runtime-kimojio")]
+            loop {
+                match self.try_recv() {
+                    Ok(value) => return Ok(value),
+                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                    Err(TryRecvError::Empty) => super::wait_for_storage_channel_poll().await?,
+                }
+            }
+        }
+
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
             let result = match &self.inner {
                 AsyncReceiverInner::Bounded(receiver) => receiver.try_recv(),
@@ -362,6 +383,20 @@ mod backend {
     impl<T> AsyncReceiver<T> {
         pub(crate) async fn recv_async(&self) -> Result<T, RecvError> {
             self.inner.recv_async().await.map_err(|_| RecvError)
+        }
+
+        pub(crate) async fn recv_async_storage(&self) -> Result<T, RecvError> {
+            #[cfg(not(feature = "storage-runtime-kimojio"))]
+            return self.recv_async().await;
+
+            #[cfg(feature = "storage-runtime-kimojio")]
+            loop {
+                match self.try_recv() {
+                    Ok(value) => return Ok(value),
+                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                    Err(TryRecvError::Empty) => super::wait_for_storage_channel_poll().await?,
+                }
+            }
         }
 
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -536,6 +571,20 @@ mod backend {
                     Ok(value) => return Ok(value),
                     Err(TryRecvError::Disconnected) => return Err(RecvError),
                     Err(TryRecvError::Empty) => listener.await,
+                }
+            }
+        }
+
+        pub(crate) async fn recv_async_storage(&self) -> Result<T, RecvError> {
+            #[cfg(not(feature = "storage-runtime-kimojio"))]
+            return self.recv_async().await;
+
+            #[cfg(feature = "storage-runtime-kimojio")]
+            loop {
+                match self.try_recv() {
+                    Ok(value) => return Ok(value),
+                    Err(TryRecvError::Disconnected) => return Err(RecvError),
+                    Err(TryRecvError::Empty) => super::wait_for_storage_channel_poll().await?,
                 }
             }
         }

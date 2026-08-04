@@ -41,7 +41,18 @@ crate.spec(package = "boring", version = "4.22.0")
 crate.spec(package = "event-listener", version = "5.4.2")
 crate.spec(package = "flume", version = "0.12.0")
 crate.spec(package = "kanal", version = "0.1.1")
+crate.spec(
+    default_features = False,
+    package = "kimojio",
+    version = "0.17.0",
+)
 crate.spec(package = "mimalloc", version = "0.1.52")
+crate.spec(
+    default_features = False,
+    features = ["async-cancel", "iouring", "sync"],
+    package = "monoio",
+    version = "0.2.4",
+)
 crate.spec(
     default_features = False,
     features = ["boringssl-boring-crate"],

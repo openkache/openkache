@@ -1,8 +1,8 @@
 //! Multi-threaded KV cache runtime. [`ThreadedKvkache`] manages a pool of
-//! thread-per-core workers, each running a `compio`-based event loop. Handles
+//! thread-per-core workers, each running the selected storage event loop. Handles
 //! request routing by key hash, benchmark batch execution, and graceful shutdown.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -14,8 +14,6 @@ use aes::{
     Aes256,
     cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
-use compio::driver::ProactorBuilder;
-use compio::runtime::RuntimeBuilder;
 use openkache_protocol::{ItemId, SetOptions};
 
 use crate::channel::{self, Sender};
@@ -35,7 +33,6 @@ const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
 const SERVER_KEY_VERSION: u32 = 1;
 const SERVER_KEY_FILE_BYTES: usize = 64;
 const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
-const SQPOLL_IDLE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -113,6 +110,12 @@ impl ThreadedKvkache {
                 .cpu_ids
                 .iter()
                 .any(|cpu_id| config.network.cpu_ids.contains(cpu_id));
+        if has_combined_worker && !crate::storage_runtime::SUPPORTS_COMBINED_NETWORK_ROLE {
+            return Err(KvError::InvalidConfig(format!(
+                "storage runtime {} requires separate network and storage CPUs",
+                crate::storage_runtime::NAME
+            )));
+        }
         let combined_entries = has_combined_worker
             .then(|| {
                 config
@@ -220,32 +223,16 @@ impl ThreadedKvkache {
             let thread = std::thread::Builder::new()
                 .name(format!("kvkache-worker-{thread_id}"))
                 .spawn(move || {
-                    let mut proactor = ProactorBuilder::new();
-                    proactor.capacity(entries);
-                    if io_config.sqpoll {
-                        proactor.sqpoll_idle(SQPOLL_IDLE);
-                        if let Some(cpu_id) = io_config.sqpoll_cpu_ids.get(thread_id) {
-                            proactor.sqpoll_cpu(
-                                (*cpu_id)
-                                    .try_into()
-                                    .expect("SQPOLL CPU identifier was validated"),
-                            );
-                        }
-                    }
-                    let cpus = HashSet::from([cpu_id]);
-                    let runtime = RuntimeBuilder::new()
-                        .with_proactor(proactor)
-                        .thread_affinity(cpus)
-                        .event_interval(event_interval)
-                        .build();
-                    let runtime = match runtime {
-                        Ok(runtime) => runtime,
-                        Err(error) => {
-                            let _ = started_tx.send(Err(error.to_string()));
-                            return;
-                        }
+                    let startup_error = started_tx.clone();
+                    let runtime_config = crate::storage_runtime::RuntimeConfig {
+                        worker_index: thread_id,
+                        entries,
+                        event_interval,
+                        sqpoll: io_config.sqpoll,
+                        sqpoll_cpu: io_config.sqpoll_cpu_ids.get(thread_id).copied(),
+                        worker_cpu: cpu_id,
                     };
-                    runtime.block_on(async move {
+                    let result = crate::storage_runtime::run(runtime_config, async move {
                         if let Some(error) = crate::platform::cpu_assignment_error(
                             &format!("thread {thread_id}"),
                             cpu_id,
@@ -268,13 +255,16 @@ impl ThreadedKvkache {
                             }
                         };
                         if let Some(receiver) = core_task_receiver {
-                            compio::runtime::spawn(run_core_tasks(receiver)).detach();
+                            crate::storage_runtime::spawn_detached(run_core_tasks(receiver));
                         }
                         let _ = started_tx.send(Ok(()));
                         if let Err(error) = worker_loop(cache, receiver, io_config, cpu_id).await {
                             eprintln!("worker {thread_id} stopped: {error}");
                         }
                     });
+                    if let Err(error) = result {
+                        let _ = startup_error.send(Err(error.to_string()));
+                    }
                 })?;
             workers.push(WorkerHandle {
                 sender,

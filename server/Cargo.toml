@@ -5,7 +5,7 @@ edition.workspace = true
 license = "AGPL-3.0-or-later"
 
 [features]
-default = ["allocator-jemalloc", "channel-kanal", "quic-noq"]
+default = ["allocator-jemalloc", "channel-kanal", "quic-noq", "storage-runtime-compio"]
 # Forces the portable lookup paths for cross-architecture benchmarking.
 force-scalar = []
 allocator-system = []
@@ -15,6 +15,9 @@ allocator-snmalloc = ["dep:snmalloc-rs"]
 channel-crossfire = ["dep:crossfire"]
 channel-flume = ["dep:flume"]
 channel-kanal = ["dep:event-listener", "dep:kanal"]
+storage-runtime-compio = []
+storage-runtime-kimojio = ["dep:kimojio"]
+storage-runtime-monoio = ["dep:monoio"]
 quic-quinn = ["dep:compio-quic"]
 quic-noq = ["dep:comnoq"]
 quic-quiche = ["dep:boring", "dep:quiche"]
@@ -37,8 +40,10 @@ event-listener = { version = "*", optional = true }
 flume = { version = "*", optional = true }
 futures-util = "*"
 kanal = { version = "*", optional = true }
+kimojio = { version = "*", default-features = false, optional = true }
 libc = "*"
 mimalloc = { version = "*", optional = true }
+monoio = { version = "*", default-features = false, features = ["async-cancel", "iouring", "sync"], optional = true }
 openkache-protocol = { path = "../protocol" }
 quiche = { version = "*", default-features = false, features = ["boringssl-boring-crate"], optional = true }
 rand = "*"
