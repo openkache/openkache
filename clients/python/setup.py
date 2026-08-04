@@ -1,4 +1,9 @@
-"""Build the wheel's portable ctypes Rust adapter with Cargo."""
+"""Build the wheel's portable ctypes Rust adapter.
+
+Repository checkouts provide a Bazel-built native artifact. Source
+distributions remain self-contained and compile their adapter with Cargo when
+they are built outside the repository.
+"""
 
 from __future__ import annotations
 
@@ -106,30 +111,36 @@ class build_native(Command):
             raise RuntimeError("setuptools did not initialize build_lib")
         destination = Path(self.build_lib) / "openkache" / native_library_name()
         destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.is_file():
+            destination.unlink()
         legacy_destination = destination.with_name("_native.so")
         if legacy_destination.is_file():
             legacy_destination.unlink()
-        environment = os.environ.copy()
-        environment.pop("CARGO_BUILD_TARGET", None)
-        environment["CARGO_TARGET_DIR"] = str(NATIVE_ROOT / "target")
-        subprocess.run(
-            [
-                os.environ.get("CARGO", "cargo"),
-                "build",
-                "--locked",
-                "--release",
-                "--manifest-path",
-                str(NATIVE_ROOT / "Cargo.toml"),
-            ],
-            cwd=PACKAGE_ROOT,
-            env=environment,
-            check=True,
-        )
-        native_name = native_library_name()
-        source = NATIVE_ROOT / "target" / "release" / native_name
+        configured_source = os.environ.get("OPENKACHE_CLIENT_NATIVE")
+        if configured_source:
+            source = Path(configured_source)
+        else:
+            environment = os.environ.copy()
+            environment.pop("CARGO_BUILD_TARGET", None)
+            environment["CARGO_TARGET_DIR"] = str(NATIVE_ROOT / "target")
+            subprocess.run(
+                [
+                    os.environ.get("CARGO", "cargo"),
+                    "build",
+                    "--locked",
+                    "--release",
+                    "--manifest-path",
+                    str(NATIVE_ROOT / "Cargo.toml"),
+                ],
+                cwd=PACKAGE_ROOT,
+                env=environment,
+                check=True,
+            )
+            native_name = native_library_name()
+            source = NATIVE_ROOT / "target" / "release" / native_name
         if not source.is_file():
-            raise RuntimeError(f"Cargo did not produce {source}")
-        shutil.copy2(source, destination)
+            raise RuntimeError(f"native build did not produce {source}")
+        shutil.copyfile(source, destination)
 
 
 class build_py(_build_py):
@@ -176,6 +187,8 @@ class sdist(_sdist):
             'path = "../../protocol"',
             'path = "../protocol"',
         )
+        _replace_workspace_edition(release_root / "core" / "Cargo.toml")
+        _replace_workspace_edition(release_root / "protocol" / "Cargo.toml")
 
 
 def _replace_path_dependency(path: Path, source: str, destination: str) -> None:
@@ -184,6 +197,17 @@ def _replace_path_dependency(path: Path, source: str, destination: str) -> None:
         raise RuntimeError(
             f"expected exactly one {source!r} dependency path in {path}"
         )
+    path.write_text(content.replace(source, destination), encoding="utf-8")
+
+
+def _replace_workspace_edition(path: Path) -> None:
+    """Make a flattened sdist crate independent of the checkout workspace."""
+
+    source = "edition.workspace = true"
+    destination = 'edition = "2024"'
+    content = path.read_text(encoding="utf-8")
+    if content.count(source) != 1:
+        raise RuntimeError(f"expected exactly one {source!r} in {path}")
     path.write_text(content.replace(source, destination), encoding="utf-8")
 
 
