@@ -49,7 +49,8 @@ below.
 - **Account**: A deployment-defined authenticated identity. Version 1 does not
   make an account the owner or scope of a namespace.
 - **Namespace**: A named server-wide collection of Item IDs with default
-  expiration and eviction policies.
+  expiration and eviction policies. A namespace is not nested under an
+  account.
 - **Namespace ID**: The server-assigned positive 64-bit identity of a
   namespace used in wire frames.
 - **Namespace revision**: The positive 64-bit version of a namespace's
@@ -364,10 +365,13 @@ and are not case-folded or Unicode-normalized. The wire protocol imposes no
 path, shell, or cloud-provider naming profile. The empty name is an ordinary
 namespace name. Namespace names are unique within one server.
 
-Namespace ownership and authorization are deployment concerns. A deployment
-MAY associate an owner with a namespace and MAY grant other authenticated
-accounts access through an ACL, but those identities and grants are not fields
-in a v1 frame. The namespace name and ID do not change when access is shared.
+Namespace ownership and authorization are deployment concerns, not namespace
+identity rules. A deployment MAY designate an administrative owner and MAY
+grant other authenticated accounts access through an ACL, but those identities
+and grants are not fields in a v1 frame. For every account authorized to use a
+namespace, the same name resolves to the same server-wide namespace ID and the
+same `(namespace_id, item_id)` data. Sharing access never creates an
+account-local namespace or changes the namespace name or ID.
 
 These rules are protocol rules, not cloud-provider resource-name rules. An SDK
 MAY offer an additional cloud-portable validator (for example, lowercase ASCII
