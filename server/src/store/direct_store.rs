@@ -1099,21 +1099,37 @@ impl Kvkache {
         }
         validate_ttl(options.ttl_ms)?;
         self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
-        let now_ms = unix_time_ms();
-        let previous = self.locate_item(&storage_key).await?;
-        let previous_live = previous
-            .as_ref()
-            .is_some_and(|located| located.item.is_live_at(now_ms));
-        if !set_condition_allows(options.condition, previous_live) {
+        // Check the condition before admission so a request that is already
+        // known to be NotStored does not fail because of unrelated capacity.
+        let initial_previous = self.locate_item(&storage_key).await?;
+        let initial_previous_live = initial_previous.as_ref().is_some_and(|located| {
+            located.item.is_live_at(unix_time_ms())
+                && self
+                    .table
+                    .candidate_locations(&storage_key)
+                    .contains(&located.table_location)
+        });
+        if !set_condition_allows(options.condition, initial_previous_live) {
             return Ok(SetOutcome::NotStored);
         }
+        drop(initial_previous);
         self.admit_set()?;
-        let previous_location = previous.as_ref().map(|located| located.table_location);
-        let previous_mutable_value = previous
-            .as_ref()
-            .and_then(|located| self.mutable_value_handle(located));
-
-        let new_location = loop {
+        let mut previous = self.locate_item(&storage_key).await?;
+        let (new_location, previous_live, previous_location, previous_mutable_value) = loop {
+            let previous_live = previous.as_ref().is_some_and(|located| {
+                located.item.is_live_at(unix_time_ms())
+                    && self
+                        .table
+                        .candidate_locations(&storage_key)
+                        .contains(&located.table_location)
+            });
+            if !set_condition_allows(options.condition, previous_live) {
+                return Ok(SetOutcome::NotStored);
+            }
+            let previous_location = previous.as_ref().map(|located| located.table_location);
+            let previous_mutable_value = previous
+                .as_ref()
+                .and_then(|located| self.mutable_value_handle(located));
             if let Some(location) = self.try_append_value(
                 storage_key,
                 &value.bytes,
@@ -1122,10 +1138,19 @@ impl Kvkache {
                 previous_location,
                 previous_mutable_value,
             )? {
-                break location;
+                break (
+                    location,
+                    previous_live,
+                    previous_location,
+                    previous_mutable_value,
+                );
             }
             let lane = self.fullest_mutable_lane()?;
             self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
+            // Capacity work can evict or expire the item observed above. Refresh
+            // the state before retrying so conditional SET semantics are
+            // evaluated at the eventual mutation boundary.
+            previous = self.locate_item(&storage_key).await?;
         };
         let previous_disappeared = self.publish_table_location(
             storage_key,
