@@ -3,8 +3,10 @@
 use std::future::Future;
 use std::io;
 use std::ops::Range;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -16,6 +18,7 @@ pub(crate) struct RuntimeConfig {
     pub(crate) sqpoll: bool,
     pub(crate) sqpoll_cpu: Option<usize>,
     pub(crate) worker_cpu: usize,
+    pub(crate) simulated_io_latency: Duration,
 }
 
 #[cfg(feature = "storage-runtime-kimojio")]
@@ -51,7 +54,12 @@ mod backend {
     where
         F: Future + 'static,
     {
-        let _ = (config.entries, config.event_interval, config.sqpoll_cpu);
+        let _ = (
+            config.entries,
+            config.event_interval,
+            config.sqpoll_cpu,
+            config.simulated_io_latency,
+        );
         if config.sqpoll {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -65,8 +73,8 @@ mod backend {
             )
         })?;
         crate::platform::pin_current_thread(config.worker_cpu)?;
-        let configuration = Configuration::new()
-            .set_exit_behavior(ExitBehavior::WhenMainTaskCompletes);
+        let configuration =
+            Configuration::new().set_exit_behavior(ExitBehavior::WhenMainTaskCompletes);
         let mut runtime = kimojio::Runtime::new(worker_index, configuration);
         match runtime.block_on(future) {
             Some(Ok(output)) => Ok(output),
@@ -150,13 +158,10 @@ mod backend {
             B: ReadBuffer,
         {
             let range_start = range.start;
-            let result = operations::pread(
-                &*self.0,
-                &mut buffer.read_capacity_mut()[range],
-                offset,
-            )
-            .await
-            .map_err(io::Error::from);
+            let result =
+                operations::pread(&*self.0, &mut buffer.read_capacity_mut()[range], offset)
+                    .await
+                    .map_err(io::Error::from);
             if let Ok(read) = &result {
                 buffer.set_read_len(range_start + *read);
             }
@@ -176,6 +181,126 @@ mod backend {
                 .await
                 .map_err(io::Error::from);
             (result, buffer)
+        }
+    }
+}
+
+#[cfg(feature = "storage-runtime-simulated")]
+mod backend {
+    use std::cell::Cell;
+    use std::collections::HashSet;
+
+    use compio::driver::{DriverType, ProactorBuilder};
+    use compio::runtime::RuntimeBuilder;
+
+    use super::*;
+
+    thread_local! {
+        static IO_LATENCY: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    pub(crate) const NAME: &str = "simulated";
+    pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
+
+    pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
+        configured
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct File {
+        latency: Duration,
+    }
+
+    pub(crate) trait ReadBuffer: 'static {
+        fn set_read_len(&mut self, initialized_len: usize);
+    }
+
+    pub(crate) trait WriteBuffer: 'static {}
+
+    pub(crate) fn run<F>(config: RuntimeConfig, future: F) -> io::Result<F::Output>
+    where
+        F: Future,
+    {
+        let _ = (config.worker_index, config.entries, config.sqpoll_cpu);
+        if config.sqpoll {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "simulated storage workers do not support SQPOLL",
+            ));
+        }
+        IO_LATENCY.set(config.simulated_io_latency);
+        let mut proactor = ProactorBuilder::new();
+        proactor.driver_type(DriverType::Poll);
+        let runtime = RuntimeBuilder::new()
+            .with_proactor(proactor)
+            .thread_affinity(HashSet::from([config.worker_cpu]))
+            .event_interval(config.event_interval)
+            .build()?;
+        Ok(runtime.block_on(future))
+    }
+
+    pub(crate) fn spawn_detached<F>(future: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        compio::runtime::spawn(future).detach();
+    }
+
+    pub(crate) async fn timeout<F>(duration: Duration, future: F) -> Result<F::Output, Timeout>
+    where
+        F: Future,
+    {
+        compio::runtime::time::timeout(duration, future)
+            .await
+            .map_err(|_| Timeout)
+    }
+
+    pub(crate) async fn open_file(
+        _path: &Path,
+        _create: bool,
+        _write: bool,
+        _flags: i32,
+    ) -> io::Result<File> {
+        Ok(File {
+            latency: IO_LATENCY.get(),
+        })
+    }
+
+    impl File {
+        pub(crate) async fn set_len(&self, _len: u64) -> io::Result<()> {
+            Ok(())
+        }
+
+        pub(crate) async fn read_at<B>(
+            &self,
+            mut buffer: B,
+            range: Range<usize>,
+            _offset: u64,
+        ) -> (io::Result<usize>, B)
+        where
+            B: ReadBuffer,
+        {
+            if !self.latency.is_zero() {
+                compio::runtime::time::sleep(self.latency).await;
+            }
+            let read = range.len();
+            buffer.set_read_len(range.end);
+            (Ok(read), buffer)
+        }
+
+        pub(crate) async fn write_at<B>(
+            &self,
+            buffer: B,
+            range: Range<usize>,
+            _offset: u64,
+        ) -> (io::Result<usize>, B)
+        where
+            B: WriteBuffer,
+        {
+            if !self.latency.is_zero() {
+                compio::runtime::time::sleep(self.latency).await;
+            }
+            (Ok(range.len()), buffer)
         }
     }
 }
@@ -218,7 +343,7 @@ mod backend {
     where
         F: Future,
     {
-        let _ = config.worker_index;
+        let _ = (config.worker_index, config.simulated_io_latency);
         let mut proactor = ProactorBuilder::new();
         proactor.capacity(config.entries);
         if config.sqpoll {
@@ -350,7 +475,12 @@ mod backend {
     where
         F: Future,
     {
-        let _ = (config.worker_index, config.event_interval, config.sqpoll_cpu);
+        let _ = (
+            config.worker_index,
+            config.event_interval,
+            config.sqpoll_cpu,
+            config.simulated_io_latency,
+        );
         if config.sqpoll {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
