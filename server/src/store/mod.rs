@@ -221,10 +221,7 @@ impl DerefMut for DirectIoBufferLease {
     }
 }
 
-#[cfg(any(
-    feature = "storage-runtime-kimojio",
-    feature = "storage-runtime-simulated"
-))]
+#[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::ReadBuffer for DirectIoBuffer {
     fn read_capacity_mut(&mut self) -> &mut [u8] {
         let capacity = self.capacity();
@@ -238,20 +235,25 @@ impl storage_runtime::ReadBuffer for DirectIoBuffer {
     }
 }
 
-#[cfg(any(
-    feature = "storage-runtime-kimojio",
-    feature = "storage-runtime-simulated"
-))]
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::ReadBuffer for DirectIoBuffer {
+    fn set_read_len(&mut self, initialized_len: usize) {
+        debug_assert!(initialized_len <= self.capacity());
+        self.initialized_len = self.initialized_len.max(initialized_len);
+    }
+}
+
+#[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::WriteBuffer for DirectIoBuffer {
     fn initialized(&self) -> &[u8] {
         self
     }
 }
 
-#[cfg(any(
-    feature = "storage-runtime-kimojio",
-    feature = "storage-runtime-simulated"
-))]
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::WriteBuffer for DirectIoBuffer {}
+
+#[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::ReadBuffer for DirectIoBufferLease {
     fn read_capacity_mut(&mut self) -> &mut [u8] {
         self.buffer_mut().read_capacity_mut()
@@ -262,15 +264,22 @@ impl storage_runtime::ReadBuffer for DirectIoBufferLease {
     }
 }
 
-#[cfg(any(
-    feature = "storage-runtime-kimojio",
-    feature = "storage-runtime-simulated"
-))]
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::ReadBuffer for DirectIoBufferLease {
+    fn set_read_len(&mut self, initialized_len: usize) {
+        self.buffer_mut().set_read_len(initialized_len);
+    }
+}
+
+#[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::WriteBuffer for DirectIoBufferLease {
     fn initialized(&self) -> &[u8] {
         self
     }
 }
+
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::WriteBuffer for DirectIoBufferLease {}
 
 #[cfg(feature = "storage-runtime-compio")]
 impl IoBuf for DirectIoBufferLease {
