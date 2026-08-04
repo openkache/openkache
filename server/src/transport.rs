@@ -387,6 +387,9 @@ async fn read_buffered_request(
             if let Some(header) = Request::decode_header(&frame)? {
                 break Ok::<_, StreamReadError>((frame, header));
             }
+            if frame.len() >= maximum {
+                return Err(StreamReadError::TooLarge);
+            }
             let start = frame.len();
             frame.reserve(1);
             let BufResult(result, next) = stream.read_exact(frame.slice(start..start + 1)).await;
@@ -405,6 +408,9 @@ async fn read_buffered_request(
         loop {
             if let Some(frame_len) = header.frame_len(&frame)? {
                 break Ok::<_, StreamReadError>((frame, frame_len));
+            }
+            if frame.len() >= maximum {
+                return Err(StreamReadError::TooLarge);
             }
             let start = frame.len();
             frame.reserve(1);
@@ -992,6 +998,9 @@ mod quiche_backend {
                     if let Some(header) = Request::decode_header(&self.buffered)? {
                         break Ok::<_, StreamReadError>(header);
                     }
+                    if self.buffered.len() >= maximum {
+                        return Err(StreamReadError::TooLarge);
+                    }
                     let chunk = self.next_chunk("stream header read").await?;
                     self.buffered.extend_from_slice(&chunk);
                 }
@@ -1005,6 +1014,9 @@ mod quiche_backend {
                 loop {
                     if let Some(frame_len) = header.frame_len(&self.buffered)? {
                         break Ok::<_, StreamReadError>(frame_len);
+                    }
+                    if self.buffered.len() >= maximum {
+                        return Err(StreamReadError::TooLarge);
                     }
                     let chunk = self.next_chunk("stream metadata read").await?;
                     self.buffered.extend_from_slice(&chunk);
