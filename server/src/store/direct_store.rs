@@ -2772,7 +2772,7 @@ fn bucket_hash_index_for_bucket(
 
 fn set_condition_allows(condition: SetCondition, current_live: bool) -> bool {
     match condition {
-        SetCondition::None => true,
+        SetCondition::Any => true,
         SetCondition::IfAbsent => !current_live,
         SetCondition::IfPresent => current_live,
     }

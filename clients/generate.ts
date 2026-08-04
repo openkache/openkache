@@ -182,7 +182,7 @@ const FFI_CONNECTION_STATE_FIELDS = [
   { name: "Unknown", field: "connectionStateUnknown" },
 ] as const
 const FFI_SET_CONDITION_FIELDS = [
-  { name: "None", field: "setConditionNone" },
+  { name: "Any", field: "setConditionAny" },
   { name: "IfAbsent", field: "setConditionIfAbsent" },
   { name: "IfPresent", field: "setConditionIfPresent" },
 ] as const
@@ -1685,7 +1685,7 @@ internal static partial class Protocol
     internal const uint FfiConnectionDisconnected = ${formatted_decimal(ffi_connection("Disconnected"))}u;
     internal const uint FfiConnectionClosed = ${formatted_decimal(ffi_connection("Closed"))}u;
     internal const uint FfiConnectionUnknown = ${formatted_decimal(ffi_connection("Unknown"))}u;
-    internal const uint FfiSetConditionNone = ${formatted_decimal(ffi_set_condition("None"))}u;
+    internal const uint FfiSetConditionAny = ${formatted_decimal(ffi_set_condition("Any"))}u;
     internal const uint FfiSetConditionIfAbsent = ${formatted_decimal(ffi_set_condition("IfAbsent"))}u;
     internal const uint FfiSetConditionIfPresent = ${formatted_decimal(ffi_set_condition("IfPresent"))}u;
 
@@ -2545,7 +2545,7 @@ ${assignments}
   const result_not_deleted = swift_ffi_value(ffi.result_kinds, "NotDeleted", "result")
   const result_connected = swift_ffi_value(ffi.result_kinds, "Connected", "result")
   const result_not_stored = swift_ffi_value(ffi.result_kinds, "NotStored", "result")
-  const set_condition_none = swift_ffi_value(ffi.set_conditions, "None", "SET condition")
+  const set_condition_any = swift_ffi_value(ffi.set_conditions, "Any", "SET condition")
   const set_condition_if_absent = swift_ffi_value(
     ffi.set_conditions,
     "IfAbsent",
@@ -2688,7 +2688,7 @@ public enum Smithy_Native_Contract: Sendable {
   public static let resultNotDeleted: UInt32 = ${result_not_deleted}
   public static let resultConnected: UInt32 = ${result_connected}
   public static let resultNotStored: UInt32 = ${result_not_stored}
-  public static let setConditionNone: UInt32 = ${set_condition_none}
+  public static let setConditionAny: UInt32 = ${set_condition_any}
   public static let setConditionIfAbsent: UInt32 = ${set_condition_if_absent}
   public static let setConditionIfPresent: UInt32 = ${set_condition_if_present}
 }

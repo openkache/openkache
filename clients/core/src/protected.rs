@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
+    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, NamespaceDescriptor, NamespacePolicy,
     Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
 };
@@ -52,6 +52,12 @@ macro_rules! protected_builder_methods {
             /// Presents a mutual TLS client identity.
             pub fn client_identity(mut self, identity: ClientIdentity) -> Self {
                 self.raw = self.raw.client_identity(identity);
+                self
+            }
+
+            /// Offers protocol versions in descending order and enforces a minimum version.
+            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
+                self.raw = self.raw.alpn_policy(policy);
                 self
             }
 

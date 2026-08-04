@@ -909,7 +909,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     {
         return condition switch
         {
-            null => Protocol.FfiSetConditionNone,
+            null => Protocol.FfiSetConditionAny,
             Smithy.SetCondition.IfAbsent => Protocol.FfiSetConditionIfAbsent,
             Smithy.SetCondition.IfPresent => Protocol.FfiSetConditionIfPresent,
             _ => throw new ArgumentOutOfRangeException(nameof(condition)),

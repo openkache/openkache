@@ -668,9 +668,9 @@ private enum NativeBridge {
     private static func nativeCondition(_ condition: OpenKacheSetCondition?) -> UInt32 {
         switch condition {
         case .none:
-            return Smithy_Native_Contract.setConditionNone
+            return Smithy_Native_Contract.setConditionAny
         case .any:
-            return Smithy_Native_Contract.setConditionNone
+            return Smithy_Native_Contract.setConditionAny
         case .ifAbsent:
             return Smithy_Native_Contract.setConditionIfAbsent
         case .ifPresent:

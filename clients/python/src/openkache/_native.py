@@ -18,7 +18,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_CLOSED,
     SMITHY_FFI_RESULT_CONNECTED,
     SMITHY_FFI_RESULT_ERROR,
-    SMITHY_FFI_SET_CONDITION_NONE,
+    SMITHY_FFI_SET_CONDITION_ANY,
 )
 
 
@@ -364,7 +364,7 @@ class NativeClient:
         *,
         key: bytes = b"",
         value: bytes = b"",
-        condition: int = SMITHY_FFI_SET_CONDITION_NONE,
+        condition: int = SMITHY_FFI_SET_CONDITION_ANY,
         ttl_ms: int | None = None,
     ) -> tuple[int, bytes]:
         return self._execute(
@@ -382,7 +382,7 @@ class NativeClient:
         *,
         item_id: bytes,
         value: bytes = b"",
-        condition: int = SMITHY_FFI_SET_CONDITION_NONE,
+        condition: int = SMITHY_FFI_SET_CONDITION_ANY,
         ttl_ms: int | None = None,
     ) -> tuple[int, bytes]:
         return self._execute(

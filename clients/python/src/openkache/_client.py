@@ -63,7 +63,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_VALUE,
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
-    SMITHY_FFI_SET_CONDITION_NONE,
+    SMITHY_FFI_SET_CONDITION_ANY,
     SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_MAX_IN_FLIGHT,
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
@@ -311,7 +311,7 @@ class SetOptions:
     @property
     def _condition_code(self) -> int:
         if self.condition is None:
-            return SMITHY_FFI_SET_CONDITION_NONE
+            return SMITHY_FFI_SET_CONDITION_ANY
         if self.condition is SmithySetCondition.IF_ABSENT:
             return SMITHY_FFI_SET_CONDITION_IF_ABSENT
         return SMITHY_FFI_SET_CONDITION_IF_PRESENT

@@ -27,8 +27,8 @@ use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, St
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
-    Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy, ServerTrust,
-    SetOptions,
+    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy,
+    ServerTrust, SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
@@ -356,6 +356,7 @@ struct Core<C: ClientConnection> {
     address: SocketAddr,
     server_name: String,
     tls: rustls::ClientConfig,
+    alpn: AlpnPolicy,
     connect_timeout: Duration,
     request_timeout: Duration,
     retry: RetryPolicy,
@@ -405,6 +406,7 @@ impl<C: ClientConnection> Core<C> {
         address: SocketAddr,
         server_name: String,
         tls: rustls::ClientConfig,
+        alpn: AlpnPolicy,
         timeouts: ClientTimeouts,
         retry: RetryPolicy,
         max_in_flight: usize,
@@ -421,6 +423,17 @@ impl<C: ClientConnection> Core<C> {
             max_in_flight,
         )
         .await?;
+        if let Some(protocol) = connection.negotiated_alpn() {
+            if let Err(error) = alpn.validate_negotiated(protocol) {
+                connection.close();
+                return Err(error);
+            }
+        } else {
+            connection.close();
+            return Err(Error::Connection(
+                "server did not negotiate an ALPN protocol".into(),
+            ));
+        }
         let core = Self {
             connection: RwLock::new(Arc::new(connection)),
             reconnect: futures_util::lock::Mutex::new(()),
@@ -428,6 +441,7 @@ impl<C: ClientConnection> Core<C> {
             address,
             server_name,
             tls,
+            alpn,
             connect_timeout: timeouts.connect,
             request_timeout: timeouts.request,
             retry,
@@ -941,6 +955,19 @@ impl<C: ClientConnection> Core<C> {
                 return Err(error);
             }
         };
+        if let Some(protocol) = replacement.negotiated_alpn() {
+            if let Err(error) = self.alpn.validate_negotiated(protocol) {
+                replacement.close();
+                self.mark_disconnected(failed);
+                return Err(error);
+            }
+        } else {
+            replacement.close();
+            self.mark_disconnected(failed);
+            return Err(Error::Connection(
+                "server did not negotiate an ALPN protocol".into(),
+            ));
+        }
         let mut connection = self
             .connection
             .write()
@@ -995,6 +1022,7 @@ struct BuilderSettings {
     endpoint: Endpoint,
     trust: ServerTrust,
     identity: Option<ClientIdentity>,
+    alpn: AlpnPolicy,
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
@@ -1009,6 +1037,7 @@ impl BuilderSettings {
             endpoint,
             trust: ServerTrust::default(),
             identity: None,
+            alpn: AlpnPolicy::default(),
             timeouts: ClientTimeouts::default(),
             retry: RetryPolicy::default(),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
@@ -1065,10 +1094,11 @@ impl BuilderSettings {
 
     fn finish(self) -> Result<ConnectionSettings> {
         self.validate()?;
-        let tls = make_tls_config(self.trust, self.identity)?;
+        let tls = make_tls_config(self.trust, self.identity, &self.alpn)?;
         Ok(ConnectionSettings {
             endpoint: self.endpoint,
             tls,
+            alpn: self.alpn,
             timeouts: self.timeouts,
             retry: self.retry,
             max_in_flight: self.max_in_flight,
@@ -1082,6 +1112,7 @@ impl BuilderSettings {
 struct ConnectionSettings {
     endpoint: Endpoint,
     tls: rustls::ClientConfig,
+    alpn: AlpnPolicy,
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
@@ -1108,6 +1139,13 @@ macro_rules! builder_methods {
             /// Presents a mutual TLS client identity.
             pub fn client_identity(mut self, identity: ClientIdentity) -> Self {
                 self.settings.identity = Some(identity);
+                self
+            }
+
+            /// Offers protocol versions in descending order and enforces a
+            /// minimum negotiated version.
+            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
+                self.settings.alpn = policy;
                 self
             }
 
@@ -1405,6 +1443,7 @@ async fn connect_quinn(
         address,
         settings.endpoint.server_name().to_owned(),
         settings.tls,
+        settings.alpn,
         settings.timeouts,
         settings.retry,
         settings.max_in_flight,
@@ -1431,6 +1470,7 @@ async fn connect_compio(
         address,
         settings.endpoint.server_name().to_owned(),
         settings.tls,
+        settings.alpn,
         settings.timeouts,
         settings.retry,
         settings.max_in_flight,
@@ -1502,6 +1542,7 @@ async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<Socket
 fn make_tls_config(
     trust: ServerTrust,
     identity: Option<ClientIdentity>,
+    alpn: &AlpnPolicy,
 ) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     match trust {
@@ -1547,7 +1588,7 @@ fn make_tls_config(
         }
         None => builder.with_no_client_auth(),
     };
-    config.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
+    config.alpn_protocols = alpn.protocols().to_vec();
     Ok(config)
 }
 

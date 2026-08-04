@@ -107,8 +107,8 @@ const (
 	SmithyFFIResultConnected uint32 = 8
 	// SmithyFFIResultNotStored is the native ABI result kind for NotStored.
 	SmithyFFIResultNotStored uint32 = 9
-	// SmithyFFISetConditionNone is the native ABI SET condition for None.
-	SmithyFFISetConditionNone uint32 = 0
+	// SmithyFFISetConditionAny is the native ABI SET condition for Any.
+	SmithyFFISetConditionAny uint32 = 0
 	// SmithyFFISetConditionIfAbsent is the native ABI SET condition for IfAbsent.
 	SmithyFFISetConditionIfAbsent uint32 = 1
 	// SmithyFFISetConditionIfPresent is the native ABI SET condition for IfPresent.

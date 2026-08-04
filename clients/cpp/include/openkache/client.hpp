@@ -27,7 +27,7 @@ public:
 
 /// Atomic existence condition for one SET operation.
 enum class Set_Condition : std::uint32_t {
-    None = OPENKACHE_CLIENT_SET_CONDITION_NONE,
+    Any = OPENKACHE_CLIENT_SET_CONDITION_ANY,
     If_Absent = OPENKACHE_CLIENT_SET_CONDITION_IF_ABSENT,
     If_Present = OPENKACHE_CLIENT_SET_CONDITION_IF_PRESENT,
 };
@@ -70,7 +70,7 @@ enum class Connection_State : std::uint32_t {
 
 /// Optional behavior for one SET operation.
 struct Set_Options {
-    Set_Condition condition = Set_Condition::None;
+    Set_Condition condition = Set_Condition::Any;
     std::optional<Expiration_Mode> expiration_mode;
     std::optional<Eviction_Mode> eviction_mode;
     std::optional<std::uint64_t> ttl_ms;
@@ -472,7 +472,7 @@ private:
     static std::pair<Byte, std::uint64_t> wire_options(const Set_Options& options) {
         Byte flags = OPENKACHE_SMITHY_SET_CONDITION_ANY_BITS;
         switch (options.condition) {
-        case Set_Condition::None:
+        case Set_Condition::Any:
             break;
         case Set_Condition::If_Absent:
             flags |= OPENKACHE_SMITHY_SET_IF_ABSENT_BITS;

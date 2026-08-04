@@ -802,7 +802,7 @@ fn set_options_from_flags(flags: u8, ttl_ms: u64) -> std::result::Result<SetOpti
         ));
     }
     let condition = match flags & SET_CONDITION_MASK {
-        value if value == SET_CONDITION_ANY_BITS => SetCondition::None,
+        value if value == SET_CONDITION_ANY_BITS => SetCondition::Any,
         SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
         SET_IF_PRESENT_BITS => SetCondition::IfPresent,
         value if value == SET_CONDITION_RESERVED_BITS => {
@@ -844,7 +844,7 @@ fn set_options_from_flags(flags: u8, ttl_ms: u64) -> std::result::Result<SetOpti
         _ => return Err("SET flags contain an unknown eviction mode".to_owned()),
     };
     let mut options = match condition {
-        SetCondition::None => SetOptions::new(),
+        SetCondition::Any => SetOptions::new(),
         SetCondition::IfAbsent => SetOptions::new().if_absent(),
         SetCondition::IfPresent => SetOptions::new().if_present(),
     };
@@ -1592,7 +1592,7 @@ fn execute_entry_with_flags(
         value_length,
         raw,
         Some((set_flags, ttl_ms)),
-        FfiSetCondition::None as u32,
+        FfiSetCondition::Any as u32,
         0,
         0,
     )
@@ -1652,12 +1652,12 @@ fn execute_entry_inner(
             let condition = match FfiSetCondition::try_from(set_condition)
                 .map_err(|condition| format!("unsupported SET condition {condition}"))?
             {
-                FfiSetCondition::None => SetCondition::None,
+                FfiSetCondition::Any => SetCondition::Any,
                 FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
                 FfiSetCondition::IfPresent => SetCondition::IfPresent,
             };
             let mut set_options = match condition {
-                SetCondition::None => SetOptions::new(),
+                SetCondition::Any => SetOptions::new(),
                 SetCondition::IfAbsent => SetOptions::new().if_absent(),
                 SetCondition::IfPresent => SetOptions::new().if_present(),
             };
@@ -1700,7 +1700,7 @@ fn execute_entry_inner(
             }
             operation
                 if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                    && (set_options.condition() != SetCondition::None
+                    && (set_options.condition() != SetCondition::Any
                         || set_options.time_to_live_millis().is_some()) =>
             {
                 Err("SET options require a SET operation".to_owned())

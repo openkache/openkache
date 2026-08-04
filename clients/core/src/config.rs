@@ -416,6 +416,182 @@ pub enum ServerTrust {
     Custom(Vec<Certificate>),
 }
 
+/// ALPN identifiers offered during QUIC/TLS negotiation.
+///
+/// The identifiers use the protocol's `openkache/<positive-decimal-version>`
+/// grammar. Entries are offered in strict descending version order, as
+/// required by the wire contract. A negotiated version below `minimum_version`
+/// is rejected after the handshake, which lets a client advertise a fallback
+/// while still enforcing its deployment minimum.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AlpnPolicy {
+    protocols: Vec<Vec<u8>>,
+    minimum_version: u32,
+}
+
+impl AlpnPolicy {
+    /// Creates an ALPN policy from a strict descending list of protocol names.
+    ///
+    /// # Arguments
+    ///
+    /// * `protocols` - Non-empty ALPN names such as `openkache/2` and
+    ///   `openkache/1`, in descending version order.
+    /// * `minimum_version` - Lowest protocol version this client will accept
+    ///   after negotiation.
+    ///
+    /// # Returns
+    ///
+    /// A validated policy retained by the client builder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when an identifier is malformed, the
+    /// order is not strictly descending, a duplicate is present, the minimum
+    /// is zero, or no offered version can satisfy the minimum.
+    pub fn new(protocols: Vec<Vec<u8>>, minimum_version: u32) -> Result<Self> {
+        if protocols.is_empty() {
+            return Err(Error::configuration(
+                "alpn.protocols",
+                "must contain at least one protocol",
+            ));
+        }
+        if minimum_version == 0 {
+            return Err(Error::configuration(
+                "alpn.minimum_version",
+                "must be greater than zero",
+            ));
+        }
+
+        let mut previous_version = None;
+        let mut has_acceptable_version = false;
+        for (index, protocol) in protocols.iter().enumerate() {
+            let version = parse_alpn_version(protocol).map_err(|message| {
+                Error::configuration(
+                    "alpn.protocols",
+                    format!("entry {index} is invalid: {message}"),
+                )
+            })?;
+            if version >= minimum_version {
+                has_acceptable_version = true;
+            }
+            if let Some(previous_version) = previous_version {
+                if version >= previous_version {
+                    return Err(Error::configuration(
+                        "alpn.protocols",
+                        "versions must be strictly descending with no duplicates",
+                    ));
+                }
+            }
+            previous_version = Some(version);
+        }
+        if !has_acceptable_version {
+            return Err(Error::configuration(
+                "alpn.minimum_version",
+                "no offered protocol reaches the minimum version",
+            ));
+        }
+        Ok(Self {
+            protocols,
+            minimum_version,
+        })
+    }
+
+    /// Creates a policy from positive protocol version numbers.
+    ///
+    /// # Arguments
+    ///
+    /// * `versions` - Non-empty versions in strict descending order.
+    /// * `minimum_version` - Lowest version accepted after negotiation.
+    ///
+    /// # Returns
+    ///
+    /// A validated policy with canonical `openkache/<version>` identifiers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Configuration`] when the version list violates the
+    /// same constraints as [`Self::new`].
+    pub fn from_versions(versions: Vec<u32>, minimum_version: u32) -> Result<Self> {
+        let protocols = versions
+            .into_iter()
+            .map(|version| format!("openkache/{version}").into_bytes())
+            .collect();
+        Self::new(protocols, minimum_version)
+    }
+
+    /// Returns the offered ALPN identifiers in negotiation order.
+    pub fn protocols(&self) -> &[Vec<u8>] {
+        &self.protocols
+    }
+
+    /// Returns the minimum negotiated protocol version accepted by the client.
+    pub const fn minimum_version(&self) -> u32 {
+        self.minimum_version
+    }
+
+    pub(crate) fn validate_negotiated(&self, protocol: &[u8]) -> Result<()> {
+        if !self
+            .protocols
+            .iter()
+            .any(|offered| offered.as_slice() == protocol)
+        {
+            return Err(Error::Connection(
+                "server negotiated an ALPN protocol that was not offered".into(),
+            ));
+        }
+        let version = parse_alpn_version(protocol).map_err(|message| {
+            Error::Connection(format!("server negotiated an invalid ALPN protocol: {message}"))
+        })?;
+        if version < self.minimum_version {
+            return Err(Error::Connection(format!(
+                "server negotiated ALPN version {version}, below client minimum {}",
+                self.minimum_version
+            )));
+        }
+        if protocol != openkache_protocol::ALPN {
+            return Err(Error::Connection(format!(
+                "client does not implement negotiated ALPN {}",
+                String::from_utf8_lossy(protocol)
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Default for AlpnPolicy {
+    fn default() -> Self {
+        let minimum_version = parse_alpn_version(openkache_protocol::ALPN)
+            .expect("the generated OpenKache ALPN must contain a positive version");
+        Self {
+            protocols: vec![openkache_protocol::ALPN.to_vec()],
+            minimum_version,
+        }
+    }
+}
+
+fn parse_alpn_version(protocol: &[u8]) -> std::result::Result<u32, &'static str> {
+    const PREFIX: &[u8] = b"openkache/";
+    let suffix = protocol
+        .strip_prefix(PREFIX)
+        .ok_or("must start with openkache/")?;
+    if suffix.is_empty() {
+        return Err("version is missing");
+    }
+    if suffix.len() > 1 && suffix[0] == b'0' {
+        return Err("version must not contain leading zeroes");
+    }
+    if !suffix.iter().all(u8::is_ascii_digit) {
+        return Err("version must contain only decimal digits");
+    }
+    let version = std::str::from_utf8(suffix)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or("version is outside the positive u32 range")?;
+    (version > 0)
+        .then_some(version)
+        .ok_or("version must be greater than zero")
+}
+
 /// Deadlines applied to connection setup and complete request exchanges.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClientTimeouts {
@@ -462,7 +638,7 @@ impl SetOptions {
     /// Creates unconditional set behavior inheriting namespace expiration and eviction defaults.
     pub const fn new() -> Self {
         Self {
-            condition: SetCondition::None,
+            condition: SetCondition::Any,
             expiration_mode: ExpirationMode::Inherit,
             time_to_live_ms: None,
             eviction_mode: EvictionMode::Inherit,

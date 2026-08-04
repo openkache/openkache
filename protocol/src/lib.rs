@@ -91,17 +91,11 @@ impl AsRef<[u8]> for ItemId {
 pub enum SetCondition {
     /// Store regardless of whether the item ID exists.
     #[default]
-    None,
+    Any,
     /// Store only when the item ID does not exist.
     IfAbsent,
     /// Store only when the item ID already exists.
     IfPresent,
-}
-
-impl SetCondition {
-    /// The protocol's `Any` condition. `None` remains as a source-compatible alias.
-    #[allow(non_upper_case_globals)]
-    pub const Any: Self = Self::None;
 }
 
 /// Item-level expiration selection.
@@ -243,7 +237,7 @@ impl Default for SetOptions {
 impl SetOptions {
     /// Creates unconditional `SET` behavior inheriting namespace defaults.
     pub const NONE: Self = Self {
-        condition: SetCondition::None,
+        condition: SetCondition::Any,
         expiration_mode: ExpirationMode::Inherit,
         ttl_ms: None,
         eviction_mode: EvictionMode::Inherit,
@@ -282,7 +276,7 @@ impl SetOptions {
             return Err(ProtocolError::InvalidSetTtl);
         }
         let condition = match self.condition {
-            SetCondition::None => SET_CONDITION_ANY_BITS,
+            SetCondition::Any => SET_CONDITION_ANY_BITS,
             SetCondition::IfAbsent => SET_IF_ABSENT_BITS,
             SetCondition::IfPresent => SET_IF_PRESENT_BITS,
         };
@@ -321,7 +315,7 @@ impl SetOptions {
             ));
         }
         let condition = match flags & SET_CONDITION_MASK {
-            SET_CONDITION_ANY_BITS => SetCondition::None,
+            SET_CONDITION_ANY_BITS => SetCondition::Any,
             SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
             SET_IF_PRESENT_BITS => SetCondition::IfPresent,
             _ => return Err(ProtocolError::ConflictingSetConditions),

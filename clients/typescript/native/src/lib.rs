@@ -781,8 +781,8 @@ fn override_policy_string(policy: OverridePolicy) -> String {
 
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     match condition {
-        None => Ok(SetCondition::None),
-        Some("any") => Ok(SetCondition::None),
+        None => Ok(SetCondition::Any),
+        Some("any") => Ok(SetCondition::Any),
         Some("if_absent") => Ok(SetCondition::IfAbsent),
         Some("if_present") => Ok(SetCondition::IfPresent),
         Some(value) => Err(invalid_argument(format!(
@@ -818,7 +818,7 @@ fn parse_wire_set_options(
 ) -> Result<SetOptions> {
     let condition = parse_condition(condition)?;
     let mut options = match condition {
-        SetCondition::None => SetOptions::new(),
+        SetCondition::Any => SetOptions::new(),
         SetCondition::IfAbsent => SetOptions::new().if_absent(),
         SetCondition::IfPresent => SetOptions::new().if_present(),
     };

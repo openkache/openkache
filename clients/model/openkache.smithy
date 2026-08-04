@@ -101,7 +101,7 @@ structure ffiContract {
     resultNotStored: Integer
 
     @required
-    setConditionNone: Integer
+    setConditionAny: Integer
 
     @required
     setConditionIfAbsent: Integer
@@ -240,7 +240,7 @@ structure valueEnvelope {
     resultNotDeleted: 7,
     resultConnected: 8,
     resultNotStored: 9,
-    setConditionNone: 0,
+    setConditionAny: 0,
     setConditionIfAbsent: 1,
     setConditionIfPresent: 2,
     connectionStateConnected: 0,

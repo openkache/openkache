@@ -19,7 +19,7 @@ use std::time::Duration;
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
-    Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
+    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
     DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES,
     ItemId, ItemValue, NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PrivateKey,
@@ -325,6 +325,12 @@ macro_rules! builder_methods {
             /// Presents a mutual TLS client identity.
             pub fn client_identity(mut self, identity: ClientIdentity) -> Self {
                 self.inner = self.inner.client_identity(identity);
+                self
+            }
+
+            /// Offers protocol versions in descending order and enforces a minimum version.
+            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
+                self.inner = self.inner.alpn_policy(policy);
                 self
             }
 
