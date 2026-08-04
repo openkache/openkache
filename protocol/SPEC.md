@@ -664,10 +664,14 @@ Item ID.
   string and a `workers` array of strings.
 - Unauthorized: `Forbidden` with an optional diagnostic payload.
 
-The JSON object is a point-in-time diagnostic snapshot for the requested
-namespace. Clients MUST ignore unknown object members so diagnostics can grow
-without changing the frame protocol. The JSON payload remains subject to the
-64 MiB response limit.
+The JSON object is a point-in-time diagnostic snapshot of the server and its
+storage workers. Version 1 does not require the `storage` or `workers` values
+to be filtered to the requested namespace; `namespace_id` scopes the request,
+checks that the namespace exists, and provides the authorization boundary.
+Per-namespace diagnostic members MAY be added in future responses. Clients
+MUST ignore unknown object members so diagnostics can grow without changing
+the frame protocol. The JSON payload remains subject to the 64 MiB response
+limit.
 
 ### `SYNC`
 

@@ -1214,6 +1214,18 @@ async fn execute_request(
         expected_revision,
         create_if_missing,
     } = request;
+    // Do not reveal whether an administrative namespace exists to a peer that
+    // is not authorized to inspect or synchronize server diagnostics.
+    if matches!(opcode, Opcode::Stats | Opcode::Sync) && !administrator {
+        return response_bytes(
+            Status::Forbidden,
+            if opcode == Opcode::Stats {
+                b"STATS requires administrator authorization"
+            } else {
+                b"SYNC requires administrator authorization"
+            },
+        );
+    }
     // Serialize lifecycle and data-plane operations for one namespace while
     // allowing unrelated namespaces to proceed concurrently. The registry
     // mutex only protects map metadata; this async lock covers the cache
