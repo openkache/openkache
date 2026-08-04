@@ -57,6 +57,10 @@ typedef enum openkache_client_operation {
     OPENKACHE_CLIENT_OPERATION_DELETE = OPENKACHE_SMITHY_OPCODE_DELETE,
     OPENKACHE_CLIENT_OPERATION_STATS = OPENKACHE_SMITHY_OPCODE_STATS,
     OPENKACHE_CLIENT_OPERATION_SYNC = OPENKACHE_SMITHY_OPCODE_SYNC,
+    OPENKACHE_CLIENT_OPERATION_NAMESPACE_OPEN = OPENKACHE_SMITHY_OPCODE_NAMESPACE_OPEN,
+    OPENKACHE_CLIENT_OPERATION_NAMESPACE_UPDATE_POLICY =
+        OPENKACHE_SMITHY_OPCODE_NAMESPACE_UPDATE_POLICY,
+    OPENKACHE_CLIENT_OPERATION_NAMESPACE_DELETE = OPENKACHE_SMITHY_OPCODE_NAMESPACE_DELETE,
     /* Language-adapter operations; these are not wire opcodes. */
     OPENKACHE_CLIENT_OPERATION_GET_JSON = OPENKACHE_SMITHY_FFI_OPERATION_GET_JSON,
     OPENKACHE_CLIENT_OPERATION_SET_JSON = OPENKACHE_SMITHY_FFI_OPERATION_SET_JSON,
@@ -212,6 +216,81 @@ openkache_client_result_t *openkache_client_execute_raw(
     uint32_t set_condition,
     uint8_t ttl_enabled,
     uint64_t ttl_ms
+);
+
+/*
+ * Executes one protected operation with the complete wire SET policy byte.
+ * `set_flags` and `ttl_ms` must be zero for operations other than SET.
+ */
+openkache_client_result_t *openkache_client_execute_with_options(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Executes one exact-item-ID operation with the complete wire SET policy byte.
+ * `set_flags` and `ttl_ms` must be zero for operations other than SET.
+ */
+openkache_client_result_t *openkache_client_execute_raw_with_options(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Executes exact item-ID data-plane operations in an explicitly supplied
+ * namespace. `set_flags` is the complete wire SET flag byte; it and `ttl_ms`
+ * must be zero for operations other than SET.
+ */
+openkache_client_result_t *openkache_client_execute_scoped(
+    const openkache_client_t *client,
+    uint32_t operation,
+    uint64_t namespace_id,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Namespace-management ABI calls. Namespace descriptors are returned in a
+ * fixed 25-byte payload: namespace_id (u64 BE), revision (u64 BE), policy
+ * flags (u8), and default TTL (u64 BE; zero for no-expiry).
+ */
+openkache_client_result_t *openkache_client_namespace_open(
+    const openkache_client_t *client,
+    const uint8_t *name,
+    size_t name_length,
+    uint8_t create_if_missing,
+    uint8_t policy_flags,
+    uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_namespace_update_policy(
+    const openkache_client_t *client,
+    uint64_t namespace_id,
+    uint64_t expected_revision,
+    uint8_t policy_flags,
+    uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_namespace_delete(
+    const openkache_client_t *client,
+    uint64_t namespace_id,
+    uint64_t expected_revision
 );
 
 /* Returns one of openkache_client_connection_state_t; null handles return UNKNOWN. */

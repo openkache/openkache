@@ -454,6 +454,15 @@ impl<C: ClientConnection> Core<C> {
 
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
         let namespace_id = self.ensure_namespace().await?;
+        self.get_in_namespace(namespace_id, item_id).await
+    }
+
+    async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<GetOutcome<ItemValue>> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
                 Request::new_scoped(
@@ -467,7 +476,11 @@ impl<C: ClientConnection> Core<C> {
             .await?;
         match response.status {
             Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
-            Status::NotFound => Ok(GetOutcome::NotFound),
+            Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
+            Status::NotFound => Err(Error::UnexpectedResponse {
+                operation: Operation::Get,
+                message: "NotFound response must have an empty payload".into(),
+            }),
             status => Err(unexpected_status(Operation::Get, status)),
         }
     }
@@ -479,6 +492,18 @@ impl<C: ClientConnection> Core<C> {
         options: SetOptions,
     ) -> Result<SetOutcome> {
         let namespace_id = self.ensure_namespace().await?;
+        self.set_in_namespace(namespace_id, item_id, value, options)
+            .await
+    }
+
+    async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        validate_client_namespace_id(namespace_id)?;
         let request = Request::new_scoped_with_options(
             Opcode::Set,
             namespace_id,
@@ -487,16 +512,32 @@ impl<C: ClientConnection> Core<C> {
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
-        match self.request(request).await?.status {
-            Status::Created => Ok(SetOutcome::Created),
-            Status::Replaced => Ok(SetOutcome::Replaced),
-            Status::NotStored => Ok(SetOutcome::NotStored),
+        let response = self.request(request).await?;
+        match response.status {
+            Status::Created if response.payload.is_empty() => Ok(SetOutcome::Created),
+            Status::Replaced if response.payload.is_empty() => Ok(SetOutcome::Replaced),
+            Status::NotStored if response.payload.is_empty() => Ok(SetOutcome::NotStored),
+            Status::Created | Status::Replaced | Status::NotStored => {
+                Err(Error::UnexpectedResponse {
+                    operation: Operation::Set,
+                    message: "SET success responses must have an empty payload".into(),
+                })
+            }
             status => Err(unexpected_status(Operation::Set, status)),
         }
     }
 
     async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
         let namespace_id = self.ensure_namespace().await?;
+        self.delete_in_namespace(namespace_id, item_id).await
+    }
+
+    async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<DeleteOutcome> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
                 Request::new_scoped(
@@ -509,14 +550,23 @@ impl<C: ClientConnection> Core<C> {
             )
             .await?;
         match response.status {
-            Status::Deleted => Ok(DeleteOutcome::Deleted),
-            Status::NotFound => Ok(DeleteOutcome::NotFound),
+            Status::Deleted if response.payload.is_empty() => Ok(DeleteOutcome::Deleted),
+            Status::NotFound if response.payload.is_empty() => Ok(DeleteOutcome::NotFound),
+            Status::Deleted | Status::NotFound => Err(Error::UnexpectedResponse {
+                operation: Operation::Delete,
+                message: "DELETE domain responses must have an empty payload".into(),
+            }),
             status => Err(unexpected_status(Operation::Delete, status)),
         }
     }
 
     async fn stats(&self) -> Result<String> {
         let namespace_id = self.ensure_namespace().await?;
+        self.stats_in_namespace(namespace_id).await
+    }
+
+    async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
                 Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
@@ -524,19 +574,33 @@ impl<C: ClientConnection> Core<C> {
             )
             .await?;
         expect_status(Operation::Stats, response.status, &[Status::Ok])?;
+        validate_stats_payload(&response.payload)?;
         String::from_utf8(response.payload)
             .map_err(|error| Error::Protocol(format!("STATS response is not UTF-8: {error}")))
     }
 
     async fn sync(&self) -> Result<()> {
         let namespace_id = self.ensure_namespace().await?;
+        self.sync_in_namespace(namespace_id).await
+    }
+
+    async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
                 Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
-        expect_status(Operation::Sync, response.status, &[Status::Ok])
+        expect_status(Operation::Sync, response.status, &[Status::Ok])?;
+        if response.payload.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedResponse {
+                operation: Operation::Sync,
+                message: "SYNC success responses must have an empty payload".into(),
+            })
+        }
     }
 
     async fn request(&self, request: Request) -> Result<Response> {
@@ -643,6 +707,17 @@ impl<C: ClientConnection> Core<C> {
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> Result<NamespaceDescriptor> {
+        self.open_namespace_with_outcome(name, create_if_missing, policy)
+            .await
+            .map(|(descriptor, _created)| descriptor)
+    }
+
+    async fn open_namespace_with_outcome(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<(NamespaceDescriptor, bool)> {
         let response = self
             .request(
                 Request::namespace_open(name, create_if_missing, policy)
@@ -657,7 +732,7 @@ impl<C: ClientConnection> Core<C> {
         let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
         self.namespace_id
             .store(descriptor.namespace_id, Ordering::Release);
-        Ok(descriptor)
+        Ok((descriptor, status == Status::Created))
     }
 
     async fn update_namespace_policy(
@@ -697,6 +772,12 @@ impl<C: ClientConnection> Core<C> {
             response.status,
             &[Status::Deleted],
         )?;
+        if !response.payload.is_empty() {
+            return Err(Error::UnexpectedResponse {
+                operation: Operation::NamespaceDelete,
+                message: "NAMESPACE_DELETE success responses must have an empty payload".into(),
+            });
+        }
         let _ = self.namespace_id.compare_exchange(
             namespace_id,
             0,
@@ -851,6 +932,16 @@ impl<C: ClientConnection> Core<C> {
         }
         Ok(())
     }
+}
+
+fn validate_client_namespace_id(namespace_id: u64) -> Result<()> {
+    if namespace_id == 0 {
+        return Err(Error::configuration(
+            "namespace_id",
+            "must be a positive server-assigned namespace ID",
+        ));
+    }
+    Ok(())
 }
 
 struct BuilderSettings {
@@ -1047,6 +1138,18 @@ macro_rules! raw_client_methods {
                     .await
             }
 
+            /// Resolves a namespace and reports whether the request created it.
+            pub async fn namespace_open_with_outcome(
+                &self,
+                name: impl AsRef<[u8]>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> Result<(NamespaceDescriptor, bool)> {
+                self.0
+                    .open_namespace_with_outcome(name.as_ref().to_vec(), create_if_missing, policy)
+                    .await
+            }
+
             /// Replaces a namespace policy using its current revision.
             pub async fn namespace_update_policy(
                 &self,
@@ -1075,6 +1178,15 @@ macro_rules! raw_client_methods {
                 self.0.get(item_id).await
             }
 
+            /// Retrieves exact encoded bytes in an explicitly supplied namespace.
+            pub async fn get_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<ItemValue>> {
+                self.0.get_in_namespace(namespace_id, item_id).await
+            }
+
             /// Stores exact encoded bytes with explicit wire-level set options.
             pub async fn set(
                 &self,
@@ -1085,9 +1197,31 @@ macro_rules! raw_client_methods {
                 self.0.set(item_id, value, options).await
             }
 
+            /// Stores exact encoded bytes in an explicitly supplied namespace.
+            pub async fn set_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.0
+                    .set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+
             /// Deletes a fixed-size item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
+            }
+
+            /// Deletes a fixed-size item ID in an explicitly supplied namespace.
+            pub async fn delete_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<DeleteOutcome> {
+                self.0.delete_in_namespace(namespace_id, item_id).await
             }
 
             /// Returns server statistics as their JSON text.
@@ -1095,9 +1229,19 @@ macro_rules! raw_client_methods {
                 self.0.stats().await
             }
 
+            /// Returns statistics for an explicitly supplied namespace.
+            pub async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
+                self.0.stats_in_namespace(namespace_id).await
+            }
+
             /// Waits until prior mutations satisfy the server durability barrier.
             pub async fn sync(&self) -> Result<()> {
                 self.0.sync().await
+            }
+
+            /// Waits for the durability barrier for an explicitly supplied namespace.
+            pub async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+                self.0.sync_in_namespace(namespace_id).await
             }
 
             /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
@@ -1366,6 +1510,45 @@ fn expect_status(operation: Operation, status: Status, expected: &[Status]) -> R
     } else {
         Err(unexpected_status(operation, status))
     }
+}
+
+fn validate_stats_payload(payload: &[u8]) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|error| Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: format!("STATS response is not valid JSON: {error}"),
+        })?;
+    let object = value.as_object().ok_or_else(|| Error::UnexpectedResponse {
+        operation: Operation::Stats,
+        message: "STATS response must be a JSON object".into(),
+    })?;
+    if object
+        .get("storage")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return Err(Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: "STATS response must contain a string storage member".into(),
+        });
+    }
+    let workers = object
+        .get("workers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: "STATS response must contain a workers array".into(),
+        })?;
+    if workers
+        .iter()
+        .any(|worker| serde_json::Value::as_str(worker).is_none())
+    {
+        return Err(Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: "STATS workers entries must be strings".into(),
+        });
+    }
+    Ok(())
 }
 
 fn unexpected_status(operation: Operation, status: Status) -> Error {

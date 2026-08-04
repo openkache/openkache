@@ -15,11 +15,49 @@ export interface Wire_Entry {
 /** Protocol v1 constants consumed by the Rust protocol crate. */
 export interface Wire_V1_Contract {
   readonly alpn: string
+  readonly opcode_bytes: number
+  readonly status_bytes: number
   readonly request_fixed_bytes: number
   readonly response_fixed_bytes: number
+  readonly min_varuint_bytes: number
   readonly max_varuint_bytes: number
+  readonly namespace_id_bytes: number
+  readonly namespace_revision_bytes: number
+  readonly namespace_name_length_bytes: number
+  readonly namespace_name_max_bytes: number
+  readonly set_flags_bytes: number
+  readonly set_condition_mask: number
+  readonly set_condition_any_bits: number
+  readonly set_condition_reserved_bits: number
+  readonly set_expiration_mask: number
+  readonly set_inherit_expiration_bits: number
+  readonly set_no_expiry_bits: number
   /** The SET expiration-mode bit pattern for ExplicitTtl. */
   readonly set_ttl_flag: number
+  readonly set_expiration_reserved_bits: number
+  readonly set_eviction_mask: number
+  readonly set_inherit_eviction_bits: number
+  readonly set_evictable_bits: number
+  readonly set_eviction_protected_bits: number
+  readonly set_eviction_reserved_bits: number
+  readonly set_reserved_mask: number
+  readonly open_flags_bytes: number
+  readonly open_create_if_missing_flag: number
+  readonly open_reserved_mask: number
+  readonly delete_flags_bytes: number
+  readonly delete_if_empty_bits: number
+  readonly delete_mode_mask: number
+  readonly delete_reserved_mask: number
+  readonly policy_flags_bytes: number
+  readonly policy_default_expiration_mask: number
+  readonly policy_no_expiry_bits: number
+  readonly policy_fixed_ttl_bits: number
+  readonly policy_default_expiration_reserved_bits: number
+  readonly policy_expiration_override_flag: number
+  readonly policy_eviction_protected_flag: number
+  readonly policy_eviction_override_flag: number
+  readonly policy_reserved_mask: number
+  readonly error_status_minimum: number
   readonly set_if_absent_flag: number
   readonly set_if_present_flag: number
 }
@@ -164,10 +202,79 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
   const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v1`)
   const v1 = {
     alpn: string_member(contract, "alpn", "wireContract.v1"),
-    request_fixed_bytes: integer_member(contract, "requestFixedBytes", "wireContract.v1", 1),
-    response_fixed_bytes: integer_member(contract, "responseFixedBytes", "wireContract.v1", 1),
+    opcode_bytes: integer_member(contract, "opcodeBytes", "wireContract.v1", 1, 0xff),
+    status_bytes: integer_member(contract, "statusBytes", "wireContract.v1", 1, 0xff),
+    request_fixed_bytes: integer_member(
+      contract,
+      "requestFixedBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    response_fixed_bytes: integer_member(
+      contract,
+      "responseFixedBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    min_varuint_bytes: integer_member(
+      contract,
+      "minVaruintBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
     max_varuint_bytes: integer_member(contract, "maxVaruintBytes", "wireContract.v1", 1),
-    set_ttl_flag: integer_member(contract, "setTtlFlag", "wireContract.v1", 0, 0xff),
+    namespace_id_bytes: integer_member(
+      contract,
+      "namespaceIdBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    namespace_revision_bytes: integer_member(
+      contract,
+      "namespaceRevisionBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    namespace_name_length_bytes: integer_member(
+      contract,
+      "namespaceNameLengthBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    namespace_name_max_bytes: integer_member(
+      contract,
+      "namespaceNameMaxBytes",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_flags_bytes: integer_member(
+      contract,
+      "setFlagsBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    set_condition_mask: integer_member(
+      contract,
+      "setConditionMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_condition_any_bits: integer_member(
+      contract,
+      "setConditionAnyBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
     set_if_absent_flag: integer_member(
       contract,
       "setIfAbsentFlag",
@@ -182,36 +289,312 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
       0,
       0xff,
     ),
+    set_condition_reserved_bits: integer_member(
+      contract,
+      "setConditionReservedBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_expiration_mask: integer_member(
+      contract,
+      "setExpirationMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_inherit_expiration_bits: integer_member(
+      contract,
+      "setInheritExpirationBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_no_expiry_bits: integer_member(
+      contract,
+      "setNoExpiryBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_ttl_flag: integer_member(contract, "setTtlFlag", "wireContract.v1", 0, 0xff),
+    set_expiration_reserved_bits: integer_member(
+      contract,
+      "setExpirationReservedBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_eviction_mask: integer_member(
+      contract,
+      "setEvictionMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_inherit_eviction_bits: integer_member(
+      contract,
+      "setInheritEvictionBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_evictable_bits: integer_member(
+      contract,
+      "setEvictableBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_eviction_protected_bits: integer_member(
+      contract,
+      "setEvictionProtectedBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_eviction_reserved_bits: integer_member(
+      contract,
+      "setEvictionReservedBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    set_reserved_mask: integer_member(
+      contract,
+      "setReservedMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    open_flags_bytes: integer_member(
+      contract,
+      "openFlagsBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    open_create_if_missing_flag: integer_member(
+      contract,
+      "openCreateIfMissingFlag",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    open_reserved_mask: integer_member(
+      contract,
+      "openReservedMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    delete_flags_bytes: integer_member(
+      contract,
+      "deleteFlagsBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    delete_if_empty_bits: integer_member(
+      contract,
+      "deleteIfEmptyBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    delete_mode_mask: integer_member(
+      contract,
+      "deleteModeMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    delete_reserved_mask: integer_member(
+      contract,
+      "deleteReservedMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_flags_bytes: integer_member(
+      contract,
+      "policyFlagsBytes",
+      "wireContract.v1",
+      1,
+      0xff,
+    ),
+    policy_default_expiration_mask: integer_member(
+      contract,
+      "policyDefaultExpirationMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_no_expiry_bits: integer_member(
+      contract,
+      "policyNoExpiryBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_fixed_ttl_bits: integer_member(
+      contract,
+      "policyFixedTtlBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_default_expiration_reserved_bits: integer_member(
+      contract,
+      "policyDefaultExpirationReservedBits",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_expiration_override_flag: integer_member(
+      contract,
+      "policyExpirationOverrideFlag",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_eviction_protected_flag: integer_member(
+      contract,
+      "policyEvictionProtectedFlag",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_eviction_override_flag: integer_member(
+      contract,
+      "policyEvictionOverrideFlag",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    policy_reserved_mask: integer_member(
+      contract,
+      "policyReservedMask",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
+    error_status_minimum: integer_member(
+      contract,
+      "errorStatusMinimum",
+      "wireContract.v1",
+      0,
+      0xff,
+    ),
   } satisfies Wire_V1_Contract
   if (v1.alpn !== "openkache/1") {
     throw new Error(
       `${WIRE_CONTRACT_TRAIT_ID}.v1.alpn must be "openkache/1" for the current protocol implementation`,
     )
   }
-  if (v1.request_fixed_bytes !== 1 || v1.response_fixed_bytes !== 1) {
+  if (
+    v1.opcode_bytes !== 1 ||
+    v1.status_bytes !== 1 ||
+    v1.request_fixed_bytes !== 1 ||
+    v1.response_fixed_bytes !== 1
+  ) {
     throw new Error(
-      `${WIRE_CONTRACT_TRAIT_ID}.v1 fixed header sizes must be request=1 and response=1`,
+      `${WIRE_CONTRACT_TRAIT_ID}.v1 opcode, status, request, and response fixed sizes must all be 1`,
     )
   }
-  if (v1.max_varuint_bytes !== 9) {
+  if (v1.min_varuint_bytes !== 1 || v1.max_varuint_bytes !== 9) {
     throw new Error(
-      `${WIRE_CONTRACT_TRAIT_ID}.v1.maxVaruintBytes must be 9 for the unsigned 64-bit protocol`,
+      `${WIRE_CONTRACT_TRAIT_ID}.v1 vu128 widths must be minimum=1 and maximum=9 for the unsigned 64-bit protocol`,
     )
   }
-  const flags = [
-    { name: "SetTtl", value: v1.set_ttl_flag },
-    { name: "SetIfAbsent", value: v1.set_if_absent_flag },
-    { name: "SetIfPresent", value: v1.set_if_present_flag },
+  if (
+    v1.namespace_id_bytes !== 8 ||
+    v1.namespace_revision_bytes !== 8 ||
+    v1.namespace_name_length_bytes !== 1 ||
+    v1.namespace_name_max_bytes !== 0xff ||
+    v1.set_flags_bytes !== 1 ||
+    v1.open_flags_bytes !== 1 ||
+    v1.delete_flags_bytes !== 1 ||
+    v1.policy_flags_bytes !== 1
+  ) {
+    throw new Error(
+      "wire v1 fixed field widths must be namespace/revision=8, name length and flag fields=1, and name max=255",
+    )
+  }
+  const flag_groups = [
+    {
+      name: "SET condition",
+      mask: v1.set_condition_mask,
+      values: [
+        v1.set_condition_any_bits,
+        v1.set_if_absent_flag,
+        v1.set_if_present_flag,
+        v1.set_condition_reserved_bits,
+      ],
+    },
+    {
+      name: "SET expiration",
+      mask: v1.set_expiration_mask,
+      values: [
+        v1.set_inherit_expiration_bits,
+        v1.set_no_expiry_bits,
+        v1.set_ttl_flag,
+        v1.set_expiration_reserved_bits,
+      ],
+    },
+    {
+      name: "SET eviction",
+      mask: v1.set_eviction_mask,
+      values: [
+        v1.set_inherit_eviction_bits,
+        v1.set_evictable_bits,
+        v1.set_eviction_protected_bits,
+        v1.set_eviction_reserved_bits,
+      ],
+    },
+    {
+      name: "namespace policy expiration",
+      mask: v1.policy_default_expiration_mask,
+      values: [
+        v1.policy_no_expiry_bits,
+        v1.policy_fixed_ttl_bits,
+        v1.policy_default_expiration_reserved_bits,
+      ],
+    },
   ] as const
-  unique_wire_values(flags, "SET flag")
-  if (flags.some(({ value }) => value === 0 || (value & (value - 1)) !== 0)) {
-    throw new Error("SET contract flags must each contain exactly one non-zero bit")
+  for (const group of flag_groups) {
+    unique_wire_values(
+      group.values.map((value, index) => ({ name: `${group.name} ${index}`, value })),
+      group.name,
+    )
+    if (group.values.some((value) => (value & ~group.mask) !== 0)) {
+      throw new Error(`${group.name} values must fit within mask 0x${group.mask.toString(16)}`)
+    }
   }
-  if (v1.set_if_absent_flag !== 0x01 || v1.set_if_present_flag !== 0x02) {
-    throw new Error("SET condition flags must be 0x01 (IfAbsent) and 0x02 (IfPresent)")
+  if (
+    v1.set_if_absent_flag !== 0x01 ||
+    v1.set_if_present_flag !== 0x02 ||
+    v1.set_condition_reserved_bits !== v1.set_condition_mask ||
+    v1.set_expiration_reserved_bits !== v1.set_expiration_mask ||
+    v1.set_eviction_reserved_bits !== v1.set_eviction_mask ||
+    v1.set_reserved_mask !== 0xc0
+  ) {
+    throw new Error("SET masks and reserved values do not match the v1 bit layout")
   }
-  if (v1.set_ttl_flag !== 0x08) {
-    throw new Error("SET TTL flag must be 0x08 (ExplicitTtl)")
+  if (
+    v1.open_create_if_missing_flag === 0 ||
+    v1.open_reserved_mask !== (0xff ^ v1.open_create_if_missing_flag) ||
+    v1.delete_if_empty_bits !== 0 ||
+    v1.delete_reserved_mask !== (0xff ^ v1.delete_mode_mask) ||
+    v1.policy_expiration_override_flag !== 0x04 ||
+    v1.policy_eviction_protected_flag !== 0x08 ||
+    v1.policy_eviction_override_flag !== 0x10 ||
+    v1.policy_reserved_mask !== 0xe0
+  ) {
+    throw new Error("namespace open/delete/policy flags do not match the v1 bit layout")
+  }
+  if (v1.error_status_minimum !== 0x80) {
+    throw new Error("wire v1 errorStatusMinimum must be 0x80")
   }
   return v1
 }
@@ -376,20 +759,77 @@ ${variants}
 
 /** Renders protocol v1 Rust definitions without client-only declarations. */
 export function render_rust_wire(contract: Wire_Contract): string {
+  const v1 = contract.v1
   return `// Generated from the OpenKache Smithy wire contract. Do not edit.
 
 /// QUIC application protocol identifier for wire protocol version 1.
-pub const ALPN: &[u8] = ${rust_byte_string_literal(contract.v1.alpn)};
+pub const ALPN: &[u8] = ${rust_byte_string_literal(v1.alpn)};
+/// Bytes occupied by the request opcode.
+pub const OPCODE_BYTES: usize = ${formatted_decimal(v1.opcode_bytes)};
+/// Bytes occupied by the response status.
+pub const STATUS_BYTES: usize = ${formatted_decimal(v1.status_bytes)};
 /// Bytes before the variable-length request lengths.
-pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(contract.v1.request_fixed_bytes)};
+pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(v1.request_fixed_bytes)};
 /// Bytes before the variable-length response payload length.
-pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(contract.v1.response_fixed_bytes)};
+pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(v1.response_fixed_bytes)};
+/// Minimum bytes in one canonical unsigned \`vu128\`.
+pub const MIN_VARUINT_BYTES: usize = ${formatted_decimal(v1.min_varuint_bytes)};
 /// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
-pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v1.max_varuint_bytes)};
+pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(v1.max_varuint_bytes)};
 /// Bytes in every canonical item ID carried by the protocol.
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
+/// Bytes in every namespace ID and namespace revision.
+pub const NAMESPACE_ID_BYTES: usize = ${formatted_decimal(v1.namespace_id_bytes)};
+pub const NAMESPACE_REVISION_BYTES: usize = ${formatted_decimal(v1.namespace_revision_bytes)};
+/// Bytes in the fixed namespace name length field.
+pub const NAMESPACE_NAME_LENGTH_BYTES: usize = ${formatted_decimal(v1.namespace_name_length_bytes)};
+/// Maximum UTF-8 octets in a namespace name.
+pub const NAMESPACE_NAME_MAX_BYTES: usize = ${formatted_decimal(v1.namespace_name_max_bytes)};
+
+/// Width of the SET flags field.
+pub const SET_FLAGS_BYTES: usize = ${formatted_decimal(v1.set_flags_bytes)};
+pub const SET_CONDITION_MASK: u8 = ${formatted_byte(v1.set_condition_mask)};
+pub const SET_CONDITION_ANY_BITS: u8 = ${formatted_byte(v1.set_condition_any_bits)};
+pub const SET_IF_ABSENT_BITS: u8 = ${formatted_byte(v1.set_if_absent_flag)};
+pub const SET_IF_PRESENT_BITS: u8 = ${formatted_byte(v1.set_if_present_flag)};
+pub const SET_CONDITION_RESERVED_BITS: u8 = ${formatted_byte(v1.set_condition_reserved_bits)};
+pub const SET_EXPIRATION_MASK: u8 = ${formatted_byte(v1.set_expiration_mask)};
+pub const SET_INHERIT_EXPIRATION_BITS: u8 = ${formatted_byte(v1.set_inherit_expiration_bits)};
+pub const SET_NO_EXPIRY_BITS: u8 = ${formatted_byte(v1.set_no_expiry_bits)};
+pub const SET_EXPLICIT_TTL_BITS: u8 = ${formatted_byte(v1.set_ttl_flag)};
+pub const SET_EXPIRATION_RESERVED_BITS: u8 = ${formatted_byte(v1.set_expiration_reserved_bits)};
+pub const SET_EVICTION_MASK: u8 = ${formatted_byte(v1.set_eviction_mask)};
+pub const SET_INHERIT_EVICTION_BITS: u8 = ${formatted_byte(v1.set_inherit_eviction_bits)};
+pub const SET_EVICTABLE_BITS: u8 = ${formatted_byte(v1.set_evictable_bits)};
+pub const SET_EVICTION_PROTECTED_BITS: u8 = ${formatted_byte(v1.set_eviction_protected_bits)};
+pub const SET_EVICTION_RESERVED_BITS: u8 = ${formatted_byte(v1.set_eviction_reserved_bits)};
+pub const SET_RESERVED_MASK: u8 = ${formatted_byte(v1.set_reserved_mask)};
+
+/// Namespace-open flag fields.
+pub const OPEN_FLAGS_BYTES: usize = ${formatted_decimal(v1.open_flags_bytes)};
+pub const OPEN_CREATE_IF_MISSING: u8 = ${formatted_byte(v1.open_create_if_missing_flag)};
+pub const OPEN_RESERVED_MASK: u8 = ${formatted_byte(v1.open_reserved_mask)};
+/// Namespace-delete flag fields.
+pub const DELETE_FLAGS_BYTES: usize = ${formatted_decimal(v1.delete_flags_bytes)};
+pub const DELETE_IF_EMPTY: u8 = ${formatted_byte(v1.delete_if_empty_bits)};
+pub const DELETE_MODE_MASK: u8 = ${formatted_byte(v1.delete_mode_mask)};
+pub const DELETE_RESERVED_MASK: u8 = ${formatted_byte(v1.delete_reserved_mask)};
+
+/// Namespace-policy flag fields.
+pub const POLICY_FLAGS_BYTES: usize = ${formatted_decimal(v1.policy_flags_bytes)};
+pub const POLICY_DEFAULT_EXPIRATION_MASK: u8 = ${formatted_byte(v1.policy_default_expiration_mask)};
+pub const POLICY_NO_EXPIRY: u8 = ${formatted_byte(v1.policy_no_expiry_bits)};
+pub const POLICY_FIXED_TTL: u8 = ${formatted_byte(v1.policy_fixed_ttl_bits)};
+pub const POLICY_DEFAULT_EXPIRATION_RESERVED_BITS: u8 = ${formatted_byte(v1.policy_default_expiration_reserved_bits)};
+pub const POLICY_EXPIRATION_OVERRIDE: u8 = ${formatted_byte(v1.policy_expiration_override_flag)};
+pub const POLICY_EVICTION_PROTECTED: u8 = ${formatted_byte(v1.policy_eviction_protected_flag)};
+pub const POLICY_EVICTION_OVERRIDE: u8 = ${formatted_byte(v1.policy_eviction_override_flag)};
+pub const POLICY_RESERVED_MASK: u8 = ${formatted_byte(v1.policy_reserved_mask)};
+
+/// First assigned status value reserved for errors.
+pub const ERROR_STATUS_MINIMUM: u8 = ${formatted_byte(v1.error_status_minimum)};
 
 ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 

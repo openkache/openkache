@@ -85,12 +85,8 @@ enum PreparedKeyedOperation {
     Set {
         value: StoredItemValue,
         options: SetOptions,
-        evaluated_at_ms: u64,
-        expires_at_ms: u64,
     },
-    Delete {
-        evaluated_at_ms: u64,
-    },
+    Delete,
 }
 
 #[derive(Clone, Copy)]
@@ -631,21 +627,9 @@ impl Kvkache {
                 self.keyed_read_plan(storage_key, ReadPurpose::Value),
             ),
             KeyedOperation::Set { value, options } => {
-                let evaluated_at_ms = unix_time_ms();
-                let expires_at_ms = options
-                    .ttl_ms
-                    .and_then(|ttl_ms| evaluated_at_ms.checked_add(ttl_ms))
-                    .unwrap_or_default();
                 let observation = if options.ttl_ms == Some(0) {
                     KeyedObservationPlan::Error(KvError::InvalidRequest(
                         "SET TTL must be greater than zero milliseconds".into(),
-                    ))
-                } else if options
-                    .ttl_ms
-                    .is_some_and(|ttl_ms| evaluated_at_ms.checked_add(ttl_ms).is_none())
-                {
-                    KeyedObservationPlan::Error(KvError::InvalidRequest(
-                        "SET TTL exceeds the supported time range".into(),
                     ))
                 } else if let Err(error) =
                     self.validate_value(&value.bytes, options.ttl_ms.is_some())
@@ -666,16 +650,12 @@ impl Kvkache {
                     PreparedKeyedOperation::Set {
                         value,
                         options,
-                        evaluated_at_ms,
-                        expires_at_ms,
                     },
                     observation,
                 )
             }
             KeyedOperation::Delete => (
-                PreparedKeyedOperation::Delete {
-                    evaluated_at_ms: unix_time_ms(),
-                },
+                PreparedKeyedOperation::Delete,
                 self.keyed_read_plan(storage_key, ReadPurpose::State),
             ),
         };
@@ -791,12 +771,31 @@ impl Kvkache {
                 PreparedKeyedOperation::Set {
                     value,
                     options,
-                    evaluated_at_ms,
-                    expires_at_ms,
                 },
                 KeyedObservation::State(previous),
             ) => {
                 let visible_value = (options == SetOptions::NONE).then(|| value.clone());
+                let evaluated_at_ms = unix_time_ms();
+                let expires_at_ms = match options
+                    .ttl_ms
+                    .map(|ttl_ms| {
+                        evaluated_at_ms.checked_add(ttl_ms).ok_or_else(|| {
+                            KvError::InvalidRequest(
+                                "SET TTL exceeds the supported time range".into(),
+                            )
+                        })
+                    })
+                    .transpose()
+                {
+                    Ok(expires_at_ms) => expires_at_ms.unwrap_or_default(),
+                    Err(error) => {
+                        return KeyedFinish {
+                            outcome: Err(error),
+                            visible_state: None,
+                            flush_required: false,
+                        };
+                    }
+                };
                 match self.finish_keyed_set(
                     completed.storage_key,
                     value,
@@ -822,9 +821,9 @@ impl Kvkache {
                 }
             }
             (
-                PreparedKeyedOperation::Delete { evaluated_at_ms },
+                PreparedKeyedOperation::Delete,
                 KeyedObservation::State(previous),
-            ) => match self.finish_keyed_delete(completed.storage_key, evaluated_at_ms, previous) {
+            ) => match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous) {
                 Ok((deleted, flush_required)) => (
                     Ok(KeyedOutcome::Deleted(deleted)),
                     Some(KeyedVisibleState::Missing),

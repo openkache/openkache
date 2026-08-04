@@ -34,6 +34,21 @@ typedef openkache_client_result *(*openkache_go_execute_fn)(
 typedef openkache_client_result *(*openkache_go_execute_raw_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_execute_with_options_fn)(
+    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
+    const uint8_t *, size_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_execute_raw_with_options_fn)(
+    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
+    const uint8_t *, size_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_execute_scoped_fn)(
+    const openkache_client_handle *, uint32_t, uint64_t, const uint8_t *, size_t,
+    const uint8_t *, size_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_namespace_open_fn)(
+    const openkache_client_handle *, const uint8_t *, size_t, uint8_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_namespace_update_policy_fn)(
+    const openkache_client_handle *, uint64_t, uint64_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_namespace_delete_fn)(
+    const openkache_client_handle *, uint64_t, uint64_t);
 typedef uint32_t (*openkache_go_connection_state_fn)(
     const openkache_client_handle *);
 typedef uint32_t (*openkache_go_result_kind_fn)(const openkache_client_result *);
@@ -51,6 +66,12 @@ typedef struct openkache_go_library {
     openkache_go_connect_ex_fn connect_ex;
     openkache_go_execute_fn execute;
     openkache_go_execute_raw_fn execute_raw;
+    openkache_go_execute_with_options_fn execute_with_options;
+    openkache_go_execute_raw_with_options_fn execute_raw_with_options;
+    openkache_go_execute_scoped_fn execute_scoped;
+    openkache_go_namespace_open_fn namespace_open;
+    openkache_go_namespace_update_policy_fn namespace_update_policy;
+    openkache_go_namespace_delete_fn namespace_delete;
     openkache_go_connection_state_fn connection_state;
     openkache_go_result_kind_fn result_kind;
     openkache_go_result_data_fn result_data;
@@ -153,6 +174,12 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
     OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
     OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
+    OPENKACHE_GO_LOAD(execute_with_options, "openkache_client_execute_with_options");
+    OPENKACHE_GO_LOAD(execute_raw_with_options, "openkache_client_execute_raw_with_options");
+    OPENKACHE_GO_LOAD(execute_scoped, "openkache_client_execute_scoped");
+    OPENKACHE_GO_LOAD(namespace_open, "openkache_client_namespace_open");
+    OPENKACHE_GO_LOAD(namespace_update_policy, "openkache_client_namespace_update_policy");
+    OPENKACHE_GO_LOAD(namespace_delete, "openkache_client_namespace_delete");
     OPENKACHE_GO_LOAD(connection_state, "openkache_client_connection_state");
     OPENKACHE_GO_LOAD(result_kind, "openkache_client_result_kind");
     OPENKACHE_GO_LOAD(result_data, "openkache_client_result_data");
@@ -163,6 +190,9 @@ openkache_go_library *openkache_go_library_load(
 #undef OPENKACHE_GO_LOAD
 
     if (library->abi == NULL || library->connect == NULL || library->execute == NULL ||
+        library->execute_with_options == NULL || library->execute_raw_with_options == NULL ||
+        library->execute_scoped == NULL || library->namespace_open == NULL ||
+        library->namespace_update_policy == NULL || library->namespace_delete == NULL ||
         library->result_kind == NULL || library->result_data == NULL ||
         library->result_data_length == NULL || library->result_take_client == NULL ||
         library->result_free == NULL || library->client_free == NULL) {
@@ -268,6 +298,80 @@ openkache_client_result *openkache_go_execute_raw(
         set_condition, ttl_enabled, ttl_ms);
 }
 
+openkache_client_result *openkache_go_execute_with_options(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const uint8_t *application_key, size_t application_key_length,
+    const uint8_t *value, size_t value_length,
+    uint8_t set_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_with_options == NULL) return NULL;
+    return library->execute_with_options(
+        client, operation, application_key, application_key_length, value,
+        value_length, set_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_execute_raw_with_options(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    const uint8_t *item_id, size_t item_id_length,
+    const uint8_t *value, size_t value_length,
+    uint8_t set_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_raw_with_options == NULL) return NULL;
+    return library->execute_raw_with_options(
+        client, operation, item_id, item_id_length, value, value_length,
+        set_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_execute_scoped(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation,
+    uint64_t namespace_id,
+    const uint8_t *item_id, size_t item_id_length,
+    const uint8_t *value, size_t value_length,
+    uint8_t set_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_scoped == NULL) return NULL;
+    return library->execute_scoped(
+        client, operation, namespace_id, item_id, item_id_length, value,
+        value_length, set_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_namespace_open(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    const uint8_t *name, size_t name_length,
+    uint8_t create_if_missing, uint8_t policy_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->namespace_open == NULL) return NULL;
+    return library->namespace_open(
+        client, name, name_length, create_if_missing, policy_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_namespace_update_policy(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint64_t namespace_id, uint64_t expected_revision,
+    uint8_t policy_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->namespace_update_policy == NULL) return NULL;
+    return library->namespace_update_policy(
+        client, namespace_id, expected_revision, policy_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_namespace_delete(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint64_t namespace_id, uint64_t expected_revision
+) {
+    if (library == NULL || library->namespace_delete == NULL) return NULL;
+    return library->namespace_delete(client, namespace_id, expected_revision);
+}
+
 uint32_t openkache_go_result_kind(
     const openkache_go_library *library,
     const openkache_client_result *result
@@ -329,6 +433,8 @@ type nativeHandle struct {
 	library *nativeLibrary
 	client  *C.openkache_client_handle
 	raw     bool
+	scoped  bool
+	options bool
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -493,6 +599,8 @@ func decodeConnectResult(
 		library: library,
 		client:  client,
 		raw:     C.openkache_go_has_execute_raw(library.ptr) != 0,
+		scoped:  true,
+		options: true,
 	}
 	handle.cond = sync.NewCond(&handle.mu)
 	return handle, nil
@@ -523,6 +631,172 @@ func (h *nativeHandle) executeRaw(
 	return h.executeNative(ctx, operation, itemID[:], value, options, true)
 }
 
+func (h *nativeHandle) executeScoped(
+	ctx context.Context,
+	operation uint32,
+	namespaceID uint64,
+	itemID ItemID,
+	value []byte,
+	options SetOptions,
+) (nativeResult, error) {
+	if !h.scoped {
+		return nativeResult{}, &Error{
+			Operation: "execute scoped",
+			Message:   "native library does not support namespace-scoped operations",
+		}
+	}
+	flags, ttl, err := options.wireFlags()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	itemBytes := itemID[:]
+	if operation == SmithyOpcodeStats || operation == SmithyOpcodeSync {
+		itemBytes = nil
+	}
+	itemMemory := C.CBytes(itemBytes)
+	valueMemory := C.CBytes(value)
+	done := make(chan nativeResult, 1)
+	go func() {
+		defer h.end()
+		result := C.openkache_go_execute_scoped(
+			h.library.ptr,
+			client,
+			C.uint32_t(operation),
+			C.uint64_t(namespaceID),
+			(*C.uint8_t)(itemMemory),
+			C.size_t(len(itemBytes)),
+			(*C.uint8_t)(valueMemory),
+			C.size_t(len(value)),
+			C.uint8_t(flags),
+			C.uint64_t(ttl),
+		)
+		C.free(itemMemory)
+		C.free(valueMemory)
+		kind, data := decodeResult(h.library, result)
+		done <- nativeResult{kind: kind, data: data}
+	}()
+	select {
+	case result := <-done:
+		if result.kind == SmithyFFIResultError {
+			return nativeResult{}, &Error{Message: string(result.data)}
+		}
+		return result, nil
+	case <-ctx.Done():
+		return nativeResult{}, ctx.Err()
+	}
+}
+
+func (h *nativeHandle) namespaceOpen(
+	ctx context.Context,
+	name []byte,
+	createIfMissing bool,
+	policyFlags uint8,
+	ttl uint64,
+) (nativeResult, error) {
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	nameMemory := C.CBytes(name)
+	done := make(chan nativeResult, 1)
+	go func() {
+		defer h.end()
+		result := C.openkache_go_namespace_open(
+			h.library.ptr,
+			client,
+			(*C.uint8_t)(nameMemory),
+			C.size_t(len(name)),
+			C.uint8_t(boolByte(createIfMissing)),
+			C.uint8_t(policyFlags),
+			C.uint64_t(ttl),
+		)
+		C.free(nameMemory)
+		kind, data := decodeResult(h.library, result)
+		done <- nativeResult{kind: kind, data: data}
+	}()
+	select {
+	case result := <-done:
+		if result.kind == SmithyFFIResultError {
+			return nativeResult{}, &Error{Message: string(result.data)}
+		}
+		return result, nil
+	case <-ctx.Done():
+		return nativeResult{}, ctx.Err()
+	}
+}
+
+func (h *nativeHandle) namespaceUpdatePolicy(
+	ctx context.Context,
+	namespaceID uint64,
+	expectedRevision uint64,
+	policyFlags uint8,
+	ttl uint64,
+) (nativeResult, error) {
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	done := make(chan nativeResult, 1)
+	go func() {
+		defer h.end()
+		result := C.openkache_go_namespace_update_policy(
+			h.library.ptr,
+			client,
+			C.uint64_t(namespaceID),
+			C.uint64_t(expectedRevision),
+			C.uint8_t(policyFlags),
+			C.uint64_t(ttl),
+		)
+		kind, data := decodeResult(h.library, result)
+		done <- nativeResult{kind: kind, data: data}
+	}()
+	select {
+	case result := <-done:
+		if result.kind == SmithyFFIResultError {
+			return nativeResult{}, &Error{Message: string(result.data)}
+		}
+		return result, nil
+	case <-ctx.Done():
+		return nativeResult{}, ctx.Err()
+	}
+}
+
+func (h *nativeHandle) namespaceDelete(
+	ctx context.Context,
+	namespaceID uint64,
+	expectedRevision uint64,
+) (nativeResult, error) {
+	client, err := h.begin()
+	if err != nil {
+		return nativeResult{}, err
+	}
+	done := make(chan nativeResult, 1)
+	go func() {
+		defer h.end()
+		result := C.openkache_go_namespace_delete(
+			h.library.ptr,
+			client,
+			C.uint64_t(namespaceID),
+			C.uint64_t(expectedRevision),
+		)
+		kind, data := decodeResult(h.library, result)
+		done <- nativeResult{kind: kind, data: data}
+	}()
+	select {
+	case result := <-done:
+		if result.kind == SmithyFFIResultError {
+			return nativeResult{}, &Error{Message: string(result.data)}
+		}
+		return result, nil
+	case <-ctx.Done():
+		return nativeResult{}, ctx.Err()
+	}
+}
+
 func (h *nativeHandle) executeNative(
 	ctx context.Context,
 	operation uint32,
@@ -530,6 +804,12 @@ func (h *nativeHandle) executeNative(
 	options SetOptions,
 	raw bool,
 ) (nativeResult, error) {
+	if !h.options {
+		return nativeResult{}, &Error{
+			Operation: "execute",
+			Message:   "native library does not support complete SET options",
+		}
+	}
 	client, err := h.begin()
 	if err != nil {
 		return nativeResult{}, err
@@ -537,32 +817,31 @@ func (h *nativeHandle) executeNative(
 	keyMemory := C.CBytes(key)
 	valueMemory := C.CBytes(value)
 
-	condition := SmithyFFISetConditionNone
-	switch options.Condition {
-	case IfAbsent:
-		condition = SmithyFFISetConditionIfAbsent
-	case IfPresent:
-		condition = SmithyFFISetConditionIfPresent
+	flags, ttl, err := options.wireFlags()
+	if err != nil {
+		C.free(keyMemory)
+		C.free(valueMemory)
+		h.end()
+		return nativeResult{}, err
 	}
-	ttlEnabled := boolByte(options.TTLMillis != 0)
 
 	done := make(chan nativeResult, 1)
 	go func() {
 		defer h.end()
 		var result *C.openkache_client_result
 		if raw {
-			result = C.openkache_go_execute_raw(
+			result = C.openkache_go_execute_raw_with_options(
 				h.library.ptr, client, C.uint32_t(operation),
 				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
 				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
-				C.uint32_t(condition), C.uint8_t(ttlEnabled), C.uint64_t(options.TTLMillis),
+				C.uint8_t(flags), C.uint64_t(ttl),
 			)
 		} else {
-			result = C.openkache_go_execute(
+			result = C.openkache_go_execute_with_options(
 				h.library.ptr, client, C.uint32_t(operation),
 				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
 				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
-				C.uint32_t(condition), C.uint8_t(ttlEnabled), C.uint64_t(options.TTLMillis),
+				C.uint8_t(flags), C.uint64_t(ttl),
 			)
 		}
 		C.free(keyMemory)

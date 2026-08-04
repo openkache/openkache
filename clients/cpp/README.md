@@ -50,9 +50,12 @@ Construct `openkache::Connect_Options` with the server address and 32-byte
 data-protection key, then call `openkache::Client::connect`. A DER/PEM trust
 certificate is optional; an empty buffer uses system roots. `get` returns
 `std::optional<Bytes>`, `set` returns `Set_Outcome`, and `remove` reports
-whether a value existed. `get_raw`, `set_raw`, and `remove_raw` expose exact
-32-byte item-ID operations without value protection. Transport and validation
-failures throw `openkache::Error`.
+whether a value existed. `Set_Options` supports conditional writes,
+namespace-inherited or explicit expiration, and evictable or
+eviction-protected items; a non-empty `ttl_ms` without an explicit mode is
+accepted as the convenience `Explicit_Ttl` shorthand. `get_raw`, `set_raw`,
+and `remove_raw` expose exact 32-byte item-ID operations without value
+protection. Transport and validation failures throw `openkache::Error`.
 
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in

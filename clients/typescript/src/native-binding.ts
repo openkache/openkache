@@ -27,6 +27,25 @@ export interface Native_Client_Options {
   readonly encryption?: "compact" | "robust"
 }
 
+export interface Native_Namespace_Policy {
+  readonly default_expiration: "no_expiry" | "fixed_ttl"
+  readonly default_ttl_milliseconds?: bigint
+  readonly expiration_override: "allowed" | "disallowed"
+  readonly default_eviction: "evictable" | "eviction_protected"
+  readonly eviction_override: "allowed" | "disallowed"
+}
+
+export interface Native_Namespace_Descriptor {
+  readonly namespace_id: bigint
+  readonly revision: bigint
+  readonly policy: Native_Namespace_Policy
+}
+
+export interface Native_Namespace_Open_Output {
+  readonly descriptor: Native_Namespace_Descriptor
+  readonly created: boolean
+}
+
 interface Native_Value_Envelope {
   readonly encoding: string
   readonly type_name: string
@@ -41,7 +60,9 @@ export interface Native_Client {
   set(
     key: Uint8Array,
     value: Uint8Array,
-    condition?: "if_absent" | "if_present",
+    condition?: "any" | "if_absent" | "if_present",
+    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
+    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
     ttl_ms?: number,
   ): Promise<string>
   set_value(
@@ -49,13 +70,17 @@ export interface Native_Client {
     encoding: string,
     type_name: string,
     payload: Uint8Array,
-    condition?: "if_absent" | "if_present",
+    condition?: "any" | "if_absent" | "if_present",
+    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
+    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
     ttl_ms?: number,
   ): Promise<string>
   set_json(
     key: Uint8Array,
     value: unknown,
-    condition?: "if_absent" | "if_present",
+    condition?: "any" | "if_absent" | "if_present",
+    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
+    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
     ttl_ms?: number,
   ): Promise<string>
   delete(key: Uint8Array): Promise<boolean>
@@ -66,13 +91,45 @@ export interface Native_Client {
   connection_state(): string
   reconnect(): Promise<void>
   raw_get(item_id: Uint8Array): Promise<Uint8Array | null>
+  raw_get_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+  ): Promise<Uint8Array | null>
   raw_set(
     item_id: Uint8Array,
     value: Uint8Array,
-    condition?: "if_absent" | "if_present",
+    condition?: "any" | "if_absent" | "if_present",
+    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
+    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
     ttl_ms?: number,
   ): Promise<string>
+  raw_set_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+    value: Uint8Array,
+    condition?: "any" | "if_absent" | "if_present",
+    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
+    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
+    ttl_ms?: bigint,
+  ): Promise<string>
   raw_delete(item_id: Uint8Array): Promise<boolean>
+  raw_delete_in_namespace(
+    namespace_id: bigint,
+    item_id: Uint8Array,
+  ): Promise<boolean>
+  namespace_open(
+    name: string,
+    create_if_missing: boolean,
+    policy?: Native_Namespace_Policy,
+  ): Promise<Native_Namespace_Open_Output>
+  namespace_update_policy(
+    namespace_id: bigint,
+    expected_revision: bigint,
+    policy: Native_Namespace_Policy,
+  ): Promise<Native_Namespace_Descriptor>
+  namespace_delete(namespace_id: bigint, expected_revision: bigint): Promise<void>
+  stats_in_namespace(namespace_id: bigint): Promise<string>
+  sync_in_namespace(namespace_id: bigint): Promise<void>
 }
 
 interface Native_Module {

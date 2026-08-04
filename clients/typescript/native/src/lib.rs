@@ -3,14 +3,15 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use napi::bindgen_prelude::Uint8Array;
+use napi::bindgen_prelude::{BigInt, Uint8Array};
 use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
-    DeleteOutcome, Endpoint, GetOutcome, ItemId, ItemValue, PrivateKey, ProtectedClient,
-    RetryPolicy, SetCondition, SetOptions, SetOutcome, value_envelope,
+    DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault,
+    GetOutcome, ItemId, ItemValue, NamespaceDescriptor, NamespacePolicy, OverridePolicy,
+    PrivateKey, ProtectedClient, RetryPolicy, SetCondition, SetOptions, SetOutcome, value_envelope,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -60,6 +61,37 @@ pub struct NativeValueEnvelope {
     #[napi(js_name = "type_name")]
     pub type_name: String,
     pub payload: Uint8Array,
+}
+
+/// Namespace policy represented with Smithy enum strings and lossless JavaScript BigInts.
+#[napi(object)]
+pub struct NativeNamespacePolicy {
+    #[napi(js_name = "default_expiration")]
+    pub default_expiration: String,
+    #[napi(js_name = "default_ttl_milliseconds")]
+    pub default_ttl_milliseconds: Option<BigInt>,
+    #[napi(js_name = "expiration_override")]
+    pub expiration_override: String,
+    #[napi(js_name = "default_eviction")]
+    pub default_eviction: String,
+    #[napi(js_name = "eviction_override")]
+    pub eviction_override: String,
+}
+
+/// Namespace identity and policy returned by namespace-management operations.
+#[napi(object)]
+pub struct NativeNamespaceDescriptor {
+    #[napi(js_name = "namespace_id")]
+    pub namespace_id: BigInt,
+    pub revision: BigInt,
+    pub policy: NativeNamespacePolicy,
+}
+
+/// Result returned by NAMESPACE_OPEN.
+#[napi(object)]
+pub struct NativeNamespaceOpenOutput {
+    pub descriptor: NativeNamespaceDescriptor,
+    pub created: bool,
 }
 
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
@@ -150,9 +182,18 @@ impl NativeClient {
         key: Uint8Array,
         value: Uint8Array,
         condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        self.store(key.as_ref(), value.as_ref().to_vec(), condition, ttl_ms)
+        self.store(
+            key.as_ref(),
+            value.as_ref().to_vec(),
+            condition,
+            expiration_mode,
+            eviction_mode,
+            ttl_ms,
+        )
             .await
     }
 
@@ -183,11 +224,21 @@ impl NativeClient {
         type_name: String,
         payload: Uint8Array,
         condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
         let value = value_envelope::encode(&encoding, &type_name, payload.as_ref())
             .map_err(native_error)?;
-        self.store(key.as_ref(), value, condition, ttl_ms).await
+        self.store(
+            key.as_ref(),
+            value,
+            condition,
+            expiration_mode,
+            eviction_mode,
+            ttl_ms,
+        )
+        .await
     }
 
     /// Serializes and stores a core-owned canonical JSON value.
@@ -197,10 +248,17 @@ impl NativeClient {
         key: Uint8Array,
         value: serde_json::Value,
         condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
         let value = parse_json_value(value)?;
-        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
+        let options = parse_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
         self.active_client()?
             .set_value(key.as_ref(), Value::Json(value), options)
             .await
@@ -287,6 +345,27 @@ impl NativeClient {
             .map_err(native_error)
     }
 
+    /// Retrieves exact bytes in an explicitly supplied namespace.
+    #[napi(js_name = "raw_get_in_namespace")]
+    pub async fn raw_get_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<Option<Uint8Array>> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        self.active_client()?
+            .raw()
+            .get_in_namespace(namespace_id, item_id)
+            .await
+            .map(|value| {
+                value
+                    .into_option()
+                    .map(|value| Uint8Array::new(value.into_bytes()))
+            })
+            .map_err(native_error)
+    }
+
     /// Stores exact bytes for a fixed-size protocol item ID.
     #[napi(js_name = "raw_set")]
     pub async fn raw_set(
@@ -294,13 +373,53 @@ impl NativeClient {
         item_id: Uint8Array,
         value: Uint8Array,
         condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
         let item_id = parse_item_id(item_id.as_ref())?;
-        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
+        let options = parse_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
         self.active_client()?
             .raw()
             .set(item_id, ItemValue::new(value.as_ref().to_vec()), options)
+            .await
+            .map(map_set_outcome)
+            .map_err(native_error)
+    }
+
+    /// Stores exact bytes with all item-level policy selectors in an explicit namespace.
+    #[napi(js_name = "raw_set_in_namespace")]
+    pub async fn raw_set_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .raw()
+            .set_in_namespace(
+                namespace_id,
+                item_id,
+                ItemValue::new(value.as_ref().to_vec()),
+                options,
+            )
             .await
             .map(map_set_outcome)
             .map_err(native_error)
@@ -317,6 +436,102 @@ impl NativeClient {
             .map(|outcome| outcome == DeleteOutcome::Deleted)
             .map_err(native_error)
     }
+
+    /// Deletes an item ID in an explicitly supplied namespace.
+    #[napi(js_name = "raw_delete_in_namespace")]
+    pub async fn raw_delete_in_namespace(
+        &self,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+    ) -> Result<bool> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let item_id = parse_item_id(item_id.as_ref())?;
+        self.active_client()?
+            .raw()
+            .delete_in_namespace(namespace_id, item_id)
+            .await
+            .map(|outcome| outcome == DeleteOutcome::Deleted)
+            .map_err(native_error)
+    }
+
+    /// Retrieves a namespace by name and optionally creates it.
+    #[napi(js_name = "namespace_open")]
+    pub async fn namespace_open(
+        &self,
+        name: String,
+        create_if_missing: bool,
+        policy: Option<NativeNamespacePolicy>,
+    ) -> Result<NativeNamespaceOpenOutput> {
+        let policy = policy.map(parse_namespace_policy).transpose()?;
+        let (descriptor, created) = self
+            .active_client()?
+            .raw()
+            .namespace_open_with_outcome(name.as_bytes(), create_if_missing, policy)
+            .await
+            .map_err(native_error)?;
+        Ok(NativeNamespaceOpenOutput {
+            descriptor: native_namespace_descriptor(descriptor),
+            created,
+        })
+    }
+
+    /// Replaces a namespace policy using its current revision.
+    #[napi(js_name = "namespace_update_policy")]
+    pub async fn namespace_update_policy(
+        &self,
+        namespace_id: BigInt,
+        expected_revision: BigInt,
+        policy: NativeNamespacePolicy,
+    ) -> Result<NativeNamespaceDescriptor> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let expected_revision = parse_bigint_u64(expected_revision, "expected_revision", false)?;
+        let policy = parse_namespace_policy(policy)?;
+        let descriptor = self
+            .active_client()?
+            .raw()
+            .namespace_update_policy(namespace_id, expected_revision, policy)
+            .await
+            .map_err(native_error)?;
+        Ok(native_namespace_descriptor(descriptor))
+    }
+
+    /// Deletes an empty namespace using its current revision.
+    #[napi(js_name = "namespace_delete")]
+    pub async fn namespace_delete(
+        &self,
+        namespace_id: BigInt,
+        expected_revision: BigInt,
+    ) -> Result<()> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let expected_revision = parse_bigint_u64(expected_revision, "expected_revision", false)?;
+        self.active_client()?
+            .raw()
+            .namespace_delete(namespace_id, expected_revision)
+            .await
+            .map_err(native_error)
+    }
+
+    /// Retrieves statistics for an explicitly supplied namespace.
+    #[napi(js_name = "stats_in_namespace")]
+    pub async fn stats_in_namespace(&self, namespace_id: BigInt) -> Result<String> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        self.active_client()?
+            .raw()
+            .stats_in_namespace(namespace_id)
+            .await
+            .map_err(native_error)
+    }
+
+    /// Waits for a durability barrier in an explicitly supplied namespace.
+    #[napi(js_name = "sync_in_namespace")]
+    pub async fn sync_in_namespace(&self, namespace_id: BigInt) -> Result<()> {
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        self.active_client()?
+            .raw()
+            .sync_in_namespace(namespace_id)
+            .await
+            .map_err(native_error)
+    }
 }
 
 impl NativeClient {
@@ -325,9 +540,16 @@ impl NativeClient {
         key: &[u8],
         value: Vec<u8>,
         condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
     ) -> Result<String> {
-        let options = parse_set_options(condition.as_deref(), ttl_ms)?;
+        let options = parse_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
         let client = self.active_client()?;
         client
             .set(key, value, options)
@@ -458,9 +680,109 @@ fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey> {
     PrivateKey::from_der_or_pem(bytes).map_err(native_error)
 }
 
+fn parse_bigint_u64(value: BigInt, name: &str, allow_zero: bool) -> Result<u64> {
+    let (negative, value, lossless) = value.get_u64();
+    if negative || !lossless || (!allow_zero && value == 0) {
+        return Err(invalid_argument(format!(
+            "{name} must be a positive unsigned 64-bit integer"
+        )));
+    }
+    Ok(value)
+}
+
+fn bigint_u64(value: u64) -> BigInt {
+    BigInt {
+        sign_bit: false,
+        words: vec![value],
+    }
+}
+
+fn parse_namespace_policy(policy: NativeNamespacePolicy) -> Result<NamespacePolicy> {
+    let default_expiration = match policy.default_expiration.as_str() {
+        "no_expiry" => {
+            if policy.default_ttl_milliseconds.is_some() {
+                return Err(invalid_argument(
+                    "default_ttl_milliseconds is only valid with fixed_ttl expiration",
+                ));
+            }
+            ExpirationDefault::NoExpiry
+        }
+        "fixed_ttl" => {
+            let ttl_ms = policy
+                .default_ttl_milliseconds
+                .ok_or_else(|| invalid_argument("fixed_ttl requires default_ttl_milliseconds"))?;
+            let ttl_ms = parse_bigint_u64(ttl_ms, "default_ttl_milliseconds", false)?;
+            ExpirationDefault::FixedTtl { ttl_ms }
+        }
+        value => {
+            return Err(invalid_argument(format!(
+                "default_expiration must be no_expiry or fixed_ttl, got {value}"
+            )));
+        }
+    };
+    let expiration_override = parse_override_policy(&policy.expiration_override)?;
+    let default_eviction = match policy.default_eviction.as_str() {
+        "evictable" => EvictionDefault::Evictable,
+        "eviction_protected" => EvictionDefault::EvictionProtected,
+        value => {
+            return Err(invalid_argument(format!(
+                "default_eviction must be evictable or eviction_protected, got {value}"
+            )));
+        }
+    };
+    let eviction_override = parse_override_policy(&policy.eviction_override)?;
+    Ok(NamespacePolicy {
+        default_expiration,
+        expiration_override,
+        default_eviction,
+        eviction_override,
+    })
+}
+
+fn parse_override_policy(value: &str) -> Result<OverridePolicy> {
+    match value {
+        "allowed" => Ok(OverridePolicy::Allowed),
+        "disallowed" => Ok(OverridePolicy::Disallowed),
+        value => Err(invalid_argument(format!(
+            "override policy must be allowed or disallowed, got {value}"
+        ))),
+    }
+}
+
+fn native_namespace_descriptor(descriptor: NamespaceDescriptor) -> NativeNamespaceDescriptor {
+    let (default_expiration, default_ttl_milliseconds) = match descriptor.policy.default_expiration
+    {
+        ExpirationDefault::NoExpiry => ("no_expiry".to_owned(), None),
+        ExpirationDefault::FixedTtl { ttl_ms } => ("fixed_ttl".to_owned(), Some(bigint_u64(ttl_ms))),
+    };
+    NativeNamespaceDescriptor {
+        namespace_id: bigint_u64(descriptor.namespace_id),
+        revision: bigint_u64(descriptor.revision),
+        policy: NativeNamespacePolicy {
+            default_expiration,
+            default_ttl_milliseconds,
+            expiration_override: override_policy_string(descriptor.policy.expiration_override),
+            default_eviction: match descriptor.policy.default_eviction {
+                EvictionDefault::Evictable => "evictable".to_owned(),
+                EvictionDefault::EvictionProtected => "eviction_protected".to_owned(),
+            },
+            eviction_override: override_policy_string(descriptor.policy.eviction_override),
+        },
+    }
+}
+
+fn override_policy_string(policy: OverridePolicy) -> String {
+    match policy {
+        OverridePolicy::Allowed => "allowed",
+        OverridePolicy::Disallowed => "disallowed",
+    }
+    .to_owned()
+}
+
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     match condition {
         None => Ok(SetCondition::None),
+        Some("any") => Ok(SetCondition::None),
         Some("if_absent") => Ok(SetCondition::IfAbsent),
         Some("if_present") => Ok(SetCondition::IfPresent),
         Some(value) => Err(invalid_argument(format!(
@@ -469,18 +791,76 @@ fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     }
 }
 
-fn parse_set_options(condition: Option<&str>, ttl_ms: Option<f64>) -> Result<SetOptions> {
-    let condition = parse_condition(condition)?;
+fn parse_set_options(
+    condition: Option<&str>,
+    expiration_mode: Option<&str>,
+    eviction_mode: Option<&str>,
+    ttl_ms: Option<f64>,
+) -> Result<SetOptions> {
     let ttl_ms = ttl_ms
         .map(|value| parse_u64(value, "ttl_ms", false))
         .transpose()?;
+    let expiration_mode =
+        expiration_mode.or(if ttl_ms.is_some() { Some("explicit_ttl") } else { None });
+    parse_wire_set_options(
+        condition,
+        expiration_mode,
+        eviction_mode,
+        ttl_ms.map(bigint_u64),
+    )
+}
+
+fn parse_wire_set_options(
+    condition: Option<&str>,
+    expiration_mode: Option<&str>,
+    eviction_mode: Option<&str>,
+    ttl_ms: Option<BigInt>,
+) -> Result<SetOptions> {
+    let condition = parse_condition(condition)?;
     let mut options = match condition {
         SetCondition::None => SetOptions::new(),
         SetCondition::IfAbsent => SetOptions::new().if_absent(),
         SetCondition::IfPresent => SetOptions::new().if_present(),
     };
-    if let Some(ttl_ms) = ttl_ms {
-        options = options.expires_after_millis(ttl_ms);
+    let expiration_mode = expiration_mode.unwrap_or("inherit");
+    match expiration_mode {
+        "inherit" => {
+            if ttl_ms.is_some() {
+                return Err(invalid_argument(
+                    "ttl_milliseconds is only valid with explicit_ttl expiration",
+                ));
+            }
+            options = options.inherit_expiration();
+        }
+        "no_expiry" => {
+            if ttl_ms.is_some() {
+                return Err(invalid_argument(
+                    "ttl_milliseconds is only valid with explicit_ttl expiration",
+                ));
+            }
+            options = options.no_expiry();
+        }
+        "explicit_ttl" => {
+            let ttl_ms = ttl_ms
+                .ok_or_else(|| invalid_argument("explicit_ttl requires ttl_milliseconds"))?;
+            let ttl_ms = parse_bigint_u64(ttl_ms, "ttl_milliseconds", false)?;
+            options = options.expires_after_millis(ttl_ms);
+        }
+        value => {
+            return Err(invalid_argument(format!(
+                "expiration_mode must be inherit, no_expiry, or explicit_ttl, got {value}"
+            )));
+        }
+    }
+    match eviction_mode.unwrap_or("inherit") {
+        "inherit" => {}
+        "evictable" => options = options.evictable(),
+        "eviction_protected" => options = options.eviction_protected(),
+        value => {
+            return Err(invalid_argument(format!(
+                "eviction_mode must be inherit, evictable, or eviction_protected, got {value}"
+            )));
+        }
     }
     Ok(options)
 }

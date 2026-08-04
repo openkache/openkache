@@ -1102,8 +1102,10 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let (response, _response_permit) = match Request::decode_owned(request_bytes) {
+        let mut terminal_after_response = false;
+        let response_result = match Request::decode_owned(request_bytes) {
             Ok(request) => {
+                let may_mutate = request_may_mutate(&request);
                 let response_permit = if request.opcode == Opcode::Get {
                     match request_budget
                         .acquire(max_item_bytes, request_timeout)
@@ -1141,15 +1143,27 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 .await
                 {
                     Ok(response) => (response, response_permit),
+                    Err(_) if may_mutate => {
+                        // The worker request may already have crossed its mutation
+                        // linearization point when this wait expires. An error response
+                        // would falsely guarantee that it did not take effect.
+                        return;
+                    }
                     Err(_) => (
                         response_bytes(Status::Timeout, b"request execution timed out"),
                         response_permit,
                     ),
                 }
             }
-            Err(error) => (protocol_error_response(error), None),
+            Err(error) => {
+                terminal_after_response = true;
+                (protocol_error_response(error), None)
+            }
         };
-        if !write_response(&mut send, response, request_timeout).await {
+        if !write_response(&mut send, response_result.0, request_timeout).await {
+            break;
+        }
+        if terminal_after_response {
             break;
         }
     }
@@ -1164,6 +1178,17 @@ async fn write_response<S: SendStream>(
         return false;
     };
     send.write_response(frame, request_timeout).await.is_ok()
+}
+
+fn request_may_mutate(request: &Request) -> bool {
+    matches!(
+        request.opcode,
+        Opcode::Set
+            | Opcode::Delete
+            | Opcode::Sync
+            | Opcode::NamespaceUpdatePolicy
+            | Opcode::NamespaceDelete
+    ) || (request.opcode == Opcode::NamespaceOpen && request.create_if_missing)
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.

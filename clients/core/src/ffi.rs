@@ -21,8 +21,18 @@ use crate::contract::{
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, GetOutcome, ItemId, ItemValue, LocalProtectedClient, PrivateKey, RetryPolicy,
+    Endpoint, EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome, ItemId,
+    ItemValue, LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy,
     ServerTrust, SetCondition, SetOptions, SetOutcome,
+};
+use openkache_protocol::{
+    POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED,
+    POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_NO_EXPIRY, POLICY_RESERVED_MASK,
+    SET_CONDITION_ANY_BITS, SET_CONDITION_MASK, SET_CONDITION_RESERVED_BITS, SET_EVICTABLE_BITS,
+    SET_EVICTION_MASK, SET_EVICTION_PROTECTED_BITS, SET_EVICTION_RESERVED_BITS,
+    SET_EXPIRATION_MASK, SET_EXPIRATION_RESERVED_BITS, SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS,
+    SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS, SET_INHERIT_EXPIRATION_BITS,
+    SET_NO_EXPIRY_BITS, SET_RESERVED_MASK,
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 64;
@@ -98,6 +108,31 @@ enum Command {
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
+        response: SyncSender<FfiResult>,
+    },
+    ExecuteScoped {
+        operation: FfiOperation,
+        namespace_id: u64,
+        item_id: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        response: SyncSender<FfiResult>,
+    },
+    NamespaceOpen {
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+        response: SyncSender<FfiResult>,
+    },
+    NamespaceUpdatePolicy {
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+        response: SyncSender<FfiResult>,
+    },
+    NamespaceDelete {
+        namespace_id: u64,
+        expected_revision: u64,
         response: SyncSender<FfiResult>,
     },
     Shutdown,
@@ -234,6 +269,79 @@ impl FfiClient {
             raw,
             response,
         };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if let Err(error) = self.commands.send_timeout(command, remaining) {
+            return FfiResult::error(format!("client worker queue deadline exceeded: {error}"));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            FfiResult::error(format!("client operation timed out: {error}"))
+        })
+    }
+
+    fn execute_scoped(
+        &self,
+        operation: FfiOperation,
+        namespace_id: u64,
+        item_id: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+    ) -> FfiResult {
+        self.send_command_with_response(|response| Command::ExecuteScoped {
+            operation,
+            namespace_id,
+            item_id,
+            value,
+            set_options,
+            response,
+        })
+    }
+
+    fn namespace_open(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> FfiResult {
+        self.send_command_with_response(|response| Command::NamespaceOpen {
+            name,
+            create_if_missing,
+            policy,
+            response,
+        })
+    }
+
+    fn namespace_update_policy(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> FfiResult {
+        self.send_command_with_response(|response| Command::NamespaceUpdatePolicy {
+            namespace_id,
+            expected_revision,
+            policy,
+            response,
+        })
+    }
+
+    fn namespace_delete(&self, namespace_id: u64, expected_revision: u64) -> FfiResult {
+        self.send_command_with_response(|response| Command::NamespaceDelete {
+            namespace_id,
+            expected_revision,
+            response,
+        })
+    }
+
+    fn send_command_with_response(
+        &self,
+        build: impl FnOnce(SyncSender<FfiResult>) -> Command,
+    ) -> FfiResult {
+        let (response, receiver) = sync_channel(1);
+        let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
+            return FfiResult::error("client request timeout exceeds the platform clock range");
+        };
+        let command = build(response);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if let Err(error) = self.commands.send_timeout(command, remaining) {
             return FfiResult::error(format!("client worker queue deadline exceeded: {error}"));
@@ -383,6 +491,89 @@ fn run_worker(
                 );
                 let _ = response.send(result);
             }
+            Command::ExecuteScoped {
+                operation,
+                namespace_id,
+                item_id,
+                value,
+                set_options,
+                response,
+            } => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(execute_scoped(
+                        &client,
+                        operation,
+                        namespace_id,
+                        item_id,
+                        value,
+                        set_options,
+                    ))
+                }))
+                .unwrap_or_else(|_| {
+                    Err(crate::Error::configuration(
+                        "operation",
+                        "native client worker panicked",
+                    ))
+                })
+                .unwrap_or_else(|error| FfiResult::error(error.to_string()));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
+                let _ = response.send(result);
+            }
+            Command::NamespaceOpen {
+                name,
+                create_if_missing,
+                policy,
+                response,
+            } => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(namespace_open(&client, name, create_if_missing, policy))
+                }))
+                .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
+                let _ = response.send(result);
+            }
+            Command::NamespaceUpdatePolicy {
+                namespace_id,
+                expected_revision,
+                policy,
+                response,
+            } => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(namespace_update_policy(
+                        &client,
+                        namespace_id,
+                        expected_revision,
+                        policy,
+                    ))
+                }))
+                .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
+                let _ = response.send(result);
+            }
+            Command::NamespaceDelete {
+                namespace_id,
+                expected_revision,
+                response,
+            } => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime.block_on(namespace_delete(&client, namespace_id, expected_revision))
+                }))
+                .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
+                let _ = response.send(result);
+            }
             Command::Shutdown => break,
         }
     }
@@ -491,6 +682,263 @@ async fn execute_raw(
             "unsupported operation from the generated Smithy contract",
         )),
     }
+}
+
+async fn execute_scoped(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    namespace_id: u64,
+    item_id: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> std::result::Result<FfiResult, crate::Error> {
+    match operation {
+        FfiOperation::Get => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .raw()
+                .get_in_namespace(namespace_id, item_id)
+                .await
+                .map(|value| get_result(value, value_result))
+        }
+        FfiOperation::Set => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .raw()
+                .set_in_namespace(namespace_id, item_id, ItemValue::new(value), set_options)
+                .await
+                .map(set_result)
+        }
+        FfiOperation::Delete => {
+            let item_id = ItemId::from_slice(&item_id)?;
+            client
+                .raw()
+                .delete_in_namespace(namespace_id, item_id)
+                .await
+                .map(delete_result)
+        }
+        FfiOperation::Stats => client
+            .raw()
+            .stats_in_namespace(namespace_id)
+            .await
+            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
+        FfiOperation::Sync => client
+            .raw()
+            .sync_in_namespace(namespace_id)
+            .await
+            .map(|()| ok_result()),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "unsupported namespace-scoped operation from the generated Smithy contract",
+        )),
+    }
+}
+
+async fn namespace_open(
+    client: &LocalProtectedClient,
+    name: Vec<u8>,
+    create_if_missing: bool,
+    policy: Option<NamespacePolicy>,
+) -> FfiResult {
+    match client
+        .raw()
+        .namespace_open_with_outcome(name, create_if_missing, policy)
+        .await
+    {
+        Ok((descriptor, created)) => match ffi_namespace_descriptor(descriptor) {
+            Ok(payload) => FfiResult::success(
+                if created {
+                    FfiResultKind::Created
+                } else {
+                    FfiResultKind::Ok
+                },
+                payload,
+            ),
+            Err(error) => FfiResult::error(error.to_string()),
+        },
+        Err(error) => FfiResult::error(error.to_string()),
+    }
+}
+
+async fn namespace_update_policy(
+    client: &LocalProtectedClient,
+    namespace_id: u64,
+    expected_revision: u64,
+    policy: NamespacePolicy,
+) -> FfiResult {
+    match client
+        .raw()
+        .namespace_update_policy(namespace_id, expected_revision, policy)
+        .await
+    {
+        Ok(descriptor) => match ffi_namespace_descriptor(descriptor) {
+            Ok(payload) => FfiResult::success(FfiResultKind::Value, payload),
+            Err(error) => FfiResult::error(error.to_string()),
+        },
+        Err(error) => FfiResult::error(error.to_string()),
+    }
+}
+
+async fn namespace_delete(
+    client: &LocalProtectedClient,
+    namespace_id: u64,
+    expected_revision: u64,
+) -> FfiResult {
+    match client
+        .raw()
+        .namespace_delete(namespace_id, expected_revision)
+        .await
+    {
+        Ok(()) => ok_result(),
+        Err(error) => FfiResult::error(error.to_string()),
+    }
+}
+
+fn set_options_from_flags(flags: u8, ttl_ms: u64) -> std::result::Result<SetOptions, String> {
+    if flags & SET_RESERVED_MASK != 0 {
+        return Err(format!(
+            "SET flags contain reserved bits 0x{:02x}",
+            flags & SET_RESERVED_MASK
+        ));
+    }
+    let condition = match flags & SET_CONDITION_MASK {
+        value if value == SET_CONDITION_ANY_BITS => SetCondition::None,
+        SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
+        SET_IF_PRESENT_BITS => SetCondition::IfPresent,
+        value if value == SET_CONDITION_RESERVED_BITS => {
+            return Err("SET flags contain conflicting conditions".to_owned());
+        }
+        _ => return Err("SET flags contain an unknown condition".to_owned()),
+    };
+    let expiration_mode = match flags & SET_EXPIRATION_MASK {
+        value if value == SET_INHERIT_EXPIRATION_BITS => {
+            if ttl_ms != 0 {
+                return Err("SET TTL is only valid with explicit TTL mode".to_owned());
+            }
+            ExpirationMode::Inherit
+        }
+        value if value == SET_NO_EXPIRY_BITS => {
+            if ttl_ms != 0 {
+                return Err("SET TTL is only valid with explicit TTL mode".to_owned());
+            }
+            ExpirationMode::NoExpiry
+        }
+        value if value == SET_EXPLICIT_TTL_BITS => {
+            if ttl_ms == 0 {
+                return Err("SET TTL must be greater than zero milliseconds".to_owned());
+            }
+            ExpirationMode::ExplicitTtl
+        }
+        value if value == SET_EXPIRATION_RESERVED_BITS => {
+            return Err("SET flags contain a reserved expiration mode".to_owned());
+        }
+        _ => return Err("SET flags contain an unknown expiration mode".to_owned()),
+    };
+    let eviction_mode = match flags & SET_EVICTION_MASK {
+        value if value == SET_INHERIT_EVICTION_BITS => EvictionMode::Inherit,
+        SET_EVICTABLE_BITS => EvictionMode::Evictable,
+        SET_EVICTION_PROTECTED_BITS => EvictionMode::EvictionProtected,
+        value if value == SET_EVICTION_RESERVED_BITS => {
+            return Err("SET flags contain a reserved eviction mode".to_owned());
+        }
+        _ => return Err("SET flags contain an unknown eviction mode".to_owned()),
+    };
+    let mut options = match condition {
+        SetCondition::None => SetOptions::new(),
+        SetCondition::IfAbsent => SetOptions::new().if_absent(),
+        SetCondition::IfPresent => SetOptions::new().if_present(),
+    };
+    options = match expiration_mode {
+        ExpirationMode::Inherit => options.inherit_expiration(),
+        ExpirationMode::NoExpiry => options.no_expiry(),
+        ExpirationMode::ExplicitTtl => options.expires_after_millis(ttl_ms),
+    };
+    options = match eviction_mode {
+        EvictionMode::Inherit => options.inherit_eviction(),
+        EvictionMode::Evictable => options.evictable(),
+        EvictionMode::EvictionProtected => options.eviction_protected(),
+    };
+    Ok(options)
+}
+
+fn namespace_policy_from_flags(
+    flags: u8,
+    ttl_ms: u64,
+) -> std::result::Result<NamespacePolicy, String> {
+    if flags & POLICY_RESERVED_MASK != 0 {
+        return Err(format!(
+            "namespace policy flags contain reserved bits 0x{:02x}",
+            flags & POLICY_RESERVED_MASK
+        ));
+    }
+    let default_expiration = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
+        POLICY_NO_EXPIRY => {
+            if ttl_ms != 0 {
+                return Err("namespace policy TTL requires fixed TTL mode".to_owned());
+            }
+            ExpirationDefault::NoExpiry
+        }
+        POLICY_FIXED_TTL => {
+            if ttl_ms == 0 {
+                return Err(
+                    "namespace policy fixed TTL must be greater than zero milliseconds".to_owned(),
+                );
+            }
+            ExpirationDefault::FixedTtl { ttl_ms }
+        }
+        _ => return Err("namespace policy has an unknown default expiration".to_owned()),
+    };
+    Ok(NamespacePolicy {
+        default_expiration,
+        expiration_override: if flags & POLICY_EXPIRATION_OVERRIDE != 0 {
+            OverridePolicy::Allowed
+        } else {
+            OverridePolicy::Disallowed
+        },
+        default_eviction: if flags & POLICY_EVICTION_PROTECTED != 0 {
+            EvictionDefault::EvictionProtected
+        } else {
+            EvictionDefault::Evictable
+        },
+        eviction_override: if flags & POLICY_EVICTION_OVERRIDE != 0 {
+            OverridePolicy::Allowed
+        } else {
+            OverridePolicy::Disallowed
+        },
+    })
+}
+
+fn ffi_namespace_descriptor(
+    descriptor: crate::NamespaceDescriptor,
+) -> std::result::Result<Vec<u8>, String> {
+    let (flags, ttl_ms) = namespace_policy_to_flags(descriptor.policy)?;
+    let mut payload = Vec::with_capacity(8 + 8 + 1 + 8);
+    payload.extend_from_slice(&descriptor.namespace_id.to_be_bytes());
+    payload.extend_from_slice(&descriptor.revision.to_be_bytes());
+    payload.push(flags);
+    payload.extend_from_slice(&ttl_ms.to_be_bytes());
+    Ok(payload)
+}
+
+fn namespace_policy_to_flags(policy: NamespacePolicy) -> std::result::Result<(u8, u64), String> {
+    let (expiration, ttl_ms) = match policy.default_expiration {
+        ExpirationDefault::NoExpiry => (POLICY_NO_EXPIRY, 0),
+        ExpirationDefault::FixedTtl { ttl_ms } if ttl_ms > 0 => (POLICY_FIXED_TTL, ttl_ms),
+        ExpirationDefault::FixedTtl { .. } => {
+            return Err("namespace policy fixed TTL must be greater than zero milliseconds".into());
+        }
+    };
+    let mut flags = expiration;
+    if policy.expiration_override == OverridePolicy::Allowed {
+        flags |= POLICY_EXPIRATION_OVERRIDE;
+    }
+    if policy.default_eviction == EvictionDefault::EvictionProtected {
+        flags |= POLICY_EVICTION_PROTECTED;
+    }
+    if policy.eviction_override == OverridePolicy::Allowed {
+        flags |= POLICY_EVICTION_OVERRIDE;
+    }
+    Ok((flags, ttl_ms))
 }
 
 fn connection_state_value(state: ConnectionState) -> u32 {
@@ -875,6 +1323,230 @@ pub unsafe extern "C" fn openkache_client_execute_raw(
     )
 }
 
+/// Executes one protected operation with the complete wire SET policy byte.
+///
+/// This entry point preserves application-key derivation and value protection while allowing
+/// callers to select expiration and eviction policy in addition to the existence condition.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty application-key/value pointer pair must identify readable memory for this call, and
+/// the client must not be freed until the call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_with_options(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    execute_entry_with_flags(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        set_flags,
+        ttl_ms,
+        false,
+    )
+}
+
+/// Executes one exact-item-ID operation with the complete wire SET policy byte.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty item-ID/value pointer pair must identify readable memory for this call, and the
+/// client must not be freed until the call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_raw_with_options(
+    client: *const FfiClient,
+    operation: u32,
+    item_id: *const u8,
+    item_id_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    execute_entry_with_flags(
+        client,
+        operation,
+        item_id,
+        item_id_length,
+        value,
+        value_length,
+        set_flags,
+        ttl_ms,
+        true,
+    )
+}
+
+/// Executes one exact-item-ID operation in an explicitly supplied namespace.
+///
+/// `set_flags` is the complete wire SET flag byte. It is ignored for operations other than SET,
+/// which must pass zero for both `set_flags` and `ttl_ms`.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty item-ID/value pointer pair must identify readable memory for this call, and the
+/// client must not be freed until the call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_scoped(
+    client: *const FfiClient,
+    operation: u32,
+    namespace_id: u64,
+    item_id: *const u8,
+    item_id_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        if namespace_id == 0 {
+            return Err("namespace_id must be a positive server-assigned ID".to_owned());
+        }
+        let item_id = copy_bytes(item_id, item_id_length, "item_id")?;
+        let value = copy_bytes(value, value_length, "value")?;
+        let operation = FfiOperation::try_from(operation)
+            .map_err(|operation| format!("unsupported operation {operation}"))?;
+        let set_options = if operation == FfiOperation::Set {
+            set_options_from_flags(set_flags, ttl_ms)?
+        } else {
+            if set_flags != 0 || ttl_ms != 0 {
+                return Err("SET flags and TTL require a SET operation".to_owned());
+            }
+            SetOptions::new()
+        };
+        match operation {
+            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
+                if item_id.len() != crate::ITEM_ID_BYTES =>
+            {
+                Err(format!(
+                    "item_id must contain exactly {} bytes, got {}",
+                    crate::ITEM_ID_BYTES,
+                    item_id.len()
+                ))
+            }
+            FfiOperation::Get | FfiOperation::Delete if !value.is_empty() => {
+                Err("operation does not accept a value".to_owned())
+            }
+            FfiOperation::Stats | FfiOperation::Sync if !item_id.is_empty() => {
+                Err("operation does not accept an item_id".to_owned())
+            }
+            FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
+                Err("operation does not accept a value".to_owned())
+            }
+            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
+                "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
+            ),
+            FfiOperation::NamespaceOpen
+            | FfiOperation::NamespaceUpdatePolicy
+            | FfiOperation::NamespaceDelete
+            | FfiOperation::Reconnect => {
+                Err("namespace management and reconnect use dedicated native ABI calls".to_owned())
+            }
+            _ => Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options)),
+        }
+    }))
+}
+
+/// Opens or resolves a namespace and returns its encoded descriptor payload.
+///
+/// The result kind is `Created` when a namespace was created and `Ok` when it already existed.
+/// `policy_flags` and `ttl_ms` are used only when `create_if_missing` is non-zero.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`].
+/// Every non-empty name pointer must identify readable memory for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_namespace_open(
+    client: *const FfiClient,
+    name: *const u8,
+    name_length: usize,
+    create_if_missing: u8,
+    policy_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let name = copy_bytes(name, name_length, "namespace name")?;
+        if name.len() > openkache_protocol::NAMESPACE_NAME_MAX_BYTES {
+            return Err(format!(
+                "namespace name exceeds {} octets",
+                openkache_protocol::NAMESPACE_NAME_MAX_BYTES
+            ));
+        }
+        let create_if_missing = create_if_missing != 0;
+        let policy = if create_if_missing {
+            Some(namespace_policy_from_flags(policy_flags, ttl_ms)?)
+        } else {
+            if policy_flags != 0 || ttl_ms != 0 {
+                return Err("namespace policy requires create_if_missing".to_owned());
+            }
+            None
+        };
+        Ok(client.namespace_open(name, create_if_missing, policy))
+    }))
+}
+
+/// Replaces a namespace policy using its optimistic revision.
+///
+/// A successful result has kind `Value` and contains the encoded namespace descriptor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_namespace_update_policy(
+    client: *const FfiClient,
+    namespace_id: u64,
+    expected_revision: u64,
+    policy_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let policy = namespace_policy_from_flags(policy_flags, ttl_ms)?;
+        Ok(client.namespace_update_policy(namespace_id, expected_revision, policy))
+    }))
+}
+
+/// Deletes an empty namespace using its optimistic revision.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_namespace_delete(
+    client: *const FfiClient,
+    namespace_id: u64,
+    expected_revision: u64,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        Ok(client.namespace_delete(namespace_id, expected_revision))
+    }))
+}
+
 // The argument list mirrors the stable native operation contract.
 #[allow(clippy::too_many_arguments)]
 fn execute_entry(
@@ -888,6 +1560,61 @@ fn execute_entry(
     ttl_enabled: u8,
     ttl_ms: u64,
     raw: bool,
+) -> *mut FfiResult {
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        raw,
+        None,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+    )
+}
+
+fn execute_entry_with_flags(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+    raw: bool,
+) -> *mut FfiResult {
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        raw,
+        Some((set_flags, ttl_ms)),
+        FfiSetCondition::None as u32,
+        0,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_entry_inner(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    raw: bool,
+    complete_flags: Option<(u8, u64)>,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
 ) -> *mut FfiResult {
     boxed_result(catch_result(|| {
         let client = unsafe {
@@ -916,25 +1643,36 @@ fn execute_entry(
                 application_key.len()
             ));
         }
-        let condition = match FfiSetCondition::try_from(set_condition)
-            .map_err(|condition| format!("unsupported SET condition {condition}"))?
-        {
-            FfiSetCondition::None => SetCondition::None,
-            FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
-            FfiSetCondition::IfPresent => SetCondition::IfPresent,
-            _ => return Err("unsupported SET condition from the generated Smithy contract".into()),
-        };
-        let mut set_options = match condition {
-            SetCondition::None => SetOptions::new(),
-            SetCondition::IfAbsent => SetOptions::new().if_absent(),
-            SetCondition::IfPresent => SetOptions::new().if_present(),
-        };
-        if ttl_enabled != 0 {
-            if ttl_ms == 0 {
-                return Err("SET TTL must be greater than zero milliseconds".to_owned());
+        let set_options = if let Some((flags, ttl_ms)) = complete_flags {
+            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+                set_options_from_flags(flags, ttl_ms)?
+            } else {
+                if flags != 0 || ttl_ms != 0 {
+                    return Err("SET flags and TTL require a SET operation".to_owned());
+                }
+                SetOptions::new()
             }
-            set_options = set_options.expires_after_millis(ttl_ms);
-        }
+        } else {
+            let condition = match FfiSetCondition::try_from(set_condition)
+                .map_err(|condition| format!("unsupported SET condition {condition}"))?
+            {
+                FfiSetCondition::None => SetCondition::None,
+                FfiSetCondition::IfAbsent => SetCondition::IfAbsent,
+                FfiSetCondition::IfPresent => SetCondition::IfPresent,
+            };
+            let mut set_options = match condition {
+                SetCondition::None => SetOptions::new(),
+                SetCondition::IfAbsent => SetOptions::new().if_absent(),
+                SetCondition::IfPresent => SetOptions::new().if_present(),
+            };
+            if ttl_enabled != 0 {
+                if ttl_ms == 0 {
+                    return Err("SET TTL must be greater than zero milliseconds".to_owned());
+                }
+                set_options = set_options.expires_after_millis(ttl_ms);
+            }
+            set_options
+        };
         match operation {
             FfiOperation::Get
             | FfiOperation::Set

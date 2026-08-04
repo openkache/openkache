@@ -151,6 +151,81 @@ class _NativeApi:
             ),
             _RESULT_POINTER,
         )
+        self.execute_with_options = self._function(
+            "openkache_client_execute_with_options",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.execute_raw_with_options = self._function(
+            "openkache_client_execute_raw_with_options",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.execute_scoped = self._function(
+            "openkache_client_execute_scoped",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                ctypes.c_uint64,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.namespace_open = self._function(
+            "openkache_client_namespace_open",
+            (
+                _CLIENT_POINTER,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.namespace_update_policy = self._function(
+            "openkache_client_namespace_update_policy",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.namespace_delete = self._function(
+            "openkache_client_namespace_delete",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint64,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
         self.connection_state = self._function(
             "openkache_client_connection_state", (_CLIENT_POINTER,), ctypes.c_uint32
         )
@@ -319,6 +394,156 @@ class NativeClient:
             ttl_ms=ttl_ms,
         )
 
+    def execute_with_options(
+        self,
+        operation: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> tuple[int, bytes]:
+        return self._execute_with_options(
+            self._api.execute_with_options,
+            operation,
+            key=key,
+            value=value,
+            set_flags=set_flags,
+            ttl_ms=ttl_ms,
+        )
+
+    def execute_raw_with_options(
+        self,
+        operation: int,
+        *,
+        item_id: bytes,
+        value: bytes = b"",
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> tuple[int, bytes]:
+        return self._execute_with_options(
+            self._api.execute_raw_with_options,
+            operation,
+            key=item_id,
+            value=value,
+            set_flags=set_flags,
+            ttl_ms=ttl_ms,
+        )
+
+    def execute_scoped(
+        self,
+        operation: int,
+        *,
+        namespace_id: int,
+        item_id: bytes,
+        value: bytes = b"",
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> tuple[int, bytes]:
+        item_buffer, item_pointer = _as_native_buffer(item_id)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.execute_scoped(
+                handle,
+                operation,
+                namespace_id,
+                item_pointer,
+                len(item_id),
+                value_pointer,
+                len(value),
+                set_flags,
+                ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            del item_buffer, value_buffer
+            return kind, payload
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def namespace_open(
+        self,
+        *,
+        name: bytes,
+        create_if_missing: bool,
+        policy_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> tuple[int, bytes]:
+        name_buffer, name_pointer = _as_native_buffer(name)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.namespace_open(
+                handle,
+                name_pointer,
+                len(name),
+                1 if create_if_missing else 0,
+                policy_flags,
+                ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            del name_buffer
+            return kind, payload
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def namespace_update_policy(
+        self,
+        *,
+        namespace_id: int,
+        expected_revision: int,
+        policy_flags: int,
+        ttl_ms: int,
+    ) -> tuple[int, bytes]:
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.namespace_update_policy(
+                handle,
+                namespace_id,
+                expected_revision,
+                policy_flags,
+                ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def namespace_delete(self, *, namespace_id: int, expected_revision: int) -> None:
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.namespace_delete(handle, namespace_id, expected_revision)
+            self._api.read_result(result)
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
     def connection_state(self) -> int:
         with self._lifecycle:
             if not self._handle:
@@ -364,6 +589,42 @@ class NativeClient:
                 condition,
                 1 if ttl_ms is not None else 0,
                 0 if ttl_ms is None else ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute_with_options(
+        self,
+        function: object,
+        operation: int,
+        *,
+        key: bytes,
+        value: bytes,
+        set_flags: int,
+        ttl_ms: int,
+    ) -> tuple[int, bytes]:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(
+                handle,
+                operation,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                set_flags,
+                ttl_ms,
             )
             kind, payload, _ = self._api.read_result(result)
             return kind, payload

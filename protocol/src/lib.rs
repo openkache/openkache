@@ -30,16 +30,16 @@ macro_rules! wire_enum {
 
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
-pub const NAMESPACE_ID_BYTES: usize = 8;
-pub const NAMESPACE_NAME_MAX_BYTES: usize = u8::MAX as usize;
-
-const REQUEST_PREFIX_FIXED_BYTES: usize = 1;
-const RESPONSE_PREFIX_FIXED_BYTES: usize = 1;
-const MAX_POLICY_BYTES: usize = 1 + MAX_VARUINT_BYTES;
-const MAX_REQUEST_PREFIX_BYTES: usize =
-    1 + NAMESPACE_ID_BYTES + 1 + ITEM_ID_BYTES + MAX_VARUINT_BYTES + MAX_VARUINT_BYTES;
+const MAX_POLICY_BYTES: usize = POLICY_FLAGS_BYTES + MAX_VARUINT_BYTES;
+const MAX_REQUEST_PREFIX_BYTES: usize = REQUEST_FIXED_BYTES
+    + NAMESPACE_ID_BYTES
+    + SET_FLAGS_BYTES
+    + ITEM_ID_BYTES
+    + MAX_VARUINT_BYTES
+    + MAX_VARUINT_BYTES;
 const MAX_NAMESPACE_OPEN_PREFIX_BYTES: usize =
-    1 + 1 + 1 + NAMESPACE_NAME_MAX_BYTES + MAX_POLICY_BYTES;
+    OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES + NAMESPACE_NAME_MAX_BYTES
+        + MAX_POLICY_BYTES;
 
 /// Conservative maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
@@ -49,36 +49,12 @@ pub const MAX_REQUEST_FRAME_BYTES: usize =
         MAX_NAMESPACE_OPEN_PREFIX_BYTES
     };
 /// Conservative maximum complete response frame size.
-pub const MAX_RESPONSE_FRAME_BYTES: usize = 1 + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
-
-const SET_CONDITION_MASK: u8 = 0x03;
-const SET_EXPIRATION_MASK: u8 = 0x0c;
-const SET_EVICTION_MASK: u8 = 0x30;
-const SET_RESERVED_MASK: u8 = 0xc0;
-const SET_IF_ABSENT_BITS: u8 = 0x01;
-const SET_IF_PRESENT_BITS: u8 = 0x02;
-const SET_INHERIT_EXPIRATION_BITS: u8 = 0x00;
-const SET_NO_EXPIRY_BITS: u8 = 0x04;
-const SET_EXPLICIT_TTL_BITS: u8 = 0x08;
-const SET_INHERIT_EVICTION_BITS: u8 = 0x00;
-const SET_EVICTABLE_BITS: u8 = 0x10;
-const SET_EVICTION_PROTECTED_BITS: u8 = 0x20;
-
-const OPEN_CREATE_IF_MISSING: u8 = 0x01;
-const DELETE_IF_EMPTY: u8 = 0x00;
-const DELETE_MODE_MASK: u8 = 0x03;
-
-const POLICY_DEFAULT_EXPIRATION_MASK: u8 = 0x03;
-const POLICY_FIXED_TTL: u8 = 0x01;
-const POLICY_EXPIRATION_OVERRIDE: u8 = 0x04;
-const POLICY_EVICTION_PROTECTED: u8 = 0x08;
-const POLICY_EVICTION_OVERRIDE: u8 = 0x10;
-const POLICY_RESERVED_MASK: u8 = 0xe0;
+pub const MAX_RESPONSE_FRAME_BYTES: usize = STATUS_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
 
 impl Status {
     /// Returns whether this status represents a server-side error.
     pub const fn is_error(self) -> bool {
-        (self as u8) >= 0x80
+        (self as u8) >= ERROR_STATUS_MINIMUM
     }
 }
 
@@ -204,7 +180,8 @@ pub struct NamespaceDescriptor {
 impl NamespaceDescriptor {
     /// Encodes the descriptor payload returned by namespace-management requests.
     pub fn encode(self) -> Result<Vec<u8>> {
-        let mut payload = Vec::with_capacity(16 + MAX_POLICY_BYTES);
+        let mut payload =
+            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
         payload.extend_from_slice(&self.namespace_id.to_be_bytes());
         payload.extend_from_slice(&self.revision.to_be_bytes());
         payload.extend_from_slice(&self.policy.encode()?);
@@ -213,7 +190,7 @@ impl NamespaceDescriptor {
 
     /// Decodes one complete namespace descriptor payload.
     pub fn decode(input: &[u8]) -> Result<Self> {
-        let fixed = NAMESPACE_ID_BYTES * 2;
+        let fixed = NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
         if input.len() < fixed {
             return Err(ProtocolError::FrameTooShort {
                 expected: fixed,
@@ -305,7 +282,7 @@ impl SetOptions {
             return Err(ProtocolError::InvalidSetTtl);
         }
         let condition = match self.condition {
-            SetCondition::None => 0,
+            SetCondition::None => SET_CONDITION_ANY_BITS,
             SetCondition::IfAbsent => SET_IF_ABSENT_BITS,
             SetCondition::IfPresent => SET_IF_PRESENT_BITS,
         };
@@ -344,7 +321,7 @@ impl SetOptions {
             ));
         }
         let condition = match flags & SET_CONDITION_MASK {
-            0 => SetCondition::None,
+            SET_CONDITION_ANY_BITS => SetCondition::None,
             SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
             SET_IF_PRESENT_BITS => SetCondition::IfPresent,
             _ => return Err(ProtocolError::ConflictingSetConditions),
@@ -402,7 +379,7 @@ impl NamespacePolicy {
     pub fn encode(self) -> Result<Vec<u8>> {
         let mut output = Vec::with_capacity(MAX_POLICY_BYTES);
         let mut flags = match self.default_expiration {
-            ExpirationDefault::NoExpiry => 0,
+            ExpirationDefault::NoExpiry => POLICY_NO_EXPIRY,
             ExpirationDefault::FixedTtl { ttl_ms } => {
                 if ttl_ms == 0 {
                     return Err(ProtocolError::InvalidNamespacePolicy(
@@ -729,7 +706,7 @@ impl Request {
     /// Decodes and validates one complete request frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
         let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: REQUEST_PREFIX_FIXED_BYTES,
+            expected: REQUEST_FIXED_BYTES,
             actual: frame.len(),
         })?;
         let expected = header
@@ -752,15 +729,20 @@ impl Request {
             )
         });
         let namespace_name = if header.opcode == Opcode::NamespaceOpen {
-            Some(frame[3..3 + usize::from(frame[2])].to_vec())
+            let name_start = OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES;
+            let name_len_offset = OPCODE_BYTES + OPEN_FLAGS_BYTES;
+            Some(frame[name_start..name_start + usize::from(frame[name_len_offset])].to_vec())
         } else {
             None
         };
         let (namespace_policy, expected_revision, create_if_missing) = match header.opcode {
             Opcode::NamespaceOpen => {
-                let create = frame[1] & OPEN_CREATE_IF_MISSING != 0;
+                let flags_offset = OPCODE_BYTES;
+                let name_len_offset = flags_offset + OPEN_FLAGS_BYTES;
+                let name_start = name_len_offset + NAMESPACE_NAME_LENGTH_BYTES;
+                let create = frame[flags_offset] & OPEN_CREATE_IF_MISSING != 0;
                 let policy = if create {
-                    let start = 3 + usize::from(frame[2]);
+                    let start = name_start + usize::from(frame[name_len_offset]);
                     Some(
                         decode_namespace_policy(&frame[start..])?
                             .ok_or(ProtocolError::MissingNamespacePolicy)?
@@ -772,8 +754,9 @@ impl Request {
                 (policy, None, create)
             }
             Opcode::NamespaceUpdatePolicy => {
-                let revision = read_u64_be(&frame[1 + NAMESPACE_ID_BYTES..])?;
-                let start = 1 + NAMESPACE_ID_BYTES + NAMESPACE_ID_BYTES;
+                let revision_start = OPCODE_BYTES + NAMESPACE_ID_BYTES;
+                let revision = read_u64_be(&frame[revision_start..])?;
+                let start = revision_start + NAMESPACE_REVISION_BYTES;
                 let policy = Some(
                     decode_namespace_policy(&frame[start..])?
                         .ok_or(ProtocolError::MissingNamespacePolicy)?
@@ -783,7 +766,9 @@ impl Request {
             }
             Opcode::NamespaceDelete => (
                 None,
-                Some(read_u64_be(&frame[1 + 1 + NAMESPACE_ID_BYTES..])?),
+                Some(read_u64_be(
+                    &frame[OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
+                )?),
                 false,
             ),
             _ => (None, None, false),
@@ -804,7 +789,10 @@ impl Request {
             item_id,
             set_options: if header.opcode == Opcode::Set {
                 SetOptions::decode(
-                    frame[1 + NAMESPACE_ID_BYTES..].first().copied().unwrap(),
+                    frame[OPCODE_BYTES + NAMESPACE_ID_BYTES..]
+                        .first()
+                        .copied()
+                        .unwrap(),
                     ttl_ms,
                 )?
             } else {
@@ -823,7 +811,7 @@ impl Request {
     /// Decodes a request while reusing the frame allocation for its value.
     pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
         let header = Self::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: REQUEST_PREFIX_FIXED_BYTES,
+            expected: REQUEST_FIXED_BYTES,
             actual: frame.len(),
         })?;
         let expected = header
@@ -856,7 +844,7 @@ impl Request {
         match opcode {
             Opcode::Ping => Ok(Some(RequestHeader {
                 opcode,
-                encoded_len: 1,
+                encoded_len: OPCODE_BYTES,
                 value_len: 0,
                 namespace_id: None,
                 item_id_start: None,
@@ -864,27 +852,27 @@ impl Request {
                 has_ttl: false,
             })),
             Opcode::Get | Opcode::Delete => {
-                let required = 1 + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
+                let required = OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
                 if prefix.len() < required {
                     return Ok(None);
                 }
-                let namespace_id = read_namespace_id(&prefix[1..])?;
+                let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
                 Ok(Some(RequestHeader {
                     opcode,
                     encoded_len: required,
                     value_len: 0,
                     namespace_id: Some(namespace_id),
-                    item_id_start: Some(1 + NAMESPACE_ID_BYTES),
+                    item_id_start: Some(OPCODE_BYTES + NAMESPACE_ID_BYTES),
                     set_options: SetOptions::NONE,
                     has_ttl: false,
                 }))
             }
             Opcode::Stats | Opcode::Sync => {
-                let required = 1 + NAMESPACE_ID_BYTES;
+                let required = OPCODE_BYTES + NAMESPACE_ID_BYTES;
                 if prefix.len() < required {
                     return Ok(None);
                 }
-                let namespace_id = read_namespace_id(&prefix[1..])?;
+                let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
                 Ok(Some(RequestHeader {
                     opcode,
                     encoded_len: required,
@@ -1044,18 +1032,19 @@ impl Request {
 }
 
 fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = 1 + NAMESPACE_ID_BYTES + 1 + ITEM_ID_BYTES;
+    let fixed = OPCODE_BYTES + NAMESPACE_ID_BYTES + SET_FLAGS_BYTES + ITEM_ID_BYTES;
     if prefix.len() < fixed {
         return Ok(None);
     }
-    let namespace_id = read_namespace_id(&prefix[1..])?;
-    let flags = prefix[1 + NAMESPACE_ID_BYTES];
+    let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
+    let flags_offset = OPCODE_BYTES + NAMESPACE_ID_BYTES;
+    let flags = prefix[flags_offset];
     if flags & SET_RESERVED_MASK != 0 {
         return Err(ProtocolError::UnknownRequestFlags(
             flags & SET_RESERVED_MASK,
         ));
     }
-    if flags & SET_CONDITION_MASK == 0x03 {
+    if flags & SET_CONDITION_MASK == SET_CONDITION_RESERVED_BITS {
         return Err(ProtocolError::ConflictingSetConditions);
     }
     let has_ttl = matches!(flags & SET_EXPIRATION_MASK, SET_EXPLICIT_TTL_BITS);
@@ -1075,7 +1064,7 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
             opcode: Opcode::Set,
         });
     }
-    let item_id_start = 1 + NAMESPACE_ID_BYTES + 1;
+    let item_id_start = flags_offset + SET_FLAGS_BYTES;
     let mut cursor = fixed;
     let ttl_ms = if has_ttl {
         let Some((ttl, length)) = decode_varuint(&prefix[cursor..], "SET TTL")? else {
@@ -1108,21 +1097,24 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
 }
 
 fn decode_namespace_open_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    if prefix.len() < 3 {
+    let fixed = OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES;
+    if prefix.len() < fixed {
         return Ok(None);
     }
-    let flags = prefix[1];
-    if flags & !OPEN_CREATE_IF_MISSING != 0 {
+    let flags = prefix[OPCODE_BYTES];
+    if flags & OPEN_RESERVED_MASK != 0 {
         return Err(ProtocolError::UnknownRequestFlags(
-            flags & !OPEN_CREATE_IF_MISSING,
+            flags & OPEN_RESERVED_MASK,
         ));
     }
-    let name_len = usize::from(prefix[2]);
-    let name_end = 3 + name_len;
+    let name_len_offset = OPCODE_BYTES + OPEN_FLAGS_BYTES;
+    let name_start = fixed;
+    let name_len = usize::from(prefix[name_len_offset]);
+    let name_end = name_start + name_len;
     if prefix.len() < name_end {
         return Ok(None);
     }
-    validate_namespace_name(&prefix[3..name_end])?;
+    validate_namespace_name(&prefix[name_start..name_end])?;
     let create = flags & OPEN_CREATE_IF_MISSING != 0;
     let encoded_len = if create {
         let Some((_, policy_len)) = decode_namespace_policy(&prefix[name_end..])? else {
@@ -1144,12 +1136,12 @@ fn decode_namespace_open_header(prefix: &[u8]) -> Result<Option<RequestHeader>> 
 }
 
 fn decode_namespace_update_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = 1 + NAMESPACE_ID_BYTES + NAMESPACE_ID_BYTES;
+    let fixed = OPCODE_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
     if prefix.len() < fixed {
         return Ok(None);
     }
-    let namespace_id = read_namespace_id(&prefix[1..])?;
-    let expected_revision = read_u64_be(&prefix[1 + NAMESPACE_ID_BYTES..])?;
+    let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
+    let expected_revision = read_u64_be(&prefix[OPCODE_BYTES + NAMESPACE_ID_BYTES..])?;
     if expected_revision == 0 {
         return Err(ProtocolError::InvalidRevision);
     }
@@ -1168,20 +1160,23 @@ fn decode_namespace_update_header(prefix: &[u8]) -> Result<Option<RequestHeader>
 }
 
 fn decode_namespace_delete_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = 1 + 1 + NAMESPACE_ID_BYTES + NAMESPACE_ID_BYTES;
+    let fixed = OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
     if prefix.len() < fixed {
         return Ok(None);
     }
-    if prefix[1] & DELETE_MODE_MASK != DELETE_IF_EMPTY {
-        return Err(ProtocolError::UnknownRequestFlags(prefix[1]));
+    let flags_offset = OPCODE_BYTES;
+    if prefix[flags_offset] & DELETE_MODE_MASK != DELETE_IF_EMPTY {
+        return Err(ProtocolError::UnknownRequestFlags(prefix[flags_offset]));
     }
-    if prefix[1] & !DELETE_MODE_MASK != 0 {
+    if prefix[flags_offset] & DELETE_RESERVED_MASK != 0 {
         return Err(ProtocolError::UnknownRequestFlags(
-            prefix[1] & !DELETE_MODE_MASK,
+            prefix[flags_offset] & DELETE_RESERVED_MASK,
         ));
     }
-    let namespace_id = read_namespace_id(&prefix[2..])?;
-    let expected_revision = read_u64_be(&prefix[2 + NAMESPACE_ID_BYTES..])?;
+    let namespace_id = read_namespace_id(&prefix[flags_offset + DELETE_FLAGS_BYTES..])?;
+    let expected_revision = read_u64_be(
+        &prefix[flags_offset + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
+    )?;
     if expected_revision == 0 {
         return Err(ProtocolError::InvalidRevision);
     }
@@ -1206,9 +1201,10 @@ fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usiz
         ));
     }
     let default_expiration = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
-        0 => ExpirationDefault::NoExpiry,
+        POLICY_NO_EXPIRY => ExpirationDefault::NoExpiry,
         POLICY_FIXED_TTL => {
-            let Some((ttl_ms, _length)) = decode_varuint(&input[1..], "namespace default TTL")?
+            let Some((ttl_ms, _length)) =
+                decode_varuint(&input[POLICY_FLAGS_BYTES..], "namespace default TTL")?
             else {
                 return Ok(None);
             };
@@ -1226,8 +1222,8 @@ fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usiz
         }
     };
     let encoded_len = match default_expiration {
-        ExpirationDefault::NoExpiry => 1,
-        ExpirationDefault::FixedTtl { ttl_ms } => 1 + encode_varuint(ttl_ms).1,
+        ExpirationDefault::NoExpiry => POLICY_FLAGS_BYTES,
+        ExpirationDefault::FixedTtl { ttl_ms } => POLICY_FLAGS_BYTES + encode_varuint(ttl_ms).1,
     };
     Ok(Some((
         NamespacePolicy {
@@ -1462,7 +1458,7 @@ impl Response {
         validate_value_length(self.payload.len())?;
         let (length, length_bytes) = encode_varuint(self.payload.len() as u64);
         let mut frame =
-            Vec::with_capacity(RESPONSE_PREFIX_FIXED_BYTES + length_bytes + self.payload.len());
+            Vec::with_capacity(RESPONSE_FIXED_BYTES + length_bytes + self.payload.len());
         frame.push(self.status as u8);
         frame.extend_from_slice(&length[..length_bytes]);
         frame.extend_from_slice(&self.payload);
@@ -1482,7 +1478,7 @@ impl Response {
         let status = Status::try_from(status_byte)?;
         let Some((payload_len, encoded_len)) = decode_varuint(
             prefix
-                .get(RESPONSE_PREFIX_FIXED_BYTES..)
+                .get(RESPONSE_FIXED_BYTES..)
                 .unwrap_or_default(),
             "response payload length",
         )?
@@ -1494,7 +1490,7 @@ impl Response {
         validate_value_length(payload_len)?;
         Ok(Some(ResponseHeader {
             status,
-            encoded_len: RESPONSE_PREFIX_FIXED_BYTES + encoded_len,
+            encoded_len: RESPONSE_FIXED_BYTES + encoded_len,
             payload_len,
         }))
     }
@@ -1509,7 +1505,7 @@ impl Response {
     /// Decodes and validates one complete response frame.
     pub fn decode(frame: &[u8]) -> Result<Self> {
         let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: 2,
+            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;

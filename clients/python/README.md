@@ -66,12 +66,34 @@ encryption, and value framing.
 ```python
 from openkache import (
     SmithyGetInput,
+    SmithyNamespaceOpenInput,
+    SmithyNamespacePolicy,
+    SmithyExpirationDefault,
+    SmithyEvictionDefault,
+    SmithyOverridePolicy,
     SmithySetInput,
 )
 
 item_id = bytes(32)
-await client.raw.set(SmithySetInput(item_id=item_id, value=b"opaque"))
-result = await client.raw.get(SmithyGetInput(item_id=item_id))
+namespace = await client.raw.namespace_open(
+    SmithyNamespaceOpenInput(
+        name="example",
+        create_if_missing=True,
+        policy=SmithyNamespacePolicy(
+            default_expiration=SmithyExpirationDefault.NO_EXPIRY,
+            expiration_override=SmithyOverridePolicy.ALLOWED,
+            default_eviction=SmithyEvictionDefault.EVICTABLE,
+            eviction_override=SmithyOverridePolicy.ALLOWED,
+        ),
+    )
+)
+namespace_id = namespace.descriptor.namespace_id
+await client.raw.set(
+    SmithySetInput(namespace_id=namespace_id, item_id=item_id, value=b"opaque")
+)
+result = await client.raw.get(
+    SmithyGetInput(namespace_id=namespace_id, item_id=item_id)
+)
 ```
 
 ## Configuration

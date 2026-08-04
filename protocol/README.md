@@ -51,12 +51,15 @@ variable-integer parsing.
 ## Core components
 
 - `model/openkache.smithy` is the canonical source for server-visible wire
-  values: operation and status assignments, shared limits, and version-specific
-  frame layout.
-- `wire.ts` owns wire-model AST extraction and Rust wire rendering.
+  values: operation and status assignments, shared limits, fixed widths, and
+  version-specific frame and flag layout.
+- `wire.ts` owns wire-model AST extraction and deterministic rendering of the
+  Rust and language-neutral wire contract.
 - `generate.ts` validates the wire Smithy model and emits only the Rust wire
-  definitions used by this crate. Client defaults, API shapes, native ABI
-  identifiers, value-format metadata, and language-specific outputs belong to
+  definitions used by this crate. The client generator consumes the same
+  extracted wire contract for C, C#, Go, Python, Swift, and TypeScript
+  constants; client defaults, API shapes, native ABI identifiers, and
+  value-format metadata belong to
   [`../clients/model/openkache.smithy`](../clients/model/openkache.smithy) and
   [`../clients/generate.ts`](../clients/generate.ts).
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
@@ -73,6 +76,9 @@ policy; protocol v1 specifies only when a successful response may be sent.
 
 ## Configuration
 
-Protocol identifiers, operation assignments, and wire ceilings are compile-time
-definitions sourced from the wire Smithy model. The crate has no runtime
-configuration files.
+Protocol identifiers, operation assignments, fixed field widths, flag masks,
+status boundaries, and wire ceilings are compile-time definitions sourced from
+the wire Smithy model. The crate has no runtime configuration files. Change
+these values in `model/openkache.smithy`, regenerate the contract, and let the
+generation/conformance tests catch any implementation that still carries a
+stale literal.

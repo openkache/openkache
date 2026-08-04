@@ -32,6 +32,20 @@ enum class Set_Condition : std::uint32_t {
     If_Present = OPENKACHE_CLIENT_SET_CONDITION_IF_PRESENT,
 };
 
+/// Item-level expiration selection for one SET operation.
+enum class Expiration_Mode : Byte {
+    Inherit = OPENKACHE_SMITHY_SET_INHERIT_EXPIRATION_BITS,
+    No_Expiry = OPENKACHE_SMITHY_SET_NO_EXPIRY_BITS,
+    Explicit_Ttl = OPENKACHE_SMITHY_SET_EXPLICIT_TTL_BITS,
+};
+
+/// Item-level capacity-eviction selection for one SET operation.
+enum class Eviction_Mode : Byte {
+    Inherit = OPENKACHE_SMITHY_SET_INHERIT_EVICTION_BITS,
+    Evictable = OPENKACHE_SMITHY_SET_EVICTABLE_BITS,
+    Eviction_Protected = OPENKACHE_SMITHY_SET_EVICTION_PROTECTED_BITS,
+};
+
 /// Authenticated-encryption profile for formatted values.
 enum class Encryption : std::uint32_t {
     Compact = OPENKACHE_CLIENT_ENCRYPTION_COMPACT,
@@ -57,6 +71,8 @@ enum class Connection_State : std::uint32_t {
 /// Optional behavior for one SET operation.
 struct Set_Options {
     Set_Condition condition = Set_Condition::None;
+    std::optional<Expiration_Mode> expiration_mode;
+    std::optional<Eviction_Mode> eviction_mode;
     std::optional<std::uint64_t> ttl_ms;
 };
 
@@ -428,32 +444,93 @@ private:
         if (client_ == nullptr) {
             throw Error("OpenKache client is closed");
         }
-        const auto ttl_enabled = options.ttl_ms.has_value();
-        const auto ttl_ms = options.ttl_ms.value_or(0);
+        const auto [set_flags, ttl_ms] = wire_options(options);
         const auto* key_data = key.empty() ? nullptr : key.data();
         const auto* value_data = value.empty() ? nullptr : value.data();
         auto* result = raw
-            ? openkache_client_execute_raw(
+            ? openkache_client_execute_raw_with_options(
                   client_,
                   operation,
                   key_data,
                   key.size(),
                   value_data,
                   value.size(),
-                  static_cast<std::uint32_t>(options.condition),
-                  ttl_enabled ? 1u : 0u,
+                  set_flags,
                   ttl_ms)
-            : openkache_client_execute(
+            : openkache_client_execute_with_options(
                   client_,
                   operation,
                   key_data,
                   key.size(),
                   value_data,
                   value.size(),
-                  static_cast<std::uint32_t>(options.condition),
-                  ttl_enabled ? 1u : 0u,
+                  set_flags,
                   ttl_ms);
         return take_result(result);
+    }
+
+    static std::pair<Byte, std::uint64_t> wire_options(const Set_Options& options) {
+        Byte flags = OPENKACHE_SMITHY_SET_CONDITION_ANY_BITS;
+        switch (options.condition) {
+        case Set_Condition::None:
+            break;
+        case Set_Condition::If_Absent:
+            flags |= OPENKACHE_SMITHY_SET_IF_ABSENT_BITS;
+            break;
+        case Set_Condition::If_Present:
+            flags |= OPENKACHE_SMITHY_SET_IF_PRESENT_BITS;
+            break;
+        default:
+            throw Error("OpenKache SET condition is not supported");
+        }
+
+        const auto ttl = options.ttl_ms.value_or(0);
+        if (options.ttl_ms.has_value() && ttl == 0) {
+            throw Error("OpenKache SET TTL must be greater than zero milliseconds");
+        }
+        const auto expiration = options.expiration_mode.value_or(
+            options.ttl_ms.has_value()
+                ? Expiration_Mode::Explicit_Ttl
+                : Expiration_Mode::Inherit);
+        switch (expiration) {
+        case Expiration_Mode::Inherit:
+            if (options.ttl_ms.has_value()) {
+                throw Error(
+                    "OpenKache SET TTL is only valid with Explicit_Ttl expiration");
+            }
+            flags |= OPENKACHE_SMITHY_SET_INHERIT_EXPIRATION_BITS;
+            break;
+        case Expiration_Mode::No_Expiry:
+            if (options.ttl_ms.has_value()) {
+                throw Error(
+                    "OpenKache SET TTL is only valid with Explicit_Ttl expiration");
+            }
+            flags |= OPENKACHE_SMITHY_SET_NO_EXPIRY_BITS;
+            break;
+        case Expiration_Mode::Explicit_Ttl:
+            if (!options.ttl_ms.has_value()) {
+                throw Error("OpenKache SET Explicit_Ttl requires a positive TTL");
+            }
+            flags |= OPENKACHE_SMITHY_SET_EXPLICIT_TTL_BITS;
+            break;
+        default:
+            throw Error("OpenKache SET expiration mode is not supported");
+        }
+
+        switch (options.eviction_mode.value_or(Eviction_Mode::Inherit)) {
+        case Eviction_Mode::Inherit:
+            flags |= OPENKACHE_SMITHY_SET_INHERIT_EVICTION_BITS;
+            break;
+        case Eviction_Mode::Evictable:
+            flags |= OPENKACHE_SMITHY_SET_EVICTABLE_BITS;
+            break;
+        case Eviction_Mode::Eviction_Protected:
+            flags |= OPENKACHE_SMITHY_SET_EVICTION_PROTECTED_BITS;
+            break;
+        default:
+            throw Error("OpenKache SET eviction mode is not supported");
+        }
+        return {flags, ttl};
     }
 
     openkache_client_t* client_ = nullptr;

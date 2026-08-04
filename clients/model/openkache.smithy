@@ -2,6 +2,14 @@ $version: "2"
 
 namespace openkache.client
 
+/// Marks a Smithy Long member whose domain is the complete unsigned 64-bit range.
+///
+/// Smithy's built-in Long is signed, while OpenKache uses fixed-width unsigned
+/// integers for namespace identities, revisions, and TTLs. The custom
+/// generator maps this trait to each language's unsigned 64-bit type.
+@trait(selector: "member")
+structure unsignedLong {}
+
 /// Defaults used by the shared client core and language adapters.
 @trait(selector: "service")
 structure clientDefaults {
@@ -218,7 +226,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 2,
+    abiVersion: 3,
     operationGetJson: 16,
     operationSetJson: 17,
     operationReconnect: 4294967041,
@@ -273,7 +281,17 @@ structure valueEnvelope {
 )
 service OpenKacheClient {
     version: "1"
-    operations: [Ping, Get, Set, Delete, Stats, Sync]
+    operations: [
+        Ping,
+        Get,
+        Set,
+        Delete,
+        Stats,
+        Sync,
+        NamespaceOpen,
+        NamespaceUpdatePolicy,
+        NamespaceDelete
+    ]
 }
 
 operation Ping {
@@ -314,6 +332,10 @@ structure PingOutput {}
 
 structure GetInput {
     @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
     itemId: ItemId
 }
 
@@ -323,6 +345,10 @@ structure GetOutput {
 
 structure SetInput {
     @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
     itemId: ItemId
 
     @required
@@ -330,6 +356,11 @@ structure SetInput {
 
     condition: SetCondition
 
+    expirationMode: ExpirationMode
+
+    evictionMode: EvictionMode
+
+    @unsignedLong
     ttlMilliseconds: Long
 }
 
@@ -340,6 +371,10 @@ structure SetOutput {
 
 structure DeleteInput {
     @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
     itemId: ItemId
 }
 
@@ -348,19 +383,149 @@ structure DeleteOutput {
     deleted: Boolean
 }
 
-structure StatsInput {}
-
 structure StatsOutput {
     @required
     json: String
 }
 
-structure SyncInput {}
+structure StatsInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+}
+
+structure SyncInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+}
+
 structure SyncOutput {}
 
+operation NamespaceOpen {
+    input: NamespaceOpenInput
+    output: NamespaceOpenOutput
+}
+
+operation NamespaceUpdatePolicy {
+    input: NamespaceUpdatePolicyInput
+    output: NamespaceUpdatePolicyOutput
+}
+
+operation NamespaceDelete {
+    input: NamespaceDeleteInput
+    output: NamespaceDeleteOutput
+}
+
+structure NamespaceOpenInput {
+    @required
+    name: String
+
+    @required
+    createIfMissing: Boolean
+
+    policy: NamespacePolicy
+}
+
+structure NamespaceOpenOutput {
+    @required
+    descriptor: NamespaceDescriptor
+
+    @required
+    created: Boolean
+}
+
+structure NamespaceUpdatePolicyInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    expectedRevision: Long
+
+    @required
+    policy: NamespacePolicy
+}
+
+structure NamespaceUpdatePolicyOutput {
+    @required
+    descriptor: NamespaceDescriptor
+}
+
+structure NamespaceDeleteInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    expectedRevision: Long
+}
+
+structure NamespaceDeleteOutput {}
+
+structure NamespaceDescriptor {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    revision: Long
+
+    @required
+    policy: NamespacePolicy
+}
+
+structure NamespacePolicy {
+    @required
+    defaultExpiration: ExpirationDefault
+
+    @unsignedLong
+    defaultTtlMilliseconds: Long
+
+    @required
+    expirationOverride: OverridePolicy
+
+    @required
+    defaultEviction: EvictionDefault
+
+    @required
+    evictionOverride: OverridePolicy
+}
+
 enum SetCondition {
+    ANY = "any"
     IF_ABSENT = "if_absent"
     IF_PRESENT = "if_present"
+}
+
+enum ExpirationMode {
+    INHERIT = "inherit"
+    NO_EXPIRY = "no_expiry"
+    EXPLICIT_TTL = "explicit_ttl"
+}
+
+enum EvictionMode {
+    INHERIT = "inherit"
+    EVICTABLE = "evictable"
+    EVICTION_PROTECTED = "eviction_protected"
+}
+
+enum OverridePolicy {
+    ALLOWED = "allowed"
+    DISALLOWED = "disallowed"
+}
+
+enum ExpirationDefault {
+    NO_EXPIRY = "no_expiry"
+    FIXED_TTL = "fixed_ttl"
+}
+
+enum EvictionDefault {
+    EVICTABLE = "evictable"
+    EVICTION_PROTECTED = "eviction_protected"
 }
 
 enum SetOutcome {

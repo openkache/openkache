@@ -297,7 +297,19 @@ const (
 
 // SetOptions controls an individual SET operation.
 type SetOptions struct {
+	// Condition selects the atomic existence predicate. The zero value is
+	// unconditional.
 	Condition SetCondition
+	// ExpirationMode selects whether the item inherits the namespace policy,
+	// never expires, or uses TTLMillis. The zero value inherits.
+	ExpirationMode SmithyExpirationMode
+	// EvictionMode selects whether the item inherits the namespace policy,
+	// remains evictable, or is protected from capacity eviction. The zero value
+	// inherits.
+	EvictionMode SmithyEvictionMode
+	// TTLMillis is the positive relative lifetime used by ExplicitTtl. For
+	// compatibility, a non-zero value with an empty ExpirationMode selects
+	// ExplicitTtl.
 	TTLMillis uint64
 }
 
@@ -378,6 +390,29 @@ type nativeResult struct {
 type nativeClient interface {
 	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
 	executeRaw(context.Context, uint32, ItemID, []byte, SetOptions) (nativeResult, error)
+	executeScoped(
+		context.Context,
+		uint32,
+		uint64,
+		ItemID,
+		[]byte,
+		SetOptions,
+	) (nativeResult, error)
+	namespaceOpen(
+		context.Context,
+		[]byte,
+		bool,
+		uint8,
+		uint64,
+	) (nativeResult, error)
+	namespaceUpdatePolicy(
+		context.Context,
+		uint64,
+		uint64,
+		uint8,
+		uint64,
+	) (nativeResult, error)
+	namespaceDelete(context.Context, uint64, uint64) (nativeResult, error)
 	state() uint32
 	close() error
 }
@@ -436,6 +471,59 @@ func (c *Client) invokeRaw(
 ) (nativeResult, error) {
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.executeRaw(ctx, operation, itemID, value, options)
+	})
+}
+
+func (c *Client) invokeScoped(
+	ctx context.Context,
+	operation uint32,
+	namespaceID uint64,
+	itemID ItemID,
+	value []byte,
+	options SetOptions,
+) (nativeResult, error) {
+	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.executeScoped(ctx, operation, namespaceID, itemID, value, options)
+	})
+}
+
+func (c *Client) invokeNamespaceOpen(
+	ctx context.Context,
+	name []byte,
+	createIfMissing bool,
+	policyFlags uint8,
+	ttl uint64,
+) (nativeResult, error) {
+	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.namespaceOpen(ctx, name, createIfMissing, policyFlags, ttl)
+	})
+}
+
+func (c *Client) invokeNamespaceUpdatePolicy(
+	ctx context.Context,
+	namespaceID uint64,
+	expectedRevision uint64,
+	policyFlags uint8,
+	ttl uint64,
+) (nativeResult, error) {
+	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.namespaceUpdatePolicy(
+			ctx,
+			namespaceID,
+			expectedRevision,
+			policyFlags,
+			ttl,
+		)
+	})
+}
+
+func (c *Client) invokeNamespaceDelete(
+	ctx context.Context,
+	namespaceID uint64,
+	expectedRevision uint64,
+) (nativeResult, error) {
+	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
+		return native.namespaceDelete(ctx, namespaceID, expectedRevision)
 	})
 }
 
@@ -556,10 +644,100 @@ func (c *Client) SetJSON(
 }
 
 func validateSetOptions(options SetOptions) error {
-	if options.Condition != "" && options.Condition != IfAbsent && options.Condition != IfPresent {
-		return validationError("set.condition", "must be empty, IfAbsent, or IfPresent")
+	if options.Condition != "" && options.Condition != SmithySetConditionAny &&
+		options.Condition != IfAbsent && options.Condition != IfPresent {
+		return validationError(
+			"set.condition",
+			"must be empty, Any, IfAbsent, or IfPresent",
+		)
+	}
+	if options.TTLMillis == 0 &&
+		options.ExpirationMode == SmithyExpirationModeExplicitTtl {
+		return validationError(
+			"set.ttl_milliseconds",
+			"must be greater than zero with ExplicitTtl expiration",
+		)
+	}
+	switch options.ExpirationMode {
+	case "":
+		// A non-zero TTL is the legacy shorthand for ExplicitTtl.
+		if options.TTLMillis != 0 {
+			break
+		}
+	case SmithyExpirationModeInherit, SmithyExpirationModeNoExpiry:
+		if options.TTLMillis != 0 {
+			return validationError(
+				"set.ttl_milliseconds",
+				"is only valid with ExplicitTtl expiration",
+			)
+		}
+	case SmithyExpirationModeExplicitTtl:
+		if options.TTLMillis == 0 {
+			return validationError(
+				"set.ttl_milliseconds",
+				"must be greater than zero with ExplicitTtl expiration",
+			)
+		}
+	default:
+		return validationError("set.expiration_mode", "contains an unknown value")
+	}
+	switch options.EvictionMode {
+	case "", SmithyEvictionModeInherit, SmithyEvictionModeEvictable,
+		SmithyEvictionModeEvictionProtected:
+	default:
+		return validationError("set.eviction_mode", "contains an unknown value")
 	}
 	return nil
+}
+
+func (options SetOptions) wireFlags() (uint8, uint64, error) {
+	if err := validateSetOptions(options); err != nil {
+		return 0, 0, err
+	}
+	flags := uint8(SmithySetConditionAnyBits)
+	switch options.Condition {
+	case "", SmithySetConditionAny:
+	case SmithySetConditionIfAbsent:
+		flags |= uint8(SmithySetIfAbsentBits)
+	case SmithySetConditionIfPresent:
+		flags |= uint8(SmithySetIfPresentBits)
+	default:
+		return 0, 0, validationError("set.condition", "contains an unknown value")
+	}
+
+	expiration := options.ExpirationMode
+	if expiration == "" {
+		if options.TTLMillis != 0 {
+			expiration = SmithyExpirationModeExplicitTtl
+		} else {
+			expiration = SmithyExpirationModeInherit
+		}
+	}
+	switch expiration {
+	case SmithyExpirationModeInherit:
+		flags |= uint8(SmithySetInheritExpirationBits)
+	case SmithyExpirationModeNoExpiry:
+		flags |= uint8(SmithySetNoExpiryBits)
+	case SmithyExpirationModeExplicitTtl:
+		flags |= uint8(SmithySetExplicitTTLBits)
+	default:
+		return 0, 0, validationError("set.expiration_mode", "contains an unknown value")
+	}
+
+	switch options.EvictionMode {
+	case "", SmithyEvictionModeInherit:
+		flags |= uint8(SmithySetInheritEvictionBits)
+	case SmithyEvictionModeEvictable:
+		flags |= uint8(SmithySetEvictableBits)
+	case SmithyEvictionModeEvictionProtected:
+		flags |= uint8(SmithySetEvictionProtectedBits)
+	default:
+		return 0, 0, validationError("set.eviction_mode", "contains an unknown value")
+	}
+	if expiration != SmithyExpirationModeExplicitTtl {
+		return flags, 0, nil
+	}
+	return flags, options.TTLMillis, nil
 }
 
 // SetItem stores exact opaque bytes for a wire item ID.

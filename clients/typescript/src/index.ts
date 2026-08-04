@@ -38,6 +38,16 @@ import {
   type Smithy_Delete_Output,
   type Smithy_Get_Input,
   type Smithy_Get_Output,
+  type Smithy_Eviction_Mode,
+  type Smithy_Expiration_Mode,
+  type Smithy_Namespace_Delete_Input,
+  type Smithy_Namespace_Delete_Output,
+  type Smithy_Namespace_Descriptor,
+  type Smithy_Namespace_Open_Input,
+  type Smithy_Namespace_Open_Output,
+  type Smithy_Namespace_Policy,
+  type Smithy_Namespace_Update_Policy_Input,
+  type Smithy_Namespace_Update_Policy_Output,
   type Smithy_OpenKache_Api,
   type Smithy_Ping_Input,
   type Smithy_Ping_Output,
@@ -152,6 +162,10 @@ export type Set_Outcome = Smithy_Set_Outcome
 export interface Set_Options {
   /** Store only when the key is absent (`if_absent`) or present (`if_present`). */
   readonly condition?: Smithy_Set_Condition
+  /** Item expiration selection. */
+  readonly expiration_mode?: Smithy_Expiration_Mode
+  /** Item capacity-eviction selection. */
+  readonly eviction_mode?: Smithy_Eviction_Mode
   /** Positive relative lifetime in milliseconds. */
   readonly ttl_ms?: number
 }
@@ -382,6 +396,8 @@ export class OpenKache_Client {
         envelope.type_name,
         envelope.payload,
         options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
         options.ttl_ms,
       )
       return parse_set_outcome(outcome)
@@ -477,6 +493,8 @@ export class OpenKache_Client {
         owned_key_bytes(key),
         value,
         options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
         options.ttl_ms,
       )
       return parse_set_outcome(outcome)
@@ -557,6 +575,8 @@ export class OpenKache_Client {
         owned_key_bytes(key),
         bytes,
         options.condition,
+        options.expiration_mode,
+        options.eviction_mode,
         options.ttl_ms,
       )
       return parse_set_outcome(outcome)
@@ -703,7 +723,10 @@ class Raw_Client implements OpenKache_Raw_Client {
   async get(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      const value = await this.#native_client.raw_get(owned_item_id(input.item_id))
+      const value = await this.#native_client.raw_get_in_namespace(
+        input.namespace_id,
+        owned_item_id(input.item_id),
+      )
       return value === null ? {} : { value }
     } catch (error) {
       throw as_openkache_error(error)
@@ -720,14 +743,13 @@ class Raw_Client implements OpenKache_Raw_Client {
   async set(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      validate_set_options({
-        condition: input.condition,
-        ttl_ms: input.ttl_milliseconds,
-      })
-      const outcome = await this.#native_client.raw_set(
+      const outcome = await this.#native_client.raw_set_in_namespace(
+        input.namespace_id,
         owned_item_id(input.item_id),
         owned_raw_value(input.value),
         input.condition,
+        input.expiration_mode,
+        input.eviction_mode,
         input.ttl_milliseconds,
       )
       return { outcome: parse_set_outcome(outcome) }
@@ -747,7 +769,8 @@ class Raw_Client implements OpenKache_Raw_Client {
     assert_lifecycle_open(this.#lifecycle)
     try {
       return {
-        deleted: await this.#native_client.raw_delete(
+        deleted: await this.#native_client.raw_delete_in_namespace(
+          input.namespace_id,
           owned_item_id(input.item_id),
         ),
       }
@@ -763,10 +786,10 @@ class Raw_Client implements OpenKache_Raw_Client {
    * @returns The server's JSON statistics string.
    * @throws {OpenKache_Error} When authorization or transport fails.
    */
-  async stats(_input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
+  async stats(input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      return { json: await this.#native_client.stats() }
+      return { json: await this.#native_client.stats_in_namespace(input.namespace_id) }
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -779,10 +802,69 @@ class Raw_Client implements OpenKache_Raw_Client {
    * @returns An empty Smithy operation output.
    * @throws {OpenKache_Error} When authorization or synchronization fails.
    */
-  async sync(_input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
+  async sync(input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
     assert_lifecycle_open(this.#lifecycle)
     try {
-      await this.#native_client.sync()
+      await this.#native_client.sync_in_namespace(input.namespace_id)
+      return {}
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy NAMESPACE_OPEN operation.
+   *
+   * @param input - Namespace name, creation flag, and optional policy.
+   * @returns The server-assigned descriptor and creation result.
+   */
+  async namespace_open(
+    input: Smithy_Namespace_Open_Input,
+  ): Promise<Smithy_Namespace_Open_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      return await this.#native_client.namespace_open(
+        input.name,
+        input.create_if_missing,
+        input.policy,
+      )
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy NAMESPACE_UPDATE_POLICY operation.
+   */
+  async namespace_update_policy(
+    input: Smithy_Namespace_Update_Policy_Input,
+  ): Promise<Smithy_Namespace_Update_Policy_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      return {
+        descriptor: await this.#native_client.namespace_update_policy(
+          input.namespace_id,
+          input.expected_revision,
+          input.policy,
+        ),
+      }
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Invokes the Smithy NAMESPACE_DELETE operation.
+   */
+  async namespace_delete(
+    input: Smithy_Namespace_Delete_Input,
+  ): Promise<Smithy_Namespace_Delete_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      await this.#native_client.namespace_delete(
+        input.namespace_id,
+        input.expected_revision,
+      )
       return {}
     } catch (error) {
       throw as_openkache_error(error)
@@ -1007,11 +1089,47 @@ function validate_set_options(options: Set_Options): void {
   }
   if (
     options.condition !== undefined &&
+    options.condition !== "any" &&
     options.condition !== "if_absent" &&
     options.condition !== "if_present"
   ) {
     throw new OpenKache_Error(
-      `condition must be if_absent or if_present, got ${String(options.condition)}`,
+      `condition must be any, if_absent, or if_present, got ${String(options.condition)}`,
+    )
+  }
+  if (
+    options.expiration_mode !== undefined &&
+    options.expiration_mode !== "inherit" &&
+    options.expiration_mode !== "no_expiry" &&
+    options.expiration_mode !== "explicit_ttl"
+  ) {
+    throw new OpenKache_Error(
+      `expiration_mode must be inherit, no_expiry, or explicit_ttl, got ${String(options.expiration_mode)}`,
+    )
+  }
+  if (
+    options.eviction_mode !== undefined &&
+    options.eviction_mode !== "inherit" &&
+    options.eviction_mode !== "evictable" &&
+    options.eviction_mode !== "eviction_protected"
+  ) {
+    throw new OpenKache_Error(
+      `eviction_mode must be inherit, evictable, or eviction_protected, got ${String(options.eviction_mode)}`,
+    )
+  }
+  if (
+    options.expiration_mode === "explicit_ttl" &&
+    options.ttl_ms === undefined
+  ) {
+    throw new OpenKache_Error("ttl_ms is required with explicit_ttl expiration_mode")
+  }
+  if (
+    options.expiration_mode !== undefined &&
+    options.expiration_mode !== "explicit_ttl" &&
+    options.ttl_ms !== undefined
+  ) {
+    throw new OpenKache_Error(
+      "ttl_ms is only valid with explicit_ttl expiration_mode",
     )
   }
   validate_positive_integer(options.ttl_ms, "ttl_ms")

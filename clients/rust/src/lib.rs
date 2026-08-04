@@ -42,28 +42,137 @@ pub use openkache_client_core::{RawClient, RawClientBuilder};
 
 fn smithy_set_options(
     condition: Option<smithy::SetCondition>,
-    ttl_milliseconds: Option<i64>,
+    expiration_mode: Option<smithy::ExpirationMode>,
+    ttl_milliseconds: Option<u64>,
+    eviction_mode: Option<smithy::EvictionMode>,
 ) -> Result<SetOptions> {
     let mut options = match condition {
         None => SetOptions::new(),
+        Some(smithy::SetCondition::Any) => SetOptions::new(),
         Some(smithy::SetCondition::IfAbsent) => SetOptions::new().if_absent(),
         Some(smithy::SetCondition::IfPresent) => SetOptions::new().if_present(),
     };
-    if let Some(ttl_milliseconds) = ttl_milliseconds {
-        if ttl_milliseconds <= 0 {
-            return Err(Error::Configuration {
-                field: "set.ttl_milliseconds",
-                message: "must be greater than zero milliseconds".into(),
-            });
+    match expiration_mode.unwrap_or(smithy::ExpirationMode::Inherit) {
+        smithy::ExpirationMode::Inherit => {
+            if ttl_milliseconds.is_some() {
+                return Err(Error::Configuration {
+                    field: "set.ttl_milliseconds",
+                    message: "is only valid with explicit_ttl expiration mode".into(),
+                });
+            }
+            options = options.inherit_expiration();
         }
-        let ttl_milliseconds =
-            u64::try_from(ttl_milliseconds).map_err(|_| Error::Configuration {
+        smithy::ExpirationMode::NoExpiry => {
+            if ttl_milliseconds.is_some() {
+                return Err(Error::Configuration {
+                    field: "set.ttl_milliseconds",
+                    message: "is only valid with explicit_ttl expiration mode".into(),
+                });
+            }
+            options = options.no_expiry();
+        }
+        smithy::ExpirationMode::ExplicitTtl => {
+            let ttl_milliseconds = ttl_milliseconds.ok_or_else(|| Error::Configuration {
                 field: "set.ttl_milliseconds",
-                message: "must fit in an unsigned 64-bit millisecond count".into(),
+                message: "is required with explicit_ttl expiration mode".into(),
             })?;
-        options = options.expires_after_millis(ttl_milliseconds);
+            if ttl_milliseconds == 0 {
+                return Err(Error::Configuration {
+                    field: "set.ttl_milliseconds",
+                    message: "must be greater than zero milliseconds".into(),
+                });
+            }
+            options = options.expires_after_millis(ttl_milliseconds);
+        }
+    }
+    match eviction_mode.unwrap_or(smithy::EvictionMode::Inherit) {
+        smithy::EvictionMode::Inherit => {
+            options = options.inherit_eviction();
+        }
+        smithy::EvictionMode::Evictable => {
+            options = options.evictable();
+        }
+        smithy::EvictionMode::EvictionProtected => {
+            options = options.eviction_protected();
+        }
     }
     Ok(options)
+}
+
+fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespacePolicy> {
+    let default_expiration = match policy.default_expiration {
+        smithy::ExpirationDefault::NoExpiry => {
+            if policy.default_ttl_milliseconds.is_some() {
+                return Err(Error::Configuration {
+                    field: "namespace.policy.default_ttl_milliseconds",
+                    message: "is only valid with fixed_ttl expiration".into(),
+                });
+            }
+            ExpirationDefault::NoExpiry
+        }
+        smithy::ExpirationDefault::FixedTtl => {
+            let ttl_ms = policy
+                .default_ttl_milliseconds
+                .ok_or_else(|| Error::Configuration {
+                    field: "namespace.policy.default_ttl_milliseconds",
+                    message: "is required with fixed_ttl expiration".into(),
+                })?;
+            if ttl_ms == 0 {
+                return Err(Error::Configuration {
+                    field: "namespace.policy.default_ttl_milliseconds",
+                    message: "must be greater than zero milliseconds".into(),
+                });
+            }
+            ExpirationDefault::FixedTtl { ttl_ms }
+        }
+    };
+    Ok(NamespacePolicy {
+        default_expiration,
+        expiration_override: match policy.expiration_override {
+            smithy::OverridePolicy::Allowed => OverridePolicy::Allowed,
+            smithy::OverridePolicy::Disallowed => OverridePolicy::Disallowed,
+        },
+        default_eviction: match policy.default_eviction {
+            smithy::EvictionDefault::Evictable => EvictionDefault::Evictable,
+            smithy::EvictionDefault::EvictionProtected => EvictionDefault::EvictionProtected,
+        },
+        eviction_override: match policy.eviction_override {
+            smithy::OverridePolicy::Allowed => OverridePolicy::Allowed,
+            smithy::OverridePolicy::Disallowed => OverridePolicy::Disallowed,
+        },
+    })
+}
+
+fn smithy_namespace_descriptor(descriptor: NamespaceDescriptor) -> smithy::NamespaceDescriptor {
+    let (default_expiration, default_ttl_milliseconds) = match descriptor.policy.default_expiration
+    {
+        ExpirationDefault::NoExpiry => (smithy::ExpirationDefault::NoExpiry, None),
+        ExpirationDefault::FixedTtl { ttl_ms } => {
+            (smithy::ExpirationDefault::FixedTtl, Some(ttl_ms))
+        }
+    };
+    smithy::NamespaceDescriptor {
+        namespace_id: descriptor.namespace_id,
+        revision: descriptor.revision,
+        policy: smithy::NamespacePolicy {
+            default_expiration,
+            default_ttl_milliseconds,
+            expiration_override: match descriptor.policy.expiration_override {
+                OverridePolicy::Allowed => smithy::OverridePolicy::Allowed,
+                OverridePolicy::Disallowed => smithy::OverridePolicy::Disallowed,
+            },
+            default_eviction: match descriptor.policy.default_eviction {
+                EvictionDefault::Evictable => smithy::EvictionDefault::Evictable,
+                EvictionDefault::EvictionProtected => {
+                    smithy::EvictionDefault::EvictionProtected
+                }
+            },
+            eviction_override: match descriptor.policy.eviction_override {
+                OverridePolicy::Allowed => smithy::OverridePolicy::Allowed,
+                OverridePolicy::Disallowed => smithy::OverridePolicy::Disallowed,
+            },
+        },
+    }
 }
 
 macro_rules! impl_smithy_api {
@@ -84,7 +193,7 @@ macro_rules! impl_smithy_api {
                 input: smithy::GetInput,
             ) -> std::result::Result<smithy::GetOutput, Self::Error> {
                 let item_id = ItemId::from_slice(&input.item_id)?;
-                let value = match $client::get(self, item_id).await? {
+                let value = match $client::get_in_namespace(self, input.namespace_id, item_id).await? {
                     GetOutcome::Found(value) => Some(value.into_bytes()),
                     GetOutcome::NotFound => None,
                 };
@@ -96,9 +205,21 @@ macro_rules! impl_smithy_api {
                 input: smithy::SetInput,
             ) -> std::result::Result<smithy::SetOutput, Self::Error> {
                 let item_id = ItemId::from_slice(&input.item_id)?;
-                let options = smithy_set_options(input.condition, input.ttl_milliseconds)?;
+                let options = smithy_set_options(
+                    input.condition,
+                    input.expiration_mode,
+                    input.ttl_milliseconds,
+                    input.eviction_mode,
+                )?;
                 let outcome =
-                    $client::set(self, item_id, ItemValue::new(input.value), options).await?;
+                    $client::set_in_namespace(
+                        self,
+                        input.namespace_id,
+                        item_id,
+                        ItemValue::new(input.value),
+                        options,
+                    )
+                    .await?;
                 let outcome = match outcome {
                     SetOutcome::Created => smithy::SetOutcome::Created,
                     SetOutcome::Replaced => smithy::SetOutcome::Replaced,
@@ -112,24 +233,69 @@ macro_rules! impl_smithy_api {
                 input: smithy::DeleteInput,
             ) -> std::result::Result<smithy::DeleteOutput, Self::Error> {
                 let item_id = ItemId::from_slice(&input.item_id)?;
-                let deleted = $client::delete(self, item_id).await? == DeleteOutcome::Deleted;
+                let deleted = $client::delete_in_namespace(self, input.namespace_id, item_id)
+                    .await?
+                    == DeleteOutcome::Deleted;
                 Ok(smithy::DeleteOutput { deleted })
             }
 
             async fn stats(
                 &self,
-                _input: smithy::StatsInput,
+                input: smithy::StatsInput,
             ) -> std::result::Result<smithy::StatsOutput, Self::Error> {
-                let json = $client::stats(self).await?;
+                let json = $client::stats_in_namespace(self, input.namespace_id).await?;
                 Ok(smithy::StatsOutput { json })
             }
 
             async fn sync(
                 &self,
-                _input: smithy::SyncInput,
+                input: smithy::SyncInput,
             ) -> std::result::Result<smithy::SyncOutput, Self::Error> {
-                $client::sync(self).await?;
+                $client::sync_in_namespace(self, input.namespace_id).await?;
                 Ok(smithy::SyncOutput)
+            }
+
+            async fn namespace_open(
+                &self,
+                input: smithy::NamespaceOpenInput,
+            ) -> std::result::Result<smithy::NamespaceOpenOutput, Self::Error> {
+                let policy = input
+                    .policy
+                    .map(smithy_namespace_policy)
+                    .transpose()?;
+                let (descriptor, created) =
+                    $client::namespace_open_with_outcome(self, input.name.into_bytes(), input.create_if_missing, policy)
+                        .await?;
+                Ok(smithy::NamespaceOpenOutput {
+                    descriptor: smithy_namespace_descriptor(descriptor),
+                    created,
+                })
+            }
+
+            async fn namespace_update_policy(
+                &self,
+                input: smithy::NamespaceUpdatePolicyInput,
+            ) -> std::result::Result<smithy::NamespaceUpdatePolicyOutput, Self::Error> {
+                let policy = smithy_namespace_policy(input.policy)?;
+                let descriptor = $client::namespace_update_policy(
+                    self,
+                    input.namespace_id,
+                    input.expected_revision,
+                    policy,
+                )
+                .await?;
+                Ok(smithy::NamespaceUpdatePolicyOutput {
+                    descriptor: smithy_namespace_descriptor(descriptor),
+                })
+            }
+
+            async fn namespace_delete(
+                &self,
+                input: smithy::NamespaceDeleteInput,
+            ) -> std::result::Result<smithy::NamespaceDeleteOutput, Self::Error> {
+                $client::namespace_delete(self, input.namespace_id, input.expected_revision)
+                    .await?;
+                Ok(smithy::NamespaceDeleteOutput)
             }
         }
     };
