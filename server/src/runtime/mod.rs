@@ -134,12 +134,21 @@ impl ThreadedKvkache {
         let server_secret =
             load_or_create_server_secret(&config.storage.directory, existing_storage)?;
         let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
-        Self::start_with_server_secret(config, server_secret, allow_checkpoint, combined_entries)
+        Self::start_with_server_secret(
+            config,
+            server_secret,
+            allow_checkpoint,
+            combined_entries,
+            true,
+            false,
+        )
     }
 
     fn start_with_server_key(
         config: crate::config::AppConfig,
         server_key: [u8; 32],
+        copy_ssd_inline_value_once: bool,
+        lease_ssd_read_buffer: bool,
     ) -> Result<Self> {
         config.validate()?;
         fs::create_dir_all(&config.storage.directory)?;
@@ -154,6 +163,8 @@ impl ThreadedKvkache {
             },
             allow_checkpoint,
             None,
+            copy_ssd_inline_value_once,
+            lease_ssd_read_buffer,
         )
     }
 
@@ -162,6 +173,8 @@ impl ThreadedKvkache {
         server_secret: ServerSecret,
         allow_checkpoint: bool,
         combined_entries: Option<u32>,
+        copy_ssd_inline_value_once: bool,
+        lease_ssd_read_buffer: bool,
     ) -> Result<Self> {
         let server_cipher = Aes256::new(&server_secret.key.into());
         let (started_tx, started_rx) =
@@ -185,7 +198,9 @@ impl ThreadedKvkache {
                 (None, None)
             };
             let started_tx = started_tx.clone();
-            let shard_config = config.worker_config(thread_id);
+            let mut shard_config = config.worker_config(thread_id);
+            shard_config.copy_ssd_inline_value_once = copy_ssd_inline_value_once;
+            shard_config.lease_ssd_read_buffer = lease_ssd_read_buffer;
             let io_config = config.io_uring.clone();
             let entries = if combined {
                 combined_entries.expect("combined ring capacity was validated")
@@ -543,13 +558,99 @@ impl ThreadedKvkache {
         total_table_capacity: usize,
         bucket_choice_count: usize,
     ) -> Result<Self> {
-        Self::for_trace_benchmark_with_bucket_policy(
+        Self::for_trace_benchmark_with_bucket_choices_and_read_pool(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            BUCKET_READ_POOL_CAPACITY,
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with a configurable Bucket-read pool bound.
+    ///
+    /// # Arguments
+    ///
+    /// * `directory` - Fresh storage directory owned by this benchmark instance.
+    /// * `cpu_ids` - One pinned CPU identifier per worker.
+    /// * `total_segment_count` - Segment count divided evenly across workers.
+    /// * `total_table_capacity` - Planned key capacity divided across workers.
+    /// * `bucket_choice_count` - Power-of-two candidate count from 1 through 32.
+    /// * `bucket_read_pool_capacity` - Fixed 4 KiB read buffers preallocated per worker;
+    ///   zero selects the allocation baseline.
+    ///
+    /// # Returns
+    ///
+    /// A running worker set whose storage-key secret is fixed for reproducible placement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sizing, placement, Bucket choices, or worker startup is invalid.
+    pub fn for_trace_benchmark_with_bucket_choices_and_read_pool(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_read_pool_capacity: usize,
+    ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_choices_read_pool_and_inline_copy(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            bucket_read_pool_capacity,
+            true,
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with configurable read-buffer and inline-copy modes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_trace_benchmark_with_bucket_choices_read_pool_and_inline_copy(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_read_pool_capacity: usize,
+        copy_ssd_inline_value_once: bool,
+    ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_choices_read_pool_and_response_lease(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            bucket_read_pool_capacity,
+            copy_ssd_inline_value_once,
+            false,
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with staged stable-SSD GET optimizations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_trace_benchmark_with_bucket_choices_read_pool_and_response_lease(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_read_pool_capacity: usize,
+        copy_ssd_inline_value_once: bool,
+        lease_ssd_read_buffer: bool,
+    ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_policy_and_read_pool(
             directory,
             cpu_ids,
             total_segment_count,
             total_table_capacity,
             bucket_choice_count,
             crate::config::BucketSelectionPolicy::LeastUsed,
+            bucket_read_pool_capacity,
+            copy_ssd_inline_value_once,
+            lease_ssd_read_buffer,
         )
     }
 
@@ -580,6 +681,30 @@ impl ThreadedKvkache {
         bucket_choice_count: usize,
         bucket_selection_policy: crate::config::BucketSelectionPolicy,
     ) -> Result<Self> {
+        Self::for_trace_benchmark_with_bucket_policy_and_read_pool(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            bucket_selection_policy,
+            BUCKET_READ_POOL_CAPACITY,
+            true,
+            false,
+        )
+    }
+
+    fn for_trace_benchmark_with_bucket_policy_and_read_pool(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_selection_policy: crate::config::BucketSelectionPolicy,
+        bucket_read_pool_capacity: usize,
+        copy_ssd_inline_value_once: bool,
+        lease_ssd_read_buffer: bool,
+    ) -> Result<Self> {
         let thread_count = cpu_ids.len();
         if thread_count == 0 {
             return Err(KvError::InvalidConfig(
@@ -597,9 +722,15 @@ impl ThreadedKvkache {
             total_segment_count,
             total_table_capacity,
         )?;
+        config.storage.bucket_read_pool_capacity_per_thread = bucket_read_pool_capacity;
         config.table.bucket_choice_count = bucket_choice_count;
         config.table.bucket_selection_policy = bucket_selection_policy;
-        Self::start_with_server_key(config, [0; 32])
+        Self::start_with_server_key(
+            config,
+            [0; 32],
+            copy_ssd_inline_value_once,
+            lease_ssd_read_buffer,
+        )
     }
 
     pub fn run_benchmark_batch(

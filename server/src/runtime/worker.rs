@@ -398,6 +398,12 @@ impl KeyScheduler {
         self.lanes.is_empty()
     }
 
+    fn has_waiting(&self, storage_key: &StorageKey) -> bool {
+        self.lanes
+            .get(storage_key)
+            .is_some_and(|lane| lane.waiting_head.is_some())
+    }
+
     fn enqueue(&mut self, storage_key: StorageKey, command: KeyedCommand) -> Result<()> {
         let slot = self
             .waiting
@@ -727,11 +733,12 @@ pub(super) async fn worker_loop(
                 result?;
             }
             WorkerEvent::Completed(completed) => {
+                let include_visible_state = scheduler.has_waiting(&completed.storage_key);
                 let KeyedFinish {
                     outcome,
                     visible_state,
                     flush_required,
-                } = cache.finish_keyed(completed.job);
+                } = cache.finish_keyed(completed.job, include_visible_state);
                 let (responses, success_state, failure_state) = match completed.completion {
                     RunningCompletion::Direct(response) => match outcome {
                         Ok(outcome) if !flush_required => {

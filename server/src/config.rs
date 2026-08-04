@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::BUCKET_BYTES;
 use crate::error::{KvError, Result};
 use crate::platform::allowed_cpu_ids;
+use crate::store::BUCKET_READ_POOL_CAPACITY;
 
 pub(crate) const DEFAULT_BUCKET_CHOICE_COUNT: usize = 4;
+pub(crate) const MAX_BUCKET_READ_POOL_CAPACITY: usize = 4_096;
 
 const DEFAULT_MAX_ITEM_BYTES: usize = 16 * 1024 * 1024;
 
@@ -129,6 +131,9 @@ pub struct Config {
     pub mutable_segment_count: usize,
     pub max_flushes_in_flight: usize,
     pub stable_ram_segment_count: usize,
+    pub bucket_read_pool_capacity: usize,
+    pub copy_ssd_inline_value_once: bool,
+    pub lease_ssd_read_buffer: bool,
     pub large_value_threshold: usize,
     pub max_item_bytes: usize,
     pub segment_count: usize,
@@ -156,6 +161,9 @@ impl Default for Config {
             mutable_segment_count: 3,
             max_flushes_in_flight: 2,
             stable_ram_segment_count: 2,
+            bucket_read_pool_capacity: BUCKET_READ_POOL_CAPACITY,
+            copy_ssd_inline_value_once: true,
+            lease_ssd_read_buffer: false,
             large_value_threshold: 20 * 1024,
             max_item_bytes: DEFAULT_MAX_ITEM_BYTES,
             segment_count: 64,
@@ -219,6 +227,11 @@ impl Config {
             return Err(KvError::InvalidConfig(
                 "stable RAM Segment count cannot exceed physical Segment count".into(),
             ));
+        }
+        if self.bucket_read_pool_capacity > MAX_BUCKET_READ_POOL_CAPACITY {
+            return Err(KvError::InvalidConfig(format!(
+                "Bucket-read pool capacity cannot exceed {MAX_BUCKET_READ_POOL_CAPACITY} buffers"
+            )));
         }
         if self.large_value_threshold == 0 {
             return Err(KvError::InvalidConfig(
@@ -579,6 +592,8 @@ pub struct StorageConfig {
     pub max_flushes_in_flight_per_thread: usize,
     /// Recently flushed read-only SGs retained in RAM by each storage worker.
     pub stable_ram_segments_per_thread: usize,
+    /// Fixed 4 KiB direct-read buffers preallocated by each storage worker.
+    pub bucket_read_pool_capacity_per_thread: usize,
     /// Values larger than this threshold use the large-value tier.
     pub large_value_threshold_kib: usize,
     /// Preallocated worker-local large-value circular file capacity.
@@ -599,6 +614,7 @@ impl Default for StorageConfig {
             mutable_segments_per_thread: 3,
             max_flushes_in_flight_per_thread: 2,
             stable_ram_segments_per_thread: 2,
+            bucket_read_pool_capacity_per_thread: BUCKET_READ_POOL_CAPACITY,
             large_value_threshold_kib: 20,
             large_value_capacity_mib_per_thread: 64,
             max_item_size_mib: DEFAULT_MAX_ITEM_BYTES / (1024 * 1024),
@@ -814,6 +830,11 @@ impl AppConfig {
                     .into(),
             ));
         }
+        if self.storage.bucket_read_pool_capacity_per_thread > MAX_BUCKET_READ_POOL_CAPACITY {
+            return Err(KvError::InvalidConfig(format!(
+                "storage.bucket_read_pool_capacity_per_thread cannot exceed {MAX_BUCKET_READ_POOL_CAPACITY} buffers"
+            )));
+        }
         if self.storage.max_item_size_mib == 0
             || self.storage.max_item_size_mib > self.storage.large_value_capacity_mib_per_thread
             || self
@@ -902,6 +923,7 @@ impl AppConfig {
                 mutable_segments_per_thread: 3,
                 max_flushes_in_flight_per_thread: 2,
                 stable_ram_segments_per_thread: 2,
+                bucket_read_pool_capacity_per_thread: BUCKET_READ_POOL_CAPACITY,
                 large_value_threshold_kib: 20,
                 large_value_capacity_mib_per_thread: 64,
                 max_item_size_mib: 16,
@@ -938,6 +960,9 @@ impl AppConfig {
             mutable_segment_count: self.storage.mutable_segments_per_thread,
             max_flushes_in_flight: self.storage.max_flushes_in_flight_per_thread,
             stable_ram_segment_count: self.storage.stable_ram_segments_per_thread,
+            bucket_read_pool_capacity: self.storage.bucket_read_pool_capacity_per_thread,
+            copy_ssd_inline_value_once: true,
+            lease_ssd_read_buffer: false,
             large_value_threshold: self.storage.large_value_threshold_kib * 1024,
             max_item_bytes: self.storage.max_item_size_mib * 1024 * 1024,
             segment_count: self.storage.segments_per_thread,

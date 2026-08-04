@@ -10,7 +10,7 @@ pub(crate) const STORED_BLOB_REF_BYTES: usize = STORED_VALUE_TAG_BYTES + BLOB_RE
 pub(crate) const STORED_LARGE_VALUE_REF_BYTES: usize =
     STORED_VALUE_TAG_BYTES + LARGE_VALUE_REF_BYTES;
 
-const INLINE_VALUE_TAG: u8 = 0;
+pub(crate) const INLINE_VALUE_TAG: u8 = 0;
 const BLOB_VALUE_TAG: u8 = 1;
 const LARGE_VALUE_TAG: u8 = 2;
 
