@@ -12,12 +12,33 @@ jobs:
   ci:
     runs-on: [self-hosted, Linux, openkache-ci]
     timeout-minutes: 5
+    env:
+      CC: clang
+      CXX: clang++
+      AR: llvm-ar
+      RANLIB: llvm-ranlib
+      CMAKE_AR: llvm-ar
+      CMAKE_RANLIB: llvm-ranlib
+      CMAKE_C_COMPILER: clang
+      CMAKE_CXX_COMPILER: clang++
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
 
       - uses: ./.github/actions/setup-smithy-codegen
+
+      - name: Verify Clang toolchain
+        run: |
+          for tool in clang clang++ llvm-ar llvm-ranlib; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "ERROR: required Clang/LLVM tool is missing: $tool" >&2
+              echo "Why: public CI build scripts must not fall back to the host GCC toolchain." >&2
+              echo "Fix: install the pinned runner Clang/LLVM toolchain before running this workflow." >&2
+              exit 1
+            fi
+          done
+          clang --version
 
       - name: Generate Python Smithy contract
         working-directory: clients/python
