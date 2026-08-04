@@ -761,6 +761,30 @@ impl<C: ClientConnection> Core<C> {
             &[Status::Ok],
         )?;
         let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
+        if descriptor.namespace_id != namespace_id {
+            return Err(Error::UnexpectedResponse {
+                operation: Operation::NamespaceUpdatePolicy,
+                message: format!(
+                    "descriptor namespace ID {} does not match requested namespace ID {namespace_id}",
+                    descriptor.namespace_id
+                ),
+            });
+        }
+        let expected_next_revision = expected_revision.checked_add(1).ok_or_else(|| {
+            Error::UnexpectedResponse {
+                operation: Operation::NamespaceUpdatePolicy,
+                message: "successful policy update cannot follow the maximum revision".into(),
+            }
+        })?;
+        if descriptor.revision != expected_next_revision {
+            return Err(Error::UnexpectedResponse {
+                operation: Operation::NamespaceUpdatePolicy,
+                message: format!(
+                    "descriptor revision {} does not follow expected revision {expected_revision}",
+                    descriptor.revision
+                ),
+            });
+        }
         if self.namespace_id.load(Ordering::Acquire) == namespace_id {
             self.namespace_id
                 .store(descriptor.namespace_id, Ordering::Release);
