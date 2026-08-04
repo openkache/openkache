@@ -1107,7 +1107,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(StreamReadError::Transport(_)) => break,
         };
         let request_bytes = std::mem::take(&mut frame.bytes);
-        let mut terminal_after_response = false;
+        let mut terminal_after_response = frame.has_trailing_bytes;
         let response_result = match Request::decode_owned(request_bytes) {
             Ok(request) => {
                 let may_mutate = request_may_mutate(&request);
@@ -1147,7 +1147,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 )
                 .await
                 {
-                    Ok(response) => (response, response_permit),
+                    Ok(Some(response)) => (response, response_permit),
+                    Ok(None) => {
+                        // A mutating storage failure may have crossed its
+                        // linearization point. Do not send an error response
+                        // that would falsely guarantee that no mutation took
+                        // effect.
+                        return;
+                    }
                     Err(_) if may_mutate => {
                         // The worker request may already have crossed its mutation
                         // linearization point when this wait expires. An error response
@@ -1202,7 +1209,7 @@ async fn execute_request(
     request: Request,
     administrator: bool,
     namespaces: &Mutex<NamespaceRegistry>,
-) -> Response {
+) -> Option<Response> {
     let Request {
         opcode,
         namespace_id,
@@ -1217,14 +1224,14 @@ async fn execute_request(
     // Do not reveal whether an administrative namespace exists to a peer that
     // is not authorized to inspect or synchronize server diagnostics.
     if matches!(opcode, Opcode::Stats | Opcode::Sync) && !administrator {
-        return response_bytes(
+        return Some(response_bytes(
             Status::Forbidden,
             if opcode == Opcode::Stats {
                 b"STATS requires administrator authorization"
             } else {
                 b"SYNC requires administrator authorization"
             },
-        );
+        ));
     }
     // Serialize lifecycle and data-plane operations for one namespace while
     // allowing unrelated namespaces to proceed concurrently. The registry
@@ -1246,7 +1253,10 @@ async fn execute_request(
             .ok()
             .and_then(|registry| registry.operation_lock(namespace_id));
         let Some(operation_lock) = operation_lock else {
-            return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+            return Some(response_bytes(
+                Status::NamespaceNotFound,
+                b"namespace does not exist",
+            ));
         };
         Some(operation_lock)
     } else {
@@ -1258,17 +1268,17 @@ async fn execute_request(
         None
     };
     let result = match opcode {
-        Opcode::Ping => return response_bytes(Status::Ok, b"PONG"),
+        Opcode::Ping => return Some(response_bytes(Status::Ok, b"PONG")),
         Opcode::NamespaceOpen => {
             let name = namespace_name.expect("namespace-open requests have a validated name");
             let result = namespaces
                 .lock()
                 .map_err(|_| Status::InternalError)
                 .and_then(|mut registry| registry.open(name, create_if_missing, namespace_policy));
-            return match result {
+            return Some(match result {
                 Ok((status, descriptor)) => response(status, descriptor_payload(descriptor)),
                 Err(status) => response_bytes(status, b"namespace operation rejected"),
-            };
+            });
         }
         Opcode::NamespaceUpdatePolicy => {
             let result = namespaces
@@ -1281,18 +1291,30 @@ async fn execute_request(
                         namespace_policy.expect("namespace update has a validated policy"),
                     )
                 });
-            return match result {
+            return Some(match result {
                 Ok(descriptor) => response(Status::Ok, descriptor_payload(descriptor)),
                 Err(status) => response_bytes(status, b"namespace policy update rejected"),
-            };
+            });
         }
         Opcode::NamespaceDelete => {
             let namespace_id = namespace_id.expect("namespace delete has a validated ID");
-            let tracked_items = namespaces
-                .lock()
-                .ok()
-                .and_then(|registry| registry.tracked_items(namespace_id))
-                .unwrap_or_default();
+            let tracked_items = match namespaces.lock() {
+                Ok(registry) => match registry.tracked_items(namespace_id) {
+                    Some(items) => items,
+                    None => {
+                        return Some(response_bytes(
+                            Status::NamespaceNotFound,
+                            b"namespace does not exist",
+                        ));
+                    }
+                },
+                Err(_) => {
+                    return Some(response_bytes(
+                        Status::InternalError,
+                        b"namespace metadata is unavailable",
+                    ));
+                }
+            };
             // Expired items are logically absent even if their old storage records have not
             // been compacted yet. Prune them before the empty check so TTL does not prevent
             // namespace deletion.
@@ -1302,9 +1324,19 @@ async fn execute_request(
                     Ok(None) => {
                         if let Ok(mut registry) = namespaces.lock() {
                             registry.prune_item(namespace_id, item_id);
+                        } else {
+                            return Some(response_bytes(
+                                Status::InternalError,
+                                b"namespace metadata is unavailable",
+                            ));
                         }
                     }
-                    Err(_) => {}
+                    Err(error) => {
+                        // Emptiness is a deletion precondition. If storage
+                        // cannot answer the point lookup, do not remove the
+                        // namespace metadata.
+                        return Some(cache_error_response(error));
+                    }
                 }
             }
             let result = namespaces
@@ -1316,18 +1348,21 @@ async fn execute_request(
                         expected_revision.expect("namespace delete has a validated revision"),
                     )
                 });
-            return match result {
+            return Some(match result {
                 Ok(()) => response(Status::Deleted, Vec::new()),
                 Err(status) => response_bytes(status, b"namespace deletion rejected"),
-            };
+            });
         }
         Opcode::Get => {
             let namespace_id = namespace_id.expect("GET requests have a validated namespace ID");
             if !namespace_exists(namespaces, namespace_id) {
-                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+                return Some(response_bytes(
+                    Status::NamespaceNotFound,
+                    b"namespace does not exist",
+                ));
             }
             let item_id = item_id.expect("GET requests have a validated item ID");
-            return match cache.get_async_in_namespace(namespace_id, item_id).await {
+            return Some(match cache.get_async_in_namespace(namespace_id, item_id).await {
                 Ok(Some(value)) => response(Status::Ok, value.into_bytes()),
                 Ok(None) => {
                     if let Ok(mut registry) = namespaces.lock() {
@@ -1336,7 +1371,7 @@ async fn execute_request(
                     response(Status::NotFound, Vec::new())
                 }
                 Err(error) => cache_error_response(error),
-            };
+            });
         }
         Opcode::Set => {
             let namespace_id = namespace_id.expect("SET requests have a validated namespace ID");
@@ -1347,12 +1382,17 @@ async fn execute_request(
             {
                 Some(policy) => policy,
                 None => {
-                    return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+                    return Some(response_bytes(
+                        Status::NamespaceNotFound,
+                        b"namespace does not exist",
+                    ));
                 }
             };
             let effective_options = match resolve_set_options(policy, set_options) {
                 Ok(options) => options,
-                Err(status) => return response_bytes(status, b"SET policy is disallowed"),
+                Err(status) => {
+                    return Some(response_bytes(status, b"SET policy is disallowed"));
+                }
             };
             let item_id = item_id.expect("SET requests have a validated item ID");
             let outcome = cache
@@ -1365,92 +1405,119 @@ async fn execute_request(
                 .await;
             return match outcome {
                 Ok(outcome) => {
-                    if let Ok(mut registry) = namespaces.lock() {
-                        registry.mark_set(namespace_id, item_id, outcome);
-                    }
-                    response(
+                    let Ok(mut registry) = namespaces.lock() else {
+                        // The storage mutation already completed, but the
+                        // metadata update needed for namespace lifecycle
+                        // correctness cannot be recorded. Do not send a
+                        // definitive response.
+                        return None;
+                    };
+                    registry.mark_set(namespace_id, item_id, outcome);
+                    Some(response(
                         match outcome {
                             SetOutcome::Created => Status::Created,
                             SetOutcome::Replaced => Status::Replaced,
                             SetOutcome::NotStored => Status::NotStored,
                         },
                         Vec::new(),
-                    )
+                    ))
                 }
-                Err(error) => cache_error_response(error),
+                Err(error) => mutation_cache_error_response(error),
             };
         }
         Opcode::Delete => {
             let namespace_id = namespace_id.expect("DELETE requests have a validated namespace ID");
             if !namespace_exists(namespaces, namespace_id) {
-                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+                return Some(response_bytes(
+                    Status::NamespaceNotFound,
+                    b"namespace does not exist",
+                ));
             }
             let item_id = item_id.expect("DELETE requests have a validated item ID");
             let deleted = cache.delete_async_in_namespace(namespace_id, item_id).await;
             return match deleted {
                 Ok(deleted) => {
-                    if let Ok(mut registry) = namespaces.lock() {
-                        registry.mark_delete(namespace_id, item_id, deleted);
-                    }
-                    response(
+                    let Ok(mut registry) = namespaces.lock() else {
+                        // The DELETE may already have taken effect. Closing
+                        // the lane avoids claiming a reliable outcome while
+                        // leaving the namespace tracker stale.
+                        return None;
+                    };
+                    registry.mark_delete(namespace_id, item_id, deleted);
+                    Some(response(
                         if deleted {
                             Status::Deleted
                         } else {
                             Status::NotFound
                         },
                         Vec::new(),
-                    )
+                    ))
                 }
-                Err(error) => cache_error_response(error),
+                Err(error) => mutation_cache_error_response(error),
             };
         }
         Opcode::Stats if !administrator => {
-            return response_bytes(
+            return Some(response_bytes(
                 Status::Forbidden,
                 b"STATS requires administrator authorization",
-            );
+            ));
         }
         Opcode::Stats => {
             if !namespace_exists(
                 namespaces,
                 namespace_id.expect("STATS requests have a validated namespace ID"),
             ) {
-                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+                return Some(response_bytes(
+                    Status::NamespaceNotFound,
+                    b"namespace does not exist",
+                ));
             }
-            cache.stats_async().await.map(|workers| {
-                let worker_bytes = workers.iter().map(String::len).sum::<usize>();
-                let mut payload = String::with_capacity(32 + worker_bytes);
-                payload.push_str(r#"{"storage":"ssd","workers":["#);
-                for (index, worker) in workers.into_iter().enumerate() {
-                    if index > 0 {
-                        payload.push(',');
+            match cache.stats_async().await {
+                Ok(workers) => {
+                    let worker_bytes = workers.iter().map(String::len).sum::<usize>();
+                    let mut payload = String::with_capacity(32 + worker_bytes);
+                    payload.push_str(r#"{"storage":"ssd","workers":["#);
+                    for (index, worker) in workers.into_iter().enumerate() {
+                        if index > 0 {
+                            payload.push(',');
+                        }
+                        write!(payload, "{worker:?}").expect("writing to a String cannot fail");
                     }
-                    write!(payload, "{worker:?}").expect("writing to a String cannot fail");
+                    payload.push_str("]}");
+                    Some(response(Status::Ok, payload.into_bytes()))
                 }
-                payload.push_str("]}");
-                response(Status::Ok, payload.into_bytes())
-            })
+                Err(error) => Some(cache_error_response(error)),
+            }
         }
         Opcode::Sync if !administrator => {
-            return response_bytes(
+            return Some(response_bytes(
                 Status::Forbidden,
                 b"SYNC requires administrator authorization",
-            );
+            ));
         }
         Opcode::Sync => {
             if !namespace_exists(
                 namespaces,
                 namespace_id.expect("SYNC requests have a validated namespace ID"),
             ) {
-                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+                return Some(response_bytes(
+                    Status::NamespaceNotFound,
+                    b"namespace does not exist",
+                ));
             }
-            cache
-                .sync_async()
-                .await
-                .map(|()| response(Status::Ok, Vec::new()))
+            match cache.sync_async().await {
+                Ok(()) => Some(response(Status::Ok, Vec::new())),
+                Err(_) => {
+                    // SYNC is a persistence barrier. A worker may have
+                    // completed its flush before another worker failed, so no
+                    // error response can safely claim that the barrier did
+                    // not take effect.
+                    None
+                }
+            }
         }
     };
-    result.unwrap_or_else(cache_error_response)
+    result
 }
 
 fn namespace_exists(namespaces: &Mutex<NamespaceRegistry>, namespace_id: u64) -> bool {
@@ -1517,6 +1584,26 @@ fn cache_error_response(error: KvError) -> Response {
         }
     };
     response_display(status, error)
+}
+
+/// Returns an error response only when the storage failure is known to happen
+/// before a mutation can be applied.
+///
+/// A timeout, I/O failure, worker failure, or internal usage failure may be
+/// reported after the storage worker crossed its mutation linearization point.
+/// Returning a protocol error for those cases would violate the v1 guarantee
+/// that every mutating error response means "no mutation".
+fn mutation_cache_error_response(error: KvError) -> Option<Response> {
+    let safe_before_mutation = matches!(
+        &error,
+        KvError::InvalidRequest(_)
+            | KvError::TableFull
+            | KvError::ItemTooLarge { .. }
+            | KvError::BlobSegmentFull { .. }
+            | KvError::CapacityExhausted { .. }
+            | KvError::NoCapacity
+    );
+    safe_before_mutation.then(|| cache_error_response(error))
 }
 
 /// Maps framing and validation failures to stable protocol statuses.

@@ -198,13 +198,28 @@ pub(super) enum StreamReadError {
 /// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
+    /// Whether the transport had already delivered bytes beyond this frame.
+    ///
+    /// QUIC stream reads may coalesce multiple client writes. If the backend
+    /// exposes those trailing bytes, the lane must be retired after the
+    /// current response because the peer violated request/response lockstep.
+    pub(super) has_trailing_bytes: bool,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
     fn new(bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
+        Self::with_trailing_bytes(bytes, permit, false)
+    }
+
+    fn with_trailing_bytes(
+        bytes: Vec<u8>,
+        permit: RequestBudgetPermit,
+        has_trailing_bytes: bool,
+    ) -> Self {
         Self {
             bytes,
+            has_trailing_bytes,
             _permit: permit,
         }
     }
@@ -970,12 +985,17 @@ mod quiche_backend {
             .await
             .map_err(|_| StreamReadError::Timeout)?
             .map_err(StreamReadError::Transport)?;
-            let frame = if self.buffered.len() == frame_len {
+            let has_trailing_bytes = self.buffered.len() > frame_len;
+            let frame = if !has_trailing_bytes {
                 std::mem::take(&mut self.buffered)
             } else {
                 self.buffered.drain(..frame_len).collect()
             };
-            Ok(RequestFrame::new(frame, permit))
+            Ok(RequestFrame::with_trailing_bytes(
+                frame,
+                permit,
+                has_trailing_bytes,
+            ))
         }
     }
 
