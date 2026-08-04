@@ -937,10 +937,22 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     ),
   }
   const opcode_names = new Set(wire.opcodes.map((entry) => entry.name))
+  const api_operation_names = new Set<string>()
   for (const operation of api.operations) {
+    if (api_operation_names.has(operation.name)) {
+      throw new Error(`duplicate client operation ${operation.name}`)
+    }
+    api_operation_names.add(operation.name)
     if (!opcode_names.has(operation.name)) {
       throw new Error(
         `client operation ${operation.name} has no matching protocol opcode`,
+      )
+    }
+  }
+  for (const opcode of wire.opcodes) {
+    if (!api_operation_names.has(opcode.name)) {
+      throw new Error(
+        `wire opcode ${opcode.name} has no matching client operation`,
       )
     }
   }
