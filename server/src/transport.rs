@@ -374,7 +374,10 @@ async fn read_buffered_request(
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
     let header = Vec::with_capacity(1).slice(..1);
-    let BufResult(result, header) = stream.read_exact(header).await;
+    let BufResult(result, header) =
+        compio::runtime::time::timeout(timeout, stream.read_exact(header))
+            .await
+            .map_err(|_| StreamReadError::Timeout)?;
     result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
 
     let frame = header.into_inner();
@@ -975,9 +978,15 @@ mod quiche_backend {
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            while self.buffered.is_empty() {
-                self.buffered = self.next_chunk("stream header read").await?;
-            }
+            compio::runtime::time::timeout(timeout, async {
+                while self.buffered.is_empty() {
+                    self.buffered = self.next_chunk("stream header read").await?;
+                }
+                Ok::<(), TransportError>(())
+            })
+            .await
+            .map_err(|_| StreamReadError::Timeout)?
+            .map_err(StreamReadError::Transport)?;
             let header = compio::runtime::time::timeout(timeout, async {
                 loop {
                     if let Some(header) = Request::decode_header(&self.buffered)? {
