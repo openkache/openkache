@@ -848,6 +848,15 @@ impl Kvkache {
             return Ok((SetOutcome::NotStored, None, false, false));
         }
         self.admit_set()?;
+        // Admission can wait for a capacity refresh. Re-evaluate the
+        // condition at the mutation boundary so expiration is observed at
+        // the same point that determines the replacement outcome.
+        let previous_live = previous
+            .as_ref()
+            .is_some_and(|located| item_state_is_live_at(located.item_state, unix_time_ms()));
+        if !set_condition_allows(options.condition, previous_live) {
+            return Ok((SetOutcome::NotStored, None, false, false));
+        }
         let previous_location = previous.as_ref().map(|located| located.table_location);
         let previous_state = previous.as_ref().map(|located| located.item_state);
         let previous_mutable_value = previous.and_then(|located| located.mutable_value);
