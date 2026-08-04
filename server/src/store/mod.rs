@@ -1,14 +1,15 @@
 //! Direct mutable SG cache with worker-local variable generation files.
 
-use std::cell::RefCell;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::channel::{AsyncReceiver, Sender, TrySendError};
 use crate::*;
 use compio::BufResult;
 use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
@@ -44,8 +45,8 @@ const FILE_RESERVATION_RETRY_DELAYS: [Duration; 6] = [
     Duration::from_millis(32),
 ];
 const STORAGE_RESERVE_PERCENT: u64 = 5;
-/// Retains at most 1 MiB of idle 4 KiB read buffers per storage worker.
-pub(crate) const BUCKET_READ_POOL_CAPACITY: usize = 256;
+/// Preallocates one 4 KiB read buffer for each default in-flight worker job.
+pub(crate) const BUCKET_READ_POOL_CAPACITY: usize = 64;
 
 #[repr(C, align(4096))]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,28 +130,205 @@ impl SetLen for DirectIoBuffer {
     }
 }
 
-#[derive(Default)]
+struct DirectIoBufferPoolStats {
+    active: AtomicUsize,
+    allocations: AtomicU64,
+    reuses: AtomicU64,
+    high_water: AtomicUsize,
+}
+
+pub(crate) struct DirectIoBufferLease {
+    buffer: Option<DirectIoBuffer>,
+    recycle: Option<Sender<DirectIoBuffer>>,
+    stats: Option<Arc<DirectIoBufferPoolStats>>,
+}
+
+impl DirectIoBufferLease {
+    fn unpooled(buffer: DirectIoBuffer) -> Self {
+        Self {
+            buffer: Some(buffer),
+            recycle: None,
+            stats: None,
+        }
+    }
+
+    fn pooled(
+        buffer: DirectIoBuffer,
+        recycle: Sender<DirectIoBuffer>,
+        stats: Arc<DirectIoBufferPoolStats>,
+    ) -> Self {
+        Self {
+            buffer: Some(buffer),
+            recycle: Some(recycle),
+            stats: Some(stats),
+        }
+    }
+
+    fn buffer(&self) -> &DirectIoBuffer {
+        self.buffer.as_ref().expect("direct-I/O lease has a buffer")
+    }
+
+    fn buffer_mut(&mut self) -> &mut DirectIoBuffer {
+        self.buffer.as_mut().expect("direct-I/O lease has a buffer")
+    }
+}
+
+impl Drop for DirectIoBufferLease {
+    fn drop(&mut self) {
+        let Some(mut buffer) = self.buffer.take() else {
+            return;
+        };
+        let Some(recycle) = self.recycle.as_ref() else {
+            return;
+        };
+        buffer.initialized_len = 0;
+        match recycle.try_send(buffer) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                debug_assert!(
+                    false,
+                    "direct-I/O recycle queue exceeded its fixed capacity"
+                );
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+        if let Some(stats) = &self.stats {
+            stats.active.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Deref for DirectIoBufferLease {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.buffer()
+    }
+}
+
+impl DerefMut for DirectIoBufferLease {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buffer_mut()
+    }
+}
+
+impl IoBuf for DirectIoBufferLease {
+    fn as_init(&self) -> &[u8] {
+        self
+    }
+}
+
+impl IoBufMut for DirectIoBufferLease {
+    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        self.buffer_mut().as_uninit()
+    }
+}
+
+impl SetLen for DirectIoBufferLease {
+    unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: the caller upholds `SetLen`'s initialization contract.
+        unsafe { self.buffer_mut().set_len(len) };
+    }
+}
+
 pub(crate) struct DirectIoBufferPool {
-    pub(crate) buffers: RefCell<Vec<DirectIoBuffer>>,
+    capacity: usize,
+    recycle: Option<Sender<DirectIoBuffer>>,
+    available: Option<AsyncReceiver<DirectIoBuffer>>,
+    stats: Arc<DirectIoBufferPoolStats>,
+}
+
+impl Default for DirectIoBufferPool {
+    fn default() -> Self {
+        Self::with_capacity(BUCKET_READ_POOL_CAPACITY)
+    }
 }
 
 impl DirectIoBufferPool {
-    pub(crate) fn take_bucket(&self) -> DirectIoBuffer {
-        self.buffers
-            .borrow_mut()
-            .pop()
-            .unwrap_or_else(|| DirectIoBuffer::for_read(BUCKET_BYTES))
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_buffer_bytes(capacity, BUCKET_BYTES)
     }
 
-    pub(crate) fn recycle_bucket(&self, mut buffer: DirectIoBuffer) {
-        if buffer.capacity() != BUCKET_BYTES {
-            return;
+    pub(crate) fn with_capacity_and_buffer_bytes(capacity: usize, buffer_bytes: usize) -> Self {
+        assert!(buffer_bytes > 0 && buffer_bytes.is_multiple_of(BUCKET_BYTES));
+        let stats = Arc::new(DirectIoBufferPoolStats {
+            active: AtomicUsize::new(0),
+            allocations: AtomicU64::new(0),
+            reuses: AtomicU64::new(0),
+            high_water: AtomicUsize::new(0),
+        });
+        if capacity == 0 {
+            return Self {
+                capacity,
+                recycle: None,
+                available: None,
+                stats,
+            };
         }
-        buffer.initialized_len = 0;
-        let mut buffers = self.buffers.borrow_mut();
-        if buffers.len() < BUCKET_READ_POOL_CAPACITY {
-            buffers.push(buffer);
+        let (recycle, available) = crate::channel::bounded_async(capacity);
+        for _ in 0..capacity {
+            recycle
+                .try_send(DirectIoBuffer::for_read(buffer_bytes))
+                .expect("new direct-I/O pool has capacity for every preallocated buffer");
         }
+        Self {
+            capacity,
+            recycle: Some(recycle),
+            available: Some(available),
+            stats,
+        }
+    }
+
+    pub(crate) async fn take_bucket(&self) -> DirectIoBufferLease {
+        self.take_buffer(BUCKET_BYTES).await
+    }
+
+    pub(crate) async fn take_buffer(&self, read_len: usize) -> DirectIoBufferLease {
+        debug_assert!(read_len > 0 && read_len.is_multiple_of(BUCKET_BYTES));
+        let Some(available) = &self.available else {
+            self.stats.allocations.fetch_add(1, Ordering::Relaxed);
+            return DirectIoBufferLease::unpooled(DirectIoBuffer::for_read(read_len));
+        };
+        let buffer = available
+            .recv_async()
+            .await
+            .expect("direct-I/O pool sender remains owned by the pool");
+        debug_assert!(buffer.capacity() >= read_len);
+        self.stats.reuses.fetch_add(1, Ordering::Relaxed);
+        let active = self.stats.active.fetch_add(1, Ordering::Relaxed) + 1;
+        self.stats.high_water.fetch_max(active, Ordering::Relaxed);
+        DirectIoBufferLease::pooled(
+            buffer,
+            self.recycle
+                .as_ref()
+                .expect("enabled direct-I/O pool has a recycle sender")
+                .clone(),
+            Arc::clone(&self.stats),
+        )
+    }
+
+    pub(crate) fn allocations(&self) -> u64 {
+        self.stats.allocations.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn reuses(&self) -> u64 {
+        self.stats.reuses.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn idle(&self) -> usize {
+        if self.capacity == 0 {
+            return 0;
+        }
+        self.capacity
+            .saturating_sub(self.stats.active.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn high_water(&self) -> usize {
+        self.stats.high_water.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -529,14 +707,17 @@ fn direct_io_timeout(
     }
 }
 
-pub(crate) async fn read_exact_direct(
+pub(crate) async fn read_exact_direct<B>(
     file: &File,
-    mut buffer: DirectIoBuffer,
+    mut buffer: B,
     offset: u64,
     len: usize,
     timeout_us: u64,
     operation: &'static str,
-) -> Result<DirectIoBuffer> {
+) -> Result<B>
+where
+    B: IoBufMut + SetLen + 'static,
+{
     let timeout = Duration::from_micros(timeout_us);
     let started = Instant::now();
     let mut completed = 0usize;
