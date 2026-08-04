@@ -167,6 +167,7 @@ pub(super) trait ReceiveStream {
     fn read_request(
         &mut self,
         maximum: usize,
+        maximum_value: usize,
         timeout: Duration,
         budget: &RequestBudget,
     ) -> impl Future<Output = Result<RequestFrame, StreamReadError>>;
@@ -357,6 +358,7 @@ async fn read_buffered_request(
     stream: &mut impl AsyncRead,
     backend: &'static str,
     maximum: usize,
+    maximum_value: usize,
     timeout: Duration,
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
@@ -381,6 +383,9 @@ async fn read_buffered_request(
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
+    if header.value_len() > maximum_value {
+        return Err(StreamReadError::TooLarge);
+    }
     let (mut frame, frame_len) = compio::runtime::time::timeout(timeout, async {
         let mut frame = frame;
         loop {
@@ -586,10 +591,11 @@ mod quinn_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
+            maximum_value: usize,
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
+            read_buffered_request(&mut self.0, NAME, maximum, maximum_value, timeout, budget).await
         }
     }
 
@@ -715,10 +721,11 @@ mod noq_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
+            maximum_value: usize,
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
+            read_buffered_request(&mut self.0, NAME, maximum, maximum_value, timeout, budget).await
         }
     }
 
@@ -917,6 +924,7 @@ mod quiche_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
+            maximum_value: usize,
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
@@ -934,6 +942,9 @@ mod quiche_backend {
             })
             .await
             .map_err(|_| StreamReadError::Timeout)??;
+            if header.value_len() > maximum_value {
+                return Err(StreamReadError::TooLarge);
+            }
             let frame_len = compio::runtime::time::timeout(timeout, async {
                 loop {
                     if let Some(frame_len) = header.frame_len(&self.buffered)? {

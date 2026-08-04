@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -394,7 +394,7 @@ enum PendingKeyedMutation {
     Set {
         storage_key: StorageKey,
         value: StoredItemValue,
-        expires_at_ms: u64,
+        ttl_ms: Option<u64>,
         eviction_protected: bool,
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
@@ -464,6 +464,12 @@ struct EvictionExtent {
     next_bucket: usize,
 }
 
+struct EvictableLocation {
+    storage_key: StorageKey,
+    table_location: TableLocation,
+    live: bool,
+}
+
 struct EvictionWork {
     victim: GenerationLocation,
     reader_guard: Option<Rc<SsdBacking>>,
@@ -475,6 +481,7 @@ struct EvictionWork {
     retiring: bool,
     has_large_value_extent: bool,
     protected_item_found: bool,
+    evictable_items: Vec<EvictableLocation>,
 }
 
 pub(crate) struct Kvkache {
@@ -631,6 +638,8 @@ impl Kvkache {
                     KeyedObservationPlan::Error(KvError::InvalidRequest(
                         "SET TTL must be greater than zero milliseconds".into(),
                     ))
+                } else if let Err(error) = validate_ttl(options.ttl_ms) {
+                    KeyedObservationPlan::Error(error)
                 } else if let Err(error) =
                     self.validate_value(&value.bytes, options.ttl_ms.is_some())
                 {
@@ -646,13 +655,7 @@ impl Kvkache {
                         Err(error) => KeyedObservationPlan::Error(error),
                     }
                 };
-                (
-                    PreparedKeyedOperation::Set {
-                        value,
-                        options,
-                    },
-                    observation,
-                )
+                (PreparedKeyedOperation::Set { value, options }, observation)
             }
             KeyedOperation::Delete => (
                 PreparedKeyedOperation::Delete,
@@ -767,41 +770,14 @@ impl Kvkache {
                 });
                 (Ok(KeyedOutcome::Value(value)), visible_state, false)
             }
-            (
-                PreparedKeyedOperation::Set {
-                    value,
-                    options,
-                },
-                KeyedObservation::State(previous),
-            ) => {
+            (PreparedKeyedOperation::Set { value, options }, KeyedObservation::State(previous)) => {
                 let visible_value = (options == SetOptions::NONE).then(|| value.clone());
                 let evaluated_at_ms = unix_time_ms();
-                let expires_at_ms = match options
-                    .ttl_ms
-                    .map(|ttl_ms| {
-                        evaluated_at_ms.checked_add(ttl_ms).ok_or_else(|| {
-                            KvError::InvalidRequest(
-                                "SET TTL exceeds the supported time range".into(),
-                            )
-                        })
-                    })
-                    .transpose()
-                {
-                    Ok(expires_at_ms) => expires_at_ms.unwrap_or_default(),
-                    Err(error) => {
-                        return KeyedFinish {
-                            outcome: Err(error),
-                            visible_state: None,
-                            flush_required: false,
-                        };
-                    }
-                };
                 match self.finish_keyed_set(
                     completed.storage_key,
                     value,
                     options,
                     evaluated_at_ms,
-                    expires_at_ms,
                     previous,
                 ) {
                     Ok((outcome, flush_required)) => {
@@ -820,17 +796,16 @@ impl Kvkache {
                     Err(error) => (Err(error), None, false),
                 }
             }
-            (
-                PreparedKeyedOperation::Delete,
-                KeyedObservation::State(previous),
-            ) => match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous) {
-                Ok((deleted, flush_required)) => (
-                    Ok(KeyedOutcome::Deleted(deleted)),
-                    Some(KeyedVisibleState::Missing),
-                    flush_required,
-                ),
-                Err(error) => (Err(error), None, false),
-            },
+            (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
+                match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous) {
+                    Ok((deleted, flush_required)) => (
+                        Ok(KeyedOutcome::Deleted(deleted)),
+                        Some(KeyedVisibleState::Missing),
+                        flush_required,
+                    ),
+                    Err(error) => (Err(error), None, false),
+                }
+            }
             _ => (
                 Err(KvError::Worker(
                     "keyed operation completed with an incompatible observation".into(),
@@ -856,7 +831,6 @@ impl Kvkache {
         value: StoredItemValue,
         options: SetOptions,
         evaluated_at_ms: u64,
-        expires_at_ms: u64,
         previous: Option<LocatedKeyState>,
     ) -> Result<(SetOutcome, bool)> {
         let previous_live = previous
@@ -875,7 +849,7 @@ impl Kvkache {
         if let Some(replacement) = self.try_append_value(
             storage_key,
             &value.bytes,
-            expires_at_ms,
+            options.ttl_ms,
             matches!(options.eviction_mode, EvictionMode::EvictionProtected),
             previous_location,
             previous_mutable_value,
@@ -895,7 +869,7 @@ impl Kvkache {
             .push_back(PendingKeyedMutation::Set {
                 storage_key,
                 value,
-                expires_at_ms,
+                ttl_ms: options.ttl_ms,
                 eviction_protected: matches!(
                     options.eviction_mode,
                     EvictionMode::EvictionProtected
@@ -950,7 +924,7 @@ impl Kvkache {
             PendingKeyedMutation::Set {
                 storage_key,
                 value,
-                expires_at_ms,
+                ttl_ms,
                 eviction_protected,
                 previous,
                 previous_mutable_value,
@@ -959,7 +933,7 @@ impl Kvkache {
                 let Some(replacement) = self.try_append_value(
                     storage_key,
                     &value.bytes,
-                    expires_at_ms,
+                    ttl_ms,
                     eviction_protected,
                     previous,
                     previous_mutable_value,
@@ -968,7 +942,7 @@ impl Kvkache {
                     return Ok(Some(PendingKeyedMutation::Set {
                         storage_key,
                         value,
-                        expires_at_ms,
+                        ttl_ms,
                         eviction_protected,
                         previous,
                         previous_mutable_value,
@@ -1042,6 +1016,7 @@ impl Kvkache {
                 "SET TTL must be greater than zero milliseconds".into(),
             ));
         }
+        validate_ttl(options.ttl_ms)?;
         self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
         let now = Instant::now();
         let refresh_memory = now >= self.next_memory_capacity_check;
@@ -1050,15 +1025,6 @@ impl Kvkache {
         }
         self.resource_guard.admit_set(refresh_memory)?;
         let now_ms = unix_time_ms();
-        let expires_at_ms = options
-            .ttl_ms
-            .map(|ttl_ms| {
-                now_ms.checked_add(ttl_ms).ok_or_else(|| {
-                    KvError::InvalidRequest("SET TTL exceeds the supported time range".into())
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
         let previous = self.locate_item(&storage_key).await?;
         let previous_live = previous
             .as_ref()
@@ -1075,7 +1041,7 @@ impl Kvkache {
             if let Some(location) = self.try_append_value(
                 storage_key,
                 &value.bytes,
-                expires_at_ms,
+                options.ttl_ms,
                 matches!(options.eviction_mode, EvictionMode::EvictionProtected),
                 previous_location,
                 previous_mutable_value,
@@ -1143,11 +1109,15 @@ impl Kvkache {
         &mut self,
         storage_key: StorageKey,
         value: &[u8],
-        expires_at_ms: u64,
+        ttl_ms: Option<u64>,
         eviction_protected: bool,
         previous_location: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
     ) -> Result<Option<MutablePlacement>> {
+        // A pending SET may wait behind capacity work. Resolve its relative TTL
+        // only when an append is actually admitted, so the deadline starts at
+        // the mutation linearization point rather than at request admission.
+        let expires_at_ms = ttl_deadline(ttl_ms)?;
         let large = value.len() > self.config.large_value_threshold
             || value.len() > self.config.blob_segment_size;
         let blob = !large && value.len() > BLOB_ITEM_THRESHOLD_BYTES;
@@ -1664,6 +1634,7 @@ impl Kvkache {
             retiring: false,
             has_large_value_extent,
             protected_item_found: false,
+            evictable_items: Vec::new(),
         };
         schedule_eviction_read(&self.data, &self.config, &mut eviction);
         self.eviction = Some(eviction);
@@ -1743,6 +1714,7 @@ impl Kvkache {
                     eviction.now_ms,
                     extent,
                     &mut eviction.protected_item_found,
+                    &mut eviction.evictable_items,
                 )?;
                 extent.next_bucket += 1;
                 cleaned += 1;
@@ -1761,7 +1733,20 @@ impl Kvkache {
         }
 
         if eviction.protected_item_found {
+            // Do not partially apply capacity eviction when a protected item makes
+            // admission impossible. The protocol's NoCapacity outcome guarantees
+            // that the failed SET made no mutation, including no collateral evictions.
             return Poll::Ready(Err(KvError::NoCapacity));
+        }
+
+        for candidate in eviction.evictable_items.drain(..) {
+            if self
+                .table
+                .remove(&candidate.storage_key, candidate.table_location)
+                && candidate.live
+            {
+                self.live_keys = self.live_keys.saturating_sub(1);
+            }
         }
 
         self.directory
@@ -1779,6 +1764,7 @@ impl Kvkache {
         now_ms: u64,
         extent: &EvictionExtent,
         protected_item_found: &mut bool,
+        evictable_items: &mut Vec<EvictableLocation>,
     ) -> Result<()> {
         let bucket_offset = extent.next_bucket * BUCKET_BYTES;
         let bucket_index = (extent.offset + bucket_offset) / BUCKET_BYTES;
@@ -1828,11 +1814,11 @@ impl Kvkache {
                 *protected_item_found = true;
                 continue;
             }
-            if self.table.remove(&item.storage_key, location) {
-                if item.is_live_at(now_ms) {
-                    self.live_keys = self.live_keys.saturating_sub(1);
-                }
-            }
+            evictable_items.push(EvictableLocation {
+                storage_key: item.storage_key,
+                table_location: location,
+                live: item.is_live_at(now_ms),
+            });
         }
         Ok(())
     }
@@ -2714,9 +2700,34 @@ fn set_condition_allows(condition: SetCondition, current_live: bool) -> bool {
     }
 }
 
+fn validate_ttl(ttl_ms: Option<u64>) -> Result<()> {
+    let _ = ttl_deadline(ttl_ms)?;
+    Ok(())
+}
+
+fn ttl_deadline(ttl_ms: Option<u64>) -> Result<u64> {
+    let Some(ttl_ms) = ttl_ms else {
+        return Ok(0);
+    };
+    unix_time_ms()
+        .checked_add(ttl_ms)
+        .ok_or_else(|| KvError::InvalidRequest("SET TTL exceeds the supported time range".into()))
+}
+
+/// Returns a Unix-epoch-compatible timestamp driven by a monotonic clock.
+///
+/// Deadlines are persisted as Unix-epoch milliseconds so they remain
+/// comparable after a restart. The wall clock is sampled once per process;
+/// subsequent reads use `Instant` and therefore cannot move backwards when
+/// the system clock is adjusted.
 fn unix_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(u64::MAX)
+    static CLOCK: OnceLock<(u64, Instant)> = OnceLock::new();
+    let (anchor_ms, anchor) = CLOCK.get_or_init(|| {
+        let anchor_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        (anchor_ms, Instant::now())
+    });
+    anchor_ms.saturating_add(u64::try_from(anchor.elapsed().as_millis()).unwrap_or(u64::MAX))
 }

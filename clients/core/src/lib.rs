@@ -815,7 +815,15 @@ impl<C: ClientConnection> Core<C> {
         let response = Response::decode_owned(frame)
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
-        stream.release();
+        // These statuses are emitted for a malformed or prefix-rejected request. The
+        // server closes that lane after the response, so putting it back in the idle
+        // pool would let a later request borrow a dead stream.
+        if !matches!(
+            response.status,
+            Status::InvalidRequest | Status::UnsupportedOpcode | Status::TooLarge
+        ) {
+            stream.release();
+        }
         Ok(response)
     }
 

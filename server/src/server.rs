@@ -1072,7 +1072,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
 ) {
     loop {
         let mut frame = match receive
-            .read_request(MAX_REQUEST_FRAME_BYTES, request_timeout, &request_budget)
+            .read_request(
+                MAX_REQUEST_FRAME_BYTES,
+                max_item_bytes,
+                request_timeout,
+                &request_budget,
+            )
             .await
         {
             Ok(frame) => frame,
