@@ -16,6 +16,7 @@ SERVER_DEFAULT_FEATURES = [
     "allocator-jemalloc",
     "channel-kanal",
     "quic-noq",
+    "storage-runtime-compio",
 ]
 
 filegroup(
@@ -69,8 +70,18 @@ alias(
 )
 
 alias(
+    name = "server_optional_kimojio",
+    actual = "@crates//kimojio",
+)
+
+alias(
     name = "server_optional_mimalloc",
     actual = "@crates//mimalloc",
+)
+
+alias(
+    name = "server_optional_monoio",
+    actual = "@crates//monoio",
 )
 
 alias(

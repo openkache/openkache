@@ -691,7 +691,7 @@ pub(super) async fn worker_loop(
         let can_receive = barrier.is_none() && !disconnected && scheduler.has_waiting_capacity();
         let idle_before_event = inflight.is_empty() && scheduler.is_idle();
         let event = if can_receive {
-            let mut incoming = std::pin::pin!(receiver.recv_async());
+            let mut incoming = std::pin::pin!(receiver.recv_async_storage());
             poll_fn(|context| {
                 if cache.has_background_work()
                     && let Poll::Ready(result) = cache.poll_background(context)
@@ -822,9 +822,9 @@ pub(super) async fn worker_loop(
                     && scheduler.has_waiting_capacity()
                     && io_config.batch_max_wait_us > 0
                 {
-                    match compio::runtime::time::timeout(
+                    match crate::storage_runtime::timeout(
                         Duration::from_micros(io_config.batch_max_wait_us),
-                        receiver.recv_async(),
+                        receiver.recv_async_storage(),
                     )
                     .await
                     {

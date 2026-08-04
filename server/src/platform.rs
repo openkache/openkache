@@ -60,6 +60,30 @@ pub(crate) fn cpu_assignment_error(_role: &str, _expected_cpu: usize) -> Option<
     None
 }
 
+/// Pins the calling thread to one Linux logical CPU.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "storage-runtime-kimojio", feature = "storage-runtime-monoio")
+))]
+pub(crate) fn pin_current_thread(cpu_id: usize) -> std::io::Result<()> {
+    if cpu_id >= libc::CPU_SETSIZE as usize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("CPU identifier {cpu_id} exceeds CPU_SETSIZE"),
+        ));
+    }
+    let mut set = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };
+    unsafe { libc::CPU_SET(cpu_id, &mut set) };
+    let result = unsafe {
+        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set as *const _)
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 /// Formats the worker placement information available on the current host.
 #[cfg(target_os = "linux")]
 pub(crate) fn cpu_diagnostic(_affinity_id: usize) -> String {
