@@ -1418,9 +1418,10 @@ private func smithyPolicyFlags(
 private func smithyNamespaceDescriptor(
     _ payload: Data
 ) throws -> Smithy_Namespace_Descriptor {
-    guard payload.count == 25 else {
+    let fixedBytes = 17
+    guard payload.count >= fixedBytes else {
         throw OpenKacheError(
-            "namespace descriptor payload must contain 25 bytes, got \(payload.count)"
+            "namespace descriptor payload is missing its identity or policy flags"
         )
     }
     let namespaceID = readBigEndianUInt64(payload, offset: 0)
@@ -1432,17 +1433,20 @@ private func smithyNamespaceDescriptor(
     guard flags & Smithy_Value_Format.policyReservedMask == 0 else {
         throw OpenKacheError("namespace descriptor contains reserved policy bits")
     }
-    let ttl = readBigEndianUInt64(payload, offset: 17)
     let defaultExpiration: Smithy_Expiration_Default
     let defaultTtl: UInt64?
     switch flags & Smithy_Value_Format.policyDefaultExpirationMask {
     case Smithy_Value_Format.policyNoExpiry:
-        guard ttl == 0 else {
-            throw OpenKacheError("namespace descriptor carries TTL for noExpiry")
+        guard payload.count == fixedBytes else {
+            throw OpenKacheError("namespace descriptor carries a TTL for noExpiry")
         }
         defaultExpiration = .noExpiry
         defaultTtl = nil
     case Smithy_Value_Format.policyFixedTtl:
+        let (ttl, ttlBytes) = try decodeSmithyVU128(Data(payload.dropFirst(fixedBytes)))
+        guard fixedBytes + ttlBytes == payload.count else {
+            throw OpenKacheError("namespace descriptor contains trailing policy bytes")
+        }
         guard ttl > 0 else {
             throw OpenKacheError("namespace descriptor fixed TTL must be positive")
         }
@@ -1468,6 +1472,86 @@ private func smithyNamespaceDescriptor(
                 : .disallowed
         )
     )
+}
+
+private func decodeSmithyVU128(_ payload: Data) throws -> (UInt64, Int) {
+    guard let first = payload.first else {
+        throw OpenKacheError("namespace descriptor TTL is missing")
+    }
+    let length: Int
+    switch first {
+    case 0..<0x80:
+        length = 1
+    case 0x80..<0xC0:
+        length = 2
+    case 0xC0..<0xE0:
+        length = 3
+    case 0xE0..<0xF0:
+        length = 4
+    default:
+        length = Int(first & 0x0F) + 2
+        guard length <= 9 else {
+            throw OpenKacheError("namespace descriptor TTL exceeds nine bytes")
+        }
+    }
+    guard payload.count >= length else {
+        throw OpenKacheError("namespace descriptor TTL is truncated")
+    }
+    let value: UInt64
+    if length == 1 {
+        value = UInt64(first)
+    } else if length == 2 && first < 0xF0 {
+        value = UInt64(first & 0x3F) << 6 | UInt64(payload[1])
+    } else if length == 3 && first < 0xF0 {
+        value = UInt64(first & 0x1F) << 13 |
+            UInt64(payload[1]) << 5 |
+            UInt64(payload[2])
+    } else if length == 4 && first < 0xF0 {
+        value = UInt64(first & 0x0F) << 20 |
+            UInt64(payload[1]) << 12 |
+            UInt64(payload[2]) << 4 |
+            UInt64(payload[3])
+    } else {
+        var decoded: UInt64 = 0
+        for index in 1..<length {
+            decoded |= UInt64(payload[index]) << UInt64(8 * (index - 1))
+        }
+        let maskOctets = Int((first & 0x07) ^ 0x07)
+        value = maskOctets == 0
+            ? decoded
+            : decoded & (UInt64.max >> UInt64(8 * maskOctets))
+    }
+    guard encodeSmithyVU128(value) == Array(payload.prefix(length)) else {
+        throw OpenKacheError("namespace descriptor TTL is not canonical")
+    }
+    return (value, length)
+}
+
+private func encodeSmithyVU128(_ value: UInt64) -> [UInt8] {
+    if value < 0x80 {
+        return [UInt8(value)]
+    }
+    if value < 0x4000 {
+        return [0x80 | UInt8(value >> 8), UInt8(value)]
+    }
+    if value < 0x200000 {
+        return [0xC0 | UInt8(value >> 16), UInt8(value >> 8), UInt8(value)]
+    }
+    if value < 0x10000000 {
+        return [
+            0xE0 | UInt8(value >> 24),
+            UInt8(value >> 16),
+            UInt8(value >> 8),
+            UInt8(value),
+        ]
+    }
+    let length = (64 - value.leadingZeroBitCount + 7) / 8 + 1
+    var encoded = [UInt8](repeating: 0, count: length)
+    encoded[0] = 0xF0 | UInt8(length - 2)
+    for index in 1..<length {
+        encoded[index] = UInt8(value >> UInt64(8 * (index - 1)))
+    }
+    return encoded
 }
 
 private func readBigEndianUInt64(_ data: Data, offset: Int) -> UInt64 {

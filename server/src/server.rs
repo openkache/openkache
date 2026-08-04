@@ -3,10 +3,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
+use std::io::{ErrorKind, Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
@@ -33,6 +38,15 @@ use crate::{
 };
 
 pub(crate) type NetworkWorkerCompletion = (usize, std::result::Result<(), String>);
+
+const NAMESPACE_METADATA_FILE: &str = ".openkache-namespaces";
+const NAMESPACE_METADATA_MAGIC: &[u8; 8] = b"OKNSPACE";
+const NAMESPACE_METADATA_VERSION: u32 = 2;
+const NAMESPACE_METADATA_LEGACY_VERSION: u32 = 1;
+const NAMESPACE_METADATA_MAX_ENTRIES: u64 = 1_000_000;
+const NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY: u64 = 1_000_000_000;
+const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
+static NEXT_NAMESPACE_METADATA_TEMP: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) struct NetworkWorkerHandle {
     stop: Sender<()>,
@@ -235,25 +249,59 @@ struct NamespaceEntry {
     descriptor: NamespaceDescriptor,
     name: Vec<u8>,
     items: HashSet<ItemId>,
+    dirty_workers: HashSet<usize>,
     operation_lock: Arc<AsyncMutex<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SetReservation {
+    inserted_item: bool,
+    inserted_worker: bool,
 }
 
 // Namespace names and IDs are server-wide. Authentication and any future
 // owner/ACL mapping are separate authorization concerns and do not participate
 // in registry lookup.
 struct NamespaceRegistry {
-    next_id: u64,
+    /// The next never-before-issued ID. `None` means the u64 ID space is exhausted.
+    next_id: Option<u64>,
     by_id: HashMap<u64, NamespaceEntry>,
     by_name: HashMap<Vec<u8>, u64>,
+    metadata_path: std::path::PathBuf,
+    lifecycle_lock: Arc<AsyncMutex<()>>,
 }
 
 impl NamespaceRegistry {
-    fn new() -> Self {
-        Self {
-            next_id: 1,
+    fn load(directory: &Path, existing_storage: bool) -> std::io::Result<Self> {
+        let metadata_path = directory.join(NAMESPACE_METADATA_FILE);
+        let mut registry = Self {
+            next_id: Some(1),
             by_id: HashMap::new(),
             by_name: HashMap::new(),
-        }
+            metadata_path,
+            lifecycle_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let mut file = match std::fs::File::open(&registry.metadata_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                if existing_storage {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "namespace metadata is missing for existing storage",
+                    ));
+                }
+                return Ok(registry);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        registry.decode_metadata(&bytes)?;
+        Ok(registry)
+    }
+
+    fn lifecycle_lock(&self) -> Arc<AsyncMutex<()>> {
+        Arc::clone(&self.lifecycle_lock)
     }
 
     fn open(
@@ -263,19 +311,17 @@ impl NamespaceRegistry {
         policy: Option<NamespacePolicy>,
     ) -> std::result::Result<(Status, NamespaceDescriptor), Status> {
         if let Some(namespace_id) = self.by_name.get(&name).copied() {
-            let descriptor = self
-                .by_id
-                .get(&namespace_id)
-                .expect("namespace name index must have an entry")
-                .descriptor;
-            return Ok((Status::Ok, descriptor));
+            let Some(entry) = self.by_id.get(&namespace_id) else {
+                return Err(Status::InternalError);
+            };
+            return Ok((Status::Ok, entry.descriptor));
         }
         if !create_if_missing {
             return Err(Status::NamespaceNotFound);
         }
         let policy = policy.ok_or(Status::InvalidRequest)?;
-        let namespace_id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).ok_or(Status::InternalError)?;
+        let previous_next_id = self.next_id;
+        let namespace_id = self.allocate_id()?;
         let descriptor = NamespaceDescriptor {
             namespace_id,
             revision: 1,
@@ -286,12 +332,29 @@ impl NamespaceRegistry {
             namespace_id,
             NamespaceEntry {
                 descriptor,
-                name,
+                name: name.clone(),
                 items: HashSet::new(),
+                dirty_workers: HashSet::new(),
                 operation_lock: Arc::new(AsyncMutex::new(())),
             },
         );
+        if self.persist().is_err() {
+            self.by_id.remove(&namespace_id);
+            self.by_name.remove(&name);
+            self.next_id = previous_next_id;
+            return Err(Status::InternalError);
+        }
         Ok((Status::Created, descriptor))
+    }
+
+    fn allocate_id(&mut self) -> std::result::Result<u64, Status> {
+        let namespace_id = self.next_id.ok_or(Status::InternalError)?;
+        self.next_id = if namespace_id == u64::MAX {
+            None
+        } else {
+            Some(namespace_id + 1)
+        };
+        Ok(namespace_id)
     }
 
     fn operation_lock(&self, namespace_id: u64) -> Option<Arc<AsyncMutex<()>>> {
@@ -316,20 +379,30 @@ impl NamespaceRegistry {
         expected_revision: u64,
         policy: NamespacePolicy,
     ) -> std::result::Result<NamespaceDescriptor, Status> {
-        let entry = self
-            .by_id
-            .get_mut(&namespace_id)
-            .ok_or(Status::NamespaceNotFound)?;
-        if entry.descriptor.revision != expected_revision {
-            return Err(Status::Conflict);
+        let (previous, descriptor) = {
+            let entry = self
+                .by_id
+                .get_mut(&namespace_id)
+                .ok_or(Status::NamespaceNotFound)?;
+            if entry.descriptor.revision != expected_revision {
+                return Err(Status::Conflict);
+            }
+            let previous = entry.descriptor;
+            entry.descriptor.revision = entry
+                .descriptor
+                .revision
+                .checked_add(1)
+                .ok_or(Status::InternalError)?;
+            entry.descriptor.policy = policy;
+            (previous, entry.descriptor)
+        };
+        if self.persist().is_err() {
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                entry.descriptor = previous;
+            }
+            return Err(Status::InternalError);
         }
-        entry.descriptor.revision = entry
-            .descriptor
-            .revision
-            .checked_add(1)
-            .ok_or(Status::InternalError)?;
-        entry.descriptor.policy = policy;
-        Ok(entry.descriptor)
+        Ok(descriptor)
     }
 
     fn delete(
@@ -347,24 +420,148 @@ impl NamespaceRegistry {
         if !entry.items.is_empty() {
             return Err(Status::NamespaceNotEmpty);
         }
-        let name = entry.name.clone();
-        self.by_id.remove(&namespace_id);
-        self.by_name.remove(&name);
+        let Some(entry) = self.by_id.remove(&namespace_id) else {
+            return Err(Status::NamespaceNotFound);
+        };
+        self.by_name.remove(&entry.name);
+        if self.persist().is_err() {
+            self.by_name.insert(entry.name.clone(), namespace_id);
+            self.by_id.insert(namespace_id, entry);
+            return Err(Status::InternalError);
+        }
         Ok(())
     }
 
-    fn mark_set(&mut self, namespace_id: u64, item_id: ItemId, outcome: SetOutcome) {
-        if matches!(outcome, SetOutcome::Created | SetOutcome::Replaced)
-            && let Some(entry) = self.by_id.get_mut(&namespace_id)
-        {
-            entry.items.insert(item_id);
+    /// Records an item before a SET is dispatched to storage.
+    ///
+    /// Persisting the conservative "possibly present" state first means a
+    /// crash between storage mutation and metadata update cannot make
+    /// `IfEmpty` deletion incorrectly report an empty namespace.
+    fn reserve_item(
+        &mut self,
+        namespace_id: u64,
+        item_id: ItemId,
+        worker: usize,
+    ) -> std::result::Result<SetReservation, Status> {
+        let reservation = self
+            .by_id
+            .get_mut(&namespace_id)
+            .ok_or(Status::NamespaceNotFound)
+            .map(|entry| {
+                SetReservation {
+                    inserted_item: entry.items.insert(item_id),
+                    inserted_worker: entry.dirty_workers.insert(worker),
+                }
+            })?;
+        if !reservation.inserted_item && !reservation.inserted_worker {
+            return Ok(reservation);
         }
+        if self.persist().is_err() {
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                if reservation.inserted_item {
+                    entry.items.remove(&item_id);
+                }
+                if reservation.inserted_worker {
+                    entry.dirty_workers.remove(&worker);
+                }
+            }
+            return Err(Status::InternalError);
+        }
+        Ok(reservation)
     }
 
-    fn mark_delete(&mut self, namespace_id: u64, item_id: ItemId, deleted: bool) {
-        if deleted && let Some(entry) = self.by_id.get_mut(&namespace_id) {
-            entry.items.remove(&item_id);
+    /// Reverses a SET reservation when storage reports a definitive
+    /// no-mutation result.
+    ///
+    /// The namespace operation lock prevents another operation from changing
+    /// the same entry between reservation and rollback. If metadata
+    /// persistence fails, the conservative reservation is restored and the
+    /// caller must treat the result as ambiguous.
+    fn rollback_set_reservation(
+        &mut self,
+        namespace_id: u64,
+        item_id: ItemId,
+        worker: usize,
+        reservation: SetReservation,
+    ) -> std::result::Result<(), Status> {
+        if !reservation.inserted_item && !reservation.inserted_worker {
+            return Ok(());
         }
+        {
+            let Some(entry) = self.by_id.get_mut(&namespace_id) else {
+                return Err(Status::NamespaceNotFound);
+            };
+            if reservation.inserted_item {
+                entry.items.remove(&item_id);
+            }
+            if reservation.inserted_worker {
+                entry.dirty_workers.remove(&worker);
+            }
+        }
+        if self.persist().is_err() {
+            if reservation.inserted_item {
+                if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                    entry.items.insert(item_id);
+                }
+            }
+            if reservation.inserted_worker {
+                if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                    entry.dirty_workers.insert(worker);
+                }
+            }
+            return Err(Status::InternalError);
+        }
+        Ok(())
+    }
+
+    /// Records a worker before a DELETE is dispatched to storage.
+    ///
+    /// The marker is intentionally conservative: a DELETE that finds no item
+    /// still leaves the worker dirty until the next successful `SYNC`.
+    fn reserve_worker(
+        &mut self,
+        namespace_id: u64,
+        worker: usize,
+    ) -> std::result::Result<(), Status> {
+        let inserted = self
+            .by_id
+            .get_mut(&namespace_id)
+            .ok_or(Status::NamespaceNotFound)?
+            .dirty_workers
+            .insert(worker);
+        if !inserted {
+            return Ok(());
+        }
+        if self.persist().is_err() {
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                entry.dirty_workers.remove(&worker);
+            }
+            return Err(Status::InternalError);
+        }
+        Ok(())
+    }
+
+    fn mark_delete(
+        &mut self,
+        namespace_id: u64,
+        item_id: ItemId,
+        deleted: bool,
+    ) -> std::result::Result<(), Status> {
+        let removed = deleted
+            && self
+                .by_id
+                .get_mut(&namespace_id)
+                .is_some_and(|entry| entry.items.remove(&item_id));
+        if removed && self.persist().is_err() {
+            // Keeping the item in memory is conservative when persistence
+            // fails; the caller closes the lane because the mutation outcome
+            // can no longer be represented reliably.
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                entry.items.insert(item_id);
+            }
+            return Err(Status::InternalError);
+        }
+        Ok(())
     }
 
     fn tracked_items(&self, namespace_id: u64) -> Option<Vec<ItemId>> {
@@ -373,10 +570,274 @@ impl NamespaceRegistry {
             .map(|entry| entry.items.iter().copied().collect())
     }
 
-    fn prune_item(&mut self, namespace_id: u64, item_id: ItemId) {
-        if let Some(entry) = self.by_id.get_mut(&namespace_id) {
-            entry.items.remove(&item_id);
+    fn dirty_workers(&self, namespace_id: u64) -> Option<Vec<usize>> {
+        self.by_id.get(&namespace_id).map(|entry| {
+            let mut workers = entry.dirty_workers.iter().copied().collect::<Vec<_>>();
+            workers.sort_unstable();
+            workers
+        })
+    }
+
+    fn mark_workers_clean(&mut self, namespace_id: u64) -> std::result::Result<(), Status> {
+        let previous = {
+            let entry = self
+                .by_id
+                .get_mut(&namespace_id)
+                .ok_or(Status::NamespaceNotFound)?;
+            let previous = entry.dirty_workers.clone();
+            entry.dirty_workers.clear();
+            previous
+        };
+        if previous.is_empty() {
+            return Ok(());
         }
+        if self.persist().is_err() {
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                entry.dirty_workers = previous;
+            }
+            return Err(Status::InternalError);
+        }
+        Ok(())
+    }
+
+    fn prune_item(&mut self, namespace_id: u64, item_id: ItemId) -> std::result::Result<(), Status> {
+        let Some(entry) = self.by_id.get_mut(&namespace_id) else {
+            return Err(Status::NamespaceNotFound);
+        };
+        if !entry.items.remove(&item_id) {
+            return Ok(());
+        }
+        if self.persist().is_err() {
+            if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+                entry.items.insert(item_id);
+            }
+            return Err(Status::InternalError);
+        }
+        Ok(())
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
+        let mut entries = self.by_id.values().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.descriptor.namespace_id);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(NAMESPACE_METADATA_MAGIC);
+        bytes.extend_from_slice(&NAMESPACE_METADATA_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&self.next_id.unwrap_or(0).to_be_bytes());
+        bytes.extend_from_slice(&(entries.len() as u64).to_be_bytes());
+        for entry in entries {
+            let name_len = u16::try_from(entry.name.len()).map_err(|_| {
+                std::io::Error::new(ErrorKind::InvalidData, "namespace name is too long")
+            })?;
+            bytes.extend_from_slice(&entry.descriptor.namespace_id.to_be_bytes());
+            bytes.extend_from_slice(&entry.descriptor.revision.to_be_bytes());
+            bytes.extend_from_slice(&name_len.to_be_bytes());
+            bytes.extend_from_slice(&entry.name);
+            let policy =
+                entry.descriptor.policy.encode().map_err(|error| {
+                    std::io::Error::new(ErrorKind::InvalidData, error.to_string())
+                })?;
+            let policy_len = u8::try_from(policy.len())
+                .map_err(|_| std::io::Error::new(ErrorKind::InvalidData, "policy is too long"))?;
+            bytes.push(policy_len);
+            bytes.extend_from_slice(&policy);
+            bytes.extend_from_slice(&(entry.items.len() as u64).to_be_bytes());
+            let mut items = entry.items.iter().copied().collect::<Vec<_>>();
+            items.sort_unstable();
+            for item_id in items {
+                bytes.extend_from_slice(item_id.as_bytes());
+            }
+            bytes.extend_from_slice(&(entry.dirty_workers.len() as u64).to_be_bytes());
+            let mut dirty_workers = entry.dirty_workers.iter().copied().collect::<Vec<_>>();
+            dirty_workers.sort_unstable();
+            for worker in dirty_workers {
+                bytes.extend_from_slice(
+                    &u64::try_from(worker)
+                        .map_err(|_| {
+                            std::io::Error::new(
+                                ErrorKind::InvalidData,
+                                "storage worker ID does not fit metadata",
+                            )
+                        })?
+                        .to_be_bytes(),
+                );
+            }
+        }
+
+        let sequence = NEXT_NAMESPACE_METADATA_TEMP.fetch_add(1, Ordering::Relaxed);
+        let temporary_path = self
+            .metadata_path
+            .with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+        let write_result = (|| {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options.open(&temporary_path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            std::fs::rename(&temporary_path, &self.metadata_path)?;
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&temporary_path);
+        }
+        write_result
+    }
+
+    fn decode_metadata(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let mut cursor = MetadataCursor::new(bytes);
+        if cursor.take(NAMESPACE_METADATA_MAGIC.len())? != NAMESPACE_METADATA_MAGIC {
+            return Err(cursor.invalid("namespace metadata magic is invalid"));
+        }
+        let metadata_version = cursor.u32()?;
+        if metadata_version != NAMESPACE_METADATA_VERSION
+            && metadata_version != NAMESPACE_METADATA_LEGACY_VERSION
+        {
+            return Err(cursor.invalid("namespace metadata version is unsupported"));
+        }
+        let next_id = cursor.u64()?;
+        self.next_id = (next_id != 0).then_some(next_id);
+        let entry_count = cursor.u64()?;
+        if entry_count > NAMESPACE_METADATA_MAX_ENTRIES {
+            return Err(cursor.invalid("namespace metadata contains too many namespaces"));
+        }
+        for _ in 0..entry_count {
+            let namespace_id = cursor.u64()?;
+            let revision = cursor.u64()?;
+            if namespace_id == 0 || revision == 0 {
+                return Err(cursor.invalid("namespace metadata contains zero identity"));
+            }
+            let name_len = usize::from(cursor.u16()?);
+            if name_len > openkache_protocol::NAMESPACE_NAME_MAX_BYTES {
+                return Err(cursor.invalid("namespace metadata name is too long"));
+            }
+            let name = cursor.take(name_len)?.to_vec();
+            std::str::from_utf8(&name)
+                .map_err(|_| cursor.invalid("namespace metadata name is not UTF-8"))?;
+            let policy_len = usize::from(cursor.u8()?);
+            let policy_bytes = cursor.take(policy_len)?;
+            let (policy, used) = NamespacePolicy::decode(policy_bytes)
+                .map_err(|error| cursor.invalid(error.to_string()))?
+                .ok_or_else(|| cursor.invalid("namespace metadata policy is truncated"))?;
+            if used != policy_len {
+                return Err(cursor.invalid("namespace metadata policy has trailing bytes"));
+            }
+            let item_count = cursor.u64()?;
+            if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY
+                || item_count > (cursor.remaining() / openkache_protocol::ITEM_ID_BYTES) as u64
+            {
+                return Err(cursor.invalid("namespace metadata item list is invalid"));
+            }
+            let mut items = HashSet::with_capacity(item_count as usize);
+            for _ in 0..item_count {
+                let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
+                let item_id = ItemId::new(item_bytes.try_into().expect("item ID width is fixed"));
+                items.insert(item_id);
+            }
+            let mut dirty_workers = HashSet::new();
+            if metadata_version >= NAMESPACE_METADATA_VERSION {
+                let dirty_worker_count = cursor.u64()?;
+                if dirty_worker_count > NAMESPACE_METADATA_MAX_DIRTY_WORKERS {
+                    return Err(cursor.invalid("namespace metadata dirty-worker list is invalid"));
+                }
+                for _ in 0..dirty_worker_count {
+                    let worker = usize::try_from(cursor.u64()?)
+                        .map_err(|_| cursor.invalid("namespace metadata worker ID is invalid"))?;
+                    if !dirty_workers.insert(worker) {
+                        return Err(cursor.invalid(
+                            "namespace metadata contains duplicate dirty workers",
+                        ));
+                    }
+                }
+            }
+            if self.by_id.contains_key(&namespace_id) || self.by_name.contains_key(&name) {
+                return Err(cursor.invalid("namespace metadata contains duplicate identity"));
+            }
+            self.by_name.insert(name.clone(), namespace_id);
+            self.by_id.insert(
+                namespace_id,
+                NamespaceEntry {
+                    descriptor: NamespaceDescriptor {
+                        namespace_id,
+                        revision,
+                        policy,
+                    },
+                    name,
+                    items,
+                    dirty_workers,
+                    operation_lock: Arc::new(AsyncMutex::new(())),
+                },
+            );
+        }
+        if cursor.remaining() != 0 {
+            return Err(cursor.invalid("namespace metadata has trailing bytes"));
+        }
+        let maximum_id = self.by_id.keys().copied().max();
+        match (maximum_id, self.next_id) {
+            (Some(maximum_id), Some(next_id)) if next_id <= maximum_id => {
+                return Err(cursor.invalid("namespace metadata next ID is not monotonic"));
+            }
+            (Some(_), None) if maximum_id != Some(u64::MAX) => {
+                return Err(cursor.invalid("namespace metadata marks IDs exhausted early"));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+struct MetadataCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> MetadataCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, length: usize) -> std::io::Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or_else(|| self.invalid("namespace metadata length overflowed"))?;
+        if end > self.bytes.len() {
+            return Err(self.invalid("namespace metadata is truncated"));
+        }
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+
+    fn u8(&mut self) -> std::io::Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u16(&mut self) -> std::io::Result<u16> {
+        Ok(u16::from_be_bytes(
+            self.take(2)?.try_into().expect("u16 width is fixed"),
+        ))
+    }
+
+    fn u32(&mut self) -> std::io::Result<u32> {
+        Ok(u32::from_be_bytes(
+            self.take(4)?.try_into().expect("u32 width is fixed"),
+        ))
+    }
+
+    fn u64(&mut self) -> std::io::Result<u64> {
+        Ok(u64::from_be_bytes(
+            self.take(8)?.try_into().expect("u64 width is fixed"),
+        ))
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
+
+    fn invalid(&self, message: impl Into<String>) -> std::io::Error {
+        std::io::Error::new(ErrorKind::InvalidData, message.into())
     }
 }
 
@@ -566,9 +1027,23 @@ impl KacheServer {
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
         let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
+        let storage_directory = config.storage.directory.clone();
+        let existing_storage = (0..config.runtime.thread_count)
+            .any(|thread_id| config.worker_config(thread_id).data_path.exists());
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
         let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
+        let namespaces = match NamespaceRegistry::load(&storage_directory, existing_storage) {
+            Ok(registry) => registry,
+            Err(error) => {
+                cache.shutdown()?;
+                return Err(ServerError::NamespaceMetadata(error.to_string()));
+            }
+        };
+        if let Err(error) = namespaces.persist() {
+            cache.shutdown()?;
+            return Err(ServerError::NamespaceMetadata(error.to_string()));
+        }
         let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
             Ok(sockets) => sockets,
             Err(error) => {
@@ -585,7 +1060,7 @@ impl KacheServer {
             tls: Arc::new(tls),
             access_policy: Arc::new(access_policy),
             cache,
-            namespaces: Arc::new(Mutex::new(NamespaceRegistry::new())),
+            namespaces: Arc::new(Mutex::new(namespaces)),
             network,
             request_timeout,
             max_item_bytes,
@@ -1233,6 +1708,27 @@ async fn execute_request(
             },
         ));
     }
+    // Namespace open and delete are identity operations. Serialize them with
+    // one lifecycle lock so an open cannot observe a descriptor while delete
+    // is concurrently removing it (or vice versa).
+    let lifecycle_lock = if matches!(opcode, Opcode::NamespaceOpen | Opcode::NamespaceDelete) {
+        match namespaces.lock() {
+            Ok(registry) => Some(registry.lifecycle_lock()),
+            Err(_) => {
+                return Some(response_bytes(
+                    Status::InternalError,
+                    b"namespace metadata is unavailable",
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let _lifecycle_guard = if let Some(lifecycle_lock) = lifecycle_lock.as_ref() {
+        Some(lifecycle_lock.lock().await)
+    } else {
+        None
+    };
     // Serialize lifecycle and data-plane operations for one namespace while
     // allowing unrelated namespaces to proceed concurrently. The registry
     // mutex only protects map metadata; this async lock covers the cache
@@ -1267,6 +1763,19 @@ async fn execute_request(
     } else {
         None
     };
+    // A request may have captured an operation lock immediately before a
+    // concurrent namespace delete removed its registry entry. Re-check after
+    // waiting for that lock so the stale request cannot access the new
+    // namespace that might later reuse the same name.
+    if let Some(namespace_id) = namespace_id
+        && namespace_lock.is_some()
+        && !namespace_exists(namespaces, namespace_id)
+    {
+        return Some(response_bytes(
+            Status::NamespaceNotFound,
+            b"namespace does not exist",
+        ));
+    }
     let result = match opcode {
         Opcode::Ping => return Some(response_bytes(Status::Ok, b"PONG")),
         Opcode::NamespaceOpen => {
@@ -1323,7 +1832,12 @@ async fn execute_request(
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         if let Ok(mut registry) = namespaces.lock() {
-                            registry.prune_item(namespace_id, item_id);
+                            if registry.prune_item(namespace_id, item_id).is_err() {
+                                return Some(response_bytes(
+                                    Status::InternalError,
+                                    b"namespace metadata is unavailable",
+                                ));
+                            }
                         } else {
                             return Some(response_bytes(
                                 Status::InternalError,
@@ -1366,7 +1880,12 @@ async fn execute_request(
                 Ok(Some(value)) => response(Status::Ok, value.into_bytes()),
                 Ok(None) => {
                     if let Ok(mut registry) = namespaces.lock() {
-                        registry.prune_item(namespace_id, item_id);
+                        if registry.prune_item(namespace_id, item_id).is_err() {
+                            return Some(response_bytes(
+                                Status::InternalError,
+                                b"namespace metadata is unavailable",
+                            ));
+                        }
                     }
                     response(Status::NotFound, Vec::new())
                 }
@@ -1395,6 +1914,17 @@ async fn execute_request(
                 }
             };
             let item_id = item_id.expect("SET requests have a validated item ID");
+            let worker = cache.namespace_item_worker(namespace_id, item_id);
+            let reservation = match namespaces
+                .lock()
+                .map_err(|_| Status::InternalError)
+                .and_then(|mut registry| registry.reserve_item(namespace_id, item_id, worker))
+            {
+                Ok(reservation) => reservation,
+                Err(status) => {
+                    return Some(response_bytes(status, b"namespace metadata is unavailable"));
+                }
+            };
             let outcome = cache
                 .set_async_in_namespace(
                     namespace_id,
@@ -1404,25 +1934,45 @@ async fn execute_request(
                 )
                 .await;
             return match outcome {
-                Ok(outcome) => {
-                    let Ok(mut registry) = namespaces.lock() else {
-                        // The storage mutation already completed, but the
-                        // metadata update needed for namespace lifecycle
-                        // correctness cannot be recorded. Do not send a
-                        // definitive response.
-                        return None;
-                    };
-                    registry.mark_set(namespace_id, item_id, outcome);
-                    Some(response(
-                        match outcome {
-                            SetOutcome::Created => Status::Created,
-                            SetOutcome::Replaced => Status::Replaced,
-                            SetOutcome::NotStored => Status::NotStored,
-                        },
-                        Vec::new(),
-                    ))
+                Ok(SetOutcome::Created) => Some(response(Status::Created, Vec::new())),
+                Ok(SetOutcome::Replaced) => Some(response(Status::Replaced, Vec::new())),
+                Ok(SetOutcome::NotStored) => {
+                    let rollback = namespaces
+                        .lock()
+                        .map_err(|_| Status::InternalError)
+                        .and_then(|mut registry| {
+                            registry.rollback_set_reservation(
+                                namespace_id,
+                                item_id,
+                                worker,
+                                reservation,
+                            )
+                        });
+                    match rollback {
+                        Ok(()) => Some(response(Status::NotStored, Vec::new())),
+                        Err(_) => None,
+                    }
                 }
-                Err(error) => mutation_cache_error_response(error),
+                Err(error) => match mutation_cache_error_response(error) {
+                    Some(response) => {
+                        let rollback = namespaces
+                            .lock()
+                            .map_err(|_| Status::InternalError)
+                            .and_then(|mut registry| {
+                                registry.rollback_set_reservation(
+                                    namespace_id,
+                                    item_id,
+                                    worker,
+                                    reservation,
+                                )
+                            });
+                        match rollback {
+                            Ok(()) => Some(response),
+                            Err(_) => None,
+                        }
+                    }
+                    None => None,
+                },
             };
         }
         Opcode::Delete => {
@@ -1434,6 +1984,14 @@ async fn execute_request(
                 ));
             }
             let item_id = item_id.expect("DELETE requests have a validated item ID");
+            let worker = cache.namespace_item_worker(namespace_id, item_id);
+            if let Err(status) = namespaces
+                .lock()
+                .map_err(|_| Status::InternalError)
+                .and_then(|mut registry| registry.reserve_worker(namespace_id, worker))
+            {
+                return Some(response_bytes(status, b"namespace metadata is unavailable"));
+            }
             let deleted = cache.delete_async_in_namespace(namespace_id, item_id).await;
             return match deleted {
                 Ok(deleted) => {
@@ -1443,7 +2001,14 @@ async fn execute_request(
                         // leaving the namespace tracker stale.
                         return None;
                     };
-                    registry.mark_delete(namespace_id, item_id, deleted);
+                    if registry
+                        .mark_delete(namespace_id, item_id, deleted)
+                        .is_err()
+                    {
+                        // The DELETE may already have taken effect, but the
+                        // persisted tracker could not be updated.
+                        return None;
+                    }
                     Some(response(
                         if deleted {
                             Status::Deleted
@@ -1505,8 +2070,40 @@ async fn execute_request(
                     b"namespace does not exist",
                 ));
             }
-            match cache.sync_async().await {
-                Ok(()) => Some(response(Status::Ok, Vec::new())),
+            let namespace_id = namespace_id.expect("SYNC requests have a validated namespace ID");
+            let dirty_workers = match namespaces.lock() {
+                Ok(registry) => match registry.dirty_workers(namespace_id) {
+                    Some(workers) => workers,
+                    None => {
+                        return Some(response_bytes(
+                            Status::NamespaceNotFound,
+                            b"namespace does not exist",
+                        ));
+                    }
+                },
+                Err(_) => {
+                    return Some(response_bytes(
+                        Status::InternalError,
+                        b"namespace metadata is unavailable",
+                    ));
+                }
+            };
+            match cache.sync_workers_async(&dirty_workers).await {
+                Ok(()) => {
+                    let clean = namespaces
+                        .lock()
+                        .map_err(|_| Status::InternalError)
+                        .and_then(|mut registry| registry.mark_workers_clean(namespace_id));
+                    match clean {
+                        Ok(()) => Some(response(Status::Ok, Vec::new())),
+                        Err(_) => {
+                            // The worker barrier completed, but the metadata
+                            // update did not. Keep the outcome ambiguous so
+                            // the next SYNC retries the conservative barrier.
+                            None
+                        }
+                    }
+                }
                 Err(_) => {
                     // SYNC is a persistence barrier. A worker may have
                     // completed its flush before another worker failed, so no
@@ -1659,6 +2256,8 @@ pub enum ServerError {
         path: std::path::PathBuf,
         message: String,
     },
+    #[error("namespace metadata is invalid or unavailable: {0}")]
+    NamespaceMetadata(String),
     #[error("TLS configuration failed: {0}")]
     Tls(#[from] rustls::Error),
     #[error("QUIC transport failed: {0}")]

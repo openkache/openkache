@@ -911,13 +911,9 @@ fn namespace_policy_from_flags(
 fn ffi_namespace_descriptor(
     descriptor: crate::NamespaceDescriptor,
 ) -> std::result::Result<Vec<u8>, String> {
-    let (flags, ttl_ms) = namespace_policy_to_flags(descriptor.policy)?;
-    let mut payload = Vec::with_capacity(8 + 8 + 1 + 8);
-    payload.extend_from_slice(&descriptor.namespace_id.to_be_bytes());
-    payload.extend_from_slice(&descriptor.revision.to_be_bytes());
-    payload.push(flags);
-    payload.extend_from_slice(&ttl_ms.to_be_bytes());
-    Ok(payload)
+    descriptor
+        .encode()
+        .map_err(|error| format!("namespace descriptor encoding failed: {error}"))
 }
 
 fn namespace_policy_to_flags(policy: NamespacePolicy) -> std::result::Result<(u8, u64), String> {

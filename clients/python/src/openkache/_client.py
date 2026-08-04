@@ -1099,25 +1099,30 @@ def _namespace_policy_wire(
 
 
 def _namespace_descriptor(payload: bytes) -> SmithyNamespaceDescriptor:
-    if len(payload) != 25:
+    fixed_bytes = 8 + 8 + 1
+    if len(payload) < fixed_bytes:
         raise OpenKacheError(
-            f"namespace descriptor payload must contain 25 bytes, got {len(payload)}"
+            "namespace descriptor payload is missing its identity or policy flags"
         )
     namespace_id = int.from_bytes(payload[0:8], "big")
     revision = int.from_bytes(payload[8:16], "big")
     flags = payload[16]
-    ttl_ms = int.from_bytes(payload[17:25], "big")
     if namespace_id == 0 or revision == 0:
         raise OpenKacheError("namespace descriptor contains a zero identity or revision")
     if flags & SMITHY_POLICY_RESERVED_MASK:
         raise OpenKacheError("namespace descriptor contains reserved policy bits")
     expiration_bits = flags & SMITHY_POLICY_DEFAULT_EXPIRATION_MASK
     if expiration_bits == SMITHY_POLICY_NO_EXPIRY:
-        if ttl_ms != 0:
-            raise OpenKacheError("namespace descriptor carries TTL for no_expiry policy")
+        if len(payload) != fixed_bytes:
+            raise OpenKacheError(
+                "namespace descriptor carries a TTL for no_expiry policy"
+            )
         default_expiration = SmithyExpirationDefault.NO_EXPIRY
         default_ttl = None
     elif expiration_bits == SMITHY_POLICY_FIXED_TTL:
+        ttl_ms, ttl_bytes = _decode_smithy_vu128(payload[fixed_bytes:])
+        if fixed_bytes + ttl_bytes != len(payload):
+            raise OpenKacheError("namespace descriptor contains trailing policy bytes")
         if ttl_ms == 0:
             raise OpenKacheError("namespace descriptor fixed TTL must be positive")
         default_expiration = SmithyExpirationDefault.FIXED_TTL
@@ -1148,6 +1153,57 @@ def _namespace_descriptor(payload: bytes) -> SmithyNamespaceDescriptor:
         revision=revision,
         policy=policy,
     )
+
+
+def _decode_smithy_vu128(payload: bytes) -> tuple[int, int]:
+    if not payload:
+        raise OpenKacheError("namespace descriptor TTL is missing")
+    first = payload[0]
+    if first < 0x80:
+        length = 1
+    elif first < 0xC0:
+        length = 2
+    elif first < 0xE0:
+        length = 3
+    elif first < 0xF0:
+        length = 4
+    else:
+        length = (first & 0x0F) + 2
+        if length > 9:
+            raise OpenKacheError("namespace descriptor TTL exceeds nine bytes")
+    if len(payload) < length:
+        raise OpenKacheError("namespace descriptor TTL is truncated")
+    if length == 1:
+        value = first
+    elif length == 2 and first < 0xF0:
+        value = (first & 0x3F) << 6 | payload[1]
+    elif length == 3 and first < 0xF0:
+        value = (first & 0x1F) << 13 | payload[1] << 5 | payload[2]
+    elif length == 4 and first < 0xF0:
+        value = (first & 0x0F) << 20 | payload[1] << 12 | payload[2] << 4 | payload[3]
+    else:
+        value = int.from_bytes(payload[1:length], "little")
+        mask_octets = (first & 0x07) ^ 0x07
+        if mask_octets:
+            value &= (1 << (64 - 8 * mask_octets)) - 1
+    if _encode_smithy_vu128(value) != payload[:length]:
+        raise OpenKacheError("namespace descriptor TTL is not canonical")
+    return value, length
+
+
+def _encode_smithy_vu128(value: int) -> bytes:
+    if value < 0x80:
+        return bytes((value,))
+    if value < 0x4000:
+        return bytes((0x80 | (value >> 8), value & 0xFF))
+    if value < 0x200000:
+        return bytes((0xC0 | (value >> 16), (value >> 8) & 0xFF, value & 0xFF))
+    if value < 0x10000000:
+        return bytes(
+            (0xE0 | (value >> 24), (value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
+        )
+    length = (value.bit_length() + 7) // 8 + 1
+    return bytes((0xF0 | (length - 2),)) + value.to_bytes(length - 1, "little")
 
 
 def _set_outcome(kind: int) -> SmithySetOutcome:

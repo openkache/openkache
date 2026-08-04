@@ -645,15 +645,10 @@ impl Kvkache {
                 {
                     KeyedObservationPlan::Error(error)
                 } else {
-                    let now = Instant::now();
-                    let refresh_memory = now >= self.next_memory_capacity_check;
-                    if refresh_memory {
-                        self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
-                    }
-                    match self.resource_guard.admit_set(refresh_memory) {
-                        Ok(()) => self.keyed_read_plan(storage_key, ReadPurpose::State),
-                        Err(error) => KeyedObservationPlan::Error(error),
-                    }
+                    // Observe the current item state before admission. A
+                    // conditional SET that will return NotStored must not be
+                    // rejected by an unrelated capacity check.
+                    self.keyed_read_plan(storage_key, ReadPurpose::State)
                 };
                 (PreparedKeyedOperation::Set { value, options }, observation)
             }
@@ -839,6 +834,7 @@ impl Kvkache {
         if !set_condition_allows(options.condition, previous_live) {
             return Ok((SetOutcome::NotStored, false));
         }
+        self.admit_set()?;
         let previous_location = previous.as_ref().map(|located| located.table_location);
         let previous_mutable_value = previous.and_then(|located| located.mutable_value);
         let outcome = if previous_live {
@@ -879,6 +875,15 @@ impl Kvkache {
                 previous_live,
             });
         Ok((outcome, true))
+    }
+
+    fn admit_set(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let refresh_memory = now >= self.next_memory_capacity_check;
+        if refresh_memory {
+            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
+        }
+        self.resource_guard.admit_set(refresh_memory)
     }
 
     fn finish_keyed_delete(
@@ -1018,12 +1023,6 @@ impl Kvkache {
         }
         validate_ttl(options.ttl_ms)?;
         self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
-        let now = Instant::now();
-        let refresh_memory = now >= self.next_memory_capacity_check;
-        if refresh_memory {
-            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
-        }
-        self.resource_guard.admit_set(refresh_memory)?;
         let now_ms = unix_time_ms();
         let previous = self.locate_item(&storage_key).await?;
         let previous_live = previous
@@ -1032,6 +1031,7 @@ impl Kvkache {
         if !set_condition_allows(options.condition, previous_live) {
             return Ok(SetOutcome::NotStored);
         }
+        self.admit_set()?;
         let previous_location = previous.as_ref().map(|located| located.table_location);
         let previous_mutable_value = previous
             .as_ref()
@@ -2709,6 +2709,11 @@ fn ttl_deadline(ttl_ms: Option<u64>) -> Result<u64> {
     let Some(ttl_ms) = ttl_ms else {
         return Ok(0);
     };
+    if ttl_ms == 0 {
+        return Err(KvError::InvalidRequest(
+            "SET TTL must be greater than zero milliseconds".into(),
+        ));
+    }
     unix_time_ms()
         .checked_add(ttl_ms)
         .ok_or_else(|| KvError::InvalidRequest("SET TTL exceeds the supported time range".into()))

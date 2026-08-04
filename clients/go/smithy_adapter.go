@@ -1,6 +1,7 @@
 package openkache
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -323,14 +324,11 @@ func smithyNamespacePolicyWire(
 }
 
 func smithyNamespaceDescriptor(payload []byte) (SmithyNamespaceDescriptor, error) {
-	const descriptorBytes = SmithyNamespaceIDBytes +
-		SmithyNamespaceRevisionBytes +
-		SmithyPolicyFlagsBytes +
-		SmithyNamespaceRevisionBytes
-	if len(payload) != descriptorBytes {
+	const fixedBytes = SmithyNamespaceIDBytes + SmithyNamespaceRevisionBytes
+	if len(payload) < fixedBytes+SmithyPolicyFlagsBytes {
 		return SmithyNamespaceDescriptor{}, validationError(
 			"namespace.descriptor",
-			fmt.Sprintf("must contain exactly %d bytes, got %d", descriptorBytes, len(payload)),
+			"must contain namespace identity and policy flags",
 		)
 	}
 	namespaceID := binary.BigEndian.Uint64(payload[:SmithyNamespaceIDBytes])
@@ -339,9 +337,32 @@ func smithyNamespaceDescriptor(payload []byte) (SmithyNamespaceDescriptor, error
 		payload[revisionStart : revisionStart+SmithyNamespaceRevisionBytes],
 	)
 	flagsOffset := revisionStart + SmithyNamespaceRevisionBytes
+	var ttl uint64
+	ttlBytes := 0
+	if payload[flagsOffset]&uint8(SmithyPolicyDefaultExpirationMask) ==
+		uint8(SmithyPolicyFixedTTL) {
+		var err error
+		ttl, ttlBytes, err = decodeSmithyVu128(payload[flagsOffset+SmithyPolicyFlagsBytes:])
+		if err != nil {
+			return SmithyNamespaceDescriptor{}, validationError(
+				"namespace.descriptor.policy.default_ttl_milliseconds",
+				err.Error(),
+			)
+		}
+	}
+	if fixedBytes+SmithyPolicyFlagsBytes+ttlBytes != len(payload) {
+		return SmithyNamespaceDescriptor{}, validationError(
+			"namespace.descriptor",
+			fmt.Sprintf(
+				"contains trailing or missing policy bytes: expected %d, got %d",
+				fixedBytes+SmithyPolicyFlagsBytes+ttlBytes,
+				len(payload),
+			),
+		)
+	}
 	policy, err := smithyNamespacePolicyFromWire(
 		payload[flagsOffset],
-		binary.BigEndian.Uint64(payload[flagsOffset+SmithyPolicyFlagsBytes:]),
+		ttl,
 	)
 	if err != nil {
 		return SmithyNamespaceDescriptor{}, err
@@ -351,6 +372,96 @@ func smithyNamespaceDescriptor(payload []byte) (SmithyNamespaceDescriptor, error
 		Revision:    revision,
 		Policy:      policy,
 	}, nil
+}
+
+func decodeSmithyVu128(payload []byte) (uint64, int, error) {
+	if len(payload) == 0 {
+		return 0, 0, fmt.Errorf("is missing")
+	}
+	first := payload[0]
+	length := 1
+	switch {
+	case first < 0x80:
+	case first < 0xc0:
+		length = 2
+	case first < 0xe0:
+		length = 3
+	case first < 0xf0:
+		length = 4
+	default:
+		length = int(first&0x0f) + 2
+		if length > 9 {
+			return 0, 0, fmt.Errorf("uses more than nine bytes")
+		}
+	}
+	if len(payload) < length {
+		return 0, 0, fmt.Errorf("is truncated")
+	}
+	var value uint64
+	switch {
+	case length == 1:
+		value = uint64(first)
+	case length == 2 && first < 0xf0:
+		value = uint64(first&0x3f)<<6 | uint64(payload[1])
+	case length == 3 && first < 0xf0:
+		value = uint64(first&0x1f)<<13 |
+			uint64(payload[1])<<5 |
+			uint64(payload[2])
+	case length == 4 && first < 0xf0:
+		value = uint64(first&0x0f)<<20 |
+			uint64(payload[1])<<12 |
+			uint64(payload[2])<<4 |
+			uint64(payload[3])
+	default:
+		for index := 1; index < length; index++ {
+			value |= uint64(payload[index]) << (8 * (index - 1))
+		}
+		if maskOctets := int((first & 0x07) ^ 0x07); maskOctets > 0 {
+			value &= ^uint64(0) >> (8 * maskOctets)
+		}
+	}
+	encoded := encodeSmithyVu128(value)
+	if !bytes.Equal(encoded, payload[:length]) {
+		return 0, 0, fmt.Errorf("is not canonical")
+	}
+	return value, length, nil
+}
+
+func encodeSmithyVu128(value uint64) []byte {
+	switch {
+	case value < 0x80:
+		return []byte{byte(value)}
+	case value < 0x4000:
+		return []byte{0x80 | byte(value>>8), byte(value)}
+	case value < 0x200000:
+		return []byte{0xc0 | byte(value>>16), byte(value >> 8), byte(value)}
+	case value < 0x10000000:
+		return []byte{
+			0xe0 | byte(value>>24),
+			byte(value >> 16),
+			byte(value >> 8),
+			byte(value),
+		}
+	default:
+		length := (64-bitsLeadingZeros64(value)+7)/8 + 1
+		encoded := make([]byte, length)
+		encoded[0] = 0xf0 | byte(length-2)
+		for index := 1; index < length; index++ {
+			encoded[index] = byte(value >> (8 * (index - 1)))
+		}
+		return encoded
+	}
+}
+
+func bitsLeadingZeros64(value uint64) int {
+	if value == 0 {
+		return 64
+	}
+	zeros := 0
+	for bit := uint64(1) << 63; value&bit == 0; bit >>= 1 {
+		zeros++
+	}
+	return zeros
 }
 
 func smithyNamespacePolicyFromWire(

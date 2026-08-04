@@ -383,6 +383,12 @@ impl ThreadedKvkache {
         derive_scoped_storage_key(&self.server_cipher, namespace_id, item_id)
     }
 
+    /// Returns the storage worker that owns one namespace-scoped item.
+    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
+        let storage_key = self.scoped_storage_key(namespace_id, item_id);
+        self.owner(&storage_key)
+    }
+
     fn request(
         &self,
         worker: usize,
@@ -992,6 +998,29 @@ impl ThreadedKvkache {
         for thread_id in 0..self.workers.len() {
             match self
                 .request_async(thread_id, |response| WorkerRequest::Sync { response })
+                .await?
+            {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes exactly the storage workers that have observed mutations for a namespace.
+    pub(crate) async fn sync_workers_async(&self, workers: &[usize]) -> Result<()> {
+        for &worker in workers {
+            if worker >= self.workers.len() {
+                return Err(KvError::Worker(format!(
+                    "namespace references unknown storage worker {worker}"
+                )));
+            }
+            match self
+                .request_async(worker, |response| WorkerRequest::Sync { response })
                 .await?
             {
                 WorkerResponse::Synced => {}
