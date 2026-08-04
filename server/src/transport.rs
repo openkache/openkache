@@ -208,10 +208,6 @@ pub(super) struct RequestFrame {
 }
 
 impl RequestFrame {
-    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
-        Self::with_trailing_bytes(bytes, permit, false)
-    }
-
     fn with_trailing_bytes(
         bytes: Vec<u8>,
         permit: RequestBudgetPermit,
@@ -423,7 +419,22 @@ async fn read_buffered_request(
     let permit = budget.acquire(header.value_len(), timeout).await?;
     let body_start = frame.len();
     if body_start == frame_len {
-        return Ok(RequestFrame::new(frame, permit));
+        let probe = Vec::with_capacity(1).slice(..1);
+        let has_trailing_bytes =
+            match compio::runtime::time::timeout(Duration::ZERO, stream.read(probe)).await {
+                Err(_) => false,
+                Ok(BufResult(result, _)) => {
+                    let bytes = result.map_err(|error| {
+                        TransportError::backend(backend, "trailing-byte probe", error)
+                    })?;
+                    bytes != 0
+                }
+            };
+        return Ok(RequestFrame::with_trailing_bytes(
+            frame,
+            permit,
+            has_trailing_bytes,
+        ));
     }
 
     frame.reserve(frame_len - body_start);
@@ -432,9 +443,30 @@ async fn read_buffered_request(
         stream.read_exact(frame.slice(body_start..frame_len)),
     )
     .await
-    .map_err(|_| StreamReadError::Timeout)?;
+        .map_err(|_| StreamReadError::Timeout)?;
     result.map_err(|error| TransportError::backend(backend, "stream body read", error))?;
-    Ok(RequestFrame::new(body.into_inner(), permit))
+    let frame = body.into_inner();
+    // `read_exact` intentionally stops at the declared frame boundary. Probe the
+    // backend's already-readable bytes once so a client that pipelined a second
+    // request cannot make us interpret that request after the first response.
+    // The zero-duration timeout is non-blocking: when no byte is buffered the
+    // receive future is cancelled and the lane remains reusable.
+    let probe = Vec::with_capacity(1).slice(..1);
+    let has_trailing_bytes = match compio::runtime::time::timeout(Duration::ZERO, stream.read(probe))
+        .await
+    {
+        Err(_) => false,
+        Ok(BufResult(result, _)) => {
+            let bytes = result
+                .map_err(|error| TransportError::backend(backend, "trailing-byte probe", error))?;
+            bytes != 0
+        }
+    };
+    Ok(RequestFrame::with_trailing_bytes(
+        frame,
+        permit,
+        has_trailing_bytes,
+    ))
 }
 
 /// Stable transport failure with backend and operation context.

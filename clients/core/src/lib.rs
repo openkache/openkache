@@ -390,6 +390,14 @@ impl RequestFailure {
             invalidates_connection,
         }
     }
+
+    fn after_response(error: Error) -> Self {
+        Self {
+            error,
+            may_have_reached_server: true,
+            invalidates_connection: false,
+        }
+    }
 }
 
 impl<C: ClientConnection> Core<C> {
@@ -793,6 +801,7 @@ impl<C: ClientConnection> Core<C> {
         request: Request,
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
+        let opcode = request.opcode;
         let mut stream = connection
             .acquire_lane(deadline)
             .await
@@ -815,13 +824,19 @@ impl<C: ClientConnection> Core<C> {
         let response = Response::decode_owned(frame)
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
-        // These statuses are emitted for a malformed or prefix-rejected request. The
-        // server closes that lane after the response, so putting it back in the idle
-        // pool would let a later request borrow a dead stream.
-        if !matches!(
-            response.status,
-            Status::InvalidRequest | Status::UnsupportedOpcode | Status::TooLarge
-        ) {
+        // Validate the operation/status/payload contract before returning the lane to
+        // the pool. A status that is not meaningful for this request is a protocol
+        // violation; the lane must be discarded even when the QUIC connection remains
+        // usable. This also prevents a malformed success from being mistaken for a
+        // definitive mutation result.
+        if let Err(error) = validate_response_contract(opcode, &response) {
+            return Err(RequestFailure::after_response(error));
+        }
+        // Error responses may be emitted while the server is still parsing a request,
+        // in which case the server terminates the lane. Retiring every error lane is
+        // conservative and remains valid for errors that the server could have
+        // returned on a reusable lane.
+        if !response.status.is_error() {
             stream.release();
         }
         Ok(response)
@@ -1557,6 +1572,110 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
         });
     }
     Ok(())
+}
+
+fn validate_response_contract(opcode: Opcode, response: &Response) -> Result<()> {
+    let operation = operation(opcode);
+    if response.status.is_error() {
+        let applicable = match response.status {
+            Status::InvalidRequest
+            | Status::TooLarge
+            | Status::Overloaded
+            | Status::Timeout
+            | Status::Forbidden
+            | Status::InternalError => true,
+            Status::NoCapacity | Status::PolicyConflict => opcode == Opcode::Set,
+            Status::Conflict => {
+                matches!(opcode, Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete)
+            }
+            Status::NamespaceNotFound => matches!(
+                opcode,
+                Opcode::Get
+                    | Opcode::Set
+                    | Opcode::Delete
+                    | Opcode::Stats
+                    | Opcode::Sync
+                    | Opcode::NamespaceOpen
+                    | Opcode::NamespaceUpdatePolicy
+                    | Opcode::NamespaceDelete
+            ),
+            Status::NamespaceNotEmpty => opcode == Opcode::NamespaceDelete,
+            Status::UnsupportedOpcode => false,
+            // `Status::try_from` rejects unassigned values before this helper runs.
+            Status::Ok
+            | Status::NotFound
+            | Status::Created
+            | Status::Replaced
+            | Status::Deleted
+            | Status::NotStored => false,
+        };
+        if !applicable {
+            return Err(Error::UnexpectedResponse {
+                operation,
+                message: format!(
+                    "status {:?} is not applicable to {opcode:?}",
+                    response.status
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    let invalid_payload = |message: &'static str| {
+        Err(Error::UnexpectedResponse {
+            operation,
+            message: message.into(),
+        })
+    };
+    match (opcode, response.status) {
+        (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
+        (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
+
+        (Opcode::Get, Status::Ok) => Ok(()),
+        (Opcode::Get, Status::NotFound) if response.payload.is_empty() => Ok(()),
+        (Opcode::Get, Status::NotFound) => {
+            invalid_payload("GET NotFound responses must have an empty payload")
+        }
+
+        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored)
+            if response.payload.is_empty() =>
+        {
+            Ok(())
+        }
+        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored) => {
+            invalid_payload("SET success responses must have an empty payload")
+        }
+
+        (Opcode::Delete, Status::Deleted | Status::NotFound)
+            if response.payload.is_empty() =>
+        {
+            Ok(())
+        }
+        (Opcode::Delete, Status::Deleted | Status::NotFound) => {
+            invalid_payload("DELETE domain responses must have an empty payload")
+        }
+
+        (Opcode::Stats, Status::Ok) => validate_stats_payload(&response.payload),
+        (Opcode::Sync, Status::Ok) if response.payload.is_empty() => Ok(()),
+        (Opcode::Sync, Status::Ok) => {
+            invalid_payload("SYNC success responses must have an empty payload")
+        }
+
+        (Opcode::NamespaceOpen, Status::Ok | Status::Created)
+        | (Opcode::NamespaceUpdatePolicy, Status::Ok) => {
+            NamespaceDescriptor::decode(&response.payload).map(|_| ()).map_err(|error| {
+                Error::UnexpectedResponse {
+                    operation,
+                    message: format!("namespace descriptor is invalid: {error}"),
+                }
+            })
+        }
+        (Opcode::NamespaceDelete, Status::Deleted) if response.payload.is_empty() => Ok(()),
+        (Opcode::NamespaceDelete, Status::Deleted) => {
+            invalid_payload("NAMESPACE_DELETE success responses must have an empty payload")
+        }
+        (_, status) => Err(unexpected_status(operation, status)),
+    }
 }
 
 fn unexpected_status(operation: Operation, status: Status) -> Error {
