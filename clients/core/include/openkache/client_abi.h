@@ -266,9 +266,11 @@ openkache_client_result_t *openkache_client_execute_scoped(
 );
 
 /*
- * Namespace-management ABI calls. Namespace descriptors are returned in a
- * fixed 25-byte payload: namespace_id (u64 BE), revision (u64 BE), policy
- * flags (u8), and default TTL (u64 BE; zero for no-expiry).
+ * Namespace-management ABI calls. Namespace descriptors use the protocol
+ * payload layout: namespace_id (u64 BE), revision (u64 BE), policy flags
+ * (u8), and a canonical variable unsigned integer default TTL only when the
+ * policy selects FixedTtl. No-expiry descriptors therefore contain 17 bytes;
+ * FixedTtl descriptors contain 18 through 26 bytes.
  */
 openkache_client_result_t *openkache_client_namespace_open(
     const openkache_client_t *client,
