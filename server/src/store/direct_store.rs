@@ -78,6 +78,13 @@ pub(crate) struct KeyedFinish {
     pub(crate) outcome: Result<KeyedOutcome>,
     pub(crate) visible_state: Option<KeyedVisibleState>,
     pub(crate) flush_required: bool,
+    pub(crate) pending: bool,
+}
+
+pub(crate) struct PendingKeyedResult {
+    pub(crate) storage_key: StorageKey,
+    pub(crate) outcome: KeyedOutcome,
+    pub(crate) visible_state: Option<KeyedVisibleState>,
 }
 
 enum PreparedKeyedOperation {
@@ -398,8 +405,15 @@ enum PendingKeyedMutation {
         eviction_protected: bool,
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
-        previous_live: bool,
+        previous_state: Option<ItemState>,
+        condition: SetCondition,
+        include_visible_state: bool,
     },
+}
+
+enum PendingKeyedProgress {
+    Complete(PendingKeyedResult),
+    Pending(PendingKeyedMutation),
 }
 
 struct DirectStoreIo {
@@ -754,19 +768,20 @@ impl Kvkache {
                     outcome: Err(error),
                     visible_state: None,
                     flush_required: false,
+                    pending: false,
                 };
             }
         };
-        let (outcome, visible_state, flush_required) = match (completed.operation, observation) {
+        let (outcome, visible_state, flush_required, pending) =
+            match (completed.operation, observation) {
             (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
                 let visible_state = include_visible_state.then(|| match &mut value {
                     Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
                     None => KeyedVisibleState::Missing,
                 });
-                (Ok(KeyedOutcome::Value(value)), visible_state, false)
+                (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
             }
             (PreparedKeyedOperation::Set { value, options }, KeyedObservation::State(previous)) => {
-                let visible_value = (options == SetOptions::NONE).then(|| value.clone());
                 let evaluated_at_ms = unix_time_ms();
                 match self.finish_keyed_set(
                     completed.storage_key,
@@ -774,21 +789,15 @@ impl Kvkache {
                     options,
                     evaluated_at_ms,
                     previous,
+                    include_visible_state,
                 ) {
-                    Ok((outcome, flush_required)) => {
-                        let visible_state = visible_value.and_then(|value| match outcome {
-                            SetOutcome::Created | SetOutcome::Replaced => {
-                                Some(KeyedVisibleState::Present(value))
-                            }
-                            SetOutcome::NotStored => None,
-                        });
-                        (
-                            Ok(KeyedOutcome::Set(outcome)),
-                            visible_state,
-                            flush_required,
-                        )
-                    }
-                    Err(error) => (Err(error), None, false),
+                    Ok((outcome, visible_state, flush_required, pending)) => (
+                        Ok(KeyedOutcome::Set(outcome)),
+                        visible_state,
+                        flush_required,
+                        pending,
+                    ),
+                    Err(error) => (Err(error), None, false, false),
                 }
             }
             (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
@@ -797,8 +806,9 @@ impl Kvkache {
                         Ok(KeyedOutcome::Deleted(deleted)),
                         Some(KeyedVisibleState::Missing),
                         flush_required,
+                        false,
                     ),
-                    Err(error) => (Err(error), None, false),
+                    Err(error) => (Err(error), None, false, false),
                 }
             }
             _ => (
@@ -807,12 +817,14 @@ impl Kvkache {
                 )),
                 None,
                 false,
+                false,
             ),
         };
         KeyedFinish {
             outcome,
             visible_state,
             flush_required,
+            pending,
         }
     }
 
@@ -823,25 +835,22 @@ impl Kvkache {
     fn finish_keyed_set(
         &mut self,
         storage_key: StorageKey,
-        value: StoredItemValue,
+        mut value: StoredItemValue,
         options: SetOptions,
         evaluated_at_ms: u64,
         previous: Option<LocatedKeyState>,
-    ) -> Result<(SetOutcome, bool)> {
+        include_visible_state: bool,
+    ) -> Result<(SetOutcome, Option<KeyedVisibleState>, bool, bool)> {
         let previous_live = previous
             .as_ref()
             .is_some_and(|located| item_state_is_live_at(located.item_state, evaluated_at_ms));
         if !set_condition_allows(options.condition, previous_live) {
-            return Ok((SetOutcome::NotStored, false));
+            return Ok((SetOutcome::NotStored, None, false, false));
         }
         self.admit_set()?;
         let previous_location = previous.as_ref().map(|located| located.table_location);
+        let previous_state = previous.as_ref().map(|located| located.item_state);
         let previous_mutable_value = previous.and_then(|located| located.mutable_value);
-        let outcome = if previous_live {
-            SetOutcome::Replaced
-        } else {
-            SetOutcome::Created
-        };
         if let Some(replacement) = self.try_append_value(
             storage_key,
             &value.bytes,
@@ -859,7 +868,14 @@ impl Kvkache {
             if !previous_live || previous_disappeared {
                 self.live_keys += 1;
             }
-            return Ok((outcome, false));
+            let outcome = if previous_live {
+                SetOutcome::Replaced
+            } else {
+                SetOutcome::Created
+            };
+            let visible_state = (include_visible_state && options == SetOptions::NONE)
+                .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
+            return Ok((outcome, visible_state, false, false));
         }
         self.pending_keyed_mutations
             .push_back(PendingKeyedMutation::Set {
@@ -872,9 +888,14 @@ impl Kvkache {
                 ),
                 previous: previous_location,
                 previous_mutable_value,
-                previous_live,
+                previous_state,
+                condition: options.condition,
+                include_visible_state,
             });
-        Ok((outcome, true))
+        // The operation has not linearized yet. The worker must defer its
+        // response until capacity work appends the value and re-evaluates the
+        // condition against the current expiration/eviction state.
+        Ok((SetOutcome::NotStored, None, true, true))
     }
 
     fn admit_set(&mut self) -> Result<()> {
@@ -903,38 +924,71 @@ impl Kvkache {
         Ok((true, false))
     }
 
-    pub(crate) fn progress_capacity(&mut self) -> Result<bool> {
+    pub(crate) fn progress_capacity(&mut self) -> Result<(bool, Vec<PendingKeyedResult>)> {
         self.advance_closings()?;
         self.advance_flushes()?;
+        let mut completed = Vec::new();
         while let Some(mutation) = self.pending_keyed_mutations.pop_front() {
-            if let Some(mutation) = self.try_apply_pending_keyed_mutation(mutation)? {
-                self.pending_keyed_mutations.push_front(mutation);
-                if self.active_flush_count() >= self.config.max_flushes_in_flight {
-                    return Ok(false);
+            match self.try_apply_pending_keyed_mutation(mutation)? {
+                PendingKeyedProgress::Complete(result) => completed.push(result),
+                PendingKeyedProgress::Pending(mutation) => {
+                    self.pending_keyed_mutations.push_front(mutation);
+                    if self.active_flush_count() >= self.config.max_flushes_in_flight {
+                        return Ok((false, completed));
+                    }
+                    let lane = self.fullest_mutable_lane()?;
+                    self.close_lane(lane, SegmentFlushReason::Capacity)?;
+                    self.advance_closings()?;
+                    self.advance_flushes()?;
                 }
-                let lane = self.fullest_mutable_lane()?;
-                self.close_lane(lane, SegmentFlushReason::Capacity)?;
-                self.advance_closings()?;
-                self.advance_flushes()?;
             }
         }
-        Ok(true)
+        Ok((true, completed))
+    }
+
+    pub(crate) fn cancel_pending_keyed_mutation(&mut self, storage_key: StorageKey) {
+        self.pending_keyed_mutations.retain(|mutation| {
+            !matches!(
+                mutation,
+                PendingKeyedMutation::Set {
+                    storage_key: pending_key,
+                    ..
+                } if *pending_key == storage_key
+            )
+        });
     }
 
     fn try_apply_pending_keyed_mutation(
         &mut self,
         mutation: PendingKeyedMutation,
-    ) -> Result<Option<PendingKeyedMutation>> {
+    ) -> Result<PendingKeyedProgress> {
         match mutation {
             PendingKeyedMutation::Set {
                 storage_key,
-                value,
+                mut value,
                 ttl_ms,
                 eviction_protected,
                 previous,
                 previous_mutable_value,
-                previous_live,
+                previous_state,
+                condition,
+                include_visible_state,
             } => {
+                let previous_live = previous_state.is_some_and(|state| {
+                    item_state_is_live_at(state, unix_time_ms())
+                        && previous.is_some_and(|location| {
+                            self.table
+                                .candidate_locations(&storage_key)
+                                .contains(&location)
+                        })
+                });
+                if !set_condition_allows(condition, previous_live) {
+                    return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
+                        storage_key,
+                        outcome: KeyedOutcome::Set(SetOutcome::NotStored),
+                        visible_state: None,
+                    }));
+                }
                 let Some(replacement) = self.try_append_value(
                     storage_key,
                     &value.bytes,
@@ -944,14 +998,16 @@ impl Kvkache {
                     previous_mutable_value,
                 )?
                 else {
-                    return Ok(Some(PendingKeyedMutation::Set {
+                    return Ok(PendingKeyedProgress::Pending(PendingKeyedMutation::Set {
                         storage_key,
                         value,
                         ttl_ms,
                         eviction_protected,
                         previous,
                         previous_mutable_value,
-                        previous_live,
+                        previous_state,
+                        condition,
+                        include_visible_state,
                     }));
                 };
                 let previous_disappeared = self.publish_table_location(
@@ -963,9 +1019,20 @@ impl Kvkache {
                 if !previous_live || previous_disappeared {
                     self.live_keys += 1;
                 }
+                let outcome = if previous_live {
+                    SetOutcome::Replaced
+                } else {
+                    SetOutcome::Created
+                };
+                let visible_state = include_visible_state
+                    .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
+                return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
+                    storage_key,
+                    outcome: KeyedOutcome::Set(outcome),
+                    visible_state,
+                }));
             }
         }
-        Ok(None)
     }
 
     #[allow(dead_code)]
@@ -1801,9 +1868,11 @@ impl Kvkache {
                     PendingKeyedMutation::Set {
                         storage_key,
                         previous: Some(previous),
-                        previous_live: true,
+                        previous_state: Some(previous_state),
                         ..
-                    } if *storage_key == item.storage_key && previous.sg_index == logical_sg_id
+                    } if *storage_key == item.storage_key
+                        && previous.sg_index == logical_sg_id
+                        && item_state_is_live_at(*previous_state, now_ms)
                 )
             });
             if item.eviction_protected && item.is_live_at(now_ms) && !replacing_protected_item {

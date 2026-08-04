@@ -562,11 +562,17 @@ enum WorkerEvent {
     Request(Option<WorkerRequest>),
 }
 
-struct DeferredLaneCompletion {
-    storage_key: StorageKey,
-    responses: Vec<DeferredWorkerResponse>,
-    success_state: Option<KeyedVisibleState>,
-    failure_state: Option<KeyedVisibleState>,
+enum DeferredLaneCompletion {
+    Batch {
+        storage_key: StorageKey,
+        responses: Vec<DeferredWorkerResponse>,
+        success_state: Option<KeyedVisibleState>,
+        failure_state: Option<KeyedVisibleState>,
+    },
+    Pending {
+        storage_key: StorageKey,
+        response: WorkerResponseSender,
+    },
 }
 
 fn send_success(responses: Vec<DeferredWorkerResponse>) {
@@ -638,34 +644,93 @@ pub(super) async fn worker_loop(
     loop {
         if !deferred_completions.is_empty() {
             match cache.progress_capacity() {
-                Ok(true) => {
-                    for completion in deferred_completions.drain(..) {
-                        send_success(completion.responses);
+                Ok((capacity_ready, completed)) => {
+                    for result in completed {
+                        let index = deferred_completions
+                            .iter()
+                            .position(|completion| {
+                                matches!(
+                                    completion,
+                                    DeferredLaneCompletion::Pending { storage_key, .. }
+                                        if *storage_key == result.storage_key
+                                )
+                            })
+                            .expect("completed capacity mutation has a deferred response");
+                        let completion = deferred_completions.swap_remove(index);
+                        let DeferredLaneCompletion::Pending {
+                            storage_key,
+                            response,
+                        } = completion
+                        else {
+                            unreachable!("capacity completion matched a non-pending response");
+                        };
+                        response.send(Ok(outcome_response(result.outcome)));
                         if let Some(running) = finish_scheduler_lane(
                             &mut cache,
                             &mut scheduler,
-                            completion.storage_key,
-                            completion.success_state,
+                            storage_key,
+                            result.visible_state,
                         ) {
                             inflight.push(run_keyed_command(running));
+                        }
+                    }
+                    if capacity_ready {
+                        for completion in deferred_completions.drain(..) {
+                            let DeferredLaneCompletion::Batch {
+                                storage_key,
+                                responses,
+                                success_state,
+                                ..
+                            } = completion
+                            else {
+                                unreachable!(
+                                    "capacity reported ready with an unresolved mutation"
+                                );
+                            };
+                            send_success(responses);
+                            if let Some(running) = finish_scheduler_lane(
+                                &mut cache,
+                                &mut scheduler,
+                                storage_key,
+                                success_state,
+                            ) {
+                                inflight.push(run_keyed_command(running));
+                            }
                         }
                     }
                 }
                 Err(error) => {
                     let message = error.to_string();
                     for completion in deferred_completions.drain(..) {
-                        send_failure(completion.responses, &message);
+                        let (storage_key, failure_state) = match completion {
+                            DeferredLaneCompletion::Batch {
+                                storage_key,
+                                responses,
+                                failure_state,
+                                ..
+                            } => {
+                                send_failure(responses, &message);
+                                (storage_key, failure_state)
+                            }
+                            DeferredLaneCompletion::Pending {
+                                storage_key,
+                                response,
+                            } => {
+                                cache.cancel_pending_keyed_mutation(storage_key);
+                                response.send(Err(KvError::Worker(message.clone())));
+                                (storage_key, None)
+                            }
+                        };
                         if let Some(running) = finish_scheduler_lane(
                             &mut cache,
                             &mut scheduler,
-                            completion.storage_key,
-                            completion.failure_state,
+                            storage_key,
+                            failure_state,
                         ) {
                             inflight.push(run_keyed_command(running));
                         }
                     }
                 }
-                Ok(false) => {}
             }
         }
 
@@ -733,15 +798,33 @@ pub(super) async fn worker_loop(
                 Ok(_) => {}
                 Err(KvError::NoCapacity) if !deferred_completions.is_empty() => {
                     for completion in deferred_completions.drain(..) {
-                        send_failure(
-                            completion.responses,
-                            "write cannot be admitted without evicting protected items",
-                        );
+                        let (storage_key, failure_state) = match completion {
+                            DeferredLaneCompletion::Batch {
+                                storage_key,
+                                responses,
+                                failure_state,
+                                ..
+                            } => {
+                                send_failure(
+                                    responses,
+                                    "write cannot be admitted without evicting protected items",
+                                );
+                                (storage_key, failure_state)
+                            }
+                            DeferredLaneCompletion::Pending {
+                                storage_key,
+                                response,
+                            } => {
+                                cache.cancel_pending_keyed_mutation(storage_key);
+                                response.send(Err(KvError::NoCapacity));
+                                (storage_key, None)
+                            }
+                        };
                         if let Some(running) = finish_scheduler_lane(
                             &mut cache,
                             &mut scheduler,
-                            completion.storage_key,
-                            completion.failure_state,
+                            storage_key,
+                            failure_state,
                         ) {
                             inflight.push(run_keyed_command(running));
                         }
@@ -755,8 +838,9 @@ pub(super) async fn worker_loop(
                     outcome,
                     visible_state,
                     flush_required,
+                    pending,
                 } = cache.finish_keyed(completed.job, include_visible_state);
-                let (responses, success_state, failure_state) = match completed.completion {
+                let completion = match completed.completion {
                     RunningCompletion::Direct(response) => match outcome {
                         Ok(outcome) if !flush_required => {
                             response.send(Ok(outcome_response(outcome)));
@@ -770,14 +854,19 @@ pub(super) async fn worker_loop(
                             }
                             continue;
                         }
-                        Ok(outcome) => (
-                            vec![DeferredWorkerResponse {
+                        Ok(_) if pending => DeferredLaneCompletion::Pending {
+                            storage_key: completed.storage_key,
+                            response,
+                        },
+                        Ok(outcome) => DeferredLaneCompletion::Batch {
+                            storage_key: completed.storage_key,
+                            responses: vec![DeferredWorkerResponse {
                                 sender: response,
                                 value: outcome_response(outcome),
                             }],
-                            visible_state,
-                            None,
-                        ),
+                            success_state: visible_state,
+                            failure_state: None,
+                        },
                         Err(error) => {
                             response.send(Err(error));
                             if let Some(running) = finish_scheduler_lane(
@@ -796,7 +885,12 @@ pub(super) async fn worker_loop(
                         success_state,
                         failure_state,
                     } => match outcome {
-                        Ok(_) => (responses, Some(success_state), Some(failure_state)),
+                        Ok(_) => DeferredLaneCompletion::Batch {
+                            storage_key: completed.storage_key,
+                            responses,
+                            success_state: Some(success_state),
+                            failure_state: Some(failure_state),
+                        },
                         Err(error) => {
                             send_failure(responses, &error.to_string());
                             if let Some(running) = finish_scheduler_lane(
@@ -812,20 +906,21 @@ pub(super) async fn worker_loop(
                     },
                 };
                 if flush_required {
-                    deferred_completions.push(DeferredLaneCompletion {
-                        storage_key: completed.storage_key,
+                    deferred_completions.push(completion);
+                } else {
+                    let DeferredLaneCompletion::Batch {
+                        storage_key,
                         responses,
                         success_state,
-                        failure_state,
-                    });
-                } else {
+                        ..
+                    } = completion
+                    else {
+                        unreachable!("a pending completion must require capacity work");
+                    };
                     send_success(responses);
-                    if let Some(running) = finish_scheduler_lane(
-                        &mut cache,
-                        &mut scheduler,
-                        completed.storage_key,
-                        success_state,
-                    ) {
+                    if let Some(running) =
+                        finish_scheduler_lane(&mut cache, &mut scheduler, storage_key, success_state)
+                    {
                         inflight.push(run_keyed_command(running));
                     }
                 }
