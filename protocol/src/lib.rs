@@ -904,6 +904,7 @@ impl Request {
             Opcode::Ping => {
                 if self.namespace_id.is_some()
                     || self.item_id.is_some()
+                    || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
                     || self.namespace_policy.is_some()
@@ -920,10 +921,12 @@ impl Request {
             Opcode::Get | Opcode::Delete => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.item_id.is_none()
+                    || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
                     || self.namespace_policy.is_some()
                     || self.expected_revision.is_some()
+                    || self.create_if_missing
                 {
                     return Err(ProtocolError::InvalidRequestShape {
                         opcode: self.opcode,
@@ -935,10 +938,12 @@ impl Request {
             Opcode::Stats | Opcode::Sync => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.item_id.is_some()
+                    || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
                     || self.namespace_policy.is_some()
                     || self.expected_revision.is_some()
+                    || self.create_if_missing
                 {
                     return Err(ProtocolError::InvalidRequestShape {
                         opcode: self.opcode,
@@ -960,6 +965,7 @@ impl Request {
                 if self.namespace_name.is_some()
                     || self.namespace_policy.is_some()
                     || self.expected_revision.is_some()
+                    || self.create_if_missing
                 {
                     return Err(ProtocolError::InvalidSetOptions {
                         opcode: self.opcode,
@@ -981,7 +987,12 @@ impl Request {
                         ProtocolError::UnexpectedNamespacePolicy
                     });
                 }
-                if self.expected_revision.is_some() || self.namespace_id.is_some() {
+                if self.expected_revision.is_some()
+                    || self.namespace_id.is_some()
+                    || self.item_id.is_some()
+                    || self.set_options != SetOptions::NONE
+                    || !self.value.is_empty()
+                {
                     return Err(ProtocolError::InvalidRequestShape {
                         opcode: self.opcode,
                         expected_item_id: 0,
@@ -999,6 +1010,7 @@ impl Request {
                     .ok_or(ProtocolError::MissingNamespacePolicy)?
                     .encode()?;
                 if self.item_id.is_some()
+                    || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
                     || self.create_if_missing
@@ -1014,6 +1026,7 @@ impl Request {
                 validate_namespace_id(self.namespace_id)?;
                 validate_revision(self.expected_revision)?;
                 if self.item_id.is_some()
+                    || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
                     || self.namespace_policy.is_some()
