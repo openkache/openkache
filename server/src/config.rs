@@ -902,7 +902,7 @@ impl AppConfig {
             },
             io_uring: IoUringConfig {
                 entries_per_worker: 256,
-                max_inflight_per_worker: 32,
+                max_inflight_per_worker: 64,
                 batch_size: 64,
                 ..IoUringConfig::default()
             },
