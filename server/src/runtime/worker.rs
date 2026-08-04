@@ -283,6 +283,7 @@ pub(super) struct DeferredWorkerResponse {
 pub(super) struct CollapsedLaneBatch {
     pub(super) operation: Option<KeyedOperation>,
     pub(super) responses: Vec<DeferredWorkerResponse>,
+    pub(super) mutation_response_index: Option<usize>,
     pub(super) success_state: KeyedVisibleState,
     pub(super) failure_state: KeyedVisibleState,
 }
@@ -292,9 +293,11 @@ impl CollapsedLaneBatch {
         let base_present = matches!(base, KeyedVisibleState::Present(_));
         let mut current = base.clone();
         let mut responses = Vec::with_capacity(commands.len());
+        let mut mutation_response_index = None;
         let mut mutated = false;
 
         for command in commands {
+            let response_index = responses.len();
             let (sender, value) = match command {
                 KeyedCommand::Get { response } => {
                     let value = match &current {
@@ -315,12 +318,14 @@ impl CollapsedLaneBatch {
                     };
                     current = KeyedVisibleState::Present(value);
                     mutated = true;
+                    mutation_response_index = Some(response_index);
                     (response, WorkerResponse::Set(outcome))
                 }
                 KeyedCommand::Delete { response } => {
                     let deleted = matches!(current, KeyedVisibleState::Present(_));
                     current = KeyedVisibleState::Missing;
                     mutated = true;
+                    mutation_response_index = Some(response_index);
                     (response, WorkerResponse::Deleted(deleted))
                 }
             };
@@ -339,10 +344,14 @@ impl CollapsedLaneBatch {
         } else {
             None
         };
+        let mutation_response_index = operation
+            .as_ref()
+            .map(|_| mutation_response_index.expect("collapsed mutation has a response"));
 
         Self {
             operation,
             responses,
+            mutation_response_index,
             success_state: current,
             failure_state: base,
         }
@@ -537,6 +546,7 @@ enum RunningCompletion {
     Direct(WorkerResponseSender),
     Collapsed {
         responses: Vec<DeferredWorkerResponse>,
+        mutation_response_index: Option<usize>,
         success_state: KeyedVisibleState,
         failure_state: KeyedVisibleState,
     },
@@ -573,12 +583,30 @@ enum DeferredLaneCompletion {
         storage_key: StorageKey,
         response: WorkerResponseSender,
     },
+    CollapsedPending {
+        storage_key: StorageKey,
+        responses: Vec<DeferredWorkerResponse>,
+        mutation_response_index: usize,
+        failure_state: KeyedVisibleState,
+    },
 }
 
 fn send_success(responses: Vec<DeferredWorkerResponse>) {
     for response in responses {
         response.sender.send(Ok(response.value));
     }
+}
+
+fn send_pending_success(
+    mut responses: Vec<DeferredWorkerResponse>,
+    mutation_response_index: usize,
+    outcome: KeyedOutcome,
+) {
+    let response = responses
+        .get_mut(mutation_response_index)
+        .expect("collapsed mutation response index is in bounds");
+    response.value = outcome_response(outcome);
+    send_success(responses);
 }
 
 fn send_failure(responses: Vec<DeferredWorkerResponse>, message: &str) {
@@ -601,6 +629,7 @@ fn finish_scheduler_lane(
         let CollapsedLaneBatch {
             operation,
             responses,
+            mutation_response_index,
             success_state,
             failure_state,
         } = batch;
@@ -609,6 +638,7 @@ fn finish_scheduler_lane(
             storage_key,
             completion: RunningCompletion::Collapsed {
                 responses,
+                mutation_response_index,
                 success_state,
                 failure_state,
             },
@@ -648,53 +678,80 @@ pub(super) async fn worker_loop(
                     for result in completed {
                         let index = deferred_completions
                             .iter()
-                            .position(|completion| {
-                                matches!(
-                                    completion,
-                                    DeferredLaneCompletion::Pending { storage_key, .. }
-                                        if *storage_key == result.storage_key
-                                )
+                            .position(|completion| match completion {
+                                DeferredLaneCompletion::Pending { storage_key, .. }
+                                | DeferredLaneCompletion::CollapsedPending {
+                                    storage_key, ..
+                                } => *storage_key == result.storage_key,
+                                DeferredLaneCompletion::Batch { .. } => false,
                             })
                             .expect("completed capacity mutation has a deferred response");
                         let completion = deferred_completions.swap_remove(index);
-                        let DeferredLaneCompletion::Pending {
-                            storage_key,
-                            response,
-                        } = completion
-                        else {
-                            unreachable!("capacity completion matched a non-pending response");
-                        };
-                        response.send(Ok(outcome_response(result.outcome)));
-                        if let Some(running) = finish_scheduler_lane(
-                            &mut cache,
-                            &mut scheduler,
-                            storage_key,
-                            result.visible_state,
-                        ) {
-                            inflight.push(run_keyed_command(running));
+                        match completion {
+                            DeferredLaneCompletion::Pending {
+                                storage_key,
+                                response,
+                            } => {
+                                response.send(Ok(outcome_response(result.outcome)));
+                                if let Some(running) = finish_scheduler_lane(
+                                    &mut cache,
+                                    &mut scheduler,
+                                    storage_key,
+                                    result.visible_state,
+                                ) {
+                                    inflight.push(run_keyed_command(running));
+                                }
+                            }
+                            DeferredLaneCompletion::CollapsedPending {
+                                storage_key,
+                                responses,
+                                mutation_response_index,
+                                ..
+                            } => {
+                                send_pending_success(
+                                    responses,
+                                    mutation_response_index,
+                                    result.outcome,
+                                );
+                                if let Some(running) = finish_scheduler_lane(
+                                    &mut cache,
+                                    &mut scheduler,
+                                    storage_key,
+                                    result.visible_state,
+                                ) {
+                                    inflight.push(run_keyed_command(running));
+                                }
+                            }
+                            DeferredLaneCompletion::Batch { .. } => {
+                                unreachable!("capacity completion matched a flush batch")
+                            }
                         }
                     }
                     if capacity_ready {
                         for completion in deferred_completions.drain(..) {
-                            let DeferredLaneCompletion::Batch {
-                                storage_key,
-                                responses,
-                                success_state,
-                                ..
-                            } = completion
-                            else {
-                                unreachable!(
-                                    "capacity reported ready with an unresolved mutation"
-                                );
-                            };
-                            send_success(responses);
-                            if let Some(running) = finish_scheduler_lane(
-                                &mut cache,
-                                &mut scheduler,
-                                storage_key,
-                                success_state,
-                            ) {
-                                inflight.push(run_keyed_command(running));
+                            match completion {
+                                DeferredLaneCompletion::Batch {
+                                    storage_key,
+                                    responses,
+                                    success_state,
+                                    ..
+                                } => {
+                                    send_success(responses);
+                                    if let Some(running) = finish_scheduler_lane(
+                                        &mut cache,
+                                        &mut scheduler,
+                                        storage_key,
+                                        success_state,
+                                    ) {
+                                        inflight.push(run_keyed_command(running));
+                                    }
+                                }
+                                DeferredLaneCompletion::Pending { .. }
+                                | DeferredLaneCompletion::CollapsedPending { .. } => {
+                                    unreachable!(
+                                        "capacity reported ready with an unresolved mutation"
+                                    );
+                                }
                             }
                         }
                     }
@@ -719,6 +776,16 @@ pub(super) async fn worker_loop(
                                 cache.cancel_pending_keyed_mutation(storage_key);
                                 response.send(Err(KvError::Worker(message.clone())));
                                 (storage_key, None)
+                            }
+                            DeferredLaneCompletion::CollapsedPending {
+                                storage_key,
+                                responses,
+                                failure_state,
+                                ..
+                            } => {
+                                cache.cancel_pending_keyed_mutation(storage_key);
+                                send_failure(responses, &message);
+                                (storage_key, Some(failure_state))
                             }
                         };
                         if let Some(running) = finish_scheduler_lane(
@@ -819,6 +886,19 @@ pub(super) async fn worker_loop(
                                 response.send(Err(KvError::NoCapacity));
                                 (storage_key, None)
                             }
+                            DeferredLaneCompletion::CollapsedPending {
+                                storage_key,
+                                responses,
+                                failure_state,
+                                ..
+                            } => {
+                                cache.cancel_pending_keyed_mutation(storage_key);
+                                send_failure(
+                                    responses,
+                                    "write cannot be admitted without evicting protected items",
+                                );
+                                (storage_key, Some(failure_state))
+                            }
                         };
                         if let Some(running) = finish_scheduler_lane(
                             &mut cache,
@@ -882,6 +962,19 @@ pub(super) async fn worker_loop(
                     },
                     RunningCompletion::Collapsed {
                         responses,
+                        mutation_response_index,
+                        failure_state,
+                        ..
+                    } if pending => DeferredLaneCompletion::CollapsedPending {
+                        storage_key: completed.storage_key,
+                        responses,
+                        mutation_response_index: mutation_response_index
+                            .expect("collapsed pending mutation has a response"),
+                        failure_state,
+                    },
+                    RunningCompletion::Collapsed {
+                        responses,
+                        mutation_response_index: _,
                         success_state,
                         failure_state,
                     } => match outcome {
@@ -918,9 +1011,12 @@ pub(super) async fn worker_loop(
                         unreachable!("a pending completion must require capacity work");
                     };
                     send_success(responses);
-                    if let Some(running) =
-                        finish_scheduler_lane(&mut cache, &mut scheduler, storage_key, success_state)
-                    {
+                    if let Some(running) = finish_scheduler_lane(
+                        &mut cache,
+                        &mut scheduler,
+                        storage_key,
+                        success_state,
+                    ) {
                         inflight.push(run_keyed_command(running));
                     }
                 }
