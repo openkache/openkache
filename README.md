@@ -293,8 +293,10 @@ cargo server-build \
   --features allocator-mimalloc,channel-crossfire,quic-noq
 ```
 
-The allocator features are mutually exclusive. The server reports the selected
-allocator during startup.
+The supported choices are `allocator-jemalloc` (the default),
+`allocator-system`, `allocator-mimalloc`, and `allocator-snmalloc`. The
+features are mutually exclusive, and a server binary must select exactly one.
+The server reports the selected allocator during startup.
 
 ### Server channel
 

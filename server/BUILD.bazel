@@ -12,6 +12,12 @@ load(
 
 package(default_visibility = ["//visibility:public"])
 
+SERVER_DEFAULT_FEATURES = [
+    "allocator-jemalloc",
+    "channel-kanal",
+    "quic-noq",
+]
+
 filegroup(
     name = "server_source_tree",
     srcs = glob(["src/**/*.rs"]),
@@ -53,6 +59,11 @@ alias(
 )
 
 alias(
+    name = "server_optional_jemallocator",
+    actual = "@crates//tikv-jemallocator",
+)
+
+alias(
     name = "server_optional_kanal",
     actual = "@crates//kanal",
 )
@@ -74,7 +85,10 @@ alias(
 
 filegroup(
     name = "runtime_sources",
-    srcs = ["Cargo.toml"] + glob(["src/**"]),
+    srcs = [
+        "BUILD.bazel",
+        "Cargo.toml",
+    ] + glob(["src/**"]),
 )
 
 rust_library(
@@ -84,11 +98,7 @@ rust_library(
         exclude = ["src/bin/**"],
     ),
     aliases = crate_aliases("server"),
-    crate_features = [
-        "allocator-jemalloc",
-        "channel-kanal",
-        "quic-noq",
-    ],
+    crate_features = SERVER_DEFAULT_FEATURES,
     crate_name = "openkache",
     crate_root = "src/lib.rs",
     edition = RUST_EDITION,
@@ -106,11 +116,17 @@ rust_binary(
         "src/bin/openkache_server.rs",
     ],
     aliases = crate_aliases("server"),
+    crate_features = SERVER_DEFAULT_FEATURES,
     crate_name = "openkache_server",
     crate_root = "src/bin/openkache_server.rs",
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
-    deps = dedupe_labels([":openkache_server"] + cargo_deps("server")),
+    deps = dedupe_labels([
+        ":openkache_server",
+        ":server_optional_event_listener",
+        ":server_optional_jemallocator",
+        ":server_optional_kanal",
+    ] + cargo_deps("server")),
 )
 
 rust_binary(
