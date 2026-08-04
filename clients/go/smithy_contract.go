@@ -21,12 +21,15 @@ const (
 
 // Smithy operation values carried by the native ABI.
 const (
-	SmithyOpcodePing   uint32 = 1
-	SmithyOpcodeGet    uint32 = 2
-	SmithyOpcodeSet    uint32 = 3
-	SmithyOpcodeDelete uint32 = 4
-	SmithyOpcodeStats  uint32 = 5
-	SmithyOpcodeSync   uint32 = 6
+	SmithyOpcodePing                  uint32 = 1
+	SmithyOpcodeGet                   uint32 = 2
+	SmithyOpcodeSet                   uint32 = 3
+	SmithyOpcodeDelete                uint32 = 4
+	SmithyOpcodeStats                 uint32 = 5
+	SmithyOpcodeSync                  uint32 = 6
+	SmithyOpcodeNamespaceOpen         uint32 = 7
+	SmithyOpcodeNamespaceUpdatePolicy uint32 = 8
+	SmithyOpcodeNamespaceDelete       uint32 = 9
 )
 
 // Smithy native ABI values shared by language adapters.
@@ -34,9 +37,9 @@ const (
 	// SmithyFFIABIVersion is the native ABI version implemented by the core.
 	SmithyFFIABIVersion uint32 = 2
 	// SmithyFFIOperationGetJson identifies the native operation GetJson.
-	SmithyFFIOperationGetJson uint32 = 7
+	SmithyFFIOperationGetJson uint32 = 16
 	// SmithyFFIOperationSetJson identifies the native operation SetJson.
-	SmithyFFIOperationSetJson uint32 = 8
+	SmithyFFIOperationSetJson uint32 = 17
 	// SmithyFFIOperationReconnect identifies the native operation Reconnect.
 	SmithyFFIOperationReconnect uint32 = 4294967041
 	// SmithyFFIResultError is the native ABI result kind for Error.

@@ -46,8 +46,9 @@ below.
 - **Lane**: One client-initiated bidirectional QUIC stream.
 - **Frame**: One complete request or response encoded as specified below.
 - **Item ID**: The exact 32-octet identifier used for cache equality.
-- **Account**: The authenticated tenant scope that owns namespaces.
-- **Namespace**: A named account-local collection of Item IDs with default
+- **Account**: A deployment-defined authenticated identity. Version 1 does not
+  make an account the owner or scope of a namespace.
+- **Namespace**: A named server-wide collection of Item IDs with default
   expiration and eviction policies.
 - **Namespace ID**: The server-assigned positive 64-bit identity of a
   namespace used in wire frames.
@@ -58,9 +59,9 @@ below.
   is defined by this document.
 - **Canonical `vu128`**: The unique encoding selected by the unsigned 64-bit
   rules in this document.
-- **Expiration policy**: The item-level choice among inheriting a namespace
+- **Expiration mode**: The item-level choice among inheriting a namespace
   default, never expiring by TTL, or using an explicit TTL.
-- **Eviction policy**: The item-level choice among inheriting a namespace
+- **Eviction mode**: The item-level choice among inheriting a namespace
   default, being eligible for capacity eviction, or being protected from
   capacity eviction.
 - **Eviction algorithm**: The namespace-level selection algorithm (for example,
@@ -226,7 +227,7 @@ the canonical encoding.
 | Field | Limit |
 |---|---:|
 | Namespace ID | exactly 8 octets; numeric value `1..=2^64 - 1` |
-| Namespace name | `0..=255` UTF-8 octets; zero selects the account default |
+| Namespace name | `0..=255` UTF-8 octets; zero is a valid empty name |
 | Item ID | exactly 32 octets when present |
 | `SET` request value | `0..=67,108,864` octets |
 | Response payload | `0..=67,108,864` octets |
@@ -238,11 +239,14 @@ smaller operational item limit. A request within the wire ceiling but above
 the server limit receives `TooLarge`, and the server MUST reject it before
 applying a mutation.
 
-The largest valid request is 67,108,919 octets: a `SET` with an eight-octet
-`namespace_id`, one flags octet, the four-octet maximum `value_len`, a
-32-octet Item ID, a nine-octet TTL, and a 64 MiB value. The largest valid
-response is 67,108,869 octets: one status octet, a four-octet maximum
-`payload_len`, and a 64 MiB payload.
+The largest valid `SET` request is 67,108,924 octets: an opcode, an
+eight-octet `namespace_id`, one flags octet, a 32-octet Item ID, a nine-octet
+TTL, a nine-octet maximum `value_len`, and a 64 MiB value. The largest valid
+`NAMESPACE_OPEN` request is 268 octets: an opcode, two flag/length octets, a
+255-octet name, and a ten-octet maximum namespace policy. The
+`MAX_REQUEST_FRAME_BYTES` receive limit is the larger of those operation
+limits. The largest valid response is 67,108,874 octets: one status octet, a
+nine-octet maximum `payload_len`, and a 64 MiB payload.
 
 ## Request frames
 
@@ -323,10 +327,10 @@ described in [Namespace policy](#namespace-policy).
 
 ### Namespace
 
-The public API addresses a namespace by its account-local name. Namespace
+The public API addresses a namespace by its server-wide name. Namespace
 management uses the same request/response protocol as data operations; it does
-not require a separate control-plane transport. A client MAY obtain a
-namespace handle and use it for all operations:
+not require a separate control-plane transport. A client MAY obtain a namespace
+handle and use it for all operations:
 
 ```text
 cache = client.namespace("cache")       # resolves or opens by name
@@ -334,15 +338,15 @@ cache.set(item_id, value, options)
 ```
 
 `namespace_id` is a fixed eight-octet `u64be` in the numeric range
-`1..=2^64 - 1`. The server assigns it; it is an opaque, stable identity within
-the owning account. `0` is reserved and MUST be rejected. The ID is carried
-per request rather than bound to a lane, so a lane may be reused for different
-namespaces and retries can be encoded deterministically.
+`1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
+identity. `0` is reserved and MUST be rejected. The ID is carried per request
+rather than bound to a lane, so a lane may be reused for different namespaces
+and retries can be encoded deterministically.
 
-Every account has a server-provided default namespace with a non-zero
-`namespace_id`. An API MAY expose `client.set(item_id, value, options)` as
-shorthand for that namespace. A namespace ID of zero is never a
-default-namespace sentinel.
+The wire protocol has no default namespace concept. An SDK MAY expose
+`client.set(item_id, value, options)` as a convenience shorthand, but it MUST
+resolve a configured namespace name through `NAMESPACE_OPEN` and then send the
+returned non-zero ID. A namespace ID of zero is never a selector.
 
 The `NAMESPACE_OPEN` name field has a one-octet length:
 
@@ -350,30 +354,33 @@ The `NAMESPACE_OPEN` name field has a one-octet length:
 name_len:u8 | name:name_len
 ```
 
-`name_len = 0` selects the account's default namespace and carries no name
-octets. The `CreateIfMissing` flag MUST be clear when `name_len = 0`; the
-default namespace already exists and cannot be created by this operation.
+`name_len = 0` is the valid empty namespace name and carries no name octets.
+It may be used with either value of `CreateIfMissing`.
 
-For a named namespace, `name_len` MUST be `1..=255` and `name` MUST be valid
+For any namespace name, `name_len` MUST be `0..=255` and `name` MUST be valid
 UTF-8. The length is the UTF-8 octet count, not the number of Unicode scalar
 values. Names are compared by their exact UTF-8 octets, are case-sensitive,
-and are not case-folded or Unicode-normalized. A name MUST NOT contain a NUL,
-Unicode control character, `/`, or `\`; `.` and `..` are reserved and invalid.
-The empty name is reserved for the default namespace and is not a named
-namespace. Named namespace names are unique within an account.
+and are not case-folded or Unicode-normalized. The wire protocol imposes no
+path, shell, or cloud-provider naming profile. The empty name is an ordinary
+namespace name. Namespace names are unique within one server.
+
+Namespace ownership and authorization are deployment concerns. A deployment
+MAY associate an owner with a namespace and MAY grant other authenticated
+accounts access through an ACL, but those identities and grants are not fields
+in a v1 frame. The namespace name and ID do not change when access is shared.
 
 These rules are protocol rules, not cloud-provider resource-name rules. An SDK
-MAY offer an additional cloud-portable validator (for example, lowercase
-ASCII `a-z0-9-` with a 3–63 octet limit), but the wire protocol does not require
-that narrower profile.
+MAY offer an additional cloud-portable validator (for example, lowercase ASCII
+`a-z0-9-` with a 3–63 octet limit), but the wire protocol does not require that
+narrower profile.
 
 `GET`, `SET`, `DELETE`, `STATS`, and `SYNC` are namespace-scoped and carry a
 `namespace_id`. `PING` is connection-scoped and carries none. `NAMESPACE_OPEN`
 resolves a name to a namespace descriptor and can create a missing named
 namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
 optimistic-concurrency check. `NAMESPACE_DELETE` deletes an empty named
-namespace with an optimistic-concurrency check. A default namespace MUST NOT
-be deleted.
+namespace with an optimistic-concurrency check. Any namespace, including the
+empty-name namespace, may be deleted when it is empty.
 
 An item is identified by the pair `(namespace_id, item_id)`. The same 32-octet
 Item ID in two namespaces denotes two independent items.
@@ -420,7 +427,7 @@ namespace.resolve(name)
     -> NAMESPACE_OPEN with CreateIfMissing clear
 
 namespace.open_or_create(name, policy)
-    -> NAMESPACE_OPEN with CreateIfMissing set (name MUST be non-empty)
+    -> NAMESPACE_OPEN with CreateIfMissing set (empty name is allowed)
 
 namespace.update_policy(id, expected_revision, policy)
     -> NAMESPACE_UPDATE_POLICY
@@ -441,13 +448,13 @@ A namespace has a default expiration policy, a default eviction policy, and an
 independent rule for whether each default may be overridden by an item request.
 
 ```rust
-enum ExpirationPolicy {
+enum ExpirationMode {
     Inherit,       // use the namespace default
     NoExpiry,      // no TTL-based expiration
     ExplicitTtl,   // SET carries ttl_ms
 }
 
-enum EvictionPolicy {
+enum EvictionMode {
     Inherit,            // use the namespace default
     Evictable,          // eligible for the namespace eviction algorithm
     EvictionProtected,  // never selected for capacity eviction
@@ -476,9 +483,9 @@ enum Condition {
 
 struct SetOptions {
     condition: Condition,
-    expiration_policy: ExpirationPolicy,
-    ttl_ms: Option<u64>, // required iff expiration_policy == ExplicitTtl
-    eviction_policy: EvictionPolicy,
+    expiration_mode: ExpirationMode,
+    ttl_ms: Option<u64>, // required iff expiration_mode == ExplicitTtl
+    eviction_mode: EvictionMode,
 }
 
 struct NamespacePolicy {
@@ -524,7 +531,7 @@ TTL is encoded in the namespace configuration, not in a request. `EvictionDefaul
 is either `Evictable` or `EvictionProtected`; neither namespace default may be
 `Inherit`.
 
-`SET` carries the item-level `ExpirationPolicy` and `EvictionPolicy` selections
+`SET` carries the item-level `ExpirationMode` and `EvictionMode` selections
 in its flags. `Inherit` resolves to the namespace default. An explicit item
 selection is accepted only when the corresponding namespace
 `OverridePolicy` is `Allowed`; otherwise the server returns `PolicyConflict`
@@ -539,7 +546,7 @@ requests that select that explicit override. An inherited policy is resolved
 against the namespace policy current at the `SET` linearization point.
 
 At the public API, `ttl_ms` MUST be present exactly when
-`expiration_policy == ExplicitTtl` and MUST be positive. It MUST be absent for
+`expiration_mode == ExplicitTtl` and MUST be positive. It MUST be absent for
 `Inherit` and `NoExpiry`; a client MUST reject that invalid combination before
 encoding a frame.
 
@@ -684,10 +691,10 @@ deployment durability contract is outside the frame protocol.
 07 | open_flags:u8 | name_len:u8 | name:name_len | [namespace_policy]
 ```
 
-`name_len = 0` resolves the account's default namespace. A non-empty name
-resolves the matching account-local named namespace. With `CreateIfMissing`
-set, an absent non-empty name is created using the supplied policy. Existing
-names are never overwritten by `CreateIfMissing`.
+`name_len = 0` resolves the empty-name namespace. A non-empty name resolves the
+matching server-wide namespace. With `CreateIfMissing` set, an absent name
+(including the empty name) is created using the supplied policy.
+Existing names are never overwritten by `CreateIfMissing`.
 
 - Existing namespace: `Ok` with a `namespace_descriptor` payload.
 - Newly created namespace: `Created` with a `namespace_descriptor` payload.
@@ -696,8 +703,7 @@ names are never overwritten by `CreateIfMissing`.
 
 The returned descriptor contains the server-assigned ID, current revision, and
 effective namespace policy. The response does not repeat the name because the
-client already supplied it; for the default namespace, `name_len = 0` provides
-the same context.
+client already supplied it.
 
 ### `NAMESPACE_UPDATE_POLICY`
 
@@ -707,11 +713,11 @@ the same context.
 08 | namespace_id:u64be | expected_revision:u64be | namespace_policy
 ```
 
-The server checks authorization, namespace existence, and
-`expected_revision`, then atomically replaces the namespace policy and
-increments the revision. A successful response is `Ok` with the updated
-`namespace_descriptor` payload. A revision mismatch returns `Conflict` and
-makes no policy change.
+The server checks namespace existence and `expected_revision`, then atomically
+replaces the namespace policy and increments the revision. Authorization is
+deployment-specific because v1 has no owner or account field. A successful
+response is `Ok` with the updated `namespace_descriptor` payload. A revision
+mismatch returns `Conflict` and makes no policy change.
 
 Policy changes apply only to future `SET` operations. Existing items retain the
 expiration deadline and resolved eviction policy that were stored when they
@@ -727,8 +733,10 @@ were written.
 
 The only valid v1 `delete_flags` value is `00` (`IfEmpty`). The server checks
 the revision and atomically tests whether the namespace has any logically
-present items. A successful deletion returns `Deleted` with an empty payload.
-The default namespace cannot be deleted and returns `Forbidden`.
+present items. Authorization is deployment-specific because v1 has no owner or
+account field. A successful deletion returns `Deleted` with an empty payload.
+The namespace is deleted when it is empty; there is no reserved default
+namespace exception in v1.
 
 ## Response frames
 
@@ -859,9 +867,8 @@ NAMESPACE_DELETE:
 
 The brackets indicate fields present only for `SET` or
 `NAMESPACE_OPEN` with `CreateIfMissing`. The namespace ID and revision occupy
-eight octets whenever present. `name_len = 0` is valid only as the default
-namespace selector; a non-empty name must satisfy the UTF-8 and name rules
-above.
+eight octets whenever present. `name_len = 0` is a valid empty name; every
+name must satisfy the UTF-8 and name rules above.
 
 A receiver MUST enforce the 64 MiB value ceiling and any smaller server limit
 before allocating or reading the value body. A declared value above either
@@ -1031,14 +1038,14 @@ field and an empty value.
 
 ### Namespace management
 
-Resolve the account default namespace:
+Resolve the empty-name namespace:
 
 ```text
 07 00 00
 ```
 
 This is `NAMESPACE_OPEN` with `open_flags = 00` and `name_len = 00`. It has no
-name or policy bytes.
+name or policy bytes; the empty name is the namespace being resolved.
 
 Create or open the named namespace `cache`:
 
@@ -1078,8 +1085,8 @@ A protocol v1 implementation is not complete unless it:
   every namespace-scoped request;
 - supports `NAMESPACE_OPEN`, `NAMESPACE_UPDATE_POLICY`, and
   `NAMESPACE_DELETE` on the same protocol lanes;
-- treats `name_len = 0` as the account default namespace selector and validates
-  named UTF-8 names as specified;
+- treats `name_len = 0` as a valid empty namespace name and validates all
+  UTF-8 names as specified;
 - uses a one-octet namespace name length and enforces the 255-octet ceiling;
 - starts namespace revisions at one and enforces
   `expected_revision` on policy updates and deletion;
@@ -1089,11 +1096,11 @@ A protocol v1 implementation is not complete unless it:
 - includes `value_len` only in `SET`;
 - validates operation-specific flags for `SET`, `NAMESPACE_OPEN`, and
   `NAMESPACE_DELETE`;
-- encodes `Any`/`IfAbsent`/`IfPresent`, `ExpirationPolicy`, and
-  `EvictionPolicy` as specified in the `SET` flags;
+- encodes `Any`/`IfAbsent`/`IfPresent`, `ExpirationMode`, and `EvictionMode` as
+  specified in the `SET` flags;
 - rejects non-canonical, truncated, wider-than-`u64`, and overflowing `vu128`;
 - validates the fixed 32-octet Item ID shape;
-- validates expiration-policy/TTL correspondence before reading a large
+- validates expiration-mode/TTL correspondence before reading a large
   value;
 - computes TTL from the mutation linearization point using a monotonic clock;
 - treats `now >= deadline` as expired;

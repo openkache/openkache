@@ -19,6 +19,8 @@ pub(crate) const ITEM_EXPIRATION_BYTES: usize = std::mem::size_of::<u64>();
 pub(crate) const TOMBSTONE_KIND: u8 = 0;
 pub(crate) const LIVE_KIND: u8 = 1;
 pub(crate) const EXPIRING_LIVE_KIND: u8 = 2;
+pub(crate) const PROTECTED_LIVE_KIND: u8 = 3;
+pub(crate) const PROTECTED_EXPIRING_LIVE_KIND: u8 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Item {
@@ -26,15 +28,25 @@ pub(crate) struct Item {
     pub(crate) value: Vec<u8>,
     pub(crate) is_tombstone: bool,
     pub(crate) expires_at_ms: u64,
+    pub(crate) eviction_protected: bool,
 }
 
 impl Item {
     pub(crate) fn live(storage_key: StorageKey, value: Vec<u8>) -> Self {
+        Self::live_with_eviction(storage_key, value, false)
+    }
+
+    pub(crate) fn live_with_eviction(
+        storage_key: StorageKey,
+        value: Vec<u8>,
+        eviction_protected: bool,
+    ) -> Self {
         Self {
             storage_key,
             value,
             is_tombstone: false,
             expires_at_ms: 0,
+            eviction_protected,
         }
     }
 
@@ -43,12 +55,22 @@ impl Item {
         value: Vec<u8>,
         expires_at_ms: u64,
     ) -> Self {
+        Self::live_expiring_with_eviction(storage_key, value, expires_at_ms, false)
+    }
+
+    pub(crate) fn live_expiring_with_eviction(
+        storage_key: StorageKey,
+        value: Vec<u8>,
+        expires_at_ms: u64,
+        eviction_protected: bool,
+    ) -> Self {
         debug_assert!(expires_at_ms > 0);
         Self {
             storage_key,
             value,
             is_tombstone: false,
             expires_at_ms,
+            eviction_protected,
         }
     }
 
@@ -59,6 +81,7 @@ impl Item {
             value: Vec::new(),
             is_tombstone: true,
             expires_at_ms: 0,
+            eviction_protected: false,
         }
     }
 
@@ -85,6 +108,7 @@ impl Item {
 pub(crate) struct ItemState {
     pub(super) is_tombstone: bool,
     pub(super) expires_at_ms: u64,
+    pub(super) eviction_protected: bool,
 }
 
 pub(crate) struct MutableSegment {
@@ -345,6 +369,7 @@ fn item_at(bucket: &[u8], item_slot: usize) -> Option<Item> {
         value: bucket[value_start..span.end].to_vec(),
         is_tombstone: state.is_tombstone,
         expires_at_ms: state.expires_at_ms,
+        eviction_protected: state.eviction_protected,
     })
 }
 
@@ -355,6 +380,7 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
             ItemState {
                 is_tombstone: true,
                 expires_at_ms: 0,
+                eviction_protected: false,
             },
             storage_key_end + ITEM_KIND_BYTES,
         ),
@@ -362,6 +388,7 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
             ItemState {
                 is_tombstone: false,
                 expires_at_ms: 0,
+                eviction_protected: false,
             },
             storage_key_end + ITEM_KIND_BYTES,
         ),
@@ -380,6 +407,35 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
                 ItemState {
                     is_tombstone: false,
                     expires_at_ms,
+                    eviction_protected: false,
+                },
+                expiration_end,
+            )
+        }
+        PROTECTED_LIVE_KIND => (
+            ItemState {
+                is_tombstone: false,
+                expires_at_ms: 0,
+                eviction_protected: true,
+            },
+            storage_key_end + ITEM_KIND_BYTES,
+        ),
+        PROTECTED_EXPIRING_LIVE_KIND => {
+            let expiration_start = storage_key_end + ITEM_KIND_BYTES;
+            let expiration_end = expiration_start + ITEM_EXPIRATION_BYTES;
+            if expiration_end > span.end {
+                return None;
+            }
+            let expires_at_ms =
+                u64::from_le_bytes(bucket[expiration_start..expiration_end].try_into().unwrap());
+            if expires_at_ms == 0 {
+                return None;
+            }
+            (
+                ItemState {
+                    is_tombstone: false,
+                    expires_at_ms,
+                    eviction_protected: true,
                 },
                 expiration_end,
             )
@@ -443,12 +499,16 @@ fn write_item_body(bucket: &mut [u8], start: usize, end: usize, item: &Item) {
     debug_assert_eq!(end - start, item.encoded_len());
     let storage_key_end = start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
     bucket[start..storage_key_end].copy_from_slice(&item.storage_key.as_bytes()[1..]);
-    bucket[storage_key_end] = if item.is_tombstone {
-        TOMBSTONE_KIND
-    } else if item.expires_at_ms != 0 {
-        EXPIRING_LIVE_KIND
-    } else {
-        LIVE_KIND
+    bucket[storage_key_end] = match (
+        item.is_tombstone,
+        item.eviction_protected,
+        item.expires_at_ms != 0,
+    ) {
+        (true, _, _) => TOMBSTONE_KIND,
+        (false, false, false) => LIVE_KIND,
+        (false, false, true) => EXPIRING_LIVE_KIND,
+        (false, true, false) => PROTECTED_LIVE_KIND,
+        (false, true, true) => PROTECTED_EXPIRING_LIVE_KIND,
     };
     let mut value_start = storage_key_end + ITEM_KIND_BYTES;
     if item.expires_at_ms != 0 {

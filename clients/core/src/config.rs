@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 
-use openkache_protocol::SetCondition;
+use openkache_protocol::{EvictionMode, ExpirationMode, SetCondition};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -453,15 +453,19 @@ impl Default for RetryPolicy {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SetOptions {
     condition: SetCondition,
+    expiration_mode: ExpirationMode,
     time_to_live_ms: Option<u64>,
+    eviction_mode: EvictionMode,
 }
 
 impl SetOptions {
-    /// Creates persistent, unconditional set behavior.
+    /// Creates unconditional set behavior inheriting namespace expiration and eviction defaults.
     pub const fn new() -> Self {
         Self {
             condition: SetCondition::None,
+            expiration_mode: ExpirationMode::Inherit,
             time_to_live_ms: None,
+            eviction_mode: EvictionMode::Inherit,
         }
     }
 
@@ -479,7 +483,40 @@ impl SetOptions {
 
     /// Applies a relative expiration in milliseconds.
     pub const fn expires_after_millis(mut self, milliseconds: u64) -> Self {
+        self.expiration_mode = ExpirationMode::ExplicitTtl;
         self.time_to_live_ms = Some(milliseconds);
+        self
+    }
+
+    /// Stores the item without a TTL-based expiration.
+    pub const fn no_expiry(mut self) -> Self {
+        self.expiration_mode = ExpirationMode::NoExpiry;
+        self.time_to_live_ms = None;
+        self
+    }
+
+    /// Resolves expiration from the selected namespace's current default.
+    pub const fn inherit_expiration(mut self) -> Self {
+        self.expiration_mode = ExpirationMode::Inherit;
+        self.time_to_live_ms = None;
+        self
+    }
+
+    /// Allows the namespace's capacity eviction algorithm to select this item.
+    pub const fn evictable(mut self) -> Self {
+        self.eviction_mode = EvictionMode::Evictable;
+        self
+    }
+
+    /// Protects this item from capacity eviction.
+    pub const fn eviction_protected(mut self) -> Self {
+        self.eviction_mode = EvictionMode::EvictionProtected;
+        self
+    }
+
+    /// Resolves eviction eligibility from the selected namespace's default.
+    pub const fn inherit_eviction(mut self) -> Self {
+        self.eviction_mode = EvictionMode::Inherit;
         self
     }
 
@@ -500,9 +537,11 @@ impl SetOptions {
                 "must be greater than zero",
             ));
         }
-        Ok(openkache_protocol::SetOptions::new(
+        Ok(openkache_protocol::SetOptions::with_policies(
             self.condition,
+            self.expiration_mode,
             self.time_to_live_ms,
+            self.eviction_mode,
         ))
     }
 }

@@ -1,19 +1,22 @@
 //! QUIC server backed by the sharded SSD-first cache runtime.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use compio::driver::ProactorBuilder;
 use compio::runtime::RuntimeBuilder;
+use futures_util::lock::Mutex as AsyncMutex;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
-    MAX_REQUEST_FRAME_BYTES, Opcode, ProtocolError, Request, Response, Status,
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId,
+    MAX_REQUEST_FRAME_BYTES, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy,
+    ProtocolError, Request, Response, SetOptions, Status,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -227,6 +230,156 @@ enum AccessPolicy {
     },
 }
 
+#[derive(Clone)]
+struct NamespaceEntry {
+    descriptor: NamespaceDescriptor,
+    name: Vec<u8>,
+    items: HashSet<ItemId>,
+    operation_lock: Arc<AsyncMutex<()>>,
+}
+
+// Namespace names and IDs are server-wide. Authentication and any future
+// owner/ACL mapping are separate authorization concerns and do not participate
+// in registry lookup.
+struct NamespaceRegistry {
+    next_id: u64,
+    by_id: HashMap<u64, NamespaceEntry>,
+    by_name: HashMap<Vec<u8>, u64>,
+}
+
+impl NamespaceRegistry {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            by_id: HashMap::new(),
+            by_name: HashMap::new(),
+        }
+    }
+
+    fn open(
+        &mut self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> std::result::Result<(Status, NamespaceDescriptor), Status> {
+        if let Some(namespace_id) = self.by_name.get(&name).copied() {
+            let descriptor = self
+                .by_id
+                .get(&namespace_id)
+                .expect("namespace name index must have an entry")
+                .descriptor;
+            return Ok((Status::Ok, descriptor));
+        }
+        if !create_if_missing {
+            return Err(Status::NamespaceNotFound);
+        }
+        let policy = policy.ok_or(Status::InvalidRequest)?;
+        let namespace_id = self.next_id;
+        self.next_id = self.next_id.checked_add(1).ok_or(Status::InternalError)?;
+        let descriptor = NamespaceDescriptor {
+            namespace_id,
+            revision: 1,
+            policy,
+        };
+        self.by_name.insert(name.clone(), namespace_id);
+        self.by_id.insert(
+            namespace_id,
+            NamespaceEntry {
+                descriptor,
+                name,
+                items: HashSet::new(),
+                operation_lock: Arc::new(AsyncMutex::new(())),
+            },
+        );
+        Ok((Status::Created, descriptor))
+    }
+
+    fn operation_lock(&self, namespace_id: u64) -> Option<Arc<AsyncMutex<()>>> {
+        self.by_id
+            .get(&namespace_id)
+            .map(|entry| Arc::clone(&entry.operation_lock))
+    }
+
+    fn descriptor(&self, namespace_id: u64) -> Option<NamespaceDescriptor> {
+        self.by_id.get(&namespace_id).map(|entry| entry.descriptor)
+    }
+
+    fn policy(&self, namespace_id: u64) -> Option<NamespacePolicy> {
+        self.by_id
+            .get(&namespace_id)
+            .map(|entry| entry.descriptor.policy)
+    }
+
+    fn update(
+        &mut self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> std::result::Result<NamespaceDescriptor, Status> {
+        let entry = self
+            .by_id
+            .get_mut(&namespace_id)
+            .ok_or(Status::NamespaceNotFound)?;
+        if entry.descriptor.revision != expected_revision {
+            return Err(Status::Conflict);
+        }
+        entry.descriptor.revision = entry
+            .descriptor
+            .revision
+            .checked_add(1)
+            .ok_or(Status::InternalError)?;
+        entry.descriptor.policy = policy;
+        Ok(entry.descriptor)
+    }
+
+    fn delete(
+        &mut self,
+        namespace_id: u64,
+        expected_revision: u64,
+    ) -> std::result::Result<(), Status> {
+        let entry = self
+            .by_id
+            .get(&namespace_id)
+            .ok_or(Status::NamespaceNotFound)?;
+        if entry.descriptor.revision != expected_revision {
+            return Err(Status::Conflict);
+        }
+        if !entry.items.is_empty() {
+            return Err(Status::NamespaceNotEmpty);
+        }
+        let name = entry.name.clone();
+        self.by_id.remove(&namespace_id);
+        self.by_name.remove(&name);
+        Ok(())
+    }
+
+    fn mark_set(&mut self, namespace_id: u64, item_id: ItemId, outcome: SetOutcome) {
+        if matches!(outcome, SetOutcome::Created | SetOutcome::Replaced)
+            && let Some(entry) = self.by_id.get_mut(&namespace_id)
+        {
+            entry.items.insert(item_id);
+        }
+    }
+
+    fn mark_delete(&mut self, namespace_id: u64, item_id: ItemId, deleted: bool) {
+        if deleted && let Some(entry) = self.by_id.get_mut(&namespace_id) {
+            entry.items.remove(&item_id);
+        }
+    }
+
+    fn tracked_items(&self, namespace_id: u64) -> Option<Vec<ItemId>> {
+        self.by_id
+            .get(&namespace_id)
+            .map(|entry| entry.items.iter().copied().collect())
+    }
+
+    fn prune_item(&mut self, namespace_id: u64, item_id: ItemId) {
+        if let Some(entry) = self.by_id.get_mut(&namespace_id) {
+            entry.items.remove(&item_id);
+        }
+    }
+}
+
 impl AccessPolicy {
     fn permits_administration(&self, peer_certificate: Option<&CertificateDer<'_>>) -> bool {
         match self {
@@ -331,6 +484,7 @@ pub struct KacheServer {
     tls: Arc<ServerTlsConfig>,
     access_policy: Arc<AccessPolicy>,
     cache: Arc<ThreadedKvkache>,
+    namespaces: Arc<Mutex<NamespaceRegistry>>,
     network: NetworkConfig,
     request_timeout: Duration,
     max_item_bytes: usize,
@@ -431,6 +585,7 @@ impl KacheServer {
             tls: Arc::new(tls),
             access_policy: Arc::new(access_policy),
             cache,
+            namespaces: Arc::new(Mutex::new(NamespaceRegistry::new())),
             network,
             request_timeout,
             max_item_bytes,
@@ -483,6 +638,7 @@ impl KacheServer {
             tls,
             access_policy,
             cache,
+            namespaces,
             network,
             request_timeout,
             max_item_bytes,
@@ -511,6 +667,7 @@ impl KacheServer {
                 max_stream_lanes: network.max_stream_lanes_per_connection,
                 request_budget: request_budget.clone(),
                 max_item_bytes,
+                namespaces: Arc::clone(&namespaces),
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
             let role = QuicNetworkRole {
@@ -735,6 +892,7 @@ struct NetworkWorkerLimits {
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    namespaces: Arc<Mutex<NamespaceRegistry>>,
 }
 
 async fn run_selected_endpoint(
@@ -772,6 +930,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         max_stream_lanes,
         request_budget,
         max_item_bytes,
+        namespaces,
     } = limits;
     let mut connections = FuturesUnordered::new();
     loop {
@@ -784,7 +943,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, cache, access_policy, request_timeout, max_stream_lanes,
-                        request_budget.clone(), max_item_bytes,
+                        request_budget.clone(), max_item_bytes, Arc::clone(&namespaces),
                     ));
                 }
                 _ = stopping => break,
@@ -799,7 +958,7 @@ async fn run_network_worker<E: TransportEndpoint>(
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
                         incoming, cache, access_policy, request_timeout, max_stream_lanes,
-                        request_budget.clone(), max_item_bytes,
+                        request_budget.clone(), max_item_bytes, Arc::clone(&namespaces),
                     ));
                 }
                 _ = completed => {}
@@ -821,10 +980,11 @@ async fn serve_incoming<I: TransportIncoming>(
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    namespaces: Arc<Mutex<NamespaceRegistry>>,
 ) {
     if let Ok(mut connection) = incoming.connect().await {
-        let administrator =
-            access_policy.permits_administration(connection.take_peer_certificate().as_ref());
+        let peer_certificate = connection.take_peer_certificate();
+        let administrator = access_policy.permits_administration(peer_certificate.as_ref());
         serve_connection(
             connection,
             cache,
@@ -833,6 +993,7 @@ async fn serve_incoming<I: TransportIncoming>(
             max_stream_lanes,
             request_budget,
             max_item_bytes,
+            namespaces,
         )
         .await;
     }
@@ -847,6 +1008,7 @@ async fn serve_connection<C: TransportConnection>(
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    namespaces: Arc<Mutex<NamespaceRegistry>>,
 ) {
     let mut streams = FuturesUnordered::new();
     loop {
@@ -865,6 +1027,7 @@ async fn serve_connection<C: TransportConnection>(
                         request_timeout,
                         request_budget.clone(),
                         max_item_bytes,
+                        Arc::clone(&namespaces),
                     ));
                 }
                 Err(_) => break,
@@ -884,6 +1047,7 @@ async fn serve_connection<C: TransportConnection>(
                             request_timeout,
                             request_budget.clone(),
                             max_item_bytes,
+                            Arc::clone(&namespaces),
                         ));
                     }
                     Err(_) => break,
@@ -904,6 +1068,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     request_timeout: Duration,
     request_budget: RequestBudget,
     max_item_bytes: usize,
+    namespaces: Arc<Mutex<NamespaceRegistry>>,
 ) {
     loop {
         let mut frame = match receive
@@ -971,7 +1136,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 };
                 match compio::runtime::time::timeout(
                     request_timeout,
-                    execute_request(cache, request, administrator),
+                    execute_request(cache, request, administrator, namespaces.as_ref()),
                 )
                 .await
                 {
@@ -1006,84 +1171,302 @@ async fn execute_request(
     cache: &ThreadedKvkache,
     request: Request,
     administrator: bool,
+    namespaces: &Mutex<NamespaceRegistry>,
 ) -> Response {
     let Request {
         opcode,
+        namespace_id,
         item_id,
         set_options,
         value,
+        namespace_name,
+        namespace_policy,
+        expected_revision,
+        create_if_missing,
     } = request;
+    // Serialize lifecycle and data-plane operations for one namespace while
+    // allowing unrelated namespaces to proceed concurrently. The registry
+    // mutex only protects map metadata; this async lock covers the cache
+    // operation and its corresponding item-tracking update.
+    let namespace_lock = if matches!(
+        opcode,
+        Opcode::Get
+            | Opcode::Set
+            | Opcode::Delete
+            | Opcode::Stats
+            | Opcode::Sync
+            | Opcode::NamespaceUpdatePolicy
+            | Opcode::NamespaceDelete
+    ) {
+        let namespace_id = namespace_id.expect("namespace-scoped requests have a validated ID");
+        let operation_lock = namespaces
+            .lock()
+            .ok()
+            .and_then(|registry| registry.operation_lock(namespace_id));
+        let Some(operation_lock) = operation_lock else {
+            return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+        };
+        Some(operation_lock)
+    } else {
+        None
+    };
+    let _namespace_guard = if let Some(operation_lock) = namespace_lock.as_ref() {
+        Some(operation_lock.lock().await)
+    } else {
+        None
+    };
     let result = match opcode {
         Opcode::Ping => return response_bytes(Status::Ok, b"PONG"),
-        Opcode::Get => cache
-            .get_async(item_id.expect("GET requests have a validated item ID"))
-            .await
-            .map(|value| match value {
-                Some(value) => response(Status::Ok, value.into_bytes()),
-                None => response(Status::NotFound, Vec::new()),
-            }),
-        Opcode::Set => cache
-            .set_async_with_options(
-                item_id.expect("SET requests have a validated item ID"),
-                crate::types::StoredItemValue::new(value),
-                set_options,
-            )
-            .await
-            .map(|outcome| match outcome {
-                SetOutcome::Created => response(Status::Created, Vec::new()),
-                SetOutcome::Replaced => response(Status::Replaced, Vec::new()),
-                SetOutcome::NotStored => response(Status::NotStored, Vec::new()),
-            }),
-        Opcode::Delete => cache
-            .delete_async(item_id.expect("DELETE requests have a validated item ID"))
-            .await
-            .map(|deleted| {
-                response(
-                    if deleted {
-                        Status::Deleted
-                    } else {
-                        Status::NotFound
-                    },
-                    Vec::new(),
+        Opcode::NamespaceOpen => {
+            let name = namespace_name.expect("namespace-open requests have a validated name");
+            let result = namespaces
+                .lock()
+                .map_err(|_| Status::InternalError)
+                .and_then(|mut registry| registry.open(name, create_if_missing, namespace_policy));
+            return match result {
+                Ok((status, descriptor)) => response(status, descriptor_payload(descriptor)),
+                Err(status) => response_bytes(status, b"namespace operation rejected"),
+            };
+        }
+        Opcode::NamespaceUpdatePolicy => {
+            let result = namespaces
+                .lock()
+                .map_err(|_| Status::InternalError)
+                .and_then(|mut registry| {
+                    registry.update(
+                        namespace_id.expect("namespace update has a validated ID"),
+                        expected_revision.expect("namespace update has a validated revision"),
+                        namespace_policy.expect("namespace update has a validated policy"),
+                    )
+                });
+            return match result {
+                Ok(descriptor) => response(Status::Ok, descriptor_payload(descriptor)),
+                Err(status) => response_bytes(status, b"namespace policy update rejected"),
+            };
+        }
+        Opcode::NamespaceDelete => {
+            let namespace_id = namespace_id.expect("namespace delete has a validated ID");
+            let tracked_items = namespaces
+                .lock()
+                .ok()
+                .and_then(|registry| registry.tracked_items(namespace_id))
+                .unwrap_or_default();
+            // Expired items are logically absent even if their old storage records have not
+            // been compacted yet. Prune them before the empty check so TTL does not prevent
+            // namespace deletion.
+            for item_id in tracked_items {
+                match cache.get_async_in_namespace(namespace_id, item_id).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        if let Ok(mut registry) = namespaces.lock() {
+                            registry.prune_item(namespace_id, item_id);
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            let result = namespaces
+                .lock()
+                .map_err(|_| Status::InternalError)
+                .and_then(|mut registry| {
+                    registry.delete(
+                        namespace_id,
+                        expected_revision.expect("namespace delete has a validated revision"),
+                    )
+                });
+            return match result {
+                Ok(()) => response(Status::Deleted, Vec::new()),
+                Err(status) => response_bytes(status, b"namespace deletion rejected"),
+            };
+        }
+        Opcode::Get => {
+            let namespace_id = namespace_id.expect("GET requests have a validated namespace ID");
+            if !namespace_exists(namespaces, namespace_id) {
+                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+            }
+            let item_id = item_id.expect("GET requests have a validated item ID");
+            return match cache.get_async_in_namespace(namespace_id, item_id).await {
+                Ok(Some(value)) => response(Status::Ok, value.into_bytes()),
+                Ok(None) => {
+                    if let Ok(mut registry) = namespaces.lock() {
+                        registry.prune_item(namespace_id, item_id);
+                    }
+                    response(Status::NotFound, Vec::new())
+                }
+                Err(error) => cache_error_response(error),
+            };
+        }
+        Opcode::Set => {
+            let namespace_id = namespace_id.expect("SET requests have a validated namespace ID");
+            let policy = match namespaces
+                .lock()
+                .ok()
+                .and_then(|registry| registry.policy(namespace_id))
+            {
+                Some(policy) => policy,
+                None => {
+                    return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+                }
+            };
+            let effective_options = match resolve_set_options(policy, set_options) {
+                Ok(options) => options,
+                Err(status) => return response_bytes(status, b"SET policy is disallowed"),
+            };
+            let item_id = item_id.expect("SET requests have a validated item ID");
+            let outcome = cache
+                .set_async_in_namespace(
+                    namespace_id,
+                    item_id,
+                    crate::types::StoredItemValue::new(value),
+                    effective_options,
                 )
-            }),
+                .await;
+            return match outcome {
+                Ok(outcome) => {
+                    if let Ok(mut registry) = namespaces.lock() {
+                        registry.mark_set(namespace_id, item_id, outcome);
+                    }
+                    response(
+                        match outcome {
+                            SetOutcome::Created => Status::Created,
+                            SetOutcome::Replaced => Status::Replaced,
+                            SetOutcome::NotStored => Status::NotStored,
+                        },
+                        Vec::new(),
+                    )
+                }
+                Err(error) => cache_error_response(error),
+            };
+        }
+        Opcode::Delete => {
+            let namespace_id = namespace_id.expect("DELETE requests have a validated namespace ID");
+            if !namespace_exists(namespaces, namespace_id) {
+                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+            }
+            let item_id = item_id.expect("DELETE requests have a validated item ID");
+            let deleted = cache.delete_async_in_namespace(namespace_id, item_id).await;
+            return match deleted {
+                Ok(deleted) => {
+                    if let Ok(mut registry) = namespaces.lock() {
+                        registry.mark_delete(namespace_id, item_id, deleted);
+                    }
+                    response(
+                        if deleted {
+                            Status::Deleted
+                        } else {
+                            Status::NotFound
+                        },
+                        Vec::new(),
+                    )
+                }
+                Err(error) => cache_error_response(error),
+            };
+        }
         Opcode::Stats if !administrator => {
             return response_bytes(
                 Status::Forbidden,
                 b"STATS requires administrator authorization",
             );
         }
-        Opcode::Stats => cache.stats_async().await.map(|workers| {
-            let worker_bytes = workers.iter().map(String::len).sum::<usize>();
-            let mut payload = String::with_capacity(32 + worker_bytes);
-            payload.push_str(r#"{"storage":"ssd","workers":["#);
-            for (index, worker) in workers.into_iter().enumerate() {
-                if index > 0 {
-                    payload.push(',');
-                }
-                write!(payload, "{worker:?}").expect("writing to a String cannot fail");
+        Opcode::Stats => {
+            if !namespace_exists(
+                namespaces,
+                namespace_id.expect("STATS requests have a validated namespace ID"),
+            ) {
+                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
             }
-            payload.push_str("]}");
-            response(Status::Ok, payload.into_bytes())
-        }),
+            cache.stats_async().await.map(|workers| {
+                let worker_bytes = workers.iter().map(String::len).sum::<usize>();
+                let mut payload = String::with_capacity(32 + worker_bytes);
+                payload.push_str(r#"{"storage":"ssd","workers":["#);
+                for (index, worker) in workers.into_iter().enumerate() {
+                    if index > 0 {
+                        payload.push(',');
+                    }
+                    write!(payload, "{worker:?}").expect("writing to a String cannot fail");
+                }
+                payload.push_str("]}");
+                response(Status::Ok, payload.into_bytes())
+            })
+        }
         Opcode::Sync if !administrator => {
             return response_bytes(
                 Status::Forbidden,
                 b"SYNC requires administrator authorization",
             );
         }
-        Opcode::Sync => cache
-            .sync_async()
-            .await
-            .map(|()| response(Status::Ok, Vec::new())),
+        Opcode::Sync => {
+            if !namespace_exists(
+                namespaces,
+                namespace_id.expect("SYNC requests have a validated namespace ID"),
+            ) {
+                return response_bytes(Status::NamespaceNotFound, b"namespace does not exist");
+            }
+            cache
+                .sync_async()
+                .await
+                .map(|()| response(Status::Ok, Vec::new()))
+        }
     };
     result.unwrap_or_else(cache_error_response)
+}
+
+fn namespace_exists(namespaces: &Mutex<NamespaceRegistry>, namespace_id: u64) -> bool {
+    namespaces
+        .lock()
+        .ok()
+        .and_then(|registry| registry.descriptor(namespace_id))
+        .is_some()
+}
+
+fn descriptor_payload(descriptor: NamespaceDescriptor) -> Vec<u8> {
+    descriptor
+        .encode()
+        .expect("validated namespace policy remains encodable")
+}
+
+fn resolve_set_options(
+    policy: NamespacePolicy,
+    options: SetOptions,
+) -> std::result::Result<SetOptions, Status> {
+    if options.expiration_mode != ExpirationMode::Inherit
+        && policy.expiration_override == OverridePolicy::Disallowed
+    {
+        return Err(Status::PolicyConflict);
+    }
+    if options.eviction_mode != EvictionMode::Inherit
+        && policy.eviction_override == OverridePolicy::Disallowed
+    {
+        return Err(Status::PolicyConflict);
+    }
+    let (expiration_mode, ttl_ms) = match options.expiration_mode {
+        ExpirationMode::Inherit => match policy.default_expiration {
+            ExpirationDefault::NoExpiry => (ExpirationMode::NoExpiry, None),
+            ExpirationDefault::FixedTtl { ttl_ms } => (ExpirationMode::ExplicitTtl, Some(ttl_ms)),
+        },
+        ExpirationMode::NoExpiry => (ExpirationMode::NoExpiry, None),
+        ExpirationMode::ExplicitTtl => (ExpirationMode::ExplicitTtl, options.ttl_ms),
+    };
+    let eviction_mode = match options.eviction_mode {
+        EvictionMode::Inherit => match policy.default_eviction {
+            EvictionDefault::Evictable => EvictionMode::Evictable,
+            EvictionDefault::EvictionProtected => EvictionMode::EvictionProtected,
+        },
+        selected => selected,
+    };
+    Ok(SetOptions::with_policies(
+        options.condition,
+        expiration_mode,
+        ttl_ms,
+        eviction_mode,
+    ))
 }
 
 /// Maps cache failures to stable protocol statuses and messages.
 fn cache_error_response(error: KvError) -> Response {
     let status = match error {
         KvError::Timeout(_) => Status::Timeout,
+        KvError::NoCapacity => Status::NoCapacity,
         KvError::TableFull | KvError::CapacityExhausted { .. } => Status::Overloaded,
         KvError::ItemTooLarge { .. } | KvError::BlobSegmentFull { .. } => Status::TooLarge,
         KvError::InvalidRequest(_) => Status::InvalidRequest,

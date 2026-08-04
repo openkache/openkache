@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{SetCondition, SetOptions};
+use openkache_protocol::{EvictionMode, SetCondition, SetOptions};
 
 use super::*;
 use crate::types::StoredItemValue;
@@ -261,6 +261,7 @@ impl PreparedReadCandidate {
                     state: ItemState {
                         is_tombstone: item.is_tombstone,
                         expires_at_ms: item.expires_at_ms,
+                        eviction_protected: item.eviction_protected,
                     },
                     value: ObservedValue::None,
                 }))
@@ -398,6 +399,7 @@ enum PendingKeyedMutation {
         storage_key: StorageKey,
         value: StoredItemValue,
         expires_at_ms: u64,
+        eviction_protected: bool,
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
         previous_live: bool,
@@ -476,6 +478,7 @@ struct EvictionWork {
     now_ms: u64,
     retiring: bool,
     has_large_value_extent: bool,
+    protected_item_found: bool,
 }
 
 pub(crate) struct Kvkache {
@@ -874,6 +877,7 @@ impl Kvkache {
             storage_key,
             &value.bytes,
             expires_at_ms,
+            matches!(options.eviction_mode, EvictionMode::EvictionProtected),
             previous_location,
             previous_mutable_value,
         )? {
@@ -893,6 +897,10 @@ impl Kvkache {
                 storage_key,
                 value,
                 expires_at_ms,
+                eviction_protected: matches!(
+                    options.eviction_mode,
+                    EvictionMode::EvictionProtected
+                ),
                 previous: previous_location,
                 previous_mutable_value,
                 previous_live,
@@ -944,6 +952,7 @@ impl Kvkache {
                 storage_key,
                 value,
                 expires_at_ms,
+                eviction_protected,
                 previous,
                 previous_mutable_value,
                 previous_live,
@@ -952,6 +961,7 @@ impl Kvkache {
                     storage_key,
                     &value.bytes,
                     expires_at_ms,
+                    eviction_protected,
                     previous,
                     previous_mutable_value,
                 )?
@@ -960,6 +970,7 @@ impl Kvkache {
                         storage_key,
                         value,
                         expires_at_ms,
+                        eviction_protected,
                         previous,
                         previous_mutable_value,
                         previous_live,
@@ -1066,6 +1077,7 @@ impl Kvkache {
                 storage_key,
                 &value.bytes,
                 expires_at_ms,
+                matches!(options.eviction_mode, EvictionMode::EvictionProtected),
                 previous_location,
                 previous_mutable_value,
             )? {
@@ -1133,6 +1145,7 @@ impl Kvkache {
         storage_key: StorageKey,
         value: &[u8],
         expires_at_ms: u64,
+        eviction_protected: bool,
         previous_location: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
     ) -> Result<Option<MutablePlacement>> {
@@ -1167,6 +1180,7 @@ impl Kvkache {
                     storage_key,
                     value,
                     expires_at_ms,
+                    eviction_protected,
                     large,
                     blob,
                     previous_mutable_value,
@@ -1188,7 +1202,12 @@ impl Kvkache {
             let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
                 continue;
             };
-            let item = live_item(storage_key, staged.encoded, expires_at_ms);
+            let item = live_item(
+                storage_key,
+                staged.encoded,
+                expires_at_ms,
+                eviction_protected,
+            );
             let location = generation.segment.append(item, true).ok_or_else(|| {
                 KvError::Worker("chosen mutable SG Bucket rejected an Item".into())
             })?;
@@ -1645,6 +1664,7 @@ impl Kvkache {
             now_ms: unix_time_ms(),
             retiring: false,
             has_large_value_extent,
+            protected_item_found: false,
         };
         schedule_eviction_read(&self.data, &self.config, &mut eviction);
         self.eviction = Some(eviction);
@@ -1719,7 +1739,12 @@ impl Kvkache {
             while extent.next_bucket * BUCKET_BYTES < extent.buffer.len()
                 && (cleaned == 0 || (cleaned < 64 && Instant::now() < deadline))
             {
-                self.clean_eviction_bucket(eviction.victim.logical_sg_id, eviction.now_ms, extent)?;
+                self.clean_eviction_bucket(
+                    eviction.victim.logical_sg_id,
+                    eviction.now_ms,
+                    extent,
+                    &mut eviction.protected_item_found,
+                )?;
                 extent.next_bucket += 1;
                 cleaned += 1;
             }
@@ -1736,6 +1761,10 @@ impl Kvkache {
             return Poll::Pending;
         }
 
+        if eviction.protected_item_found {
+            return Poll::Ready(Err(KvError::NoCapacity));
+        }
+
         self.directory
             .begin_retiring(eviction.victim.logical_sg_id)?;
         eviction.reader_guard.take();
@@ -1750,6 +1779,7 @@ impl Kvkache {
         logical_sg_id: u32,
         now_ms: u64,
         extent: &EvictionExtent,
+        protected_item_found: &mut bool,
     ) -> Result<()> {
         let bucket_offset = extent.next_bucket * BUCKET_BYTES;
         let bucket_index = (extent.offset + bucket_offset) / BUCKET_BYTES;
@@ -1770,6 +1800,35 @@ impl Kvkache {
                 sg_index: logical_sg_id,
                 bucket_hash_index,
             };
+            // Ignore stale records that no longer back the table entry. This is important for
+            // protected items that were explicitly deleted or replaced while their generation
+            // was stable.
+            if !self
+                .table
+                .candidate_locations(&item.storage_key)
+                .contains(&location)
+            {
+                continue;
+            }
+            let replacing_protected_item = self.pending_keyed_mutations.iter().any(|mutation| {
+                matches!(
+                    mutation,
+                    PendingKeyedMutation::Set {
+                        storage_key,
+                        previous: Some(previous),
+                        previous_live: true,
+                        ..
+                    } if *storage_key == item.storage_key && previous.sg_index == logical_sg_id
+                )
+            });
+            if item.eviction_protected && item.is_live_at(now_ms) && !replacing_protected_item {
+                // Capacity eviction may remove only resolved Evictable items. Keep protected
+                // records in the generation and report NoCapacity once the victim has been
+                // scanned; the generation log remains pinned so the protected value stays
+                // readable.
+                *protected_item_found = true;
+                continue;
+            }
             if self.table.remove(&item.storage_key, location) {
                 if item.is_live_at(now_ms) {
                     self.live_keys = self.live_keys.saturating_sub(1);
@@ -2111,6 +2170,7 @@ fn item_is_live_now(item: &Item) -> bool {
     item_state_is_live_now(ItemState {
         is_tombstone: item.is_tombstone,
         expires_at_ms: item.expires_at_ms,
+        eviction_protected: item.eviction_protected,
     })
 }
 
@@ -2315,6 +2375,7 @@ fn try_replace_value_in_place(
     storage_key: StorageKey,
     value: &[u8],
     expires_at_ms: u64,
+    eviction_protected: bool,
     large: bool,
     blob: bool,
     previous: Option<MutableValueHandle>,
@@ -2375,7 +2436,7 @@ fn try_replace_value_in_place(
         _ => None,
     };
     if let Some((mutable_value, encoded)) = same_slot {
-        let item = live_item(storage_key, encoded, expires_at_ms);
+        let item = live_item(storage_key, encoded, expires_at_ms, eviction_protected);
         if generation.segment.replace(previous_location, item, true) {
             match (previous, mutable_value) {
                 (
@@ -2405,7 +2466,12 @@ fn try_replace_value_in_place(
     let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
         return Ok(InPlaceValue::NotReplaced);
     };
-    let item = live_item(storage_key, staged.encoded, expires_at_ms);
+    let item = live_item(
+        storage_key,
+        staged.encoded,
+        expires_at_ms,
+        eviction_protected,
+    );
     if !generation.segment.replace(previous_location, item, true) {
         clear_mutable_value(generation, lane, staged.mutable_value);
         return Ok(InPlaceValue::NotReplaced);
@@ -2487,11 +2553,16 @@ fn clear_mutable_value(
     }
 }
 
-fn live_item(storage_key: StorageKey, encoded: Vec<u8>, expires_at_ms: u64) -> Item {
+fn live_item(
+    storage_key: StorageKey,
+    encoded: Vec<u8>,
+    expires_at_ms: u64,
+    eviction_protected: bool,
+) -> Item {
     if expires_at_ms == 0 {
-        Item::live(storage_key, encoded)
+        Item::live_with_eviction(storage_key, encoded, eviction_protected)
     } else {
-        Item::live_expiring(storage_key, encoded, expires_at_ms)
+        Item::live_expiring_with_eviction(storage_key, encoded, expires_at_ms, eviction_protected)
     }
 }
 

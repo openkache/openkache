@@ -219,8 +219,8 @@ structure valueEnvelope {
 )
 @ffiContract(
     abiVersion: 2,
-    operationGetJson: 7,
-    operationSetJson: 8,
+    operationGetJson: 16,
+    operationSetJson: 17,
     operationReconnect: 4294967041,
     resultError: 0,
     resultOk: 1,

@@ -18,6 +18,7 @@ export interface Wire_V1_Contract {
   readonly request_fixed_bytes: number
   readonly response_fixed_bytes: number
   readonly max_varuint_bytes: number
+  /** The SET expiration-mode bit pattern for ExplicitTtl. */
   readonly set_ttl_flag: number
   readonly set_if_absent_flag: number
   readonly set_if_present_flag: number
@@ -187,9 +188,9 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
       `${WIRE_CONTRACT_TRAIT_ID}.v1.alpn must be "openkache/1" for the current protocol implementation`,
     )
   }
-  if (v1.request_fixed_bytes !== 2 || v1.response_fixed_bytes !== 1) {
+  if (v1.request_fixed_bytes !== 1 || v1.response_fixed_bytes !== 1) {
     throw new Error(
-      `${WIRE_CONTRACT_TRAIT_ID}.v1 fixed header sizes must be request=2 and response=1`,
+      `${WIRE_CONTRACT_TRAIT_ID}.v1 fixed header sizes must be request=1 and response=1`,
     )
   }
   if (v1.max_varuint_bytes !== 9) {
@@ -204,7 +205,13 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
   ] as const
   unique_wire_values(flags, "SET flag")
   if (flags.some(({ value }) => value === 0 || (value & (value - 1)) !== 0)) {
-    throw new Error("SET flags must each contain exactly one non-zero bit")
+    throw new Error("SET contract flags must each contain exactly one non-zero bit")
+  }
+  if (v1.set_if_absent_flag !== 0x01 || v1.set_if_present_flag !== 0x02) {
+    throw new Error("SET condition flags must be 0x01 (IfAbsent) and 0x02 (IfPresent)")
+  }
+  if (v1.set_ttl_flag !== 0x08) {
+    throw new Error("SET TTL flag must be 0x08 (ExplicitTtl)")
   }
   return v1
 }
@@ -383,10 +390,6 @@ pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(contract.v1.max_varuint
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
-
-const SET_TTL_FLAG: u8 = ${formatted_byte(contract.v1.set_ttl_flag)};
-const SET_IF_ABSENT_FLAG: u8 = ${formatted_byte(contract.v1.set_if_absent_flag)};
-const SET_IF_PRESENT_FLAG: u8 = ${formatted_byte(contract.v1.set_if_present_flag)};
 
 ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 

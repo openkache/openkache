@@ -49,7 +49,7 @@ structure wireOpcode {
 @trait(selector: "enum > member")
 structure wireStatus {
     @required
-    value: Byte
+    value: Integer
 }
 
 @wireContract(
@@ -57,12 +57,12 @@ structure wireStatus {
     maxValueBytes: 67108864,
     v1: {
         alpn: "openkache/1",
-        requestFixedBytes: 2,
+        requestFixedBytes: 1,
         responseFixedBytes: 1,
         maxVaruintBytes: 9,
-        setTtlFlag: 1,
-        setIfAbsentFlag: 2,
-        setIfPresentFlag: 4
+        setTtlFlag: 8,
+        setIfAbsentFlag: 1,
+        setIfPresentFlag: 2
     }
 )
 service OpenKache {
@@ -87,6 +87,15 @@ enum Opcode {
 
     @wireOpcode(value: 6)
     SYNC = "sync"
+
+    @wireOpcode(value: 7)
+    NAMESPACE_OPEN = "namespace_open"
+
+    @wireOpcode(value: 8)
+    NAMESPACE_UPDATE_POLICY = "namespace_update_policy"
+
+    @wireOpcode(value: 9)
+    NAMESPACE_DELETE = "namespace_delete"
 }
 
 enum Status {
@@ -108,24 +117,39 @@ enum Status {
     @wireStatus(value: 5)
     NOT_STORED = "not_stored"
 
-    @wireStatus(value: 64)
+    @wireStatus(value: 128)
     INVALID_REQUEST = "invalid_request"
 
-    @wireStatus(value: 65)
+    @wireStatus(value: 129)
     UNSUPPORTED_OPCODE = "unsupported_opcode"
 
-    @wireStatus(value: 66)
+    @wireStatus(value: 130)
     TOO_LARGE = "too_large"
 
-    @wireStatus(value: 67)
+    @wireStatus(value: 131)
     OVERLOADED = "overloaded"
 
-    @wireStatus(value: 68)
+    @wireStatus(value: 132)
     TIMEOUT = "timeout"
 
-    @wireStatus(value: 69)
+    @wireStatus(value: 133)
     FORBIDDEN = "forbidden"
 
-    @wireStatus(value: 127)
+    @wireStatus(value: 134)
     INTERNAL_ERROR = "internal_error"
+
+    @wireStatus(value: 135)
+    NO_CAPACITY = "no_capacity"
+
+    @wireStatus(value: 136)
+    POLICY_CONFLICT = "policy_conflict"
+
+    @wireStatus(value: 137)
+    CONFLICT = "conflict"
+
+    @wireStatus(value: 138)
+    NAMESPACE_NOT_FOUND = "namespace_not_found"
+
+    @wireStatus(value: 139)
+    NAMESPACE_NOT_EMPTY = "namespace_not_empty"
 }

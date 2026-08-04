@@ -21,8 +21,10 @@ pub use openkache_client_core::contract;
 pub use openkache_client_core::{
     Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
     DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
-    GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, Operation, PrivateKey, Result, RetryPolicy,
-    ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value, value_envelope,
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES,
+    ItemId, ItemValue, NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PrivateKey,
+    Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value,
+    value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -178,6 +180,24 @@ macro_rules! builder_methods {
                 self
             }
 
+            /// Selects a previously server-assigned namespace ID without resolving a name.
+            pub fn namespace_id(mut self, namespace_id: u64) -> Self {
+                self.inner = self.inner.namespace_id(namespace_id);
+                self
+            }
+
+            /// Resolves this namespace name with `CreateIfMissing` during connection setup.
+            pub fn namespace_name(mut self, namespace_name: impl AsRef<[u8]>) -> Self {
+                self.inner = self.inner.namespace_name(namespace_name);
+                self
+            }
+
+            /// Supplies the policy used if the configured namespace name is missing.
+            pub fn namespace_policy(mut self, policy: NamespacePolicy) -> Self {
+                self.inner = self.inner.namespace_policy(policy);
+                self
+            }
+
             /// Applies optional client-side compression before encryption.
             pub fn compression(mut self, compression: value::Compression) -> Self {
                 self.inner = self.inner.compression(compression);
@@ -208,6 +228,46 @@ macro_rules! client_methods {
             /// Verifies the connection and returns the complete request round-trip time.
             pub async fn ping(&self) -> Result<Duration> {
                 self.inner.ping().await
+            }
+
+            /// Returns the currently selected server-assigned namespace ID.
+            pub fn namespace_id(&self) -> Option<u64> {
+                self.inner.namespace_id()
+            }
+
+            /// Resolves a namespace name and optionally creates it.
+            pub async fn namespace_open(
+                &self,
+                name: impl AsRef<[u8]>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> Result<NamespaceDescriptor> {
+                self.inner
+                    .namespace_open(name, create_if_missing, policy)
+                    .await
+            }
+
+            /// Replaces a namespace policy using its current revision.
+            pub async fn namespace_update_policy(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+                policy: NamespacePolicy,
+            ) -> Result<NamespaceDescriptor> {
+                self.inner
+                    .namespace_update_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+
+            /// Deletes an empty namespace using its current revision.
+            pub async fn namespace_delete(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+            ) -> Result<()> {
+                self.inner
+                    .namespace_delete(namespace_id, expected_revision)
+                    .await
             }
 
             /// Retrieves and decodes a value for arbitrary application key bytes.
@@ -266,7 +326,7 @@ macro_rules! client_methods {
                 self.inner.close().await
             }
 
-            /// Starts an awaitable set request with persistent, unconditional defaults.
+            /// Starts an awaitable set request inheriting namespace policy defaults.
             pub fn set<'a>(
                 &'a self,
                 application_key: impl AsRef<[u8]>,

@@ -729,9 +729,26 @@ pub(super) async fn worker_loop(
         };
 
         match event {
-            WorkerEvent::Background(result) => {
-                result?;
-            }
+            WorkerEvent::Background(result) => match result {
+                Ok(_) => {}
+                Err(KvError::NoCapacity) if !deferred_completions.is_empty() => {
+                    for completion in deferred_completions.drain(..) {
+                        send_failure(
+                            completion.responses,
+                            "write cannot be admitted without evicting protected items",
+                        );
+                        if let Some(running) = finish_scheduler_lane(
+                            &mut cache,
+                            &mut scheduler,
+                            completion.storage_key,
+                            completion.failure_state,
+                        ) {
+                            inflight.push(run_keyed_command(running));
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            },
             WorkerEvent::Completed(completed) => {
                 let include_visible_state = scheduler.has_waiting(&completed.storage_key);
                 let KeyedFinish {
