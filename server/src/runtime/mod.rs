@@ -231,6 +231,9 @@ impl ThreadedKvkache {
                         sqpoll: io_config.sqpoll,
                         sqpoll_cpu: io_config.sqpoll_cpu_ids.get(thread_id).copied(),
                         worker_cpu: cpu_id,
+                        simulated_io_latency: Duration::from_micros(
+                            config.runtime.simulated_io_latency_us,
+                        ),
                     };
                     let result = crate::storage_runtime::run(runtime_config, async move {
                         if let Some(error) = crate::platform::cpu_assignment_error(
@@ -631,6 +634,32 @@ impl ThreadedKvkache {
         copy_ssd_inline_value_once: bool,
         lease_ssd_read_buffer: bool,
     ) -> Result<Self> {
+        Self::for_trace_benchmark_with_simulated_io_latency(
+            directory,
+            cpu_ids,
+            total_segment_count,
+            total_table_capacity,
+            bucket_choice_count,
+            bucket_read_pool_capacity,
+            copy_ssd_inline_value_once,
+            lease_ssd_read_buffer,
+            0,
+        )
+    }
+
+    /// Starts a deterministic benchmark runtime with configurable simulated I/O latency.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_trace_benchmark_with_simulated_io_latency(
+        directory: std::path::PathBuf,
+        cpu_ids: Vec<usize>,
+        total_segment_count: usize,
+        total_table_capacity: usize,
+        bucket_choice_count: usize,
+        bucket_read_pool_capacity: usize,
+        copy_ssd_inline_value_once: bool,
+        lease_ssd_read_buffer: bool,
+        simulated_io_latency_us: u64,
+    ) -> Result<Self> {
         Self::for_trace_benchmark_with_bucket_policy_and_read_pool(
             directory,
             cpu_ids,
@@ -641,6 +670,7 @@ impl ThreadedKvkache {
             bucket_read_pool_capacity,
             copy_ssd_inline_value_once,
             lease_ssd_read_buffer,
+            simulated_io_latency_us,
         )
     }
 
@@ -681,9 +711,11 @@ impl ThreadedKvkache {
             BUCKET_READ_POOL_CAPACITY,
             true,
             false,
+            0,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn for_trace_benchmark_with_bucket_policy_and_read_pool(
         directory: std::path::PathBuf,
         cpu_ids: Vec<usize>,
@@ -694,6 +726,7 @@ impl ThreadedKvkache {
         bucket_read_pool_capacity: usize,
         copy_ssd_inline_value_once: bool,
         lease_ssd_read_buffer: bool,
+        simulated_io_latency_us: u64,
     ) -> Result<Self> {
         let thread_count = cpu_ids.len();
         if thread_count == 0 {
@@ -715,6 +748,7 @@ impl ThreadedKvkache {
         config.storage.bucket_read_pool_capacity_per_thread = bucket_read_pool_capacity;
         config.table.bucket_choice_count = bucket_choice_count;
         config.table.bucket_selection_policy = bucket_selection_policy;
+        config.runtime.simulated_io_latency_us = simulated_io_latency_us;
         Self::start_with_server_key(
             config,
             [0; 32],

@@ -509,6 +509,8 @@ pub struct RuntimeConfig {
     pub thread_count: usize,
     pub cpu_ids: Vec<usize>,
     pub event_interval: usize,
+    /// Delay before each simulated storage read or write completes.
+    pub simulated_io_latency_us: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -524,6 +526,7 @@ impl RuntimeConfig {
             thread_count,
             cpu_ids,
             event_interval: 31,
+            simulated_io_latency_us: 0,
         }
     }
 }
@@ -739,6 +742,18 @@ impl AppConfig {
                 "runtime.event_interval must be non-zero".into(),
             ));
         }
+        #[cfg(not(feature = "storage-runtime-simulated"))]
+        if self.runtime.simulated_io_latency_us != 0 {
+            return Err(KvError::InvalidConfig(
+                "runtime.simulated_io_latency_us requires storage-runtime-simulated".into(),
+            ));
+        }
+        #[cfg(feature = "storage-runtime-simulated")]
+        if self.io_uring.sqpoll {
+            return Err(KvError::InvalidConfig(
+                "simulated storage workers do not support io_uring SQPOLL".into(),
+            ));
+        }
         if self.io_uring.iopoll {
             return Err(KvError::InvalidConfig(
                 "io_uring IOPOLL must remain false".into(),
@@ -899,6 +914,7 @@ impl AppConfig {
                 thread_count,
                 cpu_ids,
                 event_interval: 31,
+                simulated_io_latency_us: 0,
             },
             io_uring: IoUringConfig {
                 entries_per_worker: 256,

@@ -63,7 +63,10 @@ pub(crate) fn cpu_assignment_error(_role: &str, _expected_cpu: usize) -> Option<
 /// Pins the calling thread to one Linux logical CPU.
 #[cfg(all(
     target_os = "linux",
-    any(feature = "storage-runtime-kimojio", feature = "storage-runtime-monoio")
+    any(
+        feature = "storage-runtime-kimojio",
+        feature = "storage-runtime-monoio"
+    )
 ))]
 pub(crate) fn pin_current_thread(cpu_id: usize) -> std::io::Result<()> {
     if cpu_id >= libc::CPU_SETSIZE as usize {

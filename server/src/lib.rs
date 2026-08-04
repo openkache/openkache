@@ -37,26 +37,50 @@ compile_error!(
 #[cfg(not(any(
     feature = "storage-runtime-compio",
     feature = "storage-runtime-kimojio",
-    feature = "storage-runtime-monoio"
+    feature = "storage-runtime-monoio",
+    feature = "storage-runtime-simulated"
 )))]
 compile_error!(
-    "enable exactly one storage runtime feature: `storage-runtime-compio`, `storage-runtime-kimojio`, or `storage-runtime-monoio`"
+    "enable exactly one storage runtime feature: `storage-runtime-compio`, `storage-runtime-kimojio`, `storage-runtime-monoio`, or `storage-runtime-simulated`"
 );
 
 #[cfg(any(
-    all(feature = "storage-runtime-compio", feature = "storage-runtime-kimojio"),
+    all(
+        feature = "storage-runtime-compio",
+        feature = "storage-runtime-kimojio"
+    ),
     all(feature = "storage-runtime-compio", feature = "storage-runtime-monoio"),
-    all(feature = "storage-runtime-kimojio", feature = "storage-runtime-monoio")
+    all(
+        feature = "storage-runtime-compio",
+        feature = "storage-runtime-simulated"
+    ),
+    all(
+        feature = "storage-runtime-kimojio",
+        feature = "storage-runtime-monoio"
+    ),
+    all(
+        feature = "storage-runtime-kimojio",
+        feature = "storage-runtime-simulated"
+    ),
+    all(
+        feature = "storage-runtime-monoio",
+        feature = "storage-runtime-simulated"
+    )
 ))]
 compile_error!(
-    "enable exactly one storage runtime feature: `storage-runtime-compio`, `storage-runtime-kimojio`, or `storage-runtime-monoio`"
+    "enable exactly one storage runtime feature: `storage-runtime-compio`, `storage-runtime-kimojio`, `storage-runtime-monoio`, or `storage-runtime-simulated`"
 );
 
 #[cfg(all(
-    any(feature = "storage-runtime-kimojio", feature = "storage-runtime-monoio"),
+    any(
+        feature = "storage-runtime-kimojio",
+        feature = "storage-runtime-monoio"
+    ),
     not(target_os = "linux")
 ))]
-compile_error!("`storage-runtime-kimojio` and `storage-runtime-monoio` require Linux io_uring support");
+compile_error!(
+    "`storage-runtime-kimojio` and `storage-runtime-monoio` require Linux io_uring support"
+);
 
 pub mod allocators;
 pub mod breadcrumb_filter;
