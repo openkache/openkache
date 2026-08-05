@@ -15,6 +15,7 @@ use compio::driver::{DriverType, ProactorBuilder};
 use compio::runtime::{Runtime, RuntimeBuilder};
 
 const SQPOLL_IDLE: Duration = Duration::from_secs(2);
+const RUNTIME_SMOKE_DELAY: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DriverRequirement {
@@ -110,9 +111,9 @@ const fn native_compio_driver() -> DriverRequirement {
 ///
 /// The required-driver setting is applied to the underlying `ProactorBuilder`
 /// before `RuntimeBuilder::build`, so a requested native or SQPOLL runtime
-/// cannot silently become Compio's polling fallback. For storage workers, the
-/// caller runs the real file-open and reservation path on the returned runtime;
-/// that path is the startup smoke test for the configured I/O mode.
+/// cannot silently become Compio's polling fallback. The returned runtime first
+/// exercises its production event loop, then storage workers run the real
+/// file-open and reservation path on that same runtime.
 pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
     if config.sqpoll && config.driver != DriverRequirement::IoUring {
         return Err(io::Error::new(
@@ -164,6 +165,10 @@ pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
             config.driver,
         )));
     }
+    catch_runtime_panic(format!("Compio {} runtime smoke test", config.role), || {
+        runtime.block_on(compio::runtime::time::sleep(RUNTIME_SMOKE_DELAY))
+    })
+    .map_err(|error| runtime_initialization_error(config, error))?;
     Ok(runtime)
 }
 
@@ -222,9 +227,9 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Converts a runtime panic into the same startup error path as fallible
 /// runtime builders.
 ///
-/// Kimojio can initialize its io_uring rings while constructing the runtime or
-/// entering `block_on`, and the dependency currently unwraps ring setup
-/// errors. Keeping this conversion shared makes both eager and lazy
+/// Alternate runtimes can initialize io_uring while constructing the runtime or
+/// entering `block_on`, and a dependency may panic instead of returning an
+/// error. Keeping this conversion shared makes both eager and lazy
 /// initialization failures observable to the worker startup handshake.
 #[allow(dead_code)]
 pub(crate) fn catch_runtime_panic<T>(
@@ -724,20 +729,22 @@ mod backend {
             ));
         }
         crate::platform::pin_current_thread(config.worker_cpu)?;
-        let mut runtime = RuntimeBuilder::<IoUringDriver>::new()
-            .with_entries(config.entries)
-            .enable_timer()
-            .attach_thread_pool(Box::new(monoio::blocking::DefaultThreadPool::new(1)))
-            .build()
-            .map_err(|error| {
-                let errno = error
-                    .raw_os_error()
-                    .map_or_else(String::new, |code| format!(" (errno {code})"));
-                io::Error::new(
-                    error.kind(),
-                    format!("Monoio io_uring runtime could not initialize{errno}: {error}"),
-                )
-            })?;
+        let mut runtime = catch_runtime_panic("Monoio io_uring runtime initialization", || {
+            RuntimeBuilder::<IoUringDriver>::new()
+                .with_entries(config.entries)
+                .enable_timer()
+                .attach_thread_pool(Box::new(monoio::blocking::DefaultThreadPool::new(1)))
+                .build()
+        })?
+        .map_err(|error| {
+            let errno = error
+                .raw_os_error()
+                .map_or_else(String::new, |code| format!(" (errno {code})"));
+            io::Error::new(
+                error.kind(),
+                format!("Monoio io_uring runtime could not initialize{errno}: {error}"),
+            )
+        })?;
         catch_runtime_panic("Monoio io_uring storage runtime", || {
             runtime.block_on(future)
         })
