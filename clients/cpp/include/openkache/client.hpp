@@ -150,6 +150,15 @@ struct Connect_Options {
 /// from the caller's perspective; network work is performed by the dedicated Rust worker.
 class Client {
 public:
+    /// Result returned by the shared Smithy operation boundary.
+    ///
+    /// `kind` is one of the generated `OPENKACHE_SMITHY_FFI_RESULT_*` values and `payload`
+    /// contains the operation-defined response bytes.
+    struct Operation_Result {
+        std::uint32_t kind;
+        Bytes payload;
+    };
+
     Client() noexcept = default;
 
     /// Takes ownership of a native client pointer.
@@ -295,6 +304,31 @@ public:
         return std::string(
             reinterpret_cast<const char*>(bytes.data()),
             bytes.size());
+    }
+
+    /// Executes a generated operation through the protected Smithy ABI boundary.
+    ///
+    /// `operation` must be a generated protocol opcode or native FFI operation identifier.
+    /// Global operations pass empty `key`; item operations pass their application key. Use
+    /// [`execute_raw_operation`] when `key` is already an exact protocol item ID.
+    Operation_Result execute_operation(
+        std::uint32_t operation,
+        std::span<const Byte> key = {},
+        std::span<const Byte> value = {},
+        Set_Options options = {}) const {
+        return execute(operation, key, value, options, false);
+    }
+
+    /// Executes a generated operation through the exact-item-ID Smithy ABI boundary.
+    ///
+    /// Use this for operations whose input contract supplies an exact protocol item ID rather
+    /// than an application key.
+    Operation_Result execute_raw_operation(
+        std::uint32_t operation,
+        std::span<const Byte> item_id = {},
+        std::span<const Byte> value = {},
+        Set_Options options = {}) const {
+        return execute(operation, item_id, value, options, true);
     }
 
     /// Retrieves an application-key value, or `std::nullopt` when absent.
@@ -479,11 +513,6 @@ public:
     }
 
 private:
-    struct Operation_Result {
-        std::uint32_t kind;
-        Bytes payload;
-    };
-
     static std::optional<Bytes> get_outcome(
         Operation_Result result,
         const char* operation) {
