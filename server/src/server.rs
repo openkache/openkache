@@ -1869,7 +1869,7 @@ async fn execute_request(
             // been compacted yet. Prune them before the empty check so TTL does not prevent
             // namespace deletion.
             for item_id in tracked_items {
-                match cache.get_async_in_namespace(namespace_id, item_id).await {
+                match cache.get_in_namespace(namespace_id, item_id).await {
                     Ok(Some(_)) => {}
                     Ok(None) => {
                         if let Ok(mut registry) = namespaces.lock() {
@@ -1917,7 +1917,7 @@ async fn execute_request(
                 ));
             }
             let item_id = item_id.expect("GET requests have a validated item ID");
-            return Some(match cache.get_async_in_namespace(namespace_id, item_id).await {
+            return Some(match cache.get_in_namespace(namespace_id, item_id).await {
                 Ok(Some(value)) => response(Status::Ok, value.into_bytes()),
                 Ok(None) => {
                     if let Ok(mut registry) = namespaces.lock() {
@@ -1967,7 +1967,7 @@ async fn execute_request(
                 }
             };
             let outcome = cache
-                .set_async_in_namespace(
+                .set_in_namespace(
                     namespace_id,
                     item_id,
                     crate::types::StoredItemValue::new(value),
@@ -2033,7 +2033,7 @@ async fn execute_request(
             {
                 return Some(response_bytes(status, b"namespace metadata is unavailable"));
             }
-            let deleted = cache.delete_async_in_namespace(namespace_id, item_id).await;
+            let deleted = cache.delete_in_namespace(namespace_id, item_id).await;
             return match deleted {
                 Ok(deleted) => {
                     let Ok(mut registry) = namespaces.lock() else {
@@ -2078,7 +2078,7 @@ async fn execute_request(
                     b"namespace does not exist",
                 ));
             }
-            match cache.stats_async().await {
+            match cache.stats().await {
                 Ok(workers) => {
                     let worker_bytes = workers.iter().map(String::len).sum::<usize>();
                     let mut payload = String::with_capacity(32 + worker_bytes);
@@ -2129,7 +2129,7 @@ async fn execute_request(
                     ));
                 }
             };
-            match cache.sync_workers_async(&dirty_workers).await {
+            match cache.sync_workers(&dirty_workers).await {
                 Ok(()) => {
                     let clean = namespaces
                         .lock()
