@@ -274,13 +274,15 @@ const SMITHY_EXECUTABLE = process.env.OPENKACHE_SMITHY_EXECUTABLE ?? "smithy"
 const SMITHY_USE_SHELL = process.env.OPENKACHE_SMITHY_USE_SHELL === "1"
 const SERVICE_SHAPE_ID = "openkache.protocol#OpenKache"
 const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
+const API_NAMESPACE = "openkache.protocol"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
-const OPERATION_CONTRACT_TRAIT_ID = "openkache.client#operationContract"
+const OPERATION_CONTRACT_TRAIT_ID = "openkache.protocol#operationContract"
 const FFI_OPERATION_CONTRACT_TRAIT_ID = "openkache.client#ffiOperationContract"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
-const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
+const UNSIGNED_LONG_TRAIT_ID = "openkache.protocol#unsignedLong"
+const LEGACY_UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
 const FFI_ENUMS = {
   operations: { name: "FfiOperation", kind: "FFI operation" },
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
@@ -554,7 +556,10 @@ function api_type(
     "smithy.api#String": "string",
   }
   const prelude =
-    member_traits?.[UNSIGNED_LONG_TRAIT_ID] !== undefined &&
+    (
+      member_traits?.[UNSIGNED_LONG_TRAIT_ID] !== undefined ||
+      member_traits?.[LEGACY_UNSIGNED_LONG_TRAIT_ID] !== undefined
+    ) &&
     target === "smithy.api#Long"
       ? "unsigned_long"
       : prelude_types[target]
@@ -1662,7 +1667,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const parsed_api = api_contract(
     shapes,
     client_service_id,
-    client_namespace,
+    API_NAMESPACE,
     wire.opcodes.map((entry) => entry.name),
   )
   const api = {
@@ -2244,6 +2249,12 @@ function render_rust_ffi_operation_contract(contract: Client_Contract): string {
         },`
     })
     .join("\n")
+  const protocol_opcode_arms = contract.opcodes
+    .map(
+      (entry) =>
+        `        FfiOperation::${entry.name} => Some(openkache_protocol::Opcode::${entry.name}),`,
+    )
+    .join("\n")
   return `/// Input buffer kind declared by the native FFI contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FfiInputKind {
@@ -2270,6 +2281,16 @@ pub const fn ffi_operation_contract(
 ) -> FfiOperationContract {
     match operation {
 ${rendered_entries}
+    }
+}
+
+/// Resolves a protocol opcode from the shared native operation enum.
+pub const fn protocol_opcode(
+    operation: FfiOperation,
+) -> Option<openkache_protocol::Opcode> {
+    match operation {
+${protocol_opcode_arms}
+        _ => None,
     }
 }
 `
@@ -4032,14 +4053,119 @@ abstract interface class SmithyOpenKacheApi implements ${interfaces} {}
 `
 }
 
+interface Operation_Field_Binding {
+  readonly input_payload?: Api_Member
+  readonly output_payload?: Api_Member
+}
+
+interface Managed_Api_Operation extends Api_Operation {
+  readonly binding: Operation_Field_Binding
+  readonly contract: Api_Operation_Contract
+  readonly opcode: Wire_Entry
+}
+
+function operation_structure(
+  contract: Client_Contract,
+  operation: Api_Operation,
+  direction: "input" | "output",
+): Api_Structure {
+  const name = direction === "input" ? operation.input : operation.output
+  const structure = contract.api.structures.find((candidate) => candidate.name === name)
+  if (structure === undefined) {
+    throw new Error(
+      `operation ${operation.name} ${direction} structure ${name} is missing from the Smithy contract`,
+    )
+  }
+  return structure
+}
+
+function required_string_member(
+  contract: Client_Contract,
+  operation: Api_Operation,
+  direction: "input" | "output",
+): Api_Member {
+  const structure = operation_structure(contract, operation, direction)
+  const members = structure.members.filter(
+    (member) => member.required && member.type.kind === "string",
+  )
+  if (structure.members.length !== 1 || members.length !== 1) {
+    throw new Error(
+      `operation ${operation.name} ${direction} shape ${structure.name} must define exactly one required String member and no other members for responseKind echo`,
+    )
+  }
+  return members[0]!
+}
+
+function operation_field_binding(
+  contract: Client_Contract,
+  operation: Api_Operation & { readonly contract: Api_Operation_Contract },
+): Operation_Field_Binding {
+  if (operation.contract.response_kind !== "echo") return {}
+  return {
+    input_payload: required_string_member(contract, operation, "input"),
+    output_payload: required_string_member(contract, operation, "output"),
+  }
+}
+
 function managed_operation_entries(
   contract: Client_Contract,
 ): readonly Managed_Api_Operation[] {
-  return contract.api.operations.filter(
-    (operation): operation is Api_Operation & {
+  return contract.api.operations.flatMap((operation) => {
+    if (operation.contract === undefined) return []
+    const opcode = contract.opcodes.find((entry) => entry.name === operation.name)
+    if (opcode === undefined) {
+      throw new Error(`operation ${operation.name} has no matching protocol opcode`)
+    }
+    const managed_operation: Api_Operation & {
       readonly contract: Api_Operation_Contract
-    } => operation.contract !== undefined,
-  )
+    } = {
+      ...operation,
+      contract: operation.contract,
+    }
+    return [{
+      ...managed_operation,
+      binding: operation_field_binding(contract, managed_operation),
+      opcode,
+    }]
+  })
+}
+
+function operation_field(
+  operation: Managed_Api_Operation,
+  direction: "input" | "output",
+  field: "payload",
+): Api_Member {
+  const member = direction === "input"
+    ? operation.binding.input_payload
+    : operation.binding.output_payload
+  if (member === undefined) {
+    throw new Error(
+      `operation ${operation.name} has no generated ${direction} ${field} member`,
+    )
+  }
+  return member
+}
+
+function operation_field_name(
+  member: Api_Member,
+  language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
+): string {
+  switch (language) {
+    case "csharp":
+      return pascal_case(member.name)
+    case "dart":
+    case "java":
+    case "kotlin":
+      return member.name
+    case "go":
+      return go_exported_name(member.name)
+    case "python":
+    case "rust":
+    case "typescript":
+      return snake_case(member.name)
+    case "swift":
+      return swift_property_name(member.name)
+  }
 }
 
 function managed_operation_constant(
@@ -4055,10 +4181,6 @@ function managed_operation_constant(
 
 function managed_operation_label(operation: Api_Operation): string {
   return snake_case(operation.name).toUpperCase()
-}
-
-type Managed_Api_Operation = Api_Operation & {
-  readonly contract: Api_Operation_Contract
 }
 
 function render_java_operation_method(operation: Managed_Api_Operation): string {
@@ -4082,14 +4204,20 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
     case "echo":
-      return `    @Override
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "java",
+        )
+        operation_field(operation, "output", "payload")
+        return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
         return smithySubmit(() -> {
             NativeResult result = smithyExecute(
                 ${operation_constant},
                 new byte[0],
-                input.message().getBytes(StandardCharsets.UTF_8),
+                input.${input_payload}().getBytes(StandardCharsets.UTF_8),
                 0,
                 0);
             smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
@@ -4097,6 +4225,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 smithyDecodeUtf8(result.payload(), "${operation_label}"));
         });
     }`
+      }
     case "value":
       return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
@@ -4435,16 +4564,26 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             ${operation.output}()
         }`
     case "echo":
-      return `${prefix}            val result = smithyInvoke(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "kotlin",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "kotlin",
+        )
+        return `${prefix}            val result = smithyInvoke(
                 ${operation_constant},
                 byteArrayOf(),
-                input.message.toByteArray(),
+                input.${input_payload}.toByteArray(),
             )
             smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
             ${operation.output}(
-                message = smithyDecodeUtf8(result.payload, "${operation_label}"),
+                ${output_payload} = smithyDecodeUtf8(result.payload, "${operation_label}"),
             )
         }`
+      }
     case "value":
       return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
@@ -4720,16 +4859,26 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     return const ${operation.output}();
   });`
     case "echo":
-      return `${prefix}    final result = _invoke(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "dart",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "dart",
+        )
+        return `${prefix}    final result = _invoke(
       ${operation_constant},
       const <int>[],
-      utf8.encode(input.message),
+      utf8.encode(input.${input_payload}),
     );
     _smithyRequireKind(result, smithyResultValue, '${operation_label}');
     return ${operation.output}(
-      message: _smithyDecodeUtf8(result.payload, '${operation_label}'),
+      ${output_payload}: _smithyDecodeUtf8(result.payload, '${operation_label}'),
     );
   });`
+      }
     case "value":
       return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
@@ -5636,12 +5785,23 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     return {};
   }`
     case "echo":
-      return `  async ${method_name}(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "typescript",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "typescript",
+        )
+        const application_value = `await this.#transport.invoke_application_value(${operation.opcode.value}, input.${input_payload})`
+        return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { message: ${transport_result} };
+    return { ${output_payload}: ${application_value} };
   }`
+      }
     case "value":
       return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
@@ -5717,6 +5877,7 @@ export function render_typescript_operations(contract: Client_Contract): string 
   imported_types.add("Smithy_Namespace_Open_Output")
   const imports = [...imported_types].sort().join(",\n  ")
   const transports = managed_operations
+    .filter((operation) => operation.contract.response_kind !== "echo")
     .map(
       (operation) =>
         `  ${snake_case(operation.name)}(
@@ -5724,6 +5885,14 @@ export function render_typescript_operations(contract: Client_Contract): string 
   ): Promise<${typescript_operation_transport_result(operation)}>`,
     )
     .join("\n")
+  const application_value_transport = managed_operations.some(
+    (operation) => operation.contract.response_kind === "echo",
+  )
+    ? `  invoke_application_value(
+    operation: number,
+    payload: string,
+  ): Promise<string>`
+    : ""
   const methods = managed_operations
     .map(render_typescript_operation_method)
     .join("\n\n")
@@ -5737,6 +5906,7 @@ import type {
 export interface Smithy_Operation_Transport {
   assert_open(): void
 ${transports}
+${application_value_transport}
 }
 
 /** Generated Smithy operations backed by the language adapter's native hooks. */
@@ -6082,7 +6252,16 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	return ${output}{}, nil
 }`
     case "echo":
-      return `func (s smithyClient) ${method}(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "go",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "go",
+        )
+        return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
@@ -6090,7 +6269,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 		ctx,
 		${opcode},
 		nil,
-		[]byte(input.Message),
+		[]byte(input.${input_payload}),
 		SetOptions{},
 	)
 	if err != nil {
@@ -6099,8 +6278,9 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	if result.kind != SmithyFFIResultValue {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
-	return ${output}{Message: string(result.data)}, nil
+	return ${output}{${output_payload}: string(result.data)}, nil
 }`
+      }
     case "value":
       return `func (s smithyClient) ${method}(
 	ctx context.Context,
@@ -6552,9 +6732,21 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
         await self._smithy_transport.${method_name}(input)
         return ${output}()`
     case "echo":
-      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "python",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "python",
+        )
+        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return ${output}(message=await self._smithy_transport.${method_name}(input))`
+        return ${output}(${output_payload}=await self._smithy_transport.invoke_application_value(
+            ${operation.opcode.value}, input.${input_payload}
+        ))`
+      }
     case "value":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
@@ -6610,6 +6802,7 @@ export function render_python_operations(contract: Client_Contract): string {
   imported_types.add("SmithySetOutcome")
   const imports = [...imported_types].sort().join(",\n    ")
   const transports = managed_operations
+    .filter((operation) => operation.contract.response_kind !== "echo")
     .map(
       (operation) =>
         `    async def ${snake_case(operation.name)}(
@@ -6617,6 +6810,13 @@ export function render_python_operations(contract: Client_Contract): string {
     ) -> ${python_operation_transport_result(operation)}: ...`,
     )
     .join("\n")
+  const application_value_transport = managed_operations.some(
+    (operation) => operation.contract.response_kind === "echo",
+  )
+    ? `    async def invoke_application_value(
+        self, operation: int, payload: str
+    ) -> str: ...`
+    : ""
   const methods = managed_operations
     .map(render_python_operation_method)
     .join("\n\n")
@@ -6637,6 +6837,7 @@ class SmithyOperationTransport(Protocol):
     def assert_open(self) -> None: ...
 
 ${transports}
+${application_value_transport}
 
 
 class SmithyGeneratedOperations:
@@ -7268,11 +7469,24 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
     return ${output}()
   }`
     case "echo":
-      return `  public func ${method_name}(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "swift",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "swift",
+        )
+        return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(message: try await ${hook}(input.message))
+    ${output}(${output_payload}: try await smithyInvokeApplication(
+      UInt32(Smithy_Opcode.${swift_property_name(operation.name)}.rawValue),
+      input.${input_payload}
+    ))
   }`
+      }
     case "value":
       return `  public func ${method_name}(
     _ input: ${input}
@@ -7678,7 +7892,16 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         return new Smithy.${operation.output}();
     }`
     case "echo":
-      return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "csharp",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "csharp",
+        )
+        return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
     {
@@ -7686,14 +7909,15 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         var result = await RequestAsync(
             Protocol.Opcode.${operation.name},
             ReadOnlyMemory<byte>.Empty,
-            ValidateValue(Encoding.UTF8.GetBytes(input.Message)),
+            ValidateValue(Encoding.UTF8.GetBytes(input.${input_payload})),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ExpectKind("${label}", result, Protocol.FfiResultValue);
         return new Smithy.${operation.output}
         {
-            Message = new UTF8Encoding(false, true).GetString(result.Payload),
+            ${output_payload} = new UTF8Encoding(false, true).GetString(result.Payload),
         };
     }`
+      }
     case "value":
       return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
@@ -8142,6 +8366,7 @@ ${operations.join("\n\n")}
 
 function render_rust_operation_method(operation: Managed_Api_Operation): string {
   const method_name = snake_case(operation.name)
+  const operation_label = managed_operation_label(operation)
   switch (operation.contract.response_kind) {
     case "pong":
       return `            async fn ${method_name}(
@@ -8152,19 +8377,33 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 Ok(smithy::${operation.output})
             }`
     case "echo":
-      return `            async fn ${method_name}(
+      {
+        const input_payload = operation_field_name(
+          operation_field(operation, "input", "payload"),
+          "rust",
+        )
+        const output_payload = operation_field_name(
+          operation_field(operation, "output", "payload"),
+          "rust",
+        )
+        return `            async fn ${method_name}(
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let message = $client::echo(self, input.message.into_bytes())
+                let payload = $client::execute_application(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    input.${input_payload}.into_bytes(),
+                )
                     .await
                     .and_then(|value| {
                         String::from_utf8(value).map_err(|error| {
-                            Error::Protocol(format!("ECHO response is not UTF-8: {error}"))
+                            Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
                         })
                     })?;
-                Ok(smithy::${operation.output} { message })
+                Ok(smithy::${operation.output} { ${output_payload}: payload })
             }`
+      }
     case "value":
       return `            async fn ${method_name}(
                 &self,

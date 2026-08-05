@@ -17,8 +17,6 @@ from typing import Any, Final, Iterable, Sequence
 from ._generated import (
     SmithyDeleteInput,
     SmithyDeleteOutput,
-    SmithyEchoInput,
-    SmithyEchoOutput,
     SmithyEvictionDefault,
     SmithyEvictionMode,
     SmithyExpirationDefault,
@@ -697,8 +695,21 @@ class _RawOperationTransport(SmithyOperationTransport):
         del input
         await self._owner.ping()
 
-    async def echo(self, input: SmithyEchoInput) -> str:
-        return await self._owner.echo(input.message)
+    async def invoke_application_value(self, operation: int, payload: str) -> str:
+        kind, value = await self._owner._execute(
+            operation,
+            value=payload.encode("utf-8"),
+        )
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(
+                f"application operation {operation} returned unexpected native result {kind}"
+            )
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise OpenKacheError(
+                f"application operation {operation} response is not UTF-8: {error}"
+            ) from error
 
     async def get(self, input: SmithyGetInput) -> bytes | None:
         kind, payload = await self._owner._execute_scoped(

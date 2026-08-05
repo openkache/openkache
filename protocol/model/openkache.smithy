@@ -2,6 +2,78 @@ $version: "2"
 
 namespace openkache.protocol
 
+/// Marks a Smithy Long member whose domain is the complete unsigned 64-bit range.
+///
+/// Smithy's built-in Long is signed, while OpenKache uses fixed-width unsigned
+/// integers for namespace identities, revisions, and TTLs. Client generators
+/// map this trait to each language's unsigned 64-bit type.
+@trait(selector: "member")
+structure unsignedLong {}
+
+/// Request scope used by a generated operation contract.
+enum OperationScope {
+    GLOBAL = "global"
+    ITEM = "item"
+    NAMESPACE = "namespace"
+    NAMESPACE_MANAGEMENT = "namespace_management"
+}
+
+/// Native request shape used by a generated operation adapter.
+enum OperationRequestKind {
+    EMPTY = "empty"
+    APPLICATION_VALUE = "application_value"
+    SCOPED_ITEM = "scoped_item"
+    SCOPED_NAMESPACE = "scoped_namespace"
+    NAMESPACE_OPEN = "namespace_open"
+    NAMESPACE_UPDATE_POLICY = "namespace_update_policy"
+    NAMESPACE_DELETE = "namespace_delete"
+}
+
+/// Response payload contract used by the shared client core.
+enum OperationResponseKind {
+    EMPTY = "empty"
+    PONG = "pong"
+    ECHO = "echo"
+    VALUE = "value"
+    SET_OUTCOME = "set_outcome"
+    DELETE_OUTCOME = "delete_outcome"
+    STATS_JSON = "stats_json"
+    NAMESPACE_DESCRIPTOR = "namespace_descriptor"
+}
+
+/// Retry policy used by a generated operation contract.
+enum OperationRetryMode {
+    ALWAYS = "always"
+    NEVER = "never"
+    WHEN_NOT_CREATING = "when_not_creating"
+}
+
+list OperationStatuses {
+    member: String
+}
+
+/// Semantic contract consumed by the shared client core and language adapters.
+@trait(selector: "operation")
+structure operationContract {
+    @required
+    scope: OperationScope
+
+    @required
+    requestKind: OperationRequestKind
+
+    @required
+    responseKind: OperationResponseKind
+
+    @required
+    retryMode: OperationRetryMode
+
+    @required
+    successStatuses: OperationStatuses
+
+    @required
+    errorStatuses: OperationStatuses
+}
+
 /// Values that are visible on the client/server wire.
 @trait(selector: "service")
 structure wireContract {
@@ -251,6 +323,342 @@ enum Opcode {
 
     @wireOpcode(value: 10)
     ECHO = "echo"
+}
+
+@operationContract(
+    scope: "global",
+    requestKind: "empty",
+    responseKind: "pong",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
+)
+operation Ping {
+    input: PingInput
+    output: PingOutput
+}
+
+@operationContract(
+    scope: "item",
+    requestKind: "scoped_item",
+    responseKind: "value",
+    retryMode: "always",
+    successStatuses: ["ok", "not_found"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
+operation Get {
+    input: GetInput
+    output: GetOutput
+}
+
+@operationContract(
+    scope: "item",
+    requestKind: "scoped_item",
+    responseKind: "set_outcome",
+    retryMode: "never",
+    successStatuses: ["created", "replaced", "not_stored"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "no_capacity", "policy_conflict", "namespace_not_found"]
+)
+operation Set {
+    input: SetInput
+    output: SetOutput
+}
+
+@operationContract(
+    scope: "item",
+    requestKind: "scoped_item",
+    responseKind: "delete_outcome",
+    retryMode: "never",
+    successStatuses: ["deleted", "not_found"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found", "namespace_not_empty"]
+)
+operation Delete {
+    input: DeleteInput
+    output: DeleteOutput
+}
+
+@operationContract(
+    scope: "namespace",
+    requestKind: "scoped_namespace",
+    responseKind: "stats_json",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
+operation Stats {
+    input: StatsInput
+    output: StatsOutput
+}
+
+@operationContract(
+    scope: "namespace",
+    requestKind: "scoped_namespace",
+    responseKind: "empty",
+    retryMode: "never",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
+operation Sync {
+    input: SyncInput
+    output: SyncOutput
+}
+
+/// Experimental API used to verify cross-language contract propagation.
+@operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "echo",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
+)
+operation Echo {
+    input: EchoInput
+    output: EchoOutput
+}
+
+@operationContract(
+    scope: "namespace_management",
+    requestKind: "namespace_open",
+    responseKind: "namespace_descriptor",
+    retryMode: "when_not_creating",
+    successStatuses: ["ok", "created"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
+operation NamespaceOpen {
+    input: NamespaceOpenInput
+    output: NamespaceOpenOutput
+}
+
+@operationContract(
+    scope: "namespace_management",
+    requestKind: "namespace_update_policy",
+    responseKind: "namespace_descriptor",
+    retryMode: "never",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found"]
+)
+operation NamespaceUpdatePolicy {
+    input: NamespaceUpdatePolicyInput
+    output: NamespaceUpdatePolicyOutput
+}
+
+@operationContract(
+    scope: "namespace_management",
+    requestKind: "namespace_delete",
+    responseKind: "empty",
+    retryMode: "never",
+    successStatuses: ["deleted"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found", "namespace_not_empty"]
+)
+operation NamespaceDelete {
+    input: NamespaceDeleteInput
+    output: NamespaceDeleteOutput
+}
+
+blob ItemId
+blob Value
+
+structure PingInput {}
+structure PingOutput {}
+
+structure GetInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    itemId: ItemId
+}
+
+structure GetOutput {
+    value: Value
+}
+
+structure SetInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    itemId: ItemId
+
+    @required
+    value: Value
+
+    condition: SetCondition
+
+    expirationMode: ExpirationMode
+
+    evictionMode: EvictionMode
+
+    @unsignedLong
+    ttlMilliseconds: Long
+}
+
+structure SetOutput {
+    @required
+    outcome: SetOutcome
+}
+
+structure DeleteInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    itemId: ItemId
+}
+
+structure DeleteOutput {
+    @required
+    deleted: Boolean
+}
+
+structure StatsOutput {
+    @required
+    json: String
+}
+
+structure StatsInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+}
+
+structure SyncInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+}
+
+structure SyncOutput {}
+
+structure EchoInput {
+    @required
+    message: String
+}
+
+structure EchoOutput {
+    @required
+    message: String
+}
+
+structure NamespaceOpenInput {
+    @required
+    name: String
+
+    @required
+    createIfMissing: Boolean
+
+    policy: NamespacePolicy
+}
+
+structure NamespaceOpenOutput {
+    @required
+    descriptor: NamespaceDescriptor
+
+    @required
+    created: Boolean
+}
+
+structure NamespaceUpdatePolicyInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    expectedRevision: Long
+
+    @required
+    policy: NamespacePolicy
+}
+
+structure NamespaceUpdatePolicyOutput {
+    @required
+    descriptor: NamespaceDescriptor
+}
+
+structure NamespaceDeleteInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    expectedRevision: Long
+}
+
+structure NamespaceDeleteOutput {}
+
+structure NamespaceDescriptor {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    revision: Long
+
+    @required
+    policy: NamespacePolicy
+}
+
+structure NamespacePolicy {
+    @required
+    defaultExpiration: ExpirationDefault
+
+    @unsignedLong
+    defaultTtlMilliseconds: Long
+
+    @required
+    expirationOverride: OverridePolicy
+
+    @required
+    defaultEviction: EvictionDefault
+
+    @required
+    evictionOverride: OverridePolicy
+}
+
+enum SetCondition {
+    ANY = "any"
+    IF_ABSENT = "if_absent"
+    IF_PRESENT = "if_present"
+}
+
+enum ExpirationMode {
+    INHERIT = "inherit"
+    NO_EXPIRY = "no_expiry"
+    EXPLICIT_TTL = "explicit_ttl"
+}
+
+enum EvictionMode {
+    INHERIT = "inherit"
+    EVICTABLE = "evictable"
+    EVICTION_PROTECTED = "eviction_protected"
+}
+
+enum OverridePolicy {
+    ALLOWED = "allowed"
+    DISALLOWED = "disallowed"
+}
+
+enum ExpirationDefault {
+    NO_EXPIRY = "no_expiry"
+    FIXED_TTL = "fixed_ttl"
+}
+
+enum EvictionDefault {
+    EVICTABLE = "evictable"
+    EVICTION_PROTECTED = "eviction_protected"
+}
+
+enum SetOutcome {
+    CREATED = "created"
+    REPLACED = "replaced"
+    NOT_STORED = "not_stored"
 }
 
 enum Status {

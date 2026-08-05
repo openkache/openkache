@@ -1111,8 +1111,26 @@ public actor OpenKacheRawClient {
         try await ping()
     }
 
-    internal func smithyEcho(_ message: String) async throws -> String {
-        try await echo(message)
+    internal func smithyInvokeApplication(
+        _ operation: UInt32,
+        _ payload: String
+    ) async throws -> String {
+        try await perform { handle in
+            let result = try NativeBridge.execute(
+                handle,
+                operation: operation,
+                value: Data(payload.utf8)
+            )
+            return try consumeResult(result) { kind, bytes in
+                guard kind == Smithy_Native_Contract.resultValue else {
+                    throw OpenKacheError("unexpected application operation result")
+                }
+                guard let text = String(data: bytes, encoding: .utf8) else {
+                    throw OpenKacheError("application operation response is not valid UTF-8")
+                }
+                return text
+            }
+        }
     }
 
     internal func smithyGet(_ namespaceID: UInt64, itemID: Data) async throws -> Data? {

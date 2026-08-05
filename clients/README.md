@@ -111,16 +111,15 @@ language-appropriate lifecycle, and own result handles; protocol, retry, TLS,
 value-format, and protection behavior remain in the core. Every operation,
 result, state, limit, and value-format identifier is generated from the two
 scoped Smithy models for each package's build output, keeping all bindings
-aligned without hand-maintained constants. The wire model in
+aligned without hand-maintained constants. The protocol model in
 [`../protocol/model/openkache.smithy`](../protocol/model/openkache.smithy)
-contains only values the server must understand; its `Opcode` enum is the
-canonical operation-name list. The client model in
-[`model/openkache.smithy`](model/openkache.smithy) owns operation input/output
-shapes, adapter defaults, native ABI identifiers, and value-format metadata;
-its service no longer repeats the protocol operation list. The client entry
-point [`generate.ts`](generate.ts) resolves those shapes by protocol opcode
-name, validates that both models agree, and combines them for SDK outputs. Its
-only protocol dependency is the wire contract module
+owns the server-visible values, operation semantics, and operation input/output
+shapes; its `Opcode` enum is the canonical operation-name list. The client model
+in [`model/openkache.smithy`](model/openkache.smithy) owns only adapter defaults,
+native ABI identifiers, and value-format metadata. The client entry point
+[`generate.ts`](generate.ts) resolves the protocol API and client-owned
+metadata, validates that both models agree, and combines them for SDK outputs.
+Its wire extraction dependency is the protocol contract module
 [`../protocol/wire.ts`](../protocol/wire.ts).
 
 The TypeScript release package includes Linux x64 and ARM64 Node-API adapters.

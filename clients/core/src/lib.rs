@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status};
+use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Request, Response, Status};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -33,7 +33,7 @@ pub use config::{
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 pub use openkache_protocol::{
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ITEM_ID_BYTES,
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, Opcode, ITEM_ID_BYTES,
     NamespaceDescriptor, NamespacePolicy, OverridePolicy, SetCondition,
 };
 #[cfg(feature = "quic-compio")]
@@ -89,6 +89,8 @@ pub enum Operation {
     NamespaceUpdatePolicy,
     /// `NAMESPACE_DELETE` request.
     NamespaceDelete,
+    /// A protocol request whose operation-specific client label is generated from Smithy.
+    Protocol(Opcode),
     /// DNS lookup.
     DnsResolution,
     /// Initial QUIC and TLS connection establishment.
@@ -132,6 +134,7 @@ impl std::fmt::Display for Operation {
             Self::NamespaceOpen => "NAMESPACE_OPEN",
             Self::NamespaceUpdatePolicy => "NAMESPACE_UPDATE_POLICY",
             Self::NamespaceDelete => "NAMESPACE_DELETE",
+            Self::Protocol(opcode) => return formatter.write_str(opcode.name()),
             Self::DnsResolution => "DNS resolution",
             Self::ConnectionSetup => "connection setup",
             Self::ConnectionRetry => "connection retry",
@@ -482,6 +485,13 @@ impl<C: ClientConnection> Core<C> {
             .request(Request::new(Opcode::Echo, None, value).map_err(Error::protocol)?)
             .await?;
         expect_status(Operation::Echo, response.status, &[Status::Ok])?;
+        Ok(response.payload)
+    }
+
+    async fn execute_application(&self, opcode: Opcode, value: Vec<u8>) -> Result<Vec<u8>> {
+        let response = self
+            .request(Request::new(opcode, None, value).map_err(Error::protocol)?)
+            .await?;
         Ok(response.payload)
     }
 
@@ -1226,6 +1236,17 @@ macro_rules! raw_client_methods {
                 self.0.echo(value.as_ref().to_vec()).await
             }
 
+            /// Sends an application payload through a Smithy-declared global operation.
+            pub async fn execute_application(
+                &self,
+                operation: Opcode,
+                value: impl AsRef<[u8]>,
+            ) -> Result<Vec<u8>> {
+                self.0
+                    .execute_application(operation, value.as_ref().to_vec())
+                    .await
+            }
+
             /// Returns the currently selected server-assigned namespace ID.
             pub fn namespace_id(&self) -> Option<u64> {
                 self.0.namespace_id()
@@ -1778,6 +1799,7 @@ fn server_error_code(status: Status) -> ServerErrorCode {
     }
 }
 
+#[allow(unreachable_patterns)]
 fn operation(opcode: Opcode) -> Operation {
     match opcode {
         Opcode::Ping => Operation::Ping,
@@ -1790,5 +1812,6 @@ fn operation(opcode: Opcode) -> Operation {
         Opcode::NamespaceOpen => Operation::NamespaceOpen,
         Opcode::NamespaceUpdatePolicy => Operation::NamespaceUpdatePolicy,
         Opcode::NamespaceDelete => Operation::NamespaceDelete,
+        opcode => Operation::Protocol(opcode),
     }
 }
