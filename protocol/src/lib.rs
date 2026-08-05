@@ -484,7 +484,7 @@ impl RequestHeader {
         }
     }
 
-    /// Returns the opaque SET value length, or zero for other operations.
+    /// Returns the opaque SET or ECHO value length, or zero for other operations.
     pub const fn value_len(self) -> usize {
         self.value_len
     }
@@ -666,6 +666,10 @@ impl Request {
         output.push(self.opcode as u8);
         match self.opcode {
             Opcode::Ping => {}
+            Opcode::Echo => {
+                let (encoded, length) = encode_varuint(self.value.len() as u64);
+                output.extend_from_slice(&encoded[..length]);
+            }
             Opcode::Get | Opcode::Delete | Opcode::Stats | Opcode::Sync => {
                 put_namespace_id(&mut output, self.namespace_id)?;
                 if matches!(self.opcode, Opcode::Get | Opcode::Delete) {
@@ -867,7 +871,7 @@ impl Request {
             });
         }
         let mut request = Self::decode(&frame)?;
-        if header.opcode == Opcode::Set {
+        if matches!(header.opcode, Opcode::Set | Opcode::Echo) {
             frame.copy_within(header.encoded_len.., 0);
             frame.truncate(header.value_len);
             request.value = frame;
@@ -891,6 +895,7 @@ impl Request {
                 set_options: SetOptions::NONE,
                 has_ttl: false,
             })),
+            Opcode::Echo => decode_echo_header(prefix),
             Opcode::Get | Opcode::Delete => {
                 let required = OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
                 if prefix.len() < required {
@@ -955,6 +960,22 @@ impl Request {
                         opcode: self.opcode,
                         expected_item_id: 0,
                         expected_value: "0",
+                    });
+                }
+            }
+            Opcode::Echo => {
+                if self.namespace_id.is_some()
+                    || self.item_id.is_some()
+                    || self.set_options != SetOptions::NONE
+                    || self.namespace_name.is_some()
+                    || self.namespace_policy.is_some()
+                    || self.expected_revision.is_some()
+                    || self.create_if_missing
+                {
+                    return Err(ProtocolError::InvalidRequestShape {
+                        opcode: self.opcode,
+                        expected_item_id: 0,
+                        expected_value: "any",
                     });
                 }
             }
@@ -1146,6 +1167,25 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
         item_id_start: Some(item_id_start),
         set_options,
         has_ttl,
+    }))
+}
+
+fn decode_echo_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
+    let Some((value_len, value_len_bytes)) =
+        decode_varuint(&prefix[OPCODE_BYTES..], "ECHO value length")?
+    else {
+        return Ok(None);
+    };
+    let value_len = usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+    validate_value_length(value_len)?;
+    Ok(Some(RequestHeader {
+        opcode: Opcode::Echo,
+        encoded_len: OPCODE_BYTES + value_len_bytes,
+        value_len,
+        namespace_id: None,
+        item_id_start: None,
+        set_options: SetOptions::NONE,
+        has_ttl: false,
     }))
 }
 

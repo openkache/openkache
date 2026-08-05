@@ -50,6 +50,7 @@ interface Native_Value_Envelope {
 
 export interface Native_Client {
   ping(): Promise<void>
+  echo(value: Uint8Array): Promise<Uint8Array>
   get(key: Uint8Array): Promise<Uint8Array | null>
   get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
   get_json(key: Uint8Array): Promise<string | null>

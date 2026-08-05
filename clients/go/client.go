@@ -580,6 +580,18 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Echo sends an experimental UTF-8 message and returns the echoed message.
+func (c *Client) Echo(ctx context.Context, message string) (string, error) {
+	result, err := c.invoke(ctx, SmithyOpcodeEcho, nil, []byte(message), SetOptions{})
+	if err != nil {
+		return "", operationError("echo", err)
+	}
+	if result.kind != SmithyFFIResultValue {
+		return "", unexpectedResult("echo", result.kind)
+	}
+	return string(result.data), nil
+}
+
 // Get retrieves decrypted and decompressed bytes for key. The found result is
 // distinguished from an empty stored value by the found boolean.
 func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {

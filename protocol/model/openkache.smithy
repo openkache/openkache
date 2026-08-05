@@ -248,6 +248,9 @@ enum Opcode {
 
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
+
+    @wireOpcode(value: 10)
+    ECHO = "echo"
 }
 
 enum Status {

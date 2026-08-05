@@ -270,6 +270,13 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/core/generated_local/smithy_contract.h"),
   go_api: generated_path("clients/go/smithy_api.go"),
   go_contract: generated_path("clients/go/smithy_contract.go"),
+  java_contract: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated_local/SmithyContract.java",
+  ),
+  kotlin_contract: generated_path(
+    "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyContract.kt",
+  ),
+  dart_contract: generated_path("clients/dart/lib/generated_local/smithy_contract.dart"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -1871,6 +1878,144 @@ ${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION"
 ${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
 
 #endif
+`
+}
+
+function required_contract_entry(
+  entries: readonly Wire_Entry[],
+  name: string,
+  location: string,
+): Wire_Entry {
+  const entry = entries.find((candidate) => candidate.name === name)
+  if (entry === undefined) {
+    throw new Error(`${location} is missing required ${name} entry`)
+  }
+  return entry
+}
+
+interface Adapter_Contract_Values {
+  readonly abi_version: number
+  readonly operation_echo: number
+  readonly result_error: number
+  readonly result_value: number
+  readonly result_connected: number
+  readonly set_condition_any: number
+  readonly default_zstandard_level: number
+  readonly default_zstandard_minimum_input_bytes: number
+  readonly default_zstandard_minimum_savings_bytes: number
+  readonly default_connect_timeout_milliseconds: number
+  readonly default_request_timeout_milliseconds: number
+}
+
+function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Values {
+  return {
+    abi_version: contract.ffi.abi_version,
+    operation_echo: required_contract_entry(
+      contract.opcodes,
+      "Echo",
+      "protocol opcode contract",
+    ).value,
+    result_error: required_contract_entry(
+      contract.ffi.result_kinds,
+      "Error",
+      "FFI result-kind contract",
+    ).value,
+    result_value: required_contract_entry(
+      contract.ffi.result_kinds,
+      "Value",
+      "FFI result-kind contract",
+    ).value,
+    result_connected: required_contract_entry(
+      contract.ffi.result_kinds,
+      "Connected",
+      "FFI result-kind contract",
+    ).value,
+    set_condition_any: required_contract_entry(
+      contract.ffi.set_conditions,
+      "Any",
+      "FFI SET-condition contract",
+    ).value,
+    default_zstandard_level: contract.client_defaults.zstandard_level,
+    default_zstandard_minimum_input_bytes:
+      contract.client_defaults.zstandard_minimum_input_bytes,
+    default_zstandard_minimum_savings_bytes:
+      contract.client_defaults.zstandard_minimum_savings_bytes,
+    default_connect_timeout_milliseconds:
+      contract.client_defaults.connect_timeout_milliseconds,
+    default_request_timeout_milliseconds:
+      contract.client_defaults.request_timeout_milliseconds,
+  }
+}
+
+/** Renders the native constants consumed by the Java JNA adapter. */
+export function render_java_contract(contract: Client_Contract): string {
+  const values = adapter_contract_values(contract)
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated_local;
+
+/** Native values shared by the Java adapter and the Rust client-core ABI. */
+public final class SmithyContract {
+    private SmithyContract() {}
+
+    public static final int ABI_VERSION = ${values.abi_version};
+    public static final int OPERATION_ECHO = ${values.operation_echo};
+    public static final int RESULT_ERROR = ${values.result_error};
+    public static final int RESULT_VALUE = ${values.result_value};
+    public static final int RESULT_CONNECTED = ${values.result_connected};
+    public static final int SET_CONDITION_ANY = ${values.set_condition_any};
+    public static final int DEFAULT_ZSTANDARD_LEVEL = ${values.default_zstandard_level};
+    public static final long DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${values.default_zstandard_minimum_input_bytes}L;
+    public static final long DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${values.default_zstandard_minimum_savings_bytes}L;
+    public static final long DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${values.default_connect_timeout_milliseconds}L;
+    public static final long DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${values.default_request_timeout_milliseconds}L;
+}
+`
+}
+
+/** Renders the native constants consumed by the Kotlin JNA adapter. */
+export function render_kotlin_contract(contract: Client_Contract): string {
+  const values = adapter_contract_values(contract)
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated_local
+
+/** Native values shared by the Kotlin adapter and the Rust client-core ABI. */
+public object SmithyContract {
+    public const val ABI_VERSION: Int = ${values.abi_version}
+    public const val OPERATION_ECHO: Int = ${values.operation_echo}
+    public const val RESULT_ERROR: Int = ${values.result_error}
+    public const val RESULT_VALUE: Int = ${values.result_value}
+    public const val RESULT_CONNECTED: Int = ${values.result_connected}
+    public const val SET_CONDITION_ANY: Int = ${values.set_condition_any}
+    public const val DEFAULT_ZSTANDARD_LEVEL: Int = ${values.default_zstandard_level}
+    public const val DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES: Long = ${values.default_zstandard_minimum_input_bytes}L
+    public const val DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES: Long = ${values.default_zstandard_minimum_savings_bytes}L
+    public const val DEFAULT_CONNECT_TIMEOUT_MILLISECONDS: Long = ${values.default_connect_timeout_milliseconds}L
+    public const val DEFAULT_REQUEST_TIMEOUT_MILLISECONDS: Long = ${values.default_request_timeout_milliseconds}L
+}
+`
+}
+
+/** Renders the native constants consumed by the Dart FFI adapter. */
+export function render_dart_contract(contract: Client_Contract): string {
+  const values = adapter_contract_values(contract)
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+/// Native values shared by the Dart adapter and the Rust client-core ABI.
+const int smithyFfiAbiVersion = ${values.abi_version};
+const int smithyOperationEcho = ${values.operation_echo};
+const int smithyResultError = ${values.result_error};
+const int smithyResultValue = ${values.result_value};
+const int smithyResultConnected = ${values.result_connected};
+const int smithySetConditionAny = ${values.set_condition_any};
+const int smithyDefaultZstandardLevel = ${values.default_zstandard_level};
+const int smithyDefaultZstandardMinimumInputBytes =
+    ${values.default_zstandard_minimum_input_bytes};
+const int smithyDefaultZstandardMinimumSavingsBytes =
+    ${values.default_zstandard_minimum_savings_bytes};
+const int smithyDefaultConnectTimeoutMilliseconds =
+    ${values.default_connect_timeout_milliseconds};
+const int smithyDefaultRequestTimeoutMilliseconds =
+    ${values.default_request_timeout_milliseconds};
 `
 }
 
@@ -3481,8 +3626,11 @@ function smithy_ast(client_model: boolean): unknown {
 type Generation_Target =
   | "all"
   | "c-contract"
+  | "dart"
   | "dotnet"
   | "go"
+  | "java"
+  | "kotlin"
   | "python"
   | "rust-api"
   | "rust-client"
@@ -3498,10 +3646,16 @@ function generation_target(value: string | undefined): Generation_Target {
       return "all"
     case "c-contract":
       return "c-contract"
+    case "dart":
+      return "dart"
     case "dotnet":
       return "dotnet"
     case "go":
       return "go"
+    case "java":
+      return "java"
+    case "kotlin":
+      return "kotlin"
     case "python":
       return "python"
     case "rust-api":
@@ -3554,10 +3708,17 @@ function expected_outputs(
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+        [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
+        [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
       }
     case "c-contract":
       return {
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
+      }
+    case "dart":
+      return {
+        [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
       }
     case "dotnet":
       return {
@@ -3568,6 +3729,14 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+      }
+    case "java":
+      return {
+        [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+      }
+    case "kotlin":
+      return {
+        [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
       }
     case "rust-api":
       return {

@@ -124,6 +124,16 @@ impl NativeClient {
             .map_err(native_error)
     }
 
+    /// Sends an experimental payload and returns the exact echoed bytes.
+    #[napi]
+    pub async fn echo(&self, value: Uint8Array) -> Result<Uint8Array> {
+        self.active_client()?
+            .echo(value.as_ref())
+            .await
+            .map(Uint8Array::new)
+            .map_err(native_error)
+    }
+
     /// Retrieves exact decoded bytes or `null` when the key is absent.
     #[napi]
     pub async fn get(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {

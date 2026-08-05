@@ -71,6 +71,8 @@ impl std::fmt::Display for Backend {
 pub enum Operation {
     /// `PING` request.
     Ping,
+    /// Experimental `ECHO` request.
+    Echo,
     /// `GET` request.
     Get,
     /// `SET` request.
@@ -121,6 +123,7 @@ impl std::fmt::Display for Operation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
             Self::Ping => "PING",
+            Self::Echo => "ECHO",
             Self::Get => "GET",
             Self::Set => "SET",
             Self::Delete => "DELETE",
@@ -474,6 +477,14 @@ impl<C: ClientConnection> Core<C> {
         Ok(started.elapsed())
     }
 
+    async fn echo(&self, value: Vec<u8>) -> Result<Vec<u8>> {
+        let response = self
+            .request(Request::new(Opcode::Echo, None, value).map_err(Error::protocol)?)
+            .await?;
+        expect_status(Operation::Echo, response.status, &[Status::Ok])?;
+        Ok(response.payload)
+    }
+
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
         let namespace_id = self.ensure_namespace().await?;
         self.get_in_namespace(namespace_id, item_id).await
@@ -633,8 +644,11 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats)
-            || (request.opcode == Opcode::NamespaceOpen && !request.create_if_missing);
+        let response_safe = matches!(
+            request.opcode,
+            Opcode::Ping | Opcode::Echo | Opcode::Get | Opcode::Stats
+        ) || (request.opcode == Opcode::NamespaceOpen
+            && !request.create_if_missing);
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
@@ -1206,6 +1220,11 @@ macro_rules! raw_client_methods {
                 self.0.ping().await
             }
 
+            /// Sends an experimental UTF-8-independent payload and returns the echoed bytes.
+            pub async fn echo(&self, value: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+                self.0.echo(value.as_ref().to_vec()).await
+            }
+
             /// Returns the currently selected server-assigned namespace ID.
             pub fn namespace_id(&self) -> Option<u64> {
                 self.0.namespace_id()
@@ -1710,6 +1729,7 @@ fn validate_response_contract(
     match (opcode, response.status) {
         (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
         (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
+        (Opcode::Echo, Status::Ok) => Ok(()),
 
         (Opcode::Get, Status::Ok) => Ok(()),
         (Opcode::Get, Status::NotFound) if response.payload.is_empty() => Ok(()),
@@ -1780,6 +1800,7 @@ fn server_error_code(status: Status) -> ServerErrorCode {
 fn operation(opcode: Opcode) -> Operation {
     match opcode {
         Opcode::Ping => Operation::Ping,
+        Opcode::Echo => Operation::Echo,
         Opcode::Get => Operation::Get,
         Opcode::Set => Operation::Set,
         Opcode::Delete => Operation::Delete,

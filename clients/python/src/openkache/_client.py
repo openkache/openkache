@@ -17,6 +17,8 @@ from typing import Any, Final, Iterable, Sequence
 from ._generated import (
     SmithyDeleteInput,
     SmithyDeleteOutput,
+    SmithyEchoInput,
+    SmithyEchoOutput,
     SmithyEvictionDefault,
     SmithyEvictionMode,
     SmithyExpirationDefault,
@@ -82,6 +84,7 @@ from ._generated.smithy_contract import (
     SMITHY_ITEM_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
+    SMITHY_OPCODE_ECHO,
     SMITHY_OPCODE_GET,
     SMITHY_OPCODE_NAMESPACE_DELETE,
     SMITHY_OPCODE_NAMESPACE_OPEN,
@@ -445,6 +448,23 @@ class OpenKacheClient:
         self._assert_open()
         await self._execute(SMITHY_OPCODE_PING)
 
+    async def echo(self, message: str) -> str:
+        """Sends an experimental UTF-8 message and returns the echoed message."""
+
+        self._assert_open()
+        if not isinstance(message, str):
+            raise OpenKacheValueError("message must be a string")
+        kind, payload = await self._execute(
+            SMITHY_OPCODE_ECHO,
+            value=message.encode("utf-8"),
+        )
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"ECHO returned unexpected native result {kind}")
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise OpenKacheError(f"ECHO response is not UTF-8: {error}") from error
+
     async def get(self, key: str | bytes | bytearray | memoryview) -> Any | None:
         """Gets a JSON value, or ``None`` when the key is absent."""
 
@@ -671,6 +691,18 @@ class RawClient(SmithyOpenKacheApi):
         del input
         await self._owner.ping()
         return SmithyPingOutput()
+
+    async def echo(self, input: SmithyEchoInput) -> SmithyEchoOutput:
+        kind, payload = await self._owner._execute(
+            SMITHY_OPCODE_ECHO,
+            value=input.message.encode("utf-8"),
+        )
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"ECHO returned unexpected native result {kind}")
+        try:
+            return SmithyEchoOutput(message=payload.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise OpenKacheError(f"ECHO response is not UTF-8: {error}") from error
 
     async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)

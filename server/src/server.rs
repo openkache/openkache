@@ -1627,9 +1627,14 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         let response_result = match Request::decode_owned(request_bytes) {
             Ok(request) => {
                 let may_mutate = request_may_mutate(&request);
-                let response_permit = if request.opcode == Opcode::Get {
+                let response_permit = if matches!(request.opcode, Opcode::Get | Opcode::Echo) {
+                    let response_budget_bytes = if request.opcode == Opcode::Echo {
+                        request.value.len()
+                    } else {
+                        max_item_bytes
+                    };
                     match request_budget
-                        .acquire(max_item_bytes, request_timeout)
+                        .acquire(response_budget_bytes, request_timeout)
                         .await
                     {
                         Ok(permit) => Some(permit),
@@ -1819,6 +1824,7 @@ async fn execute_request(
     }
     let result = match opcode {
         Opcode::Ping => return Some(response_bytes(Status::Ok, b"PONG")),
+        Opcode::Echo => return Some(response(Status::Ok, value)),
         Opcode::NamespaceOpen => {
             let name = namespace_name.expect("namespace-open requests have a validated name");
             let result = namespaces
