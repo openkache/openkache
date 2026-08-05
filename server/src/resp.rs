@@ -24,7 +24,7 @@ use crate::server::{
     launch_network_role, shutdown_network_workers_and_cache,
 };
 use crate::types::StoredItemValue;
-use crate::{AppConfig, NetworkCache, SetOutcome, ThreadedKvkache};
+use crate::{AppConfig, NetworkWorkerCache, SetOutcome, ThreadedKvkache};
 
 const MAX_ARRAY_ITEMS: usize = 64;
 const MAX_BULK_BYTES: usize = 16 * 1024 * 1024;
@@ -344,7 +344,7 @@ async fn run_resp_worker(
     stop: AsyncReceiver<()>,
 ) -> std::io::Result<()> {
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
-    let cache = NetworkCache::new(cache, network_shard.worker_id());
+    let cache = NetworkWorkerCache::new(cache, network_shard.worker_id());
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {
@@ -392,7 +392,7 @@ async fn run_resp_worker(
 
 async fn serve_resp_connection(
     mut stream: TcpStream,
-    cache: &NetworkCache<'_>,
+    cache: &NetworkWorkerCache<'_>,
     network_shard: NetworkShard<'_>,
     request_timeout: Duration,
 ) -> std::io::Result<()> {
@@ -553,7 +553,7 @@ pub(crate) fn status_for_resp_response(
 }
 
 async fn execute_command(
-    cache: &NetworkCache<'_>,
+    cache: &NetworkWorkerCache<'_>,
     command: &[&[u8]],
     response: &mut Vec<u8>,
 ) -> bool {

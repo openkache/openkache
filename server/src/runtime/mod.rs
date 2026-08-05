@@ -115,17 +115,17 @@ pub struct ThreadedKvkache {
     observability: Option<Arc<ObservabilityState>>,
 }
 
-/// A network-worker-owned view of the storage runtime.
+/// A network-worker-owned view of the storage runtime and its request shard.
 ///
 /// The wrapper carries the caller shard explicitly so queue and wait telemetry
 /// is recorded by the network worker that issued the request. The storage
 /// runtime remains shared only for request routing and response delivery.
-pub(crate) struct NetworkCache<'a> {
+pub(crate) struct NetworkWorkerCache<'a> {
     cache: &'a ThreadedKvkache,
     network_worker: NetworkWorkerId,
 }
 
-impl<'a> NetworkCache<'a> {
+impl<'a> NetworkWorkerCache<'a> {
     pub(crate) fn new(cache: &'a ThreadedKvkache, network_worker: NetworkWorkerId) -> Self {
         Self {
             cache,

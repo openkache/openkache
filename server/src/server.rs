@@ -37,8 +37,8 @@ use crate::transport::{
     ServerTlsConfig, StreamReadError, TransportError,
 };
 use crate::{
-    AppConfig, KvError, NetworkCache, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache,
-    TlsConfig,
+    AppConfig, KvError, NetworkConfig, NetworkWorkerCache, QuicBackend, SetOutcome,
+    ThreadedKvkache, TlsConfig,
 };
 
 pub(crate) type NetworkWorkerCompletion = (usize, std::result::Result<(), String>);
@@ -1499,7 +1499,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         observability,
     } = limits;
     let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
-    let cache = NetworkCache::new(cache, network_shard.worker_id());
+    let cache = NetworkWorkerCache::new(cache, network_shard.worker_id());
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {
@@ -1544,7 +1544,7 @@ async fn run_network_worker<E: TransportEndpoint>(
 /// Completes one QUIC handshake and serves the accepted connection.
 async fn serve_incoming<I: TransportIncoming>(
     incoming: I,
-    cache: &NetworkCache<'_>,
+    cache: &NetworkWorkerCache<'_>,
     network_shard: NetworkShard<'_>,
     access_policy: &AccessPolicy,
     request_timeout: Duration,
@@ -1580,7 +1580,7 @@ async fn serve_incoming<I: TransportIncoming>(
 /// Multiplexes bounded reusable request lanes for one QUIC connection.
 async fn serve_connection<C: TransportConnection>(
     connection: C,
-    cache: &NetworkCache<'_>,
+    cache: &NetworkWorkerCache<'_>,
     network_shard: NetworkShard<'_>,
     administrator: bool,
     request_timeout: Duration,
@@ -1646,7 +1646,7 @@ async fn serve_connection<C: TransportConnection>(
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
-    cache: &NetworkCache<'_>,
+    cache: &NetworkWorkerCache<'_>,
     network_shard: NetworkShard<'_>,
     administrator: bool,
     request_timeout: Duration,
@@ -1851,7 +1851,7 @@ fn request_may_mutate(request: &Request) -> bool {
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
 async fn execute_request(
-    cache: &NetworkCache<'_>,
+    cache: &NetworkWorkerCache<'_>,
     request: Request,
     administrator: bool,
     namespaces: &Mutex<NamespaceRegistry>,
