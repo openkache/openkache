@@ -6134,6 +6134,12 @@ export function render_go_contract(contract: Client_Contract): string {
         `\tSmithyFFINamespaceDescriptor${field.go_name}Offset = ${field.offset}`,
     )
     .join("\n")
+  const item_id_operations = contract.api.operations.filter(
+    (operation) => operation.contract?.request_kind === "scoped_item",
+  )
+  const item_id_cases = item_id_operations
+    .map((operation) => `SmithyOpcode${operation.name}`)
+    .join(", ")
   return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
 
 package openkache
@@ -6212,6 +6218,18 @@ ${contract.opcodes
   .map((entry) => `\tSmithyOpcode${entry.name} uint32 = ${entry.value}`)
   .join("\n")}
 )
+
+// smithyOperationUsesItemID reports whether the Smithy operation's native input is an item ID.
+// The switch is generated from operation semantics so native adapters do not name individual
+// operations when marshalling a generic scoped request.
+func smithyOperationUsesItemID(operation uint32) bool {
+\tswitch operation {
+\tcase ${item_id_cases}:
+\t\treturn true
+\tdefault:
+\t\treturn false
+\t}
+}
 
 // Smithy native ABI values shared by language adapters.
 const (
@@ -8656,12 +8674,15 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let payload = $client::execute_application(
+                let payload = $client::execute_raw(
                     self,
                     openkache_client_core::Opcode::${operation.name},
+                    [],
                     input.${input_payload}.into_bytes(),
+                    openkache_client_core::SetOptions::new(),
                 )
                     .await
+                    .map(|result| result.payload)
                     .and_then(|value| {
                         String::from_utf8(value).map_err(|error| {
                             Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))

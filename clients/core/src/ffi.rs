@@ -41,12 +41,11 @@ use crate::contract::{
 };
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
-    LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
-    SetCondition, SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, Endpoint,
+    EvictionDefault, ExpirationDefault, GetOutcome, LocalProtectedClient, NamespacePolicy,
+    OverridePolicy, PrivateKey, RetryPolicy, ServerTrust, SetCondition, SetOptions,
+    SetOutcome,
 };
-use openkache_protocol::Request;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Opaque result allocated by the native ABI.
@@ -614,36 +613,20 @@ async fn execute_protocol_global(
 ) -> Option<std::result::Result<FfiResult, crate::Error>> {
     let opcode = crate::contract::protocol_opcode(operation)?;
     let contract = crate::contract::operation_contract(opcode);
-    match (contract.request_kind, contract.response_kind) {
-        (
-            crate::contract::OperationRequestKind::ApplicationValue,
-            crate::contract::OperationResponseKind::ApplicationValue,
-        ) => Some(
-            client
-                .raw()
-                .execute_application(opcode, value)
-                .await
-                .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
-        ),
-        (
-            crate::contract::OperationRequestKind::Empty,
-            crate::contract::OperationResponseKind::Pong
-            | crate::contract::OperationResponseKind::Empty,
-        ) => {
-            let request = Request::new(opcode, None, value).map_err(crate::Error::protocol);
-            Some(match request {
-                Ok(request) => client.raw().execute_request(request).await.map(|_response| {
-                    match contract.response_kind {
-                        crate::contract::OperationResponseKind::Pong
-                        | crate::contract::OperationResponseKind::Empty => ok_result(),
-                        _ => unreachable!("global response kind checked above"),
-                    }
-                }),
-                Err(error) => Err(error),
-            })
-        }
-        _ => None,
+    if !matches!(
+        contract.request_kind,
+        crate::contract::OperationRequestKind::Empty
+            | crate::contract::OperationRequestKind::ApplicationValue
+    ) {
+        return None;
     }
+    Some(
+        client
+            .raw()
+            .execute_raw(opcode, [], value, SetOptions::new())
+            .await
+            .and_then(operation_result),
+    )
 }
 
 async fn execute_protected(
@@ -687,42 +670,10 @@ async fn execute_protected_data_plane(
             "operation is not available through the protected ABI",
         ));
     };
-    let contract = crate::contract::operation_contract(opcode);
-    match (contract.request_kind, contract.response_kind) {
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::Value,
-        ) => client
-            .get(&application_key)
-            .await
-            .map(|value| get_result(value, bytes_result)),
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::SetOutcome,
-        ) => client
-            .set(&application_key, value, set_options)
-            .await
-            .map(set_result),
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::DeleteOutcome,
-        ) => client.delete(&application_key).await.map(delete_result),
-        (
-            crate::contract::OperationRequestKind::ScopedNamespace,
-            crate::contract::OperationResponseKind::StatsJson,
-        ) => client
-            .stats()
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        (
-            crate::contract::OperationRequestKind::ScopedNamespace,
-            crate::contract::OperationResponseKind::Empty,
-        ) => client.sync().await.map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
-            "operation",
-            "protocol operation is not available through the protected ABI",
-        )),
-    }
+    client
+        .execute_operation(opcode, application_key, value, set_options)
+        .await
+        .and_then(operation_result)
 }
 
 async fn execute_raw(
@@ -744,54 +695,11 @@ async fn execute_raw(
             "operation is not available through the exact item-ID ABI",
         ));
     };
-    let contract = crate::contract::operation_contract(opcode);
-    match (contract.request_kind, contract.response_kind) {
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::Value,
-        ) => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .get(item_id)
-                .await
-                .map(|value| get_result(value, value_result))
-        }
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::SetOutcome,
-        ) => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .set(item_id, ItemValue::new(value), set_options)
-                .await
-                .map(set_result)
-        }
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::DeleteOutcome,
-        ) => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client.raw().delete(item_id).await.map(delete_result)
-        }
-        (
-            crate::contract::OperationRequestKind::ScopedNamespace,
-            crate::contract::OperationResponseKind::StatsJson,
-        ) => client
-            .raw()
-            .stats()
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        (
-            crate::contract::OperationRequestKind::ScopedNamespace,
-            crate::contract::OperationResponseKind::Empty,
-        ) => client.raw().sync().await.map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
-            "operation",
-            "protocol operation is not available through the exact item-ID ABI",
-        )),
-    }
+    client
+        .raw()
+        .execute_raw(opcode, item_id, value, set_options)
+        .await
+        .and_then(operation_result)
 }
 
 async fn execute_scoped(
@@ -808,62 +716,11 @@ async fn execute_scoped(
             "operation is not available through the namespace-scoped exact-ID ABI",
         ));
     };
-    let contract = crate::contract::operation_contract(opcode);
-    match (contract.request_kind, contract.response_kind) {
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::Value,
-        ) => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .get_in_namespace(namespace_id, item_id)
-                .await
-                .map(|value| get_result(value, value_result))
-        }
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::SetOutcome,
-        ) => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .set_in_namespace(namespace_id, item_id, ItemValue::new(value), set_options)
-                .await
-                .map(set_result)
-        }
-        (
-            crate::contract::OperationRequestKind::ScopedItem,
-            crate::contract::OperationResponseKind::DeleteOutcome,
-        ) => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .delete_in_namespace(namespace_id, item_id)
-                .await
-                .map(delete_result)
-        }
-        (
-            crate::contract::OperationRequestKind::ScopedNamespace,
-            crate::contract::OperationResponseKind::StatsJson,
-        ) => client
-            .raw()
-            .stats_in_namespace(namespace_id)
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        (
-            crate::contract::OperationRequestKind::ScopedNamespace,
-            crate::contract::OperationResponseKind::Empty,
-        ) => client
-            .raw()
-            .sync_in_namespace(namespace_id)
-            .await
-            .map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
-            "operation",
-            "protocol operation is not available through the namespace-scoped exact-ID ABI",
-        )),
-    }
+    client
+        .raw()
+        .execute_scoped(opcode, namespace_id, item_id, value, set_options)
+        .await
+        .and_then(operation_result)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1032,33 +889,20 @@ fn ok_result() -> FfiResult {
     FfiResult::success(FfiResultKind::Ok, Vec::new())
 }
 
+fn operation_result(
+    result: crate::OperationResult,
+) -> std::result::Result<FfiResult, crate::Error> {
+    let kind = FfiResultKind::try_from(result.kind).map_err(|kind| {
+        crate::Error::configuration(
+            "operation result",
+            format!("unsupported native result kind {kind}"),
+        )
+    })?;
+    Ok(FfiResult::success(kind, result.payload))
+}
+
 fn not_found_result() -> FfiResult {
     FfiResult::success(FfiResultKind::NotFound, Vec::new())
-}
-
-fn get_result<T>(outcome: GetOutcome<T>, found: impl FnOnce(T) -> FfiResult) -> FfiResult {
-    match outcome {
-        GetOutcome::Found(value) => found(value),
-        GetOutcome::NotFound => not_found_result(),
-    }
-}
-
-fn value_result(value: ItemValue) -> FfiResult {
-    bytes_result(value.into_bytes())
-}
-
-fn bytes_result(payload: Vec<u8>) -> FfiResult {
-    FfiResult::success(FfiResultKind::Value, payload)
-}
-
-fn delete_result(outcome: DeleteOutcome) -> FfiResult {
-    FfiResult::success(
-        match outcome {
-            DeleteOutcome::Deleted => FfiResultKind::Deleted,
-            DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-        },
-        Vec::new(),
-    )
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
