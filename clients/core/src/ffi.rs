@@ -14,7 +14,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
-pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
+pub use crate::contract::{
+    FfiInputKind, FfiOperation, FfiOperationContract, FfiResultKind, FfiSetCondition,
+};
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::{
     FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
@@ -767,6 +769,86 @@ async fn execute_scoped(
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FfiInvocation {
+    Protected,
+    Raw,
+    Scoped,
+}
+
+fn validate_ffi_operation(
+    operation: FfiOperation,
+    operation_contract: FfiOperationContract,
+    invocation: FfiInvocation,
+    input: &[u8],
+    value: &[u8],
+    set_options: &SetOptions,
+) -> std::result::Result<(), String> {
+    if operation_contract.dedicated_abi {
+        return Err("namespace management uses dedicated native ABI calls".to_owned());
+    }
+    let supported = match invocation {
+        FfiInvocation::Protected => operation_contract.supports_protected,
+        FfiInvocation::Raw => operation_contract.supports_raw,
+        FfiInvocation::Scoped => operation_contract.supports_scoped,
+    };
+    if !supported {
+        return Err(match invocation {
+            FfiInvocation::Protected => {
+                "operation is not available through the protected ABI".to_owned()
+            }
+            FfiInvocation::Raw => {
+                if matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
+                    "exact item-ID calls do not support formatted JSON operations".to_owned()
+                } else {
+                    "operation is not available through the exact item-ID ABI".to_owned()
+                }
+            }
+            FfiInvocation::Scoped => {
+                "operation is not available through the namespace-scoped exact-ID ABI".to_owned()
+            }
+        });
+    }
+    match (invocation, operation_contract.input_kind) {
+        (FfiInvocation::Protected, FfiInputKind::None) if !input.is_empty() => {
+            return Err("operation does not accept an application key".to_owned());
+        }
+        (FfiInvocation::Protected, FfiInputKind::ApplicationKey)
+        | (FfiInvocation::Protected, FfiInputKind::ItemId)
+            if input.is_empty() =>
+        {
+            return Err("application key must not be empty".to_owned());
+        }
+        (FfiInvocation::Raw, FfiInputKind::None) if !input.is_empty() => {
+            return Err("operation does not accept an item_id".to_owned());
+        }
+        (FfiInvocation::Raw, FfiInputKind::ItemId)
+        | (FfiInvocation::Scoped, FfiInputKind::ItemId)
+            if input.len() != crate::ITEM_ID_BYTES =>
+        {
+            return Err(format!(
+                "item_id must contain exactly {} bytes, got {}",
+                crate::ITEM_ID_BYTES,
+                input.len()
+            ));
+        }
+        (FfiInvocation::Scoped, FfiInputKind::None) if !input.is_empty() => {
+            return Err("operation does not accept an item_id".to_owned());
+        }
+        _ => {}
+    }
+    if !operation_contract.accepts_value && !value.is_empty() {
+        return Err("operation does not accept a value".to_owned());
+    }
+    if !operation_contract.accepts_set_options
+        && (set_options.condition() != SetCondition::Any
+            || set_options.time_to_live_millis().is_some())
+    {
+        return Err("SET options require a SET operation".to_owned());
+    }
+    Ok(())
+}
+
 async fn namespace_open(
     client: &LocalProtectedClient,
     name: Vec<u8>,
@@ -1332,7 +1414,8 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        let set_options = if operation == FfiOperation::Set {
+        let operation_contract = crate::contract::ffi_operation_contract(operation);
+        let set_options = if operation_contract.accepts_set_options {
             set_options_from_flags(set_flags, ttl_ms)?
         } else {
             if set_flags != 0 || ttl_ms != 0 {
@@ -1340,45 +1423,15 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             }
             SetOptions::new()
         };
-        match operation {
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-                if item_id.len() != crate::ITEM_ID_BYTES =>
-            {
-                Err(format!(
-                    "item_id must contain exactly {} bytes, got {}",
-                    crate::ITEM_ID_BYTES,
-                    item_id.len()
-                ))
-            }
-            FfiOperation::Get | FfiOperation::Delete if !value.is_empty() => {
-                Err("operation does not accept a value".to_owned())
-            }
-            FfiOperation::Stats | FfiOperation::Sync if !item_id.is_empty() => {
-                Err("operation does not accept an item_id".to_owned())
-            }
-            FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
-                Err("operation does not accept a value".to_owned())
-            }
-            FfiOperation::GetJson
-            | FfiOperation::SetJson
-            | FfiOperation::Ping
-            | FfiOperation::Echo => Err(
-                "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
-            ),
-            FfiOperation::NamespaceOpen
-            | FfiOperation::NamespaceUpdatePolicy
-            | FfiOperation::NamespaceDelete
-            | FfiOperation::Reconnect => {
-                Err("namespace management and reconnect use dedicated native ABI calls".to_owned())
-            }
-            FfiOperation::Get
-            | FfiOperation::Set
-            | FfiOperation::Delete
-            | FfiOperation::Stats
-            | FfiOperation::Sync => {
-                Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options))
-            }
-        }
+        validate_ffi_operation(
+            operation,
+            operation_contract,
+            FfiInvocation::Scoped,
+            &item_id,
+            &value,
+            &set_options,
+        )?;
+        Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options))
     }))
 }
 
@@ -1610,24 +1663,9 @@ fn execute_entry_inner(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
-        }
-        if raw
-            && matches!(
-                operation,
-                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-            )
-            && application_key.len() != crate::ITEM_ID_BYTES
-        {
-            return Err(format!(
-                "item_id must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES,
-                application_key.len()
-            ));
-        }
+        let operation_contract = crate::contract::ffi_operation_contract(operation);
         let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+            if operation_contract.accepts_set_options {
                 set_options_from_flags(flags, ttl_ms)?
             } else {
                 if flags != 0 || ttl_ms != 0 {
@@ -1656,59 +1694,19 @@ fn execute_entry_inner(
             }
             set_options
         };
-        match operation {
-            FfiOperation::Get
-            | FfiOperation::Set
-            | FfiOperation::GetJson
-            | FfiOperation::SetJson
-            | FfiOperation::Delete
-                if !raw && application_key.is_empty() =>
-            {
-                Err("application key must not be empty".to_owned())
-            }
-            FfiOperation::Ping
-            | FfiOperation::Echo
-            | FfiOperation::Stats
-            | FfiOperation::Sync
-            | FfiOperation::Reconnect
-                if !application_key.is_empty() =>
-            {
-                Err("operation does not accept an application key".to_owned())
-            }
-            FfiOperation::Ping
-            | FfiOperation::Get
-            | FfiOperation::GetJson
-            | FfiOperation::Delete
-            | FfiOperation::Stats
-            | FfiOperation::Sync
-            | FfiOperation::Reconnect
-                if !value.is_empty() =>
-            {
-                Err("operation does not accept a value".to_owned())
-            }
-            operation
-                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                    && (set_options.condition() != SetCondition::Any
-                        || set_options.time_to_live_millis().is_some()) =>
-            {
-                Err("SET options require a SET operation".to_owned())
-            }
-            FfiOperation::Ping
-            | FfiOperation::Echo
-            | FfiOperation::Get
-            | FfiOperation::GetJson
-            | FfiOperation::Set
-            | FfiOperation::SetJson
-            | FfiOperation::Delete
-            | FfiOperation::Stats
-            | FfiOperation::Sync
-            | FfiOperation::Reconnect
-            | FfiOperation::NamespaceOpen
-            | FfiOperation::NamespaceUpdatePolicy
-            | FfiOperation::NamespaceDelete => {
-                Ok(client.execute(operation, application_key, value, set_options, raw))
-            }
-        }
+        validate_ffi_operation(
+            operation,
+            operation_contract,
+            if raw {
+                FfiInvocation::Raw
+            } else {
+                FfiInvocation::Protected
+            },
+            &application_key,
+            &value,
+            &set_options,
+        )?;
+        Ok(client.execute(operation, application_key, value, set_options, raw))
     }))
 }
 

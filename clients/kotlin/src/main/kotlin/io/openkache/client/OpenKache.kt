@@ -218,18 +218,12 @@ public class EchoClient private constructor(
         flags: Int = 0,
         ttlMilliseconds: Long = 0,
     ): NativeResult {
-        if ((operation == SmithyContract.OPERATION_GET
-                || operation == SmithyContract.OPERATION_SET
-                || operation == SmithyContract.OPERATION_DELETE)
+        if (SmithyContract.operationRequiresItemId(operation)
             && itemId.size != SmithyContract.ITEM_ID_BYTES
         ) {
             throw IllegalArgumentException("itemId must contain exactly ${SmithyContract.ITEM_ID_BYTES} bytes")
         }
-        if (itemId.isNotEmpty()
-            && operation != SmithyContract.OPERATION_GET
-            && operation != SmithyContract.OPERATION_SET
-            && operation != SmithyContract.OPERATION_DELETE
-        ) {
+        if (itemId.isNotEmpty() && !SmithyContract.operationSupportsScoped(operation)) {
             throw IllegalArgumentException("operation does not accept an itemId")
         }
         synchronized(this) {

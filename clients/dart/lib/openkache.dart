@@ -332,18 +332,13 @@ final class EchoClient implements OpenKacheClient {
     int flags = 0,
     int ttlMilliseconds = 0,
   }) {
-    if ((operation == smithyOperationGet ||
-            operation == smithyOperationSet ||
-            operation == smithyOperationDelete) &&
+    if (smithyOperationRequiresItemId(operation) &&
         itemId.length != smithyItemIdBytes) {
       throw ArgumentError(
         'itemId must contain exactly $smithyItemIdBytes bytes',
       );
     }
-    if (itemId.isNotEmpty &&
-        operation != smithyOperationGet &&
-        operation != smithyOperationSet &&
-        operation != smithyOperationDelete) {
+    if (itemId.isNotEmpty && !smithyOperationSupportsScoped(operation)) {
       throw ArgumentError('operation does not accept an itemId');
     }
     final itemBuffer = _Buffer(itemId);
