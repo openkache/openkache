@@ -73,6 +73,7 @@ fn report_common(
         println!("Storage directory: {}", storage_directory.display());
     }
     println!("Storage runtime: {}", openkache::storage_runtime_name());
+    println!("Network runtime: {}", openkache::network_runtime_name());
     report_storage_device(storage_device);
     println!("Allocator: {}", allocator::NAME);
     println!("Press Ctrl-C or send SIGTERM to stop");
@@ -106,8 +107,5 @@ fn report_storage_device(kind: StorageDeviceKind) {
 }
 
 async fn shutdown_signal() {
-    let interrupt = compio::signal::ctrl_c();
-    let terminate = compio::signal::unix::signal(libc::SIGTERM);
-    futures_util::pin_mut!(interrupt, terminate);
-    let _ = futures_util::future::select(interrupt, terminate).await;
+    openkache::shutdown_signal().await;
 }

@@ -4,6 +4,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
+#[cfg(feature = "network-runtime-kimojio")]
+use std::time::Duration;
 
 const DEFAULT_RETAINED_CAPACITY: usize = 256;
 
@@ -99,6 +101,15 @@ impl<T> CompletionSlot<T> {
             state.waker = Some(cx.waker().clone());
         }
         Poll::Pending
+    }
+
+    #[cfg(feature = "network-runtime-kimojio")]
+    fn try_take(&self, generation: u64) -> Result<Option<T>, CompletionDisconnected> {
+        let mut state = lock(&self.state);
+        if !state.active || state.generation != generation || state.disconnected {
+            return Err(CompletionDisconnected);
+        }
+        Ok(state.value.take())
     }
 
     fn deactivate(&self, generation: u64) -> bool {
@@ -214,6 +225,38 @@ impl<T> CompletionReceiver<'_, T> {
     fn release(&mut self) {
         if let Some(slot) = self.slot.take() {
             self.slab.recycle(slot, self.generation);
+        }
+    }
+
+    #[cfg(feature = "network-runtime-kimojio")]
+    fn try_recv(&mut self) -> Result<Option<T>, CompletionDisconnected> {
+        let result = self
+            .slot
+            .as_ref()
+            .expect("completion receiver is not polled after completion")
+            .try_take(self.generation);
+        if result.is_err() || result.as_ref().is_ok_and(Option::is_some) {
+            self.release();
+        }
+        result
+    }
+
+    pub(super) async fn recv_async_network(self) -> Result<T, CompletionDisconnected>
+    where
+        T: Unpin,
+    {
+        #[cfg(not(feature = "network-runtime-kimojio"))]
+        return self.await;
+
+        #[cfg(feature = "network-runtime-kimojio")]
+        {
+            let mut receiver = self;
+            loop {
+                match receiver.try_recv()? {
+                    Some(value) => return Ok(value),
+                    None => crate::network_runtime::sleep(Duration::from_micros(10)).await,
+                }
+            }
         }
     }
 }

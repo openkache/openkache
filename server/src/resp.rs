@@ -6,10 +6,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use compio::BufResult;
-use compio::buf::{IntoInner, IoBuf};
-use compio::io::{AsyncRead, AsyncWriteExt};
-use compio::net::{TcpListener, TcpStream};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{ItemId, SetOptions};
@@ -18,6 +14,7 @@ use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver};
+use crate::network_runtime::{self, TcpListener, TcpStream};
 use crate::platform::StorageDeviceKind;
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
@@ -153,6 +150,7 @@ impl RespServer {
             match launch_network_role(
                 &cache,
                 NetworkRolePlacement::new(
+                    worker_id,
                     cpu_id,
                     format!("openkache-resp-{worker_id}"),
                     entries,
@@ -203,7 +201,7 @@ impl RespServer {
         }
 
         let shutdown = shutdown.fuse();
-        let worker_finished = finished_rx.recv_async().fuse();
+        let worker_finished = finished_rx.recv_async_network().fuse();
         pin_mut!(shutdown, worker_finished);
         let (worker_failure, completed_workers) = select! {
             () = shutdown => (None, 0),
@@ -292,7 +290,7 @@ async fn run_resp_worker(
     loop {
         if connections.is_empty() {
             let incoming = listener.accept().fuse();
-            let stopping = stop.recv_async().fuse();
+            let stopping = stop.recv_async_network().fuse();
             pin_mut!(incoming, stopping);
             select! {
                 incoming = incoming => {
@@ -305,7 +303,7 @@ async fn run_resp_worker(
         } else {
             let incoming = listener.accept().fuse();
             let completed = connections.next().fuse();
-            let stopping = stop.recv_async().fuse();
+            let stopping = stop.recv_async_network().fuse();
             pin_mut!(incoming, completed, stopping);
             select! {
                 incoming = incoming => {
@@ -329,16 +327,12 @@ async fn serve_resp_connection(
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut responses = Vec::new();
     loop {
-        let read_start = pending.len();
-        pending.reserve(READ_BUFFER_BYTES);
-        let BufResult(result, input) = stream
-            .read(pending.slice(read_start..read_start + READ_BUFFER_BYTES))
-            .await;
-        let bytes_read = result?;
-        pending = input.into_inner();
+        let input = vec![0_u8; READ_BUFFER_BYTES];
+        let (bytes_read, input) = stream.read(input).await?;
         if bytes_read == 0 {
             return Ok(());
         }
+        pending.extend_from_slice(&input[..bytes_read]);
         if pending.len() > MAX_BUFFER_BYTES {
             responses.clear();
             error(&mut responses, "request buffer exceeds RESP limit");
@@ -389,11 +383,8 @@ async fn write_with_timeout(
     response: Vec<u8>,
     timeout: Duration,
 ) -> std::io::Result<Vec<u8>> {
-    match compio::runtime::time::timeout(timeout, stream.write_all(response)).await {
-        Ok(BufResult(result, response)) => {
-            result?;
-            Ok(response)
-        }
+    match network_runtime::timeout(timeout, stream.write_all(response)).await {
+        Ok(result) => result,
         Err(_) => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "RESP response write timed out",

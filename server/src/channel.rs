@@ -18,6 +18,11 @@ async fn wait_for_storage_channel_poll() -> Result<(), RecvError> {
         .map_err(|_| RecvError)
 }
 
+#[cfg(feature = "network-runtime-kimojio")]
+async fn wait_for_network_channel_poll() {
+    crate::network_runtime::sleep(Duration::from_micros(10)).await;
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("sending on a disconnected channel")]
 pub(crate) struct SendError;
@@ -262,9 +267,6 @@ mod backend {
         }
 
         pub(crate) async fn recv_async_storage(&self) -> Result<T, RecvError> {
-            #[cfg(not(feature = "storage-runtime-kimojio"))]
-            return self.recv_async().await;
-
             #[cfg(feature = "storage-runtime-kimojio")]
             loop {
                 match self.try_recv() {
@@ -273,6 +275,9 @@ mod backend {
                     Err(TryRecvError::Empty) => super::wait_for_storage_channel_poll().await?,
                 }
             }
+
+            #[cfg(not(feature = "storage-runtime-kimojio"))]
+            self.recv_async().await
         }
 
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -386,9 +391,6 @@ mod backend {
         }
 
         pub(crate) async fn recv_async_storage(&self) -> Result<T, RecvError> {
-            #[cfg(not(feature = "storage-runtime-kimojio"))]
-            return self.recv_async().await;
-
             #[cfg(feature = "storage-runtime-kimojio")]
             loop {
                 match self.try_recv() {
@@ -397,6 +399,9 @@ mod backend {
                     Err(TryRecvError::Empty) => super::wait_for_storage_channel_poll().await?,
                 }
             }
+
+            #[cfg(not(feature = "storage-runtime-kimojio"))]
+            self.recv_async().await
         }
 
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -576,9 +581,6 @@ mod backend {
         }
 
         pub(crate) async fn recv_async_storage(&self) -> Result<T, RecvError> {
-            #[cfg(not(feature = "storage-runtime-kimojio"))]
-            return self.recv_async().await;
-
             #[cfg(feature = "storage-runtime-kimojio")]
             loop {
                 match self.try_recv() {
@@ -587,6 +589,9 @@ mod backend {
                     Err(TryRecvError::Empty) => super::wait_for_storage_channel_poll().await?,
                 }
             }
+
+            #[cfg(not(feature = "storage-runtime-kimojio"))]
+            self.recv_async().await
         }
 
         pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
@@ -601,6 +606,58 @@ mod backend {
 pub(crate) use backend::{
     AsyncReceiver, Receiver, Sender, bounded, bounded_async, bounded_sync_async,
 };
+
+impl<T> Sender<T>
+where
+    T: Send + Unpin + 'static,
+{
+    /// Sends a value without registering a cross-thread waker on Kimojio.
+    pub(crate) async fn send_async_network(&self, value: T) -> Result<(), SendError> {
+        #[cfg(not(feature = "network-runtime-kimojio"))]
+        {
+            return self.send_async(value).await;
+        }
+
+        #[cfg(feature = "network-runtime-kimojio")]
+        {
+            let mut value = value;
+            loop {
+                match self.try_send(value) {
+                    Ok(()) => return Ok(()),
+                    Err(TrySendError::Disconnected(_)) => return Err(SendError),
+                    Err(TrySendError::Full(returned)) => {
+                        value = returned;
+                        wait_for_network_channel_poll().await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<T> AsyncReceiver<T>
+where
+    T: Send + Unpin + 'static,
+{
+    /// Receives a value without registering a cross-thread waker on Kimojio.
+    ///
+    /// Kimojio requires every task wake-up to originate on its owning worker.
+    /// Polling with the selected runtime's timer preserves that invariant when
+    /// a channel sender belongs to another worker or runtime.
+    pub(crate) async fn recv_async_network(&self) -> Result<T, RecvError> {
+        #[cfg(not(feature = "network-runtime-kimojio"))]
+        return self.recv_async().await;
+
+        #[cfg(feature = "network-runtime-kimojio")]
+        loop {
+            match self.try_recv() {
+                Ok(value) => return Ok(value),
+                Err(TryRecvError::Disconnected) => return Err(RecvError),
+                Err(TryRecvError::Empty) => wait_for_network_channel_poll().await,
+            }
+        }
+    }
+}
 
 pub(crate) fn unbounded_async<T>() -> (Sender<T>, AsyncReceiver<T>)
 where

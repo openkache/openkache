@@ -15,6 +15,7 @@ package(default_visibility = ["//visibility:public"])
 SERVER_DEFAULT_FEATURES = [
     "allocator-jemalloc",
     "channel-kanal",
+    "network-runtime-compio",
     "quic-noq",
     "storage-runtime-compio",
 ]
@@ -42,6 +43,16 @@ filegroup(
 alias(
     name = "server_optional_boring",
     actual = "@crates//boring",
+)
+
+alias(
+    name = "server_optional_comnoq",
+    actual = "@crates//comnoq",
+)
+
+alias(
+    name = "server_optional_compio_quic",
+    actual = "@crates//compio-quic",
 )
 
 alias(
@@ -75,6 +86,11 @@ alias(
 )
 
 alias(
+    name = "server_optional_glommio",
+    actual = "@crates//glommio",
+)
+
+alias(
     name = "server_optional_mimalloc",
     actual = "@crates//mimalloc",
 )
@@ -87,6 +103,16 @@ alias(
 alias(
     name = "server_optional_quiche",
     actual = "@crates//quiche",
+)
+
+alias(
+    name = "server_optional_rustix",
+    actual = "@crates//rustix",
+)
+
+alias(
+    name = "server_optional_signal_hook",
+    actual = "@crates//signal-hook",
 )
 
 alias(

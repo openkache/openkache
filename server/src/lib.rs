@@ -83,6 +83,61 @@ compile_error!(
     "enable exactly one storage runtime feature: `storage-runtime-compio`, `storage-runtime-kimojio`, `storage-runtime-monoio`, or `storage-runtime-simulated`"
 );
 
+#[cfg(not(any(
+    feature = "network-runtime-compio",
+    feature = "network-runtime-monoio",
+    feature = "network-runtime-glommio",
+    feature = "network-runtime-kimojio"
+)))]
+compile_error!(
+    "enable exactly one network runtime feature: `network-runtime-compio`, `network-runtime-monoio`, `network-runtime-glommio`, or `network-runtime-kimojio`"
+);
+
+#[cfg(any(
+    all(feature = "network-runtime-compio", feature = "network-runtime-monoio"),
+    all(
+        feature = "network-runtime-compio",
+        feature = "network-runtime-glommio"
+    ),
+    all(
+        feature = "network-runtime-compio",
+        feature = "network-runtime-kimojio"
+    ),
+    all(
+        feature = "network-runtime-monoio",
+        feature = "network-runtime-glommio"
+    ),
+    all(
+        feature = "network-runtime-monoio",
+        feature = "network-runtime-kimojio"
+    ),
+    all(
+        feature = "network-runtime-glommio",
+        feature = "network-runtime-kimojio"
+    )
+))]
+compile_error!(
+    "enable exactly one network runtime feature: `network-runtime-compio`, `network-runtime-monoio`, `network-runtime-glommio`, or `network-runtime-kimojio`"
+);
+
+#[cfg(any(
+    all(feature = "quic-quinn", not(feature = "network-runtime-compio")),
+    all(feature = "quic-noq", not(feature = "network-runtime-compio"))
+))]
+compile_error!(
+    "`quic-quinn` and `quic-noq` require `network-runtime-compio`; use `quic-quiche` with another network runtime"
+);
+
+#[cfg(all(
+    any(
+        feature = "network-runtime-monoio",
+        feature = "network-runtime-glommio",
+        feature = "network-runtime-kimojio"
+    ),
+    not(target_os = "linux")
+))]
+compile_error!("Monoio, Glommio, and Kimojio network runtimes require Linux io_uring support");
+
 #[cfg(all(
     any(
         feature = "storage-runtime-kimojio",
@@ -96,6 +151,7 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+pub(crate) mod network_runtime;
 pub mod platform;
 pub mod resp;
 pub mod server;
@@ -123,6 +179,24 @@ pub const fn storage_runtime_name() -> &'static str {
     storage_runtime::NAME
 }
 
+/// Returns the compile-time-selected network runtime backend.
+pub const fn network_runtime_name() -> &'static str {
+    network_runtime::name()
+}
+
+/// Runs a future on the compile-time-selected network runtime.
+pub fn block_on<F>(future: F) -> std::io::Result<F::Output>
+where
+    F: std::future::Future + 'static,
+{
+    network_runtime::block_on(future)
+}
+
+/// Waits for the process shutdown signal using the selected network runtime.
+pub async fn shutdown_signal() {
+    network_runtime::shutdown_signal().await;
+}
+
 /// Returns the io_uring submission entry count used by the selected storage runtime.
 pub const fn storage_runtime_effective_ring_entries(configured: u32) -> u32 {
     storage_runtime::effective_ring_entries(configured)
@@ -136,15 +210,6 @@ pub const fn storage_runtime_effective_ring_entries(configured: u32) -> u32 {
 /// for completion-only runtimes that do not use physical storage.
 pub const fn storage_runtime_uses_physical_storage() -> bool {
     storage_runtime::USES_PHYSICAL_STORAGE
-}
-
-/// Builds the Compio runtime used by the server's top-level task.
-///
-/// The returned runtime uses the same production builder and native-driver
-/// policy as dedicated network workers. On Linux this requires io_uring; on
-/// Apple Silicon macOS it requires Compio's polling driver.
-pub fn build_server_runtime() -> std::io::Result<compio::runtime::Runtime> {
-    storage_runtime::build(storage_runtime::CompioRuntimeConfig::server_host())
 }
 
 pub(crate) mod sizing;

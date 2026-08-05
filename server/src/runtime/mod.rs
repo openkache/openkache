@@ -57,7 +57,10 @@ struct WorkerHandle {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-type CoreTask = Box<dyn FnOnce() + Send + 'static>;
+enum CoreTask {
+    Run(Box<dyn FnOnce() + Send + 'static>),
+    Shutdown,
+}
 
 pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> StorageKey {
     let mut bytes = item_id.into_bytes();
@@ -146,11 +149,17 @@ impl ThreadedKvkache {
                 .cpu_ids
                 .iter()
                 .any(|cpu_id| config.network.cpu_ids.contains(cpu_id));
-        if has_combined_worker && !crate::storage_runtime::SUPPORTS_COMBINED_NETWORK_ROLE {
-            return Err(KvError::InvalidConfig(format!(
-                "storage runtime {} requires separate network and storage CPUs",
-                crate::storage_runtime::NAME
-            )));
+        if has_combined_worker {
+            let storage_runtime = crate::storage_runtime::NAME;
+            let network_runtime = crate::network_runtime::name();
+            if storage_runtime != network_runtime
+                || !crate::storage_runtime::SUPPORTS_COMBINED_NETWORK_ROLE
+                || !crate::network_runtime::supports_combined_network_role()
+            {
+                return Err(KvError::InvalidConfig(format!(
+                    "network/storage CPU overlap requires the same combined-capable runtime instance; network runtime is {network_runtime}, storage runtime is {storage_runtime}"
+                )));
+            }
         }
         let combined_entries = has_combined_worker
             .then(|| {
@@ -418,7 +427,7 @@ impl ThreadedKvkache {
             return Ok(false);
         };
         sender
-            .send(Box::new(task))
+            .send(CoreTask::Run(Box::new(task)))
             .map_err(|_| KvError::Worker("combined core task queue disconnected".into()))?;
         Ok(true)
     }
@@ -473,11 +482,11 @@ impl ThreadedKvkache {
     ) -> Result<WorkerResponse> {
         let (response_tx, response_rx) = self.workers[worker].completions.register();
         let request_started = std::time::Instant::now();
-        compio::runtime::time::timeout(
+        crate::network_runtime::timeout(
             Duration::from_micros(self.config.timeouts.input_max_time_us),
             self.workers[worker]
                 .sender
-                .send_async(build(WorkerResponseSender::completion(response_tx))),
+                .send_async_network(build(WorkerResponseSender::completion(response_tx))),
         )
         .await
         .map_err(|_| KvError::Timeout("request input"))?
@@ -486,7 +495,7 @@ impl ThreadedKvkache {
         let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
         let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
         let remaining = request_limit.saturating_sub(elapsed).min(output_limit);
-        compio::runtime::time::timeout(remaining, response_rx)
+        crate::network_runtime::timeout(remaining, response_rx.recv_async_network())
             .await
             .map_err(|_| KvError::Timeout("request output"))?
             .map_err(|_| KvError::Worker("worker response disconnected".into()))?
@@ -1119,6 +1128,11 @@ impl ThreadedKvkache {
     }
 
     pub fn shutdown(&mut self) -> Result<()> {
+        for worker in &self.workers {
+            if let Some(sender) = &worker.core_tasks {
+                let _ = sender.send(CoreTask::Shutdown);
+            }
+        }
         let mut responses = Vec::with_capacity(self.workers.len());
         let mut shutdown_error = None;
         for worker in &self.workers {
@@ -1158,11 +1172,11 @@ impl ThreadedKvkache {
             }
         }
         for worker in &mut self.workers {
-            if let Some(thread) = worker.thread.take()
-                && thread.join().is_err()
-                && shutdown_error.is_none()
-            {
-                shutdown_error = Some(KvError::Worker("worker thread panicked".into()));
+            if let Some(thread) = worker.thread.take() {
+                let join_result = thread.join();
+                if join_result.is_err() && shutdown_error.is_none() {
+                    shutdown_error = Some(KvError::Worker("worker thread panicked".into()));
+                }
             }
         }
         if let Some(error) = shutdown_error {

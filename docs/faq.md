@@ -52,14 +52,15 @@ that intentionally own those transformations.
 ### Can I use my own QUIC implementation?
 
 The server has a backend-independent connection and stream boundary. The
-default `noq` backend and the optional `quinn` and `quiche` backends use the
-same Compio UDP I/O and timers and are selected with `--quic-backend` or
-`[quic].backend`. Enable them with the `quic-noq`, `quic-quinn`, and
-`quic-quiche` Cargo features; at least one is required. A build with exactly one
-backend selects it automatically. A build with multiple backends requires an
-explicit selection. Mozilla neqo is not currently available: its official
-transport is not published as a standalone crate and its server API requires
-NSS certificate-database integration.
+default `noq` backend and the optional `quinn` backend retain their Compio-native
+UDP I/O and timers, so they require `network-runtime-compio`. The `quiche`
+backend uses the runtime-neutral network adapter and can run with Compio,
+Monoio, Glommio, or Kimojio. Select a backend with `--quic-backend` or
+`[quic].backend`; enable it with `quic-noq`, `quic-quinn`, or `quic-quiche`.
+A build with exactly one backend selects it automatically, while a build with
+multiple backends requires an explicit selection. Mozilla neqo is not currently
+available: its official transport is not published as a standalone crate and
+its server API requires NSS certificate-database integration.
 
 ### Can I select a different in-process channel implementation?
 

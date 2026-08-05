@@ -18,8 +18,11 @@ use super::CoreTask;
 use super::completion::CompletionSender;
 
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
-    while let Ok(task) = receiver.recv_async().await {
-        task();
+    while let Ok(task) = receiver.recv_async_storage().await {
+        match task {
+            CoreTask::Run(task) => task(),
+            CoreTask::Shutdown => break,
+        }
     }
 }
 
