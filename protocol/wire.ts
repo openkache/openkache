@@ -1130,7 +1130,7 @@ pub enum OperationRequestKind {
 pub enum OperationResponseKind {
     Empty,
     Pong,
-    Echo,
+    ApplicationValue,
     Value,
     SetOutcome,
     DeleteOutcome,
