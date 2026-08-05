@@ -19,40 +19,19 @@ pub(super) const HISTOGRAM_BUCKETS_US: [u64; 12] = [
     5_000_000, 10_000_000,
 ];
 
-pub(super) const OPERATION_NAMES: [&str; 11] = [
-    "ping",
-    "get",
-    "set",
-    "delete",
-    "stats",
-    "sync",
-    "namespace_open",
-    "namespace_update_policy",
-    "namespace_delete",
-    "echo",
-    "unknown",
-];
+const fn operation_names() -> [&'static str; Opcode::COUNT + 1] {
+    let mut names = ["unknown"; Opcode::COUNT + 1];
+    let mut index = 0;
+    while index < Opcode::COUNT {
+        names[index] = Opcode::NAMES[index];
+        index += 1;
+    }
+    names
+}
 
-pub(super) const STATUS_NAMES: [&str; 18] = [
-    "ok",
-    "not_found",
-    "created",
-    "replaced",
-    "deleted",
-    "not_stored",
-    "invalid_request",
-    "unsupported_opcode",
-    "too_large",
-    "overloaded",
-    "timeout",
-    "forbidden",
-    "internal_error",
-    "no_capacity",
-    "policy_conflict",
-    "conflict",
-    "namespace_not_found",
-    "namespace_not_empty",
-];
+pub(super) const OPERATION_NAMES: [&str; Opcode::COUNT + 1] = operation_names();
+
+pub(super) const STATUS_NAMES: [&str; Status::COUNT] = Status::NAMES;
 
 /// The operation names used by the wire protocol and the metrics registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
