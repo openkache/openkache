@@ -1231,6 +1231,14 @@ macro_rules! raw_client_methods {
                 self.0.ping().await
             }
 
+            /// Sends a validated protocol request through the shared retry and response-contract
+            /// path. Generated/native adapters use this for protocol operations whose semantic
+            /// contract does not need a handwritten convenience method.
+            #[cfg(feature = "ffi")]
+            pub(crate) async fn execute_request(&self, request: Request) -> Result<Response> {
+                self.0.request(request).await
+            }
+
             /// Sends an experimental UTF-8-independent payload and returns the echoed bytes.
             pub async fn echo(&self, value: impl AsRef<[u8]>) -> Result<Vec<u8>> {
                 self.0.echo(value.as_ref().to_vec()).await
