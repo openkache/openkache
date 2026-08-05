@@ -30,20 +30,23 @@ export OPENKACHE_CLIENT_NATIVE="$PWD/../core/target/debug/libopenkache_client_co
 ## Usage
 
 ```dart
-final client = EchoClient.connect(
+final client = Client.connect(
   address: 'cache.example.com:4433',
   serverName: 'cache.example.com',
   certificate: certificateDerOrPem,
   dataProtectionKey: dataProtectionKey,
 );
 try {
-  final echoed = await client.echoMessage('single-source-of-truth');
+  final echoed = (await client.echo(
+    const EchoInput(message: 'single-source-of-truth'),
+  )).message;
 } finally {
   client.close();
 }
 ```
 
 `dataProtectionKey` must contain 32 bytes. All cache operations use the same
-generated DTOs and ABI boundary. `EchoClient` implements every generated
+generated DTOs and ABI boundary. `Client` implements every generated
 `SmithyOpenKacheApi` method, including exact-item data operations and namespace
-management.
+management. The deprecated `EchoClient` type alias retains the experimental
+`echoMessage` convenience extension for compatibility.

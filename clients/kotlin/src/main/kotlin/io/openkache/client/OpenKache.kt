@@ -20,14 +20,11 @@ public interface OpenKacheClient : SmithyGeneratedOperations
  * The native core owns QUIC, TLS, framing, retries, and result ownership.
  * This adapter only marshals Kotlin DTOs through the stable C ABI.
  */
-public class EchoClient private constructor(
+public class Client private constructor(
     private val native: SmithyNativeApi,
     private var handle: Pointer?,
 ) : OpenKacheClient, AutoCloseable {
     private var closed = false
-
-    /** Sends one message and returns its echoed text. */
-    public suspend fun echo(message: String): String = echo(EchoInput(message)).message
 
     @Synchronized
     override fun close() {
@@ -218,7 +215,7 @@ public class EchoClient private constructor(
                 .decode(ByteBuffer.wrap(payload))
                 .toString()
         } catch (error: CharacterCodingException) {
-            throw EchoClientException("$operation response is not valid UTF-8", error)
+            throw OpenKacheClientException("$operation response is not valid UTF-8", error)
         }
     }
 
@@ -251,7 +248,7 @@ public class EchoClient private constructor(
             serverName: String,
             certificate: ByteArray = ByteArray(0),
             dataProtectionKey: ByteArray = ByteArray(32),
-        ): EchoClient {
+        ): Client {
             require(dataProtectionKey.size == 32) {
                 "dataProtectionKey must contain exactly 32 bytes"
             }
@@ -262,7 +259,7 @@ public class EchoClient private constructor(
                     SmithyNativeApi::class.java,
                 )
             } catch (error: UnsatisfiedLinkError) {
-                throw EchoClientException("failed to load OpenKache native client", error)
+                throw OpenKacheClientException("failed to load OpenKache native client", error)
             }
             check(native.openkache_client_abi_version() == SmithyContract.ABI_VERSION) {
                 "unsupported OpenKache native ABI version"
@@ -294,7 +291,7 @@ public class EchoClient private constructor(
                             check(result.kind == SmithyContract.RESULT_CONNECTED) {
                                 "native client did not return a connected handle"
                             }
-                            return EchoClient(
+                            return Client(
                                 native,
                                 result.client ?: error("native client returned no client handle"),
                             )
@@ -323,7 +320,7 @@ public class EchoClient private constructor(
                 }
                 val client = if (takeClient) native.openkache_client_result_take_client(result) else null
                 if (kind == SmithyContract.RESULT_ERROR) {
-                    throw EchoClientException(
+                    throw OpenKacheClientException(
                         String(payload, StandardCharsets.UTF_8)
                             .ifEmpty { "native client operation failed" },
                     )
@@ -339,7 +336,7 @@ public class EchoClient private constructor(
         }
 
         private fun unexpectedKind(operation: String, kind: Int) =
-            EchoClientException("$operation returned unexpected native result $kind")
+            OpenKacheClientException("$operation returned unexpected native result $kind")
     }
 }
 
@@ -349,5 +346,17 @@ public data class NativeResult(
     public val client: Pointer? = null,
 )
 
-public class EchoClientException(message: String, cause: Throwable? = null) :
+public class OpenKacheClientException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
+
+/** @deprecated Use [Client] and generated Smithy operation DTOs. */
+@Deprecated("Use Client")
+public typealias EchoClient = Client
+
+/** @deprecated Use [OpenKacheClientException]. */
+@Deprecated("Use OpenKacheClientException")
+public typealias EchoClientException = OpenKacheClientException
+
+/** Compatibility convenience for the experimental ECHO operation. */
+@Deprecated("Use echo(EchoInput) from the generated Smithy API")
+public suspend fun Client.echo(message: String): String = echo(EchoInput(message)).message

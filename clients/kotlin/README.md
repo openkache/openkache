@@ -28,20 +28,21 @@ export OPENKACHE_CLIENT_NATIVE="$PWD/target/debug/libopenkache_client_core.so"
 ## Usage
 
 ```kotlin
-val client = EchoClient.connect(
+val client = Client.connect(
     address = "cache.example.com:4433",
     serverName = "cache.example.com",
     certificate = certificateDerOrPem,
     dataProtectionKey = dataProtectionKey,
 )
 try {
-    val echoed = client.echo("single-source-of-truth")
+    val echoed = client.echo(EchoInput("single-source-of-truth")).message
 } finally {
     client.close()
 }
 ```
 
 `dataProtectionKey` must contain 32 bytes. All cache operations use the same
-generated DTOs and ABI boundary. `EchoClient` implements every generated
+generated DTOs and ABI boundary. `Client` implements every generated
 `SmithyOpenKacheApi` method, including exact-item data operations and namespace
-management.
+management. The deprecated `EchoClient` type alias retains the experimental
+string convenience helper for compatibility.
