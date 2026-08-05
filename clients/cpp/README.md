@@ -55,7 +55,10 @@ namespace-inherited or explicit expiration, and evictable or
 eviction-protected items; a non-empty `ttl_ms` without an explicit mode is
 accepted as the convenience `Explicit_Ttl` shorthand. `get_raw`, `set_raw`,
 and `remove_raw` expose exact 32-byte item-ID operations without value
-protection. Transport and validation failures throw `openkache::Error`.
+protection. `namespace_open`, `namespace_update_policy`, and
+`namespace_delete` expose the server-assigned namespace lifecycle and
+optimistic revisions. Transport and validation failures throw
+`openkache::Error`.
 
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in

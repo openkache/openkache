@@ -92,6 +92,33 @@ pub struct FfiConnectOptions {
     pub max_in_flight: usize,
 }
 
+/// Decoded namespace descriptor exposed through the stable native ABI.
+///
+/// The descriptor payload itself remains the protocol's canonical variable-length
+/// representation. Native language adapters must use
+/// [`openkache_client_namespace_descriptor_decode`] instead of reimplementing
+/// protocol parsing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FfiNamespaceDescriptor {
+    pub namespace_id: u64,
+    pub revision: u64,
+    pub default_ttl_ms: u64,
+    /// `0` = no expiry, `1` = fixed TTL.
+    pub default_expiration: u32,
+    /// `0` = disallowed, `1` = allowed.
+    pub expiration_override: u32,
+    /// `0` = evictable, `1` = eviction protected.
+    pub default_eviction: u32,
+    /// `0` = disallowed, `1` = allowed.
+    pub eviction_override: u32,
+}
+
+/// Successful namespace-descriptor decode status.
+pub const FFI_NAMESPACE_DESCRIPTOR_DECODE_OK: u32 = 0;
+/// Invalid input or malformed descriptor status.
+pub const FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID: u32 = 1;
+
 /// Opaque native handle to a dedicated Rust client worker.
 pub struct FfiClient {
     commands: CommandSender,
@@ -916,27 +943,6 @@ fn ffi_namespace_descriptor(
         .map_err(|error| format!("namespace descriptor encoding failed: {error}"))
 }
 
-fn namespace_policy_to_flags(policy: NamespacePolicy) -> std::result::Result<(u8, u64), String> {
-    let (expiration, ttl_ms) = match policy.default_expiration {
-        ExpirationDefault::NoExpiry => (POLICY_NO_EXPIRY, 0),
-        ExpirationDefault::FixedTtl { ttl_ms } if ttl_ms > 0 => (POLICY_FIXED_TTL, ttl_ms),
-        ExpirationDefault::FixedTtl { .. } => {
-            return Err("namespace policy fixed TTL must be greater than zero milliseconds".into());
-        }
-    };
-    let mut flags = expiration;
-    if policy.expiration_override == OverridePolicy::Allowed {
-        flags |= POLICY_EXPIRATION_OVERRIDE;
-    }
-    if policy.default_eviction == EvictionDefault::EvictionProtected {
-        flags |= POLICY_EVICTION_PROTECTED;
-    }
-    if policy.eviction_override == OverridePolicy::Allowed {
-        flags |= POLICY_EVICTION_OVERRIDE;
-    }
-    Ok((flags, ttl_ms))
-}
-
 fn connection_state_value(state: ConnectionState) -> u32 {
     state.code()
 }
@@ -1541,6 +1547,59 @@ pub unsafe extern "C" fn openkache_client_namespace_delete(
         };
         Ok(client.namespace_delete(namespace_id, expected_revision))
     }))
+}
+
+/// Decodes one complete namespace descriptor payload using the canonical
+/// protocol implementation.
+///
+/// Returns [`FFI_NAMESPACE_DESCRIPTOR_DECODE_OK`] on success and
+/// [`FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID`] when the output pointer is
+/// invalid or the payload is not a valid descriptor.
+///
+/// # Safety
+///
+/// `payload` must be readable for `payload_length` bytes (unless the length is
+/// zero), and `output` must point to writable storage for one
+/// [`FfiNamespaceDescriptor`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_namespace_descriptor_decode(
+    payload: *const u8,
+    payload_length: usize,
+    output: *mut FfiNamespaceDescriptor,
+) -> u32 {
+    if output.is_null() {
+        return FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
+    }
+    let payload = if payload_length == 0 {
+        &[][..]
+    } else if payload.is_null() {
+        return FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
+    } else {
+        unsafe { std::slice::from_raw_parts(payload, payload_length) }
+    };
+    let Ok(descriptor) = openkache_protocol::NamespaceDescriptor::decode(payload) else {
+        return FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
+    };
+    let (default_expiration, default_ttl_ms) = match descriptor.policy.default_expiration {
+        ExpirationDefault::NoExpiry => (0, 0),
+        ExpirationDefault::FixedTtl { ttl_ms } => (1, ttl_ms),
+    };
+    let decoded = FfiNamespaceDescriptor {
+        namespace_id: descriptor.namespace_id,
+        revision: descriptor.revision,
+        default_ttl_ms,
+        default_expiration,
+        expiration_override: u32::from(descriptor.policy.expiration_override
+            == OverridePolicy::Allowed),
+        default_eviction: u32::from(
+            descriptor.policy.default_eviction == EvictionDefault::EvictionProtected,
+        ),
+        eviction_override: u32::from(
+            descriptor.policy.eviction_override == OverridePolicy::Allowed,
+        ),
+    };
+    unsafe { output.write(decoded) };
+    FFI_NAMESPACE_DESCRIPTOR_DECODE_OK
 }
 
 // The argument list mirrors the stable native operation contract.

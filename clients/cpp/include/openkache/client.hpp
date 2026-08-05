@@ -46,6 +46,50 @@ enum class Eviction_Mode : Byte {
     Eviction_Protected = OPENKACHE_SMITHY_SET_EVICTION_PROTECTED_BITS,
 };
 
+/// Namespace-level expiration default.
+enum class Namespace_Expiration_Default : std::uint32_t {
+    No_Expiry = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
+    Fixed_Ttl = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
+};
+
+/// Namespace-level capacity-eviction default.
+enum class Namespace_Eviction_Default : std::uint32_t {
+    Evictable = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
+    Eviction_Protected = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
+};
+
+/// Whether namespace policy defaults may be overridden by individual SETs.
+enum class Namespace_Override_Policy : std::uint32_t {
+    Disallowed = OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED,
+    Allowed = OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED,
+};
+
+/// Namespace policy supplied when creating or replacing a namespace policy.
+struct Namespace_Policy {
+    Namespace_Expiration_Default default_expiration =
+        Namespace_Expiration_Default::No_Expiry;
+    std::optional<std::uint64_t> default_ttl_ms;
+    Namespace_Override_Policy expiration_override =
+        Namespace_Override_Policy::Allowed;
+    Namespace_Eviction_Default default_eviction =
+        Namespace_Eviction_Default::Evictable;
+    Namespace_Override_Policy eviction_override =
+        Namespace_Override_Policy::Allowed;
+};
+
+/// Server-assigned namespace identity and its current policy.
+struct Namespace_Descriptor {
+    std::uint64_t namespace_id;
+    std::uint64_t revision;
+    Namespace_Policy policy;
+};
+
+/// Result of opening a namespace.
+struct Namespace_Open_Result {
+    Namespace_Descriptor descriptor;
+    bool created;
+};
+
 /// Authenticated-encryption profile for formatted values.
 enum class Encryption : std::uint32_t {
     Compact = OPENKACHE_CLIENT_ENCRYPTION_COMPACT,
@@ -338,6 +382,76 @@ public:
         }
     }
 
+    /// Resolves or creates a namespace by its UTF-8 name.
+    Namespace_Open_Result namespace_open(
+        std::string_view name,
+        bool create_if_missing,
+        std::optional<Namespace_Policy> policy = std::nullopt) const {
+        if (client_ == nullptr) {
+            throw Error("OpenKache client is closed");
+        }
+        if (name.size() > OPENKACHE_SMITHY_NAMESPACE_NAME_MAX_BYTES) {
+            throw Error("OpenKache namespace name exceeds 255 UTF-8 octets");
+        }
+        const auto [flags, ttl_ms] = namespace_policy_wire(
+            policy.has_value() ? *policy : Namespace_Policy{});
+        if (!create_if_missing && policy.has_value()) {
+            throw Error("namespace policy requires create_if_missing");
+        }
+        const auto* name_data = name.empty()
+            ? nullptr
+            : reinterpret_cast<const Byte*>(name.data());
+        auto* result = openkache_client_namespace_open(
+            client_,
+            name_data,
+            name.size(),
+            static_cast<Byte>(create_if_missing ? 1u : 0u),
+            create_if_missing ? flags : 0,
+            create_if_missing ? ttl_ms : 0);
+        const auto operation = take_result(result);
+        if (operation.kind != OPENKACHE_CLIENT_RESULT_OK
+            && operation.kind != OPENKACHE_CLIENT_RESULT_CREATED) {
+            throw Error("OpenKache returned an invalid NAMESPACE_OPEN outcome");
+        }
+        return {
+            decode_namespace_descriptor(operation.payload),
+            operation.kind == OPENKACHE_CLIENT_RESULT_CREATED,
+        };
+    }
+
+    /// Replaces a namespace policy using its optimistic revision.
+    Namespace_Descriptor namespace_update_policy(
+        std::uint64_t namespace_id,
+        std::uint64_t expected_revision,
+        const Namespace_Policy& policy) const {
+        const auto [flags, ttl_ms] = namespace_policy_wire(policy);
+        auto* result = openkache_client_namespace_update_policy(
+            client_,
+            namespace_id,
+            expected_revision,
+            flags,
+            ttl_ms);
+        const auto operation = take_result(result);
+        if (operation.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
+            throw Error("OpenKache returned an invalid NAMESPACE_UPDATE_POLICY outcome");
+        }
+        return decode_namespace_descriptor(operation.payload);
+    }
+
+    /// Deletes an empty namespace using its optimistic revision.
+    void namespace_delete(
+        std::uint64_t namespace_id,
+        std::uint64_t expected_revision) const {
+        auto* result = openkache_client_namespace_delete(
+            client_,
+            namespace_id,
+            expected_revision);
+        const auto operation = take_result(result);
+        if (operation.kind != OPENKACHE_CLIENT_RESULT_OK) {
+            throw Error("OpenKache returned an invalid NAMESPACE_DELETE outcome");
+        }
+    }
+
 private:
     struct Operation_Result {
         std::uint32_t kind;
@@ -390,6 +504,76 @@ private:
             reinterpret_cast<const Byte*>(value.data()),
             value.size(),
         };
+    }
+
+    static std::pair<Byte, std::uint64_t> namespace_policy_wire(
+        const Namespace_Policy& policy) {
+        Byte flags = OPENKACHE_SMITHY_POLICY_NO_EXPIRY;
+        std::uint64_t ttl_ms = policy.default_ttl_ms.value_or(0);
+        switch (policy.default_expiration) {
+        case Namespace_Expiration_Default::No_Expiry:
+            if (policy.default_ttl_ms.has_value()) {
+                throw Error("namespace No_Expiry policy must not contain a TTL");
+            }
+            break;
+        case Namespace_Expiration_Default::Fixed_Ttl:
+            if (!policy.default_ttl_ms.has_value() || ttl_ms == 0) {
+                throw Error("namespace Fixed_Ttl policy requires a positive TTL");
+            }
+            flags = OPENKACHE_SMITHY_POLICY_FIXED_TTL;
+            break;
+        default:
+            throw Error("OpenKache namespace expiration policy is not supported");
+        }
+        if (policy.expiration_override == Namespace_Override_Policy::Allowed) {
+            flags |= OPENKACHE_SMITHY_POLICY_EXPIRATION_OVERRIDE;
+        }
+        switch (policy.default_eviction) {
+        case Namespace_Eviction_Default::Evictable:
+            break;
+        case Namespace_Eviction_Default::Eviction_Protected:
+            flags |= OPENKACHE_SMITHY_POLICY_EVICTION_PROTECTED;
+            break;
+        default:
+            throw Error("OpenKache namespace eviction policy is not supported");
+        }
+        if (policy.eviction_override == Namespace_Override_Policy::Allowed) {
+            flags |= OPENKACHE_SMITHY_POLICY_EVICTION_OVERRIDE;
+        }
+        return {flags, ttl_ms};
+    }
+
+    static Namespace_Descriptor decode_namespace_descriptor(const Bytes& payload) {
+        openkache_client_namespace_descriptor_t decoded{};
+        const auto* data = payload.empty() ? nullptr : payload.data();
+        const auto status = openkache_client_namespace_descriptor_decode(
+            data,
+            payload.size(),
+            &decoded);
+        if (status != OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK) {
+            throw Error("OpenKache returned an invalid namespace descriptor");
+        }
+        Namespace_Policy policy;
+        policy.default_expiration = decoded.default_expiration
+            == OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
+            ? Namespace_Expiration_Default::Fixed_Ttl
+            : Namespace_Expiration_Default::No_Expiry;
+        if (policy.default_expiration == Namespace_Expiration_Default::Fixed_Ttl) {
+            policy.default_ttl_ms = decoded.default_ttl_ms;
+        }
+        policy.expiration_override = decoded.expiration_override
+            == OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED
+            ? Namespace_Override_Policy::Allowed
+            : Namespace_Override_Policy::Disallowed;
+        policy.default_eviction = decoded.default_eviction
+            == OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED
+            ? Namespace_Eviction_Default::Eviction_Protected
+            : Namespace_Eviction_Default::Evictable;
+        policy.eviction_override = decoded.eviction_override
+            == OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED
+            ? Namespace_Override_Policy::Allowed
+            : Namespace_Override_Policy::Disallowed;
+        return {decoded.namespace_id, decoded.revision, policy};
     }
 
     static std::uint32_t result_kind(const openkache_client_result_t* result) noexcept {

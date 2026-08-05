@@ -387,6 +387,16 @@ type nativeResult struct {
 	data []byte
 }
 
+type nativeNamespaceDescriptor struct {
+	namespaceID        uint64
+	revision           uint64
+	defaultTTLMillis   uint64
+	defaultExpiration  uint32
+	expirationOverride uint32
+	defaultEviction    uint32
+	evictionOverride   uint32
+}
+
 type nativeClient interface {
 	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
 	executeRaw(context.Context, uint32, ItemID, []byte, SetOptions) (nativeResult, error)
@@ -413,6 +423,7 @@ type nativeClient interface {
 		uint64,
 	) (nativeResult, error)
 	namespaceDelete(context.Context, uint64, uint64) (nativeResult, error)
+	decodeNamespaceDescriptor([]byte) (nativeNamespaceDescriptor, error)
 	state() uint32
 	close() error
 }
@@ -525,6 +536,25 @@ func (c *Client) invokeNamespaceDelete(
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.namespaceDelete(ctx, namespaceID, expectedRevision)
 	})
+}
+
+func (c *Client) decodeNamespaceDescriptor(
+	ctx context.Context,
+	payload []byte,
+) (nativeNamespaceDescriptor, error) {
+	if ctx == nil {
+		return nativeNamespaceDescriptor{}, validationError("context", "must not be nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return nativeNamespaceDescriptor{}, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	native := c.native
+	if native == nil {
+		return nativeNamespaceDescriptor{}, ErrClosed
+	}
+	return native.decodeNamespaceDescriptor(payload)
 }
 
 func (c *Client) invokeNative(

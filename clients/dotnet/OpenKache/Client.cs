@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-using System.Buffers.Binary;
 using System.Text;
 
 namespace OpenKache;
@@ -671,180 +670,40 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
 
     private static Smithy.NamespaceDescriptor DecodeNamespaceDescriptor(byte[] payload)
     {
-        const int fixedBytes = 17;
-        if (payload.Length < fixedBytes)
+        using var buffer = new NativeBuffer(payload);
+        var status = NativeMethods.openkache_client_namespace_descriptor_decode(
+            buffer.Pointer,
+            buffer.Length,
+            out var decoded);
+        if (status != 0)
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
-                "namespace descriptor payload is missing its identity or policy flags.");
-        }
-        var namespaceId = BinaryPrimitives.ReadUInt64BigEndian(payload.AsSpan(0, 8));
-        var revision = BinaryPrimitives.ReadUInt64BigEndian(payload.AsSpan(8, 8));
-        if (namespaceId == 0 || revision == 0)
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "namespace descriptor contains a zero identity or revision.");
-        }
-        var flags = payload[16];
-        var expiration = (byte)(flags & Protocol.PolicyDefaultExpirationMask);
-        ulong ttlMilliseconds = 0;
-        var ttlBytes = 0;
-        if (expiration == Protocol.PolicyFixedTtl)
-        {
-            (ttlMilliseconds, ttlBytes) = DecodeVu128(payload.AsSpan(fixedBytes));
-        }
-        if (fixedBytes + ttlBytes != payload.Length)
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "namespace descriptor contains trailing or missing policy bytes.");
-        }
-        var defaultExpiration = expiration switch
-        {
-            var value when value == Protocol.PolicyNoExpiry && ttlMilliseconds == 0 =>
-                Smithy.ExpirationDefault.NoExpiry,
-            var value when value == Protocol.PolicyFixedTtl && ttlMilliseconds > 0 =>
-                Smithy.ExpirationDefault.FixedTtl,
-            _ => throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "namespace descriptor contains an invalid expiration policy."),
-        };
-        if ((flags & Protocol.PolicyReservedMask) != 0)
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "namespace descriptor contains reserved policy bits.");
+                "native ABI returned an invalid namespace descriptor.");
         }
         return new Smithy.NamespaceDescriptor
         {
-            NamespaceId = namespaceId,
-            Revision = revision,
+            NamespaceId = decoded.NamespaceId,
+            Revision = decoded.Revision,
             Policy = new Smithy.NamespacePolicy
             {
-                DefaultExpiration = defaultExpiration,
-                DefaultTtlMilliseconds = defaultExpiration == Smithy.ExpirationDefault.FixedTtl
-                    ? ttlMilliseconds
+                DefaultExpiration = decoded.DefaultExpiration == 1
+                    ? Smithy.ExpirationDefault.FixedTtl
+                    : Smithy.ExpirationDefault.NoExpiry,
+                DefaultTtlMilliseconds = decoded.DefaultExpiration == 1
+                    ? decoded.DefaultTtlMilliseconds
                     : null,
-                ExpirationOverride = (flags & Protocol.PolicyExpirationOverride) != 0
+                ExpirationOverride = decoded.ExpirationOverride == 1
                     ? Smithy.OverridePolicy.Allowed
                     : Smithy.OverridePolicy.Disallowed,
-                DefaultEviction = (flags & Protocol.PolicyEvictionProtected) != 0
+                DefaultEviction = decoded.DefaultEviction == 1
                     ? Smithy.EvictionDefault.EvictionProtected
                     : Smithy.EvictionDefault.Evictable,
-                EvictionOverride = (flags & Protocol.PolicyEvictionOverride) != 0
+                EvictionOverride = decoded.EvictionOverride == 1
                     ? Smithy.OverridePolicy.Allowed
                     : Smithy.OverridePolicy.Disallowed,
             },
         };
-    }
-
-    private static (ulong Value, int Length) DecodeVu128(ReadOnlySpan<byte> payload)
-    {
-        if (payload.IsEmpty)
-        {
-            throw new OpenKacheException("PROTOCOL_ERROR", "namespace descriptor TTL is missing.");
-        }
-        var first = payload[0];
-        var length = first switch
-        {
-            < 0x80 => 1,
-            < 0xC0 => 2,
-            < 0xE0 => 3,
-            < 0xF0 => 4,
-            _ => (first & 0x0F) + 2,
-        };
-        if (length > 9)
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "namespace descriptor TTL exceeds nine bytes.");
-        }
-        if (payload.Length < length)
-        {
-            throw new OpenKacheException("PROTOCOL_ERROR", "namespace descriptor TTL is truncated.");
-        }
-        ulong value;
-        if (length == 1)
-        {
-            value = first;
-        }
-        else if (length == 2 && first < 0xF0)
-        {
-            value = ((ulong)(first & 0x3F) << 6) | payload[1];
-        }
-        else if (length == 3 && first < 0xF0)
-        {
-            value = ((ulong)(first & 0x1F) << 13) |
-                ((ulong)payload[1] << 5) |
-                payload[2];
-        }
-        else if (length == 4 && first < 0xF0)
-        {
-            value = ((ulong)(first & 0x0F) << 20) |
-                ((ulong)payload[1] << 12) |
-                ((ulong)payload[2] << 4) |
-                payload[3];
-        }
-        else
-        {
-            value = 0;
-            for (var index = 1; index < length; index++)
-            {
-                value |= (ulong)payload[index] << (8 * (index - 1));
-            }
-            var maskOctets = (first & 0x07) ^ 0x07;
-            if (maskOctets != 0)
-            {
-                value &= ulong.MaxValue >> (8 * maskOctets);
-            }
-        }
-        var canonical = EncodeVu128(value);
-        if (!canonical.AsSpan().SequenceEqual(payload[..length]))
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "namespace descriptor TTL is not canonical.");
-        }
-        return (value, length);
-    }
-
-    private static byte[] EncodeVu128(ulong value)
-    {
-        if (value < 0x80)
-        {
-            return [(byte)value];
-        }
-        if (value < 0x4000)
-        {
-            return [(byte)(0x80 | (value >> 8)), (byte)value];
-        }
-        if (value < 0x200000)
-        {
-            return [(byte)(0xC0 | (value >> 16)), (byte)(value >> 8), (byte)value];
-        }
-        if (value < 0x10000000)
-        {
-            return [
-                (byte)(0xE0 | (value >> 24)),
-                (byte)(value >> 16),
-                (byte)(value >> 8),
-                (byte)value,
-            ];
-        }
-        var valueBytes = 1;
-        for (var remaining = value; remaining > 0xFF; remaining >>= 8)
-        {
-            valueBytes++;
-        }
-        var length = valueBytes + 1;
-        var encoded = new byte[length];
-        encoded[0] = (byte)(0xF0 | (length - 2));
-        for (var index = 1; index < length; index++)
-        {
-            encoded[index] = (byte)(value >> (8 * (index - 1)));
-        }
-        return encoded;
     }
 
     private async ValueTask<NativeResult> RequestAsync(

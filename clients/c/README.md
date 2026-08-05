@@ -1,7 +1,8 @@
 # OpenKache C client
 
 The C package is a small C17 ABI over the shared Rust client core. It provides
-protected `PING`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC` operations while
+protected `PING`, `GET`, `SET`, `DELETE`, `STATS`, `SYNC`, and namespace
+management operations while
 the core owns QUIC, TLS, retries, framing, compression, encryption, and the
 worker lifecycle.
 
@@ -56,6 +57,12 @@ released with `openkache_client_free`.
 An empty trust buffer selects system roots. `openkache_client_execute` derives
 protected item IDs from application keys, while `openkache_client_execute_raw`
 requires a 32-byte item ID and sends opaque values unchanged.
+
+`openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
+and `openkache_client_namespace_delete` manage server-assigned namespaces.
+Namespace results carry the canonical descriptor payload; use
+`openkache_client_namespace_descriptor_decode` to obtain a typed descriptor
+without reimplementing the wire parser in the application.
 
 Operation and value-format constants in the generated
 `openkache/smithy_contract.h` are sourced at build/package time from the client

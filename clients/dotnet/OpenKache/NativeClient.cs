@@ -52,6 +52,18 @@ internal static class NativeMethods
         internal nuint MaxInFlight;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NamespaceDescriptor
+    {
+        internal ulong NamespaceId;
+        internal ulong Revision;
+        internal ulong DefaultTtlMilliseconds;
+        internal uint DefaultExpiration;
+        internal uint ExpirationOverride;
+        internal uint DefaultEviction;
+        internal uint EvictionOverride;
+    }
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.U4)]
     internal static extern uint openkache_client_abi_version();
@@ -117,6 +129,13 @@ internal static class NativeMethods
         IntPtr client,
         ulong namespaceId,
         ulong expectedRevision);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.U4)]
+    internal static extern uint openkache_client_namespace_descriptor_decode(
+        IntPtr payload,
+        nuint payloadLength,
+        out NamespaceDescriptor output);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern uint openkache_client_connection_state(IntPtr client);

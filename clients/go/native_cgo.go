@@ -49,6 +49,8 @@ typedef openkache_client_result *(*openkache_go_namespace_update_policy_fn)(
     const openkache_client_handle *, uint64_t, uint64_t, uint8_t, uint64_t);
 typedef openkache_client_result *(*openkache_go_namespace_delete_fn)(
     const openkache_client_handle *, uint64_t, uint64_t);
+typedef uint32_t (*openkache_go_namespace_descriptor_decode_fn)(
+    const uint8_t *, size_t, openkache_client_namespace_descriptor_t *);
 typedef uint32_t (*openkache_go_connection_state_fn)(
     const openkache_client_handle *);
 typedef uint32_t (*openkache_go_result_kind_fn)(const openkache_client_result *);
@@ -72,6 +74,7 @@ typedef struct openkache_go_library {
     openkache_go_namespace_open_fn namespace_open;
     openkache_go_namespace_update_policy_fn namespace_update_policy;
     openkache_go_namespace_delete_fn namespace_delete;
+    openkache_go_namespace_descriptor_decode_fn namespace_descriptor_decode;
     openkache_go_connection_state_fn connection_state;
     openkache_go_result_kind_fn result_kind;
     openkache_go_result_data_fn result_data;
@@ -180,6 +183,7 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(namespace_open, "openkache_client_namespace_open");
     OPENKACHE_GO_LOAD(namespace_update_policy, "openkache_client_namespace_update_policy");
     OPENKACHE_GO_LOAD(namespace_delete, "openkache_client_namespace_delete");
+    OPENKACHE_GO_LOAD(namespace_descriptor_decode, "openkache_client_namespace_descriptor_decode");
     OPENKACHE_GO_LOAD(connection_state, "openkache_client_connection_state");
     OPENKACHE_GO_LOAD(result_kind, "openkache_client_result_kind");
     OPENKACHE_GO_LOAD(result_data, "openkache_client_result_data");
@@ -193,6 +197,7 @@ openkache_go_library *openkache_go_library_load(
         library->execute_with_options == NULL || library->execute_raw_with_options == NULL ||
         library->execute_scoped == NULL || library->namespace_open == NULL ||
         library->namespace_update_policy == NULL || library->namespace_delete == NULL ||
+        library->namespace_descriptor_decode == NULL ||
         library->result_kind == NULL || library->result_data == NULL ||
         library->result_data_length == NULL || library->result_take_client == NULL ||
         library->result_free == NULL || library->client_free == NULL) {
@@ -370,6 +375,18 @@ openkache_client_result *openkache_go_namespace_delete(
 ) {
     if (library == NULL || library->namespace_delete == NULL) return NULL;
     return library->namespace_delete(client, namespace_id, expected_revision);
+}
+
+uint32_t openkache_go_namespace_descriptor_decode(
+    const openkache_go_library *library,
+    const uint8_t *payload,
+    size_t payload_length,
+    openkache_client_namespace_descriptor_t *output
+) {
+    if (library == NULL || library->namespace_descriptor_decode == NULL) {
+        return OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
+    }
+    return library->namespace_descriptor_decode(payload, payload_length, output);
 }
 
 uint32_t openkache_go_result_kind(
@@ -795,6 +812,38 @@ func (h *nativeHandle) namespaceDelete(
 	case <-ctx.Done():
 		return nativeResult{}, ctx.Err()
 	}
+}
+
+func (h *nativeHandle) decodeNamespaceDescriptor(
+	payload []byte,
+) (nativeNamespaceDescriptor, error) {
+	var decoded C.openkache_client_namespace_descriptor_t
+	var payloadMemory unsafe.Pointer
+	if len(payload) != 0 {
+		payloadMemory = C.CBytes(payload)
+		defer C.free(payloadMemory)
+	}
+	status := C.openkache_go_namespace_descriptor_decode(
+		h.library.ptr,
+		(*C.uint8_t)(payloadMemory),
+		C.size_t(len(payload)),
+		&decoded,
+	)
+	if uint32(status) != uint32(C.OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK) {
+		return nativeNamespaceDescriptor{}, &Error{
+			Operation: "namespace descriptor",
+			Message:   "native ABI returned an invalid namespace descriptor",
+		}
+	}
+	return nativeNamespaceDescriptor{
+		namespaceID:        uint64(decoded.namespace_id),
+		revision:           uint64(decoded.revision),
+		defaultTTLMillis:   uint64(decoded.default_ttl_ms),
+		defaultExpiration:  uint32(decoded.default_expiration),
+		expirationOverride: uint32(decoded.expiration_override),
+		defaultEviction:    uint32(decoded.default_eviction),
+		evictionOverride:   uint32(decoded.eviction_override),
+	}, nil
 }
 
 func (h *nativeHandle) executeNative(

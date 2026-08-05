@@ -7,6 +7,16 @@ import Foundation
 private typealias NativeClientPointer = OpaquePointer
 private typealias NativeResultPointer = OpaquePointer
 
+private struct NativeNamespaceDescriptor {
+    var namespaceId: UInt64 = 0
+    var revision: UInt64 = 0
+    var defaultTtlMs: UInt64 = 0
+    var defaultExpiration: UInt32 = 0
+    var expirationOverride: UInt32 = 0
+    var defaultEviction: UInt32 = 0
+    var evictionOverride: UInt32 = 0
+}
+
 @_silgen_name("openkache_client_abi_version")
 private func nativeAbiVersion() -> UInt32
 
@@ -123,6 +133,13 @@ private func nativeNamespaceDelete(
     _ namespaceID: UInt64,
     _ expectedRevision: UInt64
 ) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_namespace_descriptor_decode")
+private func nativeNamespaceDescriptorDecode(
+    _ payload: UnsafePointer<UInt8>?,
+    _ payloadLength: Int,
+    _ output: UnsafeMutablePointer<NativeNamespaceDescriptor>?
+) -> UInt32
 
 @_silgen_name("openkache_client_result_kind")
 private func nativeResultKind(_ result: NativeResultPointer?) -> UInt32
@@ -625,6 +642,19 @@ private enum NativeBridge {
             throw OpenKacheError("native client returned a null namespace-delete result")
         }
         return result
+    }
+
+    static func decodeNamespaceDescriptor(
+        _ payload: Data
+    ) throws -> NativeNamespaceDescriptor {
+        var decoded = NativeNamespaceDescriptor()
+        let status = withBytes(Array(payload)) { pointer, length in
+            nativeNamespaceDescriptorDecode(pointer, length, &decoded)
+        }
+        guard status == 0 else {
+            throw OpenKacheError("native ABI returned an invalid namespace descriptor")
+        }
+        return decoded
     }
 
     private static func executeNative(
@@ -1286,7 +1316,9 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
                     throw OpenKacheError("unexpected NAMESPACE_OPEN result")
                 }
                 return Smithy_Namespace_Open_Output(
-                    descriptor: try smithyNamespaceDescriptor(payload),
+                    descriptor: smithyNamespaceDescriptor(
+                        try NativeBridge.decodeNamespaceDescriptor(payload)
+                    ),
                     created: kind == Smithy_Native_Contract.resultCreated
                 )
             }
@@ -1310,7 +1342,9 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
                     throw OpenKacheError("unexpected NAMESPACE_UPDATE_POLICY result")
                 }
                 return Smithy_Namespace_Update_Policy_Output(
-                    descriptor: try smithyNamespaceDescriptor(payload)
+                    descriptor: smithyNamespaceDescriptor(
+                        try NativeBridge.decodeNamespaceDescriptor(payload)
+                    )
                 )
             }
         }
@@ -1416,148 +1450,27 @@ private func smithyPolicyFlags(
 }
 
 private func smithyNamespaceDescriptor(
-    _ payload: Data
-) throws -> Smithy_Namespace_Descriptor {
-    let fixedBytes = 17
-    guard payload.count >= fixedBytes else {
-        throw OpenKacheError(
-            "namespace descriptor payload is missing its identity or policy flags"
-        )
-    }
-    let namespaceID = readBigEndianUInt64(payload, offset: 0)
-    let revision = readBigEndianUInt64(payload, offset: 8)
-    guard namespaceID > 0, revision > 0 else {
-        throw OpenKacheError("namespace descriptor contains zero identity or revision")
-    }
-    let flags = payload[16]
-    guard flags & Smithy_Value_Format.policyReservedMask == 0 else {
-        throw OpenKacheError("namespace descriptor contains reserved policy bits")
-    }
-    let defaultExpiration: Smithy_Expiration_Default
-    let defaultTtl: UInt64?
-    switch flags & Smithy_Value_Format.policyDefaultExpirationMask {
-    case Smithy_Value_Format.policyNoExpiry:
-        guard payload.count == fixedBytes else {
-            throw OpenKacheError("namespace descriptor carries a TTL for noExpiry")
-        }
-        defaultExpiration = .noExpiry
-        defaultTtl = nil
-    case Smithy_Value_Format.policyFixedTtl:
-        let (ttl, ttlBytes) = try decodeSmithyVU128(Data(payload.dropFirst(fixedBytes)))
-        guard fixedBytes + ttlBytes == payload.count else {
-            throw OpenKacheError("namespace descriptor contains trailing policy bytes")
-        }
-        guard ttl > 0 else {
-            throw OpenKacheError("namespace descriptor fixed TTL must be positive")
-        }
-        defaultExpiration = .fixedTtl
-        defaultTtl = ttl
-    default:
-        throw OpenKacheError("namespace descriptor contains unknown expiration bits")
-    }
+    _ decoded: NativeNamespaceDescriptor
+) -> Smithy_Namespace_Descriptor {
     return Smithy_Namespace_Descriptor(
-        namespaceId: namespaceID,
-        revision: revision,
+        namespaceId: decoded.namespaceId,
+        revision: decoded.revision,
         policy: Smithy_Namespace_Policy(
-            defaultExpiration: defaultExpiration,
-            defaultTtlMilliseconds: defaultTtl,
-            expirationOverride: flags & Smithy_Value_Format.policyExpirationOverride != 0
+            defaultExpiration: decoded.defaultExpiration == 1 ? .fixedTtl : .noExpiry,
+            defaultTtlMilliseconds: decoded.defaultExpiration == 1
+                ? decoded.defaultTtlMs
+                : nil,
+            expirationOverride: decoded.expirationOverride == 1
                 ? .allowed
                 : .disallowed,
-            defaultEviction: flags & Smithy_Value_Format.policyEvictionProtected != 0
+            defaultEviction: decoded.defaultEviction == 1
                 ? .evictionProtected
                 : .evictable,
-            evictionOverride: flags & Smithy_Value_Format.policyEvictionOverride != 0
+            evictionOverride: decoded.evictionOverride == 1
                 ? .allowed
                 : .disallowed
         )
     )
-}
-
-private func decodeSmithyVU128(_ payload: Data) throws -> (UInt64, Int) {
-    guard let first = payload.first else {
-        throw OpenKacheError("namespace descriptor TTL is missing")
-    }
-    let length: Int
-    switch first {
-    case 0..<0x80:
-        length = 1
-    case 0x80..<0xC0:
-        length = 2
-    case 0xC0..<0xE0:
-        length = 3
-    case 0xE0..<0xF0:
-        length = 4
-    default:
-        length = Int(first & 0x0F) + 2
-        guard length <= 9 else {
-            throw OpenKacheError("namespace descriptor TTL exceeds nine bytes")
-        }
-    }
-    guard payload.count >= length else {
-        throw OpenKacheError("namespace descriptor TTL is truncated")
-    }
-    let value: UInt64
-    if length == 1 {
-        value = UInt64(first)
-    } else if length == 2 && first < 0xF0 {
-        value = UInt64(first & 0x3F) << 6 | UInt64(payload[1])
-    } else if length == 3 && first < 0xF0 {
-        value = UInt64(first & 0x1F) << 13 |
-            UInt64(payload[1]) << 5 |
-            UInt64(payload[2])
-    } else if length == 4 && first < 0xF0 {
-        value = UInt64(first & 0x0F) << 20 |
-            UInt64(payload[1]) << 12 |
-            UInt64(payload[2]) << 4 |
-            UInt64(payload[3])
-    } else {
-        var decoded: UInt64 = 0
-        for index in 1..<length {
-            decoded |= UInt64(payload[index]) << UInt64(8 * (index - 1))
-        }
-        let maskOctets = Int((first & 0x07) ^ 0x07)
-        value = maskOctets == 0
-            ? decoded
-            : decoded & (UInt64.max >> UInt64(8 * maskOctets))
-    }
-    guard encodeSmithyVU128(value) == Array(payload.prefix(length)) else {
-        throw OpenKacheError("namespace descriptor TTL is not canonical")
-    }
-    return (value, length)
-}
-
-private func encodeSmithyVU128(_ value: UInt64) -> [UInt8] {
-    if value < 0x80 {
-        return [UInt8(value)]
-    }
-    if value < 0x4000 {
-        return [0x80 | UInt8(value >> 8), UInt8(value)]
-    }
-    if value < 0x200000 {
-        return [0xC0 | UInt8(value >> 16), UInt8(value >> 8), UInt8(value)]
-    }
-    if value < 0x10000000 {
-        return [
-            0xE0 | UInt8(value >> 24),
-            UInt8(value >> 16),
-            UInt8(value >> 8),
-            UInt8(value),
-        ]
-    }
-    let length = (64 - value.leadingZeroBitCount + 7) / 8 + 1
-    var encoded = [UInt8](repeating: 0, count: length)
-    encoded[0] = 0xF0 | UInt8(length - 2)
-    for index in 1..<length {
-        encoded[index] = UInt8(value >> UInt64(8 * (index - 1)))
-    }
-    return encoded
-}
-
-private func readBigEndianUInt64(_ data: Data, offset: Int) -> UInt64 {
-    data[offset..<(offset + 8)].reduce(UInt64.zero) { partial, byte in
-        (partial << 8) | UInt64(byte)
-    }
 }
 
 @_silgen_name("openkache_client_connection_state")

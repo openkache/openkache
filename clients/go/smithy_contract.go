@@ -80,7 +80,7 @@ const (
 // Smithy native ABI values shared by language adapters.
 const (
 	// SmithyFFIABIVersion is the native ABI version implemented by the core.
-	SmithyFFIABIVersion uint32 = 3
+	SmithyFFIABIVersion uint32 = 4
 	// SmithyFFIOperationGetJson identifies the native operation GetJson.
 	SmithyFFIOperationGetJson uint32 = 16
 	// SmithyFFIOperationSetJson identifies the native operation SetJson.

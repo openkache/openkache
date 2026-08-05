@@ -72,6 +72,15 @@ func (unavailableNativeClient) namespaceDelete(
 	return nativeResult{}, &Error{Operation: "namespace delete", Message: "native client unavailable"}
 }
 
+func (unavailableNativeClient) decodeNamespaceDescriptor(
+	[]byte,
+) (nativeNamespaceDescriptor, error) {
+	return nativeNamespaceDescriptor{}, &Error{
+		Operation: "namespace descriptor",
+		Message:   "native client unavailable",
+	}
+}
+
 func (unavailableNativeClient) state() uint32 {
 	return SmithyFFIConnectionStateUnknown
 }

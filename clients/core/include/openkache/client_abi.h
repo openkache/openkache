@@ -37,6 +37,31 @@ typedef struct openkache_client_result openkache_client_result_t;
 typedef openkache_client_t openkache_client_handle;
 typedef openkache_client_result_t openkache_client_result;
 
+/*
+ * Decoded namespace descriptor returned by the shared ABI helper.
+ * `default_expiration` is 0 for no expiry and 1 for fixed TTL.
+ * `default_eviction` is 0 for evictable and 1 for eviction protected.
+ * Override fields are 0 for disallowed and 1 for allowed.
+ */
+typedef struct openkache_client_namespace_descriptor {
+    uint64_t namespace_id;
+    uint64_t revision;
+    uint64_t default_ttl_ms;
+    uint32_t default_expiration;
+    uint32_t expiration_override;
+    uint32_t default_eviction;
+    uint32_t eviction_override;
+} openkache_client_namespace_descriptor_t;
+
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK 0u
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID 1u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY 0u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL 1u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE 0u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED 1u
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED 0u
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED 1u
+
 typedef enum openkache_client_result_kind {
     OPENKACHE_CLIENT_RESULT_ERROR = OPENKACHE_SMITHY_FFI_RESULT_ERROR,
     OPENKACHE_CLIENT_RESULT_OK = OPENKACHE_SMITHY_FFI_RESULT_OK,
@@ -293,6 +318,18 @@ openkache_client_result_t *openkache_client_namespace_delete(
     const openkache_client_t *client,
     uint64_t namespace_id,
     uint64_t expected_revision
+);
+
+/*
+ * Decodes the complete namespace descriptor payload using the canonical Rust
+ * protocol implementation. Returns
+ * OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK on success and
+ * OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID for malformed input.
+ */
+uint32_t openkache_client_namespace_descriptor_decode(
+    const uint8_t *payload,
+    size_t payload_length,
+    openkache_client_namespace_descriptor_t *output
 );
 
 /* Returns one of openkache_client_connection_state_t; null handles return UNKNOWN. */

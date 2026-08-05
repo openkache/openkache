@@ -226,7 +226,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 3,
+    abiVersion: 4,
     operationGetJson: 16,
     operationSetJson: 17,
     operationReconnect: 4294967041,

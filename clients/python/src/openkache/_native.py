@@ -32,6 +32,18 @@ _RESULT_POINTER = ctypes.c_void_p
 _CLIENT_POINTER = ctypes.c_void_p
 
 
+class _NamespaceDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("namespace_id", ctypes.c_uint64),
+        ("revision", ctypes.c_uint64),
+        ("default_ttl_ms", ctypes.c_uint64),
+        ("default_expiration", ctypes.c_uint32),
+        ("expiration_override", ctypes.c_uint32),
+        ("default_eviction", ctypes.c_uint32),
+        ("eviction_override", ctypes.c_uint32),
+    ]
+
+
 def _as_native_buffer(data: bytes) -> tuple[object | None, _U8_POINTER | None]:
     if not data:
         return None, None
@@ -225,6 +237,11 @@ class _NativeApi:
                 ctypes.c_uint64,
             ),
             _RESULT_POINTER,
+        )
+        self.namespace_descriptor_decode = self._function(
+            "openkache_client_namespace_descriptor_decode",
+            (_U8_POINTER, ctypes.c_size_t, ctypes.POINTER(_NamespaceDescriptor)),
+            ctypes.c_uint32,
         )
         self.connection_state = self._function(
             "openkache_client_connection_state", (_CLIENT_POINTER,), ctypes.c_uint32
@@ -543,6 +560,30 @@ class NativeClient:
                 self._active_calls -= 1
                 if self._active_calls == 0:
                     self._lifecycle.notify_all()
+
+    def decode_namespace_descriptor(
+        self,
+        payload: bytes,
+    ) -> tuple[int, int, int, int, int, int, int]:
+        payload_buffer, payload_pointer = _as_native_buffer(payload)
+        decoded = _NamespaceDescriptor()
+        status = self._api.namespace_descriptor_decode(
+            payload_pointer,
+            len(payload),
+            ctypes.byref(decoded),
+        )
+        del payload_buffer
+        if status != 0:
+            raise NativeError("native ABI returned an invalid namespace descriptor")
+        return (
+            int(decoded.namespace_id),
+            int(decoded.revision),
+            int(decoded.default_ttl_ms),
+            int(decoded.default_expiration),
+            int(decoded.expiration_override),
+            int(decoded.default_eviction),
+            int(decoded.eviction_override),
+        )
 
     def connection_state(self) -> int:
         with self._lifecycle:
