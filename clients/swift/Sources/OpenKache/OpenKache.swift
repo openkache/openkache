@@ -672,6 +672,11 @@ private func consumeResult<T>(
     return try transform(kind, resultPayload(result))
 }
 
+internal struct Smithy_Invocation_Result: Sendable {
+    let kind: UInt32
+    let payload: Data
+}
+
 private func getOutcome(
     _ kind: UInt32,
     payload: Data,
@@ -1107,111 +1112,67 @@ public actor OpenKacheRawClient {
         native = nil
     }
 
-    internal func smithyPing() async throws {
-        try await ping()
-    }
-
-    internal func smithyInvokeApplication(
+    internal func smithyInvoke(
         _ operation: UInt32,
-        _ payload: String
-    ) async throws -> String {
-        try await perform { handle in
-            let result = try NativeBridge.execute(
+        key: Data = Data(),
+        value: Data = Data(),
+        condition: Smithy_Set_Condition? = nil,
+        expirationMode: Smithy_Expiration_Mode? = nil,
+        evictionMode: Smithy_Eviction_Mode? = nil,
+        ttlMilliseconds: UInt64? = nil
+    ) async throws -> Smithy_Invocation_Result {
+        let (setFlags, ttl) = try smithySetFlags(
+            condition: condition,
+            expirationMode: expirationMode,
+            evictionMode: evictionMode,
+            ttlMilliseconds: ttlMilliseconds
+        )
+        return try await perform { handle in
+            let result = try NativeBridge.executeRawWithOptions(
                 handle,
                 operation: operation,
-                value: Data(payload.utf8)
-            )
-            return try consumeResult(result) { kind, bytes in
-                guard kind == Smithy_Native_Contract.resultValue else {
-                    throw OpenKacheError("unexpected application operation result")
-                }
-                guard let text = String(data: bytes, encoding: .utf8) else {
-                    throw OpenKacheError("application operation response is not valid UTF-8")
-                }
-                return text
-            }
-        }
-    }
-
-    internal func smithyGet(_ namespaceID: UInt64, itemID: Data) async throws -> Data? {
-        try validateItemID(itemID)
-        return try await perform { handle in
-            let result = try NativeBridge.executeScoped(
-                handle,
-                operation: UInt32(Smithy_Opcode.get.rawValue),
-                namespaceID: namespaceID,
-                itemID: itemID
-            )
-            return try consumeResult(result) { kind, payload in
-                try getOutcome(kind, payload: payload, operation: "GET")
-            }
-        }
-    }
-
-    internal func smithySet(_ input: Smithy_Set_Input) async throws -> OpenKacheSetOutcome {
-        try validateItemID(input.itemId)
-        let (setFlags, ttl) = try smithySetFlags(input)
-        return try await perform { handle in
-            let result = try NativeBridge.executeScoped(
-                handle,
-                operation: UInt32(Smithy_Opcode.set.rawValue),
-                namespaceID: input.namespaceId,
-                itemID: input.itemId,
-                value: input.value,
+                itemID: key,
+                value: value,
                 setFlags: setFlags,
                 ttl: ttl
             )
-            return try consumeResult(result) { kind, _ in
-                try setOutcome(kind, operation: "SET")
+            return try consumeResult(result) { kind, payload in
+                Smithy_Invocation_Result(kind: kind, payload: payload)
             }
         }
     }
 
-    internal func smithyDelete(_ namespaceID: UInt64, itemID: Data) async throws -> Bool {
-        try validateItemID(itemID)
+    internal func smithyInvokeScoped(
+        _ operation: UInt32,
+        namespaceID: UInt64,
+        itemID: Data = Data(),
+        value: Data = Data(),
+        condition: Smithy_Set_Condition? = nil,
+        expirationMode: Smithy_Expiration_Mode? = nil,
+        evictionMode: Smithy_Eviction_Mode? = nil,
+        ttlMilliseconds: UInt64? = nil
+    ) async throws -> Smithy_Invocation_Result {
+        if !itemID.isEmpty {
+            try validateItemID(itemID)
+        }
+        let (setFlags, ttl) = try smithySetFlags(
+            condition: condition,
+            expirationMode: expirationMode,
+            evictionMode: evictionMode,
+            ttlMilliseconds: ttlMilliseconds
+        )
         return try await perform { handle in
             let result = try NativeBridge.executeScoped(
                 handle,
-                operation: UInt32(Smithy_Opcode.delete.rawValue),
+                operation: operation,
                 namespaceID: namespaceID,
-                itemID: itemID
-            )
-            return try consumeResult(result) { kind, _ in
-                try deleteOutcome(kind, operation: "DELETE") == .deleted
-            }
-        }
-    }
-
-    internal func smithyStats(_ namespaceID: UInt64) async throws -> String {
-        try await perform { handle in
-            let result = try NativeBridge.executeScoped(
-                handle,
-                operation: UInt32(Smithy_Opcode.stats.rawValue),
-                namespaceID: namespaceID
+                itemID: itemID,
+                value: value,
+                setFlags: setFlags,
+                ttl: ttl
             )
             return try consumeResult(result) { kind, payload in
-                guard kind == Smithy_Native_Contract.resultValue else {
-                    throw OpenKacheError("unexpected STATS result")
-                }
-                guard let text = String(data: payload, encoding: .utf8) else {
-                    throw OpenKacheError("STATS response is not valid UTF-8")
-                }
-                return text
-            }
-        }
-    }
-
-    internal func smithySync(_ namespaceID: UInt64) async throws {
-        try await perform { handle in
-            let result = try NativeBridge.executeScoped(
-                handle,
-                operation: UInt32(Smithy_Opcode.sync.rawValue),
-                namespaceID: namespaceID
-            )
-            try consumeResult(result) { kind, _ in
-                guard kind == Smithy_Native_Contract.resultOk else {
-                    throw OpenKacheError("unexpected SYNC result")
-                }
+                Smithy_Invocation_Result(kind: kind, payload: payload)
             }
         }
     }
@@ -1312,10 +1273,13 @@ public actor OpenKacheRawClient {
 }
 
 private func smithySetFlags(
-    _ input: Smithy_Set_Input
+    condition: Smithy_Set_Condition?,
+    expirationMode: Smithy_Expiration_Mode?,
+    evictionMode: Smithy_Eviction_Mode?,
+    ttlMilliseconds: UInt64?
 ) throws -> (flags: UInt8, ttl: UInt64) {
     var flags: UInt8
-    switch input.condition {
+    switch condition {
     case nil, .any:
         flags = Smithy_Value_Format.setConditionAnyBits
     case .ifAbsent:
@@ -1323,24 +1287,24 @@ private func smithySetFlags(
     case .ifPresent:
         flags = Smithy_Value_Format.setIfPresentBits
     }
-    switch input.expirationMode {
+    switch expirationMode {
     case nil, .inherit:
-        guard input.ttlMilliseconds == nil else {
+        guard ttlMilliseconds == nil else {
             throw OpenKacheError("ttlMilliseconds requires explicitTtl expiration mode")
         }
         flags |= Smithy_Value_Format.setInheritExpirationBits
     case .noExpiry:
-        guard input.ttlMilliseconds == nil else {
+        guard ttlMilliseconds == nil else {
             throw OpenKacheError("ttlMilliseconds is not valid with noExpiry")
         }
         flags |= Smithy_Value_Format.setNoExpiryBits
     case .explicitTtl:
-        guard let ttl = input.ttlMilliseconds, ttl > 0 else {
+        guard let ttl = ttlMilliseconds, ttl > 0 else {
             throw OpenKacheError("ttlMilliseconds must be positive with explicitTtl")
         }
         flags |= Smithy_Value_Format.setExplicitTtlBits
     }
-    switch input.evictionMode {
+    switch evictionMode {
     case nil, .inherit:
         flags |= Smithy_Value_Format.setInheritEvictionBits
     case .evictable:
@@ -1348,7 +1312,7 @@ private func smithySetFlags(
     case .evictionProtected:
         flags |= Smithy_Value_Format.setEvictionProtectedBits
     }
-    return (flags, input.ttlMilliseconds ?? 0)
+    return (flags, ttlMilliseconds ?? 0)
 }
 
 private func smithyPolicyFlags(

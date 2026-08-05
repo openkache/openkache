@@ -106,6 +106,13 @@ pub struct NativeNamespaceOpenOutput {
     pub created: bool,
 }
 
+/// Result returned by a generated Smithy operation invocation.
+#[napi(object)]
+pub struct NativeOperationResult {
+    pub kind: u32,
+    pub payload: Uint8Array,
+}
+
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
@@ -141,14 +148,73 @@ impl NativeClient {
         operation: u32,
         value: Uint8Array,
     ) -> Result<Uint8Array> {
-        let opcode = Opcode::try_from(
-            u8::try_from(operation).map_err(|_| native_error("protocol opcode exceeds one byte"))?,
-        )
-        .map_err(native_error)?;
+        let opcode = parse_opcode(operation)?;
         self.active_client()?
             .execute_application(opcode, value.as_ref())
             .await
             .map(Uint8Array::new)
+            .map_err(native_error)
+    }
+
+    /// Executes a generated Smithy operation against exact item-ID storage.
+    #[napi(js_name = "execute_raw")]
+    pub async fn execute_raw(
+        &self,
+        operation: u32,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<NativeOperationResult> {
+        let opcode = parse_opcode(operation)?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .raw()
+            .execute_raw(opcode, item_id.as_ref(), value.as_ref(), options)
+            .await
+            .map(native_operation_result)
+            .map_err(native_error)
+    }
+
+    /// Executes a generated Smithy operation in an explicitly supplied namespace.
+    #[napi(js_name = "execute_scoped")]
+    pub async fn execute_scoped(
+        &self,
+        operation: u32,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<NativeOperationResult> {
+        let opcode = parse_opcode(operation)?;
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .raw()
+            .execute_scoped(
+                opcode,
+                namespace_id,
+                item_id.as_ref(),
+                value.as_ref(),
+                options,
+            )
+            .await
+            .map(native_operation_result)
             .map_err(native_error)
     }
 
@@ -728,6 +794,21 @@ fn parse_bigint_u64(value: BigInt, name: &str, allow_zero: bool) -> Result<u64> 
         )));
     }
     Ok(value)
+}
+
+fn parse_opcode(operation: u32) -> Result<Opcode> {
+    let operation =
+        u8::try_from(operation).map_err(|_| native_error("protocol opcode exceeds one byte"))?;
+    Opcode::try_from(operation).map_err(native_error)
+}
+
+fn native_operation_result(
+    result: openkache_client_core::OperationResult,
+) -> NativeOperationResult {
+    NativeOperationResult {
+        kind: result.kind,
+        payload: Uint8Array::new(result.payload),
+    }
 }
 
 fn bigint_u64(value: u64) -> BigInt {
