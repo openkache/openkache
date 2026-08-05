@@ -108,6 +108,7 @@ pub struct ThreadedKvkache {
     config: crate::config::AppConfig,
     workers: Vec<WorkerHandle>,
     server_cipher: Aes256,
+    storage_device_kind: crate::platform::StorageDeviceKind,
 }
 
 impl ThreadedKvkache {
@@ -120,7 +121,7 @@ impl ThreadedKvkache {
         Self::start_validated_with_network_roles(config, false)
     }
 
-    /// Starts storage workers whose overlapping CPUs can also host server network tasks.
+    /// Starts storage workers and attaches overlapping server network tasks when supported.
     pub(crate) fn start_validated_for_server(config: crate::config::AppConfig) -> Result<Self> {
         Self::start_validated_with_network_roles(config, true)
     }
@@ -205,8 +206,9 @@ impl ThreadedKvkache {
         lease_ssd_read_buffer: bool,
     ) -> Result<Self> {
         let server_cipher = Aes256::new(&server_secret.key.into());
-        let (started_tx, started_rx) =
-            channel::bounded::<std::result::Result<(), String>>(config.runtime.thread_count);
+        let (started_tx, started_rx) = channel::bounded::<
+            std::result::Result<crate::platform::StorageDeviceKind, String>,
+        >(config.runtime.thread_count);
         let queue_capacity = config
             .io_uring
             .batch_size
@@ -260,6 +262,7 @@ impl ThreadedKvkache {
                             config.runtime.simulated_io_latency_us,
                         ),
                     };
+                    let sqpoll = runtime_config.sqpoll;
                     let result = crate::storage_runtime::run(runtime_config, async move {
                         if let Some(error) = crate::platform::cpu_assignment_error(
                             &format!("thread {thread_id}"),
@@ -278,20 +281,25 @@ impl ThreadedKvkache {
                         {
                             Ok(cache) => cache,
                             Err(error) => {
-                                let _ = started_tx.send(Err(error.to_string()));
+                                let _ = started_tx.send(Err(
+                                    crate::storage_runtime::storage_startup_error(sqpoll, error),
+                                ));
                                 return;
                             }
                         };
+                        let storage_device_kind = cache.storage_device_kind;
                         if let Some(receiver) = core_task_receiver {
                             crate::storage_runtime::spawn_detached(run_core_tasks(receiver));
                         }
-                        let _ = started_tx.send(Ok(()));
+                        let _ = started_tx.send(Ok(storage_device_kind));
                         if let Err(error) = worker_loop(cache, receiver, io_config, cpu_id).await {
                             eprintln!("worker {thread_id} stopped: {error}");
                         }
                     });
                     if let Err(error) = result {
-                        let _ = startup_error.send(Err(error.to_string()));
+                        let _ = startup_error.send(Err(
+                            crate::storage_runtime::storage_startup_error(sqpoll, error),
+                        ));
                     }
                 })?;
             workers.push(WorkerHandle {
@@ -305,12 +313,15 @@ impl ThreadedKvkache {
         }
         drop(started_tx);
 
+        let mut storage_device_kind = crate::platform::StorageDeviceKind::Nvme;
         for _ in 0..config.runtime.thread_count {
             match started_rx
                 .recv()
                 .map_err(|_| KvError::Worker("worker startup channel closed".into()))?
             {
-                Ok(()) => {}
+                Ok(kind) => {
+                    storage_device_kind = storage_device_kind.combine(kind);
+                }
                 Err(message) => {
                     for worker in &workers {
                         let (response, _) = channel::bounded(1);
@@ -332,7 +343,14 @@ impl ThreadedKvkache {
             config,
             workers,
             server_cipher,
+            storage_device_kind,
         })
+    }
+
+    /// Returns the conservative classification of the files opened by all
+    /// storage workers during startup.
+    pub(crate) fn storage_device_kind(&self) -> crate::platform::StorageDeviceKind {
+        self.storage_device_kind
     }
 
     /// Reports whether the storage runtime pinned to `cpu_id` accepts a server role.

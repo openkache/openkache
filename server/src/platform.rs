@@ -1,8 +1,96 @@
 //! Host-specific runtime topology and diagnostics.
 
 use std::collections::HashSet;
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+use std::path::PathBuf;
 
 use crate::error::Result;
+
+/// Best-effort classification of the devices backing the worker storage files.
+///
+/// NVMe is the intended production medium, but it is not a correctness
+/// requirement. `Unknown` is deliberately separate from `NonNvme`: containers,
+/// device-mapper stacks, and restricted macOS environments may not expose
+/// enough metadata to identify the physical device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageDeviceKind {
+    /// Every inspected storage file resolves directly to an NVMe block device.
+    Nvme,
+    /// At least one inspected storage file resolves to a known non-NVMe block
+    /// device.
+    NonNvme,
+    /// At least one inspected storage file could not be classified, and no
+    /// inspected file was known to be non-NVMe.
+    Unknown,
+}
+
+impl StorageDeviceKind {
+    /// Conservatively combines classifications from all files used by storage.
+    ///
+    /// A known non-NVMe file takes precedence because it is enough to make the
+    /// intended all-NVMe recommendation inapplicable. Otherwise, an unknown
+    /// file prevents claiming that every storage file is on NVMe.
+    pub(crate) const fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NonNvme, _) | (_, Self::NonNvme) => Self::NonNvme,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Nvme, Self::Nvme) => Self::Nvme,
+        }
+    }
+}
+
+/// Classifies the block device owning an already-open storage file.
+///
+/// This is the authoritative path for server startup diagnostics: the
+/// descriptor was opened by the same storage worker that will issue reads and
+/// writes, so the result cannot drift from a separately inspected config path.
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+pub(crate) fn storage_device_kind_from_fd(fd: std::os::fd::RawFd) -> StorageDeviceKind {
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut metadata) } != 0 {
+        return StorageDeviceKind::Unknown;
+    }
+    linux_storage_device_kind_for_device(metadata.st_dev)
+}
+
+#[cfg(all(target_os = "macos", not(feature = "storage-runtime-simulated")))]
+pub(crate) fn storage_device_kind_from_fd(_fd: std::os::fd::RawFd) -> StorageDeviceKind {
+    // macOS does not expose a stable, unprivileged equivalent of Linux's
+    // /sys/dev/block mapping. Keep startup best-effort instead of guessing.
+    StorageDeviceKind::Unknown
+}
+
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+fn linux_storage_device_kind_for_device(device: u64) -> StorageDeviceKind {
+    let sysfs_device = PathBuf::from("/sys/dev/block").join(format!(
+        "{}:{}",
+        libc::major(device),
+        libc::minor(device)
+    ));
+    let Ok(resolved) = std::fs::canonicalize(sysfs_device) else {
+        return StorageDeviceKind::Unknown;
+    };
+
+    let Some(block_name) = resolved
+        .components()
+        .skip_while(|component| component.as_os_str() != "block")
+        .nth(1)
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return StorageDeviceKind::Unknown;
+    };
+
+    if block_name.starts_with("nvme") {
+        StorageDeviceKind::Nvme
+    } else if ["fd", "hd", "mmcblk", "sd", "sr"]
+        .iter()
+        .any(|prefix| block_name.starts_with(prefix))
+    {
+        StorageDeviceKind::NonNvme
+    } else {
+        StorageDeviceKind::Unknown
+    }
+}
 
 /// Returns the logical CPU identifiers accepted by the runtime affinity API.
 ///

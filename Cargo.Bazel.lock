@@ -3232,6 +3232,7 @@
             "io-uring",
             "macros",
             "net",
+            "polling",
             "runtime",
             "signal",
             "sync",
@@ -3466,6 +3467,7 @@
         "crate_features": {
           "common": [
             "io-uring",
+            "polling",
             "sync"
           ],
           "selects": {
@@ -3528,6 +3530,12 @@
             }
           ],
           "selects": {
+            "aarch64-apple-darwin": [
+              {
+                "id": "polling 3.11.0",
+                "target": "polling"
+              }
+            ],
             "aarch64-unknown-linux-gnu": [
               {
                 "id": "io-uring 0.7.13",
@@ -3540,6 +3548,10 @@
               {
                 "id": "once_cell 1.21.4",
                 "target": "once_cell"
+              },
+              {
+                "id": "polling 3.11.0",
+                "target": "polling"
               }
             ],
             "cfg(all(unix, not(target_os = \"linux\")))": [
@@ -3590,6 +3602,10 @@
               {
                 "id": "once_cell 1.21.4",
                 "target": "once_cell"
+              },
+              {
+                "id": "polling 3.11.0",
+                "target": "polling"
               }
             ],
             "x86_64-unknown-nixos-gnu": [
@@ -3604,6 +3620,10 @@
               {
                 "id": "once_cell 1.21.4",
                 "target": "once_cell"
+              },
+              {
+                "id": "polling 3.11.0",
+                "target": "polling"
               }
             ]
           }

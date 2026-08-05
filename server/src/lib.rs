@@ -11,6 +11,18 @@
     feature(stdarch_aarch64_sve)
 )]
 
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+compile_error!(
+    "OpenKache server supports only Linux x86_64/aarch64 and Apple Silicon macOS; \
+     use one of these supported targets"
+);
+
 #[cfg(not(any(feature = "quic-quinn", feature = "quic-noq", feature = "quic-quiche")))]
 compile_error!(
     "enable at least one QUIC backend feature: `quic-quinn`, `quic-noq`, or `quic-quiche`"
@@ -114,6 +126,15 @@ pub const fn storage_runtime_name() -> &'static str {
 /// Returns the io_uring submission entry count used by the selected storage runtime.
 pub const fn storage_runtime_effective_ring_entries(configured: u32) -> u32 {
     storage_runtime::effective_ring_entries(configured)
+}
+
+/// Builds the Compio runtime used by the server's top-level task.
+///
+/// The returned runtime uses the same production builder and native-driver
+/// policy as dedicated network workers. On Linux this requires io_uring; on
+/// Apple Silicon macOS it requires Compio's polling driver.
+pub fn build_server_runtime() -> std::io::Result<compio::runtime::Runtime> {
+    storage_runtime::build(storage_runtime::CompioRuntimeConfig::server_host())
 }
 
 pub(crate) mod sizing;

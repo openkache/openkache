@@ -101,6 +101,14 @@ data in `/var/lib/openkache`, and requires a mounted PKI bundle for its
 production default command. See the [container image guide](./docs/container-image.md)
 for secure mTLS deployment and the explicit isolated-development command.
 
+The server runtime supports Linux `x86_64`/`aarch64` and Apple Silicon macOS.
+Linux startup requires the selected native network runtime to provide `io_uring`
+and access to the `io_uring_setup`, `io_uring_enter`, and `io_uring_register`
+syscalls; unsupported targets fail with an explicit platform error. NVMe SSD is
+the intended storage medium but is not mandatory. After storage workers open
+their data files, startup warns when any opened file is on known non-NVMe
+storage or its device cannot be identified.
+
 ### Production TLS
 
 Create a small internal PKI without OpenSSL:

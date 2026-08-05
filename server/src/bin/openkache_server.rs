@@ -1,6 +1,6 @@
 //! Command-line entry point for the SSD-backed OpenKache QUIC server.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{io, net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
 use openkache::{AppConfig, QuicBackend};
@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(plan) = &sizing_plan {
         sizing::print_plan(plan);
     }
-    let runtime = compio::runtime::Runtime::new()?;
+    let runtime = openkache::build_server_runtime().map_err(runtime_initialization_error)?;
     require_native_driver(runtime.driver_type())?;
     runtime.block_on(serve::run(arguments, config))
 }
@@ -87,9 +87,12 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
     if driver.is_iouring() {
         Ok(())
     } else {
-        Err(std::io::Error::other(
-            "openkache-server requires the io_uring driver on Linux",
-        ))
+        Err(std::io::Error::other(format!(
+            "openkache-server cannot start: the network runtime fell back \
+                 to polling because Linux io_uring could not be initialized. Required \
+                 syscalls: io_uring_setup, io_uring_enter, io_uring_register. {}",
+            io_uring_kernel_hint()
+        )))
     }
 }
 
@@ -99,9 +102,101 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
         Ok(())
     } else {
         Err(std::io::Error::other(
-            "openkache-server requires the polling driver on macOS",
+            "openkache-server requires the network runtime's polling driver \
+             on Apple Silicon macOS",
         ))
     }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_initialization_error(error: io::Error) -> io::Error {
+    let cause = match error.raw_os_error() {
+        Some(libc::ENOSYS) => {
+            "the kernel may not provide io_uring, or a container seccomp profile may \
+             be denying the io_uring syscalls"
+        }
+        Some(libc::EPERM | libc::EACCES) => {
+            "the kernel or container security policy denied io_uring; check seccomp \
+             and io_uring permissions"
+        }
+        _ => "the kernel or container security policy rejected io_uring initialization",
+    };
+    io::Error::new(
+        error.kind(),
+        format!(
+            "openkache-server cannot start: the network runtime requires \
+             Linux io_uring ({error}); {cause}. \
+             Required syscalls: io_uring_setup, io_uring_enter, io_uring_register. \
+             {}",
+            io_uring_kernel_hint()
+        ),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn io_uring_kernel_hint() -> String {
+    let release = linux_kernel_release();
+    let recommendation = match linux_kernel_version(&release) {
+        Some((major, minor)) if (major, minor) < (5, 1) => {
+            "Upgrade to Linux 5.1 or newer before retrying."
+        }
+        Some(_) => {
+            "This release meets the Linux 5.1 version baseline; kernel version alone \
+             does not guarantee io_uring access."
+        }
+        None => {
+            "Linux 5.1 is the version baseline; kernel version could not be parsed, \
+             so verify the release manually."
+        }
+    };
+    format!(
+        "Detected Linux kernel {release}; Linux 5.1 is the minimum io_uring syscall \
+         baseline. {recommendation} The server attempted the requested Compio \
+         driver directly; the exact failed operation and errno are reported above. \
+         Kernel version alone is not sufficient: also check the container seccomp \
+         policy, CONFIG_IO_URING, /proc/sys/kernel/io_uring_disabled (0 enables \
+         io_uring), and the process's io_uring permissions."
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kernel_release() -> String {
+    let mut system = unsafe { std::mem::zeroed::<libc::utsname>() };
+    if unsafe { libc::uname(&mut system) } != 0 {
+        return "unknown".to_owned();
+    }
+
+    let release = unsafe { std::ffi::CStr::from_ptr(system.release.as_ptr()) };
+    let release = release.to_string_lossy().trim().to_owned();
+    if release.is_empty() {
+        "unknown".to_owned()
+    } else {
+        release
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kernel_version(release: &str) -> Option<(u32, u32)> {
+    let mut components = release.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components
+        .next()?
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor))
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_initialization_error(error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "openkache-server cannot start: the network runtime requires \
+             the polling driver on Apple Silicon macOS ({error})"
+        ),
+    )
 }
 
 /// Loads the cache configuration from TOML or returns the default configuration.

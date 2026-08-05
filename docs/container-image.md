@@ -60,19 +60,26 @@ There is no package manager or diagnostic shell in the final image. Use
 `docker image inspect localhost/openkache:dev` (or
 `podman image inspect localhost/openkache:dev`) and server logs for basic
 verification.
-The server requires a Linux host and an OCI runtime that exposes `io_uring`.
+The Linux server requires an OCI runtime that exposes `io_uring` to its selected
+native network runtime.
 Some default seccomp profiles still deny `io_uring_setup`,
 `io_uring_enter`, and `io_uring_register`, returning `ENOSYS` even when the
 kernel supports io_uring. If logs report `Function not implemented`, allow
 those three syscalls with a narrowly scoped custom profile. The examples below
 use `seccomp=unconfined` as a compatibility fallback; do not use that broad
-fallback for a hardened production deployment.
+fallback for a hardened production deployment. OpenKache exits before serving
+when io_uring cannot be initialized and includes these checks in the error
+message.
 
 ## Persistent storage
 
 Mount `/var/lib/openkache` to durable local or block storage. The server stores
 Segment files, the generated storage key, and the running-process marker there.
 Do not use an ephemeral container layer for data that must survive a restart.
+NVMe SSD is the intended production medium, but it is not required. After the
+storage workers open their data files, startup best-effort checks those opened
+files and emits a non-fatal warning when any device is non-NVMe or the
+container does not expose enough metadata to identify it.
 The storage directory must be owned or writable by UID/GID `65532`; named
 Docker and Podman volumes satisfy this when first created.
 

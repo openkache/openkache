@@ -18,6 +18,7 @@ use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver};
+use crate::platform::StorageDeviceKind;
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,
@@ -99,6 +100,17 @@ impl RespServer {
     /// This accessor returns the server result type for symmetry with the QUIC server.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+
+    /// Returns the conservative classification of the files opened by the
+    /// storage workers during bind.
+    ///
+    /// # Returns
+    ///
+    /// The aggregate classification of every data and large-value file opened
+    /// by the storage workers.
+    pub fn storage_device_kind(&self) -> StorageDeviceKind {
+        self.cache.storage_device_kind()
     }
 
     /// Accepts RESP2 connections until `shutdown` resolves, then flushes cache workers.
