@@ -614,7 +614,8 @@ async fn execute_protocol_application_value(
     let opcode = crate::contract::protocol_opcode(operation)?;
     let contract = crate::contract::operation_contract(opcode);
     if contract.request_kind != crate::contract::OperationRequestKind::ApplicationValue
-        || contract.response_kind != crate::contract::OperationResponseKind::Echo
+        || contract.response_kind
+            != crate::contract::OperationResponseKind::ApplicationValue
     {
         return None;
     }
