@@ -500,13 +500,6 @@ impl<C: ClientConnection> Core<C> {
         Ok(response.payload)
     }
 
-    async fn execute_application(&self, opcode: Opcode, value: Vec<u8>) -> Result<Vec<u8>> {
-        let response = self
-            .request(Request::new(opcode, None, value).map_err(Error::protocol)?)
-            .await?;
-        Ok(response.payload)
-    }
-
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
         let namespace_id = self.ensure_namespace().await?;
         self.get_in_namespace(namespace_id, item_id).await
@@ -1297,7 +1290,14 @@ macro_rules! raw_client_methods {
                         };
                         Ok(OperationResult {
                             kind: kind.code(),
-                            payload: response.payload,
+                            payload: match contract.response_kind {
+                                contract::OperationResponseKind::ApplicationValue => {
+                                    response.payload
+                                }
+                                contract::OperationResponseKind::Pong
+                                | contract::OperationResponseKind::Empty => Vec::new(),
+                                _ => unreachable!("global response kind checked above"),
+                            },
                         })
                     }
                     (
@@ -1483,28 +1483,24 @@ macro_rules! raw_client_methods {
                 }
             }
 
-            /// Sends a validated protocol request through the shared retry and response-contract
-            /// path. Generated/native adapters use this for protocol operations whose semantic
-            /// contract does not need a handwritten convenience method.
-            #[cfg(feature = "ffi")]
-            pub(crate) async fn execute_request(&self, request: Request) -> Result<Response> {
-                self.0.request(request).await
-            }
-
             /// Sends an experimental UTF-8-independent payload and returns the echoed bytes.
             pub async fn echo(&self, value: impl AsRef<[u8]>) -> Result<Vec<u8>> {
                 self.0.echo(value.as_ref().to_vec()).await
             }
 
-            /// Sends an application payload through a Smithy-declared global operation.
+            /// Sends an application payload through the generic Smithy operation boundary.
+            ///
+            /// This compatibility helper is deprecated; generated adapters should call
+            /// [`Self::execute_raw`] so the result discriminator remains available.
+            #[deprecated(note = "use execute_raw for generated Smithy operations")]
             pub async fn execute_application(
                 &self,
                 operation: Opcode,
                 value: impl AsRef<[u8]>,
             ) -> Result<Vec<u8>> {
-                self.0
-                    .execute_application(operation, value.as_ref().to_vec())
+                self.execute_raw(operation, [], value, SetOptions::new())
                     .await
+                    .map(|result| result.payload)
             }
 
             /// Returns the currently selected server-assigned namespace ID.

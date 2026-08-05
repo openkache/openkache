@@ -141,21 +141,6 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Sends an application payload through a Smithy-declared global operation.
-    #[napi(js_name = "invoke_application_value")]
-    pub async fn invoke_application_value(
-        &self,
-        operation: u32,
-        value: Uint8Array,
-    ) -> Result<Uint8Array> {
-        let opcode = parse_opcode(operation)?;
-        self.active_client()?
-            .execute_application(opcode, value.as_ref())
-            .await
-            .map(Uint8Array::new)
-            .map_err(native_error)
-    }
-
     /// Executes a generated Smithy operation against exact item-ID storage.
     #[napi(js_name = "execute_raw")]
     pub async fn execute_raw(

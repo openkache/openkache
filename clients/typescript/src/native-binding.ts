@@ -56,7 +56,6 @@ interface Native_Value_Envelope {
 export interface Native_Client {
   ping(): Promise<void>
   echo(value: Uint8Array): Promise<Uint8Array>
-  invoke_application_value(operation: number, value: Uint8Array): Promise<Uint8Array>
   execute_raw(
     operation: number,
     item_id: Uint8Array,

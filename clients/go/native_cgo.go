@@ -659,9 +659,9 @@ func (h *nativeHandle) executeScoped(
 	if err != nil {
 		return nativeResult{}, err
 	}
-	itemBytes := itemID[:]
-	if operation == SmithyOpcodeStats || operation == SmithyOpcodeSync {
-		itemBytes = nil
+	var itemBytes []byte
+	if smithyOperationUsesItemID(operation) {
+		itemBytes = itemID[:]
 	}
 	itemMemory := C.CBytes(itemBytes)
 	valueMemory := C.CBytes(value)

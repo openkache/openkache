@@ -137,13 +137,182 @@ macro_rules! protected_client_methods {
             self.raw.echo(value).await
         }
 
-        /// Sends an application payload through a Smithy-declared global operation.
+        /// Sends an application payload through the generic Smithy operation boundary.
+        ///
+        /// This compatibility helper is deprecated; generated adapters should use the generic
+        /// operation result returned by [`Self::execute_operation`].
+        #[deprecated(note = "use execute_operation for generated Smithy operations")]
         pub async fn execute_application(
             &self,
             operation: crate::Opcode,
             value: impl AsRef<[u8]>,
         ) -> Result<Vec<u8>> {
-            self.raw.execute_application(operation, value).await
+            self.raw
+                .execute_raw(operation, [], value, SetOptions::new())
+                .await
+                .map(|result| result.payload)
+        }
+
+        /// Executes a generated Smithy operation with application-key and value protection.
+        ///
+        /// The Smithy operation contract selects the protected request path and returns the
+        /// shared native result representation used by language adapters.
+        pub async fn execute_operation(
+            &self,
+            operation: crate::Opcode,
+            application_key: impl AsRef<[u8]>,
+            value: impl AsRef<[u8]>,
+            set_options: SetOptions,
+        ) -> Result<crate::OperationResult> {
+            let contract = crate::contract::operation_contract(operation);
+            match (contract.request_kind, contract.response_kind) {
+                (
+                    crate::contract::OperationRequestKind::Empty,
+                    crate::contract::OperationResponseKind::Pong
+                    | crate::contract::OperationResponseKind::Empty,
+                )
+                | (
+                    crate::contract::OperationRequestKind::ApplicationValue,
+                    crate::contract::OperationResponseKind::ApplicationValue,
+                ) => {
+                    self.raw
+                        .execute_raw(operation, [], value, set_options)
+                        .await
+                }
+                (
+                    crate::contract::OperationRequestKind::ScopedItem,
+                    crate::contract::OperationResponseKind::Value,
+                ) => Ok(match self.get(application_key).await? {
+                    GetOutcome::Found(value) => crate::OperationResult {
+                        kind: crate::contract::FfiResultKind::Value.code(),
+                        payload: value,
+                    },
+                    GetOutcome::NotFound => crate::OperationResult {
+                        kind: crate::contract::FfiResultKind::NotFound.code(),
+                        payload: Vec::new(),
+                    },
+                }),
+                (
+                    crate::contract::OperationRequestKind::ScopedItem,
+                    crate::contract::OperationResponseKind::SetOutcome,
+                ) => Ok(crate::OperationResult {
+                    kind: match self
+                        .set(application_key, value.as_ref().to_vec(), set_options)
+                        .await?
+                    {
+                        SetOutcome::Created => crate::contract::FfiResultKind::Created,
+                        SetOutcome::Replaced => crate::contract::FfiResultKind::Replaced,
+                        SetOutcome::NotStored => crate::contract::FfiResultKind::NotStored,
+                    }
+                    .code(),
+                    payload: Vec::new(),
+                }),
+                (
+                    crate::contract::OperationRequestKind::ScopedItem,
+                    crate::contract::OperationResponseKind::DeleteOutcome,
+                ) => Ok(crate::OperationResult {
+                    kind: match self.delete(application_key).await? {
+                        DeleteOutcome::Deleted => crate::contract::FfiResultKind::Deleted,
+                        DeleteOutcome::NotFound => crate::contract::FfiResultKind::NotDeleted,
+                    }
+                    .code(),
+                    payload: Vec::new(),
+                }),
+                (
+                    crate::contract::OperationRequestKind::ScopedNamespace,
+                    crate::contract::OperationResponseKind::StatsJson
+                    | crate::contract::OperationResponseKind::Empty,
+                ) => {
+                    self.raw
+                        .execute_raw(operation, [], value, set_options)
+                        .await
+                }
+                _ => Err(crate::Error::configuration(
+                    "operation",
+                    "protocol operation is not available through the protected ABI",
+                )),
+            }
+        }
+
+        /// Executes a generated Smithy operation in an explicitly supplied namespace with
+        /// application-key and value protection.
+        pub async fn execute_operation_scoped(
+            &self,
+            operation: crate::Opcode,
+            namespace_id: u64,
+            application_key: impl AsRef<[u8]>,
+            value: impl AsRef<[u8]>,
+            set_options: SetOptions,
+        ) -> Result<crate::OperationResult> {
+            let contract = crate::contract::operation_contract(operation);
+            match (contract.request_kind, contract.response_kind) {
+                (
+                    crate::contract::OperationRequestKind::ScopedItem,
+                    crate::contract::OperationResponseKind::Value,
+                ) => {
+                    let item_id = self.protection.item_id(application_key);
+                    Ok(match self.raw.get_in_namespace(namespace_id, item_id).await? {
+                        GetOutcome::Found(value) => {
+                            let value = self.protection.open(item_id, value)?;
+                            crate::OperationResult {
+                                kind: crate::contract::FfiResultKind::Value.code(),
+                                payload: value,
+                            }
+                        }
+                        GetOutcome::NotFound => crate::OperationResult {
+                            kind: crate::contract::FfiResultKind::NotFound.code(),
+                            payload: Vec::new(),
+                        },
+                    })
+                }
+                (
+                    crate::contract::OperationRequestKind::ScopedItem,
+                    crate::contract::OperationResponseKind::SetOutcome,
+                ) => {
+                    let item_id = self.protection.item_id(application_key.as_ref());
+                    let value = self.protection.seal_owned(item_id, value.as_ref().to_vec())?;
+                    Ok(crate::OperationResult {
+                        kind: match self
+                            .raw
+                            .set_in_namespace(namespace_id, item_id, value, set_options)
+                            .await?
+                        {
+                            SetOutcome::Created => crate::contract::FfiResultKind::Created,
+                            SetOutcome::Replaced => crate::contract::FfiResultKind::Replaced,
+                            SetOutcome::NotStored => crate::contract::FfiResultKind::NotStored,
+                        }
+                        .code(),
+                        payload: Vec::new(),
+                    })
+                }
+                (
+                    crate::contract::OperationRequestKind::ScopedItem,
+                    crate::contract::OperationResponseKind::DeleteOutcome,
+                ) => {
+                    let item_id = self.protection.item_id(application_key);
+                    Ok(crate::OperationResult {
+                        kind: match self.raw.delete_in_namespace(namespace_id, item_id).await? {
+                            DeleteOutcome::Deleted => crate::contract::FfiResultKind::Deleted,
+                            DeleteOutcome::NotFound => crate::contract::FfiResultKind::NotDeleted,
+                        }
+                        .code(),
+                        payload: Vec::new(),
+                    })
+                }
+                (
+                    crate::contract::OperationRequestKind::ScopedNamespace,
+                    crate::contract::OperationResponseKind::StatsJson
+                    | crate::contract::OperationResponseKind::Empty,
+                ) => {
+                    self.raw
+                        .execute_scoped(operation, namespace_id, [], value, set_options)
+                        .await
+                }
+                _ => Err(crate::Error::configuration(
+                    "operation",
+                    "protocol operation is not available through the namespace-scoped protected ABI",
+                )),
+            }
         }
 
         /// Returns the currently selected server-assigned namespace ID.
