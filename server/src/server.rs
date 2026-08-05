@@ -2328,7 +2328,7 @@ async fn execute_request(
                 }
             }
         }
-        Opcode::Ping | Opcode::Echo => {
+        _ => {
             unreachable!("immediate response operation escaped pre-dispatch")
         }
     };
