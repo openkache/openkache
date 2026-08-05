@@ -1,5 +1,5 @@
 {
-  "checksum": "d8e96f8b0eb853808fd506fc056ea3954fc823c365655b47597862c9c095a16d",
+  "checksum": "b60de037849fa86d63df4dba4aac045847106fc90ae06833596922f85dd5ea48",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -10787,7 +10787,7 @@
               "target": "hyper"
             },
             {
-              "id": "ipnet 2.12.1",
+              "id": "ipnet 2.12.0",
               "target": "ipnet"
             },
             {
@@ -12058,14 +12058,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "ipnet 2.12.1": {
+    "ipnet 2.12.0": {
       "name": "ipnet",
-      "version": "2.12.1",
+      "version": "2.12.0",
       "package_url": "https://github.com/krisprice/ipnet",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/ipnet/2.12.1/download",
-          "sha256": "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
+          "url": "https://static.crates.io/crates/ipnet/2.12.0/download",
+          "sha256": "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
         }
       },
       "targets": [
@@ -12095,7 +12095,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "2.12.1"
+        "version": "2.12.0"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -12178,6 +12178,54 @@
         "compile_data_glob": [
           "**"
         ],
+        "deps": {
+          "common": [
+            {
+              "id": "either 1.17.0",
+              "target": "either"
+            }
+          ],
+          "selects": {}
+        },
+        "edition": "2018",
+        "version": "0.13.0"
+      },
+      "license": "MIT OR Apache-2.0",
+      "license_ids": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "license_file": "LICENSE-APACHE"
+    },
+    "itertools 0.14.0": {
+      "name": "itertools",
+      "version": "0.14.0",
+      "package_url": "https://github.com/rust-itertools/itertools",
+      "repository": {
+        "Http": {
+          "url": "https://static.crates.io/crates/itertools/0.14.0/download",
+          "sha256": "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+        }
+      },
+      "targets": [
+        {
+          "Library": {
+            "crate_name": "itertools",
+            "crate_root": "src/lib.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
+        }
+      ],
+      "library_target_name": "itertools",
+      "common_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
         "crate_features": {
           "common": [
             "default",
@@ -12196,7 +12244,7 @@
           "selects": {}
         },
         "edition": "2018",
-        "version": "0.13.0"
+        "version": "0.14.0"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -17749,7 +17797,7 @@
               "target": "anyhow"
             },
             {
-              "id": "itertools 0.13.0",
+              "id": "itertools 0.14.0",
               "target": "itertools"
             },
             {
@@ -21756,7 +21804,13 @@
       "repository": {
         "Http": {
           "url": "https://static.crates.io/crates/snmalloc-sys/0.7.4/download",
-          "sha256": "a96cbeb16d6bcc5979f80ec907582a886b7fb3b9a707678b63dd93a10d8ee858"
+          "sha256": "a96cbeb16d6bcc5979f80ec907582a886b7fb3b9a707678b63dd93a10d8ee858",
+          "patch_args": [
+            "-p1"
+          ],
+          "patches": [
+            "@@//:bazel/snmalloc-sys-musl-runtime.patch"
+          ]
         }
       },
       "targets": [

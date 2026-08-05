@@ -1,0 +1,134 @@
+--- a/build.rs
++++ b/build.rs
+@@ -551,1 +551,116 @@
++#[cfg(feature = "build_cc")]
++fn compiler_archive(config: &BuildConfig, archive_name: &str) -> PathBuf {
++    let compiler = config.builder.get_compiler();
++    let mut command = std::process::Command::new(compiler.path());
++    command.args(compiler.args());
++    for (name, value) in compiler.env() {
++        command.env(name, value);
++    }
++    let output = command
++        .arg(format!("-print-file-name={archive_name}"))
++        .output()
++        .unwrap_or_else(|error| {
++            panic!(
++                "snmalloc-sys could not query {archive_name} from {}: {error}; \
++                 the target toolchain must provide a static compiler runtime",
++                compiler.path().display()
++            )
++        });
++    if !output.status.success() {
++        panic!(
++            "snmalloc-sys compiler {} rejected the {archive_name} query: {}",
++            compiler.path().display(),
++            String::from_utf8_lossy(&output.stderr).trim()
++        );
++    }
++    let archive = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
++    if !archive.is_file() {
++        panic!(
++            "snmalloc-sys compiler {} did not expose a static {archive_name} \
++             archive (reported {:?}); install the pinned target runtime archives",
++            compiler.path().display(),
++            archive
++        );
++    }
++    archive
++}
++
++#[cfg(feature = "build_cc")]
++fn rust_unwind_archive(config: &BuildConfig) -> PathBuf {
++    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
++    let output = std::process::Command::new(&rustc)
++        .args(["--print", "target-libdir", "--target"])
++        .arg(&config.target)
++        .output()
++        .unwrap_or_else(|error| {
++            panic!(
++                "snmalloc-sys could not query the Rust target library directory \
++                 for {}: {error}",
++                config.target
++            )
++        });
++    if !output.status.success() {
++        panic!(
++            "snmalloc-sys Rust compiler rejected the target-libdir query for {}: {}",
++            config.target,
++            String::from_utf8_lossy(&output.stderr).trim()
++        );
++    }
++    let target_libdir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
++    let archive = target_libdir.join("self-contained/libunwind.a");
++    if !archive.is_file() {
++        panic!(
++            "snmalloc-sys could not find static libunwind.a at {}; \
++             the musl Rust toolchain must ship its self-contained unwind archive",
++            archive.display()
++        );
++    }
++    archive
++}
++
++#[cfg(feature = "build_cc")]
++fn emit_linux_runtime(config: &BuildConfig) {
++    let compiler = config.builder.get_compiler();
++    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
++    if compiler.is_like_clang() && target_env == "musl" {
++        let architecture =
++            env::var("CARGO_CFG_TARGET_ARCH").expect("CARGO_CFG_TARGET_ARCH not set");
++        let builtins_name = format!("libclang_rt.builtins-{architecture}.a");
++        let builtins = compiler_archive(config, &builtins_name);
++        println!(
++            "cargo:rustc-link-search=native={}",
++            builtins.parent().expect("compiler archive has no parent").display()
++        );
++        println!(
++            "cargo:rustc-link-lib=static={}",
++            builtins_name
++                .strip_prefix("lib")
++                .and_then(|name| name.strip_suffix(".a"))
++                .expect("compiler archive name has lib*.a form")
++        );
++        let unwind = rust_unwind_archive(config);
++        println!(
++            "cargo:rustc-link-search=native={}",
++            unwind.parent().expect("unwind archive has no parent").display()
++        );
++        println!("cargo:rustc-link-lib=static=unwind");
++    } else {
++        let gcc_eh = compiler_archive(config, "libgcc_eh.a");
++        let gcc = compiler_archive(config, "libgcc.a");
++        for archive in [gcc_eh, gcc] {
++            println!(
++                "cargo:rustc-link-search=native={}",
++                archive.parent().expect("GCC archive has no parent").display()
++            );
++            println!(
++                "cargo:rustc-link-lib=static={}",
++                archive
++                    .file_stem()
++                    .and_then(|name| name.to_str())
++                    .and_then(|name| name.strip_prefix("lib"))
++                    .expect("GCC archive has a UTF-8 file stem")
++            );
++        }
++    }
++}
+ fn configure_linking(config: &BuildConfig) {
+@@ -591,7 +705,13 @@
+             println!("cargo:rustc-link-lib=stdc++");
+             println!("cargo:rustc-link-lib=pthread");
+             println!("cargo:rustc-link-lib=c");
+-            println!("cargo:rustc-link-lib=gcc_s");
++            #[cfg(feature = "build_cc")]
++            emit_linux_runtime(config);
++            #[cfg(not(feature = "build_cc"))]
++            {
++                println!("cargo:rustc-link-lib=static=gcc_eh");
++                println!("cargo:rustc-link-lib=static=gcc");
++            }
+             println!("cargo:rustc-link-lib=util");
+             println!("cargo:rustc-link-lib=rt");
+             println!("cargo:rustc-link-lib=dl");
