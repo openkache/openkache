@@ -5,9 +5,9 @@ use std::time::Duration;
 
 use crate::value::{Compression, Encryption, Value};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, Result, RetryPolicy, ServerTrust,
-    SetOptions, SetOutcome,
+    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
+    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, NamespaceDescriptor, NamespacePolicy,
+    Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -55,6 +55,12 @@ macro_rules! protected_builder_methods {
                 self
             }
 
+            /// Offers protocol versions in descending order and enforces a minimum version.
+            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
+                self.raw = self.raw.alpn_policy(policy);
+                self
+            }
+
             /// Sets connection and complete-request deadlines.
             pub fn timeouts(mut self, timeouts: ClientTimeouts) -> Self {
                 self.raw = self.raw.timeouts(timeouts);
@@ -70,6 +76,24 @@ macro_rules! protected_builder_methods {
             /// Bounds simultaneous request lanes on one QUIC connection.
             pub fn max_in_flight(mut self, maximum: usize) -> Self {
                 self.raw = self.raw.max_in_flight(maximum);
+                self
+            }
+
+            /// Selects a previously server-assigned namespace ID without resolving a name.
+            pub fn namespace_id(mut self, namespace_id: u64) -> Self {
+                self.raw = self.raw.namespace_id(namespace_id);
+                self
+            }
+
+            /// Resolves this namespace name with `CreateIfMissing` during connection setup.
+            pub fn namespace_name(mut self, namespace_name: impl AsRef<[u8]>) -> Self {
+                self.raw = self.raw.namespace_name(namespace_name);
+                self
+            }
+
+            /// Supplies the policy used if the configured namespace name is missing.
+            pub fn namespace_policy(mut self, policy: NamespacePolicy) -> Self {
+                self.raw = self.raw.namespace_policy(policy);
                 self
             }
 
@@ -106,6 +130,46 @@ macro_rules! protected_client_methods {
         /// Verifies the connection and returns the complete request round-trip time.
         pub async fn ping(&self) -> Result<Duration> {
             self.raw.ping().await
+        }
+
+        /// Returns the currently selected server-assigned namespace ID.
+        pub fn namespace_id(&self) -> Option<u64> {
+            self.raw.namespace_id()
+        }
+
+        /// Resolves a namespace name and optionally creates it.
+        pub async fn namespace_open(
+            &self,
+            name: impl AsRef<[u8]>,
+            create_if_missing: bool,
+            policy: Option<NamespacePolicy>,
+        ) -> Result<NamespaceDescriptor> {
+            self.raw
+                .namespace_open(name, create_if_missing, policy)
+                .await
+        }
+
+        /// Replaces a namespace policy using its current revision.
+        pub async fn namespace_update_policy(
+            &self,
+            namespace_id: u64,
+            expected_revision: u64,
+            policy: NamespacePolicy,
+        ) -> Result<NamespaceDescriptor> {
+            self.raw
+                .namespace_update_policy(namespace_id, expected_revision, policy)
+                .await
+        }
+
+        /// Deletes an empty namespace using its current revision.
+        pub async fn namespace_delete(
+            &self,
+            namespace_id: u64,
+            expected_revision: u64,
+        ) -> Result<()> {
+            self.raw
+                .namespace_delete(namespace_id, expected_revision)
+                .await
         }
 
         /// Retrieves, authenticates, and decodes a value for arbitrary application key bytes.

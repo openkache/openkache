@@ -31,6 +31,8 @@ pub(crate) trait ClientConnection: Sized {
 
     fn acquire_lane(&self, deadline: Deadline) -> impl Future<Output = Result<Self::Lane<'_>>>;
 
+    fn negotiated_alpn(&self) -> Option<&[u8]>;
+
     fn timeout<F: Future>(
         duration: Duration,
         future: F,
@@ -85,6 +87,10 @@ macro_rules! connection_backend {
                         operation: Operation::StreamAcquisition,
                     }),
                 }
+            }
+
+            fn negotiated_alpn(&self) -> Option<&[u8]> {
+                self.0.inner.negotiated_alpn()
             }
 
             async fn timeout<F: Future>(
@@ -150,6 +156,8 @@ async fn timeout_compio<F: Future>(duration: Duration, future: F) -> Result<Opti
 
 trait BackendConnection {
     type Stream: BackendStream + 'static;
+
+    fn negotiated_alpn(&self) -> Option<&[u8]>;
 
     fn open_bi(
         &self,

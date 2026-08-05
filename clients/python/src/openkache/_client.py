@@ -17,9 +17,22 @@ from typing import Any, Final, Iterable, Sequence
 from ._generated import (
     SmithyDeleteInput,
     SmithyDeleteOutput,
+    SmithyEvictionDefault,
+    SmithyEvictionMode,
+    SmithyExpirationDefault,
+    SmithyExpirationMode,
     SmithyGetInput,
     SmithyGetOutput,
+    SmithyNamespaceDeleteInput,
+    SmithyNamespaceDeleteOutput,
+    SmithyNamespaceDescriptor,
+    SmithyNamespaceOpenInput,
+    SmithyNamespaceOpenOutput,
+    SmithyNamespacePolicy,
+    SmithyNamespaceUpdatePolicyInput,
+    SmithyNamespaceUpdatePolicyOutput,
     SmithyOpenKacheApi,
+    SmithyOverridePolicy,
     SmithyPingInput,
     SmithyPingOutput,
     SmithySetCondition,
@@ -46,10 +59,11 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_NOT_FOUND,
     SMITHY_FFI_RESULT_NOT_STORED,
     SMITHY_FFI_RESULT_REPLACED,
+    SMITHY_FFI_RESULT_OK,
     SMITHY_FFI_RESULT_VALUE,
     SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     SMITHY_FFI_SET_CONDITION_IF_PRESENT,
-    SMITHY_FFI_SET_CONDITION_NONE,
+    SMITHY_FFI_SET_CONDITION_ANY,
     SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS,
     SMITHY_DEFAULT_MAX_IN_FLIGHT,
     SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS,
@@ -66,10 +80,33 @@ from ._generated.smithy_contract import (
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
     SMITHY_OPCODE_GET,
+    SMITHY_OPCODE_NAMESPACE_DELETE,
+    SMITHY_OPCODE_NAMESPACE_OPEN,
+    SMITHY_OPCODE_NAMESPACE_UPDATE_POLICY,
     SMITHY_OPCODE_PING,
     SMITHY_OPCODE_SET,
     SMITHY_OPCODE_STATS,
     SMITHY_OPCODE_SYNC,
+    SMITHY_POLICY_DEFAULT_EXPIRATION_MASK,
+    SMITHY_POLICY_EVICTION_OVERRIDE,
+    SMITHY_POLICY_EVICTION_PROTECTED,
+    SMITHY_POLICY_EXPIRATION_OVERRIDE,
+    SMITHY_POLICY_FIXED_TTL,
+    SMITHY_POLICY_NO_EXPIRY,
+    SMITHY_SET_CONDITION_ANY_BITS,
+    SMITHY_SET_EVICTABLE_BITS,
+    SMITHY_SET_EVICTION_PROTECTED_BITS,
+    SMITHY_SET_EXPLICIT_TTL_BITS,
+    SMITHY_SET_INHERIT_EVICTION_BITS,
+    SMITHY_SET_INHERIT_EXPIRATION_BITS,
+    SMITHY_SET_NO_EXPIRY_BITS,
+    SMITHY_SET_CONDITION_MASK,
+    SMITHY_SET_EXPIRATION_MASK,
+    SMITHY_SET_EVICTION_MASK,
+    SMITHY_SET_RESERVED_MASK,
+    SMITHY_SET_IF_ABSENT_BITS,
+    SMITHY_SET_IF_PRESENT_BITS,
+    SMITHY_MAX_VARUINT_BYTES,
     SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES,
     SMITHY_VALUE_ENCRYPTION_COMPACT,
     SMITHY_VALUE_ENCRYPTION_ROBUST,
@@ -192,9 +229,11 @@ class ClientTimeouts:
 
 @dataclass(frozen=True, slots=True)
 class SetOptions:
-    """Atomic existence condition and optional positive TTL."""
+    """Atomic existence and item-policy selections for one SET."""
 
     condition: SmithySetCondition | str | None = None
+    expiration_mode: SmithyExpirationMode | str | None = None
+    eviction_mode: SmithyEvictionMode | str | None = None
     ttl_ms: int | None = None
 
     def __post_init__(self) -> None:
@@ -211,6 +250,35 @@ class SetOptions:
             raise OpenKacheValueError(
                 "condition must be 'if_absent', 'if_present', or None"
             )
+        expiration_mode = self.expiration_mode
+        if isinstance(expiration_mode, str):
+            try:
+                expiration_mode = SmithyExpirationMode(expiration_mode)
+            except ValueError as error:
+                raise OpenKacheValueError(
+                    "expiration_mode must be 'inherit', 'no_expiry', or 'explicit_ttl'"
+                ) from error
+            object.__setattr__(self, "expiration_mode", expiration_mode)
+        elif expiration_mode is not None and not isinstance(
+            expiration_mode, SmithyExpirationMode
+        ):
+            raise OpenKacheValueError(
+                "expiration_mode must be a SmithyExpirationMode value or None"
+            )
+        eviction_mode = self.eviction_mode
+        if isinstance(eviction_mode, str):
+            try:
+                eviction_mode = SmithyEvictionMode(eviction_mode)
+            except ValueError as error:
+                raise OpenKacheValueError(
+                    "eviction_mode must be 'inherit', 'evictable', or "
+                    "'eviction_protected'"
+                ) from error
+            object.__setattr__(self, "eviction_mode", eviction_mode)
+        elif eviction_mode is not None and not isinstance(eviction_mode, SmithyEvictionMode):
+            raise OpenKacheValueError(
+                "eviction_mode must be a SmithyEvictionMode value or None"
+            )
         if self.ttl_ms is not None:
             _positive_or_zero(
                 self.ttl_ms,
@@ -218,14 +286,54 @@ class SetOptions:
                 allow_zero=False,
                 maximum=_UINT64_MAX,
             )
+        selected_expiration = expiration_mode or (
+            SmithyExpirationMode.EXPLICIT_TTL
+            if self.ttl_ms is not None
+            else SmithyExpirationMode.INHERIT
+        )
+        if selected_expiration is SmithyExpirationMode.EXPLICIT_TTL:
+            if self.ttl_ms is None:
+                raise OpenKacheValueError(
+                    "ttl_ms is required with explicit_ttl expiration_mode"
+                )
+        elif self.ttl_ms is not None:
+            raise OpenKacheValueError(
+                "ttl_ms is only valid with explicit_ttl expiration_mode"
+            )
+        object.__setattr__(self, "expiration_mode", selected_expiration)
+        object.__setattr__(
+            self,
+            "eviction_mode",
+            eviction_mode or SmithyEvictionMode.INHERIT,
+        )
 
     @property
     def _condition_code(self) -> int:
         if self.condition is None:
-            return SMITHY_FFI_SET_CONDITION_NONE
+            return SMITHY_FFI_SET_CONDITION_ANY
         if self.condition is SmithySetCondition.IF_ABSENT:
             return SMITHY_FFI_SET_CONDITION_IF_ABSENT
         return SMITHY_FFI_SET_CONDITION_IF_PRESENT
+
+    @property
+    def _wire_flags(self) -> int:
+        condition = {
+            None: SMITHY_SET_CONDITION_ANY_BITS,
+            SmithySetCondition.ANY: SMITHY_SET_CONDITION_ANY_BITS,
+            SmithySetCondition.IF_ABSENT: SMITHY_SET_IF_ABSENT_BITS,
+            SmithySetCondition.IF_PRESENT: SMITHY_SET_IF_PRESENT_BITS,
+        }[self.condition]
+        expiration = {
+            SmithyExpirationMode.INHERIT: SMITHY_SET_INHERIT_EXPIRATION_BITS,
+            SmithyExpirationMode.NO_EXPIRY: SMITHY_SET_NO_EXPIRY_BITS,
+            SmithyExpirationMode.EXPLICIT_TTL: SMITHY_SET_EXPLICIT_TTL_BITS,
+        }[self.expiration_mode]
+        eviction = {
+            SmithyEvictionMode.INHERIT: SMITHY_SET_INHERIT_EVICTION_BITS,
+            SmithyEvictionMode.EVICTABLE: SMITHY_SET_EVICTABLE_BITS,
+            SmithyEvictionMode.EVICTION_PROTECTED: SMITHY_SET_EVICTION_PROTECTED_BITS,
+        }[self.eviction_mode]
+        return condition | expiration | eviction
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,12 +555,12 @@ class OpenKacheClient:
         selected = options or SetOptions()
         try:
             return await asyncio.to_thread(
-                self._native.execute,
+                self._native.execute_with_options,
                 operation,
                 key=key,
                 value=value,
-                condition=selected._condition_code,
-                ttl_ms=selected.ttl_ms,
+                set_flags=selected._wire_flags,
+                ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
@@ -484,12 +592,40 @@ class OpenKacheClient:
         selected = options or SetOptions()
         try:
             return await asyncio.to_thread(
-                self._native.execute_raw,
+                self._native.execute_raw_with_options,
                 operation,
                 item_id=item_id,
                 value=value,
-                condition=selected._condition_code,
-                ttl_ms=selected.ttl_ms,
+                set_flags=selected._wire_flags,
+                ttl_ms=selected.ttl_ms or 0,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+
+    async def _execute_scoped(
+        self,
+        operation: int,
+        *,
+        namespace_id: int,
+        item_id: bytes = b"",
+        value: bytes = b"",
+        options: SetOptions | None = None,
+    ) -> tuple[int, bytes]:
+        self._assert_open()
+        if not isinstance(namespace_id, int) or not 1 <= namespace_id <= _UINT64_MAX:
+            raise OpenKacheValueError(
+                "namespace_id must be a positive unsigned 64-bit integer"
+            )
+        selected = options or SetOptions()
+        try:
+            return await asyncio.to_thread(
+                self._native.execute_scoped,
+                operation,
+                namespace_id=namespace_id,
+                item_id=item_id,
+                value=value,
+                set_flags=selected._wire_flags,
+                ttl_ms=selected.ttl_ms or 0,
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
@@ -523,8 +659,10 @@ class RawClient(SmithyOpenKacheApi):
 
     async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
         item_id = _item_id(input.item_id)
-        kind, payload = await self._owner._execute_raw(
-            SMITHY_OPCODE_GET, item_id=item_id
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_OPCODE_GET,
+            namespace_id=input.namespace_id,
+            item_id=item_id,
         )
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return SmithyGetOutput()
@@ -533,9 +671,19 @@ class RawClient(SmithyOpenKacheApi):
         return SmithyGetOutput(value=payload)
 
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
-        options = SetOptions(input.condition, input.ttl_milliseconds)
-        kind, _ = await self._owner._execute_raw(
+        if input.expiration_mode is None and input.ttl_milliseconds is not None:
+            raise OpenKacheValueError(
+                "ttl_milliseconds is only valid with explicit_ttl expiration mode"
+            )
+        options = SetOptions(
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_ms=input.ttl_milliseconds,
+        )
+        kind, _ = await self._owner._execute_scoped(
             SMITHY_OPCODE_SET,
+            namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
             value=_value_bytes(input.value),
             options=options,
@@ -543,19 +691,109 @@ class RawClient(SmithyOpenKacheApi):
         return SmithySetOutput(outcome=_set_outcome(kind))
 
     async def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
-        kind, _ = await self._owner._execute_raw(
-            SMITHY_OPCODE_DELETE, item_id=_item_id(input.item_id)
+        kind, _ = await self._owner._execute_scoped(
+            SMITHY_OPCODE_DELETE,
+            namespace_id=input.namespace_id,
+            item_id=_item_id(input.item_id),
         )
         return SmithyDeleteOutput(deleted=_delete_outcome(kind))
 
-    async def stats(self, input: SmithyStatsInput | None = None) -> SmithyStatsOutput:
-        del input
-        return SmithyStatsOutput(json=await self._owner.stats_json())
+    async def stats(self, input: SmithyStatsInput) -> SmithyStatsOutput:
+        kind, payload = await self._owner._execute_scoped(
+            SMITHY_OPCODE_STATS,
+            namespace_id=input.namespace_id,
+        )
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(f"STATS returned unexpected native result {kind}")
+        try:
+            return SmithyStatsOutput(json=payload.decode("utf-8"))
+        except UnicodeDecodeError as error:
+            raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
 
-    async def sync(self, input: SmithySyncInput | None = None) -> SmithySyncOutput:
-        del input
-        await self._owner.sync()
+    async def sync(self, input: SmithySyncInput) -> SmithySyncOutput:
+        await self._owner._execute_scoped(
+            SMITHY_OPCODE_SYNC,
+            namespace_id=input.namespace_id,
+        )
         return SmithySyncOutput()
+
+    async def namespace_open(
+        self, input: SmithyNamespaceOpenInput
+    ) -> SmithyNamespaceOpenOutput:
+        if input.create_if_missing and input.policy is None:
+            raise OpenKacheValueError(
+                "namespace policy is required when create_if_missing is true"
+            )
+        if not input.create_if_missing and input.policy is not None:
+            raise OpenKacheValueError(
+                "namespace policy is only valid when create_if_missing is true"
+            )
+        policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
+        try:
+            kind, payload = await asyncio.to_thread(
+                self._owner._native.namespace_open,
+                name=input.name.encode("utf-8"),
+                create_if_missing=input.create_if_missing,
+                policy_flags=policy_flags,
+                ttl_ms=ttl_ms,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        if kind not in (SMITHY_FFI_RESULT_OK, SMITHY_FFI_RESULT_CREATED):
+            raise OpenKacheError(f"NAMESPACE_OPEN returned unexpected native result {kind}")
+        try:
+            decoded = await asyncio.to_thread(
+                self._owner._native.decode_namespace_descriptor,
+                payload,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        return SmithyNamespaceOpenOutput(
+            descriptor=_namespace_descriptor(decoded),
+            created=kind == SMITHY_FFI_RESULT_CREATED,
+        )
+
+    async def namespace_update_policy(
+        self, input: SmithyNamespaceUpdatePolicyInput
+    ) -> SmithyNamespaceUpdatePolicyOutput:
+        policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
+        try:
+            kind, payload = await asyncio.to_thread(
+                self._owner._native.namespace_update_policy,
+                namespace_id=input.namespace_id,
+                expected_revision=input.expected_revision,
+                policy_flags=policy_flags,
+                ttl_ms=ttl_ms,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        if kind != SMITHY_FFI_RESULT_VALUE:
+            raise OpenKacheError(
+                f"NAMESPACE_UPDATE_POLICY returned unexpected native result {kind}"
+            )
+        try:
+            decoded = await asyncio.to_thread(
+                self._owner._native.decode_namespace_descriptor,
+                payload,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        return SmithyNamespaceUpdatePolicyOutput(
+            descriptor=_namespace_descriptor(decoded)
+        )
+
+    async def namespace_delete(
+        self, input: SmithyNamespaceDeleteInput
+    ) -> SmithyNamespaceDeleteOutput:
+        try:
+            await asyncio.to_thread(
+                self._owner._native.namespace_delete,
+                namespace_id=input.namespace_id,
+                expected_revision=input.expected_revision,
+            )
+        except NativeError as error:
+            raise OpenKacheError(str(error)) from error
+        return SmithyNamespaceDeleteOutput()
 
     async def close(self) -> None:
         await self._owner.close()
@@ -831,6 +1069,88 @@ def _is_exact_binary64_integer(value: int) -> bool:
     # conversion keeps the boundary explicit and rejects any implementation
     # that would overflow it.
     return math.isfinite(float(value))
+
+
+def _namespace_policy_wire(
+    policy: SmithyNamespacePolicy | None,
+) -> tuple[int, int]:
+    if policy is None:
+        return 0, 0
+    try:
+        default_expiration = SmithyExpirationDefault(policy.default_expiration)
+        expiration_override = SmithyOverridePolicy(policy.expiration_override)
+        default_eviction = SmithyEvictionDefault(policy.default_eviction)
+        eviction_override = SmithyOverridePolicy(policy.eviction_override)
+    except ValueError as error:
+        raise OpenKacheValueError(f"invalid namespace policy enum: {error}") from error
+    flags = 0
+    ttl_ms = policy.default_ttl_milliseconds
+    if default_expiration is SmithyExpirationDefault.NO_EXPIRY:
+        if ttl_ms is not None:
+            raise OpenKacheValueError(
+                "default_ttl_milliseconds requires fixed_ttl default_expiration"
+            )
+    else:
+        if ttl_ms is None:
+            raise OpenKacheValueError(
+                "default_ttl_milliseconds is required with fixed_ttl default_expiration"
+            )
+        _positive_or_zero(
+            ttl_ms,
+            "default_ttl_milliseconds",
+            allow_zero=False,
+            maximum=_UINT64_MAX,
+        )
+        flags |= SMITHY_POLICY_FIXED_TTL
+    if expiration_override is SmithyOverridePolicy.ALLOWED:
+        flags |= SMITHY_POLICY_EXPIRATION_OVERRIDE
+    if default_eviction is SmithyEvictionDefault.EVICTION_PROTECTED:
+        flags |= SMITHY_POLICY_EVICTION_PROTECTED
+    if eviction_override is SmithyOverridePolicy.ALLOWED:
+        flags |= SMITHY_POLICY_EVICTION_OVERRIDE
+    return flags, ttl_ms or 0
+
+
+def _namespace_descriptor(
+    decoded: tuple[int, int, int, int, int, int, int],
+) -> SmithyNamespaceDescriptor:
+    (
+        namespace_id,
+        revision,
+        default_ttl,
+        default_expiration,
+        expiration_override,
+        default_eviction,
+        eviction_override,
+    ) = decoded
+    policy = SmithyNamespacePolicy(
+        default_expiration=(
+            SmithyExpirationDefault.FIXED_TTL
+            if default_expiration == 1
+            else SmithyExpirationDefault.NO_EXPIRY
+        ),
+        default_ttl_milliseconds=default_ttl if default_expiration == 1 else None,
+        expiration_override=(
+            SmithyOverridePolicy.ALLOWED
+            if expiration_override == 1
+            else SmithyOverridePolicy.DISALLOWED
+        ),
+        default_eviction=(
+            SmithyEvictionDefault.EVICTION_PROTECTED
+            if default_eviction == 1
+            else SmithyEvictionDefault.EVICTABLE
+        ),
+        eviction_override=(
+            SmithyOverridePolicy.ALLOWED
+            if eviction_override == 1
+            else SmithyOverridePolicy.DISALLOWED
+        ),
+    )
+    return SmithyNamespaceDescriptor(
+        namespace_id=namespace_id,
+        revision=revision,
+        policy=policy,
+    )
 
 
 def _set_outcome(kind: int) -> SmithySetOutcome:

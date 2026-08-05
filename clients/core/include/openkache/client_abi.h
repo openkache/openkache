@@ -37,6 +37,31 @@ typedef struct openkache_client_result openkache_client_result_t;
 typedef openkache_client_t openkache_client_handle;
 typedef openkache_client_result_t openkache_client_result;
 
+/*
+ * Decoded namespace descriptor returned by the shared ABI helper.
+ * `default_expiration` is 0 for no expiry and 1 for fixed TTL.
+ * `default_eviction` is 0 for evictable and 1 for eviction protected.
+ * Override fields are 0 for disallowed and 1 for allowed.
+ */
+typedef struct openkache_client_namespace_descriptor {
+    uint64_t namespace_id;
+    uint64_t revision;
+    uint64_t default_ttl_ms;
+    uint32_t default_expiration;
+    uint32_t expiration_override;
+    uint32_t default_eviction;
+    uint32_t eviction_override;
+} openkache_client_namespace_descriptor_t;
+
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK 0u
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID 1u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY 0u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL 1u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE 0u
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED 1u
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED 0u
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED 1u
+
 typedef enum openkache_client_result_kind {
     OPENKACHE_CLIENT_RESULT_ERROR = OPENKACHE_SMITHY_FFI_RESULT_ERROR,
     OPENKACHE_CLIENT_RESULT_OK = OPENKACHE_SMITHY_FFI_RESULT_OK,
@@ -57,6 +82,10 @@ typedef enum openkache_client_operation {
     OPENKACHE_CLIENT_OPERATION_DELETE = OPENKACHE_SMITHY_OPCODE_DELETE,
     OPENKACHE_CLIENT_OPERATION_STATS = OPENKACHE_SMITHY_OPCODE_STATS,
     OPENKACHE_CLIENT_OPERATION_SYNC = OPENKACHE_SMITHY_OPCODE_SYNC,
+    OPENKACHE_CLIENT_OPERATION_NAMESPACE_OPEN = OPENKACHE_SMITHY_OPCODE_NAMESPACE_OPEN,
+    OPENKACHE_CLIENT_OPERATION_NAMESPACE_UPDATE_POLICY =
+        OPENKACHE_SMITHY_OPCODE_NAMESPACE_UPDATE_POLICY,
+    OPENKACHE_CLIENT_OPERATION_NAMESPACE_DELETE = OPENKACHE_SMITHY_OPCODE_NAMESPACE_DELETE,
     /* Language-adapter operations; these are not wire opcodes. */
     OPENKACHE_CLIENT_OPERATION_GET_JSON = OPENKACHE_SMITHY_FFI_OPERATION_GET_JSON,
     OPENKACHE_CLIENT_OPERATION_SET_JSON = OPENKACHE_SMITHY_FFI_OPERATION_SET_JSON,
@@ -77,7 +106,7 @@ typedef enum openkache_client_connection_state {
 } openkache_client_connection_state_t;
 
 typedef enum openkache_client_set_condition {
-    OPENKACHE_CLIENT_SET_CONDITION_NONE = OPENKACHE_SMITHY_FFI_SET_CONDITION_NONE,
+    OPENKACHE_CLIENT_SET_CONDITION_ANY = OPENKACHE_SMITHY_FFI_SET_CONDITION_ANY,
     OPENKACHE_CLIENT_SET_CONDITION_IF_ABSENT =
         OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_ABSENT,
     OPENKACHE_CLIENT_SET_CONDITION_IF_PRESENT =
@@ -212,6 +241,95 @@ openkache_client_result_t *openkache_client_execute_raw(
     uint32_t set_condition,
     uint8_t ttl_enabled,
     uint64_t ttl_ms
+);
+
+/*
+ * Executes one protected operation with the complete wire SET policy byte.
+ * `set_flags` and `ttl_ms` must be zero for operations other than SET.
+ */
+openkache_client_result_t *openkache_client_execute_with_options(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Executes one exact-item-ID operation with the complete wire SET policy byte.
+ * `set_flags` and `ttl_ms` must be zero for operations other than SET.
+ */
+openkache_client_result_t *openkache_client_execute_raw_with_options(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Executes exact item-ID data-plane operations in an explicitly supplied
+ * namespace. `set_flags` is the complete wire SET flag byte; it and `ttl_ms`
+ * must be zero for operations other than SET.
+ */
+openkache_client_result_t *openkache_client_execute_scoped(
+    const openkache_client_t *client,
+    uint32_t operation,
+    uint64_t namespace_id,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Namespace-management ABI calls. Namespace descriptors use the protocol
+ * payload layout: namespace_id (u64 BE), revision (u64 BE), policy flags
+ * (u8), and a canonical variable unsigned integer default TTL only when the
+ * policy selects FixedTtl. No-expiry descriptors therefore contain 17 bytes;
+ * FixedTtl descriptors contain 18 through 26 bytes.
+ */
+openkache_client_result_t *openkache_client_namespace_open(
+    const openkache_client_t *client,
+    const uint8_t *name,
+    size_t name_length,
+    uint8_t create_if_missing,
+    uint8_t policy_flags,
+    uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_namespace_update_policy(
+    const openkache_client_t *client,
+    uint64_t namespace_id,
+    uint64_t expected_revision,
+    uint8_t policy_flags,
+    uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_namespace_delete(
+    const openkache_client_t *client,
+    uint64_t namespace_id,
+    uint64_t expected_revision
+);
+
+/*
+ * Decodes the complete namespace descriptor payload using the canonical Rust
+ * protocol implementation. Returns
+ * OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK on success and
+ * OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID for malformed input.
+ */
+uint32_t openkache_client_namespace_descriptor_decode(
+    const uint8_t *payload,
+    size_t payload_length,
+    openkache_client_namespace_descriptor_t *output
 );
 
 /* Returns one of openkache_client_connection_state_t; null handles return UNKNOWN. */

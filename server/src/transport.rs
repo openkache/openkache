@@ -167,6 +167,7 @@ pub(super) trait ReceiveStream {
     fn read_request(
         &mut self,
         maximum: usize,
+        maximum_value: usize,
         timeout: Duration,
         budget: &RequestBudget,
     ) -> impl Future<Output = Result<RequestFrame, StreamReadError>>;
@@ -197,13 +198,24 @@ pub(super) enum StreamReadError {
 /// Request bytes paired with the server-wide memory-budget reservation they consume.
 pub(super) struct RequestFrame {
     pub(super) bytes: Vec<u8>,
+    /// Whether the transport had already delivered bytes beyond this frame.
+    ///
+    /// QUIC stream reads may coalesce multiple client writes. If the backend
+    /// exposes those trailing bytes, the lane must be retired after the
+    /// current response because the peer violated request/response lockstep.
+    pub(super) has_trailing_bytes: bool,
     _permit: RequestBudgetPermit,
 }
 
 impl RequestFrame {
-    fn new(bytes: Vec<u8>, permit: RequestBudgetPermit) -> Self {
+    fn with_trailing_bytes(
+        bytes: Vec<u8>,
+        permit: RequestBudgetPermit,
+        has_trailing_bytes: bool,
+    ) -> Self {
         Self {
             bytes,
+            has_trailing_bytes,
             _permit: permit,
         }
     }
@@ -357,11 +369,15 @@ async fn read_buffered_request(
     stream: &mut impl AsyncRead,
     backend: &'static str,
     maximum: usize,
+    maximum_value: usize,
     timeout: Duration,
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
     let header = Vec::with_capacity(1).slice(..1);
-    let BufResult(result, header) = stream.read_exact(header).await;
+    let BufResult(result, header) =
+        compio::runtime::time::timeout(timeout, stream.read_exact(header))
+            .await
+            .map_err(|_| StreamReadError::Timeout)?;
     result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
 
     let frame = header.into_inner();
@@ -370,6 +386,9 @@ async fn read_buffered_request(
         loop {
             if let Some(header) = Request::decode_header(&frame)? {
                 break Ok::<_, StreamReadError>((frame, header));
+            }
+            if frame.len() >= maximum {
+                return Err(StreamReadError::TooLarge);
             }
             let start = frame.len();
             frame.reserve(1);
@@ -381,11 +400,17 @@ async fn read_buffered_request(
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
+    if header.value_len() > maximum_value {
+        return Err(StreamReadError::TooLarge);
+    }
     let (mut frame, frame_len) = compio::runtime::time::timeout(timeout, async {
         let mut frame = frame;
         loop {
             if let Some(frame_len) = header.frame_len(&frame)? {
                 break Ok::<_, StreamReadError>((frame, frame_len));
+            }
+            if frame.len() >= maximum {
+                return Err(StreamReadError::TooLarge);
             }
             let start = frame.len();
             frame.reserve(1);
@@ -403,7 +428,22 @@ async fn read_buffered_request(
     let permit = budget.acquire(header.value_len(), timeout).await?;
     let body_start = frame.len();
     if body_start == frame_len {
-        return Ok(RequestFrame::new(frame, permit));
+        let probe = Vec::with_capacity(1).slice(..1);
+        let has_trailing_bytes =
+            match compio::runtime::time::timeout(Duration::ZERO, stream.read(probe)).await {
+                Err(_) => false,
+                Ok(BufResult(result, _)) => {
+                    let bytes = result.map_err(|error| {
+                        TransportError::backend(backend, "trailing-byte probe", error)
+                    })?;
+                    bytes != 0
+                }
+            };
+        return Ok(RequestFrame::with_trailing_bytes(
+            frame,
+            permit,
+            has_trailing_bytes,
+        ));
     }
 
     frame.reserve(frame_len - body_start);
@@ -412,9 +452,30 @@ async fn read_buffered_request(
         stream.read_exact(frame.slice(body_start..frame_len)),
     )
     .await
-    .map_err(|_| StreamReadError::Timeout)?;
+        .map_err(|_| StreamReadError::Timeout)?;
     result.map_err(|error| TransportError::backend(backend, "stream body read", error))?;
-    Ok(RequestFrame::new(body.into_inner(), permit))
+    let frame = body.into_inner();
+    // `read_exact` intentionally stops at the declared frame boundary. Probe the
+    // backend's already-readable bytes once so a client that pipelined a second
+    // request cannot make us interpret that request after the first response.
+    // The zero-duration timeout is non-blocking: when no byte is buffered the
+    // receive future is cancelled and the lane remains reusable.
+    let probe = Vec::with_capacity(1).slice(..1);
+    let has_trailing_bytes = match compio::runtime::time::timeout(Duration::ZERO, stream.read(probe))
+        .await
+    {
+        Err(_) => false,
+        Ok(BufResult(result, _)) => {
+            let bytes = result
+                .map_err(|error| TransportError::backend(backend, "trailing-byte probe", error))?;
+            bytes != 0
+        }
+    };
+    Ok(RequestFrame::with_trailing_bytes(
+        frame,
+        permit,
+        has_trailing_bytes,
+    ))
 }
 
 /// Stable transport failure with backend and operation context.
@@ -586,10 +647,11 @@ mod quinn_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
+            maximum_value: usize,
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
+            read_buffered_request(&mut self.0, NAME, maximum, maximum_value, timeout, budget).await
         }
     }
 
@@ -715,10 +777,11 @@ mod noq_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
+            maximum_value: usize,
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, timeout, budget).await
+            read_buffered_request(&mut self.0, NAME, maximum, maximum_value, timeout, budget).await
         }
     }
 
@@ -917,16 +980,26 @@ mod quiche_backend {
         async fn read_request(
             &mut self,
             maximum: usize,
+            maximum_value: usize,
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            while self.buffered.is_empty() {
-                self.buffered = self.next_chunk("stream header read").await?;
-            }
+            compio::runtime::time::timeout(timeout, async {
+                while self.buffered.is_empty() {
+                    self.buffered = self.next_chunk("stream header read").await?;
+                }
+                Ok::<(), TransportError>(())
+            })
+            .await
+            .map_err(|_| StreamReadError::Timeout)?
+            .map_err(StreamReadError::Transport)?;
             let header = compio::runtime::time::timeout(timeout, async {
                 loop {
                     if let Some(header) = Request::decode_header(&self.buffered)? {
                         break Ok::<_, StreamReadError>(header);
+                    }
+                    if self.buffered.len() >= maximum {
+                        return Err(StreamReadError::TooLarge);
                     }
                     let chunk = self.next_chunk("stream header read").await?;
                     self.buffered.extend_from_slice(&chunk);
@@ -934,10 +1007,16 @@ mod quiche_backend {
             })
             .await
             .map_err(|_| StreamReadError::Timeout)??;
+            if header.value_len() > maximum_value {
+                return Err(StreamReadError::TooLarge);
+            }
             let frame_len = compio::runtime::time::timeout(timeout, async {
                 loop {
                     if let Some(frame_len) = header.frame_len(&self.buffered)? {
                         break Ok::<_, StreamReadError>(frame_len);
+                    }
+                    if self.buffered.len() >= maximum {
+                        return Err(StreamReadError::TooLarge);
                     }
                     let chunk = self.next_chunk("stream metadata read").await?;
                     self.buffered.extend_from_slice(&chunk);
@@ -959,12 +1038,17 @@ mod quiche_backend {
             .await
             .map_err(|_| StreamReadError::Timeout)?
             .map_err(StreamReadError::Transport)?;
-            let frame = if self.buffered.len() == frame_len {
+            let has_trailing_bytes = self.buffered.len() > frame_len;
+            let frame = if !has_trailing_bytes {
                 std::mem::take(&mut self.buffered)
             } else {
                 self.buffered.drain(..frame_len).collect()
             };
-            Ok(RequestFrame::new(frame, permit))
+            Ok(RequestFrame::with_trailing_bytes(
+                frame,
+                permit,
+                has_trailing_bytes,
+            ))
         }
     }
 

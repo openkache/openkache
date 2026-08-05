@@ -29,6 +29,8 @@ pub enum KvError {
     },
     #[error("{resource} capacity is exhausted; writes are temporarily stopped")]
     CapacityExhausted { resource: &'static str },
+    #[error("write cannot be admitted without evicting protected items")]
+    NoCapacity,
     #[error("{0} timed out")]
     Timeout(&'static str),
     #[error("worker error: {0}")]

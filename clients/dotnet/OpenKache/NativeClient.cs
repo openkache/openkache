@@ -52,6 +52,18 @@ internal static class NativeMethods
         internal nuint MaxInFlight;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct NamespaceDescriptor
+    {
+        internal ulong NamespaceId;
+        internal ulong Revision;
+        internal ulong DefaultTtlMilliseconds;
+        internal uint DefaultExpiration;
+        internal uint ExpirationOverride;
+        internal uint DefaultEviction;
+        internal uint EvictionOverride;
+    }
+
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.U4)]
     internal static extern uint openkache_client_abi_version();
@@ -71,6 +83,59 @@ internal static class NativeMethods
         uint setCondition,
         byte ttlEnabled,
         ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_execute_raw_with_options(
+        IntPtr client,
+        uint operation,
+        IntPtr itemId,
+        nuint itemIdLength,
+        IntPtr value,
+        nuint valueLength,
+        byte setFlags,
+        ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_execute_scoped(
+        IntPtr client,
+        uint operation,
+        ulong namespaceId,
+        IntPtr itemId,
+        nuint itemIdLength,
+        IntPtr value,
+        nuint valueLength,
+        byte setFlags,
+        ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_namespace_open(
+        IntPtr client,
+        IntPtr name,
+        nuint nameLength,
+        byte createIfMissing,
+        byte policyFlags,
+        ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_namespace_update_policy(
+        IntPtr client,
+        ulong namespaceId,
+        ulong expectedRevision,
+        byte policyFlags,
+        ulong ttlMilliseconds);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr openkache_client_namespace_delete(
+        IntPtr client,
+        ulong namespaceId,
+        ulong expectedRevision);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.U4)]
+    internal static extern uint openkache_client_namespace_descriptor_decode(
+        IntPtr payload,
+        nuint payloadLength,
+        out NamespaceDescriptor output);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern uint openkache_client_connection_state(IntPtr client);
@@ -270,6 +335,87 @@ internal sealed class NativeClient : IAsyncDisposable
         return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    internal async ValueTask<NativeResult> ExecuteRawWithOptionsAsync(
+        uint operation,
+        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> value,
+        byte setFlags,
+        ulong ttlMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        var task = Task.Run(
+            () => ExecuteRawWithOptionsNative(
+                operation,
+                itemId,
+                value,
+                setFlags,
+                ttlMilliseconds),
+            CancellationToken.None);
+        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<NativeResult> ExecuteScopedAsync(
+        uint operation,
+        ulong namespaceId,
+        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> value,
+        byte setFlags,
+        ulong ttlMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        var task = Task.Run(
+            () => ExecuteScopedNative(
+                operation,
+                namespaceId,
+                itemId,
+                value,
+                setFlags,
+                ttlMilliseconds),
+            CancellationToken.None);
+        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<NativeResult> NamespaceOpenAsync(
+        ReadOnlyMemory<byte> name,
+        bool createIfMissing,
+        byte policyFlags,
+        ulong ttlMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        var task = Task.Run(
+            () => NamespaceOpenNative(name, createIfMissing, policyFlags, ttlMilliseconds),
+            CancellationToken.None);
+        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<NativeResult> NamespaceUpdatePolicyAsync(
+        ulong namespaceId,
+        ulong expectedRevision,
+        byte policyFlags,
+        ulong ttlMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        var task = Task.Run(
+            () => NamespaceUpdatePolicyNative(
+                namespaceId,
+                expectedRevision,
+                policyFlags,
+                ttlMilliseconds),
+            CancellationToken.None);
+        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async ValueTask<NativeResult> NamespaceDeleteAsync(
+        ulong namespaceId,
+        ulong expectedRevision,
+        CancellationToken cancellationToken)
+    {
+        var task = Task.Run(
+            () => NamespaceDeleteNative(namespaceId, expectedRevision),
+            CancellationToken.None);
+        return await task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask DisposeAsync()
     {
         IntPtr handle;
@@ -381,6 +527,131 @@ internal sealed class NativeClient : IAsyncDisposable
                 setCondition,
                 ttlEnabled ? (byte)1 : (byte)0,
                 ttlMilliseconds);
+            return NativeMethods.ReadResult(result);
+        }
+        finally
+        {
+            ReleaseCall();
+        }
+    }
+
+    private NativeResult ExecuteRawWithOptionsNative(
+        uint operation,
+        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> value,
+        byte setFlags,
+        ulong ttlMilliseconds)
+    {
+        var handle = AcquireHandle();
+        try
+        {
+            using var itemIdBuffer = new NativeBuffer(itemId);
+            using var valueBuffer = new NativeBuffer(value);
+            var result = NativeMethods.openkache_client_execute_raw_with_options(
+                handle,
+                operation,
+                itemIdBuffer.Pointer,
+                itemIdBuffer.Length,
+                valueBuffer.Pointer,
+                valueBuffer.Length,
+                setFlags,
+                ttlMilliseconds);
+            return NativeMethods.ReadResult(result);
+        }
+        finally
+        {
+            ReleaseCall();
+        }
+    }
+
+    private NativeResult ExecuteScopedNative(
+        uint operation,
+        ulong namespaceId,
+        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> value,
+        byte setFlags,
+        ulong ttlMilliseconds)
+    {
+        var handle = AcquireHandle();
+        try
+        {
+            using var itemIdBuffer = new NativeBuffer(itemId);
+            using var valueBuffer = new NativeBuffer(value);
+            var result = NativeMethods.openkache_client_execute_scoped(
+                handle,
+                operation,
+                namespaceId,
+                itemIdBuffer.Pointer,
+                itemIdBuffer.Length,
+                valueBuffer.Pointer,
+                valueBuffer.Length,
+                setFlags,
+                ttlMilliseconds);
+            return NativeMethods.ReadResult(result);
+        }
+        finally
+        {
+            ReleaseCall();
+        }
+    }
+
+    private NativeResult NamespaceOpenNative(
+        ReadOnlyMemory<byte> name,
+        bool createIfMissing,
+        byte policyFlags,
+        ulong ttlMilliseconds)
+    {
+        var handle = AcquireHandle();
+        try
+        {
+            using var nameBuffer = new NativeBuffer(name);
+            var result = NativeMethods.openkache_client_namespace_open(
+                handle,
+                nameBuffer.Pointer,
+                nameBuffer.Length,
+                createIfMissing ? (byte)1 : (byte)0,
+                policyFlags,
+                ttlMilliseconds);
+            return NativeMethods.ReadResult(result);
+        }
+        finally
+        {
+            ReleaseCall();
+        }
+    }
+
+    private NativeResult NamespaceUpdatePolicyNative(
+        ulong namespaceId,
+        ulong expectedRevision,
+        byte policyFlags,
+        ulong ttlMilliseconds)
+    {
+        var handle = AcquireHandle();
+        try
+        {
+            var result = NativeMethods.openkache_client_namespace_update_policy(
+                handle,
+                namespaceId,
+                expectedRevision,
+                policyFlags,
+                ttlMilliseconds);
+            return NativeMethods.ReadResult(result);
+        }
+        finally
+        {
+            ReleaseCall();
+        }
+    }
+
+    private NativeResult NamespaceDeleteNative(ulong namespaceId, ulong expectedRevision)
+    {
+        var handle = AcquireHandle();
+        try
+        {
+            var result = NativeMethods.openkache_client_namespace_delete(
+                handle,
+                namespaceId,
+                expectedRevision);
             return NativeMethods.ReadResult(result);
         }
         finally

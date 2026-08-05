@@ -15,6 +15,7 @@ const BACKEND: Backend = Backend::Compio;
 pub(super) struct Connection {
     _endpoint: compio_quic::Endpoint,
     inner: compio_quic::Connection,
+    negotiated_alpn: Vec<u8>,
 }
 
 pub(super) struct Stream {
@@ -48,16 +49,28 @@ pub(super) async fn connect(
             .map_err(|error| {
                 TransportError::backend(BACKEND, Operation::EndpointInitialization, error)
             })?;
-        let inner = endpoint
+        let mut inner = endpoint
             .connect(address, server_name, Some(config))
             .map_err(|error| {
                 TransportError::backend(BACKEND, Operation::ConnectionInitialization, error)
             })?
             .await
             .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?;
+        let negotiated_alpn = inner
+            .handshake_data()
+            .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?
+            .protocol
+            .ok_or_else(|| {
+                TransportError::backend(
+                    BACKEND,
+                    Operation::Handshake,
+                    "server did not negotiate an ALPN protocol",
+                )
+            })?;
         Ok(Connection {
             _endpoint: endpoint,
             inner,
+            negotiated_alpn,
         })
     })
     .await
@@ -66,6 +79,10 @@ pub(super) async fn connect(
 
 impl BackendConnection for Connection {
     type Stream = Stream;
+
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        Some(&self.negotiated_alpn)
+    }
 
     async fn open_bi(&self, timeout: Duration) -> Result<Self::Stream, TransportError> {
         let (send, receive) = compio::runtime::time::timeout(timeout, self.inner.open_bi_wait())

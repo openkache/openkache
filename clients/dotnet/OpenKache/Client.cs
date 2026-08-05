@@ -156,12 +156,12 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
-        var ttlMilliseconds = options.ValidateAndGetTtlMilliseconds();
-        var result = await RequestAsync(
+        var (setFlags, ttlMilliseconds) = options.ValidateAndGetWireOptions();
+        var result = await RequestRawWithOptionsAsync(
             Protocol.Opcode.Set,
             ValidateItemId(itemId),
             ValidateValue(value),
-            options.Condition,
+            setFlags,
             ttlMilliseconds,
             cancellationToken).ConfigureAwait(false);
         return result.Kind switch
@@ -252,9 +252,20 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.Get,
+            input.NamespaceId,
+            ValidateItemId(input.ItemId),
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         return new Smithy.GetOutput
         {
-            Value = await GetAsync(input.ItemId, cancellationToken).ConfigureAwait(false),
+            Value = result.Kind switch
+            {
+                var kind when kind == Protocol.FfiResultValue => result.Payload,
+                var kind when kind == Protocol.FfiResultNotFound => null,
+                _ => throw UnexpectedKind("GET", result.Kind),
+            },
         };
     }
 
@@ -266,24 +277,24 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        TimeSpan? timeToLive = input.TtlMilliseconds switch
-        {
-            null => null,
-            <= 0 => throw new ArgumentOutOfRangeException(nameof(input.TtlMilliseconds)),
-            var milliseconds => TimeSpan.FromMilliseconds(milliseconds.Value),
-        };
-        var outcome = await SetAsync(
-            input.ItemId,
-            input.Value,
-            new SetOptions
-            {
-                Condition = input.Condition,
-                TimeToLive = timeToLive,
-            },
+        var (setFlags, ttlMilliseconds) = NativeSetOptions(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.Set,
+            input.NamespaceId,
+            ValidateItemId(input.ItemId),
+            ValidateValue(input.Value),
+            setFlags,
+            ttlMilliseconds,
             cancellationToken).ConfigureAwait(false);
         return new Smithy.SetOutput
         {
-            Outcome = outcome,
+            Outcome = result.Kind switch
+            {
+                var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
+                var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
+                var kind when kind == Protocol.FfiResultNotStored => Smithy.SetOutcome.NotStored,
+                _ => throw UnexpectedKind("SET", result.Kind),
+            },
         };
     }
 
@@ -295,9 +306,20 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.Delete,
+            input.NamespaceId,
+            ValidateItemId(input.ItemId),
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
         return new Smithy.DeleteOutput
         {
-            Deleted = await DeleteAsync(input.ItemId, cancellationToken).ConfigureAwait(false),
+            Deleted = result.Kind switch
+            {
+                var kind when kind == Protocol.FfiResultDeleted => true,
+                var kind when kind == Protocol.FfiResultNotDeleted => false,
+                _ => throw UnexpectedKind("DELETE", result.Kind),
+            },
         };
     }
 
@@ -308,10 +330,17 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         Smithy.StatsInput input,
         CancellationToken cancellationToken = default)
     {
-        _ = input;
+        ArgumentNullException.ThrowIfNull(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.Stats,
+            input.NamespaceId,
+            ReadOnlyMemory<byte>.Empty,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("STATS", result, Protocol.FfiResultValue);
         return new Smithy.StatsOutput
         {
-            Json = await StatsAsync(cancellationToken).ConfigureAwait(false),
+            Json = Encoding.UTF8.GetString(result.Payload),
         };
     }
 
@@ -322,9 +351,48 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         Smithy.SyncInput input,
         CancellationToken cancellationToken = default)
     {
-        _ = input;
-        await SyncAsync(cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.Sync,
+            input.NamespaceId,
+            ReadOnlyMemory<byte>.Empty,
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("SYNC", result, Protocol.FfiResultOk);
         return new Smithy.SyncOutput();
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy NAMESPACE_OPEN operation.
+    /// </summary>
+    public ValueTask<Smithy.NamespaceOpenOutput> NamespaceOpenAsync(
+        Smithy.NamespaceOpenInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return NamespaceOpenCoreAsync(input, cancellationToken);
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy NAMESPACE_UPDATE_POLICY operation.
+    /// </summary>
+    public ValueTask<Smithy.NamespaceUpdatePolicyOutput> NamespaceUpdatePolicyAsync(
+        Smithy.NamespaceUpdatePolicyInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return NamespaceUpdatePolicyCoreAsync(input, cancellationToken);
+    }
+
+    /// <summary>
+    /// Invokes the generated Smithy NAMESPACE_DELETE operation.
+    /// </summary>
+    public ValueTask<Smithy.NamespaceDeleteOutput> NamespaceDeleteAsync(
+        Smithy.NamespaceDeleteInput input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        return NamespaceDeleteCoreAsync(input, cancellationToken);
     }
 
     /// <summary>
@@ -338,6 +406,304 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
         }
 
         await _nativeClient.DisposeAsync().ConfigureAwait(false);
+    }
+
+    private async ValueTask<Smithy.NamespaceOpenOutput> NamespaceOpenCoreAsync(
+        Smithy.NamespaceOpenInput input,
+        CancellationToken cancellationToken)
+    {
+        if (input.Name is null)
+        {
+            throw new ArgumentNullException(nameof(input.Name));
+        }
+        var name = Encoding.UTF8.GetBytes(input.Name);
+        if (name.Length > Protocol.NamespaceNameMaxBytes)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"namespace name exceeds {Protocol.NamespaceNameMaxBytes} UTF-8 octets.");
+        }
+        if (input.CreateIfMissing && input.Policy is null)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "namespace policy is required when CreateIfMissing is true.");
+        }
+        if (!input.CreateIfMissing && input.Policy is not null)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "namespace policy is only valid when CreateIfMissing is true.");
+        }
+        var (policyFlags, ttlMilliseconds) = NativePolicy(input.Policy);
+        try
+        {
+            var result = await _nativeClient.NamespaceOpenAsync(
+                name,
+                input.CreateIfMissing,
+                policyFlags,
+                ttlMilliseconds,
+                cancellationToken).ConfigureAwait(false);
+            if (result.Kind != Protocol.FfiResultOk
+                && result.Kind != Protocol.FfiResultCreated)
+            {
+                throw UnexpectedKind("NAMESPACE_OPEN", result.Kind);
+            }
+            return new Smithy.NamespaceOpenOutput
+            {
+                Descriptor = DecodeNamespaceDescriptor(result.Payload),
+                Created = result.Kind == Protocol.FfiResultCreated,
+            };
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException("TIMEOUT", "NAMESPACE_OPEN exceeded.");
+        }
+        catch (NativeException error)
+        {
+            throw MapNativeError(error, "NAMESPACE_OPEN_FAILED");
+        }
+    }
+
+    private async ValueTask<Smithy.NamespaceUpdatePolicyOutput> NamespaceUpdatePolicyCoreAsync(
+        Smithy.NamespaceUpdatePolicyInput input,
+        CancellationToken cancellationToken)
+    {
+        var (policyFlags, ttlMilliseconds) = NativePolicy(input.Policy);
+        try
+        {
+            var result = await _nativeClient.NamespaceUpdatePolicyAsync(
+                input.NamespaceId,
+                input.ExpectedRevision,
+                policyFlags,
+                ttlMilliseconds,
+                cancellationToken).ConfigureAwait(false);
+            ExpectKind("NAMESPACE_UPDATE_POLICY", result, Protocol.FfiResultValue);
+            return new Smithy.NamespaceUpdatePolicyOutput
+            {
+                Descriptor = DecodeNamespaceDescriptor(result.Payload),
+            };
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException("TIMEOUT", "NAMESPACE_UPDATE_POLICY exceeded.");
+        }
+        catch (NativeException error)
+        {
+            throw MapNativeError(error, "NAMESPACE_UPDATE_POLICY_FAILED");
+        }
+    }
+
+    private async ValueTask<Smithy.NamespaceDeleteOutput> NamespaceDeleteCoreAsync(
+        Smithy.NamespaceDeleteInput input,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _nativeClient.NamespaceDeleteAsync(
+                input.NamespaceId,
+                input.ExpectedRevision,
+                cancellationToken).ConfigureAwait(false);
+            ExpectKind("NAMESPACE_DELETE", result, Protocol.FfiResultOk);
+            return new Smithy.NamespaceDeleteOutput();
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException("TIMEOUT", "NAMESPACE_DELETE exceeded.");
+        }
+        catch (NativeException error)
+        {
+            throw MapNativeError(error, "NAMESPACE_DELETE_FAILED");
+        }
+    }
+
+    private async ValueTask<NativeResult> RequestScopedAsync(
+        Protocol.Opcode opcode,
+        ulong namespaceId,
+        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> value,
+        byte setFlags = 0,
+        ulong ttlMilliseconds = 0,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(
+            Volatile.Read(ref _disposed) != 0,
+            this);
+        try
+        {
+            return await _nativeClient.ExecuteScopedAsync(
+                (uint)opcode,
+                namespaceId,
+                itemId,
+                value,
+                setFlags,
+                ttlMilliseconds,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException(
+                "TIMEOUT",
+                $"{opcode.ToString().ToUpperInvariant()} exceeded.");
+        }
+        catch (NativeException error)
+        {
+            throw MapNativeError(error, "CONNECTION_FAILED");
+        }
+    }
+
+    private async ValueTask<NativeResult> RequestRawWithOptionsAsync(
+        Protocol.Opcode opcode,
+        ReadOnlyMemory<byte> itemId,
+        ReadOnlyMemory<byte> value,
+        byte setFlags,
+        ulong ttlMilliseconds,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(
+            Volatile.Read(ref _disposed) != 0,
+            this);
+        try
+        {
+            return await _nativeClient.ExecuteRawWithOptionsAsync(
+                (uint)opcode,
+                itemId,
+                value,
+                setFlags,
+                ttlMilliseconds,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new OpenKacheException(
+                "TIMEOUT",
+                $"{opcode.ToString().ToUpperInvariant()} exceeded.");
+        }
+        catch (NativeException error)
+        {
+            throw MapNativeError(error, "CONNECTION_FAILED");
+        }
+    }
+
+    private static (byte Flags, ulong TtlMilliseconds) NativeSetOptions(
+        Smithy.SetInput input)
+    {
+        var flags = input.Condition switch
+        {
+            null or Smithy.SetCondition.Any => Protocol.SetConditionAnyBits,
+            Smithy.SetCondition.IfAbsent => Protocol.SetIfAbsentBits,
+            Smithy.SetCondition.IfPresent => Protocol.SetIfPresentBits,
+            _ => throw new ArgumentOutOfRangeException(nameof(input.Condition)),
+        };
+        flags |= input.ExpirationMode switch
+        {
+            null or Smithy.ExpirationMode.Inherit when input.TtlMilliseconds is null =>
+                Protocol.SetInheritExpirationBits,
+            Smithy.ExpirationMode.NoExpiry when input.TtlMilliseconds is null =>
+                Protocol.SetNoExpiryBits,
+            Smithy.ExpirationMode.ExplicitTtl when input.TtlMilliseconds is > 0 =>
+                Protocol.SetExplicitTtlBits,
+            Smithy.ExpirationMode.NoExpiry or Smithy.ExpirationMode.Inherit =>
+                throw new ArgumentException(
+                    "ttlMilliseconds is only valid with explicit_ttl.",
+                    nameof(input.TtlMilliseconds)),
+            Smithy.ExpirationMode.ExplicitTtl => throw new ArgumentException(
+                "ttlMilliseconds must be positive with explicit_ttl.",
+                nameof(input.TtlMilliseconds)),
+            _ => throw new ArgumentOutOfRangeException(nameof(input.ExpirationMode)),
+        };
+        flags |= input.EvictionMode switch
+        {
+            null or Smithy.EvictionMode.Inherit => Protocol.SetInheritEvictionBits,
+            Smithy.EvictionMode.Evictable => Protocol.SetEvictableBits,
+            Smithy.EvictionMode.EvictionProtected => Protocol.SetEvictionProtectedBits,
+            _ => throw new ArgumentOutOfRangeException(nameof(input.EvictionMode)),
+        };
+        return (flags, input.TtlMilliseconds.GetValueOrDefault());
+    }
+
+    private static (byte Flags, ulong TtlMilliseconds) NativePolicy(
+        Smithy.NamespacePolicy? policy)
+    {
+        if (policy is null)
+        {
+            return (0, 0);
+        }
+        var flags = policy.DefaultExpiration switch
+        {
+            Smithy.ExpirationDefault.NoExpiry when policy.DefaultTtlMilliseconds is null =>
+                Protocol.PolicyNoExpiry,
+            Smithy.ExpirationDefault.FixedTtl when policy.DefaultTtlMilliseconds is > 0 =>
+                Protocol.PolicyFixedTtl,
+            Smithy.ExpirationDefault.NoExpiry or Smithy.ExpirationDefault.FixedTtl =>
+                throw new ArgumentException(
+                    "defaultTtlMilliseconds must be present only for a positive fixed_ttl.",
+                    nameof(policy.DefaultTtlMilliseconds)),
+            _ => throw new ArgumentOutOfRangeException(nameof(policy.DefaultExpiration)),
+        };
+        if (policy.ExpirationOverride == Smithy.OverridePolicy.Allowed)
+        {
+            flags |= Protocol.PolicyExpirationOverride;
+        }
+        else if (policy.ExpirationOverride != Smithy.OverridePolicy.Disallowed)
+        {
+            throw new ArgumentOutOfRangeException(nameof(policy.ExpirationOverride));
+        }
+        if (policy.DefaultEviction == Smithy.EvictionDefault.EvictionProtected)
+        {
+            flags |= Protocol.PolicyEvictionProtected;
+        }
+        else if (policy.DefaultEviction != Smithy.EvictionDefault.Evictable)
+        {
+            throw new ArgumentOutOfRangeException(nameof(policy.DefaultEviction));
+        }
+        if (policy.EvictionOverride == Smithy.OverridePolicy.Allowed)
+        {
+            flags |= Protocol.PolicyEvictionOverride;
+        }
+        else if (policy.EvictionOverride != Smithy.OverridePolicy.Disallowed)
+        {
+            throw new ArgumentOutOfRangeException(nameof(policy.EvictionOverride));
+        }
+        return (flags, policy.DefaultTtlMilliseconds.GetValueOrDefault());
+    }
+
+    private static Smithy.NamespaceDescriptor DecodeNamespaceDescriptor(byte[] payload)
+    {
+        using var buffer = new NativeBuffer(payload);
+        var status = NativeMethods.openkache_client_namespace_descriptor_decode(
+            buffer.Pointer,
+            buffer.Length,
+            out var decoded);
+        if (status != 0)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                "native ABI returned an invalid namespace descriptor.");
+        }
+        return new Smithy.NamespaceDescriptor
+        {
+            NamespaceId = decoded.NamespaceId,
+            Revision = decoded.Revision,
+            Policy = new Smithy.NamespacePolicy
+            {
+                DefaultExpiration = decoded.DefaultExpiration == 1
+                    ? Smithy.ExpirationDefault.FixedTtl
+                    : Smithy.ExpirationDefault.NoExpiry,
+                DefaultTtlMilliseconds = decoded.DefaultExpiration == 1
+                    ? decoded.DefaultTtlMilliseconds
+                    : null,
+                ExpirationOverride = decoded.ExpirationOverride == 1
+                    ? Smithy.OverridePolicy.Allowed
+                    : Smithy.OverridePolicy.Disallowed,
+                DefaultEviction = decoded.DefaultEviction == 1
+                    ? Smithy.EvictionDefault.EvictionProtected
+                    : Smithy.EvictionDefault.Evictable,
+                EvictionOverride = decoded.EvictionOverride == 1
+                    ? Smithy.OverridePolicy.Allowed
+                    : Smithy.OverridePolicy.Disallowed,
+            },
+        };
     }
 
     private async ValueTask<NativeResult> RequestAsync(
@@ -402,7 +768,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     {
         return condition switch
         {
-            null => Protocol.FfiSetConditionNone,
+            null => Protocol.FfiSetConditionAny,
             Smithy.SetCondition.IfAbsent => Protocol.FfiSetConditionIfAbsent,
             Smithy.SetCondition.IfPresent => Protocol.FfiSetConditionIfPresent,
             _ => throw new ArgumentOutOfRangeException(nameof(condition)),

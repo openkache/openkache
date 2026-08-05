@@ -72,7 +72,14 @@ export interface Client_Defaults_Contract {
   readonly minimum_positive_value: number
 }
 
-type Api_Type_Kind = "blob" | "boolean" | "enum" | "long" | "string"
+type Api_Type_Kind =
+  | "blob"
+  | "boolean"
+  | "enum"
+  | "long"
+  | "string"
+  | "structure"
+  | "unsigned_long"
 
 /** One resolved Smithy API field type. */
 export interface Api_Type {
@@ -149,6 +156,7 @@ const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
+const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
 const FFI_OPERATION_FIELDS = [
   { name: "GetJson", field: "operationGetJson" },
   { name: "SetJson", field: "operationSetJson" },
@@ -174,7 +182,7 @@ const FFI_CONNECTION_STATE_FIELDS = [
   { name: "Unknown", field: "connectionStateUnknown" },
 ] as const
 const FFI_SET_CONDITION_FIELDS = [
-  { name: "None", field: "setConditionNone" },
+  { name: "Any", field: "setConditionAny" },
   { name: "IfAbsent", field: "setConditionIfAbsent" },
   { name: "IfPresent", field: "setConditionIfPresent" },
 ] as const
@@ -228,6 +236,7 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
   python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
     generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
+  python_init: generated_path("clients/python/src/openkache/_generated/__init__.py"),
   swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
     generated_path("clients/swift/generated_local/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
@@ -334,13 +343,21 @@ function shape_type(shape: Json_Object, location: string): string {
   return string_member(shape, "type", location)
 }
 
-function api_type(shapes: Json_Object, target: string): Api_Type {
+function api_type(
+  shapes: Json_Object,
+  target: string,
+  member_traits?: Json_Object,
+): Api_Type {
   const prelude_types: Readonly<Record<string, Api_Type_Kind>> = {
     "smithy.api#Boolean": "boolean",
     "smithy.api#Long": "long",
     "smithy.api#String": "string",
   }
-  const prelude = prelude_types[target]
+  const prelude =
+    member_traits?.[UNSIGNED_LONG_TRAIT_ID] !== undefined &&
+    target === "smithy.api#Long"
+      ? "unsigned_long"
+      : prelude_types[target]
   if (prelude !== undefined) return { kind: prelude }
 
   const shape = object_member(shapes, target, "Smithy AST.shapes")
@@ -350,6 +367,8 @@ function api_type(shapes: Json_Object, target: string): Api_Type {
       return { kind: "blob" }
     case "enum":
       return { kind: "enum", name: shape_name(target) }
+    case "structure":
+      return { kind: "structure", name: shape_name(target) }
     default:
       throw new Error(`unsupported API member target ${target} with shape type ${kind}`)
   }
@@ -369,7 +388,11 @@ function api_structure(shapes: Json_Object, target: string): Api_Structure {
       return {
         name,
         required: traits?.["smithy.api#required"] !== undefined,
-        type: api_type(shapes, string_member(member, "target", `${target}.${name}`)),
+        type: api_type(
+          shapes,
+          string_member(member, "target", `${target}.${name}`),
+          traits,
+        ),
       }
     }),
   }
@@ -451,17 +474,26 @@ function api_contract(
     structure_names.add(operation.input)
     structure_names.add(operation.output)
   }
-  const structures = [...structure_names]
-    .map((name) => api_structure(shapes, `${namespace}#${name}`))
-    .sort((left, right) => left.name.localeCompare(right.name))
   const enum_names = new Set<string>()
-  for (const structure of structures) {
+  const structures_by_name = new Map<string, Api_Structure>()
+  const pending_structure_names = [...structure_names]
+  while (pending_structure_names.length > 0) {
+    const name = pending_structure_names.pop()
+    if (name === undefined || structures_by_name.has(name)) continue
+    const structure = api_structure(shapes, `${namespace}#${name}`)
+    structures_by_name.set(name, structure)
     for (const member of structure.members) {
-      if (member.type.kind === "enum" && member.type.name !== undefined) {
+      if (member.type.name === undefined) continue
+      if (member.type.kind === "enum") {
         enum_names.add(member.type.name)
+      } else if (member.type.kind === "structure") {
+        pending_structure_names.push(member.type.name)
       }
     }
   }
+  const structures = [...structures_by_name.values()].sort((left, right) =>
+    left.name.localeCompare(right.name),
+  )
 
   return {
     enums: [...enum_names]
@@ -905,10 +937,22 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     ),
   }
   const opcode_names = new Set(wire.opcodes.map((entry) => entry.name))
+  const api_operation_names = new Set<string>()
   for (const operation of api.operations) {
+    if (api_operation_names.has(operation.name)) {
+      throw new Error(`duplicate client operation ${operation.name}`)
+    }
+    api_operation_names.add(operation.name)
     if (!opcode_names.has(operation.name)) {
       throw new Error(
         `client operation ${operation.name} has no matching protocol opcode`,
+      )
+    }
+  }
+  for (const opcode of wire.opcodes) {
+    if (!api_operation_names.has(opcode.name)) {
+      throw new Error(
+        `wire opcode ${opcode.name} has no matching client operation`,
       )
     }
   }
@@ -1428,6 +1472,50 @@ export function render_c_contract(contract: Client_Contract): string {
 #define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
+#define OPENKACHE_SMITHY_OPCODE_BYTES ${contract.v1.opcode_bytes}u
+#define OPENKACHE_SMITHY_STATUS_BYTES ${contract.v1.status_bytes}u
+#define OPENKACHE_SMITHY_REQUEST_FIXED_BYTES ${contract.v1.request_fixed_bytes}u
+#define OPENKACHE_SMITHY_RESPONSE_FIXED_BYTES ${contract.v1.response_fixed_bytes}u
+#define OPENKACHE_SMITHY_MIN_VARUINT_BYTES ${contract.v1.min_varuint_bytes}u
+#define OPENKACHE_SMITHY_MAX_VARUINT_BYTES ${contract.v1.max_varuint_bytes}u
+#define OPENKACHE_SMITHY_NAMESPACE_ID_BYTES ${contract.v1.namespace_id_bytes}u
+#define OPENKACHE_SMITHY_NAMESPACE_REVISION_BYTES ${contract.v1.namespace_revision_bytes}u
+#define OPENKACHE_SMITHY_NAMESPACE_NAME_LENGTH_BYTES ${contract.v1.namespace_name_length_bytes}u
+#define OPENKACHE_SMITHY_NAMESPACE_NAME_MAX_BYTES ${contract.v1.namespace_name_max_bytes}u
+#define OPENKACHE_SMITHY_SET_FLAGS_BYTES ${contract.v1.set_flags_bytes}u
+#define OPENKACHE_SMITHY_SET_CONDITION_MASK ${c_unsigned_literal(contract.v1.set_condition_mask)}
+#define OPENKACHE_SMITHY_SET_CONDITION_ANY_BITS ${c_unsigned_literal(contract.v1.set_condition_any_bits)}
+#define OPENKACHE_SMITHY_SET_IF_ABSENT_BITS ${c_unsigned_literal(contract.v1.set_if_absent_flag)}
+#define OPENKACHE_SMITHY_SET_IF_PRESENT_BITS ${c_unsigned_literal(contract.v1.set_if_present_flag)}
+#define OPENKACHE_SMITHY_SET_CONDITION_RESERVED_BITS ${c_unsigned_literal(contract.v1.set_condition_reserved_bits)}
+#define OPENKACHE_SMITHY_SET_EXPIRATION_MASK ${c_unsigned_literal(contract.v1.set_expiration_mask)}
+#define OPENKACHE_SMITHY_SET_INHERIT_EXPIRATION_BITS ${c_unsigned_literal(contract.v1.set_inherit_expiration_bits)}
+#define OPENKACHE_SMITHY_SET_NO_EXPIRY_BITS ${c_unsigned_literal(contract.v1.set_no_expiry_bits)}
+#define OPENKACHE_SMITHY_SET_EXPLICIT_TTL_BITS ${c_unsigned_literal(contract.v1.set_ttl_flag)}
+#define OPENKACHE_SMITHY_SET_EXPIRATION_RESERVED_BITS ${c_unsigned_literal(contract.v1.set_expiration_reserved_bits)}
+#define OPENKACHE_SMITHY_SET_EVICTION_MASK ${c_unsigned_literal(contract.v1.set_eviction_mask)}
+#define OPENKACHE_SMITHY_SET_INHERIT_EVICTION_BITS ${c_unsigned_literal(contract.v1.set_inherit_eviction_bits)}
+#define OPENKACHE_SMITHY_SET_EVICTABLE_BITS ${c_unsigned_literal(contract.v1.set_evictable_bits)}
+#define OPENKACHE_SMITHY_SET_EVICTION_PROTECTED_BITS ${c_unsigned_literal(contract.v1.set_eviction_protected_bits)}
+#define OPENKACHE_SMITHY_SET_EVICTION_RESERVED_BITS ${c_unsigned_literal(contract.v1.set_eviction_reserved_bits)}
+#define OPENKACHE_SMITHY_SET_RESERVED_MASK ${c_unsigned_literal(contract.v1.set_reserved_mask)}
+#define OPENKACHE_SMITHY_OPEN_FLAGS_BYTES ${contract.v1.open_flags_bytes}u
+#define OPENKACHE_SMITHY_OPEN_CREATE_IF_MISSING ${c_unsigned_literal(contract.v1.open_create_if_missing_flag)}
+#define OPENKACHE_SMITHY_OPEN_RESERVED_MASK ${c_unsigned_literal(contract.v1.open_reserved_mask)}
+#define OPENKACHE_SMITHY_DELETE_FLAGS_BYTES ${contract.v1.delete_flags_bytes}u
+#define OPENKACHE_SMITHY_DELETE_IF_EMPTY ${c_unsigned_literal(contract.v1.delete_if_empty_bits)}
+#define OPENKACHE_SMITHY_DELETE_MODE_MASK ${c_unsigned_literal(contract.v1.delete_mode_mask)}
+#define OPENKACHE_SMITHY_DELETE_RESERVED_MASK ${c_unsigned_literal(contract.v1.delete_reserved_mask)}
+#define OPENKACHE_SMITHY_POLICY_FLAGS_BYTES ${contract.v1.policy_flags_bytes}u
+#define OPENKACHE_SMITHY_POLICY_DEFAULT_EXPIRATION_MASK ${c_unsigned_literal(contract.v1.policy_default_expiration_mask)}
+#define OPENKACHE_SMITHY_POLICY_NO_EXPIRY ${c_unsigned_literal(contract.v1.policy_no_expiry_bits)}
+#define OPENKACHE_SMITHY_POLICY_FIXED_TTL ${c_unsigned_literal(contract.v1.policy_fixed_ttl_bits)}
+#define OPENKACHE_SMITHY_POLICY_DEFAULT_EXPIRATION_RESERVED_BITS ${c_unsigned_literal(contract.v1.policy_default_expiration_reserved_bits)}
+#define OPENKACHE_SMITHY_POLICY_EXPIRATION_OVERRIDE ${c_unsigned_literal(contract.v1.policy_expiration_override_flag)}
+#define OPENKACHE_SMITHY_POLICY_EVICTION_PROTECTED ${c_unsigned_literal(contract.v1.policy_eviction_protected_flag)}
+#define OPENKACHE_SMITHY_POLICY_EVICTION_OVERRIDE ${c_unsigned_literal(contract.v1.policy_eviction_override_flag)}
+#define OPENKACHE_SMITHY_POLICY_RESERVED_MASK ${c_unsigned_literal(contract.v1.policy_reserved_mask)}
+#define OPENKACHE_SMITHY_ERROR_STATUS_MINIMUM ${c_unsigned_literal(contract.v1.error_status_minimum)}
 #define OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT ${defaults.max_in_flight}u
 #define OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS ${defaults.connect_timeout_milliseconds}u
 #define OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS ${defaults.request_timeout_milliseconds}u
@@ -1531,6 +1619,48 @@ internal static partial class Protocol
 {
     internal const string ApplicationProtocol = ${JSON.stringify(contract.v1.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
+    internal const int OpcodeBytes = ${formatted_decimal(contract.v1.opcode_bytes)};
+    internal const int StatusBytes = ${formatted_decimal(contract.v1.status_bytes)};
+    internal const int RequestFixedBytes = ${formatted_decimal(contract.v1.request_fixed_bytes)};
+    internal const int ResponseFixedBytes = ${formatted_decimal(contract.v1.response_fixed_bytes)};
+    internal const int MinimumVarUIntBytes = ${formatted_decimal(contract.v1.min_varuint_bytes)};
+    internal const int MaximumVarUIntBytes = ${formatted_decimal(contract.v1.max_varuint_bytes)};
+    internal const int NamespaceIdBytes = ${formatted_decimal(contract.v1.namespace_id_bytes)};
+    internal const int NamespaceRevisionBytes = ${formatted_decimal(contract.v1.namespace_revision_bytes)};
+    internal const int NamespaceNameLengthBytes = ${formatted_decimal(contract.v1.namespace_name_length_bytes)};
+    internal const int NamespaceNameMaxBytes = ${formatted_decimal(contract.v1.namespace_name_max_bytes)};
+    internal const int SetFlagsBytes = ${formatted_decimal(contract.v1.set_flags_bytes)};
+    internal const byte SetConditionMask = ${formatted_byte(contract.v1.set_condition_mask)};
+    internal const byte SetConditionAnyBits = ${formatted_byte(contract.v1.set_condition_any_bits)};
+    internal const byte SetConditionReservedBits = ${formatted_byte(contract.v1.set_condition_reserved_bits)};
+    internal const byte SetExpirationMask = ${formatted_byte(contract.v1.set_expiration_mask)};
+    internal const byte SetInheritExpirationBits = ${formatted_byte(contract.v1.set_inherit_expiration_bits)};
+    internal const byte SetNoExpiryBits = ${formatted_byte(contract.v1.set_no_expiry_bits)};
+    internal const byte SetExplicitTtlBits = ${formatted_byte(contract.v1.set_ttl_flag)};
+    internal const byte SetExpirationReservedBits = ${formatted_byte(contract.v1.set_expiration_reserved_bits)};
+    internal const byte SetEvictionMask = ${formatted_byte(contract.v1.set_eviction_mask)};
+    internal const byte SetInheritEvictionBits = ${formatted_byte(contract.v1.set_inherit_eviction_bits)};
+    internal const byte SetEvictableBits = ${formatted_byte(contract.v1.set_evictable_bits)};
+    internal const byte SetEvictionProtectedBits = ${formatted_byte(contract.v1.set_eviction_protected_bits)};
+    internal const byte SetEvictionReservedBits = ${formatted_byte(contract.v1.set_eviction_reserved_bits)};
+    internal const byte SetReservedMask = ${formatted_byte(contract.v1.set_reserved_mask)};
+    internal const int OpenFlagsBytes = ${formatted_decimal(contract.v1.open_flags_bytes)};
+    internal const byte OpenCreateIfMissing = ${formatted_byte(contract.v1.open_create_if_missing_flag)};
+    internal const byte OpenReservedMask = ${formatted_byte(contract.v1.open_reserved_mask)};
+    internal const int DeleteFlagsBytes = ${formatted_decimal(contract.v1.delete_flags_bytes)};
+    internal const byte DeleteIfEmpty = ${formatted_byte(contract.v1.delete_if_empty_bits)};
+    internal const byte DeleteModeMask = ${formatted_byte(contract.v1.delete_mode_mask)};
+    internal const byte DeleteReservedMask = ${formatted_byte(contract.v1.delete_reserved_mask)};
+    internal const int PolicyFlagsBytes = ${formatted_decimal(contract.v1.policy_flags_bytes)};
+    internal const byte PolicyDefaultExpirationMask = ${formatted_byte(contract.v1.policy_default_expiration_mask)};
+    internal const byte PolicyNoExpiry = ${formatted_byte(contract.v1.policy_no_expiry_bits)};
+    internal const byte PolicyFixedTtl = ${formatted_byte(contract.v1.policy_fixed_ttl_bits)};
+    internal const byte PolicyDefaultExpirationReservedBits = ${formatted_byte(contract.v1.policy_default_expiration_reserved_bits)};
+    internal const byte PolicyExpirationOverride = ${formatted_byte(contract.v1.policy_expiration_override_flag)};
+    internal const byte PolicyEvictionProtected = ${formatted_byte(contract.v1.policy_eviction_protected_flag)};
+    internal const byte PolicyEvictionOverride = ${formatted_byte(contract.v1.policy_eviction_override_flag)};
+    internal const byte PolicyReservedMask = ${formatted_byte(contract.v1.policy_reserved_mask)};
+    internal const byte ErrorStatusMinimum = ${formatted_byte(contract.v1.error_status_minimum)};
     internal const int DefaultMaxInFlight = ${formatted_decimal(defaults.max_in_flight)};
     internal const long DefaultConnectTimeoutMilliseconds = ${formatted_decimal(defaults.connect_timeout_milliseconds)};
     internal const long DefaultRequestTimeoutMilliseconds = ${formatted_decimal(defaults.request_timeout_milliseconds)};
@@ -1555,15 +1685,13 @@ internal static partial class Protocol
     internal const uint FfiConnectionDisconnected = ${formatted_decimal(ffi_connection("Disconnected"))}u;
     internal const uint FfiConnectionClosed = ${formatted_decimal(ffi_connection("Closed"))}u;
     internal const uint FfiConnectionUnknown = ${formatted_decimal(ffi_connection("Unknown"))}u;
-    internal const uint FfiSetConditionNone = ${formatted_decimal(ffi_set_condition("None"))}u;
+    internal const uint FfiSetConditionAny = ${formatted_decimal(ffi_set_condition("Any"))}u;
     internal const uint FfiSetConditionIfAbsent = ${formatted_decimal(ffi_set_condition("IfAbsent"))}u;
     internal const uint FfiSetConditionIfPresent = ${formatted_decimal(ffi_set_condition("IfPresent"))}u;
 
-    private const int MaximumVarUIntBytes = ${formatted_decimal(contract.v1.max_varuint_bytes)};
     internal const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
-    private const byte SetTtlBit = ${formatted_byte(contract.v1.set_ttl_flag)};
-    private const byte SetIfAbsentBit = ${formatted_byte(contract.v1.set_if_absent_flag)};
-    private const byte SetIfPresentBit = ${formatted_byte(contract.v1.set_if_present_flag)};
+    internal const byte SetIfAbsentBits = ${formatted_byte(contract.v1.set_if_absent_flag)};
+    internal const byte SetIfPresentBits = ${formatted_byte(contract.v1.set_if_present_flag)};
 
     internal const uint ValueFormatVersion = ${formatted_decimal(value.version)}u;
     internal const int ValueFormatMaxVu128Bytes = ${formatted_decimal(value.max_vu128_bytes)};
@@ -1618,8 +1746,15 @@ function typescript_api_type(type: Api_Type, required: boolean): string {
     case "long":
       rendered = "number"
       break
+    case "structure":
+      if (type.name === undefined) throw new Error("structure API type has no name")
+      rendered = typescript_api_name(type.name)
+      break
     case "string":
       rendered = "string"
+      break
+    case "unsigned_long":
+      rendered = "bigint"
       break
   }
   return required ? rendered : `${rendered} | undefined`
@@ -1658,6 +1793,56 @@ ${members.join("\n")}
 export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 /** Maximum opaque value bytes accepted by the protocol. */
 export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+/** Width of the request opcode and response status fields. */
+export const SMITHY_OPCODE_BYTES = ${contract.v1.opcode_bytes}
+export const SMITHY_STATUS_BYTES = ${contract.v1.status_bytes}
+/** Fixed request/response prefix widths and unsigned integer ceiling. */
+export const SMITHY_REQUEST_FIXED_BYTES = ${contract.v1.request_fixed_bytes}
+export const SMITHY_RESPONSE_FIXED_BYTES = ${contract.v1.response_fixed_bytes}
+export const SMITHY_MIN_VARUINT_BYTES = ${contract.v1.min_varuint_bytes}
+export const SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
+/** Namespace identity, revision, and name constraints. */
+export const SMITHY_NAMESPACE_ID_BYTES = ${contract.v1.namespace_id_bytes}
+export const SMITHY_NAMESPACE_REVISION_BYTES = ${contract.v1.namespace_revision_bytes}
+export const SMITHY_NAMESPACE_NAME_LENGTH_BYTES = ${contract.v1.namespace_name_length_bytes}
+export const SMITHY_NAMESPACE_NAME_MAX_BYTES = ${contract.v1.namespace_name_max_bytes}
+/** SET flag masks and values. */
+export const SMITHY_SET_FLAGS_BYTES = ${contract.v1.set_flags_bytes}
+export const SMITHY_SET_CONDITION_MASK = ${contract.v1.set_condition_mask}
+export const SMITHY_SET_CONDITION_ANY_BITS = ${contract.v1.set_condition_any_bits}
+export const SMITHY_SET_IF_ABSENT_BITS = ${contract.v1.set_if_absent_flag}
+export const SMITHY_SET_IF_PRESENT_BITS = ${contract.v1.set_if_present_flag}
+export const SMITHY_SET_CONDITION_RESERVED_BITS = ${contract.v1.set_condition_reserved_bits}
+export const SMITHY_SET_EXPIRATION_MASK = ${contract.v1.set_expiration_mask}
+export const SMITHY_SET_INHERIT_EXPIRATION_BITS = ${contract.v1.set_inherit_expiration_bits}
+export const SMITHY_SET_NO_EXPIRY_BITS = ${contract.v1.set_no_expiry_bits}
+export const SMITHY_SET_EXPLICIT_TTL_BITS = ${contract.v1.set_ttl_flag}
+export const SMITHY_SET_EXPIRATION_RESERVED_BITS = ${contract.v1.set_expiration_reserved_bits}
+export const SMITHY_SET_EVICTION_MASK = ${contract.v1.set_eviction_mask}
+export const SMITHY_SET_INHERIT_EVICTION_BITS = ${contract.v1.set_inherit_eviction_bits}
+export const SMITHY_SET_EVICTABLE_BITS = ${contract.v1.set_evictable_bits}
+export const SMITHY_SET_EVICTION_PROTECTED_BITS = ${contract.v1.set_eviction_protected_bits}
+export const SMITHY_SET_EVICTION_RESERVED_BITS = ${contract.v1.set_eviction_reserved_bits}
+export const SMITHY_SET_RESERVED_MASK = ${contract.v1.set_reserved_mask}
+/** Namespace-management flags. */
+export const SMITHY_OPEN_FLAGS_BYTES = ${contract.v1.open_flags_bytes}
+export const SMITHY_OPEN_CREATE_IF_MISSING = ${contract.v1.open_create_if_missing_flag}
+export const SMITHY_OPEN_RESERVED_MASK = ${contract.v1.open_reserved_mask}
+export const SMITHY_DELETE_FLAGS_BYTES = ${contract.v1.delete_flags_bytes}
+export const SMITHY_DELETE_IF_EMPTY = ${contract.v1.delete_if_empty_bits}
+export const SMITHY_DELETE_MODE_MASK = ${contract.v1.delete_mode_mask}
+export const SMITHY_DELETE_RESERVED_MASK = ${contract.v1.delete_reserved_mask}
+/** Namespace-policy flags and error boundary. */
+export const SMITHY_POLICY_FLAGS_BYTES = ${contract.v1.policy_flags_bytes}
+export const SMITHY_POLICY_DEFAULT_EXPIRATION_MASK = ${contract.v1.policy_default_expiration_mask}
+export const SMITHY_POLICY_NO_EXPIRY = ${contract.v1.policy_no_expiry_bits}
+export const SMITHY_POLICY_FIXED_TTL = ${contract.v1.policy_fixed_ttl_bits}
+export const SMITHY_POLICY_DEFAULT_EXPIRATION_RESERVED_BITS = ${contract.v1.policy_default_expiration_reserved_bits}
+export const SMITHY_POLICY_EXPIRATION_OVERRIDE = ${contract.v1.policy_expiration_override_flag}
+export const SMITHY_POLICY_EVICTION_PROTECTED = ${contract.v1.policy_eviction_protected_flag}
+export const SMITHY_POLICY_EVICTION_OVERRIDE = ${contract.v1.policy_eviction_override_flag}
+export const SMITHY_POLICY_RESERVED_MASK = ${contract.v1.policy_reserved_mask}
+export const SMITHY_ERROR_STATUS_MINIMUM = ${contract.v1.error_status_minimum}
 /** Default maximum number of concurrent request lanes. */
 export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
 /** Default connection-establishment timeout in milliseconds. */
@@ -1728,8 +1913,15 @@ function go_api_type(type: Api_Type, required: boolean): string {
     case "long":
       rendered = "int64"
       break
+    case "structure":
+      if (type.name === undefined) throw new Error("structure API type has no name")
+      rendered = go_api_name(type.name)
+      break
     case "string":
       rendered = "string"
+      break
+    case "unsigned_long":
+      rendered = "uint64"
       break
   }
   return required ? rendered : `*${rendered}`
@@ -1797,6 +1989,51 @@ const (
 \tSmithyItemIDBytes = ${contract.item_id_bytes}
 \t// SmithyMaxValueBytes is the protocol value and payload ceiling.
 \tSmithyMaxValueBytes = ${contract.max_value_bytes}
+\t// SmithyOpcodeBytes and SmithyStatusBytes are fixed opcode/status widths.
+\tSmithyOpcodeBytes = ${contract.v1.opcode_bytes}
+\tSmithyStatusBytes = ${contract.v1.status_bytes}
+\tSmithyRequestFixedBytes = ${contract.v1.request_fixed_bytes}
+\tSmithyResponseFixedBytes = ${contract.v1.response_fixed_bytes}
+\tSmithyMinVaruintBytes = ${contract.v1.min_varuint_bytes}
+\tSmithyMaxVaruintBytes = ${contract.v1.max_varuint_bytes}
+\tSmithyNamespaceIDBytes = ${contract.v1.namespace_id_bytes}
+\tSmithyNamespaceRevisionBytes = ${contract.v1.namespace_revision_bytes}
+\tSmithyNamespaceNameLengthBytes = ${contract.v1.namespace_name_length_bytes}
+\tSmithyNamespaceNameMaxBytes = ${contract.v1.namespace_name_max_bytes}
+\tSmithySetFlagsBytes = ${contract.v1.set_flags_bytes}
+\tSmithySetConditionMask = ${contract.v1.set_condition_mask}
+\tSmithySetConditionAnyBits = ${contract.v1.set_condition_any_bits}
+\tSmithySetIfAbsentBits = ${contract.v1.set_if_absent_flag}
+\tSmithySetIfPresentBits = ${contract.v1.set_if_present_flag}
+\tSmithySetConditionReservedBits = ${contract.v1.set_condition_reserved_bits}
+\tSmithySetExpirationMask = ${contract.v1.set_expiration_mask}
+\tSmithySetInheritExpirationBits = ${contract.v1.set_inherit_expiration_bits}
+\tSmithySetNoExpiryBits = ${contract.v1.set_no_expiry_bits}
+\tSmithySetExplicitTTLBits = ${contract.v1.set_ttl_flag}
+\tSmithySetExpirationReservedBits = ${contract.v1.set_expiration_reserved_bits}
+\tSmithySetEvictionMask = ${contract.v1.set_eviction_mask}
+\tSmithySetInheritEvictionBits = ${contract.v1.set_inherit_eviction_bits}
+\tSmithySetEvictableBits = ${contract.v1.set_evictable_bits}
+\tSmithySetEvictionProtectedBits = ${contract.v1.set_eviction_protected_bits}
+\tSmithySetEvictionReservedBits = ${contract.v1.set_eviction_reserved_bits}
+\tSmithySetReservedMask = ${contract.v1.set_reserved_mask}
+\tSmithyOpenFlagsBytes = ${contract.v1.open_flags_bytes}
+\tSmithyOpenCreateIfMissing = ${contract.v1.open_create_if_missing_flag}
+\tSmithyOpenReservedMask = ${contract.v1.open_reserved_mask}
+\tSmithyDeleteFlagsBytes = ${contract.v1.delete_flags_bytes}
+\tSmithyDeleteIfEmpty = ${contract.v1.delete_if_empty_bits}
+\tSmithyDeleteModeMask = ${contract.v1.delete_mode_mask}
+\tSmithyDeleteReservedMask = ${contract.v1.delete_reserved_mask}
+\tSmithyPolicyFlagsBytes = ${contract.v1.policy_flags_bytes}
+\tSmithyPolicyDefaultExpirationMask = ${contract.v1.policy_default_expiration_mask}
+\tSmithyPolicyNoExpiry = ${contract.v1.policy_no_expiry_bits}
+\tSmithyPolicyFixedTTL = ${contract.v1.policy_fixed_ttl_bits}
+\tSmithyPolicyDefaultExpirationReservedBits = ${contract.v1.policy_default_expiration_reserved_bits}
+\tSmithyPolicyExpirationOverride = ${contract.v1.policy_expiration_override_flag}
+\tSmithyPolicyEvictionProtected = ${contract.v1.policy_eviction_protected_flag}
+\tSmithyPolicyEvictionOverride = ${contract.v1.policy_eviction_override_flag}
+\tSmithyPolicyReservedMask = ${contract.v1.policy_reserved_mask}
+\tSmithyErrorStatusMinimum = ${contract.v1.error_status_minimum}
 \t// SmithyDataProtectionKeyBytes is the shared key width.
 \tSmithyDataProtectionKeyBytes = ${value.data_protection_key_bytes}
 \t// SmithyValueEncryptionNone selects unprotected values.
@@ -1929,8 +2166,15 @@ function python_api_type(type: Api_Type, required: boolean): string {
     case "long":
       rendered = "int"
       break
+    case "structure":
+      if (type.name === undefined) throw new Error("structure API type has no name")
+      rendered = python_api_name(type.name)
+      break
     case "string":
       rendered = "str"
+      break
+    case "unsigned_long":
+      rendered = "int"
       break
   }
   return required ? rendered : `${rendered} | None`
@@ -1998,6 +2242,17 @@ ${operations}
 `
 }
 
+/** Renders the Python generated-package facade without duplicating Smithy shape names. */
+export function render_python_generated_init(): string {
+  return `"""Smithy-generated Python contract types and constants."""
+
+from .smithy_api import *
+from .smithy_contract import *
+
+__all__ = tuple(name for name in globals() if not name.startswith("_"))
+`
+}
+
 /** Renders the Python constants shared with the core-backed adapter.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -2042,11 +2297,52 @@ export function render_python_contract(contract: Client_Contract): string {
   return `# Generated from the OpenKache Smithy contract. Do not edit.
 
 SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v1.alpn)}
+SMITHY_OPCODE_BYTES = ${contract.v1.opcode_bytes}
+SMITHY_STATUS_BYTES = ${contract.v1.status_bytes}
 SMITHY_REQUEST_FIXED_BYTES = ${contract.v1.request_fixed_bytes}
 SMITHY_RESPONSE_FIXED_BYTES = ${contract.v1.response_fixed_bytes}
+SMITHY_MIN_VARUINT_BYTES = ${contract.v1.min_varuint_bytes}
 SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
 SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
+SMITHY_NAMESPACE_ID_BYTES = ${contract.v1.namespace_id_bytes}
+SMITHY_NAMESPACE_REVISION_BYTES = ${contract.v1.namespace_revision_bytes}
+SMITHY_NAMESPACE_NAME_LENGTH_BYTES = ${contract.v1.namespace_name_length_bytes}
+SMITHY_NAMESPACE_NAME_MAX_BYTES = ${contract.v1.namespace_name_max_bytes}
+SMITHY_SET_FLAGS_BYTES = ${contract.v1.set_flags_bytes}
+SMITHY_SET_CONDITION_MASK = ${contract.v1.set_condition_mask}
+SMITHY_SET_CONDITION_ANY_BITS = ${contract.v1.set_condition_any_bits}
+SMITHY_SET_IF_ABSENT_BITS = ${contract.v1.set_if_absent_flag}
+SMITHY_SET_IF_PRESENT_BITS = ${contract.v1.set_if_present_flag}
+SMITHY_SET_CONDITION_RESERVED_BITS = ${contract.v1.set_condition_reserved_bits}
+SMITHY_SET_EXPIRATION_MASK = ${contract.v1.set_expiration_mask}
+SMITHY_SET_INHERIT_EXPIRATION_BITS = ${contract.v1.set_inherit_expiration_bits}
+SMITHY_SET_NO_EXPIRY_BITS = ${contract.v1.set_no_expiry_bits}
+SMITHY_SET_EXPLICIT_TTL_BITS = ${contract.v1.set_ttl_flag}
+SMITHY_SET_EXPIRATION_RESERVED_BITS = ${contract.v1.set_expiration_reserved_bits}
+SMITHY_SET_EVICTION_MASK = ${contract.v1.set_eviction_mask}
+SMITHY_SET_INHERIT_EVICTION_BITS = ${contract.v1.set_inherit_eviction_bits}
+SMITHY_SET_EVICTABLE_BITS = ${contract.v1.set_evictable_bits}
+SMITHY_SET_EVICTION_PROTECTED_BITS = ${contract.v1.set_eviction_protected_bits}
+SMITHY_SET_EVICTION_RESERVED_BITS = ${contract.v1.set_eviction_reserved_bits}
+SMITHY_SET_RESERVED_MASK = ${contract.v1.set_reserved_mask}
+SMITHY_OPEN_FLAGS_BYTES = ${contract.v1.open_flags_bytes}
+SMITHY_OPEN_CREATE_IF_MISSING = ${contract.v1.open_create_if_missing_flag}
+SMITHY_OPEN_RESERVED_MASK = ${contract.v1.open_reserved_mask}
+SMITHY_DELETE_FLAGS_BYTES = ${contract.v1.delete_flags_bytes}
+SMITHY_DELETE_IF_EMPTY = ${contract.v1.delete_if_empty_bits}
+SMITHY_DELETE_MODE_MASK = ${contract.v1.delete_mode_mask}
+SMITHY_DELETE_RESERVED_MASK = ${contract.v1.delete_reserved_mask}
+SMITHY_POLICY_FLAGS_BYTES = ${contract.v1.policy_flags_bytes}
+SMITHY_POLICY_DEFAULT_EXPIRATION_MASK = ${contract.v1.policy_default_expiration_mask}
+SMITHY_POLICY_NO_EXPIRY = ${contract.v1.policy_no_expiry_bits}
+SMITHY_POLICY_FIXED_TTL = ${contract.v1.policy_fixed_ttl_bits}
+SMITHY_POLICY_DEFAULT_EXPIRATION_RESERVED_BITS = ${contract.v1.policy_default_expiration_reserved_bits}
+SMITHY_POLICY_EXPIRATION_OVERRIDE = ${contract.v1.policy_expiration_override_flag}
+SMITHY_POLICY_EVICTION_PROTECTED = ${contract.v1.policy_eviction_protected_flag}
+SMITHY_POLICY_EVICTION_OVERRIDE = ${contract.v1.policy_eviction_override_flag}
+SMITHY_POLICY_RESERVED_MASK = ${contract.v1.policy_reserved_mask}
+SMITHY_ERROR_STATUS_MINIMUM = ${contract.v1.error_status_minimum}
 SMITHY_DEFAULT_MAX_IN_FLIGHT = ${defaults.max_in_flight}
 SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS = ${defaults.connect_timeout_milliseconds}
 SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS = ${defaults.request_timeout_milliseconds}
@@ -2116,8 +2412,15 @@ function swift_api_type(type: Api_Type, required: boolean): string {
     case "long":
       rendered = "Int64"
       break
+    case "structure":
+      if (type.name === undefined) throw new Error("structure API type has no name")
+      rendered = `Smithy_${typescript_name(type.name)}`
+      break
     case "string":
       rendered = "String"
+      break
+    case "unsigned_long":
+      rendered = "UInt64"
       break
   }
   return required ? rendered : `${rendered}?`
@@ -2242,7 +2545,7 @@ ${assignments}
   const result_not_deleted = swift_ffi_value(ffi.result_kinds, "NotDeleted", "result")
   const result_connected = swift_ffi_value(ffi.result_kinds, "Connected", "result")
   const result_not_stored = swift_ffi_value(ffi.result_kinds, "NotStored", "result")
-  const set_condition_none = swift_ffi_value(ffi.set_conditions, "None", "SET condition")
+  const set_condition_any = swift_ffi_value(ffi.set_conditions, "Any", "SET condition")
   const set_condition_if_absent = swift_ffi_value(
     ffi.set_conditions,
     "IfAbsent",
@@ -2280,6 +2583,50 @@ public enum Smithy_Value_Format: Sendable {
   public static let protocolAlpn: String = ${swift_string_literal(contract.v1.alpn)}
   public static let itemIdBytes: Int = ${contract.item_id_bytes}
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
+  public static let opcodeBytes: Int = ${contract.v1.opcode_bytes}
+  public static let statusBytes: Int = ${contract.v1.status_bytes}
+  public static let requestFixedBytes: Int = ${contract.v1.request_fixed_bytes}
+  public static let responseFixedBytes: Int = ${contract.v1.response_fixed_bytes}
+  public static let minVaruintBytes: Int = ${contract.v1.min_varuint_bytes}
+  public static let maxVaruintBytes: Int = ${contract.v1.max_varuint_bytes}
+  public static let namespaceIdBytes: Int = ${contract.v1.namespace_id_bytes}
+  public static let namespaceRevisionBytes: Int = ${contract.v1.namespace_revision_bytes}
+  public static let namespaceNameLengthBytes: Int = ${contract.v1.namespace_name_length_bytes}
+  public static let namespaceNameMaxBytes: Int = ${contract.v1.namespace_name_max_bytes}
+  public static let setFlagsBytes: Int = ${contract.v1.set_flags_bytes}
+  public static let setConditionMask: UInt8 = ${contract.v1.set_condition_mask}
+  public static let setConditionAnyBits: UInt8 = ${contract.v1.set_condition_any_bits}
+  public static let setIfAbsentBits: UInt8 = ${contract.v1.set_if_absent_flag}
+  public static let setIfPresentBits: UInt8 = ${contract.v1.set_if_present_flag}
+  public static let setConditionReservedBits: UInt8 = ${contract.v1.set_condition_reserved_bits}
+  public static let setExpirationMask: UInt8 = ${contract.v1.set_expiration_mask}
+  public static let setInheritExpirationBits: UInt8 = ${contract.v1.set_inherit_expiration_bits}
+  public static let setNoExpiryBits: UInt8 = ${contract.v1.set_no_expiry_bits}
+  public static let setExplicitTtlBits: UInt8 = ${contract.v1.set_ttl_flag}
+  public static let setExpirationReservedBits: UInt8 = ${contract.v1.set_expiration_reserved_bits}
+  public static let setEvictionMask: UInt8 = ${contract.v1.set_eviction_mask}
+  public static let setInheritEvictionBits: UInt8 = ${contract.v1.set_inherit_eviction_bits}
+  public static let setEvictableBits: UInt8 = ${contract.v1.set_evictable_bits}
+  public static let setEvictionProtectedBits: UInt8 = ${contract.v1.set_eviction_protected_bits}
+  public static let setEvictionReservedBits: UInt8 = ${contract.v1.set_eviction_reserved_bits}
+  public static let setReservedMask: UInt8 = ${contract.v1.set_reserved_mask}
+  public static let openFlagsBytes: Int = ${contract.v1.open_flags_bytes}
+  public static let openCreateIfMissing: UInt8 = ${contract.v1.open_create_if_missing_flag}
+  public static let openReservedMask: UInt8 = ${contract.v1.open_reserved_mask}
+  public static let deleteFlagsBytes: Int = ${contract.v1.delete_flags_bytes}
+  public static let deleteIfEmpty: UInt8 = ${contract.v1.delete_if_empty_bits}
+  public static let deleteModeMask: UInt8 = ${contract.v1.delete_mode_mask}
+  public static let deleteReservedMask: UInt8 = ${contract.v1.delete_reserved_mask}
+  public static let policyFlagsBytes: Int = ${contract.v1.policy_flags_bytes}
+  public static let policyDefaultExpirationMask: UInt8 = ${contract.v1.policy_default_expiration_mask}
+  public static let policyNoExpiry: UInt8 = ${contract.v1.policy_no_expiry_bits}
+  public static let policyFixedTtl: UInt8 = ${contract.v1.policy_fixed_ttl_bits}
+  public static let policyDefaultExpirationReservedBits: UInt8 = ${contract.v1.policy_default_expiration_reserved_bits}
+  public static let policyExpirationOverride: UInt8 = ${contract.v1.policy_expiration_override_flag}
+  public static let policyEvictionProtected: UInt8 = ${contract.v1.policy_eviction_protected_flag}
+  public static let policyEvictionOverride: UInt8 = ${contract.v1.policy_eviction_override_flag}
+  public static let policyReservedMask: UInt8 = ${contract.v1.policy_reserved_mask}
+  public static let errorStatusMinimum: UInt8 = ${contract.v1.error_status_minimum}
   public static let defaultMaxInFlight: Int = ${contract.client_defaults.max_in_flight}
   public static let defaultConnectTimeoutMilliseconds: Int = ${contract.client_defaults.connect_timeout_milliseconds}
   public static let defaultRequestTimeoutMilliseconds: Int = ${contract.client_defaults.request_timeout_milliseconds}
@@ -2296,7 +2643,6 @@ public enum Smithy_Value_Format: Sendable {
   public static let versionBytes: [UInt8] = [${version_bytes.join(", ")}]
   public static let maxVu128Bytes: Int = ${value.max_vu128_bytes}
   public static let formatByteBytes: Int = ${value.format_byte_bytes}
-  public static let maxVaruintBytes: Int = ${contract.v1.max_varuint_bytes}
   public static let setTtlFlag: UInt8 = ${contract.v1.set_ttl_flag}
   public static let setIfAbsentFlag: UInt8 = ${contract.v1.set_if_absent_flag}
   public static let setIfPresentFlag: UInt8 = ${contract.v1.set_if_present_flag}
@@ -2342,7 +2688,7 @@ public enum Smithy_Native_Contract: Sendable {
   public static let resultNotDeleted: UInt32 = ${result_not_deleted}
   public static let resultConnected: UInt32 = ${result_connected}
   public static let resultNotStored: UInt32 = ${result_not_stored}
-  public static let setConditionNone: UInt32 = ${set_condition_none}
+  public static let setConditionAny: UInt32 = ${set_condition_any}
   public static let setConditionIfAbsent: UInt32 = ${set_condition_if_absent}
   public static let setConditionIfPresent: UInt32 = ${set_condition_if_present}
 }
@@ -2445,8 +2791,15 @@ function csharp_api_type(type: Api_Type, required: boolean): string {
     case "long":
       rendered = "long"
       break
+    case "structure":
+      if (type.name === undefined) throw new Error("structure API type has no name")
+      rendered = type.name
+      break
     case "string":
       rendered = "string"
+      break
+    case "unsigned_long":
+      rendered = "ulong"
       break
   }
   return required ? rendered : `${rendered}?`
@@ -2525,8 +2878,15 @@ function rust_api_type(type: Api_Type, required: boolean): string {
     case "long":
       rendered = "i64"
       break
+    case "structure":
+      if (type.name === undefined) throw new Error("structure API type has no name")
+      rendered = type.name
+      break
     case "string":
       rendered = "String"
+      break
+    case "unsigned_long":
+      rendered = "u64"
       break
   }
   return required ? rendered : `Option<${rendered}>`
@@ -2696,6 +3056,7 @@ function expected_outputs(
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
+        [GENERATED_OUTPUTS.python_init]: render_python_generated_init(),
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
@@ -2739,6 +3100,7 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
+        [GENERATED_OUTPUTS.python_init]: render_python_generated_init(),
       }
     case "swift":
       return {

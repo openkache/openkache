@@ -7,6 +7,16 @@ import Foundation
 private typealias NativeClientPointer = OpaquePointer
 private typealias NativeResultPointer = OpaquePointer
 
+private struct NativeNamespaceDescriptor {
+    var namespaceId: UInt64 = 0
+    var revision: UInt64 = 0
+    var defaultTtlMs: UInt64 = 0
+    var defaultExpiration: UInt32 = 0
+    var expirationOverride: UInt32 = 0
+    var defaultEviction: UInt32 = 0
+    var evictionOverride: UInt32 = 0
+}
+
 @_silgen_name("openkache_client_abi_version")
 private func nativeAbiVersion() -> UInt32
 
@@ -60,6 +70,76 @@ private func nativeExecuteRaw(
     _ ttlEnabled: UInt8,
     _ ttlMilliseconds: UInt64
 ) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_with_options")
+private func nativeExecuteWithOptions(
+    _ client: NativeClientPointer?,
+    _ operation: UInt32,
+    _ applicationKey: UnsafePointer<UInt8>?,
+    _ applicationKeyLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setFlags: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_raw_with_options")
+private func nativeExecuteRawWithOptions(
+    _ client: NativeClientPointer?,
+    _ operation: UInt32,
+    _ itemID: UnsafePointer<UInt8>?,
+    _ itemIDLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setFlags: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_execute_scoped")
+private func nativeExecuteScoped(
+    _ client: NativeClientPointer?,
+    _ operation: UInt32,
+    _ namespaceID: UInt64,
+    _ itemID: UnsafePointer<UInt8>?,
+    _ itemIDLength: Int,
+    _ value: UnsafePointer<UInt8>?,
+    _ valueLength: Int,
+    _ setFlags: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_namespace_open")
+private func nativeNamespaceOpen(
+    _ client: NativeClientPointer?,
+    _ name: UnsafePointer<UInt8>?,
+    _ nameLength: Int,
+    _ createIfMissing: UInt8,
+    _ policyFlags: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_namespace_update_policy")
+private func nativeNamespaceUpdatePolicy(
+    _ client: NativeClientPointer?,
+    _ namespaceID: UInt64,
+    _ expectedRevision: UInt64,
+    _ policyFlags: UInt8,
+    _ ttlMilliseconds: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_namespace_delete")
+private func nativeNamespaceDelete(
+    _ client: NativeClientPointer?,
+    _ namespaceID: UInt64,
+    _ expectedRevision: UInt64
+) -> NativeResultPointer?
+
+@_silgen_name("openkache_client_namespace_descriptor_decode")
+private func nativeNamespaceDescriptorDecode(
+    _ payload: UnsafePointer<UInt8>?,
+    _ payloadLength: Int,
+    _ output: UnsafeMutablePointer<NativeNamespaceDescriptor>?
+) -> UInt32
 
 @_silgen_name("openkache_client_result_kind")
 private func nativeResultKind(_ result: NativeResultPointer?) -> UInt32
@@ -419,6 +499,164 @@ private enum NativeBridge {
         }
     }
 
+    static func executeWithOptions(
+        _ handle: NativeHandle,
+        operation: UInt32,
+        key: Data = Data(),
+        value: Data = Data(),
+        setFlags: UInt8 = 0,
+        ttl: UInt64 = 0
+    ) throws -> NativeResultPointer {
+        try withBytes(Array(key)) { keyPointer, keyLength in
+            try withBytes(Array(value)) { valuePointer, valueLength in
+                guard let result = nativeExecuteWithOptions(
+                    handle.pointer,
+                    operation,
+                    keyPointer,
+                    keyLength,
+                    valuePointer,
+                    valueLength,
+                    setFlags,
+                    ttl
+                ) else {
+                    throw OpenKacheError("native client returned a null operation result")
+                }
+                return result
+            }
+        }
+    }
+
+    static func executeRawWithOptions(
+        _ handle: NativeHandle,
+        operation: UInt32,
+        itemID: Data,
+        value: Data = Data(),
+        setFlags: UInt8 = 0,
+        ttl: UInt64 = 0
+    ) throws -> NativeResultPointer {
+        try withBytes(Array(itemID)) { itemIDPointer, itemIDLength in
+            try withBytes(Array(value)) { valuePointer, valueLength in
+                guard let result = nativeExecuteRawWithOptions(
+                    handle.pointer,
+                    operation,
+                    itemIDPointer,
+                    itemIDLength,
+                    valuePointer,
+                    valueLength,
+                    setFlags,
+                    ttl
+                ) else {
+                    throw OpenKacheError("native client returned a null raw operation result")
+                }
+                return result
+            }
+        }
+    }
+
+    static func executeScoped(
+        _ handle: NativeHandle,
+        operation: UInt32,
+        namespaceID: UInt64,
+        itemID: Data = Data(),
+        value: Data = Data(),
+        setFlags: UInt8 = 0,
+        ttl: UInt64 = 0
+    ) throws -> NativeResultPointer {
+        try withBytes(Array(itemID)) { itemIDPointer, itemIDLength in
+            try withBytes(Array(value)) { valuePointer, valueLength in
+                guard let result = nativeExecuteScoped(
+                    handle.pointer,
+                    operation,
+                    namespaceID,
+                    itemIDPointer,
+                    itemIDLength,
+                    valuePointer,
+                    valueLength,
+                    setFlags,
+                    ttl
+                ) else {
+                    throw OpenKacheError("native client returned a null scoped operation result")
+                }
+                return result
+            }
+        }
+    }
+
+    static func namespaceOpen(
+        _ handle: NativeHandle,
+        name: String,
+        createIfMissing: Bool,
+        policyFlags: UInt8,
+        ttl: UInt64
+    ) throws -> NativeResultPointer {
+        let bytes = Array(name.utf8)
+        guard bytes.count <= Smithy_Value_Format.namespaceNameMaxBytes else {
+            throw OpenKacheError(
+                "namespace name exceeds \(Smithy_Value_Format.namespaceNameMaxBytes) UTF-8 octets"
+            )
+        }
+        return try withBytes(bytes) { pointer, length in
+            guard let result = nativeNamespaceOpen(
+                handle.pointer,
+                pointer,
+                length,
+                createIfMissing ? 1 : 0,
+                policyFlags,
+                ttl
+            ) else {
+                throw OpenKacheError("native client returned a null namespace-open result")
+            }
+            return result
+        }
+    }
+
+    static func namespaceUpdatePolicy(
+        _ handle: NativeHandle,
+        namespaceID: UInt64,
+        expectedRevision: UInt64,
+        policyFlags: UInt8,
+        ttl: UInt64
+    ) throws -> NativeResultPointer {
+        guard let result = nativeNamespaceUpdatePolicy(
+            handle.pointer,
+            namespaceID,
+            expectedRevision,
+            policyFlags,
+            ttl
+        ) else {
+            throw OpenKacheError("native client returned a null namespace-policy result")
+        }
+        return result
+    }
+
+    static func namespaceDelete(
+        _ handle: NativeHandle,
+        namespaceID: UInt64,
+        expectedRevision: UInt64
+    ) throws -> NativeResultPointer {
+        guard let result = nativeNamespaceDelete(
+            handle.pointer,
+            namespaceID,
+            expectedRevision
+        ) else {
+            throw OpenKacheError("native client returned a null namespace-delete result")
+        }
+        return result
+    }
+
+    static func decodeNamespaceDescriptor(
+        _ payload: Data
+    ) throws -> NativeNamespaceDescriptor {
+        var decoded = NativeNamespaceDescriptor()
+        let status = withBytes(Array(payload)) { pointer, length in
+            nativeNamespaceDescriptorDecode(pointer, length, &decoded)
+        }
+        guard status == 0 else {
+            throw OpenKacheError("native ABI returned an invalid namespace descriptor")
+        }
+        return decoded
+    }
+
     private static func executeNative(
         _ handle: NativeHandle,
         operation: UInt32,
@@ -460,7 +698,9 @@ private enum NativeBridge {
     private static func nativeCondition(_ condition: OpenKacheSetCondition?) -> UInt32 {
         switch condition {
         case .none:
-            return Smithy_Native_Contract.setConditionNone
+            return Smithy_Native_Contract.setConditionAny
+        case .any:
+            return Smithy_Native_Contract.setConditionAny
         case .ifAbsent:
             return Smithy_Native_Contract.setConditionIfAbsent
         case .ifPresent:
@@ -644,14 +884,14 @@ public actor OpenKacheClient {
         options: OpenKacheSetOptions = .init()
     ) async throws -> OpenKacheSetOutcome {
         try validateKey(key)
-        let ttl = try options.ttlMilliseconds()
+        let (setFlags, ttl) = try options.wireOptions()
         return try await perform { handle in
-            let result = try NativeBridge.execute(
+            let result = try NativeBridge.executeWithOptions(
                 handle,
                 operation: UInt32(Smithy_Opcode.set.rawValue),
                 key: key,
                 value: value,
-                condition: options.condition,
+                setFlags: setFlags,
                 ttl: ttl
             )
             return try consumeResult(result) { kind, _ in
@@ -840,14 +1080,14 @@ public actor OpenKacheRawClient {
         options: OpenKacheSetOptions = .init()
     ) async throws -> OpenKacheSetOutcome {
         try validateItemID(itemID)
-        let ttl = try options.ttlMilliseconds()
+        let (setFlags, ttl) = try options.wireOptions()
         return try await perform { handle in
-            let result = try NativeBridge.executeRaw(
+            let result = try NativeBridge.executeRawWithOptions(
                 handle,
                 operation: UInt32(Smithy_Opcode.set.rawValue),
                 itemID: itemID,
                 value: value,
-                condition: options.condition,
+                setFlags: setFlags,
                 ttl: ttl
             )
             return try consumeResult(result) { kind, _ in
@@ -964,42 +1204,273 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
     }
 
     public func get(_ input: Smithy_Get_Input) async throws -> Smithy_Get_Output {
-        Smithy_Get_Output(value: try await get(input.itemId))
+        try validateItemID(input.itemId)
+        let value = try await perform { handle in
+            let result = try NativeBridge.executeScoped(
+                handle,
+                operation: UInt32(Smithy_Opcode.get.rawValue),
+                namespaceID: input.namespaceId,
+                itemID: input.itemId
+            )
+            return try consumeResult(result) { kind, payload in
+                try getOutcome(kind, payload: payload, operation: "GET")
+            }
+        }
+        return Smithy_Get_Output(value: value)
     }
 
     public func set(_ input: Smithy_Set_Input) async throws -> Smithy_Set_Output {
-        let ttl: Duration?
-        if let ttlMilliseconds = input.ttlMilliseconds {
-            guard ttlMilliseconds > 0 else {
-                throw OpenKacheError("set.ttlMilliseconds must be greater than zero")
+        try validateItemID(input.itemId)
+        let (setFlags, ttl) = try smithySetFlags(input)
+        let outcome = try await perform { handle in
+            let result = try NativeBridge.executeScoped(
+                handle,
+                operation: UInt32(Smithy_Opcode.set.rawValue),
+                namespaceID: input.namespaceId,
+                itemID: input.itemId,
+                value: input.value,
+                setFlags: setFlags,
+                ttl: ttl
+            )
+            return try consumeResult(result) { kind, _ in
+                try setOutcome(kind, operation: "SET")
             }
-            ttl = .milliseconds(ttlMilliseconds)
-        } else {
-            ttl = nil
         }
-        let options = OpenKacheSetOptions(
-            condition: input.condition,
-            expiresAfter: ttl
-        )
-        let outcome = try await set(input.itemId, value: input.value, options: options)
         return Smithy_Set_Output(outcome: outcome)
     }
 
     public func delete(_ input: Smithy_Delete_Input) async throws -> Smithy_Delete_Output {
-        let outcome = try await delete(input.itemId)
-        return Smithy_Delete_Output(deleted: outcome == .deleted)
+        try validateItemID(input.itemId)
+        let deleted = try await perform { handle in
+            let result = try NativeBridge.executeScoped(
+                handle,
+                operation: UInt32(Smithy_Opcode.delete.rawValue),
+                namespaceID: input.namespaceId,
+                itemID: input.itemId
+            )
+            return try consumeResult(result) { kind, _ in
+                try deleteOutcome(kind, operation: "DELETE") == .deleted
+            }
+        }
+        return Smithy_Delete_Output(deleted: deleted)
     }
 
     public func stats(_ input: Smithy_Stats_Input) async throws -> Smithy_Stats_Output {
-        _ = input
-        return Smithy_Stats_Output(json: try await stats())
+        let json = try await perform { handle in
+            let result = try NativeBridge.executeScoped(
+                handle,
+                operation: UInt32(Smithy_Opcode.stats.rawValue),
+                namespaceID: input.namespaceId
+            )
+            return try consumeResult(result) { kind, payload in
+                guard kind == Smithy_Native_Contract.resultValue else {
+                    throw OpenKacheError("unexpected STATS result")
+                }
+                guard let text = String(data: payload, encoding: .utf8) else {
+                    throw OpenKacheError("STATS response is not valid UTF-8")
+                }
+                return text
+            }
+        }
+        return Smithy_Stats_Output(json: json)
     }
 
     public func sync(_ input: Smithy_Sync_Input) async throws -> Smithy_Sync_Output {
-        _ = input
-        try await sync()
+        try await perform { handle in
+            let result = try NativeBridge.executeScoped(
+                handle,
+                operation: UInt32(Smithy_Opcode.sync.rawValue),
+                namespaceID: input.namespaceId
+            )
+            try consumeResult(result) { kind, _ in
+                guard kind == Smithy_Native_Contract.resultOk else {
+                    throw OpenKacheError("unexpected SYNC result")
+                }
+            }
+        }
         return Smithy_Sync_Output()
     }
+
+    public func namespaceOpen(
+        _ input: Smithy_Namespace_Open_Input
+    ) async throws -> Smithy_Namespace_Open_Output {
+        if input.createIfMissing && input.policy == nil {
+            throw OpenKacheError("namespace policy is required when createIfMissing is true")
+        }
+        if !input.createIfMissing && input.policy != nil {
+            throw OpenKacheError("namespace policy is only valid when createIfMissing is true")
+        }
+        let (flags, ttl) = try smithyPolicyFlags(input.policy)
+        return try await perform { handle in
+            let result = try NativeBridge.namespaceOpen(
+                handle,
+                name: input.name,
+                createIfMissing: input.createIfMissing,
+                policyFlags: flags,
+                ttl: ttl
+            )
+            return try consumeResult(result) { kind, payload in
+                guard kind == Smithy_Native_Contract.resultOk
+                    || kind == Smithy_Native_Contract.resultCreated
+                else {
+                    throw OpenKacheError("unexpected NAMESPACE_OPEN result")
+                }
+                return Smithy_Namespace_Open_Output(
+                    descriptor: smithyNamespaceDescriptor(
+                        try NativeBridge.decodeNamespaceDescriptor(payload)
+                    ),
+                    created: kind == Smithy_Native_Contract.resultCreated
+                )
+            }
+        }
+    }
+
+    public func namespaceUpdatePolicy(
+        _ input: Smithy_Namespace_Update_Policy_Input
+    ) async throws -> Smithy_Namespace_Update_Policy_Output {
+        let (flags, ttl) = try smithyPolicyFlags(input.policy)
+        return try await perform { handle in
+            let result = try NativeBridge.namespaceUpdatePolicy(
+                handle,
+                namespaceID: input.namespaceId,
+                expectedRevision: input.expectedRevision,
+                policyFlags: flags,
+                ttl: ttl
+            )
+            return try consumeResult(result) { kind, payload in
+                guard kind == Smithy_Native_Contract.resultValue else {
+                    throw OpenKacheError("unexpected NAMESPACE_UPDATE_POLICY result")
+                }
+                return Smithy_Namespace_Update_Policy_Output(
+                    descriptor: smithyNamespaceDescriptor(
+                        try NativeBridge.decodeNamespaceDescriptor(payload)
+                    )
+                )
+            }
+        }
+    }
+
+    public func namespaceDelete(
+        _ input: Smithy_Namespace_Delete_Input
+    ) async throws -> Smithy_Namespace_Delete_Output {
+        try await perform { handle in
+            let result = try NativeBridge.namespaceDelete(
+                handle,
+                namespaceID: input.namespaceId,
+                expectedRevision: input.expectedRevision
+            )
+            try consumeResult(result) { kind, _ in
+                guard kind == Smithy_Native_Contract.resultOk else {
+                    throw OpenKacheError("unexpected NAMESPACE_DELETE result")
+                }
+            }
+        }
+        return Smithy_Namespace_Delete_Output()
+    }
+}
+
+private func smithySetFlags(
+    _ input: Smithy_Set_Input
+) throws -> (flags: UInt8, ttl: UInt64) {
+    var flags: UInt8
+    switch input.condition {
+    case nil, .any:
+        flags = Smithy_Value_Format.setConditionAnyBits
+    case .ifAbsent:
+        flags = Smithy_Value_Format.setIfAbsentBits
+    case .ifPresent:
+        flags = Smithy_Value_Format.setIfPresentBits
+    }
+    switch input.expirationMode {
+    case nil, .inherit:
+        guard input.ttlMilliseconds == nil else {
+            throw OpenKacheError("ttlMilliseconds requires explicitTtl expiration mode")
+        }
+        flags |= Smithy_Value_Format.setInheritExpirationBits
+    case .noExpiry:
+        guard input.ttlMilliseconds == nil else {
+            throw OpenKacheError("ttlMilliseconds is not valid with noExpiry")
+        }
+        flags |= Smithy_Value_Format.setNoExpiryBits
+    case .explicitTtl:
+        guard let ttl = input.ttlMilliseconds, ttl > 0 else {
+            throw OpenKacheError("ttlMilliseconds must be positive with explicitTtl")
+        }
+        flags |= Smithy_Value_Format.setExplicitTtlBits
+    }
+    switch input.evictionMode {
+    case nil, .inherit:
+        flags |= Smithy_Value_Format.setInheritEvictionBits
+    case .evictable:
+        flags |= Smithy_Value_Format.setEvictableBits
+    case .evictionProtected:
+        flags |= Smithy_Value_Format.setEvictionProtectedBits
+    }
+    return (flags, input.ttlMilliseconds ?? 0)
+}
+
+private func smithyPolicyFlags(
+    _ policy: Smithy_Namespace_Policy?
+) throws -> (flags: UInt8, ttl: UInt64) {
+    guard let policy else {
+        return (0, 0)
+    }
+    var flags: UInt8
+    switch policy.defaultExpiration {
+    case .noExpiry:
+        guard policy.defaultTtlMilliseconds == nil else {
+            throw OpenKacheError("defaultTtlMilliseconds is invalid with noExpiry")
+        }
+        flags = Smithy_Value_Format.policyNoExpiry
+    case .fixedTtl:
+        guard let ttl = policy.defaultTtlMilliseconds, ttl > 0 else {
+            throw OpenKacheError("defaultTtlMilliseconds must be positive with fixedTtl")
+        }
+        flags = Smithy_Value_Format.policyFixedTtl
+    }
+    switch policy.expirationOverride {
+    case .allowed:
+        flags |= Smithy_Value_Format.policyExpirationOverride
+    case .disallowed:
+        break
+    }
+    switch policy.defaultEviction {
+    case .evictable:
+        break
+    case .evictionProtected:
+        flags |= Smithy_Value_Format.policyEvictionProtected
+    }
+    switch policy.evictionOverride {
+    case .allowed:
+        flags |= Smithy_Value_Format.policyEvictionOverride
+    case .disallowed:
+        break
+    }
+    return (flags, policy.defaultTtlMilliseconds ?? 0)
+}
+
+private func smithyNamespaceDescriptor(
+    _ decoded: NativeNamespaceDescriptor
+) -> Smithy_Namespace_Descriptor {
+    return Smithy_Namespace_Descriptor(
+        namespaceId: decoded.namespaceId,
+        revision: decoded.revision,
+        policy: Smithy_Namespace_Policy(
+            defaultExpiration: decoded.defaultExpiration == 1 ? .fixedTtl : .noExpiry,
+            defaultTtlMilliseconds: decoded.defaultExpiration == 1
+                ? decoded.defaultTtlMs
+                : nil,
+            expirationOverride: decoded.expirationOverride == 1
+                ? .allowed
+                : .disallowed,
+            defaultEviction: decoded.defaultEviction == 1
+                ? .evictionProtected
+                : .evictable,
+            evictionOverride: decoded.evictionOverride == 1
+                ? .allowed
+                : .disallowed
+        )
+    )
 }
 
 @_silgen_name("openkache_client_connection_state")
@@ -1009,15 +1480,23 @@ private func nativeConnectionState(_ client: NativeClientPointer?) -> UInt32
 public struct OpenKacheSetOptions: Sendable {
     /// Conditional write behavior, or nil for unconditional SET.
     public var condition: OpenKacheSetCondition?
+    /// Item expiration selection. Nil inherits the namespace policy.
+    public var expirationMode: Smithy_Expiration_Mode?
+    /// Item capacity-eviction selection. Nil inherits the namespace policy.
+    public var evictionMode: Smithy_Eviction_Mode?
     /// Positive relative lifetime.
     public var expiresAfter: Duration?
 
     /// Creates unconditional persistent options.
     public init(
         condition: OpenKacheSetCondition? = nil,
+        expirationMode: Smithy_Expiration_Mode? = nil,
+        evictionMode: Smithy_Eviction_Mode? = nil,
         expiresAfter: Duration? = nil
     ) {
         self.condition = condition
+        self.expirationMode = expirationMode
+        self.evictionMode = evictionMode
         self.expiresAfter = expiresAfter
     }
 
@@ -1026,5 +1505,45 @@ public struct OpenKacheSetOptions: Sendable {
             return nil
         }
         return try milliseconds(expiresAfter, named: "expiresAfter")
+    }
+
+    fileprivate func wireOptions() throws -> (Flags: UInt8, Ttl: UInt64) {
+        var flags: UInt8
+        switch condition {
+        case nil, .any:
+            flags = Smithy_Value_Format.setConditionAnyBits
+        case .ifAbsent:
+            flags = Smithy_Value_Format.setIfAbsentBits
+        case .ifPresent:
+            flags = Smithy_Value_Format.setIfPresentBits
+        }
+        let ttl = try ttlMilliseconds()
+        if let expirationMode {
+            switch expirationMode {
+            case .inherit where ttl == nil:
+                flags |= Smithy_Value_Format.setInheritExpirationBits
+            case .noExpiry where ttl == nil:
+                flags |= Smithy_Value_Format.setNoExpiryBits
+            case .explicitTtl where ttl != nil:
+                flags |= Smithy_Value_Format.setExplicitTtlBits
+            case .inherit, .noExpiry:
+                throw OpenKacheError("expiresAfter is only valid with explicitTtl expiration mode")
+            case .explicitTtl:
+                throw OpenKacheError("expiresAfter must be positive with explicitTtl expiration mode")
+            }
+        } else if ttl != nil {
+            flags |= Smithy_Value_Format.setExplicitTtlBits
+        } else {
+            flags |= Smithy_Value_Format.setInheritExpirationBits
+        }
+        switch evictionMode {
+        case nil, .inherit:
+            flags |= Smithy_Value_Format.setInheritEvictionBits
+        case .evictable:
+            flags |= Smithy_Value_Format.setEvictableBits
+        case .evictionProtected:
+            flags |= Smithy_Value_Format.setEvictionProtectedBits
+        }
+        return (flags, ttl ?? 0)
     }
 }

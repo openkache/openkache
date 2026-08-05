@@ -12,6 +12,7 @@ const BACKEND: Backend = Backend::Quinn;
 pub(super) struct Connection {
     _endpoint: quinn::Endpoint,
     inner: quinn::Connection,
+    negotiated_alpn: Vec<u8>,
 }
 
 pub(super) struct Stream {
@@ -50,14 +51,33 @@ pub(super) async fn connect(
         .await
         .map_err(|_| TransportError::timeout(BACKEND, Operation::ConnectionSetup, timeout))?
         .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?;
+    let negotiated_alpn = inner
+        .handshake_data()
+        .and_then(|data| {
+            data.downcast::<quinn::crypto::rustls::HandshakeData>()
+                .ok()
+        })
+        .and_then(|data| data.protocol)
+        .ok_or_else(|| {
+            TransportError::backend(
+                BACKEND,
+                Operation::Handshake,
+                "server did not negotiate an ALPN protocol",
+            )
+        })?;
     Ok(Connection {
         _endpoint: endpoint,
         inner,
+        negotiated_alpn,
     })
 }
 
 impl BackendConnection for Connection {
     type Stream = Stream;
+
+    fn negotiated_alpn(&self) -> Option<&[u8]> {
+        Some(&self.negotiated_alpn)
+    }
 
     async fn open_bi(&self, timeout: Duration) -> Result<Self::Stream, TransportError> {
         let (send, receive) = tokio::time::timeout(timeout, self.inner.open_bi())

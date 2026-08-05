@@ -9,6 +9,51 @@ const (
 	SmithyItemIDBytes = 32
 	// SmithyMaxValueBytes is the protocol value and payload ceiling.
 	SmithyMaxValueBytes = 67108864
+	// SmithyOpcodeBytes and SmithyStatusBytes are fixed opcode/status widths.
+	SmithyOpcodeBytes                         = 1
+	SmithyStatusBytes                         = 1
+	SmithyRequestFixedBytes                   = 1
+	SmithyResponseFixedBytes                  = 1
+	SmithyMinVaruintBytes                     = 1
+	SmithyMaxVaruintBytes                     = 9
+	SmithyNamespaceIDBytes                    = 8
+	SmithyNamespaceRevisionBytes              = 8
+	SmithyNamespaceNameLengthBytes            = 1
+	SmithyNamespaceNameMaxBytes               = 255
+	SmithySetFlagsBytes                       = 1
+	SmithySetConditionMask                    = 3
+	SmithySetConditionAnyBits                 = 0
+	SmithySetIfAbsentBits                     = 1
+	SmithySetIfPresentBits                    = 2
+	SmithySetConditionReservedBits            = 3
+	SmithySetExpirationMask                   = 12
+	SmithySetInheritExpirationBits            = 0
+	SmithySetNoExpiryBits                     = 4
+	SmithySetExplicitTTLBits                  = 8
+	SmithySetExpirationReservedBits           = 12
+	SmithySetEvictionMask                     = 48
+	SmithySetInheritEvictionBits              = 0
+	SmithySetEvictableBits                    = 16
+	SmithySetEvictionProtectedBits            = 32
+	SmithySetEvictionReservedBits             = 48
+	SmithySetReservedMask                     = 192
+	SmithyOpenFlagsBytes                      = 1
+	SmithyOpenCreateIfMissing                 = 1
+	SmithyOpenReservedMask                    = 254
+	SmithyDeleteFlagsBytes                    = 1
+	SmithyDeleteIfEmpty                       = 0
+	SmithyDeleteModeMask                      = 3
+	SmithyDeleteReservedMask                  = 252
+	SmithyPolicyFlagsBytes                    = 1
+	SmithyPolicyDefaultExpirationMask         = 3
+	SmithyPolicyNoExpiry                      = 0
+	SmithyPolicyFixedTTL                      = 1
+	SmithyPolicyDefaultExpirationReservedBits = 3
+	SmithyPolicyExpirationOverride            = 4
+	SmithyPolicyEvictionProtected             = 8
+	SmithyPolicyEvictionOverride              = 16
+	SmithyPolicyReservedMask                  = 224
+	SmithyErrorStatusMinimum                  = 128
 	// SmithyDataProtectionKeyBytes is the shared key width.
 	SmithyDataProtectionKeyBytes = 32
 	// SmithyValueEncryptionNone selects unprotected values.
@@ -21,22 +66,25 @@ const (
 
 // Smithy operation values carried by the native ABI.
 const (
-	SmithyOpcodePing   uint32 = 1
-	SmithyOpcodeGet    uint32 = 2
-	SmithyOpcodeSet    uint32 = 3
-	SmithyOpcodeDelete uint32 = 4
-	SmithyOpcodeStats  uint32 = 5
-	SmithyOpcodeSync   uint32 = 6
+	SmithyOpcodePing                  uint32 = 1
+	SmithyOpcodeGet                   uint32 = 2
+	SmithyOpcodeSet                   uint32 = 3
+	SmithyOpcodeDelete                uint32 = 4
+	SmithyOpcodeStats                 uint32 = 5
+	SmithyOpcodeSync                  uint32 = 6
+	SmithyOpcodeNamespaceOpen         uint32 = 7
+	SmithyOpcodeNamespaceUpdatePolicy uint32 = 8
+	SmithyOpcodeNamespaceDelete       uint32 = 9
 )
 
 // Smithy native ABI values shared by language adapters.
 const (
 	// SmithyFFIABIVersion is the native ABI version implemented by the core.
-	SmithyFFIABIVersion uint32 = 2
+	SmithyFFIABIVersion uint32 = 4
 	// SmithyFFIOperationGetJson identifies the native operation GetJson.
-	SmithyFFIOperationGetJson uint32 = 7
+	SmithyFFIOperationGetJson uint32 = 16
 	// SmithyFFIOperationSetJson identifies the native operation SetJson.
-	SmithyFFIOperationSetJson uint32 = 8
+	SmithyFFIOperationSetJson uint32 = 17
 	// SmithyFFIOperationReconnect identifies the native operation Reconnect.
 	SmithyFFIOperationReconnect uint32 = 4294967041
 	// SmithyFFIResultError is the native ABI result kind for Error.
@@ -59,8 +107,8 @@ const (
 	SmithyFFIResultConnected uint32 = 8
 	// SmithyFFIResultNotStored is the native ABI result kind for NotStored.
 	SmithyFFIResultNotStored uint32 = 9
-	// SmithyFFISetConditionNone is the native ABI SET condition for None.
-	SmithyFFISetConditionNone uint32 = 0
+	// SmithyFFISetConditionAny is the native ABI SET condition for Any.
+	SmithyFFISetConditionAny uint32 = 0
 	// SmithyFFISetConditionIfAbsent is the native ABI SET condition for IfAbsent.
 	SmithyFFISetConditionIfAbsent uint32 = 1
 	// SmithyFFISetConditionIfPresent is the native ABI SET condition for IfPresent.
@@ -107,6 +155,32 @@ const (
 
 // Smithy API enum string values extracted from the Smithy service contract.
 const (
+	// SmithyEvictionDefaultEvictableValue is the Smithy EvictionDefault value for evictable.
+	SmithyEvictionDefaultEvictableValue = "evictable"
+	// SmithyEvictionDefaultEvictionProtectedValue is the Smithy EvictionDefault value for eviction_protected.
+	SmithyEvictionDefaultEvictionProtectedValue = "eviction_protected"
+	// SmithyEvictionModeInheritValue is the Smithy EvictionMode value for inherit.
+	SmithyEvictionModeInheritValue = "inherit"
+	// SmithyEvictionModeEvictableValue is the Smithy EvictionMode value for evictable.
+	SmithyEvictionModeEvictableValue = "evictable"
+	// SmithyEvictionModeEvictionProtectedValue is the Smithy EvictionMode value for eviction_protected.
+	SmithyEvictionModeEvictionProtectedValue = "eviction_protected"
+	// SmithyExpirationDefaultNoExpiryValue is the Smithy ExpirationDefault value for no_expiry.
+	SmithyExpirationDefaultNoExpiryValue = "no_expiry"
+	// SmithyExpirationDefaultFixedTtlValue is the Smithy ExpirationDefault value for fixed_ttl.
+	SmithyExpirationDefaultFixedTtlValue = "fixed_ttl"
+	// SmithyExpirationModeInheritValue is the Smithy ExpirationMode value for inherit.
+	SmithyExpirationModeInheritValue = "inherit"
+	// SmithyExpirationModeNoExpiryValue is the Smithy ExpirationMode value for no_expiry.
+	SmithyExpirationModeNoExpiryValue = "no_expiry"
+	// SmithyExpirationModeExplicitTtlValue is the Smithy ExpirationMode value for explicit_ttl.
+	SmithyExpirationModeExplicitTtlValue = "explicit_ttl"
+	// SmithyOverridePolicyAllowedValue is the Smithy OverridePolicy value for allowed.
+	SmithyOverridePolicyAllowedValue = "allowed"
+	// SmithyOverridePolicyDisallowedValue is the Smithy OverridePolicy value for disallowed.
+	SmithyOverridePolicyDisallowedValue = "disallowed"
+	// SmithySetConditionAnyValue is the Smithy SetCondition value for any.
+	SmithySetConditionAnyValue = "any"
 	// SmithySetConditionIfAbsentValue is the Smithy SetCondition value for if_absent.
 	SmithySetConditionIfAbsentValue = "if_absent"
 	// SmithySetConditionIfPresentValue is the Smithy SetCondition value for if_present.

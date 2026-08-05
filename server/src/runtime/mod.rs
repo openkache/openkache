@@ -14,7 +14,7 @@ use aes::{
     Aes256,
     cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
-use openkache_protocol::{ItemId, SetOptions};
+use openkache_protocol::{ItemId, NAMESPACE_ID_BYTES, SetOptions};
 
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
@@ -73,6 +73,31 @@ pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> Sto
     server_cipher.encrypt_blocks(blocks);
 
     StorageKey::new(bytes)
+}
+
+/// Derives a storage key for the `(namespace_id, item_id)` wire identity.
+///
+/// The legacy unscoped helper remains available to benchmark and RESP callers;
+/// network requests must use this scoped derivation so equal item IDs in two
+/// namespaces cannot address the same storage record.
+pub(crate) fn derive_scoped_storage_key(
+    server_cipher: &Aes256,
+    namespace_id: u64,
+    item_id: ItemId,
+) -> StorageKey {
+    // Derive a namespace-specific AES key before applying the existing fixed-size
+    // AES-MDS-AES permutation. Mixing the namespace into the item input with XOR
+    // would permit deterministic cross-namespace collisions for related item IDs.
+    // A separate key makes each namespace an independent permutation, so equal
+    // item IDs remain distinct and cross-namespace collisions are computationally
+    // negligible.
+    let mut scope_material = [0u8; 32];
+    scope_material[..NAMESPACE_ID_BYTES].copy_from_slice(&namespace_id.to_be_bytes());
+    scope_material[NAMESPACE_ID_BYTES..].copy_from_slice(b"OpenKache namespace v1!!");
+    let namespace_key = derive_storage_key(server_cipher, ItemId::new(scope_material)).into_bytes();
+    let namespace_cipher = Aes256::new_from_slice(&namespace_key)
+        .expect("AES-256 namespace derivation always produces a 32-byte key");
+    derive_storage_key(&namespace_cipher, item_id)
 }
 
 fn gf_double(byte: u8) -> u8 {
@@ -357,6 +382,16 @@ impl ThreadedKvkache {
         derive_storage_key(&self.server_cipher, item_id)
     }
 
+    fn scoped_storage_key(&self, namespace_id: u64, item_id: ItemId) -> StorageKey {
+        derive_scoped_storage_key(&self.server_cipher, namespace_id, item_id)
+    }
+
+    /// Returns the storage worker that owns one namespace-scoped item.
+    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
+        let storage_key = self.scoped_storage_key(namespace_id, item_id);
+        self.owner(&storage_key)
+    }
+
     fn request(
         &self,
         worker: usize,
@@ -439,6 +474,28 @@ impl ThreadedKvkache {
         }
     }
 
+    /// Retrieves an item from a namespace-scoped wire identity.
+    pub(crate) async fn get_async_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<Option<StoredItemValue>> {
+        let storage_key = self.scoped_storage_key(namespace_id, item_id);
+        let worker = self.owner(&storage_key);
+        match self
+            .request_async(worker, |response| WorkerRequest::Get {
+                storage_key,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Value(value) => Ok(value),
+            response => Err(KvError::Worker(format!(
+                "unexpected namespace get response: {response:?}"
+            ))),
+        }
+    }
+
     pub fn set(&self, item_id: ItemId, value: Vec<u8>) -> Result<SetOutcome> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
@@ -479,6 +536,32 @@ impl ThreadedKvkache {
         }
     }
 
+    /// Stores an item under a namespace-scoped wire identity.
+    pub(crate) async fn set_async_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: StoredItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        let storage_key = self.scoped_storage_key(namespace_id, item_id);
+        let worker = self.owner(&storage_key);
+        match self
+            .request_async(worker, |response| WorkerRequest::Set {
+                storage_key,
+                value,
+                options,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Set(outcome) => Ok(outcome),
+            response => Err(KvError::Worker(format!(
+                "unexpected namespace set response: {response:?}"
+            ))),
+        }
+    }
+
     pub fn delete(&self, item_id: ItemId) -> Result<bool> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
@@ -507,6 +590,28 @@ impl ThreadedKvkache {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
             response => Err(KvError::Worker(format!(
                 "unexpected delete response: {response:?}"
+            ))),
+        }
+    }
+
+    /// Deletes an item under a namespace-scoped wire identity.
+    pub(crate) async fn delete_async_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<bool> {
+        let storage_key = self.scoped_storage_key(namespace_id, item_id);
+        let worker = self.owner(&storage_key);
+        match self
+            .request_async(worker, |response| WorkerRequest::Delete {
+                storage_key,
+                response,
+            })
+            .await?
+        {
+            WorkerResponse::Deleted(deleted) => Ok(deleted),
+            response => Err(KvError::Worker(format!(
+                "unexpected namespace delete response: {response:?}"
             ))),
         }
     }
@@ -927,6 +1032,29 @@ impl ThreadedKvkache {
         for thread_id in 0..self.workers.len() {
             match self
                 .request_async(thread_id, |response| WorkerRequest::Sync { response })
+                .await?
+            {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes exactly the storage workers that have observed mutations for a namespace.
+    pub(crate) async fn sync_workers_async(&self, workers: &[usize]) -> Result<()> {
+        for &worker in workers {
+            if worker >= self.workers.len() {
+                return Err(KvError::Worker(format!(
+                    "namespace references unknown storage worker {worker}"
+                )));
+            }
+            match self
+                .request_async(worker, |response| WorkerRequest::Sync { response })
                 .await?
             {
                 WorkerResponse::Synced => {}

@@ -72,12 +72,29 @@ For an exact protocol item ID, connect the raw adapter:
 ```swift
 let raw = try await OpenKacheRawClient.connect(options: options)
 let itemID = Data(repeating: 0x42, count: Smithy_Value_Format.itemIdBytes)
-let output = try await raw.set(
-    itemID,
-    value: Data("opaque".utf8),
-    options: OpenKacheSetOptions(condition: .ifAbsent)
+let namespace = try await raw.namespaceOpen(
+    Smithy_Namespace_Open_Input(
+        name: "example",
+        createIfMissing: true,
+        policy: Smithy_Namespace_Policy(
+            defaultExpiration: .noExpiry,
+            expirationOverride: .allowed,
+            defaultEviction: .evictable,
+            evictionOverride: .allowed
+        )
+    )
 )
-let smithyOutput = try await raw.get(Smithy_Get_Input(itemId: itemID))
+let output = try await raw.set(
+    Smithy_Set_Input(
+        namespaceId: namespace.descriptor.namespaceId,
+        itemId: itemID,
+        value: Data("opaque".utf8),
+        condition: .ifAbsent
+    )
+)
+let smithyOutput = try await raw.get(
+    Smithy_Get_Input(namespaceId: namespace.descriptor.namespaceId, itemId: itemID)
+)
 _ = (output, smithyOutput)
 ```
 

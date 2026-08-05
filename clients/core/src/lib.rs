@@ -17,7 +17,7 @@ pub mod value;
 pub mod value_envelope;
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -27,12 +27,15 @@ use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, St
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
-    Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy, ServerTrust,
-    SetOptions,
+    AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, Endpoint, PrivateKey, RetryPolicy,
+    ServerTrust, SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
-pub use openkache_protocol::{ITEM_ID_BYTES, SetCondition};
+pub use openkache_protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ITEM_ID_BYTES,
+    NamespaceDescriptor, NamespacePolicy, OverridePolicy, SetCondition,
+};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -78,6 +81,12 @@ pub enum Operation {
     Stats,
     /// `SYNC` request.
     Sync,
+    /// `NAMESPACE_OPEN` request.
+    NamespaceOpen,
+    /// `NAMESPACE_UPDATE_POLICY` request.
+    NamespaceUpdatePolicy,
+    /// `NAMESPACE_DELETE` request.
+    NamespaceDelete,
     /// DNS lookup.
     DnsResolution,
     /// Initial QUIC and TLS connection establishment.
@@ -117,6 +126,9 @@ impl std::fmt::Display for Operation {
             Self::Delete => "DELETE",
             Self::Stats => "STATS",
             Self::Sync => "SYNC",
+            Self::NamespaceOpen => "NAMESPACE_OPEN",
+            Self::NamespaceUpdatePolicy => "NAMESPACE_UPDATE_POLICY",
+            Self::NamespaceDelete => "NAMESPACE_DELETE",
             Self::DnsResolution => "DNS resolution",
             Self::ConnectionSetup => "connection setup",
             Self::ConnectionRetry => "connection retry",
@@ -153,6 +165,16 @@ pub enum ServerErrorCode {
     Forbidden,
     /// The server encountered an internal failure.
     Internal,
+    /// The request could not be admitted because protected items consume available capacity.
+    NoCapacity,
+    /// The request selected an item policy disallowed by its namespace.
+    PolicyConflict,
+    /// An optimistic namespace revision did not match.
+    Conflict,
+    /// The requested namespace does not exist.
+    NamespaceNotFound,
+    /// Namespace deletion requires an empty namespace.
+    NamespaceNotEmpty,
 }
 
 /// All client-level failures.
@@ -330,13 +352,18 @@ pub enum DeleteOutcome {
 struct Core<C: ClientConnection> {
     connection: RwLock<Arc<C>>,
     reconnect: futures_util::lock::Mutex<()>,
+    namespace_open: futures_util::lock::Mutex<()>,
     address: SocketAddr,
     server_name: String,
     tls: rustls::ClientConfig,
+    alpn: AlpnPolicy,
     connect_timeout: Duration,
     request_timeout: Duration,
     retry: RetryPolicy,
     max_in_flight: usize,
+    namespace_id: AtomicU64,
+    namespace_name: Vec<u8>,
+    namespace_policy: NamespacePolicy,
     state: AtomicU32,
 }
 
@@ -364,6 +391,14 @@ impl RequestFailure {
             invalidates_connection,
         }
     }
+
+    fn after_response(error: Error) -> Self {
+        Self {
+            error,
+            may_have_reached_server: true,
+            invalidates_connection: false,
+        }
+    }
 }
 
 impl<C: ClientConnection> Core<C> {
@@ -371,9 +406,13 @@ impl<C: ClientConnection> Core<C> {
         address: SocketAddr,
         server_name: String,
         tls: rustls::ClientConfig,
+        alpn: AlpnPolicy,
         timeouts: ClientTimeouts,
         retry: RetryPolicy,
         max_in_flight: usize,
+        namespace_id: Option<u64>,
+        namespace_name: Vec<u8>,
+        namespace_policy: NamespacePolicy,
         deadline: transport::Deadline,
     ) -> Result<Self> {
         let connection = C::connect(
@@ -384,18 +423,35 @@ impl<C: ClientConnection> Core<C> {
             max_in_flight,
         )
         .await?;
-        Ok(Self {
+        if let Some(protocol) = connection.negotiated_alpn() {
+            if let Err(error) = alpn.validate_negotiated(protocol) {
+                connection.close();
+                return Err(error);
+            }
+        } else {
+            connection.close();
+            return Err(Error::Connection(
+                "server did not negotiate an ALPN protocol".into(),
+            ));
+        }
+        let core = Self {
             connection: RwLock::new(Arc::new(connection)),
             reconnect: futures_util::lock::Mutex::new(()),
+            namespace_open: futures_util::lock::Mutex::new(()),
             address,
             server_name,
             tls,
+            alpn,
             connect_timeout: timeouts.connect,
             request_timeout: timeouts.request,
             retry,
             max_in_flight,
+            namespace_id: AtomicU64::new(namespace_id.unwrap_or(0)),
+            namespace_name,
+            namespace_policy,
             state: AtomicU32::new(ConnectionState::Connected.code()),
-        })
+        };
+        Ok(core)
     }
 
     fn connection_state(&self) -> ConnectionState {
@@ -419,15 +475,34 @@ impl<C: ClientConnection> Core<C> {
     }
 
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.get_in_namespace(namespace_id, item_id).await
+    }
+
+    async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<GetOutcome<ItemValue>> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new(Opcode::Get, Some(item_id.into_protocol()), Vec::new())
-                    .map_err(Error::protocol)?,
+                Request::new_scoped(
+                    Opcode::Get,
+                    namespace_id,
+                    Some(item_id.into_protocol()),
+                    Vec::new(),
+                )
+                .map_err(Error::protocol)?,
             )
             .await?;
         match response.status {
             Status::Ok => Ok(GetOutcome::Found(ItemValue::new(response.payload))),
-            Status::NotFound => Ok(GetOutcome::NotFound),
+            Status::NotFound if response.payload.is_empty() => Ok(GetOutcome::NotFound),
+            Status::NotFound => Err(Error::UnexpectedResponse {
+                operation: Operation::Get,
+                message: "NotFound response must have an empty payload".into(),
+            }),
             status => Err(unexpected_status(Operation::Get, status)),
         }
     }
@@ -438,49 +513,116 @@ impl<C: ClientConnection> Core<C> {
         value: ItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
-        let request = Request::new_set(
+        let namespace_id = self.ensure_namespace().await?;
+        self.set_in_namespace(namespace_id, item_id, value, options)
+            .await
+    }
+
+    async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: ItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        validate_client_namespace_id(namespace_id)?;
+        let request = Request::new_scoped_with_options(
             Opcode::Set,
+            namespace_id,
             Some(item_id.into_protocol()),
             options.into_protocol()?,
             value.into_bytes(),
         )
         .map_err(Error::protocol)?;
-        match self.request(request).await?.status {
-            Status::Created => Ok(SetOutcome::Created),
-            Status::Replaced => Ok(SetOutcome::Replaced),
-            Status::NotStored => Ok(SetOutcome::NotStored),
+        let response = self.request(request).await?;
+        match response.status {
+            Status::Created if response.payload.is_empty() => Ok(SetOutcome::Created),
+            Status::Replaced if response.payload.is_empty() => Ok(SetOutcome::Replaced),
+            Status::NotStored if response.payload.is_empty() => Ok(SetOutcome::NotStored),
+            Status::Created | Status::Replaced | Status::NotStored => {
+                Err(Error::UnexpectedResponse {
+                    operation: Operation::Set,
+                    message: "SET success responses must have an empty payload".into(),
+                })
+            }
             status => Err(unexpected_status(Operation::Set, status)),
         }
     }
 
     async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.delete_in_namespace(namespace_id, item_id).await
+    }
+
+    async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<DeleteOutcome> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new(Opcode::Delete, Some(item_id.into_protocol()), Vec::new())
-                    .map_err(Error::protocol)?,
+                Request::new_scoped(
+                    Opcode::Delete,
+                    namespace_id,
+                    Some(item_id.into_protocol()),
+                    Vec::new(),
+                )
+                .map_err(Error::protocol)?,
             )
             .await?;
         match response.status {
-            Status::Deleted => Ok(DeleteOutcome::Deleted),
-            Status::NotFound => Ok(DeleteOutcome::NotFound),
+            Status::Deleted if response.payload.is_empty() => Ok(DeleteOutcome::Deleted),
+            Status::NotFound if response.payload.is_empty() => Ok(DeleteOutcome::NotFound),
+            Status::Deleted | Status::NotFound => Err(Error::UnexpectedResponse {
+                operation: Operation::Delete,
+                message: "DELETE domain responses must have an empty payload".into(),
+            }),
             status => Err(unexpected_status(Operation::Delete, status)),
         }
     }
 
     async fn stats(&self) -> Result<String> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.stats_in_namespace(namespace_id).await
+    }
+
+    async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
-            .request(Request::new(Opcode::Stats, None, Vec::new()).map_err(Error::protocol)?)
+            .request(
+                Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
+                    .map_err(Error::protocol)?,
+            )
             .await?;
         expect_status(Operation::Stats, response.status, &[Status::Ok])?;
+        validate_stats_payload(&response.payload)?;
         String::from_utf8(response.payload)
             .map_err(|error| Error::Protocol(format!("STATS response is not UTF-8: {error}")))
     }
 
     async fn sync(&self) -> Result<()> {
+        let namespace_id = self.ensure_namespace().await?;
+        self.sync_in_namespace(namespace_id).await
+    }
+
+    async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+        validate_client_namespace_id(namespace_id)?;
         let response = self
-            .request(Request::new(Opcode::Sync, None, Vec::new()).map_err(Error::protocol)?)
+            .request(
+                Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
+                    .map_err(Error::protocol)?,
+            )
             .await?;
-        expect_status(Operation::Sync, response.status, &[Status::Ok])
+        expect_status(Operation::Sync, response.status, &[Status::Ok])?;
+        if response.payload.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::UnexpectedResponse {
+                operation: Operation::Sync,
+                message: "SYNC success responses must have an empty payload".into(),
+            })
+        }
     }
 
     async fn request(&self, request: Request) -> Result<Response> {
@@ -491,7 +633,8 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats);
+        let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats)
+            || (request.opcode == Opcode::NamespaceOpen && !request.create_if_missing);
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
@@ -545,12 +688,159 @@ impl<C: ClientConnection> Core<C> {
         ))
     }
 
+    fn selected_namespace_id(&self) -> Result<u64> {
+        match self.namespace_id.load(Ordering::Acquire) {
+            namespace_id @ 1.. => Ok(namespace_id),
+            0 => Err(Error::configuration(
+                "namespace",
+                "no namespace is selected; call namespace_open first",
+            )),
+        }
+    }
+
+    async fn ensure_namespace(&self) -> Result<u64> {
+        if let Ok(namespace_id) = self.selected_namespace_id() {
+            return Ok(namespace_id);
+        }
+        let _guard = self.namespace_open.lock().await;
+        if let Ok(namespace_id) = self.selected_namespace_id() {
+            return Ok(namespace_id);
+        }
+        self.open_namespace(
+            self.namespace_name.clone(),
+            true,
+            Some(self.namespace_policy),
+        )
+        .await
+        .map(|descriptor| descriptor.namespace_id)
+    }
+
+    /// Returns the currently selected server-assigned namespace ID.
+    fn namespace_id(&self) -> Option<u64> {
+        match self.namespace_id.load(Ordering::Acquire) {
+            namespace_id @ 1.. => Some(namespace_id),
+            0 => None,
+        }
+    }
+
+    async fn open_namespace(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<NamespaceDescriptor> {
+        self.open_namespace_with_outcome(name, create_if_missing, policy)
+            .await
+            .map(|(descriptor, _created)| descriptor)
+    }
+
+    async fn open_namespace_with_outcome(
+        &self,
+        name: Vec<u8>,
+        create_if_missing: bool,
+        policy: Option<NamespacePolicy>,
+    ) -> Result<(NamespaceDescriptor, bool)> {
+        let response = self
+            .request(
+                Request::namespace_open(name, create_if_missing, policy)
+                    .map_err(Error::protocol)?,
+            )
+            .await?;
+        let operation = Operation::NamespaceOpen;
+        let status = response.status;
+        if !matches!(status, Status::Ok | Status::Created) {
+            return Err(unexpected_status(operation, status));
+        }
+        let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
+        self.namespace_id
+            .store(descriptor.namespace_id, Ordering::Release);
+        Ok((descriptor, status == Status::Created))
+    }
+
+    async fn update_namespace_policy(
+        &self,
+        namespace_id: u64,
+        expected_revision: u64,
+        policy: NamespacePolicy,
+    ) -> Result<NamespaceDescriptor> {
+        let response = self
+            .request(
+                Request::namespace_update_policy(namespace_id, expected_revision, policy)
+                    .map_err(Error::protocol)?,
+            )
+            .await?;
+        expect_status(
+            Operation::NamespaceUpdatePolicy,
+            response.status,
+            &[Status::Ok],
+        )?;
+        let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
+        if descriptor.namespace_id != namespace_id {
+            return Err(Error::UnexpectedResponse {
+                operation: Operation::NamespaceUpdatePolicy,
+                message: format!(
+                    "descriptor namespace ID {} does not match requested namespace ID {namespace_id}",
+                    descriptor.namespace_id
+                ),
+            });
+        }
+        let expected_next_revision = expected_revision.checked_add(1).ok_or_else(|| {
+            Error::UnexpectedResponse {
+                operation: Operation::NamespaceUpdatePolicy,
+                message: "successful policy update cannot follow the maximum revision".into(),
+            }
+        })?;
+        if descriptor.revision != expected_next_revision {
+            return Err(Error::UnexpectedResponse {
+                operation: Operation::NamespaceUpdatePolicy,
+                message: format!(
+                    "descriptor revision {} does not follow expected revision {expected_revision}",
+                    descriptor.revision
+                ),
+            });
+        }
+        if self.namespace_id.load(Ordering::Acquire) == namespace_id {
+            self.namespace_id
+                .store(descriptor.namespace_id, Ordering::Release);
+        }
+        Ok(descriptor)
+    }
+
+    async fn delete_namespace(&self, namespace_id: u64, expected_revision: u64) -> Result<()> {
+        let response = self
+            .request(
+                Request::namespace_delete(namespace_id, expected_revision)
+                    .map_err(Error::protocol)?,
+            )
+            .await?;
+        expect_status(
+            Operation::NamespaceDelete,
+            response.status,
+            &[Status::Deleted],
+        )?;
+        if !response.payload.is_empty() {
+            return Err(Error::UnexpectedResponse {
+                operation: Operation::NamespaceDelete,
+                message: "NAMESPACE_DELETE success responses must have an empty payload".into(),
+            });
+        }
+        let _ = self.namespace_id.compare_exchange(
+            namespace_id,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        Ok(())
+    }
+
     async fn request_once(
         &self,
         connection: &C,
         request: Request,
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
+        let opcode = request.opcode;
+        let create_if_missing = request.create_if_missing;
         let mut stream = connection
             .acquire_lane(deadline)
             .await
@@ -573,7 +863,23 @@ impl<C: ClientConnection> Core<C> {
         let response = Response::decode_owned(frame)
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
-        stream.release();
+        // Validate the operation/status/payload contract before returning the lane to
+        // the pool. A status that is not meaningful for this request is a protocol
+        // violation; the lane must be discarded even when the QUIC connection remains
+        // usable. This also prevents a malformed success from being mistaken for a
+        // definitive mutation result.
+        if let Err(error) =
+            validate_response_contract(opcode, create_if_missing, &response)
+        {
+            return Err(RequestFailure::after_response(error));
+        }
+        // Error responses may be emitted while the server is still parsing a request,
+        // in which case the server terminates the lane. Retiring every error lane is
+        // conservative and remains valid for errors that the server could have
+        // returned on a reusable lane.
+        if !response.status.is_error() {
+            stream.release();
+        }
         Ok(response)
     }
 
@@ -652,6 +958,19 @@ impl<C: ClientConnection> Core<C> {
                 return Err(error);
             }
         };
+        if let Some(protocol) = replacement.negotiated_alpn() {
+            if let Err(error) = self.alpn.validate_negotiated(protocol) {
+                replacement.close();
+                self.mark_disconnected(failed);
+                return Err(error);
+            }
+        } else {
+            replacement.close();
+            self.mark_disconnected(failed);
+            return Err(Error::Connection(
+                "server did not negotiate an ALPN protocol".into(),
+            ));
+        }
         let mut connection = self
             .connection
             .write()
@@ -692,13 +1011,27 @@ impl<C: ClientConnection> Core<C> {
     }
 }
 
+fn validate_client_namespace_id(namespace_id: u64) -> Result<()> {
+    if namespace_id == 0 {
+        return Err(Error::configuration(
+            "namespace_id",
+            "must be a positive server-assigned namespace ID",
+        ));
+    }
+    Ok(())
+}
+
 struct BuilderSettings {
     endpoint: Endpoint,
     trust: ServerTrust,
     identity: Option<ClientIdentity>,
+    alpn: AlpnPolicy,
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+    namespace_id: Option<u64>,
+    namespace_name: Vec<u8>,
+    namespace_policy: NamespacePolicy,
 }
 
 impl BuilderSettings {
@@ -707,9 +1040,13 @@ impl BuilderSettings {
             endpoint,
             trust: ServerTrust::default(),
             identity: None,
+            alpn: AlpnPolicy::default(),
             timeouts: ClientTimeouts::default(),
             retry: RetryPolicy::default(),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            namespace_id: None,
+            namespace_name: Vec::new(),
+            namespace_policy: NamespacePolicy::default(),
         }
     }
 
@@ -749,18 +1086,28 @@ impl BuilderSettings {
                 "must not exceed u32::MAX",
             ));
         }
+        if self.namespace_id == Some(0) {
+            return Err(Error::configuration(
+                "namespace_id",
+                "must be a positive server-assigned namespace ID",
+            ));
+        }
         Ok(())
     }
 
     fn finish(self) -> Result<ConnectionSettings> {
         self.validate()?;
-        let tls = make_tls_config(self.trust, self.identity)?;
+        let tls = make_tls_config(self.trust, self.identity, &self.alpn)?;
         Ok(ConnectionSettings {
             endpoint: self.endpoint,
             tls,
+            alpn: self.alpn,
             timeouts: self.timeouts,
             retry: self.retry,
             max_in_flight: self.max_in_flight,
+            namespace_id: self.namespace_id,
+            namespace_name: self.namespace_name,
+            namespace_policy: self.namespace_policy,
         })
     }
 }
@@ -768,9 +1115,13 @@ impl BuilderSettings {
 struct ConnectionSettings {
     endpoint: Endpoint,
     tls: rustls::ClientConfig,
+    alpn: AlpnPolicy,
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+    namespace_id: Option<u64>,
+    namespace_name: Vec<u8>,
+    namespace_policy: NamespacePolicy,
 }
 
 macro_rules! builder_methods {
@@ -794,6 +1145,13 @@ macro_rules! builder_methods {
                 self
             }
 
+            /// Offers protocol versions in descending order and enforces a
+            /// minimum negotiated version.
+            pub fn alpn_policy(mut self, policy: AlpnPolicy) -> Self {
+                self.settings.alpn = policy;
+                self
+            }
+
             /// Sets connection and complete-request deadlines.
             pub fn timeouts(mut self, timeouts: ClientTimeouts) -> Self {
                 self.settings.timeouts = timeouts;
@@ -811,6 +1169,31 @@ macro_rules! builder_methods {
                 self.settings.max_in_flight = maximum;
                 self
             }
+
+            /// Selects the server-assigned namespace ID used by data-plane requests.
+            ///
+            /// Namespace IDs are opaque positive 64-bit values returned by
+            /// `NAMESPACE_OPEN`; this setting does not create or resolve a namespace.
+            pub fn namespace_id(mut self, namespace_id: u64) -> Self {
+                self.settings.namespace_id = Some(namespace_id);
+                self
+            }
+
+            /// Selects the namespace name resolved during connection setup.
+            ///
+            /// The default is the empty namespace name. The wire protocol has no default
+            /// namespace; this is only an SDK convenience that performs `NAMESPACE_OPEN` with
+            /// `CreateIfMissing` before the first data-plane request.
+            pub fn namespace_name(mut self, namespace_name: impl AsRef<[u8]>) -> Self {
+                self.settings.namespace_name = namespace_name.as_ref().to_vec();
+                self
+            }
+
+            /// Supplies the policy used if the configured namespace name is missing.
+            pub fn namespace_policy(mut self, policy: NamespacePolicy) -> Self {
+                self.settings.namespace_policy = policy;
+                self
+            }
         }
     };
 }
@@ -823,9 +1206,73 @@ macro_rules! raw_client_methods {
                 self.0.ping().await
             }
 
+            /// Returns the currently selected server-assigned namespace ID.
+            pub fn namespace_id(&self) -> Option<u64> {
+                self.0.namespace_id()
+            }
+
+            /// Resolves a namespace name and optionally creates it.
+            ///
+            /// A zero-length name is an ordinary valid namespace name. This method changes the
+            /// namespace selected by subsequent data-plane calls on this client.
+            pub async fn namespace_open(
+                &self,
+                name: impl AsRef<[u8]>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> Result<NamespaceDescriptor> {
+                self.0
+                    .open_namespace(name.as_ref().to_vec(), create_if_missing, policy)
+                    .await
+            }
+
+            /// Resolves a namespace and reports whether the request created it.
+            pub async fn namespace_open_with_outcome(
+                &self,
+                name: impl AsRef<[u8]>,
+                create_if_missing: bool,
+                policy: Option<NamespacePolicy>,
+            ) -> Result<(NamespaceDescriptor, bool)> {
+                self.0
+                    .open_namespace_with_outcome(name.as_ref().to_vec(), create_if_missing, policy)
+                    .await
+            }
+
+            /// Replaces a namespace policy using its current revision.
+            pub async fn namespace_update_policy(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+                policy: NamespacePolicy,
+            ) -> Result<NamespaceDescriptor> {
+                self.0
+                    .update_namespace_policy(namespace_id, expected_revision, policy)
+                    .await
+            }
+
+            /// Deletes an empty namespace using its current revision.
+            pub async fn namespace_delete(
+                &self,
+                namespace_id: u64,
+                expected_revision: u64,
+            ) -> Result<()> {
+                self.0
+                    .delete_namespace(namespace_id, expected_revision)
+                    .await
+            }
+
             /// Retrieves exact encoded bytes for a fixed-size item ID.
             pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
                 self.0.get(item_id).await
+            }
+
+            /// Retrieves exact encoded bytes in an explicitly supplied namespace.
+            pub async fn get_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<GetOutcome<ItemValue>> {
+                self.0.get_in_namespace(namespace_id, item_id).await
             }
 
             /// Stores exact encoded bytes with explicit wire-level set options.
@@ -838,9 +1285,31 @@ macro_rules! raw_client_methods {
                 self.0.set(item_id, value, options).await
             }
 
+            /// Stores exact encoded bytes in an explicitly supplied namespace.
+            pub async fn set_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+                value: ItemValue,
+                options: SetOptions,
+            ) -> Result<SetOutcome> {
+                self.0
+                    .set_in_namespace(namespace_id, item_id, value, options)
+                    .await
+            }
+
             /// Deletes a fixed-size item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
+            }
+
+            /// Deletes a fixed-size item ID in an explicitly supplied namespace.
+            pub async fn delete_in_namespace(
+                &self,
+                namespace_id: u64,
+                item_id: ItemId,
+            ) -> Result<DeleteOutcome> {
+                self.0.delete_in_namespace(namespace_id, item_id).await
             }
 
             /// Returns server statistics as their JSON text.
@@ -848,9 +1317,19 @@ macro_rules! raw_client_methods {
                 self.0.stats().await
             }
 
+            /// Returns statistics for an explicitly supplied namespace.
+            pub async fn stats_in_namespace(&self, namespace_id: u64) -> Result<String> {
+                self.0.stats_in_namespace(namespace_id).await
+            }
+
             /// Waits until prior mutations satisfy the server durability barrier.
             pub async fn sync(&self) -> Result<()> {
                 self.0.sync().await
+            }
+
+            /// Waits for the durability barrier for an explicitly supplied namespace.
+            pub async fn sync_in_namespace(&self, namespace_id: u64) -> Result<()> {
+                self.0.sync_in_namespace(namespace_id).await
             }
 
             /// Returns a best-effort state snapshot that does not guarantee the next request succeeds.
@@ -967,9 +1446,13 @@ async fn connect_quinn(
         address,
         settings.endpoint.server_name().to_owned(),
         settings.tls,
+        settings.alpn,
         settings.timeouts,
         settings.retry,
         settings.max_in_flight,
+        settings.namespace_id,
+        settings.namespace_name,
+        settings.namespace_policy,
         deadline,
     )
     .await
@@ -990,9 +1473,13 @@ async fn connect_compio(
         address,
         settings.endpoint.server_name().to_owned(),
         settings.tls,
+        settings.alpn,
         settings.timeouts,
         settings.retry,
         settings.max_in_flight,
+        settings.namespace_id,
+        settings.namespace_name,
+        settings.namespace_policy,
         deadline,
     )
     .await
@@ -1058,6 +1545,7 @@ async fn resolve_compio(endpoint: &Endpoint, timeout: Duration) -> Result<Socket
 fn make_tls_config(
     trust: ServerTrust,
     identity: Option<ClientIdentity>,
+    alpn: &AlpnPolicy,
 ) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     match trust {
@@ -1103,7 +1591,7 @@ fn make_tls_config(
         }
         None => builder.with_no_client_auth(),
     };
-    config.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
+    config.alpn_protocols = alpn.protocols().to_vec();
     Ok(config)
 }
 
@@ -1112,6 +1600,155 @@ fn expect_status(operation: Operation, status: Status, expected: &[Status]) -> R
         Ok(())
     } else {
         Err(unexpected_status(operation, status))
+    }
+}
+
+fn validate_stats_payload(payload: &[u8]) -> Result<()> {
+    let value: serde_json::Value =
+        serde_json::from_slice(payload).map_err(|error| Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: format!("STATS response is not valid JSON: {error}"),
+        })?;
+    let object = value.as_object().ok_or_else(|| Error::UnexpectedResponse {
+        operation: Operation::Stats,
+        message: "STATS response must be a JSON object".into(),
+    })?;
+    if object
+        .get("storage")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        return Err(Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: "STATS response must contain a string storage member".into(),
+        });
+    }
+    let workers = object
+        .get("workers")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: "STATS response must contain a workers array".into(),
+        })?;
+    if workers
+        .iter()
+        .any(|worker| serde_json::Value::as_str(worker).is_none())
+    {
+        return Err(Error::UnexpectedResponse {
+            operation: Operation::Stats,
+            message: "STATS workers entries must be strings".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_response_contract(
+    opcode: Opcode,
+    create_if_missing: bool,
+    response: &Response,
+) -> Result<()> {
+    let operation = operation(opcode);
+    if response.status.is_error() {
+        let applicable = match response.status {
+            Status::InvalidRequest
+            | Status::TooLarge
+            | Status::Overloaded
+            | Status::Timeout
+            | Status::Forbidden
+            | Status::InternalError => true,
+            Status::NoCapacity | Status::PolicyConflict => opcode == Opcode::Set,
+            Status::Conflict => {
+                matches!(opcode, Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete)
+            }
+            Status::NamespaceNotFound => matches!(
+                opcode,
+                Opcode::Get
+                    | Opcode::Set
+                    | Opcode::Delete
+                    | Opcode::Stats
+                    | Opcode::Sync
+                    | Opcode::NamespaceOpen
+                    | Opcode::NamespaceUpdatePolicy
+                    | Opcode::NamespaceDelete
+            ),
+            Status::NamespaceNotEmpty => opcode == Opcode::NamespaceDelete,
+            Status::UnsupportedOpcode => false,
+            // `Status::try_from` rejects unassigned values before this helper runs.
+            Status::Ok
+            | Status::NotFound
+            | Status::Created
+            | Status::Replaced
+            | Status::Deleted
+            | Status::NotStored => false,
+        };
+        if !applicable {
+            return Err(Error::UnexpectedResponse {
+                operation,
+                message: format!(
+                    "status {:?} is not applicable to {opcode:?}",
+                    response.status
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    let invalid_payload = |message: &'static str| {
+        Err(Error::UnexpectedResponse {
+            operation,
+            message: message.into(),
+        })
+    };
+    let descriptor_payload = || {
+        NamespaceDescriptor::decode(&response.payload).map(|_| ()).map_err(|error| {
+            Error::UnexpectedResponse {
+                operation,
+                message: format!("namespace descriptor is invalid: {error}"),
+            }
+        })
+    };
+    match (opcode, response.status) {
+        (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
+        (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
+
+        (Opcode::Get, Status::Ok) => Ok(()),
+        (Opcode::Get, Status::NotFound) if response.payload.is_empty() => Ok(()),
+        (Opcode::Get, Status::NotFound) => {
+            invalid_payload("GET NotFound responses must have an empty payload")
+        }
+
+        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored)
+            if response.payload.is_empty() =>
+        {
+            Ok(())
+        }
+        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored) => {
+            invalid_payload("SET success responses must have an empty payload")
+        }
+
+        (Opcode::Delete, Status::Deleted | Status::NotFound)
+            if response.payload.is_empty() =>
+        {
+            Ok(())
+        }
+        (Opcode::Delete, Status::Deleted | Status::NotFound) => {
+            invalid_payload("DELETE domain responses must have an empty payload")
+        }
+
+        (Opcode::Stats, Status::Ok) => validate_stats_payload(&response.payload),
+        (Opcode::Sync, Status::Ok) if response.payload.is_empty() => Ok(()),
+        (Opcode::Sync, Status::Ok) => {
+            invalid_payload("SYNC success responses must have an empty payload")
+        }
+
+        (Opcode::NamespaceOpen, Status::Ok) => descriptor_payload(),
+        (Opcode::NamespaceOpen, Status::Created) if create_if_missing => descriptor_payload(),
+        (Opcode::NamespaceUpdatePolicy, Status::Ok) => descriptor_payload(),
+        (Opcode::NamespaceDelete, Status::Deleted) if response.payload.is_empty() => Ok(()),
+        (Opcode::NamespaceDelete, Status::Deleted) => {
+            invalid_payload("NAMESPACE_DELETE success responses must have an empty payload")
+        }
+        (_, status) => Err(unexpected_status(operation, status)),
     }
 }
 
@@ -1131,6 +1768,11 @@ fn server_error_code(status: Status) -> ServerErrorCode {
         Status::Timeout => ServerErrorCode::Timeout,
         Status::Forbidden => ServerErrorCode::Forbidden,
         Status::InternalError => ServerErrorCode::Internal,
+        Status::NoCapacity => ServerErrorCode::NoCapacity,
+        Status::PolicyConflict => ServerErrorCode::PolicyConflict,
+        Status::Conflict => ServerErrorCode::Conflict,
+        Status::NamespaceNotFound => ServerErrorCode::NamespaceNotFound,
+        Status::NamespaceNotEmpty => ServerErrorCode::NamespaceNotEmpty,
         _ => ServerErrorCode::Internal,
     }
 }
@@ -1143,5 +1785,8 @@ fn operation(opcode: Opcode) -> Operation {
         Opcode::Delete => Operation::Delete,
         Opcode::Stats => Operation::Stats,
         Opcode::Sync => Operation::Sync,
+        Opcode::NamespaceOpen => Operation::NamespaceOpen,
+        Opcode::NamespaceUpdatePolicy => Operation::NamespaceUpdatePolicy,
+        Opcode::NamespaceDelete => Operation::NamespaceDelete,
     }
 }

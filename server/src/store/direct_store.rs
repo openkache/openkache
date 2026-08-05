@@ -5,13 +5,13 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::future::FutureExt;
 use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{SetCondition, SetOptions};
+use openkache_protocol::{EvictionMode, SetCondition, SetOptions};
 
 use super::*;
 use crate::types::StoredItemValue;
@@ -78,6 +78,13 @@ pub(crate) struct KeyedFinish {
     pub(crate) outcome: Result<KeyedOutcome>,
     pub(crate) visible_state: Option<KeyedVisibleState>,
     pub(crate) flush_required: bool,
+    pub(crate) pending: bool,
+}
+
+pub(crate) struct PendingKeyedResult {
+    pub(crate) storage_key: StorageKey,
+    pub(crate) outcome: KeyedOutcome,
+    pub(crate) visible_state: Option<KeyedVisibleState>,
 }
 
 enum PreparedKeyedOperation {
@@ -85,12 +92,8 @@ enum PreparedKeyedOperation {
     Set {
         value: StoredItemValue,
         options: SetOptions,
-        evaluated_at_ms: u64,
-        expires_at_ms: u64,
     },
-    Delete {
-        evaluated_at_ms: u64,
-    },
+    Delete,
 }
 
 #[derive(Clone, Copy)]
@@ -261,6 +264,7 @@ impl PreparedReadCandidate {
                     state: ItemState {
                         is_tombstone: item.is_tombstone,
                         expires_at_ms: item.expires_at_ms,
+                        eviction_protected: item.eviction_protected,
                     },
                     value: ObservedValue::None,
                 }))
@@ -397,11 +401,19 @@ enum PendingKeyedMutation {
     Set {
         storage_key: StorageKey,
         value: StoredItemValue,
-        expires_at_ms: u64,
+        ttl_ms: Option<u64>,
+        eviction_protected: bool,
         previous: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
-        previous_live: bool,
+        previous_state: Option<ItemState>,
+        condition: SetCondition,
+        include_visible_state: bool,
     },
+}
+
+enum PendingKeyedProgress {
+    Complete(PendingKeyedResult),
+    Pending(PendingKeyedMutation),
 }
 
 struct DirectStoreIo {
@@ -466,6 +478,12 @@ struct EvictionExtent {
     next_bucket: usize,
 }
 
+struct EvictableLocation {
+    storage_key: StorageKey,
+    table_location: TableLocation,
+    live: bool,
+}
+
 struct EvictionWork {
     victim: GenerationLocation,
     reader_guard: Option<Rc<SsdBacking>>,
@@ -476,6 +494,8 @@ struct EvictionWork {
     now_ms: u64,
     retiring: bool,
     has_large_value_extent: bool,
+    protected_item_found: bool,
+    evictable_items: Vec<EvictableLocation>,
 }
 
 pub(crate) struct Kvkache {
@@ -628,51 +648,26 @@ impl Kvkache {
                 self.keyed_read_plan(storage_key, ReadPurpose::Value),
             ),
             KeyedOperation::Set { value, options } => {
-                let evaluated_at_ms = unix_time_ms();
-                let expires_at_ms = options
-                    .ttl_ms
-                    .and_then(|ttl_ms| evaluated_at_ms.checked_add(ttl_ms))
-                    .unwrap_or_default();
                 let observation = if options.ttl_ms == Some(0) {
                     KeyedObservationPlan::Error(KvError::InvalidRequest(
                         "SET TTL must be greater than zero milliseconds".into(),
                     ))
-                } else if options
-                    .ttl_ms
-                    .is_some_and(|ttl_ms| evaluated_at_ms.checked_add(ttl_ms).is_none())
-                {
-                    KeyedObservationPlan::Error(KvError::InvalidRequest(
-                        "SET TTL exceeds the supported time range".into(),
-                    ))
+                } else if let Err(error) = validate_ttl(options.ttl_ms) {
+                    KeyedObservationPlan::Error(error)
                 } else if let Err(error) =
                     self.validate_value(&value.bytes, options.ttl_ms.is_some())
                 {
                     KeyedObservationPlan::Error(error)
                 } else {
-                    let now = Instant::now();
-                    let refresh_memory = now >= self.next_memory_capacity_check;
-                    if refresh_memory {
-                        self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
-                    }
-                    match self.resource_guard.admit_set(refresh_memory) {
-                        Ok(()) => self.keyed_read_plan(storage_key, ReadPurpose::State),
-                        Err(error) => KeyedObservationPlan::Error(error),
-                    }
+                    // Observe the current item state before admission. A
+                    // conditional SET that will return NotStored must not be
+                    // rejected by an unrelated capacity check.
+                    self.keyed_read_plan(storage_key, ReadPurpose::State)
                 };
-                (
-                    PreparedKeyedOperation::Set {
-                        value,
-                        options,
-                        evaluated_at_ms,
-                        expires_at_ms,
-                    },
-                    observation,
-                )
+                (PreparedKeyedOperation::Set { value, options }, observation)
             }
             KeyedOperation::Delete => (
-                PreparedKeyedOperation::Delete {
-                    evaluated_at_ms: unix_time_ms(),
-                },
+                PreparedKeyedOperation::Delete,
                 self.keyed_read_plan(storage_key, ReadPurpose::State),
             ),
         };
@@ -773,67 +768,55 @@ impl Kvkache {
                     outcome: Err(error),
                     visible_state: None,
                     flush_required: false,
+                    pending: false,
                 };
             }
         };
-        let (outcome, visible_state, flush_required) = match (completed.operation, observation) {
+        let (outcome, visible_state, flush_required, pending) =
+            match (completed.operation, observation) {
             (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
                 let visible_state = include_visible_state.then(|| match &mut value {
                     Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
                     None => KeyedVisibleState::Missing,
                 });
-                (Ok(KeyedOutcome::Value(value)), visible_state, false)
+                (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
             }
-            (
-                PreparedKeyedOperation::Set {
-                    value,
-                    options,
-                    evaluated_at_ms,
-                    expires_at_ms,
-                },
-                KeyedObservation::State(previous),
-            ) => {
-                let visible_value = (options == SetOptions::NONE).then(|| value.clone());
+            (PreparedKeyedOperation::Set { value, options }, KeyedObservation::State(previous)) => {
+                let evaluated_at_ms = unix_time_ms();
                 match self.finish_keyed_set(
                     completed.storage_key,
                     value,
                     options,
                     evaluated_at_ms,
-                    expires_at_ms,
                     previous,
+                    include_visible_state,
                 ) {
-                    Ok((outcome, flush_required)) => {
-                        let visible_state = visible_value.and_then(|value| match outcome {
-                            SetOutcome::Created | SetOutcome::Replaced => {
-                                Some(KeyedVisibleState::Present(value))
-                            }
-                            SetOutcome::NotStored => None,
-                        });
-                        (
-                            Ok(KeyedOutcome::Set(outcome)),
-                            visible_state,
-                            flush_required,
-                        )
-                    }
-                    Err(error) => (Err(error), None, false),
+                    Ok((outcome, visible_state, flush_required, pending)) => (
+                        Ok(KeyedOutcome::Set(outcome)),
+                        visible_state,
+                        flush_required,
+                        pending,
+                    ),
+                    Err(error) => (Err(error), None, false, false),
                 }
             }
-            (
-                PreparedKeyedOperation::Delete { evaluated_at_ms },
-                KeyedObservation::State(previous),
-            ) => match self.finish_keyed_delete(completed.storage_key, evaluated_at_ms, previous) {
-                Ok((deleted, flush_required)) => (
-                    Ok(KeyedOutcome::Deleted(deleted)),
-                    Some(KeyedVisibleState::Missing),
-                    flush_required,
-                ),
-                Err(error) => (Err(error), None, false),
-            },
+            (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
+                match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous) {
+                    Ok((deleted, flush_required)) => (
+                        Ok(KeyedOutcome::Deleted(deleted)),
+                        Some(KeyedVisibleState::Missing),
+                        flush_required,
+                        false,
+                    ),
+                    Err(error) => (Err(error), None, false, false),
+                }
+            }
             _ => (
                 Err(KvError::Worker(
                     "keyed operation completed with an incompatible observation".into(),
                 )),
                 None,
+                false,
                 false,
             ),
         };
@@ -841,6 +824,7 @@ impl Kvkache {
             outcome,
             visible_state,
             flush_required,
+            pending,
         }
     }
 
@@ -851,29 +835,36 @@ impl Kvkache {
     fn finish_keyed_set(
         &mut self,
         storage_key: StorageKey,
-        value: StoredItemValue,
+        mut value: StoredItemValue,
         options: SetOptions,
         evaluated_at_ms: u64,
-        expires_at_ms: u64,
         previous: Option<LocatedKeyState>,
-    ) -> Result<(SetOutcome, bool)> {
+        include_visible_state: bool,
+    ) -> Result<(SetOutcome, Option<KeyedVisibleState>, bool, bool)> {
         let previous_live = previous
             .as_ref()
             .is_some_and(|located| item_state_is_live_at(located.item_state, evaluated_at_ms));
         if !set_condition_allows(options.condition, previous_live) {
-            return Ok((SetOutcome::NotStored, false));
+            return Ok((SetOutcome::NotStored, None, false, false));
+        }
+        self.admit_set()?;
+        // Admission can wait for a capacity refresh. Re-evaluate the
+        // condition at the mutation boundary so expiration is observed at
+        // the same point that determines the replacement outcome.
+        let previous_live = previous
+            .as_ref()
+            .is_some_and(|located| item_state_is_live_at(located.item_state, unix_time_ms()));
+        if !set_condition_allows(options.condition, previous_live) {
+            return Ok((SetOutcome::NotStored, None, false, false));
         }
         let previous_location = previous.as_ref().map(|located| located.table_location);
+        let previous_state = previous.as_ref().map(|located| located.item_state);
         let previous_mutable_value = previous.and_then(|located| located.mutable_value);
-        let outcome = if previous_live {
-            SetOutcome::Replaced
-        } else {
-            SetOutcome::Created
-        };
         if let Some(replacement) = self.try_append_value(
             storage_key,
             &value.bytes,
-            expires_at_ms,
+            options.ttl_ms,
+            matches!(options.eviction_mode, EvictionMode::EvictionProtected),
             previous_location,
             previous_mutable_value,
         )? {
@@ -886,18 +877,43 @@ impl Kvkache {
             if !previous_live || previous_disappeared {
                 self.live_keys += 1;
             }
-            return Ok((outcome, false));
+            let outcome = if previous_live {
+                SetOutcome::Replaced
+            } else {
+                SetOutcome::Created
+            };
+            let visible_state = (include_visible_state && options == SetOptions::NONE)
+                .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
+            return Ok((outcome, visible_state, false, false));
         }
         self.pending_keyed_mutations
             .push_back(PendingKeyedMutation::Set {
                 storage_key,
                 value,
-                expires_at_ms,
+                ttl_ms: options.ttl_ms,
+                eviction_protected: matches!(
+                    options.eviction_mode,
+                    EvictionMode::EvictionProtected
+                ),
                 previous: previous_location,
                 previous_mutable_value,
-                previous_live,
+                previous_state,
+                condition: options.condition,
+                include_visible_state,
             });
-        Ok((outcome, true))
+        // The operation has not linearized yet. The worker must defer its
+        // response until capacity work appends the value and re-evaluates the
+        // condition against the current expiration/eviction state.
+        Ok((SetOutcome::NotStored, None, true, true))
+    }
+
+    fn admit_set(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let refresh_memory = now >= self.next_memory_capacity_check;
+        if refresh_memory {
+            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
+        }
+        self.resource_guard.admit_set(refresh_memory)
     }
 
     fn finish_keyed_delete(
@@ -917,52 +933,90 @@ impl Kvkache {
         Ok((true, false))
     }
 
-    pub(crate) fn progress_capacity(&mut self) -> Result<bool> {
+    pub(crate) fn progress_capacity(&mut self) -> Result<(bool, Vec<PendingKeyedResult>)> {
         self.advance_closings()?;
         self.advance_flushes()?;
+        let mut completed = Vec::new();
         while let Some(mutation) = self.pending_keyed_mutations.pop_front() {
-            if let Some(mutation) = self.try_apply_pending_keyed_mutation(mutation)? {
-                self.pending_keyed_mutations.push_front(mutation);
-                if self.active_flush_count() >= self.config.max_flushes_in_flight {
-                    return Ok(false);
+            match self.try_apply_pending_keyed_mutation(mutation)? {
+                PendingKeyedProgress::Complete(result) => completed.push(result),
+                PendingKeyedProgress::Pending(mutation) => {
+                    self.pending_keyed_mutations.push_front(mutation);
+                    if self.active_flush_count() >= self.config.max_flushes_in_flight {
+                        return Ok((false, completed));
+                    }
+                    let lane = self.fullest_mutable_lane()?;
+                    self.close_lane(lane, SegmentFlushReason::Capacity)?;
+                    self.advance_closings()?;
+                    self.advance_flushes()?;
                 }
-                let lane = self.fullest_mutable_lane()?;
-                self.close_lane(lane, SegmentFlushReason::Capacity)?;
-                self.advance_closings()?;
-                self.advance_flushes()?;
             }
         }
-        Ok(true)
+        Ok((true, completed))
+    }
+
+    pub(crate) fn cancel_pending_keyed_mutation(&mut self, storage_key: StorageKey) {
+        self.pending_keyed_mutations.retain(|mutation| {
+            !matches!(
+                mutation,
+                PendingKeyedMutation::Set {
+                    storage_key: pending_key,
+                    ..
+                } if *pending_key == storage_key
+            )
+        });
     }
 
     fn try_apply_pending_keyed_mutation(
         &mut self,
         mutation: PendingKeyedMutation,
-    ) -> Result<Option<PendingKeyedMutation>> {
+    ) -> Result<PendingKeyedProgress> {
         match mutation {
             PendingKeyedMutation::Set {
                 storage_key,
-                value,
-                expires_at_ms,
+                mut value,
+                ttl_ms,
+                eviction_protected,
                 previous,
                 previous_mutable_value,
-                previous_live,
+                previous_state,
+                condition,
+                include_visible_state,
             } => {
+                let previous_live = previous_state.is_some_and(|state| {
+                    item_state_is_live_at(state, unix_time_ms())
+                        && previous.is_some_and(|location| {
+                            self.table
+                                .candidate_locations(&storage_key)
+                                .contains(&location)
+                        })
+                });
+                if !set_condition_allows(condition, previous_live) {
+                    return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
+                        storage_key,
+                        outcome: KeyedOutcome::Set(SetOutcome::NotStored),
+                        visible_state: None,
+                    }));
+                }
                 let Some(replacement) = self.try_append_value(
                     storage_key,
                     &value.bytes,
-                    expires_at_ms,
+                    ttl_ms,
+                    eviction_protected,
                     previous,
                     previous_mutable_value,
                 )?
                 else {
-                    return Ok(Some(PendingKeyedMutation::Set {
+                    return Ok(PendingKeyedProgress::Pending(PendingKeyedMutation::Set {
                         storage_key,
                         value,
-                        expires_at_ms,
+                        ttl_ms,
+                        eviction_protected,
                         previous,
                         previous_mutable_value,
-                        previous_live,
+                        previous_state,
+                        condition,
+                        include_visible_state,
                     }));
                 };
                 let previous_disappeared = self.publish_table_location(
@@ -974,9 +1028,20 @@ impl Kvkache {
                 if !previous_live || previous_disappeared {
                     self.live_keys += 1;
                 }
+                let outcome = if previous_live {
+                    SetOutcome::Replaced
+                } else {
+                    SetOutcome::Created
+                };
+                let visible_state = include_visible_state
+                    .then(|| KeyedVisibleState::Present(value.clone_for_visible_state()));
+                return Ok(PendingKeyedProgress::Complete(PendingKeyedResult {
+                    storage_key,
+                    outcome: KeyedOutcome::Set(outcome),
+                    visible_state,
+                }));
             }
         }
-        Ok(None)
     }
 
     #[allow(dead_code)]
@@ -1032,47 +1097,60 @@ impl Kvkache {
                 "SET TTL must be greater than zero milliseconds".into(),
             ));
         }
+        validate_ttl(options.ttl_ms)?;
         self.validate_value(&value.bytes, options.ttl_ms.is_some())?;
-        let now = Instant::now();
-        let refresh_memory = now >= self.next_memory_capacity_check;
-        if refresh_memory {
-            self.next_memory_capacity_check = now + CAPACITY_CHECK_INTERVAL;
-        }
-        self.resource_guard.admit_set(refresh_memory)?;
-        let now_ms = unix_time_ms();
-        let expires_at_ms = options
-            .ttl_ms
-            .map(|ttl_ms| {
-                now_ms.checked_add(ttl_ms).ok_or_else(|| {
-                    KvError::InvalidRequest("SET TTL exceeds the supported time range".into())
-                })
-            })
-            .transpose()?
-            .unwrap_or_default();
-        let previous = self.locate_item(&storage_key).await?;
-        let previous_live = previous
-            .as_ref()
-            .is_some_and(|located| located.item.is_live_at(now_ms));
-        if !set_condition_allows(options.condition, previous_live) {
+        // Check the condition before admission so a request that is already
+        // known to be NotStored does not fail because of unrelated capacity.
+        let initial_previous = self.locate_item(&storage_key).await?;
+        let initial_previous_live = initial_previous.as_ref().is_some_and(|located| {
+            located.item.is_live_at(unix_time_ms())
+                && self
+                    .table
+                    .candidate_locations(&storage_key)
+                    .contains(&located.table_location)
+        });
+        if !set_condition_allows(options.condition, initial_previous_live) {
             return Ok(SetOutcome::NotStored);
         }
-        let previous_location = previous.as_ref().map(|located| located.table_location);
-        let previous_mutable_value = previous
-            .as_ref()
-            .and_then(|located| self.mutable_value_handle(located));
-
-        let new_location = loop {
+        drop(initial_previous);
+        self.admit_set()?;
+        let mut previous = self.locate_item(&storage_key).await?;
+        let (new_location, previous_live, previous_location, previous_mutable_value) = loop {
+            let previous_live = previous.as_ref().is_some_and(|located| {
+                located.item.is_live_at(unix_time_ms())
+                    && self
+                        .table
+                        .candidate_locations(&storage_key)
+                        .contains(&located.table_location)
+            });
+            if !set_condition_allows(options.condition, previous_live) {
+                return Ok(SetOutcome::NotStored);
+            }
+            let previous_location = previous.as_ref().map(|located| located.table_location);
+            let previous_mutable_value = previous
+                .as_ref()
+                .and_then(|located| self.mutable_value_handle(located));
             if let Some(location) = self.try_append_value(
                 storage_key,
                 &value.bytes,
-                expires_at_ms,
+                options.ttl_ms,
+                matches!(options.eviction_mode, EvictionMode::EvictionProtected),
                 previous_location,
                 previous_mutable_value,
             )? {
-                break location;
+                break (
+                    location,
+                    previous_live,
+                    previous_location,
+                    previous_mutable_value,
+                );
             }
             let lane = self.fullest_mutable_lane()?;
             self.flush_lane(lane, SegmentFlushReason::Capacity).await?;
+            // Capacity work can evict or expire the item observed above. Refresh
+            // the state before retrying so conditional SET semantics are
+            // evaluated at the eventual mutation boundary.
+            previous = self.locate_item(&storage_key).await?;
         };
         let previous_disappeared = self.publish_table_location(
             storage_key,
@@ -1132,7 +1210,8 @@ impl Kvkache {
         &mut self,
         storage_key: StorageKey,
         value: &[u8],
-        expires_at_ms: u64,
+        ttl_ms: Option<u64>,
+        eviction_protected: bool,
         previous_location: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
     ) -> Result<Option<MutablePlacement>> {
@@ -1146,15 +1225,16 @@ impl Kvkache {
         } else {
             STORED_VALUE_TAG_BYTES + value.len()
         };
+        let has_expiration = ttl_ms.is_some();
         for lane in 0..self.mutable.len() {
             let Some(generation) = self.mutable[lane].as_mut() else {
                 continue;
             };
             let fixed_item_bytes = ITEM_FIXED_BYTES
-                + if expires_at_ms == 0 {
-                    0
-                } else {
+                + if has_expiration {
                     ITEM_EXPIRATION_BYTES
+                } else {
+                    0
                 }
                 + encoded_len;
             let previous_in_generation =
@@ -1166,7 +1246,8 @@ impl Kvkache {
                     previous_location,
                     storage_key,
                     value,
-                    expires_at_ms,
+                    ttl_ms,
+                    eviction_protected,
                     large,
                     blob,
                     previous_mutable_value,
@@ -1188,7 +1269,22 @@ impl Kvkache {
             let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
                 continue;
             };
-            let item = live_item(storage_key, staged.encoded, expires_at_ms);
+            // Resolve the relative TTL immediately before the append. Capacity
+            // work may have delayed this pending SET, so the deadline must not
+            // start at request admission or while the value is being staged.
+            let expires_at_ms = match ttl_deadline(ttl_ms) {
+                Ok(expires_at_ms) => expires_at_ms,
+                Err(error) => {
+                    clear_mutable_value(generation, lane, staged.mutable_value);
+                    return Err(error);
+                }
+            };
+            let item = live_item(
+                storage_key,
+                staged.encoded,
+                expires_at_ms,
+                eviction_protected,
+            );
             let location = generation.segment.append(item, true).ok_or_else(|| {
                 KvError::Worker("chosen mutable SG Bucket rejected an Item".into())
             })?;
@@ -1645,6 +1741,8 @@ impl Kvkache {
             now_ms: unix_time_ms(),
             retiring: false,
             has_large_value_extent,
+            protected_item_found: false,
+            evictable_items: Vec::new(),
         };
         schedule_eviction_read(&self.data, &self.config, &mut eviction);
         self.eviction = Some(eviction);
@@ -1719,7 +1817,13 @@ impl Kvkache {
             while extent.next_bucket * BUCKET_BYTES < extent.buffer.len()
                 && (cleaned == 0 || (cleaned < 64 && Instant::now() < deadline))
             {
-                self.clean_eviction_bucket(eviction.victim.logical_sg_id, eviction.now_ms, extent)?;
+                self.clean_eviction_bucket(
+                    eviction.victim.logical_sg_id,
+                    eviction.now_ms,
+                    extent,
+                    &mut eviction.protected_item_found,
+                    &mut eviction.evictable_items,
+                )?;
                 extent.next_bucket += 1;
                 cleaned += 1;
             }
@@ -1736,6 +1840,23 @@ impl Kvkache {
             return Poll::Pending;
         }
 
+        if eviction.protected_item_found {
+            // Do not partially apply capacity eviction when a protected item makes
+            // admission impossible. The protocol's NoCapacity outcome guarantees
+            // that the failed SET made no mutation, including no collateral evictions.
+            return Poll::Ready(Err(KvError::NoCapacity));
+        }
+
+        for candidate in eviction.evictable_items.drain(..) {
+            if self
+                .table
+                .remove(&candidate.storage_key, candidate.table_location)
+                && candidate.live
+            {
+                self.live_keys = self.live_keys.saturating_sub(1);
+            }
+        }
+
         self.directory
             .begin_retiring(eviction.victim.logical_sg_id)?;
         eviction.reader_guard.take();
@@ -1750,6 +1871,8 @@ impl Kvkache {
         logical_sg_id: u32,
         now_ms: u64,
         extent: &EvictionExtent,
+        protected_item_found: &mut bool,
+        evictable_items: &mut Vec<EvictableLocation>,
     ) -> Result<()> {
         let bucket_offset = extent.next_bucket * BUCKET_BYTES;
         let bucket_index = (extent.offset + bucket_offset) / BUCKET_BYTES;
@@ -1770,11 +1893,42 @@ impl Kvkache {
                 sg_index: logical_sg_id,
                 bucket_hash_index,
             };
-            if self.table.remove(&item.storage_key, location) {
-                if item.is_live_at(now_ms) {
-                    self.live_keys = self.live_keys.saturating_sub(1);
-                }
+            // Ignore stale records that no longer back the table entry. This is important for
+            // protected items that were explicitly deleted or replaced while their generation
+            // was stable.
+            if !self
+                .table
+                .candidate_locations(&item.storage_key)
+                .contains(&location)
+            {
+                continue;
             }
+            let replacing_protected_item = self.pending_keyed_mutations.iter().any(|mutation| {
+                matches!(
+                    mutation,
+                    PendingKeyedMutation::Set {
+                        storage_key,
+                        previous: Some(previous),
+                        previous_state: Some(previous_state),
+                        ..
+                    } if *storage_key == item.storage_key
+                        && previous.sg_index == logical_sg_id
+                        && item_state_is_live_at(*previous_state, now_ms)
+                )
+            });
+            if item.eviction_protected && item.is_live_at(now_ms) && !replacing_protected_item {
+                // Capacity eviction may remove only resolved Evictable items. Keep protected
+                // records in the generation and report NoCapacity once the victim has been
+                // scanned; the generation log remains pinned so the protected value stays
+                // readable.
+                *protected_item_found = true;
+                continue;
+            }
+            evictable_items.push(EvictableLocation {
+                storage_key: item.storage_key,
+                table_location: location,
+                live: item.is_live_at(now_ms),
+            });
         }
         Ok(())
     }
@@ -2111,6 +2265,7 @@ fn item_is_live_now(item: &Item) -> bool {
     item_state_is_live_now(ItemState {
         is_tombstone: item.is_tombstone,
         expires_at_ms: item.expires_at_ms,
+        eviction_protected: item.eviction_protected,
     })
 }
 
@@ -2314,7 +2469,8 @@ fn try_replace_value_in_place(
     previous_location: TableLocation,
     storage_key: StorageKey,
     value: &[u8],
-    expires_at_ms: u64,
+    ttl_ms: Option<u64>,
+    eviction_protected: bool,
     large: bool,
     blob: bool,
     previous: Option<MutableValueHandle>,
@@ -2375,7 +2531,10 @@ fn try_replace_value_in_place(
         _ => None,
     };
     if let Some((mutable_value, encoded)) = same_slot {
-        let item = live_item(storage_key, encoded, expires_at_ms);
+        // This replacement is the mutation linearization point for the
+        // in-place path; resolve the relative TTL immediately before it.
+        let expires_at_ms = ttl_deadline(ttl_ms)?;
+        let item = live_item(storage_key, encoded, expires_at_ms, eviction_protected);
         if generation.segment.replace(previous_location, item, true) {
             match (previous, mutable_value) {
                 (
@@ -2405,7 +2564,19 @@ fn try_replace_value_in_place(
     let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
         return Ok(InPlaceValue::NotReplaced);
     };
-    let item = live_item(storage_key, staged.encoded, expires_at_ms);
+    let expires_at_ms = match ttl_deadline(ttl_ms) {
+        Ok(expires_at_ms) => expires_at_ms,
+        Err(error) => {
+            clear_mutable_value(generation, lane, staged.mutable_value);
+            return Err(error);
+        }
+    };
+    let item = live_item(
+        storage_key,
+        staged.encoded,
+        expires_at_ms,
+        eviction_protected,
+    );
     if !generation.segment.replace(previous_location, item, true) {
         clear_mutable_value(generation, lane, staged.mutable_value);
         return Ok(InPlaceValue::NotReplaced);
@@ -2487,11 +2658,16 @@ fn clear_mutable_value(
     }
 }
 
-fn live_item(storage_key: StorageKey, encoded: Vec<u8>, expires_at_ms: u64) -> Item {
+fn live_item(
+    storage_key: StorageKey,
+    encoded: Vec<u8>,
+    expires_at_ms: u64,
+    eviction_protected: bool,
+) -> Item {
     if expires_at_ms == 0 {
-        Item::live(storage_key, encoded)
+        Item::live_with_eviction(storage_key, encoded, eviction_protected)
     } else {
-        Item::live_expiring(storage_key, encoded, expires_at_ms)
+        Item::live_expiring_with_eviction(storage_key, encoded, expires_at_ms, eviction_protected)
     }
 }
 
@@ -2638,15 +2814,45 @@ fn bucket_hash_index_for_bucket(
 
 fn set_condition_allows(condition: SetCondition, current_live: bool) -> bool {
     match condition {
-        SetCondition::None => true,
+        SetCondition::Any => true,
         SetCondition::IfAbsent => !current_live,
         SetCondition::IfPresent => current_live,
     }
 }
 
+fn validate_ttl(ttl_ms: Option<u64>) -> Result<()> {
+    let _ = ttl_deadline(ttl_ms)?;
+    Ok(())
+}
+
+fn ttl_deadline(ttl_ms: Option<u64>) -> Result<u64> {
+    let Some(ttl_ms) = ttl_ms else {
+        return Ok(0);
+    };
+    if ttl_ms == 0 {
+        return Err(KvError::InvalidRequest(
+            "SET TTL must be greater than zero milliseconds".into(),
+        ));
+    }
+    unix_time_ms()
+        .checked_add(ttl_ms)
+        .ok_or_else(|| KvError::InvalidRequest("SET TTL exceeds the supported time range".into()))
+}
+
+/// Returns a Unix-epoch-compatible timestamp driven by a monotonic clock.
+///
+/// Deadlines are persisted as Unix-epoch milliseconds so they remain
+/// comparable after a restart. The wall clock is sampled once per process;
+/// subsequent reads use `Instant` and therefore cannot move backwards when
+/// the system clock is adjusted.
 fn unix_time_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(u64::MAX)
+    static CLOCK: OnceLock<(u64, Instant)> = OnceLock::new();
+    let (anchor_ms, anchor) = CLOCK.get_or_init(|| {
+        let anchor_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        (anchor_ms, Instant::now())
+    });
+    anchor_ms.saturating_add(u64::try_from(anchor.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
