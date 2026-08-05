@@ -66,13 +66,19 @@ Some default seccomp profiles still deny `io_uring_setup`,
 kernel supports io_uring. If logs report `Function not implemented`, allow
 those three syscalls with a narrowly scoped custom profile. The examples below
 use `seccomp=unconfined` as a compatibility fallback; do not use that broad
-fallback for a hardened production deployment.
+fallback for a hardened production deployment. OpenKache exits before serving
+when io_uring cannot be initialized and includes these checks in the error
+message.
 
 ## Persistent storage
 
 Mount `/var/lib/openkache` to durable local or block storage. The server stores
 Segment files, the generated storage key, and the running-process marker there.
 Do not use an ephemeral container layer for data that must survive a restart.
+NVMe SSD is the intended production medium, but it is not required. Startup
+best-effort checks the mounted filesystem and emits a non-fatal warning when it
+is not NVMe or the container does not expose enough metadata to identify the
+device.
 The storage directory must be owned or writable by UID/GID `65532`; named
 Docker and Podman volumes satisfy this when first created.
 

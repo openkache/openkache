@@ -101,6 +101,13 @@ data in `/var/lib/openkache`, and requires a mounted PKI bundle for its
 production default command. See the [container image guide](./docs/container-image.md)
 for secure mTLS deployment and the explicit isolated-development command.
 
+The server runtime supports Linux `x86_64`/`aarch64` and Apple Silicon macOS.
+Linux startup requires Compio's native `io_uring` driver and access to the
+`io_uring_setup`, `io_uring_enter`, and `io_uring_register` syscalls; unsupported
+targets fail with an explicit platform error. NVMe SSD is the intended storage
+medium but is not mandatory. Startup warns when the storage filesystem is
+non-NVMe or its device cannot be identified.
+
 ### Production TLS
 
 Create a small internal PKI without OpenSSL:

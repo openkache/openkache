@@ -1,8 +1,105 @@
 //! Host-specific runtime topology and diagnostics.
 
 use std::collections::HashSet;
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 use crate::error::Result;
+
+/// Best-effort classification of the filesystem backing the storage directory.
+///
+/// NVMe is the intended production medium, but it is not a correctness
+/// requirement. `Unknown` is deliberately separate from `NonNvme`: containers,
+/// device-mapper stacks, and restricted macOS environments may not expose
+/// enough metadata to identify the physical device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageDeviceKind {
+    /// The storage filesystem resolves directly to an NVMe block device.
+    Nvme,
+    /// The storage filesystem resolves to a known non-NVMe block device.
+    NonNvme,
+    /// The platform or container did not expose enough metadata to decide.
+    Unknown,
+}
+
+/// Classifies the block device containing `path` without creating or opening
+/// the storage directory.
+///
+/// The path may not exist yet; in that case its nearest existing ancestor is
+/// inspected. Failure to inspect the filesystem is non-fatal and returns
+/// [`StorageDeviceKind::Unknown`].
+pub fn storage_device_kind(path: &Path) -> StorageDeviceKind {
+    #[cfg(target_os = "linux")]
+    {
+        return linux_storage_device_kind(path);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = path;
+        // macOS does not expose a stable, unprivileged equivalent of Linux's
+        // /sys/dev/block mapping. Keep startup best-effort instead of invoking
+        // external tools or guessing from a /dev/diskN name.
+        return StorageDeviceKind::Unknown;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_storage_device_kind(path: &Path) -> StorageDeviceKind {
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(existing_path) = nearest_existing_path(path) else {
+        return StorageDeviceKind::Unknown;
+    };
+    let Ok(metadata) = fs::metadata(existing_path) else {
+        return StorageDeviceKind::Unknown;
+    };
+    let device = metadata.dev();
+    let sysfs_device = PathBuf::from("/sys/dev/block").join(format!(
+        "{}:{}",
+        libc::major(device),
+        libc::minor(device)
+    ));
+    let Ok(resolved) = fs::canonicalize(sysfs_device) else {
+        return StorageDeviceKind::Unknown;
+    };
+
+    let Some(block_name) = resolved
+        .components()
+        .skip_while(|component| component.as_os_str() != "block")
+        .nth(1)
+        .and_then(|component| component.as_os_str().to_str())
+    else {
+        return StorageDeviceKind::Unknown;
+    };
+
+    if block_name.starts_with("nvme") {
+        StorageDeviceKind::Nvme
+    } else if ["fd", "hd", "mmcblk", "sd", "sr"]
+        .iter()
+        .any(|prefix| block_name.starts_with(prefix))
+    {
+        StorageDeviceKind::NonNvme
+    } else {
+        StorageDeviceKind::Unknown
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
+    let mut probe = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    while !probe.exists() {
+        if !probe.pop() {
+            return None;
+        }
+    }
+    Some(probe)
+}
 
 /// Returns the logical CPU identifiers accepted by the runtime affinity API.
 ///

@@ -1,9 +1,9 @@
 //! Command-line entry point for the SSD-backed OpenKache QUIC server.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{io, net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
-use openkache::{AppConfig, QuicBackend};
+use openkache::{platform, AppConfig, QuicBackend};
 
 const DEFAULT_PORT: u16 = 4433;
 
@@ -77,8 +77,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(plan) = &sizing_plan {
         sizing::print_plan(plan);
     }
-    let runtime = compio::runtime::Runtime::new()?;
+    let runtime = compio::runtime::Runtime::new().map_err(runtime_initialization_error)?;
     require_native_driver(runtime.driver_type())?;
+    report_storage_device(&config.storage.directory);
     runtime.block_on(serve::run(arguments, config))
 }
 
@@ -88,7 +89,11 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
         Ok(())
     } else {
         Err(std::io::Error::other(
-            "openkache-server requires the io_uring driver on Linux",
+            "openkache-server cannot start: Compio fell back to polling because \
+             Linux io_uring could not be initialized. Required syscalls: \
+             io_uring_setup, io_uring_enter, io_uring_register. Check the \
+             container seccomp policy and /proc/sys/kernel/io_uring_disabled \
+             (0 enables io_uring).",
         ))
     }
 }
@@ -99,8 +104,66 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
         Ok(())
     } else {
         Err(std::io::Error::other(
-            "openkache-server requires the polling driver on macOS",
+            "openkache-server requires Compio's polling driver on Apple Silicon macOS",
         ))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_initialization_error(error: io::Error) -> io::Error {
+    let cause = match error.raw_os_error() {
+        Some(libc::ENOSYS) => {
+            "the kernel may not provide io_uring, or a container seccomp profile may \
+             be denying the io_uring syscalls"
+        }
+        Some(libc::EPERM | libc::EACCES) => {
+            "the kernel or container security policy denied io_uring; check seccomp \
+             and io_uring permissions"
+        }
+        _ => "the kernel or container security policy rejected io_uring initialization",
+    };
+    io::Error::new(
+        error.kind(),
+        format!(
+            "openkache-server cannot start: Linux requires io_uring ({error}); {cause}. \
+             Required syscalls: io_uring_setup, io_uring_enter, io_uring_register. \
+             Also check /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
+        ),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn runtime_initialization_error(error: io::Error) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        format!(
+            "openkache-server cannot start: Apple Silicon macOS requires Compio's \
+             polling driver ({error})"
+        ),
+    )
+}
+
+fn report_storage_device(path: &std::path::Path) {
+    match platform::storage_device_kind(path) {
+        platform::StorageDeviceKind::Nvme => {
+            println!("Storage device: NVMe (detected)");
+        }
+        platform::StorageDeviceKind::NonNvme => {
+            eprintln!(
+                "WARNING: storage directory {} is on a non-NVMe block device. \
+                 OpenKache will continue, but NVMe SSD is the intended production \
+                 medium for predictable latency.",
+                path.display()
+            );
+        }
+        platform::StorageDeviceKind::Unknown => {
+            eprintln!(
+                "WARNING: could not verify that storage directory {} is on NVMe. \
+                 OpenKache will continue, but NVMe SSD is the intended production \
+                 medium for predictable latency.",
+                path.display()
+            );
+        }
     }
 }
 

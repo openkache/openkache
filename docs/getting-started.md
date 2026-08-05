@@ -4,7 +4,15 @@
 
 - Linux x86_64/aarch64 or Apple Silicon macOS
 - Rust toolchain (if building from source)
-- NVMe SSD recommended for production
+- NVMe SSD recommended for production (the server warns but does not reject other
+  storage)
+
+The server runtime contract is limited to Linux x86_64/aarch64 and Apple
+Silicon macOS. Linux uses Compio's native `io_uring` driver; the required
+`io_uring_setup`, `io_uring_enter`, and `io_uring_register` syscalls must be
+available to the process. If a container seccomp profile denies them, startup
+fails with a diagnostic that points to the profile and
+`/proc/sys/kernel/io_uring_disabled`.
 
 ## Install
 
@@ -50,8 +58,12 @@ serving with the calculated configuration.
 
 The calculated limits are advisory. The planner detects standard Linux cgroup
 memory limits or macOS host memory pressure plus filesystem availability, but
-not filesystem quotas, SSD type, or device throughput. Its memory estimate
-covers the packed Table rather than whole-process peak RSS. `--cpus` selects
+not filesystem quotas, SSD type, or device throughput. At server startup,
+OpenKache best-effort checks the storage filesystem and emits a warning when it
+is not NVMe or the device cannot be identified; this warning is non-fatal.
+NVMe is recommended for the intended latency and throughput profile, but it is
+not a hard requirement. Its memory estimate covers the packed Table rather than
+whole-process peak RSS. `--cpus` selects
 worker threads but does not impose a process CPU quota. `light` and `balanced`
 accept individual values up to their 1 MiB Blob Segment size; `heavy` accepts
 up to 64 MiB. Existing storage must be reopened with the same worker count and

@@ -11,6 +11,18 @@
     feature(stdarch_aarch64_sve)
 )]
 
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
+compile_error!(
+    "OpenKache server supports only Linux x86_64/aarch64 and Apple Silicon macOS; \
+     use one of these supported targets"
+);
+
 #[cfg(not(any(feature = "quic-quinn", feature = "quic-noq", feature = "quic-quiche")))]
 compile_error!(
     "enable at least one QUIC backend feature: `quic-quinn`, `quic-noq`, or `quic-quiche`"
