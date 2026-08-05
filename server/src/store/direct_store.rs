@@ -96,6 +96,20 @@ enum PreparedKeyedOperation {
     Delete,
 }
 
+fn startup_io_error(operation: &str, error: std::io::Error) -> KvError {
+    KvError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{operation}: {error}"),
+    ))
+}
+
+fn startup_storage_error(operation: &str, error: KvError) -> KvError {
+    match error {
+        KvError::Io(error) => startup_io_error(operation, error),
+        error => error,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct LocatedKeyState {
     table_location: TableLocation,
@@ -561,14 +575,20 @@ impl Kvkache {
         _allow_checkpoint: bool,
     ) -> Result<Self> {
         if let Some(parent) = config.data_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(|error| startup_io_error("creating the data directory", error))?;
         }
-        let data = open_direct_file(&config.data_path).await?;
+        let data = open_direct_file(&config.data_path)
+            .await
+            .map_err(|error| startup_io_error("opening the data file", error))?;
         let capacity = config.generation_file_bytes()?;
-        data.set_len(capacity).await?;
+        data.set_len(capacity)
+            .await
+            .map_err(|error| startup_io_error("setting the data file length", error))?;
         reserve_file_range(&data, 0, capacity)
             .await
-            .map_err(|error| storage_io_error(&resource_guard, error))?;
+            .map_err(|error| storage_io_error(&resource_guard, error))
+            .map_err(|error| startup_storage_error("reserving the data file range", error))?;
         resource_guard.observe_storage_reservation()?;
         let table = Table::new(&config)?;
         let logical_id_capacity = config.logical_sg_capacity()?;
@@ -588,15 +608,22 @@ impl Kvkache {
         }
         let next_sequence = config.mutable_segment_count as u64;
         if let Some(parent) = config.large_value_path.parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)
+                .map_err(|error| startup_io_error("creating the large-value directory", error))?;
         }
-        let large_values = open_direct_file(&config.large_value_path).await?;
+        let large_values = open_direct_file(&config.large_value_path)
+            .await
+            .map_err(|error| startup_io_error("opening the large-value file", error))?;
         large_values
             .set_len(config.large_value_capacity as u64)
-            .await?;
+            .await
+            .map_err(|error| startup_io_error("setting the large-value file length", error))?;
         reserve_file_range(&large_values, 0, config.large_value_capacity as u64)
             .await
-            .map_err(|error| storage_io_error(&resource_guard, error))?;
+            .map_err(|error| storage_io_error(&resource_guard, error))
+            .map_err(|error| {
+                startup_storage_error("reserving the large-value file range", error)
+            })?;
         resource_guard.observe_storage_reservation()?;
         let storage_device_kind = storage_runtime::file_device_kind(&data)
             .combine(storage_runtime::file_device_kind(&large_values));

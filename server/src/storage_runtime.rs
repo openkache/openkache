@@ -211,6 +211,37 @@ fn runtime_initialization_error(config: CompioRuntimeConfig, error: io::Error) -
     )
 }
 
+#[allow(dead_code)]
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_owned();
+    }
+    "non-string panic payload".into()
+}
+
+/// Converts a runtime panic into the same startup error path as fallible
+/// runtime builders.
+///
+/// Kimojio can initialize its io_uring rings while constructing the runtime or
+/// entering `block_on`, and the dependency currently unwraps ring setup
+/// errors. Keeping this conversion shared makes both eager and lazy
+/// initialization failures observable to the worker startup handshake.
+#[allow(dead_code)]
+pub(crate) fn catch_runtime_panic<T>(
+    description: &str,
+    operation: impl FnOnce() -> T,
+) -> io::Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).map_err(|payload| {
+        io::Error::other(format!(
+            "{description} panicked: {}",
+            panic_payload_message(payload.as_ref())
+        ))
+    })
+}
+
 pub(crate) fn storage_startup_error(sqpoll: bool, message: impl std::fmt::Display) -> String {
     let feature = if sqpoll {
         "io_uring SQPOLL"
@@ -251,16 +282,6 @@ mod backend {
         128
     }
 
-    fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
-        if let Some(message) = payload.downcast_ref::<String>() {
-            return message.clone();
-        }
-        if let Some(message) = payload.downcast_ref::<&str>() {
-            return (*message).to_owned();
-        }
-        "non-string panic payload".into()
-    }
-
     #[derive(Clone)]
     pub(crate) struct File(Rc<kimojio::OwnedFd>);
 
@@ -298,18 +319,27 @@ mod backend {
         crate::platform::pin_current_thread(config.worker_cpu)?;
         let configuration =
             Configuration::new().set_exit_behavior(ExitBehavior::WhenMainTaskCompletes);
-        let mut runtime = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut runtime = catch_runtime_panic("Kimojio io_uring runtime initialization", || {
             kimojio::Runtime::new(worker_index, configuration)
-        })) {
-            Ok(runtime) => runtime,
-            Err(payload) => {
+        })?;
+        match catch_runtime_panic("Kimojio io_uring runtime initialization", || {
+            runtime.block_on(async {})
+        })? {
+            Some(Ok(())) => {}
+            Some(Err(payload)) => {
                 return Err(io::Error::other(format!(
-                    "Kimojio io_uring runtime initialization panicked: {}",
+                    "Kimojio storage runtime task panicked: {}",
                     panic_payload_message(payload.as_ref())
                 )));
             }
-        };
-        match runtime.block_on(future) {
+            None => {
+                return Err(io::Error::other(
+                    "Kimojio storage runtime shut down before its worker completed",
+                ));
+            }
+        }
+        let result = runtime.block_on(future);
+        match result {
             Some(Ok(output)) => Ok(output),
             Some(Err(payload)) => Err(io::Error::other(format!(
                 "Kimojio storage runtime task panicked: {}",
@@ -715,7 +745,16 @@ mod backend {
             .with_entries(config.entries)
             .enable_timer()
             .attach_thread_pool(Box::new(monoio::blocking::DefaultThreadPool::new(1)))
-            .build()?;
+            .build()
+            .map_err(|error| {
+                let errno = error
+                    .raw_os_error()
+                    .map_or_else(String::new, |code| format!(" (errno {code})"));
+                io::Error::new(
+                    error.kind(),
+                    format!("Monoio io_uring runtime could not initialize{errno}: {error}"),
+                )
+            })?;
         Ok(runtime.block_on(future))
     }
 
