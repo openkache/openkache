@@ -644,11 +644,12 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = matches!(
-            request.opcode,
-            Opcode::Ping | Opcode::Echo | Opcode::Get | Opcode::Stats
-        ) || (request.opcode == Opcode::NamespaceOpen
-            && !request.create_if_missing);
+        let operation_contract = contract::operation_contract(request.opcode);
+        let response_safe = match operation_contract.retry_mode {
+            contract::OperationRetryMode::Always => true,
+            contract::OperationRetryMode::Never => false,
+            contract::OperationRetryMode::WhenNotCreating => !request.create_if_missing,
+        };
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
@@ -1667,40 +1668,12 @@ fn validate_response_contract(
     response: &Response,
 ) -> Result<()> {
     let operation = operation(opcode);
+    let operation_contract = contract::operation_contract(opcode);
     if response.status.is_error() {
-        let applicable = match response.status {
-            Status::InvalidRequest
-            | Status::TooLarge
-            | Status::Overloaded
-            | Status::Timeout
-            | Status::Forbidden
-            | Status::InternalError => true,
-            Status::NoCapacity | Status::PolicyConflict => opcode == Opcode::Set,
-            Status::Conflict => {
-                matches!(opcode, Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete)
-            }
-            Status::NamespaceNotFound => matches!(
-                opcode,
-                Opcode::Get
-                    | Opcode::Set
-                    | Opcode::Delete
-                    | Opcode::Stats
-                    | Opcode::Sync
-                    | Opcode::NamespaceOpen
-                    | Opcode::NamespaceUpdatePolicy
-                    | Opcode::NamespaceDelete
-            ),
-            Status::NamespaceNotEmpty => opcode == Opcode::NamespaceDelete,
-            Status::UnsupportedOpcode => false,
-            // `Status::try_from` rejects unassigned values before this helper runs.
-            Status::Ok
-            | Status::NotFound
-            | Status::Created
-            | Status::Replaced
-            | Status::Deleted
-            | Status::NotStored => false,
-        };
-        if !applicable {
+        if !operation_contract
+            .error_statuses
+            .contains(&response.status)
+        {
             return Err(Error::UnexpectedResponse {
                 operation,
                 message: format!(
@@ -1712,6 +1685,18 @@ fn validate_response_contract(
         return Ok(());
     }
 
+    if !operation_contract
+        .success_statuses
+        .contains(&response.status)
+    {
+        return Err(unexpected_status(operation, response.status));
+    }
+    if opcode == Opcode::NamespaceOpen
+        && response.status == Status::Created
+        && !create_if_missing
+    {
+        return Err(unexpected_status(operation, response.status));
+    }
     let invalid_payload = |message: &'static str| {
         Err(Error::UnexpectedResponse {
             operation,
@@ -1726,49 +1711,45 @@ fn validate_response_contract(
             }
         })
     };
-    match (opcode, response.status) {
-        (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
-        (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
-        (Opcode::Echo, Status::Ok) => Ok(()),
-
-        (Opcode::Get, Status::Ok) => Ok(()),
-        (Opcode::Get, Status::NotFound) if response.payload.is_empty() => Ok(()),
-        (Opcode::Get, Status::NotFound) => {
-            invalid_payload("GET NotFound responses must have an empty payload")
+    match operation_contract.response_kind {
+        contract::OperationResponseKind::Pong => {
+            if response.payload == b"PONG" {
+                Ok(())
+            } else {
+                invalid_payload("PING success payload must be PONG")
+            }
         }
-
-        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored)
-            if response.payload.is_empty() =>
-        {
-            Ok(())
+        contract::OperationResponseKind::Echo => Ok(()),
+        contract::OperationResponseKind::Value => {
+            if response.status == Status::NotFound && !response.payload.is_empty() {
+                invalid_payload("GET NotFound responses must have an empty payload")
+            } else {
+                Ok(())
+            }
         }
-        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored) => {
-            invalid_payload("SET success responses must have an empty payload")
+        contract::OperationResponseKind::SetOutcome => {
+            if response.payload.is_empty() {
+                Ok(())
+            } else {
+                invalid_payload("SET success responses must have an empty payload")
+            }
         }
-
-        (Opcode::Delete, Status::Deleted | Status::NotFound)
-            if response.payload.is_empty() =>
-        {
-            Ok(())
+        contract::OperationResponseKind::DeleteOutcome => {
+            if response.payload.is_empty() {
+                Ok(())
+            } else {
+                invalid_payload("DELETE domain responses must have an empty payload")
+            }
         }
-        (Opcode::Delete, Status::Deleted | Status::NotFound) => {
-            invalid_payload("DELETE domain responses must have an empty payload")
+        contract::OperationResponseKind::StatsJson => validate_stats_payload(&response.payload),
+        contract::OperationResponseKind::NamespaceDescriptor => descriptor_payload(),
+        contract::OperationResponseKind::Empty => {
+            if response.payload.is_empty() {
+                Ok(())
+            } else {
+                invalid_payload("empty-response operations must have an empty payload")
+            }
         }
-
-        (Opcode::Stats, Status::Ok) => validate_stats_payload(&response.payload),
-        (Opcode::Sync, Status::Ok) if response.payload.is_empty() => Ok(()),
-        (Opcode::Sync, Status::Ok) => {
-            invalid_payload("SYNC success responses must have an empty payload")
-        }
-
-        (Opcode::NamespaceOpen, Status::Ok) => descriptor_payload(),
-        (Opcode::NamespaceOpen, Status::Created) if create_if_missing => descriptor_payload(),
-        (Opcode::NamespaceUpdatePolicy, Status::Ok) => descriptor_payload(),
-        (Opcode::NamespaceDelete, Status::Deleted) if response.payload.is_empty() => Ok(()),
-        (Opcode::NamespaceDelete, Status::Deleted) => {
-            invalid_payload("NAMESPACE_DELETE success responses must have an empty payload")
-        }
-        (_, status) => Err(unexpected_status(operation, status)),
     }
 }
 

@@ -10,6 +10,56 @@ namespace openkache.client
 @trait(selector: "member")
 structure unsignedLong {}
 
+/// Request scope used by a generated client operation contract.
+enum OperationScope {
+    GLOBAL = "global"
+    ITEM = "item"
+    NAMESPACE = "namespace"
+    NAMESPACE_MANAGEMENT = "namespace_management"
+}
+
+/// Response payload contract used by the shared client core.
+enum OperationResponseKind {
+    EMPTY = "empty"
+    PONG = "pong"
+    ECHO = "echo"
+    VALUE = "value"
+    SET_OUTCOME = "set_outcome"
+    DELETE_OUTCOME = "delete_outcome"
+    STATS_JSON = "stats_json"
+    NAMESPACE_DESCRIPTOR = "namespace_descriptor"
+}
+
+/// Retry policy used by a generated client operation contract.
+enum OperationRetryMode {
+    ALWAYS = "always"
+    NEVER = "never"
+    WHEN_NOT_CREATING = "when_not_creating"
+}
+
+list OperationStatuses {
+    member: String
+}
+
+/// Semantic contract consumed by the shared client core.
+@trait(selector: "operation")
+structure operationContract {
+    @required
+    scope: OperationScope
+
+    @required
+    responseKind: OperationResponseKind
+
+    @required
+    retryMode: OperationRetryMode
+
+    @required
+    successStatuses: OperationStatuses
+
+    @required
+    errorStatuses: OperationStatuses
+}
+
 /// Assigns a numeric discriminator to a native FFI enum member.
 @trait(selector: "enum > member")
 structure ffiValue {
@@ -554,37 +604,77 @@ structure valueEnvelope {
     maxTypeNameBytes: 65535,
     jsonEncoding: "json"
 )
-/// Operation names are resolved from the protocol Opcode enum by the client
-/// generator; this service owns only client-side shapes and metadata.
 service OpenKacheClient {
     version: "1"
 }
 
+@operationContract(
+    scope: "global",
+    responseKind: "pong",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
+)
 operation Ping {
     input: PingInput
     output: PingOutput
 }
 
+@operationContract(
+    scope: "item",
+    responseKind: "value",
+    retryMode: "always",
+    successStatuses: ["ok", "not_found"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
 operation Get {
     input: GetInput
     output: GetOutput
 }
 
+@operationContract(
+    scope: "item",
+    responseKind: "set_outcome",
+    retryMode: "never",
+    successStatuses: ["created", "replaced", "not_stored"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "no_capacity", "policy_conflict", "namespace_not_found"]
+)
 operation Set {
     input: SetInput
     output: SetOutput
 }
 
+@operationContract(
+    scope: "item",
+    responseKind: "delete_outcome",
+    retryMode: "never",
+    successStatuses: ["deleted", "not_found"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found", "namespace_not_empty"]
+)
 operation Delete {
     input: DeleteInput
     output: DeleteOutput
 }
 
+@operationContract(
+    scope: "namespace",
+    responseKind: "stats_json",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
 operation Stats {
     input: StatsInput
     output: StatsOutput
 }
 
+@operationContract(
+    scope: "namespace",
+    responseKind: "empty",
+    retryMode: "never",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
 operation Sync {
     input: SyncInput
     output: SyncOutput
@@ -668,22 +758,50 @@ structure SyncInput {
 
 structure SyncOutput {}
 
+@operationContract(
+    scope: "namespace_management",
+    responseKind: "namespace_descriptor",
+    retryMode: "when_not_creating",
+    successStatuses: ["ok", "created"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
 operation NamespaceOpen {
     input: NamespaceOpenInput
     output: NamespaceOpenOutput
 }
 
+@operationContract(
+    scope: "namespace_management",
+    responseKind: "namespace_descriptor",
+    retryMode: "never",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found"]
+)
 operation NamespaceUpdatePolicy {
     input: NamespaceUpdatePolicyInput
     output: NamespaceUpdatePolicyOutput
 }
 
+@operationContract(
+    scope: "namespace_management",
+    responseKind: "empty",
+    retryMode: "never",
+    successStatuses: ["deleted"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found", "namespace_not_empty"]
+)
 operation NamespaceDelete {
     input: NamespaceDeleteInput
     output: NamespaceDeleteOutput
 }
 
 /// Experimental API used to verify cross-language contract propagation.
+@operationContract(
+    scope: "global",
+    responseKind: "echo",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
+)
 operation Echo {
     input: EchoInput
     output: EchoOutput

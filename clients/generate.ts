@@ -83,6 +83,33 @@ type Api_Type_Kind =
   | "structure"
   | "unsigned_long"
 
+type Api_Operation_Scope =
+  | "global"
+  | "item"
+  | "namespace"
+  | "namespace_management"
+
+type Api_Operation_Response_Kind =
+  | "empty"
+  | "pong"
+  | "echo"
+  | "value"
+  | "set_outcome"
+  | "delete_outcome"
+  | "stats_json"
+  | "namespace_descriptor"
+
+type Api_Operation_Retry_Mode = "always" | "never" | "when_not_creating"
+
+/** Semantic operation metadata consumed by the shared client core. */
+export interface Api_Operation_Contract {
+  readonly error_statuses: readonly string[]
+  readonly response_kind: Api_Operation_Response_Kind
+  readonly retry_mode: Api_Operation_Retry_Mode
+  readonly scope: Api_Operation_Scope
+  readonly success_statuses: readonly string[]
+}
+
 /** One resolved Smithy API field type. */
 export interface Api_Type {
   readonly kind: Api_Type_Kind
@@ -116,6 +143,7 @@ export interface Api_Enum {
 
 /** One operation exposed by the Smithy service. */
 export interface Api_Operation {
+  readonly contract?: Api_Operation_Contract
   readonly input: string
   readonly name: string
   readonly output: string
@@ -223,6 +251,7 @@ const SERVICE_SHAPE_ID = "openkache.protocol#OpenKache"
 const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
+const OPERATION_CONTRACT_TRAIT_ID = "openkache.client#operationContract"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
 const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
@@ -523,6 +552,89 @@ function api_structure(shapes: Json_Object, target: string): Api_Structure {
   }
 }
 
+function operation_contract(
+  shape: Json_Object,
+  target: string,
+): Api_Operation_Contract | undefined {
+  const traits = optional_object_member(shape, "traits", target)
+  const value = traits?.[OPERATION_CONTRACT_TRAIT_ID] ??
+    traits?.["openkache.protocol#operationContract"]
+  if (value === undefined) return undefined
+  const contract = object_value(value, `${target}.traits.${OPERATION_CONTRACT_TRAIT_ID}`)
+  const scope = string_member(contract, "scope", `${target}.${OPERATION_CONTRACT_TRAIT_ID}`)
+  if (!["global", "item", "namespace", "namespace_management"].includes(scope)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
+    )
+  }
+  const response_kind = string_member(
+    contract,
+    "responseKind",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  if (
+    ![
+      "empty",
+      "pong",
+      "echo",
+      "value",
+      "set_outcome",
+      "delete_outcome",
+      "stats_json",
+      "namespace_descriptor",
+    ].includes(response_kind)
+  ) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
+    )
+  }
+  const retry_mode = string_member(
+    contract,
+    "retryMode",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  if (!["always", "never", "when_not_creating"].includes(retry_mode)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
+    )
+  }
+  const statuses = (member: string): readonly string[] => {
+    const values = array_member(
+      contract,
+      member,
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+    ).map((value, index) => {
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error(
+          `${target}.${OPERATION_CONTRACT_TRAIT_ID}.${member}[${index}] must be a non-empty string`,
+        )
+      }
+      return value
+    })
+    const unique = new Set(values)
+    if (unique.size !== values.length) {
+      throw new Error(
+        `${target}.${OPERATION_CONTRACT_TRAIT_ID}.${member} must not contain duplicate statuses`,
+      )
+    }
+    return values
+  }
+  const success_statuses = statuses("successStatuses")
+  const error_statuses = statuses("errorStatuses")
+  if (success_statuses.length === 0 || error_statuses.length === 0) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID} successStatuses and errorStatuses must not be empty`,
+    )
+  }
+  return {
+    error_statuses,
+    response_kind: response_kind as Api_Operation_Response_Kind,
+    retry_mode: retry_mode as Api_Operation_Retry_Mode,
+    scope: scope as Api_Operation_Scope,
+    success_statuses,
+  }
+}
+
 function api_enum(shapes: Json_Object, namespace: string, name: string): Api_Enum {
   const shape_id = `${namespace}#${name}`
   const shape = object_member(shapes, shape_id, "Smithy AST.shapes")
@@ -603,7 +715,9 @@ function api_contract(
         "target",
         `${target}.output`,
       )
+      const semantic_contract = operation_contract(shape, target)
       return {
+        ...(semantic_contract === undefined ? {} : { contract: semantic_contract }),
         input: shape_name(input),
         name: shape_name(target),
         output: shape_name(output),
@@ -1421,6 +1535,12 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     ),
   }
   const opcode_names = new Set(wire.opcodes.map((entry) => entry.name))
+  const status_names = new Set(
+    wire.statuses.flatMap((entry) => [
+      entry.name,
+      entry.text ?? snake_case(entry.name),
+    ]),
+  )
   const api_operation_names = new Set<string>()
   for (const operation of api.operations) {
     if (api_operation_names.has(operation.name)) {
@@ -1431,6 +1551,32 @@ export function extract_client_contract(ast: unknown): Client_Contract {
       throw new Error(
         `client operation ${operation.name} has no matching protocol opcode`,
       )
+    }
+    if (client_service_id === CLIENT_SERVICE_SHAPE_ID && operation.contract === undefined) {
+      throw new Error(
+        `client operation ${operation.name} is missing ${OPERATION_CONTRACT_TRAIT_ID}`,
+      )
+    }
+    if (operation.contract !== undefined) {
+      for (const status of [
+        ...operation.contract.success_statuses,
+        ...operation.contract.error_statuses,
+      ]) {
+        if (!status_names.has(status)) {
+          throw new Error(
+            `client operation ${operation.name} references unknown protocol status ${status}`,
+          )
+        }
+      }
+      if (
+        operation.contract.success_statuses.some((status) =>
+          operation.contract?.error_statuses.includes(status),
+        )
+      ) {
+        throw new Error(
+          `client operation ${operation.name} has overlapping success and error statuses`,
+        )
+      }
     }
   }
   for (const opcode of wire.opcodes) {
@@ -1708,6 +1854,123 @@ pub const SMITHY_${snake_case(enum_.name).toUpperCase()}_${snake_case(member.nam
     .join("\n")
 }
 
+function rust_status_variant(contract: Client_Contract, status: string): string {
+  const entry = contract.statuses.find(
+    (candidate) =>
+      candidate.name === status ||
+      candidate.text === status ||
+      snake_case(candidate.name) === status,
+  )
+  if (entry === undefined) {
+    throw new Error(`operation metadata references unknown status ${status}`)
+  }
+  return entry.name
+}
+
+function render_rust_operation_contract(contract: Client_Contract): string {
+  const operations = contract.api.operations
+  if (
+    operations.length !== contract.opcodes.length ||
+    operations.some((operation) => operation.contract === undefined)
+  ) {
+    return ""
+  }
+  const enum_variant = (
+    value: string,
+    allowed: readonly string[],
+    label: string,
+  ): string => {
+    if (!allowed.includes(value)) {
+      throw new Error(`operation metadata ${label} has unsupported value ${value}`)
+    }
+    return pascal_case(snake_case(value))
+  }
+  const scope_variants = ["global", "item", "namespace", "namespace_management"] as const
+  const response_variants = [
+    "empty",
+    "pong",
+    "echo",
+    "value",
+    "set_outcome",
+    "delete_outcome",
+    "stats_json",
+    "namespace_descriptor",
+  ] as const
+  const retry_variants = ["always", "never", "when_not_creating"] as const
+  const status_slice = (statuses: readonly string[]): string =>
+    `&[${statuses
+      .map(
+        (status) =>
+          `openkache_protocol::Status::${rust_status_variant(contract, status)}`,
+      )
+      .join(", ")}]`
+  const metadata = operations
+    .map((operation) => {
+      const operation_contract = operation.contract!
+      const opcode = contract.opcodes.find((entry) => entry.name === operation.name)
+      if (opcode === undefined) {
+        throw new Error(`operation metadata has no matching opcode ${operation.name}`)
+      }
+      return `        openkache_protocol::Opcode::${operation.name} => OperationContract {
+            scope: OperationScope::${enum_variant(operation_contract.scope, scope_variants, `${operation.name}.scope`)},
+            response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind, response_variants, `${operation.name}.responseKind`)},
+            retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode, retry_variants, `${operation.name}.retryMode`)},
+            success_statuses: ${status_slice(operation_contract.success_statuses)},
+            error_statuses: ${status_slice(operation_contract.error_statuses)},
+        },`
+    })
+    .join("\n")
+  return `/// Request scope declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationScope {
+    Global,
+    Item,
+    Namespace,
+    NamespaceManagement,
+}
+
+/// Response payload shape declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationResponseKind {
+    Empty,
+    Pong,
+    Echo,
+    Value,
+    SetOutcome,
+    DeleteOutcome,
+    StatsJson,
+    NamespaceDescriptor,
+}
+
+/// Retry behavior declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationRetryMode {
+    Always,
+    Never,
+    WhenNotCreating,
+}
+
+/// Generated semantic metadata for one protocol operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationContract {
+    pub scope: OperationScope,
+    pub response_kind: OperationResponseKind,
+    pub retry_mode: OperationRetryMode,
+    pub success_statuses: &'static [openkache_protocol::Status],
+    pub error_statuses: &'static [openkache_protocol::Status],
+}
+
+/// Returns the generated contract for a protocol operation.
+pub const fn operation_contract(
+    opcode: openkache_protocol::Opcode,
+) -> OperationContract {
+    match opcode {
+${metadata}
+    }
+}
+`
+}
+
 /** Renders the client-owned Rust defaults, ABI, and value-format declarations. */
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
@@ -1855,6 +2118,7 @@ ${descriptor_offset_constants}
 
 ${ffi_namespace_descriptor}
 ${api_enum_constants}
+${render_rust_operation_contract(contract)}
 ${rust_ffi_enum(
   "FfiOperation",
   "Native FFI operation identifiers shared by every language adapter.",
