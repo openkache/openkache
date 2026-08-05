@@ -16,11 +16,8 @@ use compio::runtime::{Runtime, RuntimeBuilder};
 
 const SQPOLL_IDLE: Duration = Duration::from_secs(2);
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DriverRequirement {
-    /// Let Compio select its best available driver.
-    Any,
     /// Require io_uring and reject Compio's polling fallback.
     IoUring,
     /// Require the polling driver.
@@ -46,7 +43,7 @@ impl CompioRuntimeConfig {
             worker_cpu,
             sqpoll: false,
             sqpoll_cpu: None,
-            driver: native_network_driver(),
+            driver: native_compio_driver(),
             role: "network",
         }
     }
@@ -67,7 +64,7 @@ impl CompioRuntimeConfig {
             driver: if sqpoll {
                 DriverRequirement::IoUring
             } else {
-                DriverRequirement::Any
+                native_compio_driver()
             },
             role: "storage",
         }
@@ -93,19 +90,19 @@ impl CompioRuntimeConfig {
             worker_cpu: None,
             sqpoll: false,
             sqpoll_cpu: None,
-            driver: native_network_driver(),
+            driver: native_compio_driver(),
             role: "server",
         }
     }
 }
 
 #[cfg(target_os = "linux")]
-const fn native_network_driver() -> DriverRequirement {
+const fn native_compio_driver() -> DriverRequirement {
     DriverRequirement::IoUring
 }
 
 #[cfg(target_os = "macos")]
-const fn native_network_driver() -> DriverRequirement {
+const fn native_compio_driver() -> DriverRequirement {
     DriverRequirement::Polling
 }
 
@@ -134,7 +131,6 @@ pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
     }
 
     match config.driver {
-        DriverRequirement::Any => {}
         DriverRequirement::IoUring => {
             #[cfg(target_os = "linux")]
             proactor.driver_type(DriverType::IoUring);
@@ -176,13 +172,15 @@ pub(crate) fn run_compio<F>(config: CompioRuntimeConfig, future: F) -> io::Resul
 where
     F: Future,
 {
+    let role = config.role;
     let runtime = build(config)?;
-    Ok(runtime.block_on(future))
+    catch_runtime_panic(format!("Compio {role} runtime"), || {
+        runtime.block_on(future)
+    })
 }
 
 fn driver_matches(driver: DriverType, requirement: DriverRequirement) -> bool {
     match requirement {
-        DriverRequirement::Any => true,
         DriverRequirement::IoUring => driver.is_iouring(),
         DriverRequirement::Polling => driver.is_polling(),
     }
@@ -190,7 +188,6 @@ fn driver_matches(driver: DriverType, requirement: DriverRequirement) -> bool {
 
 fn runtime_initialization_error(config: CompioRuntimeConfig, error: io::Error) -> io::Error {
     let feature = match config.driver {
-        DriverRequirement::Any => "Compio's selected I/O driver",
         DriverRequirement::IoUring => "native io_uring",
         DriverRequirement::Polling => "the polling driver",
     };
@@ -231,7 +228,7 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// initialization failures observable to the worker startup handshake.
 #[allow(dead_code)]
 pub(crate) fn catch_runtime_panic<T>(
-    description: &str,
+    description: impl std::fmt::Display,
     operation: impl FnOnce() -> T,
 ) -> io::Result<T> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).map_err(|payload| {
@@ -322,23 +319,9 @@ mod backend {
         let mut runtime = catch_runtime_panic("Kimojio io_uring runtime initialization", || {
             kimojio::Runtime::new(worker_index, configuration)
         })?;
-        match catch_runtime_panic("Kimojio io_uring runtime initialization", || {
-            runtime.block_on(async {})
-        })? {
-            Some(Ok(())) => {}
-            Some(Err(payload)) => {
-                return Err(io::Error::other(format!(
-                    "Kimojio storage runtime task panicked: {}",
-                    panic_payload_message(payload.as_ref())
-                )));
-            }
-            None => {
-                return Err(io::Error::other(
-                    "Kimojio storage runtime shut down before its worker completed",
-                ));
-            }
-        }
-        let result = runtime.block_on(future);
+        let result = catch_runtime_panic("Kimojio io_uring storage runtime", || {
+            runtime.block_on(future)
+        })?;
         match result {
             Some(Ok(output)) => Ok(output),
             Some(Err(payload)) => Err(io::Error::other(format!(
@@ -755,7 +738,9 @@ mod backend {
                     format!("Monoio io_uring runtime could not initialize{errno}: {error}"),
                 )
             })?;
-        Ok(runtime.block_on(future))
+        catch_runtime_panic("Monoio io_uring storage runtime", || {
+            runtime.block_on(future)
+        })
     }
 
     pub(crate) fn spawn_detached<F>(future: F)

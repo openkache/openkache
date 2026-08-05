@@ -106,6 +106,9 @@ fn startup_io_error(operation: &str, error: std::io::Error) -> KvError {
 fn startup_storage_error(operation: &str, error: KvError) -> KvError {
     match error {
         KvError::Io(error) => startup_io_error(operation, error),
+        KvError::CapacityExhausted { resource } => KvError::Worker(format!(
+            "{operation}: {resource} capacity is exhausted; writes are temporarily stopped"
+        )),
         error => error,
     }
 }
