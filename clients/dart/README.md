@@ -6,14 +6,18 @@ reimplement QUIC, TLS, framing, retries, or result ownership.
 
 ## Commands
 
-The package source imports the Smithy-derived native constants. Regenerate them
-from the canonical model before running the Dart commands:
+The package source imports Smithy-derived DTOs, operation signatures, and
+native constants. Regenerate them from the canonical model before running the
+Dart commands:
 
 ```bash
 OPENKACHE_GENERATION_TARGET=dart ../generate.ts
 dart pub get
 dart analyze
 ```
+
+Generated sources are under `lib/generated_local/` and must not be edited
+manually.
 
 Build the native library with the `ffi` feature before connecting:
 

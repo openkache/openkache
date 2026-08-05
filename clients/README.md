@@ -36,10 +36,12 @@ formats or protocol behavior.
 | Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
 | Dart | `dart/` | Experimental ECHO operation over the shared native ABI |
 
-Java, Kotlin, and Dart currently implement only the experimental ECHO operation.
-Their adapters connect to the shared Rust client-core C ABI, while the
-remaining cache operations are intentionally reserved for a later binding
-iteration.
+Java, Kotlin, and Dart currently implement only the experimental ECHO
+operation. Their adapters connect to the shared Rust client-core C ABI, while
+the remaining cache operations are intentionally reserved for a later binding
+iteration. Their Smithy DTOs, enums, and complete operation signatures are
+generated alongside the native constants; an adapter only implements the
+operations it supports.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
 format v1. The core owns Raw and canonical JSON serialization. TypeScript's
@@ -74,16 +76,17 @@ be added without introducing a second protocol implementation.
 ## Package commands and entry points
 
 Run each command from the listed package directory. The Java, Kotlin, and Dart
-commands compile and analyze their experimental ECHO adapters.
+commands generate their Smithy API types and constants before compiling or
+analyzing their experimental ECHO adapters.
 
 | Package | Validation command | Reserved package surface |
 |---|---|---|
 | C | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.h` |
 | C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
-| Dart | `OPENKACHE_GENERATION_TARGET=dart ../generate.ts && dart pub get && dart analyze` | `lib/openkache.dart` |
+| Dart | `OPENKACHE_GENERATION_TARGET=dart ../generate.ts && dart pub get && dart analyze` | `lib/openkache.dart` plus generated Smithy types |
 | Go | `go generate && go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
-| Java | `mvn package` | `src/main/java/io/openkache/client/EchoClient.java` |
-| Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` |
+| Java | `mvn package` | `src/main/java/io/openkache/client/EchoClient.java` plus generated Smithy types |
+| Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` plus generated Smithy types |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
 | Swift | `swift build` | `Sources/OpenKache/OpenKache.swift`, SwiftPM-generated Smithy API |

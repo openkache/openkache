@@ -13,24 +13,9 @@ import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 
 /**
- * Input shape for the experimental Smithy `Echo` operation.
- */
-public data class EchoInput(val message: String)
-
-/**
- * Output shape for the experimental Smithy `Echo` operation.
- */
-public data class EchoOutput(val message: String)
-
-/**
  * Contract surface for the Rust-backed Kotlin client.
  */
-public interface OpenKacheClient {
-    /**
-     * Sends an experimental UTF-8 message and returns the echoed message.
-     */
-    public suspend fun echo(input: EchoInput): EchoOutput
-}
+public interface OpenKacheClient : SmithyEchoApi
 
 /**
  * Experimental Kotlin client backed by the shared Rust client-core C ABI.

@@ -270,12 +270,19 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/core/generated_local/smithy_contract.h"),
   go_api: generated_path("clients/go/smithy_api.go"),
   go_contract: generated_path("clients/go/smithy_contract.go"),
+  java_api_root: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated_local",
+  ),
   java_contract: generated_path(
     "clients/java/src/main/java/io/openkache/client/generated_local/SmithyContract.java",
+  ),
+  kotlin_api: generated_path(
+    "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyApi.kt",
   ),
   kotlin_contract: generated_path(
     "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyContract.kt",
   ),
+  dart_api: generated_path("clients/dart/lib/generated_local/smithy_api.dart"),
   dart_contract: generated_path("clients/dart/lib/generated_local/smithy_contract.dart"),
 } as const
 
@@ -1881,6 +1888,20 @@ ${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
 `
 }
 
+interface Adapter_Contract_Values {
+  readonly abi_version: number
+  readonly operations: readonly Wire_Entry[]
+  readonly result_error: number
+  readonly result_value: number
+  readonly result_connected: number
+  readonly set_condition_any: number
+  readonly default_zstandard_level: number
+  readonly default_zstandard_minimum_input_bytes: number
+  readonly default_zstandard_minimum_savings_bytes: number
+  readonly default_connect_timeout_milliseconds: number
+  readonly default_request_timeout_milliseconds: number
+}
+
 function required_contract_entry(
   entries: readonly Wire_Entry[],
   name: string,
@@ -1893,28 +1914,10 @@ function required_contract_entry(
   return entry
 }
 
-interface Adapter_Contract_Values {
-  readonly abi_version: number
-  readonly operation_echo: number
-  readonly result_error: number
-  readonly result_value: number
-  readonly result_connected: number
-  readonly set_condition_any: number
-  readonly default_zstandard_level: number
-  readonly default_zstandard_minimum_input_bytes: number
-  readonly default_zstandard_minimum_savings_bytes: number
-  readonly default_connect_timeout_milliseconds: number
-  readonly default_request_timeout_milliseconds: number
-}
-
 function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Values {
   return {
     abi_version: contract.ffi.abi_version,
-    operation_echo: required_contract_entry(
-      contract.opcodes,
-      "Echo",
-      "protocol opcode contract",
-    ).value,
+    operations: contract.opcodes,
     result_error: required_contract_entry(
       contract.ffi.result_kinds,
       "Error",
@@ -1947,6 +1950,350 @@ function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Va
   }
 }
 
+function lower_camel_case(identifier: string): string {
+  const pascal =
+    /[_-]/.test(identifier) || identifier === identifier.toUpperCase()
+      ? pascal_case(identifier)
+      : `${identifier[0]?.toUpperCase()}${identifier.slice(1)}`
+  return pascal.length === 0
+    ? pascal
+    : `${pascal[0]?.toLowerCase()}${pascal.slice(1)}`
+}
+
+function java_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "byte[]"
+      break
+    case "boolean":
+      rendered = "boolean"
+      break
+    case "enum":
+    case "structure":
+      if (type.name === undefined) throw new Error(`Java API ${type.kind} has no name`)
+      rendered = type.name
+      break
+    case "integer":
+      rendered = "int"
+      break
+    case "long":
+    case "unsigned_long":
+      rendered = "long"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  if (required) return rendered
+  switch (rendered) {
+    case "boolean":
+      return "Boolean"
+    case "int":
+      return "Integer"
+    case "long":
+      return "Long"
+    default:
+      return rendered
+  }
+}
+
+function java_api_enum_source(enum_: Api_Enum): string {
+  const members = enum_.members
+    .map(
+      (member) =>
+        `    ${snake_case(member.name).toUpperCase()}(${JSON.stringify(member.value)})`,
+    )
+    .join(",\n")
+  return `package io.openkache.client;
+
+/** Generated Smithy ${enum_.name} string enum. */
+public enum ${enum_.name} {
+${members};
+
+    private final String smithyValue;
+
+    ${enum_.name}(String smithyValue) {
+        this.smithyValue = smithyValue;
+    }
+
+    public String smithyValue() {
+        return smithyValue;
+    }
+}
+`
+}
+
+function java_api_structure_source(structure: Api_Structure): string {
+  if (structure.members.length === 0) {
+    return `package io.openkache.client;
+
+/** Generated Smithy ${structure.name} structure. */
+public record ${structure.name}() {}
+`
+  }
+  const members = structure.members
+    .map(
+      (member) =>
+        `    ${java_api_type(member.type, member.required)} ${member.name}`,
+    )
+    .join(",\n")
+  const required_references = structure.members
+    .filter(
+      (member) =>
+        member.required &&
+        ["blob", "enum", "string", "structure"].includes(member.type.kind),
+    )
+    .map((member) => `        Objects.requireNonNull(${member.name}, "${member.name}");`)
+    .join("\n")
+  return `package io.openkache.client;
+
+import java.util.Objects;
+
+/** Generated Smithy ${structure.name} structure. */
+public record ${structure.name}(
+${members}
+) {
+    public ${structure.name} {
+${required_references}
+    }
+}
+`
+}
+
+function java_api_interface_source(contract: Client_Contract): string {
+  const interfaces = contract.api.operations
+    .map((operation) => `Smithy${operation.name}Api`)
+    .join(",\n    ")
+  return `package io.openkache.client;
+
+/** Generated Smithy operation surface. */
+public interface SmithyOpenKacheApi extends
+    ${interfaces} {}
+`
+}
+
+function java_api_operation_interface_source(operation: Api_Operation): string {
+  return `package io.openkache.client;
+
+/** Generated Smithy ${operation.name} operation surface. */
+public interface Smithy${operation.name}Api {
+    /** Invokes the Smithy ${operation.name} operation. */
+    java.util.concurrent.CompletionStage<${operation.output}> ${lower_camel_case(operation.name)}(${operation.input} input);
+}
+`
+}
+
+/** Renders generated Java Smithy shapes and the complete operation surface. */
+export function render_java_api(
+  contract: Client_Contract,
+): Readonly<Record<string, string>> {
+  const outputs: Record<string, string> = {
+    [join(GENERATED_OUTPUTS.java_api_root, "SmithyOpenKacheApi.java")]:
+      java_api_interface_source(contract),
+  }
+  for (const operation of contract.api.operations) {
+    outputs[join(GENERATED_OUTPUTS.java_api_root, `Smithy${operation.name}Api.java`)] =
+      java_api_operation_interface_source(operation)
+  }
+  for (const enum_ of contract.api.enums) {
+    outputs[join(GENERATED_OUTPUTS.java_api_root, `${enum_.name}.java`)] =
+      java_api_enum_source(enum_)
+  }
+  for (const structure of contract.api.structures) {
+    outputs[join(GENERATED_OUTPUTS.java_api_root, `${structure.name}.java`)] =
+      java_api_structure_source(structure)
+  }
+  return outputs
+}
+
+function kotlin_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "ByteArray"
+      break
+    case "boolean":
+      rendered = "Boolean"
+      break
+    case "enum":
+    case "structure":
+      if (type.name === undefined) throw new Error(`Kotlin API ${type.kind} has no name`)
+      rendered = type.name
+      break
+    case "integer":
+      rendered = "Int"
+      break
+    case "long":
+    case "unsigned_long":
+      rendered = "Long"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  return required ? rendered : `${rendered}?`
+}
+
+function kotlin_api_enum_source(enum_: Api_Enum): string {
+  const members = enum_.members
+    .map(
+      (member) =>
+        `    ${member.name}(${JSON.stringify(member.value)})`,
+    )
+    .join(",\n")
+  return `/** Generated Smithy ${enum_.name} string enum. */
+public enum class ${enum_.name}(public val smithyValue: String) {
+${members};
+}
+`
+}
+
+function kotlin_api_structure_source(structure: Api_Structure): string {
+  if (structure.members.length === 0) {
+    return `/** Generated Smithy ${structure.name} structure. */
+public class ${structure.name}
+`
+  }
+  const members = structure.members
+    .map(
+      (member) =>
+        `    public val ${member.name}: ${kotlin_api_type(member.type, member.required)}`,
+    )
+    .join(",\n")
+  return `/** Generated Smithy ${structure.name} structure. */
+public data class ${structure.name}(
+${members}
+)
+`
+}
+
+/** Renders generated Kotlin Smithy shapes and the complete operation surface. */
+export function render_kotlin_api(contract: Client_Contract): string {
+  const enums = contract.api.enums.map(kotlin_api_enum_source)
+  const structures = contract.api.structures.map(kotlin_api_structure_source)
+  const operation_interfaces = contract.api.operations.map(
+    (operation) => `/** Generated Smithy ${operation.name} operation surface. */
+public interface Smithy${operation.name}Api {
+    /** Invokes the Smithy ${operation.name} operation. */
+    public suspend fun ${lower_camel_case(operation.name)}(input: ${operation.input}): ${operation.output}
+}`,
+  )
+  const interfaces = contract.api.operations
+    .map((operation) => `Smithy${operation.name}Api`)
+    .join(",\n    ")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client
+
+${[...enums, ...structures].join("\n")}
+
+/** Generated Smithy operation surface. */
+${operation_interfaces.join("\n\n")}
+
+public interface SmithyOpenKacheApi :
+    ${interfaces}
+`
+}
+
+function dart_api_type(type: Api_Type, required: boolean): string {
+  let rendered: string
+  switch (type.kind) {
+    case "blob":
+      rendered = "List<int>"
+      break
+    case "boolean":
+      rendered = "bool"
+      break
+    case "enum":
+    case "structure":
+      if (type.name === undefined) throw new Error(`Dart API ${type.kind} has no name`)
+      rendered = type.name
+      break
+    case "integer":
+    case "long":
+    case "unsigned_long":
+      rendered = "int"
+      break
+    case "string":
+      rendered = "String"
+      break
+  }
+  return required ? rendered : `${rendered}?`
+}
+
+function dart_api_enum_source(enum_: Api_Enum): string {
+  const members = enum_.members
+    .map(
+      (member) =>
+        `  ${lower_camel_case(member.name)}('${member.value.replaceAll("'", "\\'")}'),`,
+    )
+    .join("\n")
+  return `/// Generated Smithy ${enum_.name} string enum.
+enum ${enum_.name} {
+${members}
+
+  const ${enum_.name}(this.smithyValue);
+
+  final String smithyValue;
+}
+`
+}
+
+function dart_api_structure_source(structure: Api_Structure): string {
+  const parameters = structure.members
+    .map(
+      (member) =>
+        `    ${member.required ? "required " : ""}this.${member.name},`,
+    )
+    .join("\n")
+  const fields = structure.members
+    .map(
+      (member) =>
+        `  final ${dart_api_type(member.type, member.required)} ${member.name};`,
+    )
+    .join("\n")
+  return structure.members.length === 0
+    ? `/// Generated Smithy ${structure.name} structure.
+final class ${structure.name} {
+  const ${structure.name}();
+}
+`
+    : `/// Generated Smithy ${structure.name} structure.
+final class ${structure.name} {
+  const ${structure.name}({
+${parameters}
+  });
+
+${fields}
+}
+`
+}
+
+/** Renders generated Dart Smithy shapes and the complete operation surface. */
+export function render_dart_api(contract: Client_Contract): string {
+  const enums = contract.api.enums.map(dart_api_enum_source)
+  const structures = contract.api.structures.map(dart_api_structure_source)
+  const operation_interfaces = contract.api.operations.map(
+    (operation) => `/// Generated Smithy ${operation.name} operation surface.
+abstract interface class Smithy${operation.name}Api {
+  /// Invokes the Smithy ${operation.name} operation.
+  Future<${operation.output}> ${lower_camel_case(operation.name)}(${operation.input} input);
+}`,
+  )
+  const interfaces = contract.api.operations
+    .map((operation) => `Smithy${operation.name}Api`)
+    .join(", ")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+
+${[...enums, ...structures].join("\n")}
+
+/// Generated Smithy operation surface.
+${operation_interfaces.join("\n\n")}
+
+abstract interface class SmithyOpenKacheApi implements ${interfaces} {}
+`
+}
+
 /** Renders the native constants consumed by the Java JNA adapter. */
 export function render_java_contract(contract: Client_Contract): string {
   const values = adapter_contract_values(contract)
@@ -1958,7 +2305,12 @@ public final class SmithyContract {
     private SmithyContract() {}
 
     public static final int ABI_VERSION = ${values.abi_version};
-    public static final int OPERATION_ECHO = ${values.operation_echo};
+${values.operations
+  .map(
+    (entry) =>
+      `    public static final int OPERATION_${snake_case(entry.name).toUpperCase()} = ${entry.value};`,
+  )
+  .join("\n")}
     public static final int RESULT_ERROR = ${values.result_error};
     public static final int RESULT_VALUE = ${values.result_value};
     public static final int RESULT_CONNECTED = ${values.result_connected};
@@ -1981,7 +2333,12 @@ package io.openkache.client.generated_local
 /** Native values shared by the Kotlin adapter and the Rust client-core ABI. */
 public object SmithyContract {
     public const val ABI_VERSION: Int = ${values.abi_version}
-    public const val OPERATION_ECHO: Int = ${values.operation_echo}
+${values.operations
+  .map(
+    (entry) =>
+      `    public const val OPERATION_${snake_case(entry.name).toUpperCase()}: Int = ${entry.value}`,
+  )
+  .join("\n")}
     public const val RESULT_ERROR: Int = ${values.result_error}
     public const val RESULT_VALUE: Int = ${values.result_value}
     public const val RESULT_CONNECTED: Int = ${values.result_connected}
@@ -2002,7 +2359,12 @@ export function render_dart_contract(contract: Client_Contract): string {
 
 /// Native values shared by the Dart adapter and the Rust client-core ABI.
 const int smithyFfiAbiVersion = ${values.abi_version};
-const int smithyOperationEcho = ${values.operation_echo};
+${values.operations
+  .map(
+    (entry) =>
+      `const int smithyOperation${pascal_case(entry.name)} = ${entry.value};`,
+  )
+  .join("\n")}
 const int smithyResultError = ${values.result_error};
 const int smithyResultValue = ${values.result_value};
 const int smithyResultConnected = ${values.result_connected};
@@ -3708,8 +4070,11 @@ function expected_outputs(
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+        [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
+        [GENERATED_OUTPUTS.dart_api]: render_dart_api(contract),
         [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
       }
     case "c-contract":
@@ -3718,6 +4083,7 @@ function expected_outputs(
       }
     case "dart":
       return {
+        [GENERATED_OUTPUTS.dart_api]: render_dart_api(contract),
         [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
       }
     case "dotnet":
@@ -3732,10 +4098,12 @@ function expected_outputs(
       }
     case "java":
       return {
+        ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
       }
     case "kotlin":
       return {
+        [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
       }
     case "rust-api":

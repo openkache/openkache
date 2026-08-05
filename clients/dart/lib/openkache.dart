@@ -6,21 +6,8 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
+import 'generated_local/smithy_api.dart';
 import 'generated_local/smithy_contract.dart';
-
-/// Input shape for the experimental Smithy `Echo` operation.
-final class EchoInput {
-  const EchoInput(this.message);
-
-  final String message;
-}
-
-/// Output shape for the experimental Smithy `Echo` operation.
-final class EchoOutput {
-  const EchoOutput(this.message);
-
-  final String message;
-}
 
 /// Failure reported by the shared Rust client-core ABI.
 final class EchoClientException implements Exception {
@@ -38,10 +25,7 @@ final class EchoClientException implements Exception {
 /// QUIC, TLS, framing, retries, and native result ownership remain in the
 /// shared Rust client core. This adapter only marshals Dart strings through
 /// the stable C ABI.
-abstract interface class OpenKacheClient {
-  /// Sends an experimental UTF-8 message and returns the echoed message.
-  Future<EchoOutput> echo(EchoInput input);
-}
+abstract interface class OpenKacheClient implements SmithyEchoApi {}
 
 final class EchoClient implements OpenKacheClient {
   EchoClient._(this._api, this._handle);
@@ -114,7 +98,7 @@ final class EchoClient implements OpenKacheClient {
     _ensureOpen();
     final payload = _echoBytes(utf8.encode(input.message));
     try {
-      return EchoOutput(utf8.decode(payload, allowMalformed: false));
+      return EchoOutput(message: utf8.decode(payload, allowMalformed: false));
     } on FormatException catch (error) {
       throw EchoClientException('ECHO response is not valid UTF-8', error);
     }
@@ -122,7 +106,7 @@ final class EchoClient implements OpenKacheClient {
 
   /// Sends one message and returns the echoed text.
   Future<String> echoMessage(String message) async =>
-      (await echo(EchoInput(message))).message;
+      (await echo(EchoInput(message: message))).message;
 
   /// Releases the shared native client handle.
   void close() {
