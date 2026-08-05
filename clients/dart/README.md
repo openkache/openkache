@@ -7,9 +7,9 @@ or result ownership.
 
 ## Commands
 
-The package source imports Smithy-derived DTOs, operation signatures, and
-native constants. Regenerate them from the canonical model before running the
-Dart commands:
+The package source imports Smithy-derived DTOs, operation signatures, native
+constants, `dart:ffi` declarations, and the namespace descriptor layout.
+Regenerate them from the canonical model before running the Dart commands:
 
 ```bash
 OPENKACHE_GENERATION_TARGET=dart ../generate.ts

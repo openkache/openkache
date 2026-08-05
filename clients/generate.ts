@@ -180,6 +180,165 @@ export interface Client_Contract extends Wire_Contract {
   readonly value_format: Value_Format_Contract
 }
 
+type Native_Abi_Type =
+  | "client_pointer"
+  | "descriptor_pointer"
+  | "result_pointer"
+  | "u8_pointer"
+  | "size"
+  | "uint8"
+  | "int32"
+  | "uint32"
+  | "uint64"
+  | "void"
+
+interface Native_Abi_Parameter {
+  readonly name: string
+  readonly type: Exclude<Native_Abi_Type, "void">
+}
+
+interface Native_Abi_Function {
+  readonly name: string
+  readonly return_type: Native_Abi_Type
+  readonly parameters: readonly Native_Abi_Parameter[]
+}
+
+/**
+ * Flat C ABI entry points consumed by the managed adapters.
+ *
+ * The C header remains the public ABI documentation. Keeping the declaration
+ * list here gives Java, Kotlin, and Dart one generated binding surface instead
+ * of three independently maintained copies of the same function signatures.
+ */
+const NATIVE_ABI_FUNCTIONS: readonly Native_Abi_Function[] = [
+  {
+    name: "openkache_client_abi_version",
+    return_type: "uint32",
+    parameters: [],
+  },
+  {
+    name: "openkache_client_connect",
+    return_type: "result_pointer",
+    parameters: [
+      { name: "address", type: "u8_pointer" },
+      { name: "addressLength", type: "size" },
+      { name: "serverName", type: "u8_pointer" },
+      { name: "serverNameLength", type: "size" },
+      { name: "certificate", type: "u8_pointer" },
+      { name: "certificateLength", type: "size" },
+      { name: "dataProtectionKey", type: "u8_pointer" },
+      { name: "dataProtectionKeyLength", type: "size" },
+      { name: "compressionEnabled", type: "uint8" },
+      { name: "compressionLevel", type: "int32" },
+      { name: "minimumInputSize", type: "size" },
+      { name: "minimumSavings", type: "size" },
+      { name: "connectTimeoutMilliseconds", type: "uint64" },
+      { name: "requestTimeoutMilliseconds", type: "uint64" },
+    ],
+  },
+  {
+    name: "openkache_client_execute",
+    return_type: "result_pointer",
+    parameters: [
+      { name: "client", type: "client_pointer" },
+      { name: "operation", type: "uint32" },
+      { name: "applicationKey", type: "u8_pointer" },
+      { name: "applicationKeyLength", type: "size" },
+      { name: "value", type: "u8_pointer" },
+      { name: "valueLength", type: "size" },
+      { name: "setCondition", type: "uint32" },
+      { name: "ttlEnabled", type: "uint8" },
+      { name: "ttlMilliseconds", type: "uint64" },
+    ],
+  },
+  {
+    name: "openkache_client_execute_scoped",
+    return_type: "result_pointer",
+    parameters: [
+      { name: "client", type: "client_pointer" },
+      { name: "operation", type: "uint32" },
+      { name: "namespaceId", type: "uint64" },
+      { name: "itemId", type: "u8_pointer" },
+      { name: "itemIdLength", type: "size" },
+      { name: "value", type: "u8_pointer" },
+      { name: "valueLength", type: "size" },
+      { name: "setFlags", type: "uint8" },
+      { name: "ttlMilliseconds", type: "uint64" },
+    ],
+  },
+  {
+    name: "openkache_client_namespace_open",
+    return_type: "result_pointer",
+    parameters: [
+      { name: "client", type: "client_pointer" },
+      { name: "name", type: "u8_pointer" },
+      { name: "nameLength", type: "size" },
+      { name: "createIfMissing", type: "uint8" },
+      { name: "policyFlags", type: "uint8" },
+      { name: "ttlMilliseconds", type: "uint64" },
+    ],
+  },
+  {
+    name: "openkache_client_namespace_update_policy",
+    return_type: "result_pointer",
+    parameters: [
+      { name: "client", type: "client_pointer" },
+      { name: "namespaceId", type: "uint64" },
+      { name: "expectedRevision", type: "uint64" },
+      { name: "policyFlags", type: "uint8" },
+      { name: "ttlMilliseconds", type: "uint64" },
+    ],
+  },
+  {
+    name: "openkache_client_namespace_delete",
+    return_type: "result_pointer",
+    parameters: [
+      { name: "client", type: "client_pointer" },
+      { name: "namespaceId", type: "uint64" },
+      { name: "expectedRevision", type: "uint64" },
+    ],
+  },
+  {
+    name: "openkache_client_namespace_descriptor_decode",
+    return_type: "uint32",
+    parameters: [
+      { name: "payload", type: "u8_pointer" },
+      { name: "payloadLength", type: "size" },
+      { name: "output", type: "descriptor_pointer" },
+    ],
+  },
+  {
+    name: "openkache_client_result_kind",
+    return_type: "uint32",
+    parameters: [{ name: "result", type: "result_pointer" }],
+  },
+  {
+    name: "openkache_client_result_data",
+    return_type: "u8_pointer",
+    parameters: [{ name: "result", type: "result_pointer" }],
+  },
+  {
+    name: "openkache_client_result_data_length",
+    return_type: "size",
+    parameters: [{ name: "result", type: "result_pointer" }],
+  },
+  {
+    name: "openkache_client_result_take_client",
+    return_type: "client_pointer",
+    parameters: [{ name: "result", type: "result_pointer" }],
+  },
+  {
+    name: "openkache_client_result_free",
+    return_type: "void",
+    parameters: [{ name: "result", type: "result_pointer" }],
+  },
+  {
+    name: "openkache_client_free",
+    return_type: "void",
+    parameters: [{ name: "client", type: "client_pointer" }],
+  },
+]
+
 const CLIENTS_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_ROOT = dirname(CLIENTS_DIRECTORY)
 const PROTOCOL_DIRECTORY = join(PUBLIC_ROOT, "protocol")
@@ -277,14 +436,24 @@ const GENERATED_OUTPUTS = {
   java_contract: generated_path(
     "clients/java/src/main/java/io/openkache/client/generated_local/SmithyContract.java",
   ),
+  java_native_api: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated_local/SmithyNativeApi.java",
+  ),
+  java_native_descriptor: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated_local/SmithyNativeDescriptor.java",
+  ),
   kotlin_api: generated_path(
     "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyApi.kt",
   ),
   kotlin_contract: generated_path(
     "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyContract.kt",
   ),
+  kotlin_native_api: generated_path(
+    "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyNativeApi.kt",
+  ),
   dart_api: generated_path("clients/dart/lib/generated_local/smithy_api.dart"),
   dart_contract: generated_path("clients/dart/lib/generated_local/smithy_contract.dart"),
+  dart_native_api: generated_path("clients/dart/lib/generated_local/smithy_native_api.dart"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -2245,6 +2414,276 @@ export function render_java_api(
       java_api_structure_source(structure)
   }
   return outputs
+}
+
+function native_abi_java_type(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+    case "result_pointer":
+    case "u8_pointer":
+      return "Pointer"
+    case "descriptor_pointer":
+      return "SmithyNativeDescriptor"
+    case "size":
+    case "uint64":
+      return "long"
+    case "int32":
+    case "uint32":
+      return "int"
+    case "uint8":
+      return "byte"
+    case "void":
+      return "void"
+  }
+}
+
+function native_abi_kotlin_type(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+    case "result_pointer":
+    case "u8_pointer":
+      return "Pointer?"
+    case "descriptor_pointer":
+      return "SmithyNativeDescriptor"
+    case "size":
+    case "uint64":
+      return "Long"
+    case "int32":
+    case "uint32":
+      return "Int"
+    case "uint8":
+      return "Byte"
+    case "void":
+      return "Unit"
+  }
+}
+
+function native_abi_dart_native_type(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+      return "ffi.Pointer<SmithyNativeClient>"
+    case "descriptor_pointer":
+      return "ffi.Pointer<SmithyNativeDescriptor>"
+    case "result_pointer":
+      return "ffi.Pointer<SmithyNativeResult>"
+    case "u8_pointer":
+      return "ffi.Pointer<ffi.Uint8>"
+    case "size":
+      return "ffi.UintPtr"
+    case "int32":
+      return "ffi.Int32"
+    case "uint32":
+      return "ffi.Uint32"
+    case "uint8":
+      return "ffi.Uint8"
+    case "uint64":
+      return "ffi.Uint64"
+    case "void":
+      return "ffi.Void"
+  }
+}
+
+function native_abi_dart_type(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+      return "ffi.Pointer<SmithyNativeClient>"
+    case "descriptor_pointer":
+      return "ffi.Pointer<SmithyNativeDescriptor>"
+    case "result_pointer":
+      return "ffi.Pointer<SmithyNativeResult>"
+    case "u8_pointer":
+      return "ffi.Pointer<ffi.Uint8>"
+    case "size":
+    case "int32":
+    case "uint32":
+    case "uint8":
+    case "uint64":
+      return "int"
+    case "void":
+      return "void"
+  }
+}
+
+function native_abi_dart_suffix(name: string): string {
+  const prefix = "openkache_client_"
+  const suffix = name.startsWith(prefix) ? name.slice(prefix.length) : name
+  return suffix === "free" ? "client_free" : suffix
+}
+
+export function render_java_native_descriptor(contract: Client_Contract): string {
+  const fields = contract.ffi.namespace_descriptor_fields
+  const field_order = fields.map((field) => `"${lower_camel_case(field.name)}"`).join(",\n        ")
+  const declarations = fields
+    .map(
+      (field) =>
+        `    public ${native_abi_java_type(field.rust_type === "u64" ? "uint64" : "uint32")} ${lower_camel_case(field.name)};`,
+    )
+    .join("\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client.generated_local;
+
+import com.sun.jna.Structure;
+
+/** C-compatible namespace descriptor returned by the native ABI. */
+@Structure.FieldOrder({
+        ${field_order}
+})
+public final class SmithyNativeDescriptor extends Structure {
+${declarations}
+}
+`
+}
+
+export function render_java_native_api(): string {
+  const methods = NATIVE_ABI_FUNCTIONS
+    .map((function_) => {
+      const parameters = function_.parameters
+        .map(
+          (parameter) =>
+            `${native_abi_java_type(parameter.type)} ${parameter.name}`,
+        )
+        .join(",\n            ")
+      return `    ${native_abi_java_type(function_.return_type)} ${function_.name}(${parameters});`
+    })
+    .join("\n\n")
+  return `// Generated from the OpenKache Smithy client ABI contract. Do not edit.
+package io.openkache.client.generated_local;
+
+import com.sun.jna.Library;
+import com.sun.jna.Pointer;
+
+/** Native function declarations shared by managed language adapters. */
+public interface SmithyNativeApi extends Library {
+${methods}
+}
+`
+}
+
+export function render_kotlin_native_api(contract: Client_Contract): string {
+  const methods = NATIVE_ABI_FUNCTIONS
+    .map((function_) => {
+      const parameters = function_.parameters
+        .map(
+          (parameter) =>
+            `${parameter.name}: ${native_abi_kotlin_type(parameter.type)}`,
+        )
+        .join(",\n            ")
+      return `    fun ${function_.name}(${parameters}): ${native_abi_kotlin_type(function_.return_type)}`
+    })
+    .join("\n\n")
+  const fields = contract.ffi.namespace_descriptor_fields
+    .map(
+      (field) =>
+        `    @JvmField var ${lower_camel_case(field.name)}: ${field.rust_type === "u64" ? "Long" : "Int"} = 0`,
+    )
+    .join("\n")
+  const field_order = contract.ffi.namespace_descriptor_fields
+    .map((field) => `"${lower_camel_case(field.name)}"`)
+    .join(",\n        ")
+  return `// Generated from the OpenKache Smithy client ABI contract. Do not edit.
+package io.openkache.client.generated_local
+
+import com.sun.jna.Library
+import com.sun.jna.Pointer
+import com.sun.jna.Structure
+
+/** Native function declarations shared by managed language adapters. */
+public interface SmithyNativeApi : Library {
+${methods}
+}
+
+/** C-compatible namespace descriptor returned by the native ABI. */
+@Structure.FieldOrder(
+        ${field_order}
+)
+public class SmithyNativeDescriptor : Structure() {
+${fields}
+}
+`
+}
+
+export function render_dart_native_api(contract: Client_Contract): string {
+  const fields = contract.ffi.namespace_descriptor_fields
+    .map((field) => {
+      const annotation = field.rust_type === "u64" ? "Uint64" : "Uint32"
+      return `  @ffi.${annotation}()
+  external int ${lower_camel_case(field.name)};`
+    })
+    .join("\n\n")
+  const typedefs = NATIVE_ABI_FUNCTIONS
+    .map((function_) => {
+      const suffix = pascal_case(native_abi_dart_suffix(function_.name))
+      const native_parameters = function_.parameters
+        .map((parameter) => `  ${native_abi_dart_native_type(parameter.type)}`)
+        .join(",\n")
+      const dart_parameters = function_.parameters
+        .map((parameter) => `  ${native_abi_dart_type(parameter.type)}`)
+        .join(",\n")
+      const native_signature = function_.parameters.length === 0
+        ? "Function()"
+        : `Function(\n${native_parameters}\n)`
+      const dart_signature = function_.parameters.length === 0
+        ? "Function()"
+        : `Function(\n${dart_parameters}\n)`
+      return `typedef Smithy${suffix}Native = ${native_abi_dart_native_type(function_.return_type)} ${native_signature};
+
+typedef Smithy${suffix}Dart = ${native_abi_dart_type(function_.return_type)} ${dart_signature};`
+    })
+    .join("\n\n")
+  const constructor_initializers = NATIVE_ABI_FUNCTIONS
+    .map((function_) => {
+      const suffix = pascal_case(native_abi_dart_suffix(function_.name))
+      const field = lower_camel_case(native_abi_dart_suffix(function_.name))
+      return `        ${field} = library.lookupFunction<Smithy${suffix}Native, Smithy${suffix}Dart>(
+          '${function_.name}',
+        )`
+    })
+    .join(",\n")
+  const members = NATIVE_ABI_FUNCTIONS
+    .map((function_) => {
+      const field = lower_camel_case(native_abi_dart_suffix(function_.name))
+      return `  final ${native_abi_dart_type(function_.return_type)} Function(${function_.parameters
+        .map((parameter) => native_abi_dart_type(parameter.type))
+        .join(", ")}) ${field};`
+    })
+    .join("\n")
+  return `// Generated from the OpenKache Smithy client ABI contract. Do not edit.
+
+import 'dart:ffi' as ffi;
+import 'dart:io';
+
+final class SmithyNativeClient extends ffi.Opaque {}
+
+final class SmithyNativeResult extends ffi.Opaque {}
+
+final class SmithyNativeDescriptor extends ffi.Struct {
+${fields}
+}
+
+${typedefs}
+
+/** Native function bindings shared by managed language adapters. */
+final class SmithyNativeApi {
+  SmithyNativeApi(ffi.DynamicLibrary library)
+: ${constructor_initializers};
+
+${members}
+
+  static SmithyNativeApi open(String? configuredPath) {
+    final path = configuredPath ??
+        Platform.environment['OPENKACHE_CLIENT_NATIVE'] ??
+        switch (Platform.operatingSystem) {
+          'linux' => 'libopenkache_client_core.so',
+          'macos' => 'libopenkache_client_core.dylib',
+          'windows' => 'openkache_client_core.dll',
+          _ => throw UnsupportedError(
+              'unsupported platform \${Platform.operatingSystem}',
+            ),
+        };
+    return SmithyNativeApi(ffi.DynamicLibrary.open(path));
+  }
+}
+`
 }
 
 function kotlin_api_type(type: Api_Type, required: boolean): string {
@@ -4303,10 +4742,14 @@ function expected_outputs(
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
         ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+        [GENERATED_OUTPUTS.java_native_api]: render_java_native_api(),
+        [GENERATED_OUTPUTS.java_native_descriptor]: render_java_native_descriptor(contract),
         [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
+        [GENERATED_OUTPUTS.kotlin_native_api]: render_kotlin_native_api(contract),
         [GENERATED_OUTPUTS.dart_api]: render_dart_api(contract),
         [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
+        [GENERATED_OUTPUTS.dart_native_api]: render_dart_native_api(contract),
       }
     case "c-contract":
       return {
@@ -4316,6 +4759,7 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.dart_api]: render_dart_api(contract),
         [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
+        [GENERATED_OUTPUTS.dart_native_api]: render_dart_native_api(contract),
       }
     case "dotnet":
       return {
@@ -4331,11 +4775,14 @@ function expected_outputs(
       return {
         ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
+        [GENERATED_OUTPUTS.java_native_api]: render_java_native_api(),
+        [GENERATED_OUTPUTS.java_native_descriptor]: render_java_native_descriptor(contract),
       }
     case "kotlin":
       return {
         [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
+        [GENERATED_OUTPUTS.kotlin_native_api]: render_kotlin_native_api(contract),
       }
     case "rust-api":
       return {

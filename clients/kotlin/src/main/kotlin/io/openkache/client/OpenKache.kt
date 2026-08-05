@@ -1,11 +1,11 @@
 package io.openkache.client
 
-import com.sun.jna.Library
 import com.sun.jna.Memory
 import com.sun.jna.Native
 import com.sun.jna.Pointer
-import com.sun.jna.Structure
 import io.openkache.client.generated_local.SmithyContract
+import io.openkache.client.generated_local.SmithyNativeApi
+import io.openkache.client.generated_local.SmithyNativeDescriptor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -23,7 +23,7 @@ public interface OpenKacheClient : SmithyOpenKacheApi
  * This adapter only marshals Kotlin DTOs through the stable C ABI.
  */
 public class EchoClient private constructor(
-    private val native: NativeApi,
+    private val native: SmithyNativeApi,
     private var handle: Pointer?,
 ) : OpenKacheClient, AutoCloseable {
     private var closed = false
@@ -316,7 +316,7 @@ public class EchoClient private constructor(
 
     private fun decodeDescriptor(payload: ByteArray): NamespaceDescriptor {
         Buffer(payload).use { buffer ->
-            val descriptor = NativeDescriptor()
+            val descriptor = SmithyNativeDescriptor()
             val status = native.openkache_client_namespace_descriptor_decode(
                 buffer.pointer,
                 buffer.length,
@@ -390,106 +390,6 @@ public class EchoClient private constructor(
         }
     }
 
-    private interface NativeApi : Library {
-        fun openkache_client_abi_version(): Int
-
-        fun openkache_client_connect(
-            address: Pointer?,
-            addressLength: Long,
-            serverName: Pointer?,
-            serverNameLength: Long,
-            certificate: Pointer?,
-            certificateLength: Long,
-            dataProtectionKey: Pointer?,
-            dataProtectionKeyLength: Long,
-            compressionEnabled: Byte,
-            compressionLevel: Int,
-            minimumInputSize: Long,
-            minimumSavings: Long,
-            connectTimeoutMilliseconds: Long,
-            requestTimeoutMilliseconds: Long,
-        ): Pointer?
-
-        fun openkache_client_execute(
-            client: Pointer,
-            operation: Int,
-            applicationKey: Pointer?,
-            applicationKeyLength: Long,
-            value: Pointer?,
-            valueLength: Long,
-            setCondition: Int,
-            ttlEnabled: Byte,
-            ttlMilliseconds: Long,
-        ): Pointer?
-
-        fun openkache_client_execute_scoped(
-            client: Pointer,
-            operation: Int,
-            namespaceId: Long,
-            itemId: Pointer?,
-            itemIdLength: Long,
-            value: Pointer?,
-            valueLength: Long,
-            setFlags: Byte,
-            ttlMilliseconds: Long,
-        ): Pointer?
-
-        fun openkache_client_namespace_open(
-            client: Pointer,
-            name: Pointer?,
-            nameLength: Long,
-            createIfMissing: Byte,
-            policyFlags: Byte,
-            ttlMilliseconds: Long,
-        ): Pointer?
-
-        fun openkache_client_namespace_update_policy(
-            client: Pointer,
-            namespaceId: Long,
-            expectedRevision: Long,
-            policyFlags: Byte,
-            ttlMilliseconds: Long,
-        ): Pointer?
-
-        fun openkache_client_namespace_delete(
-            client: Pointer,
-            namespaceId: Long,
-            expectedRevision: Long,
-        ): Pointer?
-
-        fun openkache_client_namespace_descriptor_decode(
-            payload: Pointer?,
-            payloadLength: Long,
-            output: NativeDescriptor,
-        ): Int
-
-        fun openkache_client_result_kind(result: Pointer): Int
-        fun openkache_client_result_data(result: Pointer): Pointer?
-        fun openkache_client_result_data_length(result: Pointer): Long
-        fun openkache_client_result_take_client(result: Pointer): Pointer?
-        fun openkache_client_result_free(result: Pointer)
-        fun openkache_client_free(client: Pointer)
-    }
-
-    @Structure.FieldOrder(
-        "namespaceId",
-        "revision",
-        "defaultTtlMs",
-        "defaultExpiration",
-        "expirationOverride",
-        "defaultEviction",
-        "evictionOverride",
-    )
-    public class NativeDescriptor : Structure() {
-        @JvmField var namespaceId: Long = 0
-        @JvmField var revision: Long = 0
-        @JvmField var defaultTtlMs: Long = 0
-        @JvmField var defaultExpiration: Int = 0
-        @JvmField var expirationOverride: Int = 0
-        @JvmField var defaultEviction: Int = 0
-        @JvmField var evictionOverride: Int = 0
-    }
-
     private data class NativeResult(val kind: Int, val payload: ByteArray, val client: Pointer? = null)
     private data class SetFlags(val flags: Int, val ttlMilliseconds: Long)
     private data class PolicyFlags(val flags: Int, val ttlMilliseconds: Long)
@@ -511,7 +411,7 @@ public class EchoClient private constructor(
             val native = try {
                 Native.load(
                     if (configured.isNullOrBlank()) "openkache_client_core" else configured,
-                    NativeApi::class.java,
+                    SmithyNativeApi::class.java,
                 )
             } catch (error: UnsatisfiedLinkError) {
                 throw EchoClientException("failed to load OpenKache native client", error)
@@ -557,7 +457,7 @@ public class EchoClient private constructor(
         }
 
         private fun readResult(
-            native: NativeApi,
+            native: SmithyNativeApi,
             result: Pointer?,
             takeClient: Boolean = false,
         ): NativeResult {

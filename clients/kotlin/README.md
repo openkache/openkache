@@ -12,10 +12,11 @@ Run from the public repository root:
 gradle --project-dir clients/kotlin build
 ```
 
-Gradle regenerates the Smithy-derived DTOs, complete operation signatures, and
-native constants before compiling the adapter. The generated sources live
-under `src/main/kotlin/io/openkache/client/generated_local/` and are not
-edited manually.
+Gradle regenerates the Smithy-derived DTOs, complete operation signatures,
+native constants, JNA declarations, and the namespace descriptor layout before
+compiling the adapter. The generated sources live under
+`src/main/kotlin/io/openkache/client/generated_local/` and are not edited
+manually.
 
 Build the native library with the `ffi` feature before connecting:
 
