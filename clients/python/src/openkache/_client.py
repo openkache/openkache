@@ -33,7 +33,6 @@ from ._generated import (
     SmithyNamespacePolicy,
     SmithyNamespaceUpdatePolicyInput,
     SmithyNamespaceUpdatePolicyOutput,
-    SmithyOpenKacheApi,
     SmithyOverridePolicy,
     SmithyPingInput,
     SmithyPingOutput,
@@ -45,6 +44,10 @@ from ._generated import (
     SmithyStatsOutput,
     SmithySyncInput,
     SmithySyncOutput,
+)
+from ._generated.smithy_operations import (
+    SmithyGeneratedOperations,
+    SmithyOperationTransport,
 )
 from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_CLOSED,
@@ -681,43 +684,35 @@ class OpenKacheClient:
         return _set_outcome(kind)
 
 
-class RawClient(SmithyOpenKacheApi):
-    """Smithy-generated exact item-ID operations over a shared connection."""
+class _RawOperationTransport(SmithyOperationTransport):
+    """Native hooks consumed by generated Smithy operations."""
 
     def __init__(self, owner: OpenKacheClient) -> None:
         self._owner = owner
 
-    async def ping(self, input: SmithyPingInput | None = None) -> SmithyPingOutput:
+    def assert_open(self) -> None:
+        self._owner._assert_open()
+
+    async def ping(self, input: SmithyPingInput) -> None:
         del input
         await self._owner.ping()
-        return SmithyPingOutput()
 
-    async def echo(self, input: SmithyEchoInput) -> SmithyEchoOutput:
-        kind, payload = await self._owner._execute(
-            SMITHY_OPCODE_ECHO,
-            value=input.message.encode("utf-8"),
-        )
-        if kind != SMITHY_FFI_RESULT_VALUE:
-            raise OpenKacheError(f"ECHO returned unexpected native result {kind}")
-        try:
-            return SmithyEchoOutput(message=payload.decode("utf-8"))
-        except UnicodeDecodeError as error:
-            raise OpenKacheError(f"ECHO response is not UTF-8: {error}") from error
+    async def echo(self, input: SmithyEchoInput) -> str:
+        return await self._owner.echo(input.message)
 
-    async def get(self, input: SmithyGetInput) -> SmithyGetOutput:
-        item_id = _item_id(input.item_id)
+    async def get(self, input: SmithyGetInput) -> bytes | None:
         kind, payload = await self._owner._execute_scoped(
             SMITHY_OPCODE_GET,
             namespace_id=input.namespace_id,
-            item_id=item_id,
+            item_id=_item_id(input.item_id),
         )
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
-            return SmithyGetOutput()
+            return None
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"GET returned unexpected native result {kind}")
-        return SmithyGetOutput(value=payload)
+        return payload
 
-    async def set(self, input: SmithySetInput) -> SmithySetOutput:
+    async def set(self, input: SmithySetInput) -> SmithySetOutcome:
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
             raise OpenKacheValueError(
                 "ttl_milliseconds is only valid with "
@@ -736,17 +731,17 @@ class RawClient(SmithyOpenKacheApi):
             value=_value_bytes(input.value),
             options=options,
         )
-        return SmithySetOutput(outcome=_set_outcome(kind))
+        return _set_outcome(kind)
 
-    async def delete(self, input: SmithyDeleteInput) -> SmithyDeleteOutput:
+    async def delete(self, input: SmithyDeleteInput) -> bool:
         kind, _ = await self._owner._execute_scoped(
             SMITHY_OPCODE_DELETE,
             namespace_id=input.namespace_id,
             item_id=_item_id(input.item_id),
         )
-        return SmithyDeleteOutput(deleted=_delete_outcome(kind))
+        return _delete_outcome(kind)
 
-    async def stats(self, input: SmithyStatsInput) -> SmithyStatsOutput:
+    async def stats(self, input: SmithyStatsInput) -> str:
         kind, payload = await self._owner._execute_scoped(
             SMITHY_OPCODE_STATS,
             namespace_id=input.namespace_id,
@@ -754,16 +749,15 @@ class RawClient(SmithyOpenKacheApi):
         if kind != SMITHY_FFI_RESULT_VALUE:
             raise OpenKacheError(f"STATS returned unexpected native result {kind}")
         try:
-            return SmithyStatsOutput(json=payload.decode("utf-8"))
+            return payload.decode("utf-8")
         except UnicodeDecodeError as error:
             raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
 
-    async def sync(self, input: SmithySyncInput) -> SmithySyncOutput:
+    async def sync(self, input: SmithySyncInput) -> None:
         await self._owner._execute_scoped(
             SMITHY_OPCODE_SYNC,
             namespace_id=input.namespace_id,
         )
-        return SmithySyncOutput()
 
     async def namespace_open(
         self, input: SmithyNamespaceOpenInput
@@ -803,7 +797,7 @@ class RawClient(SmithyOpenKacheApi):
 
     async def namespace_update_policy(
         self, input: SmithyNamespaceUpdatePolicyInput
-    ) -> SmithyNamespaceUpdatePolicyOutput:
+    ) -> SmithyNamespaceDescriptor:
         policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
         try:
             kind, payload = await asyncio.to_thread(
@@ -826,13 +820,9 @@ class RawClient(SmithyOpenKacheApi):
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
-        return SmithyNamespaceUpdatePolicyOutput(
-            descriptor=_namespace_descriptor(decoded)
-        )
+        return _namespace_descriptor(decoded)
 
-    async def namespace_delete(
-        self, input: SmithyNamespaceDeleteInput
-    ) -> SmithyNamespaceDeleteOutput:
+    async def namespace_delete(self, input: SmithyNamespaceDeleteInput) -> None:
         try:
             await asyncio.to_thread(
                 self._owner._native.namespace_delete,
@@ -841,7 +831,14 @@ class RawClient(SmithyOpenKacheApi):
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
-        return SmithyNamespaceDeleteOutput()
+
+
+class RawClient(SmithyGeneratedOperations):
+    """Smithy-generated exact item-ID operations over a shared connection."""
+
+    def __init__(self, owner: OpenKacheClient) -> None:
+        super().__init__(_RawOperationTransport(owner))
+        self._owner = owner
 
     async def close(self) -> None:
         await self._owner.close()

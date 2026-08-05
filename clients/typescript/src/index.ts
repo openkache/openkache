@@ -10,6 +10,10 @@ import {
   type Value_Codec,
   type Value_Envelope,
 } from "./value-codec.js"
+import {
+  Smithy_Generated_Operations,
+  type Smithy_Operation_Transport,
+} from "./generated_local/smithy-operations.js"
 
 export type {
   Encoded_Value,
@@ -723,7 +727,7 @@ export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
   connection_state(): Connection_State
 }
 
-class Raw_Client implements OpenKache_Raw_Client {
+class Raw_Client extends Smithy_Generated_Operations implements OpenKache_Raw_Client {
   readonly #native_client: Native_Client
   readonly #lifecycle: Client_Lifecycle
 
@@ -731,196 +735,9 @@ class Raw_Client implements OpenKache_Raw_Client {
     native_client: Native_Client,
     lifecycle: Client_Lifecycle = { closed: false },
   ) {
+    super(raw_operation_transport(native_client, lifecycle))
     this.#native_client = native_client
     this.#lifecycle = lifecycle
-  }
-
-  /**
-   * Invokes the Smithy PING operation.
-   *
-   * @param _input - Empty Smithy operation input.
-   * @returns An empty Smithy operation output.
-   * @throws {OpenKache_Error} When the operation fails.
-   */
-  async ping(_input: Smithy_Ping_Input): Promise<Smithy_Ping_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      await this.#native_client.ping()
-      return {}
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /** Invokes the experimental Smithy ECHO operation. */
-  async echo(input: Smithy_Echo_Input): Promise<Smithy_Echo_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      const value = await this.#native_client.echo(TEXT_ENCODER.encode(input.message))
-      return {
-        message: new TextDecoder("utf-8", { fatal: true }).decode(value),
-      }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy GET operation for an exact item ID.
-   *
-   * @param input - Exact protocol item ID.
-   * @returns Opaque stored bytes, or an absent value.
-   * @throws {OpenKache_Error} When the operation fails.
-   */
-  async get(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      const value = await this.#native_client.raw_get_in_namespace(
-        input.namespace_id,
-        owned_item_id(input.item_id),
-      )
-      return value === null ? {} : { value }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy SET operation for an exact item ID.
-   *
-   * @param input - Exact item ID, opaque bytes, and optional set behavior.
-   * @returns The Smithy set outcome.
-   * @throws {OpenKache_Error} When validation or the operation fails.
-   */
-  async set(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      const outcome = await this.#native_client.raw_set_in_namespace(
-        input.namespace_id,
-        owned_item_id(input.item_id),
-        owned_raw_value(input.value),
-        input.condition,
-        input.expiration_mode,
-        input.eviction_mode,
-        input.ttl_milliseconds,
-      )
-      return { outcome: parse_set_outcome(outcome) }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy DELETE operation for an exact item ID.
-   *
-   * @param input - Exact protocol item ID.
-   * @returns Whether the item was deleted.
-   * @throws {OpenKache_Error} When the operation fails.
-   */
-  async delete(input: Smithy_Delete_Input): Promise<Smithy_Delete_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return {
-        deleted: await this.#native_client.raw_delete_in_namespace(
-          input.namespace_id,
-          owned_item_id(input.item_id),
-        ),
-      }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy STATS operation.
-   *
-   * @param _input - Empty Smithy operation input.
-   * @returns The server's JSON statistics string.
-   * @throws {OpenKache_Error} When authorization or transport fails.
-   */
-  async stats(input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return { json: await this.#native_client.stats_in_namespace(input.namespace_id) }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy SYNC operation.
-   *
-   * @param _input - Empty Smithy operation input.
-   * @returns An empty Smithy operation output.
-   * @throws {OpenKache_Error} When authorization or synchronization fails.
-   */
-  async sync(input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      await this.#native_client.sync_in_namespace(input.namespace_id)
-      return {}
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy NAMESPACE_OPEN operation.
-   *
-   * @param input - Namespace name, creation flag, and optional policy.
-   * @returns The server-assigned descriptor and creation result.
-   */
-  async namespace_open(
-    input: Smithy_Namespace_Open_Input,
-  ): Promise<Smithy_Namespace_Open_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return await this.#native_client.namespace_open(
-        input.name,
-        input.create_if_missing,
-        input.policy,
-      )
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy NAMESPACE_UPDATE_POLICY operation.
-   */
-  async namespace_update_policy(
-    input: Smithy_Namespace_Update_Policy_Input,
-  ): Promise<Smithy_Namespace_Update_Policy_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return {
-        descriptor: await this.#native_client.namespace_update_policy(
-          input.namespace_id,
-          input.expected_revision,
-          input.policy,
-        ),
-      }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy NAMESPACE_DELETE operation.
-   */
-  async namespace_delete(
-    input: Smithy_Namespace_Delete_Input,
-  ): Promise<Smithy_Namespace_Delete_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      await this.#native_client.namespace_delete(
-        input.namespace_id,
-        input.expected_revision,
-      )
-      return {}
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
   }
 
   /**
@@ -966,6 +783,118 @@ class Raw_Client implements OpenKache_Raw_Client {
     } catch (error) {
       throw as_openkache_error(error)
     }
+  }
+}
+
+function raw_operation_transport(
+  native_client: Native_Client,
+  lifecycle: Client_Lifecycle,
+): Smithy_Operation_Transport {
+  return {
+    assert_open: (): void => assert_lifecycle_open(lifecycle),
+    ping: async (): Promise<void> => {
+      try {
+        await native_client.ping()
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    echo: async (input: Smithy_Echo_Input): Promise<string> => {
+      try {
+        const value = await native_client.echo(TEXT_ENCODER.encode(input.message))
+        return new TextDecoder("utf-8", { fatal: true }).decode(value)
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    get: async (input: Smithy_Get_Input): Promise<Uint8Array | null> => {
+      try {
+        return await native_client.raw_get_in_namespace(
+          input.namespace_id,
+          owned_item_id(input.item_id),
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    set: async (input: Smithy_Set_Input): Promise<Set_Outcome> => {
+      try {
+        const outcome = await native_client.raw_set_in_namespace(
+          input.namespace_id,
+          owned_item_id(input.item_id),
+          owned_raw_value(input.value),
+          input.condition,
+          input.expiration_mode,
+          input.eviction_mode,
+          input.ttl_milliseconds,
+        )
+        return parse_set_outcome(outcome)
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    delete: async (input: Smithy_Delete_Input): Promise<boolean> => {
+      try {
+        return await native_client.raw_delete_in_namespace(
+          input.namespace_id,
+          owned_item_id(input.item_id),
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    stats: async (input: Smithy_Stats_Input): Promise<string> => {
+      try {
+        return await native_client.stats_in_namespace(input.namespace_id)
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    sync: async (input: Smithy_Sync_Input): Promise<void> => {
+      try {
+        await native_client.sync_in_namespace(input.namespace_id)
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    namespace_open: async (
+      input: Smithy_Namespace_Open_Input,
+    ): Promise<Smithy_Namespace_Open_Output> => {
+      try {
+        return await native_client.namespace_open(
+          input.name,
+          input.create_if_missing,
+          input.policy,
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    namespace_update_policy: async (
+      input: Smithy_Namespace_Update_Policy_Input,
+    ): Promise<Smithy_Namespace_Descriptor> => {
+      try {
+        return await native_client.namespace_update_policy(
+          input.namespace_id,
+          input.expected_revision,
+          input.policy,
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    namespace_delete: async (
+      input: Smithy_Namespace_Delete_Input,
+    ): Promise<void> => {
+      try {
+        await native_client.namespace_delete(
+          input.namespace_id,
+          input.expected_revision,
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
   }
 }
 
