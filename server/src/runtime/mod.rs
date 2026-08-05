@@ -3,13 +3,6 @@
 //! request routing by key hash, benchmark batch execution, and graceful shutdown.
 
 use std::collections::VecDeque;
-#[cfg(not(feature = "storage-runtime-simulated"))]
-use std::fs;
-#[cfg(not(feature = "storage-runtime-simulated"))]
-use std::io::{ErrorKind, Read, Write};
-#[cfg(not(feature = "storage-runtime-simulated"))]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,18 +24,8 @@ pub use worker::*;
 
 use self::completion::CompletionSlab;
 
-#[cfg(not(feature = "storage-runtime-simulated"))]
-pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
-#[cfg(not(feature = "storage-runtime-simulated"))]
-pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
-#[cfg(not(feature = "storage-runtime-simulated"))]
-const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
-#[cfg(not(feature = "storage-runtime-simulated"))]
-const SERVER_KEY_VERSION: u32 = 1;
-#[cfg(not(feature = "storage-runtime-simulated"))]
-const SERVER_KEY_FILE_BYTES: usize = 64;
-#[cfg(not(feature = "storage-runtime-simulated"))]
-const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
+#[allow(unused_imports)]
+pub(crate) use crate::storage_backend::{RUNNING_MARKER_FILE, SERVER_KEY_FILE};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServerSecret {
@@ -174,33 +157,11 @@ impl ThreadedKvkache {
                     })
             })
             .transpose()?;
-        #[cfg(not(feature = "storage-runtime-simulated"))]
-        let (server_secret, allow_checkpoint) = {
-            fs::create_dir_all(&config.storage.directory)?;
-            let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
-                let worker = config.worker_config(thread_id);
-                worker.data_path.exists()
-            });
-            let server_secret =
-                load_or_create_server_secret(&config.storage.directory, existing_storage)?;
-            let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
-            (server_secret, allow_checkpoint)
-        };
-        #[cfg(feature = "storage-runtime-simulated")]
-        let (server_secret, allow_checkpoint) = (
-            ServerSecret {
-                // Simulated storage is intentionally ephemeral. A fixed
-                // secret keeps CPU benchmarks reproducible without an
-                // entropy or persistence dependency.
-                id: [0; 16],
-                key: [0; 32],
-            },
-            true,
-        );
+        let startup = crate::storage_backend::startup(&config)?;
         Self::start_with_server_secret(
             config,
-            server_secret,
-            allow_checkpoint,
+            startup.server_secret,
+            startup.allow_checkpoint,
             combined_entries,
             true,
             false,
@@ -214,13 +175,7 @@ impl ThreadedKvkache {
         lease_ssd_read_buffer: bool,
     ) -> Result<Self> {
         config.validate()?;
-        #[cfg(not(feature = "storage-runtime-simulated"))]
-        let allow_checkpoint = {
-            fs::create_dir_all(&config.storage.directory)?;
-            begin_storage_run(&config.storage.directory)?
-        };
-        #[cfg(feature = "storage-runtime-simulated")]
-        let allow_checkpoint = true;
+        let allow_checkpoint = crate::storage_backend::startup_with_server_key(&config)?;
         let mut id = [0; 16];
         id.copy_from_slice(&server_key[..16]);
         Self::start_with_server_secret(
@@ -1182,134 +1137,25 @@ impl ThreadedKvkache {
         if let Some(error) = shutdown_error {
             return Err(error);
         }
-        #[cfg(not(feature = "storage-runtime-simulated"))]
-        finish_storage_run(&self.config.storage.directory)?;
+        crate::storage_backend::finish(&self.config.storage.directory)?;
         Ok(())
     }
 }
 
-#[cfg(not(feature = "storage-runtime-simulated"))]
-pub(crate) fn begin_storage_run(directory: &Path) -> Result<bool> {
-    let path = directory.join(RUNNING_MARKER_FILE);
-    let allow_checkpoint = match fs::symlink_metadata(&path) {
-        Ok(metadata) if metadata.file_type().is_file() => false,
-        Ok(_) => {
-            return Err(KvError::Worker(format!(
-                "running marker {} must be a regular file",
-                path.display()
-            )));
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => true,
-        Err(error) => return Err(error.into()),
-    };
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&path)?;
-    file.write_all(RUNNING_MARKER_MAGIC)?;
-    file.sync_all()?;
-    fs::File::open(directory)?.sync_all()?;
-    Ok(allow_checkpoint)
+#[allow(dead_code)]
+pub(crate) fn begin_storage_run(directory: &std::path::Path) -> Result<bool> {
+    crate::storage_backend::begin_storage_run(directory)
 }
 
-#[cfg(not(feature = "storage-runtime-simulated"))]
-pub(crate) fn finish_storage_run(directory: &Path) -> Result<()> {
-    fs::remove_file(directory.join(RUNNING_MARKER_FILE))?;
-    fs::File::open(directory)?.sync_all()?;
-    Ok(())
+#[allow(dead_code)]
+pub(crate) fn finish_storage_run(directory: &std::path::Path) -> Result<()> {
+    crate::storage_backend::finish_storage_run(directory)
 }
 
-#[cfg(not(feature = "storage-runtime-simulated"))]
+#[allow(dead_code)]
 pub(crate) fn load_or_create_server_secret(
     directory: &Path,
     existing_storage: bool,
 ) -> Result<ServerSecret> {
-    let path = directory.join(SERVER_KEY_FILE);
-    match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            let metadata = file.metadata()?;
-            if !metadata.file_type().is_file() {
-                return Err(KvError::Worker(format!(
-                    "server key file {} must be a regular file",
-                    path.display()
-                )));
-            }
-            let permissions = metadata.permissions().mode() & 0o777;
-            if permissions & 0o077 != 0 {
-                return Err(KvError::Worker(format!(
-                    "server key file {} must not be accessible by group or other users",
-                    path.display()
-                )));
-            }
-            let mut bytes = Vec::with_capacity(SERVER_KEY_FILE_BYTES);
-            file.read_to_end(&mut bytes)?;
-            return decode_server_secret(&bytes);
-        }
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    if existing_storage {
-        return Err(KvError::Worker(format!(
-            "server key file {} is missing for existing storage",
-            path.display()
-        )));
-    }
-
-    let secret = ServerSecret {
-        id: rand::random(),
-        key: rand::random(),
-    };
-    let bytes = encode_server_secret(secret);
-    let mut file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .open(&path)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
-    fs::OpenOptions::new()
-        .read(true)
-        .open(directory)?
-        .sync_all()?;
-    Ok(secret)
-}
-
-#[cfg(not(feature = "storage-runtime-simulated"))]
-fn encode_server_secret(secret: ServerSecret) -> [u8; SERVER_KEY_FILE_BYTES] {
-    let mut bytes = [0; SERVER_KEY_FILE_BYTES];
-    bytes[..8].copy_from_slice(SERVER_KEY_MAGIC);
-    bytes[8..12].copy_from_slice(&SERVER_KEY_VERSION.to_le_bytes());
-    bytes[12..28].copy_from_slice(&secret.id);
-    bytes[28..60].copy_from_slice(&secret.key);
-    let checksum = server_key_checksum(&bytes[..60]);
-    bytes[60..64].copy_from_slice(&checksum.to_le_bytes());
-    bytes
-}
-
-#[cfg(not(feature = "storage-runtime-simulated"))]
-fn decode_server_secret(bytes: &[u8]) -> Result<ServerSecret> {
-    if bytes.len() != SERVER_KEY_FILE_BYTES
-        || &bytes[..8] != SERVER_KEY_MAGIC
-        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != SERVER_KEY_VERSION
-        || server_key_checksum(&bytes[..60])
-            != u32::from_le_bytes(bytes[60..64].try_into().unwrap())
-    {
-        return Err(KvError::Worker("server key file is invalid".into()));
-    }
-    Ok(ServerSecret {
-        id: bytes[12..28].try_into().unwrap(),
-        key: bytes[28..60].try_into().unwrap(),
-    })
-}
-
-#[cfg(not(feature = "storage-runtime-simulated"))]
-fn server_key_checksum(bytes: &[u8]) -> u32 {
-    crc32fast::hash(bytes)
+    crate::storage_backend::load_or_create_server_secret(directory, existing_storage)
 }

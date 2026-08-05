@@ -159,6 +159,7 @@ mod transport;
 pub mod types;
 
 pub(crate) mod channel;
+pub(crate) mod storage_backend;
 pub(crate) mod storage_runtime;
 
 pub use types::{ItemValue, StorageKey};
@@ -209,7 +210,7 @@ pub const fn storage_runtime_effective_ring_entries(configured: u32) -> u32 {
 /// `true` for native storage runtimes that open Segment/Blob files, and `false`
 /// for completion-only runtimes that do not use physical storage.
 pub const fn storage_runtime_uses_physical_storage() -> bool {
-    storage_runtime::USES_PHYSICAL_STORAGE
+    storage_backend::USES_PHYSICAL_STORAGE
 }
 
 pub(crate) mod sizing;

@@ -14,6 +14,7 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::{EvictionMode, SetCondition, SetOptions};
 
 use super::*;
+use crate::storage_backend;
 use crate::types::StoredItemValue;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
@@ -577,11 +578,8 @@ impl Kvkache {
         resource_guard: Arc<ResourceGuard>,
         _allow_checkpoint: bool,
     ) -> Result<Self> {
-        #[cfg(not(feature = "storage-runtime-simulated"))]
-        if let Some(parent) = config.data_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| startup_io_error("creating the data directory", error))?;
-        }
+        storage_backend::ensure_parent_directory(&config.data_path)
+            .map_err(|error| startup_io_error("creating the data directory", error))?;
         let data = open_direct_file(&config.data_path)
             .await
             .map_err(|error| startup_io_error("opening the data file", error))?;
@@ -611,11 +609,8 @@ impl Kvkache {
             }));
         }
         let next_sequence = config.mutable_segment_count as u64;
-        #[cfg(not(feature = "storage-runtime-simulated"))]
-        if let Some(parent) = config.large_value_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| startup_io_error("creating the large-value directory", error))?;
-        }
+        storage_backend::ensure_parent_directory(&config.large_value_path)
+            .map_err(|error| startup_io_error("creating the large-value directory", error))?;
         let large_values = open_direct_file(&config.large_value_path)
             .await
             .map_err(|error| startup_io_error("opening the large-value file", error))?;
@@ -630,8 +625,8 @@ impl Kvkache {
                 startup_storage_error("reserving the large-value file range", error)
             })?;
         resource_guard.observe_storage_reservation()?;
-        let storage_device_kind = storage_runtime::file_device_kind(&data)
-            .combine(storage_runtime::file_device_kind(&large_values));
+        let storage_device_kind = storage_backend::file_device_kind(&data)
+            .combine(storage_backend::file_device_kind(&large_values));
         let large_value_log = LargeValueLog::new(config.large_value_capacity)?;
         let bucket_read_pool_capacity = config.bucket_read_pool_capacity;
         let lease_ssd_read_buffer = config.lease_ssd_read_buffer;

@@ -1,7 +1,7 @@
 //! Host-specific runtime topology and diagnostics.
 
 use std::collections::HashSet;
-#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+#[cfg(target_os = "linux")]
 use std::path::PathBuf;
 
 use crate::error::Result;
@@ -50,7 +50,8 @@ impl StorageDeviceKind {
 /// This is the authoritative path for server startup diagnostics: the
 /// descriptor was opened by the same storage worker that will issue reads and
 /// writes, so the result cannot drift from a separately inspected config path.
-#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 pub(crate) fn storage_device_kind_from_fd(fd: std::os::fd::RawFd) -> StorageDeviceKind {
     let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstat(fd, &mut metadata) } != 0 {
@@ -59,14 +60,16 @@ pub(crate) fn storage_device_kind_from_fd(fd: std::os::fd::RawFd) -> StorageDevi
     linux_storage_device_kind_for_device(metadata.st_dev)
 }
 
-#[cfg(all(target_os = "macos", not(feature = "storage-runtime-simulated")))]
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
 pub(crate) fn storage_device_kind_from_fd(_fd: std::os::fd::RawFd) -> StorageDeviceKind {
     // macOS does not expose a stable, unprivileged equivalent of Linux's
     // /sys/dev/block mapping. Keep startup best-effort instead of guessing.
     StorageDeviceKind::Unknown
 }
 
-#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
 fn linux_storage_device_kind_for_device(device: u64) -> StorageDeviceKind {
     let sysfs_device = PathBuf::from("/sys/dev/block").join(format!(
         "{}:{}",

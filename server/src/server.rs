@@ -39,7 +39,6 @@ use crate::{
 
 pub(crate) type NetworkWorkerCompletion = (usize, std::result::Result<(), String>);
 
-const NAMESPACE_METADATA_FILE: &str = ".openkache-namespaces";
 const NAMESPACE_METADATA_MAGIC: &[u8; 8] = b"OKNSPACE";
 const NAMESPACE_METADATA_VERSION: u32 = 2;
 const NAMESPACE_METADATA_LEGACY_VERSION: u32 = 1;
@@ -266,23 +265,33 @@ struct NamespaceRegistry {
     next_id: Option<u64>,
     by_id: HashMap<u64, NamespaceEntry>,
     by_name: HashMap<Vec<u8>, u64>,
-    metadata_path: std::path::PathBuf,
+    metadata_path: Option<std::path::PathBuf>,
     persistent: bool,
     lifecycle_lock: Arc<AsyncMutex<()>>,
 }
 
 impl NamespaceRegistry {
     fn load(directory: &Path, existing_storage: bool) -> std::io::Result<Self> {
-        let metadata_path = directory.join(NAMESPACE_METADATA_FILE);
+        let metadata_path = match crate::storage_backend::namespace_persistence(directory) {
+            crate::storage_backend::NamespacePersistence::Durable(path) => path,
+            crate::storage_backend::NamespacePersistence::Ephemeral => {
+                return Ok(Self::ephemeral(directory));
+            }
+        };
         let mut registry = Self {
             next_id: Some(1),
             by_id: HashMap::new(),
             by_name: HashMap::new(),
-            metadata_path,
+            metadata_path: Some(metadata_path),
             persistent: true,
             lifecycle_lock: Arc::new(AsyncMutex::new(())),
         };
-        let mut file = match std::fs::File::open(&registry.metadata_path) {
+        let mut file = match std::fs::File::open(
+            registry
+                .metadata_path
+                .as_ref()
+                .expect("durable namespace registry has metadata path"),
+        ) {
             Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => {
                 if existing_storage {
@@ -301,12 +310,12 @@ impl NamespaceRegistry {
         Ok(registry)
     }
 
-    fn ephemeral(directory: &Path) -> Self {
+    fn ephemeral(_directory: &Path) -> Self {
         Self {
             next_id: Some(1),
             by_id: HashMap::new(),
             by_name: HashMap::new(),
-            metadata_path: directory.join(NAMESPACE_METADATA_FILE),
+            metadata_path: None,
             persistent: false,
             lifecycle_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -678,9 +687,15 @@ impl NamespaceRegistry {
             }
         }
 
+        let metadata_path = self
+            .metadata_path
+            .as_ref()
+            .expect("persistent namespace registry has metadata path");
         let sequence = NEXT_NAMESPACE_METADATA_TEMP.fetch_add(1, Ordering::Relaxed);
         let temporary_path = self
             .metadata_path
+            .as_ref()
+            .expect("persistent namespace registry has metadata path")
             .with_extension(format!("tmp-{}-{sequence}", std::process::id()));
         let write_result = (|| {
             let mut options = std::fs::OpenOptions::new();
@@ -691,7 +706,7 @@ impl NamespaceRegistry {
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
-            std::fs::rename(&temporary_path, &self.metadata_path)?;
+            std::fs::rename(&temporary_path, metadata_path)?;
             Ok(())
         })();
         if write_result.is_err() {
@@ -1043,28 +1058,20 @@ impl KacheServer {
         let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
         let storage_directory = config.storage.directory.clone();
-        let existing_storage = crate::storage_runtime::USES_PHYSICAL_STORAGE
-            && (0..config.runtime.thread_count)
-                .any(|thread_id| config.worker_config(thread_id).data_path.exists());
+        let existing_storage = crate::storage_backend::existing_storage(&config);
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
         let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
-        let namespaces = if crate::storage_runtime::USES_PHYSICAL_STORAGE {
-            match NamespaceRegistry::load(&storage_directory, existing_storage) {
-                Ok(registry) => registry,
-                Err(error) => {
-                    cache.shutdown()?;
-                    return Err(ServerError::NamespaceMetadata(error.to_string()));
-                }
-            }
-        } else {
-            NamespaceRegistry::ephemeral(&storage_directory)
-        };
-        if crate::storage_runtime::USES_PHYSICAL_STORAGE {
-            if let Err(error) = namespaces.persist() {
+        let namespaces = match NamespaceRegistry::load(&storage_directory, existing_storage) {
+            Ok(registry) => registry,
+            Err(error) => {
                 cache.shutdown()?;
                 return Err(ServerError::NamespaceMetadata(error.to_string()));
             }
+        };
+        if let Err(error) = namespaces.persist() {
+            cache.shutdown()?;
+            return Err(ServerError::NamespaceMetadata(error.to_string()));
         }
         let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
             Ok(sockets) => sockets,
