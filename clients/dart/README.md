@@ -1,8 +1,9 @@
-# OpenKache Dart ECHO client
+# OpenKache Dart client
 
-This package is an experimental Dart adapter for the Smithy `ECHO` operation.
-It uses `dart:ffi` to call the shared Rust client-core C ABI; Dart does not
-reimplement QUIC, TLS, framing, retries, or result ownership.
+This package is an experimental Dart adapter for the complete generated
+OpenKache Smithy API. It uses `dart:ffi` to call the shared Rust client-core C
+ABI; Dart does not reimplement QUIC, TLS, framing, retries, namespace handling,
+or result ownership.
 
 ## Commands
 
@@ -42,5 +43,7 @@ try {
 }
 ```
 
-`dataProtectionKey` must contain 32 bytes. The remaining cache operations will
-reuse this ABI boundary as they are added to the Dart package.
+`dataProtectionKey` must contain 32 bytes. All cache operations use the same
+generated DTOs and ABI boundary. `EchoClient` implements every generated
+`SmithyOpenKacheApi` method, including exact-item data operations and namespace
+management.
