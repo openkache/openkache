@@ -321,7 +321,7 @@ feature:
 ```bash
 cargo server-build \
   --no-default-features \
-  --features allocator-mimalloc,channel-crossfire,quic-noq
+  --features allocator-mimalloc,channel-crossfire,network-runtime-compio,quic-noq,storage-runtime-compio
 ```
 
 The supported choices are `allocator-jemalloc` (the default),
@@ -338,7 +338,7 @@ channels. Select exactly one of `channel-crossfire`, `channel-flume`, or
 ```bash
 cargo server-build \
   --no-default-features \
-  --features allocator-system,channel-flume,quic-noq
+  --features allocator-system,channel-flume,network-runtime-compio,quic-noq,storage-runtime-compio
 ```
 
 ### Static musl (x86_64 / aarch64)

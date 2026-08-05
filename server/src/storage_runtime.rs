@@ -1,5 +1,9 @@
 //! Compile-time-selected storage-worker runtime and direct-I/O facade.
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 use std::collections::HashSet;
 use std::future::Future;
 use std::io;
@@ -11,12 +15,32 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 use compio::driver::{DriverType, ProactorBuilder};
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 use compio::runtime::{Runtime, RuntimeBuilder};
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 const SQPOLL_IDLE: Duration = Duration::from_secs(2);
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 const RUNTIME_SMOKE_DELAY: Duration = Duration::from_millis(1);
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DriverRequirement {
     /// Require io_uring and reject Compio's polling fallback.
@@ -25,6 +49,10 @@ pub(crate) enum DriverRequirement {
     Polling,
 }
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CompioRuntimeConfig {
     pub(crate) entries: u32,
@@ -36,6 +64,10 @@ pub(crate) struct CompioRuntimeConfig {
     pub(crate) role: &'static str,
 }
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 impl CompioRuntimeConfig {
     #[cfg_attr(not(feature = "storage-runtime-compio"), allow(dead_code))]
     pub(crate) fn storage(
@@ -72,26 +104,24 @@ impl CompioRuntimeConfig {
             role: "simulated storage",
         }
     }
-
-    pub(crate) fn server_host() -> Self {
-        Self {
-            entries: 1024,
-            event_interval: 61,
-            worker_cpu: None,
-            sqpoll: false,
-            sqpoll_cpu: None,
-            driver: native_compio_driver(),
-            role: "server",
-        }
-    }
 }
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 #[cfg(target_os = "linux")]
 const fn native_compio_driver() -> DriverRequirement {
     DriverRequirement::IoUring
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(
+    any(
+        feature = "storage-runtime-compio",
+        feature = "storage-runtime-simulated"
+    ),
+    target_os = "macos"
+))]
 const fn native_compio_driver() -> DriverRequirement {
     DriverRequirement::Polling
 }
@@ -104,6 +134,10 @@ const fn native_compio_driver() -> DriverRequirement {
 /// exercises its production event loop. Native storage workers then run the
 /// real file-open and reservation path on that runtime; simulated workers use
 /// the same worker calls with their in-memory completion facade.
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
     if config.sqpoll && config.driver != DriverRequirement::IoUring {
         return Err(io::Error::new(
@@ -170,6 +204,10 @@ pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
     ),
     allow(dead_code)
 )]
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 pub(crate) fn run_compio<F>(config: CompioRuntimeConfig, future: F) -> io::Result<F::Output>
 where
     F: Future,
@@ -181,6 +219,10 @@ where
     })
 }
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 fn driver_matches(driver: DriverType, requirement: DriverRequirement) -> bool {
     match requirement {
         DriverRequirement::IoUring => driver.is_iouring(),
@@ -188,6 +230,10 @@ fn driver_matches(driver: DriverType, requirement: DriverRequirement) -> bool {
     }
 }
 
+#[cfg(any(
+    feature = "storage-runtime-compio",
+    feature = "storage-runtime-simulated"
+))]
 fn runtime_initialization_error(config: CompioRuntimeConfig, error: io::Error) -> io::Error {
     let feature = match config.driver {
         DriverRequirement::IoUring => "native io_uring",

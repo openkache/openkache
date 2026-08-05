@@ -212,15 +212,6 @@ pub const fn storage_runtime_uses_physical_storage() -> bool {
     storage_runtime::USES_PHYSICAL_STORAGE
 }
 
-/// Builds the Compio runtime used by the server's top-level task.
-///
-/// The returned runtime uses the same production builder and native-driver
-/// policy as dedicated network workers. On Linux this requires io_uring; on
-/// Apple Silicon macOS it requires Compio's polling driver.
-pub fn build_server_runtime() -> std::io::Result<compio::runtime::Runtime> {
-    storage_runtime::build(storage_runtime::CompioRuntimeConfig::server_host())
-}
-
 pub(crate) mod sizing;
 pub use sizing::{SizingPlan, SizingProfile, SizingRequest};
 
