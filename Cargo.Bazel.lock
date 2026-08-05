@@ -1,5 +1,5 @@
 {
-  "checksum": "b60de037849fa86d63df4dba4aac045847106fc90ae06833596922f85dd5ea48",
+  "checksum": "19c670309eb3675668565394394327bdb27b966da10ca9e9250278e5c1c219dc",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1867,7 +1867,7 @@
               "target": "cexpr"
             },
             {
-              "id": "clang-sys 1.8.1",
+              "id": "clang-sys 1.9.1",
               "target": "clang_sys"
             },
             {
@@ -1923,7 +1923,7 @@
         "link_deps": {
           "common": [
             {
-              "id": "clang-sys 1.8.1",
+              "id": "clang-sys 1.9.1",
               "target": "clang_sys"
             }
           ],
@@ -3070,14 +3070,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "clang-sys 1.8.1": {
+    "clang-sys 1.9.1": {
       "name": "clang-sys",
-      "version": "1.8.1",
+      "version": "1.9.1",
       "package_url": "https://github.com/KyleMayes/clang-sys",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/clang-sys/1.8.1/download",
-          "sha256": "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+          "url": "https://static.crates.io/crates/clang-sys/1.9.1/download",
+          "sha256": "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
         }
       },
       "targets": [
@@ -3155,7 +3155,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "1.8.1"
+        "version": "1.9.1"
       },
       "build_script_attrs": {
         "compile_data_glob": [
