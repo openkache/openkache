@@ -128,6 +128,15 @@ pub const fn storage_runtime_effective_ring_entries(configured: u32) -> u32 {
     storage_runtime::effective_ring_entries(configured)
 }
 
+/// Builds the Compio runtime used by the server's top-level task.
+///
+/// The returned runtime uses the same production builder and native-driver
+/// policy as dedicated network workers. On Linux this requires io_uring; on
+/// Apple Silicon macOS it requires Compio's polling driver.
+pub fn build_server_runtime() -> std::io::Result<compio::runtime::Runtime> {
+    storage_runtime::build(storage_runtime::CompioRuntimeConfig::server_host())
+}
+
 pub(crate) mod sizing;
 pub use sizing::{SizingPlan, SizingProfile, SizingRequest};
 

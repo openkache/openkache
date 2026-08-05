@@ -13,8 +13,6 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use compio::driver::ProactorBuilder;
-use compio::runtime::RuntimeBuilder;
 use futures_util::lock::Mutex as AsyncMutex;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
@@ -215,14 +213,13 @@ where
         .name(thread_name)
         .spawn(move || {
             let task_reporter = NetworkTaskReporter::new(worker_id, finished);
-            let mut proactor = ProactorBuilder::new();
-            proactor.capacity(entries);
-            let mut builder = RuntimeBuilder::new();
-            builder
-                .with_proactor(proactor)
-                .thread_affinity(HashSet::from([cpu_id]))
-                .event_interval(event_interval);
-            let runtime = match builder.build() {
+            let runtime = match crate::storage_runtime::build(
+                crate::storage_runtime::CompioRuntimeConfig::network(
+                    entries,
+                    event_interval,
+                    Some(cpu_id),
+                ),
+            ) {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     reporter.startup_failed(error.to_string());

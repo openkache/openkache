@@ -1,5 +1,6 @@
 //! Compile-time-selected storage-worker runtime and direct-I/O facade.
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::ops::Range;
@@ -9,6 +10,218 @@ use std::path::Path;
 #[cfg(not(feature = "storage-runtime-simulated"))]
 use std::rc::Rc;
 use std::time::Duration;
+
+use compio::driver::{DriverType, ProactorBuilder};
+use compio::runtime::{Runtime, RuntimeBuilder};
+
+const SQPOLL_IDLE: Duration = Duration::from_secs(2);
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DriverRequirement {
+    /// Let Compio select its best available driver.
+    Any,
+    /// Require io_uring and reject Compio's polling fallback.
+    IoUring,
+    /// Require the polling driver.
+    Polling,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CompioRuntimeConfig {
+    pub(crate) entries: u32,
+    pub(crate) event_interval: usize,
+    pub(crate) worker_cpu: Option<usize>,
+    pub(crate) sqpoll: bool,
+    pub(crate) sqpoll_cpu: Option<u32>,
+    pub(crate) driver: DriverRequirement,
+    pub(crate) role: &'static str,
+}
+
+impl CompioRuntimeConfig {
+    pub(crate) fn network(entries: u32, event_interval: usize, worker_cpu: Option<usize>) -> Self {
+        Self {
+            entries,
+            event_interval,
+            worker_cpu,
+            sqpoll: false,
+            sqpoll_cpu: None,
+            driver: native_network_driver(),
+            role: "network",
+        }
+    }
+
+    pub(crate) fn storage(
+        entries: u32,
+        event_interval: usize,
+        worker_cpu: usize,
+        sqpoll: bool,
+        sqpoll_cpu: Option<u32>,
+    ) -> Self {
+        Self {
+            entries,
+            event_interval,
+            worker_cpu: Some(worker_cpu),
+            sqpoll,
+            sqpoll_cpu,
+            driver: if sqpoll {
+                DriverRequirement::IoUring
+            } else {
+                DriverRequirement::Any
+            },
+            role: "storage",
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn simulated(entries: u32, event_interval: usize, worker_cpu: usize) -> Self {
+        Self {
+            entries,
+            event_interval,
+            worker_cpu: Some(worker_cpu),
+            sqpoll: false,
+            sqpoll_cpu: None,
+            driver: DriverRequirement::Polling,
+            role: "simulated storage",
+        }
+    }
+
+    pub(crate) fn server_host() -> Self {
+        Self {
+            entries: 1024,
+            event_interval: 61,
+            worker_cpu: None,
+            sqpoll: false,
+            sqpoll_cpu: None,
+            driver: native_network_driver(),
+            role: "server",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+const fn native_network_driver() -> DriverRequirement {
+    DriverRequirement::IoUring
+}
+
+#[cfg(target_os = "macos")]
+const fn native_network_driver() -> DriverRequirement {
+    DriverRequirement::Polling
+}
+
+/// Builds the exact Compio runtime used by a worker.
+///
+/// The required-driver setting is applied to the underlying `ProactorBuilder`
+/// before `RuntimeBuilder::build`, so a requested native or SQPOLL runtime
+/// cannot silently become Compio's polling fallback. For storage workers, the
+/// caller runs the real file-open and reservation path on the returned runtime;
+/// that path is the startup smoke test for the configured I/O mode.
+pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
+    if config.sqpoll && config.driver != DriverRequirement::IoUring {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Compio SQPOLL requires the io_uring driver requirement",
+        ));
+    }
+
+    let mut proactor = ProactorBuilder::new();
+    proactor.capacity(config.entries);
+    if config.sqpoll {
+        proactor.sqpoll_idle(SQPOLL_IDLE);
+        if let Some(cpu_id) = config.sqpoll_cpu {
+            proactor.sqpoll_cpu(cpu_id);
+        }
+    }
+
+    match config.driver {
+        DriverRequirement::Any => {}
+        DriverRequirement::IoUring => {
+            #[cfg(target_os = "linux")]
+            proactor.driver_type(DriverType::IoUring);
+            #[cfg(not(target_os = "linux"))]
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Compio io_uring is only available on Linux",
+            ));
+        }
+        DriverRequirement::Polling => {
+            proactor.driver_type(DriverType::Poll);
+        }
+    }
+
+    let mut builder = RuntimeBuilder::new();
+    builder
+        .with_proactor(proactor)
+        .event_interval(config.event_interval);
+    if let Some(cpu_id) = config.worker_cpu {
+        builder.thread_affinity(HashSet::from([cpu_id]));
+    }
+
+    let runtime = builder
+        .build()
+        .map_err(|error| runtime_initialization_error(config, error))?;
+    if !driver_matches(runtime.driver_type(), config.driver) {
+        return Err(io::Error::other(format!(
+            "Compio {} runtime selected {:?}, but {:?} was required",
+            config.role,
+            runtime.driver_type(),
+            config.driver,
+        )));
+    }
+    Ok(runtime)
+}
+
+/// Runs a production task on a runtime built by [`build`].
+pub(crate) fn run_compio<F>(config: CompioRuntimeConfig, future: F) -> io::Result<F::Output>
+where
+    F: Future,
+{
+    let runtime = build(config)?;
+    Ok(runtime.block_on(future))
+}
+
+fn driver_matches(driver: DriverType, requirement: DriverRequirement) -> bool {
+    match requirement {
+        DriverRequirement::Any => true,
+        DriverRequirement::IoUring => driver.is_iouring(),
+        DriverRequirement::Polling => driver.is_polling(),
+    }
+}
+
+fn runtime_initialization_error(config: CompioRuntimeConfig, error: io::Error) -> io::Error {
+    let feature = match config.driver {
+        DriverRequirement::Any => "Compio's selected I/O driver",
+        DriverRequirement::IoUring => "native io_uring",
+        DriverRequirement::Polling => "the polling driver",
+    };
+    let errno = error
+        .raw_os_error()
+        .map_or_else(String::new, |code| format!(" (errno {code})"));
+    let operation = if config.sqpoll {
+        " The requested SQPOLL setup was attempted directly by the production builder."
+    } else {
+        ""
+    };
+    io::Error::new(
+        error.kind(),
+        format!(
+            "Compio {} runtime could not initialize {feature}{errno}: {error}.{operation}",
+            config.role
+        ),
+    )
+}
+
+pub(crate) fn storage_startup_error(sqpoll: bool, message: impl std::fmt::Display) -> String {
+    let feature = if sqpoll {
+        "io_uring SQPOLL"
+    } else {
+        "the configured storage I/O runtime"
+    };
+    format!(
+        "storage startup failed while initializing {feature} on the production \
+         runtime: {message}"
+    )
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct RuntimeConfig {
@@ -188,10 +401,6 @@ mod backend {
 #[cfg(feature = "storage-runtime-simulated")]
 mod backend {
     use std::cell::Cell;
-    use std::collections::HashSet;
-
-    use compio::driver::{DriverType, ProactorBuilder};
-    use compio::runtime::RuntimeBuilder;
 
     use super::*;
 
@@ -229,14 +438,14 @@ mod backend {
             ));
         }
         IO_LATENCY.set(config.simulated_io_latency);
-        let mut proactor = ProactorBuilder::new();
-        proactor.driver_type(DriverType::Poll);
-        let runtime = RuntimeBuilder::new()
-            .with_proactor(proactor)
-            .thread_affinity(HashSet::from([config.worker_cpu]))
-            .event_interval(config.event_interval)
-            .build()?;
-        Ok(runtime.block_on(future))
+        super::run_compio(
+            CompioRuntimeConfig::simulated(
+                config.entries,
+                config.event_interval,
+                config.worker_cpu,
+            ),
+            future,
+        )
     }
 
     pub(crate) fn spawn_detached<F>(future: F)
@@ -310,18 +519,12 @@ pub(crate) struct Timeout;
 
 #[cfg(feature = "storage-runtime-compio")]
 mod backend {
-    use std::collections::HashSet;
-
     use compio::BufResult;
     use compio::buf::{IntoInner, IoBuf, IoBufMut, SetLen};
-    use compio::driver::ProactorBuilder;
     use compio::fs::OpenOptions;
     use compio::io::{AsyncReadAt, AsyncWriteAt};
-    use compio::runtime::RuntimeBuilder;
 
     use super::*;
-
-    const SQPOLL_IDLE: Duration = Duration::from_secs(2);
 
     pub(crate) const NAME: &str = "compio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
@@ -344,24 +547,21 @@ mod backend {
         F: Future,
     {
         let _ = (config.worker_index, config.simulated_io_latency);
-        let mut proactor = ProactorBuilder::new();
-        proactor.capacity(config.entries);
-        if config.sqpoll {
-            proactor.sqpoll_idle(SQPOLL_IDLE);
-            if let Some(cpu_id) = config.sqpoll_cpu {
-                proactor.sqpoll_cpu(
-                    cpu_id
-                        .try_into()
-                        .map_err(|_| io::Error::other("SQPOLL CPU identifier overflowed"))?,
-                );
-            }
-        }
-        let runtime = RuntimeBuilder::new()
-            .with_proactor(proactor)
-            .thread_affinity(HashSet::from([config.worker_cpu]))
-            .event_interval(config.event_interval)
-            .build()?;
-        Ok(runtime.block_on(future))
+        let sqpoll_cpu = config
+            .sqpoll_cpu
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| io::Error::other("SQPOLL CPU identifier overflowed"))?;
+        super::run_compio(
+            CompioRuntimeConfig::storage(
+                config.entries,
+                config.event_interval,
+                config.worker_cpu,
+                config.sqpoll,
+                sqpoll_cpu,
+            ),
+            future,
+        )
     }
 
     pub(crate) fn spawn_detached<F>(future: F)

@@ -77,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(plan) = &sizing_plan {
         sizing::print_plan(plan);
     }
-    let runtime = compio::runtime::Runtime::new().map_err(runtime_initialization_error)?;
+    let runtime = openkache::build_server_runtime().map_err(runtime_initialization_error)?;
     require_native_driver(runtime.driver_type())?;
     runtime.block_on(serve::run(arguments, config))
 }
@@ -151,11 +151,11 @@ fn io_uring_kernel_hint() -> String {
     };
     format!(
         "Detected Linux kernel {release}; Linux 5.1 is the minimum io_uring syscall \
-         baseline. {recommendation} Storage SQPOLL is stricter: OpenKache's Compio \
-         path uses ordinary file descriptors, so it needs Linux 5.11+ (or explicit \
-         fixed-file registration); unprivileged SQPOLL needs Linux 5.13+ (or \
-         CAP_SYS_NICE on Linux 5.11-5.12). Also check the container seccomp policy, \
-         CONFIG_IO_URING, and /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
+         baseline. {recommendation} The server attempted the requested Compio \
+         driver directly; the exact failed operation and errno are reported above. \
+         Kernel version alone is not sufficient: also check the container seccomp \
+         policy, CONFIG_IO_URING, /proc/sys/kernel/io_uring_disabled (0 enables \
+         io_uring), and the process's io_uring permissions."
     )
 }
 

@@ -262,6 +262,7 @@ impl ThreadedKvkache {
                             config.runtime.simulated_io_latency_us,
                         ),
                     };
+                    let sqpoll = runtime_config.sqpoll;
                     let result = crate::storage_runtime::run(runtime_config, async move {
                         if let Some(error) = crate::platform::cpu_assignment_error(
                             &format!("thread {thread_id}"),
@@ -280,7 +281,9 @@ impl ThreadedKvkache {
                         {
                             Ok(cache) => cache,
                             Err(error) => {
-                                let _ = started_tx.send(Err(error.to_string()));
+                                let _ = started_tx.send(Err(
+                                    crate::storage_runtime::storage_startup_error(sqpoll, error),
+                                ));
                                 return;
                             }
                         };
@@ -294,7 +297,9 @@ impl ThreadedKvkache {
                         }
                     });
                     if let Err(error) = result {
-                        let _ = startup_error.send(Err(error.to_string()));
+                        let _ = startup_error.send(Err(
+                            crate::storage_runtime::storage_startup_error(sqpoll, error),
+                        ));
                     }
                 })?;
             workers.push(WorkerHandle {
