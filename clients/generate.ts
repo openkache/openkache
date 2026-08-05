@@ -15,6 +15,7 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
+  OPERATION_RESPONSE_KINDS_BY_REQUEST,
   extract_wire_contract as extract_protocol_wire_contract,
   render_rust_wire as render_protocol_rust_wire,
   type Wire_Contract,
@@ -644,6 +645,15 @@ function operation_contract(
   ) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
+    )
+  }
+  const allowed_response_kinds =
+    OPERATION_RESPONSE_KINDS_BY_REQUEST[
+      request_kind as Api_Operation_Request_Kind
+    ]
+  if (!allowed_response_kinds.includes(response_kind as Api_Operation_Response_Kind)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID} responseKind ${response_kind} is incompatible with requestKind ${request_kind}`,
     )
   }
   const retry_mode = string_member(
@@ -2106,7 +2116,7 @@ pub enum OperationRequestKind {
 pub enum OperationResponseKind {
     Empty,
     Pong,
-    Echo,
+    ApplicationValue,
     Value,
     SetOutcome,
     DeleteOutcome,

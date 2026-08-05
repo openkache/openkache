@@ -15,27 +15,50 @@ export interface Wire_Entry {
 }
 
 /** Semantic contract declared by one Smithy protocol operation. */
+export type Wire_Operation_Scope =
+  | "global"
+  | "item"
+  | "namespace"
+  | "namespace_management"
+
+export type Wire_Operation_Request_Kind =
+  | "empty"
+  | "application_value"
+  | "scoped_item"
+  | "scoped_namespace"
+  | "namespace_open"
+  | "namespace_update_policy"
+  | "namespace_delete"
+
+export type Wire_Operation_Response_Kind =
+  | "empty"
+  | "pong"
+  | "application_value"
+  | "value"
+  | "set_outcome"
+  | "delete_outcome"
+  | "stats_json"
+  | "namespace_descriptor"
+
+/** Response shapes permitted for each protocol-owned request shape. */
+export const OPERATION_RESPONSE_KINDS_BY_REQUEST: Readonly<
+  Record<Wire_Operation_Request_Kind, readonly Wire_Operation_Response_Kind[]>
+> = {
+  empty: ["pong"],
+  application_value: ["application_value"],
+  scoped_item: ["value", "set_outcome", "delete_outcome"],
+  scoped_namespace: ["stats_json", "empty"],
+  namespace_open: ["namespace_descriptor"],
+  namespace_update_policy: ["namespace_descriptor"],
+  namespace_delete: ["empty"],
+}
+
 export interface Wire_Operation_Contract {
   readonly error_statuses: readonly string[]
-  readonly request_kind:
-    | "empty"
-    | "application_value"
-    | "scoped_item"
-    | "scoped_namespace"
-    | "namespace_open"
-    | "namespace_update_policy"
-    | "namespace_delete"
-  readonly response_kind:
-    | "empty"
-    | "pong"
-    | "application_value"
-    | "value"
-    | "set_outcome"
-    | "delete_outcome"
-    | "stats_json"
-    | "namespace_descriptor"
+  readonly request_kind: Wire_Operation_Request_Kind
+  readonly response_kind: Wire_Operation_Response_Kind
   readonly retry_mode: "always" | "never" | "when_not_creating"
-  readonly scope: "global" | "item" | "namespace" | "namespace_management"
+  readonly scope: Wire_Operation_Scope
   readonly success_statuses: readonly string[]
 }
 
@@ -758,6 +781,15 @@ function operation_contract(
   if (!response_kinds.includes(response_kind as (typeof response_kinds)[number])) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
+    )
+  }
+  const allowed_response_kinds =
+    OPERATION_RESPONSE_KINDS_BY_REQUEST[
+      request_kind as Wire_Operation_Request_Kind
+    ]
+  if (!allowed_response_kinds.includes(response_kind as Wire_Operation_Response_Kind)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID} responseKind ${response_kind} is incompatible with requestKind ${request_kind}`,
     )
   }
 

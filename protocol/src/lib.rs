@@ -37,9 +37,11 @@ const MAX_REQUEST_PREFIX_BYTES: usize = REQUEST_FIXED_BYTES
     + ITEM_ID_BYTES
     + MAX_VARUINT_BYTES
     + MAX_VARUINT_BYTES;
-const MAX_NAMESPACE_OPEN_PREFIX_BYTES: usize =
-    OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES + NAMESPACE_NAME_MAX_BYTES
-        + MAX_POLICY_BYTES;
+const MAX_NAMESPACE_OPEN_PREFIX_BYTES: usize = OPCODE_BYTES
+    + OPEN_FLAGS_BYTES
+    + NAMESPACE_NAME_LENGTH_BYTES
+    + NAMESPACE_NAME_MAX_BYTES
+    + MAX_POLICY_BYTES;
 
 /// Conservative maximum complete request frame size.
 pub const MAX_REQUEST_FRAME_BYTES: usize =
@@ -51,11 +53,51 @@ pub const MAX_REQUEST_FRAME_BYTES: usize =
 /// Conservative maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = STATUS_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
 
-const fn is_application_value_operation(opcode: Opcode) -> bool {
-    matches!(
-        operation_contract(opcode).request_kind,
-        OperationRequestKind::ApplicationValue
-    )
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RequestLayout {
+    Empty,
+    ApplicationValue,
+    Item,
+    Set,
+    Namespace,
+    NamespaceOpen,
+    NamespaceUpdatePolicy,
+    NamespaceDelete,
+}
+
+/// Resolves the binary request layout from the generated Smithy operation contract.
+///
+/// Operation names are deliberately absent here. Multiple operations may share a
+/// layout, and adding another operation with an existing semantic contract must
+/// not require another protocol-framing branch.
+fn request_layout(opcode: Opcode) -> RequestLayout {
+    let contract = operation_contract(opcode);
+    match (contract.request_kind, contract.response_kind) {
+        (OperationRequestKind::Empty, OperationResponseKind::Pong) => RequestLayout::Empty,
+        (OperationRequestKind::ApplicationValue, OperationResponseKind::ApplicationValue) => {
+            RequestLayout::ApplicationValue
+        }
+        (OperationRequestKind::ScopedItem, OperationResponseKind::Value)
+        | (OperationRequestKind::ScopedItem, OperationResponseKind::DeleteOutcome) => {
+            RequestLayout::Item
+        }
+        (OperationRequestKind::ScopedItem, OperationResponseKind::SetOutcome) => RequestLayout::Set,
+        (OperationRequestKind::ScopedNamespace, OperationResponseKind::StatsJson)
+        | (OperationRequestKind::ScopedNamespace, OperationResponseKind::Empty) => {
+            RequestLayout::Namespace
+        }
+        (OperationRequestKind::NamespaceOpen, OperationResponseKind::NamespaceDescriptor) => {
+            RequestLayout::NamespaceOpen
+        }
+        (
+            OperationRequestKind::NamespaceUpdatePolicy,
+            OperationResponseKind::NamespaceDescriptor,
+        ) => RequestLayout::NamespaceUpdatePolicy,
+        (OperationRequestKind::NamespaceDelete, OperationResponseKind::Empty) => {
+            RequestLayout::NamespaceDelete
+        }
+        _ => unreachable!("unsupported protocol operation contract"),
+    }
 }
 
 impl Status {
@@ -671,15 +713,16 @@ impl Request {
         self.validate()?;
         let mut output = Vec::new();
         output.push(self.opcode as u8);
-        match self.opcode {
-            Opcode::Ping => {}
-            opcode if is_application_value_operation(opcode) => {
+        let layout = request_layout(self.opcode);
+        match layout {
+            RequestLayout::Empty => {}
+            RequestLayout::ApplicationValue => {
                 let (encoded, length) = encode_varuint(self.value.len() as u64);
                 output.extend_from_slice(&encoded[..length]);
             }
-            Opcode::Get | Opcode::Delete | Opcode::Stats | Opcode::Sync => {
+            RequestLayout::Item | RequestLayout::Namespace => {
                 put_namespace_id(&mut output, self.namespace_id)?;
-                if matches!(self.opcode, Opcode::Get | Opcode::Delete) {
+                if layout == RequestLayout::Item {
                     output.extend_from_slice(
                         self.item_id
                             .ok_or(ProtocolError::InvalidRequestShape {
@@ -691,7 +734,7 @@ impl Request {
                     );
                 }
             }
-            Opcode::Set => {
+            RequestLayout::Set => {
                 put_namespace_id(&mut output, self.namespace_id)?;
                 output.push(self.set_options.flags()?);
                 output.extend_from_slice(
@@ -710,7 +753,7 @@ impl Request {
                 let (encoded, length) = encode_varuint(self.value.len() as u64);
                 output.extend_from_slice(&encoded[..length]);
             }
-            Opcode::NamespaceOpen => {
+            RequestLayout::NamespaceOpen => {
                 output.push(if self.create_if_missing {
                     OPEN_CREATE_IF_MISSING
                 } else {
@@ -735,7 +778,7 @@ impl Request {
                     );
                 }
             }
-            Opcode::NamespaceUpdatePolicy => {
+            RequestLayout::NamespaceUpdatePolicy => {
                 put_namespace_id(&mut output, self.namespace_id)?;
                 put_revision(&mut output, self.expected_revision)?;
                 output.extend_from_slice(
@@ -745,12 +788,11 @@ impl Request {
                         .encode()?,
                 );
             }
-            Opcode::NamespaceDelete => {
+            RequestLayout::NamespaceDelete => {
                 output.push(DELETE_IF_EMPTY);
                 put_namespace_id(&mut output, self.namespace_id)?;
                 put_revision(&mut output, self.expected_revision)?;
             }
-            _ => unreachable!("protocol operation contract has no request layout"),
         }
         Ok(output)
     }
@@ -780,51 +822,52 @@ impl Request {
                     .expect("validated item ID range"),
             )
         });
-        let namespace_name = if header.opcode == Opcode::NamespaceOpen {
+        let namespace_name = if request_layout(header.opcode) == RequestLayout::NamespaceOpen {
             let name_start = OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES;
             let name_len_offset = OPCODE_BYTES + OPEN_FLAGS_BYTES;
             Some(frame[name_start..name_start + usize::from(frame[name_len_offset])].to_vec())
         } else {
             None
         };
-        let (namespace_policy, expected_revision, create_if_missing) = match header.opcode {
-            Opcode::NamespaceOpen => {
-                let flags_offset = OPCODE_BYTES;
-                let name_len_offset = flags_offset + OPEN_FLAGS_BYTES;
-                let name_start = name_len_offset + NAMESPACE_NAME_LENGTH_BYTES;
-                let create = frame[flags_offset] & OPEN_CREATE_IF_MISSING != 0;
-                let policy = if create {
-                    let start = name_start + usize::from(frame[name_len_offset]);
-                    Some(
+        let (namespace_policy, expected_revision, create_if_missing) =
+            match request_layout(header.opcode) {
+                RequestLayout::NamespaceOpen => {
+                    let flags_offset = OPCODE_BYTES;
+                    let name_len_offset = flags_offset + OPEN_FLAGS_BYTES;
+                    let name_start = name_len_offset + NAMESPACE_NAME_LENGTH_BYTES;
+                    let create = frame[flags_offset] & OPEN_CREATE_IF_MISSING != 0;
+                    let policy = if create {
+                        let start = name_start + usize::from(frame[name_len_offset]);
+                        Some(
+                            decode_namespace_policy(&frame[start..])?
+                                .ok_or(ProtocolError::MissingNamespacePolicy)?
+                                .0,
+                        )
+                    } else {
+                        None
+                    };
+                    (policy, None, create)
+                }
+                RequestLayout::NamespaceUpdatePolicy => {
+                    let revision_start = OPCODE_BYTES + NAMESPACE_ID_BYTES;
+                    let revision = read_u64_be(&frame[revision_start..])?;
+                    let start = revision_start + NAMESPACE_REVISION_BYTES;
+                    let policy = Some(
                         decode_namespace_policy(&frame[start..])?
                             .ok_or(ProtocolError::MissingNamespacePolicy)?
                             .0,
-                    )
-                } else {
-                    None
-                };
-                (policy, None, create)
-            }
-            Opcode::NamespaceUpdatePolicy => {
-                let revision_start = OPCODE_BYTES + NAMESPACE_ID_BYTES;
-                let revision = read_u64_be(&frame[revision_start..])?;
-                let start = revision_start + NAMESPACE_REVISION_BYTES;
-                let policy = Some(
-                    decode_namespace_policy(&frame[start..])?
-                        .ok_or(ProtocolError::MissingNamespacePolicy)?
-                        .0,
-                );
-                (policy, Some(revision), false)
-            }
-            Opcode::NamespaceDelete => (
-                None,
-                Some(read_u64_be(
-                    &frame[OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
-                )?),
-                false,
-            ),
-            _ => (None, None, false),
-        };
+                    );
+                    (policy, Some(revision), false)
+                }
+                RequestLayout::NamespaceDelete => (
+                    None,
+                    Some(read_u64_be(
+                        &frame[OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
+                    )?),
+                    false,
+                ),
+                _ => (None, None, false),
+            };
         let ttl_ms = if header.has_ttl {
             let start = header.item_id_start.expect("SET has an item ID") + ITEM_ID_BYTES;
             Some(
@@ -839,7 +882,7 @@ impl Request {
             opcode: header.opcode,
             namespace_id: header.namespace_id,
             item_id,
-            set_options: if header.opcode == Opcode::Set {
+            set_options: if request_layout(header.opcode) == RequestLayout::Set {
                 SetOptions::from_wire_parts(
                     frame[OPCODE_BYTES + NAMESPACE_ID_BYTES..]
                         .first()
@@ -879,7 +922,10 @@ impl Request {
             });
         }
         let mut request = Self::decode(&frame)?;
-        if header.opcode == Opcode::Set || is_application_value_operation(header.opcode) {
+        if matches!(
+            request_layout(header.opcode),
+            RequestLayout::Set | RequestLayout::ApplicationValue
+        ) {
             frame.copy_within(header.encoded_len.., 0);
             frame.truncate(header.value_len);
             request.value = frame;
@@ -893,8 +939,8 @@ impl Request {
             return Ok(None);
         };
         let opcode = Opcode::try_from(opcode_byte)?;
-        match opcode {
-            Opcode::Ping => Ok(Some(RequestHeader {
+        match request_layout(opcode) {
+            RequestLayout::Empty => Ok(Some(RequestHeader {
                 opcode,
                 encoded_len: OPCODE_BYTES,
                 value_len: 0,
@@ -903,10 +949,8 @@ impl Request {
                 set_options: SetOptions::NONE,
                 has_ttl: false,
             })),
-            opcode if is_application_value_operation(opcode) => {
-                decode_application_value_header(prefix, opcode)
-            }
-            Opcode::Get | Opcode::Delete => {
+            RequestLayout::ApplicationValue => decode_application_value_header(prefix, opcode),
+            RequestLayout::Item => {
                 let required = OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
                 if prefix.len() < required {
                     return Ok(None);
@@ -922,7 +966,7 @@ impl Request {
                     has_ttl: false,
                 }))
             }
-            Opcode::Stats | Opcode::Sync => {
+            RequestLayout::Namespace => {
                 let required = OPCODE_BYTES + NAMESPACE_ID_BYTES;
                 if prefix.len() < required {
                     return Ok(None);
@@ -938,11 +982,10 @@ impl Request {
                     has_ttl: false,
                 }))
             }
-            Opcode::Set => decode_set_header(prefix),
-            Opcode::NamespaceOpen => decode_namespace_open_header(prefix),
-            Opcode::NamespaceUpdatePolicy => decode_namespace_update_header(prefix),
-            Opcode::NamespaceDelete => decode_namespace_delete_header(prefix),
-            _ => unreachable!("protocol operation contract has no request layout"),
+            RequestLayout::Set => decode_set_header(prefix),
+            RequestLayout::NamespaceOpen => decode_namespace_open_header(prefix),
+            RequestLayout::NamespaceUpdatePolicy => decode_namespace_update_header(prefix),
+            RequestLayout::NamespaceDelete => decode_namespace_delete_header(prefix),
         }
     }
 
@@ -956,8 +999,8 @@ impl Request {
 
     fn validate(&self) -> Result<()> {
         validate_value_length(self.value.len())?;
-        match self.opcode {
-            Opcode::Ping => {
+        match request_layout(self.opcode) {
+            RequestLayout::Empty => {
                 if self.namespace_id.is_some()
                     || self.item_id.is_some()
                     || self.set_options != SetOptions::NONE
@@ -974,7 +1017,7 @@ impl Request {
                     });
                 }
             }
-            opcode if is_application_value_operation(opcode) => {
+            RequestLayout::ApplicationValue => {
                 if self.namespace_id.is_some()
                     || self.item_id.is_some()
                     || self.set_options != SetOptions::NONE
@@ -990,7 +1033,7 @@ impl Request {
                     });
                 }
             }
-            Opcode::Get | Opcode::Delete => {
+            RequestLayout::Item => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.item_id.is_none()
                     || self.set_options != SetOptions::NONE
@@ -1007,7 +1050,7 @@ impl Request {
                     });
                 }
             }
-            Opcode::Stats | Opcode::Sync => {
+            RequestLayout::Namespace => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.item_id.is_some()
                     || self.set_options != SetOptions::NONE
@@ -1024,7 +1067,7 @@ impl Request {
                     });
                 }
             }
-            Opcode::Set => {
+            RequestLayout::Set => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.item_id.is_none() {
                     return Err(ProtocolError::InvalidItemIdLength {
@@ -1044,7 +1087,7 @@ impl Request {
                     });
                 }
             }
-            Opcode::NamespaceOpen => {
+            RequestLayout::NamespaceOpen => {
                 let name =
                     self.namespace_name
                         .as_deref()
@@ -1075,7 +1118,7 @@ impl Request {
                     policy.encode()?;
                 }
             }
-            Opcode::NamespaceUpdatePolicy => {
+            RequestLayout::NamespaceUpdatePolicy => {
                 validate_namespace_id(self.namespace_id)?;
                 validate_revision(self.expected_revision)?;
                 self.namespace_policy
@@ -1094,7 +1137,7 @@ impl Request {
                     });
                 }
             }
-            Opcode::NamespaceDelete => {
+            RequestLayout::NamespaceDelete => {
                 validate_namespace_id(self.namespace_id)?;
                 validate_revision(self.expected_revision)?;
                 if self.item_id.is_some()
@@ -1111,7 +1154,6 @@ impl Request {
                     });
                 }
             }
-            _ => unreachable!("protocol operation contract has no request layout"),
         }
         Ok(())
     }
@@ -1182,10 +1224,7 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
     }))
 }
 
-fn decode_application_value_header(
-    prefix: &[u8],
-    opcode: Opcode,
-) -> Result<Option<RequestHeader>> {
+fn decode_application_value_header(prefix: &[u8], opcode: Opcode) -> Result<Option<RequestHeader>> {
     let Some((value_len, value_len_bytes)) =
         decode_varuint(&prefix[OPCODE_BYTES..], "application value length")?
     else {
@@ -1282,9 +1321,8 @@ fn decode_namespace_delete_header(prefix: &[u8]) -> Result<Option<RequestHeader>
         ));
     }
     let namespace_id = read_namespace_id(&prefix[flags_offset + DELETE_FLAGS_BYTES..])?;
-    let expected_revision = read_u64_be(
-        &prefix[flags_offset + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
-    )?;
+    let expected_revision =
+        read_u64_be(&prefix[flags_offset + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..])?;
     if expected_revision == 0 {
         return Err(ProtocolError::InvalidRevision);
     }
@@ -1323,10 +1361,7 @@ fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usiz
     Ok(Some((policy, encoded_len)))
 }
 
-fn decode_namespace_policy_parts(
-    flags: u8,
-    ttl_ms: Option<u64>,
-) -> Result<NamespacePolicy> {
+fn decode_namespace_policy_parts(flags: u8, ttl_ms: Option<u64>) -> Result<NamespacePolicy> {
     if flags & POLICY_RESERVED_MASK != 0 {
         return Err(ProtocolError::InvalidNamespacePolicy(
             "namespace policy contains reserved bits",
@@ -1607,9 +1642,7 @@ impl Response {
         };
         let status = Status::try_from(status_byte)?;
         let Some((payload_len, encoded_len)) = decode_varuint(
-            prefix
-                .get(RESPONSE_FIXED_BYTES..)
-                .unwrap_or_default(),
+            prefix.get(RESPONSE_FIXED_BYTES..).unwrap_or_default(),
             "response payload length",
         )?
         else {
