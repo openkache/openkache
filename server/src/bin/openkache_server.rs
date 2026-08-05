@@ -87,13 +87,12 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
     if driver.is_iouring() {
         Ok(())
     } else {
-        Err(std::io::Error::other(
+        Err(std::io::Error::other(format!(
             "openkache-server cannot start: the network runtime fell back \
-             to polling because Linux io_uring could not be initialized. Required syscalls: \
-             io_uring_setup, io_uring_enter, io_uring_register. Check the \
-             container seccomp policy and /proc/sys/kernel/io_uring_disabled \
-             (0 enables io_uring).",
-        ))
+                 to polling because Linux io_uring could not be initialized. Required \
+                 syscalls: io_uring_setup, io_uring_enter, io_uring_register. {}",
+            io_uring_kernel_hint()
+        )))
     }
 }
 
@@ -128,9 +127,62 @@ fn runtime_initialization_error(error: io::Error) -> io::Error {
             "openkache-server cannot start: the network runtime requires \
              Linux io_uring ({error}); {cause}. \
              Required syscalls: io_uring_setup, io_uring_enter, io_uring_register. \
-             Also check /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
+             {}",
+            io_uring_kernel_hint()
         ),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn io_uring_kernel_hint() -> String {
+    let release = linux_kernel_release();
+    let recommendation = match linux_kernel_version(&release) {
+        Some((major, minor)) if (major, minor) < (5, 1) => {
+            "Upgrade to Linux 5.1 or newer before retrying."
+        }
+        Some(_) => {
+            "This release meets the Linux 5.1 version baseline; kernel version alone \
+             does not guarantee io_uring access."
+        }
+        None => {
+            "Linux 5.1 is the version baseline; kernel version could not be parsed, \
+             so verify the release manually."
+        }
+    };
+    format!(
+        "Detected Linux kernel {release}; io_uring requires Linux 5.1 or newer. \
+         {recommendation} Also check the container seccomp policy, CONFIG_IO_URING, \
+         and /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kernel_release() -> String {
+    let mut system = unsafe { std::mem::zeroed::<libc::utsname>() };
+    if unsafe { libc::uname(&mut system) } != 0 {
+        return "unknown".to_owned();
+    }
+
+    let release = unsafe { std::ffi::CStr::from_ptr(system.release.as_ptr()) };
+    let release = release.to_string_lossy().trim().to_owned();
+    if release.is_empty() {
+        "unknown".to_owned()
+    } else {
+        release
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_kernel_version(release: &str) -> Option<(u32, u32)> {
+    let mut components = release.split('.');
+    let major = components.next()?.parse().ok()?;
+    let minor = components
+        .next()?
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor))
 }
 
 #[cfg(target_os = "macos")]
