@@ -150,9 +150,12 @@ fn io_uring_kernel_hint() -> String {
         }
     };
     format!(
-        "Detected Linux kernel {release}; io_uring requires Linux 5.1 or newer. \
-         {recommendation} Also check the container seccomp policy, CONFIG_IO_URING, \
-         and /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
+        "Detected Linux kernel {release}; Linux 5.1 is the minimum io_uring syscall \
+         baseline. {recommendation} Storage SQPOLL is stricter: OpenKache's Compio \
+         path uses ordinary file descriptors, so it needs Linux 5.11+ (or explicit \
+         fixed-file registration); unprivileged SQPOLL needs Linux 5.13+ (or \
+         CAP_SYS_NICE on Linux 5.11-5.12). Also check the container seccomp policy, \
+         CONFIG_IO_URING, and /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
     )
 }
 
