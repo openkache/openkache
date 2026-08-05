@@ -26,9 +26,9 @@ pub enum StorageDeviceKind {
 /// Classifies the block device containing `path` without creating or opening
 /// the storage directory.
 ///
-/// The path may not exist yet; in that case its nearest existing ancestor is
-/// inspected. Failure to inspect the filesystem is non-fatal and returns
-/// [`StorageDeviceKind::Unknown`].
+/// If the path does not exist yet, or filesystem metadata is unavailable,
+/// [`StorageDeviceKind::Unknown`] is returned instead of guessing from an
+/// ancestor directory.
 ///
 /// # Arguments
 ///
@@ -63,10 +63,7 @@ fn linux_storage_device_kind(path: &Path) -> StorageDeviceKind {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
-    let Some(existing_path) = nearest_existing_path(path) else {
-        return StorageDeviceKind::Unknown;
-    };
-    let Ok(metadata) = fs::metadata(existing_path) else {
+    let Ok(metadata) = fs::metadata(path) else {
         return StorageDeviceKind::Unknown;
     };
     let device = metadata.dev();
@@ -98,21 +95,6 @@ fn linux_storage_device_kind(path: &Path) -> StorageDeviceKind {
     } else {
         StorageDeviceKind::Unknown
     }
-}
-
-#[cfg(target_os = "linux")]
-fn nearest_existing_path(path: &Path) -> Option<PathBuf> {
-    let mut probe = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir().ok()?.join(path)
-    };
-    while !probe.exists() {
-        if !probe.pop() {
-            return None;
-        }
-    }
-    Some(probe)
 }
 
 /// Returns the logical CPU identifiers accepted by the runtime affinity API.

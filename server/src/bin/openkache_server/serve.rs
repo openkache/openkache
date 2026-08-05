@@ -58,20 +58,10 @@ pub(super) async fn run(
 
 fn report_common(address: SocketAddr, storage_directory: &std::path::Path) {
     println!("OpenKache listening on {address}");
-    println!("Storage: SSD-backed ({})", storage_directory.display());
-    println!("Runtime: {}", runtime_name());
+    println!("Storage directory: {}", storage_directory.display());
+    println!("Storage runtime: {}", openkache::storage_runtime_name());
     println!("Allocator: {}", allocator::NAME);
     println!("Press Ctrl-C or send SIGTERM to stop");
-}
-
-#[cfg(target_os = "linux")]
-const fn runtime_name() -> &'static str {
-    "Compio (io_uring)"
-}
-
-#[cfg(target_os = "macos")]
-const fn runtime_name() -> &'static str {
-    "Compio (polling)"
 }
 
 async fn shutdown_signal() {

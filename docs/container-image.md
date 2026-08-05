@@ -60,7 +60,8 @@ There is no package manager or diagnostic shell in the final image. Use
 `docker image inspect localhost/openkache:dev` (or
 `podman image inspect localhost/openkache:dev`) and server logs for basic
 verification.
-The server requires a Linux host and an OCI runtime that exposes `io_uring`.
+The Linux server requires an OCI runtime that exposes `io_uring` to its selected
+native network runtime.
 Some default seccomp profiles still deny `io_uring_setup`,
 `io_uring_enter`, and `io_uring_register`, returning `ENOSYS` even when the
 kernel supports io_uring. If logs report `Function not implemented`, allow

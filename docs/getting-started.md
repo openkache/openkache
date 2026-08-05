@@ -8,11 +8,11 @@
   storage)
 
 The server runtime contract is limited to Linux x86_64/aarch64 and Apple
-Silicon macOS. Linux uses Compio's native `io_uring` driver; the required
-`io_uring_setup`, `io_uring_enter`, and `io_uring_register` syscalls must be
-available to the process. If a container seccomp profile denies them, startup
-fails with a diagnostic that points to the profile and
-`/proc/sys/kernel/io_uring_disabled`.
+Silicon macOS. On Linux, the selected native network runtime must provide
+`io_uring`; the required `io_uring_setup`, `io_uring_enter`, and
+`io_uring_register` syscalls must be available to the process. If a container
+seccomp profile denies them, startup fails with a diagnostic that points to the
+profile and `/proc/sys/kernel/io_uring_disabled`.
 
 ## Install
 
