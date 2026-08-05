@@ -102,6 +102,9 @@ structure FfiNativeFunction {
     @required
     returnType: FfiNativeType
 
+    /// Optional extension symbols may be absent from older native libraries.
+    optional: Boolean
+
     parameters: FfiNativeParameters
 }
 
@@ -283,6 +286,7 @@ structure valueEnvelope {
         },
         {
             name: "openkache_client_connect_ex",
+            optional: true,
             returnType: "result_pointer",
             parameters: [
                 { name: "address", type: "u8_pointer", mutable: false },
@@ -337,6 +341,7 @@ structure valueEnvelope {
         },
         {
             name: "openkache_client_execute_raw",
+            optional: true,
             returnType: "result_pointer",
             parameters: [
                 { name: "client", type: "client_pointer", mutable: false },
@@ -441,6 +446,7 @@ structure valueEnvelope {
         },
         {
             name: "openkache_client_connection_state",
+            optional: true,
             returnType: "uint32",
             parameters: [
                 { name: "client", type: "client_pointer", mutable: false }
