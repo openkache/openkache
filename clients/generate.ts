@@ -484,9 +484,25 @@ function api_contract(
   shapes: Json_Object,
   service_shape_id: string,
   namespace: string,
+  fallback_operation_names?: readonly string[],
 ): Api_Contract {
   const service = object_member(shapes, service_shape_id, "Smithy AST.shapes")
-  const operation_shapes = array_member(service, "operations", service_shape_id)
+  // The protocol Opcode enum is the canonical operation-name source. A
+  // service-local list remains accepted for legacy fixtures, but production
+  // client models omit it so adding an opcode cannot require a second name
+  // registration.
+  const service_operations = service.operations
+  const operation_references =
+    service_operations === undefined ||
+    (Array.isArray(service_operations) && service_operations.length === 0)
+      ? (fallback_operation_names ?? []).map((name) => ({
+          target: `${namespace}#${name}`,
+        }))
+      : array_member(service, "operations", service_shape_id)
+  if (operation_references.length === 0) {
+    throw new Error(`${service_shape_id} must define at least one operation`)
+  }
+  const operation_shapes = operation_references
     .map((operation, index): Api_Operation => {
       const reference = object_value(operation, `${service_shape_id}.operations[${index}]`)
       const target = string_member(
@@ -1136,7 +1152,12 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const value_envelope_trait = trait_value_any(service, trait_ids(VALUE_ENVELOPE_TRAIT_ID), location)
   const client_defaults_trait = trait_value_any(service, trait_ids(CLIENT_DEFAULTS_TRAIT_ID), location)
   const ffi_trait = trait_value_any(service, trait_ids(FFI_CONTRACT_TRAIT_ID), location)
-  const parsed_api = api_contract(shapes, client_service_id, client_namespace)
+  const parsed_api = api_contract(
+    shapes,
+    client_service_id,
+    client_namespace,
+    wire.opcodes.map((entry) => entry.name),
+  )
   const api = {
     ...parsed_api,
     // Smithy AST output is not required to preserve service-operation order.
@@ -2401,7 +2422,7 @@ const int smithyFfiAbiVersion = ${values.abi_version};
 ${values.operations
   .map(
     (entry) =>
-      `const int smithyOperation${pascal_case(entry.name)} = ${entry.value};`,
+      `const int smithyOperation${pascal_case(snake_case(entry.name))} = ${entry.value};`,
   )
   .join("\n")}
 const int smithyResultError = ${values.result_error};

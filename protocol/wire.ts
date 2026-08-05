@@ -9,6 +9,8 @@ type Json_Object = Readonly<Record<string, unknown>>
 /** One numeric protocol member assigned by the wire contract. */
 export interface Wire_Entry {
   readonly name: string
+  /** Optional Smithy enum value used for generated labels. */
+  readonly text?: string
   readonly value: number
 }
 
@@ -185,15 +187,28 @@ function trait_value(
   return object_member(traits, trait_id, `${location}.traits`)
 }
 
+function optional_enum_value(shape: Json_Object, location: string): string | undefined {
+  const traits = object_member(shape, "traits", location)
+  const value = traits["smithy.api#enumValue"]
+  return value === undefined
+    ? undefined
+    : string_member(traits, "smithy.api#enumValue", `${location}.traits`)
+}
+
 function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void {
   const names = new Set<string>()
+  const texts = new Set<string>()
   const values = new Set<number>()
   for (const entry of entries) {
     if (names.has(entry.name)) throw new Error(`duplicate ${kind} name ${entry.name}`)
+    if (entry.text !== undefined && texts.has(entry.text)) {
+      throw new Error(`duplicate ${kind} enum value ${entry.text}`)
+    }
     if (values.has(entry.value)) {
       throw new Error(`duplicate ${kind} wire value ${entry.value}`)
     }
     names.add(entry.name)
+    if (entry.text !== undefined) texts.add(entry.text)
     values.add(entry.value)
   }
 }
@@ -613,6 +628,7 @@ function wire_enum_entries(
       const trait = trait_value(member_shape, trait_id, `${shape_id}.${name}`)
       return {
         name: pascal_case(name),
+        text: optional_enum_value(member_shape, `${shape_id}.${name}`),
         value: integer_member(
           trait,
           "value",
@@ -726,6 +742,13 @@ function formatted_byte(value: number): string {
   return `0x${value.toString(16).padStart(2, "0")}`
 }
 
+function wire_name(identifier: string): string {
+  return identifier
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .toLowerCase()
+}
+
 function rust_byte_string_literal(value: string): string {
   const bytes = new TextEncoder().encode(value)
   let literal = 'b"'
@@ -734,6 +757,38 @@ function rust_byte_string_literal(value: string): string {
       literal += String.fromCharCode(byte)
     } else {
       literal += `\\x${byte.toString(16).padStart(2, "0")}`
+    }
+  }
+  return `${literal}"`
+}
+
+function rust_string_literal(value: string): string {
+  let literal = '"'
+  for (const character of value) {
+    switch (character) {
+      case '"':
+        literal += '\\"'
+        break
+      case "\\":
+        literal += "\\\\"
+        break
+      case "\n":
+        literal += "\\n"
+        break
+      case "\r":
+        literal += "\\r"
+        break
+      case "\t":
+        literal += "\\t"
+        break
+      default: {
+        const code_point = character.codePointAt(0) ?? 0
+        literal +=
+          code_point < 0x20
+            ? `\\u{${code_point.toString(16)}}`
+            : character
+        break
+      }
     }
   }
   return `${literal}"`
@@ -748,12 +803,44 @@ function rust_wire_enum(
   const variants = entries
     .map((entry) => `        ${entry.name} = ${formatted_byte(entry.value)},`)
     .join("\n")
+  const all_variants = entries.map((entry) => `        Self::${entry.name},`).join("\n")
+  const name_literals = entries
+    .map((entry) => `        ${rust_string_literal(entry.text ?? wire_name(entry.name))},`)
+    .join("\n")
+  const names = entries
+    .map(
+      (entry) =>
+        `        Self::${entry.name} => ${rust_string_literal(entry.text ?? wire_name(entry.name))},`,
+    )
+    .join("\n")
   return `wire_enum! {
     /// ${documentation}
     pub enum ${name} {
 ${variants}
     }
     unknown => ${unknown_variant}
+}
+
+impl ${name} {
+    /// Number of values assigned by the Smithy ${name} contract.
+    pub const COUNT: usize = ${entries.length};
+
+    /// Every assigned Smithy ${name} value in wire-value order.
+    pub const ALL: [Self; Self::COUNT] = [
+${all_variants}
+    ];
+
+    /// Stable lowercase Smithy names in wire-value order.
+    pub const NAMES: [&'static str; Self::COUNT] = [
+${name_literals}
+    ];
+
+    /// Stable lowercase Smithy name for this assigned value.
+    pub const fn name(self) -> &'static str {
+        match self {
+${names}
+        }
+    }
 }`
 }
 

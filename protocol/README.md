@@ -63,6 +63,9 @@ variable-integer parsing.
   [`../clients/model/openkache.smithy`](../clients/model/openkache.smithy) and
   [`../clients/generate.ts`](../clients/generate.ts).
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
+  `Opcode::ALL`, `Opcode::COUNT`, `Opcode::NAMES`, and `Opcode::name()` (and
+  the corresponding `Status` metadata) are generated from the same Smithy
+  enums so metrics and adapters do not repeat wire labels.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.
 - `ProtocolError` classifies malformed, unsupported, and oversized frames.

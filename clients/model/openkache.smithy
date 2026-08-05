@@ -202,20 +202,10 @@ structure valueEnvelope {
     maxTypeNameBytes: 65535,
     jsonEncoding: "json"
 )
+/// Operation names are resolved from the protocol Opcode enum by the client
+/// generator; this service owns only client-side shapes and metadata.
 service OpenKacheClient {
     version: "1"
-    operations: [
-        Ping,
-        Get,
-        Set,
-        Delete,
-        Stats,
-        Sync,
-        NamespaceOpen,
-        NamespaceUpdatePolicy,
-        NamespaceDelete,
-        Echo
-    ]
 }
 
 operation Ping {
