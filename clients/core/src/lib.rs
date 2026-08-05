@@ -308,6 +308,18 @@ impl Error {
 /// Convenience alias for client results.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Result of a generated Smithy operation executed through the native adapter boundary.
+///
+/// The numeric kind and payload use the shared client FFI contract so language adapters can
+/// decode response semantics without maintaining an operation-name dispatch table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationResult {
+    /// Smithy-generated native result-kind discriminator.
+    pub kind: u32,
+    /// Operation response payload, if the semantic contract carries one.
+    pub payload: Vec<u8>,
+}
+
 /// Successful lookup result, separate from transport or protocol failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GetOutcome<T> {
@@ -1229,6 +1241,246 @@ macro_rules! raw_client_methods {
             /// Verifies the connection and returns the complete request round-trip time.
             pub async fn ping(&self) -> Result<Duration> {
                 self.0.ping().await
+            }
+
+            /// Executes one generated Smithy operation against exact item-ID storage.
+            ///
+            /// The operation contract, rather than its name, selects the request path and
+            /// converts the typed core outcome into the shared native result representation.
+            ///
+            /// # Arguments
+            ///
+            /// * `operation` - Smithy protocol operation to execute.
+            /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
+            /// * `value` - Raw operation payload, including the value for SET or an application
+            ///   payload for a global operation.
+            /// * `set_options` - Conditional and expiration options used by SET.
+            ///
+            /// # Returns
+            ///
+            /// The contract-defined result discriminator and response payload.
+            ///
+            /// # Errors
+            ///
+            /// Returns a protocol, transport, validation, or configuration error when the
+            /// operation cannot be executed through the exact item-ID boundary.
+            pub async fn execute_raw(
+                &self,
+                operation: Opcode,
+                item_id: impl AsRef<[u8]>,
+                value: impl AsRef<[u8]>,
+                set_options: SetOptions,
+            ) -> Result<OperationResult> {
+                let contract = contract::operation_contract(operation);
+                match (contract.request_kind, contract.response_kind) {
+                    (
+                        contract::OperationRequestKind::Empty,
+                        contract::OperationResponseKind::Pong
+                        | contract::OperationResponseKind::Empty,
+                    )
+                    | (
+                        contract::OperationRequestKind::ApplicationValue,
+                        contract::OperationResponseKind::ApplicationValue,
+                    ) => {
+                        let request = Request::new(operation, None, value.as_ref().to_vec())
+                            .map_err(Error::protocol)?;
+                        let response = self.0.request(request).await?;
+                        let kind = match contract.response_kind {
+                            contract::OperationResponseKind::Pong
+                            | contract::OperationResponseKind::Empty => {
+                                contract::FfiResultKind::Ok
+                            }
+                            contract::OperationResponseKind::ApplicationValue => {
+                                contract::FfiResultKind::Value
+                            }
+                            _ => unreachable!("global response kind checked above"),
+                        };
+                        Ok(OperationResult {
+                            kind: kind.code(),
+                            payload: response.payload,
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        contract::OperationResponseKind::Value,
+                    ) => {
+                        let item_id = ItemId::from_slice(item_id.as_ref())?;
+                        Ok(match self.get(item_id).await? {
+                            GetOutcome::Found(value) => OperationResult {
+                                kind: contract::FfiResultKind::Value.code(),
+                                payload: value.into_bytes(),
+                            },
+                            GetOutcome::NotFound => OperationResult {
+                                kind: contract::FfiResultKind::NotFound.code(),
+                                payload: Vec::new(),
+                            },
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        contract::OperationResponseKind::SetOutcome,
+                    ) => {
+                        let item_id = ItemId::from_slice(item_id.as_ref())?;
+                        let result = match self
+                            .set(item_id, ItemValue::new(value.as_ref().to_vec()), set_options)
+                            .await?
+                        {
+                            SetOutcome::Created => contract::FfiResultKind::Created,
+                            SetOutcome::Replaced => contract::FfiResultKind::Replaced,
+                            SetOutcome::NotStored => contract::FfiResultKind::NotStored,
+                        };
+                        Ok(OperationResult {
+                            kind: result.code(),
+                            payload: Vec::new(),
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        contract::OperationResponseKind::DeleteOutcome,
+                    ) => {
+                        let item_id = ItemId::from_slice(item_id.as_ref())?;
+                        let result = match self.delete(item_id).await? {
+                            DeleteOutcome::Deleted => contract::FfiResultKind::Deleted,
+                            DeleteOutcome::NotFound => contract::FfiResultKind::NotDeleted,
+                        };
+                        Ok(OperationResult {
+                            kind: result.code(),
+                            payload: Vec::new(),
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedNamespace,
+                        contract::OperationResponseKind::StatsJson,
+                    ) => Ok(OperationResult {
+                        kind: contract::FfiResultKind::Value.code(),
+                        payload: self.stats().await?.into_bytes(),
+                    }),
+                    (
+                        contract::OperationRequestKind::ScopedNamespace,
+                        contract::OperationResponseKind::Empty,
+                    ) => {
+                        self.sync().await?;
+                        Ok(OperationResult {
+                            kind: contract::FfiResultKind::Ok.code(),
+                            payload: Vec::new(),
+                        })
+                    }
+                    _ => Err(Error::configuration(
+                        "operation",
+                        format!(
+                            "operation {operation:?} is not available through the exact item-ID ABI"
+                        ),
+                    )),
+                }
+            }
+
+            /// Executes one generated Smithy operation in an explicitly supplied namespace.
+            ///
+            /// This is the namespace-scoped counterpart to [`Self::execute_raw`].
+            ///
+            /// # Arguments
+            ///
+            /// * `operation` - Smithy protocol operation to execute.
+            /// * `namespace_id` - Positive server-assigned namespace ID.
+            /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
+            /// * `value` - Raw value or application payload for the operation.
+            /// * `set_options` - Conditional and expiration options used by SET.
+            ///
+            /// # Returns
+            ///
+            /// The contract-defined result discriminator and response payload.
+            ///
+            /// # Errors
+            ///
+            /// Returns a protocol, transport, validation, or configuration error when the
+            /// operation cannot be executed through the namespace-scoped boundary.
+            pub async fn execute_scoped(
+                &self,
+                operation: Opcode,
+                namespace_id: u64,
+                item_id: impl AsRef<[u8]>,
+                value: impl AsRef<[u8]>,
+                set_options: SetOptions,
+            ) -> Result<OperationResult> {
+                let contract = contract::operation_contract(operation);
+                match (contract.request_kind, contract.response_kind) {
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        contract::OperationResponseKind::Value,
+                    ) => {
+                        let item_id = ItemId::from_slice(item_id.as_ref())?;
+                        Ok(match self.get_in_namespace(namespace_id, item_id).await? {
+                            GetOutcome::Found(value) => OperationResult {
+                                kind: contract::FfiResultKind::Value.code(),
+                                payload: value.into_bytes(),
+                            },
+                            GetOutcome::NotFound => OperationResult {
+                                kind: contract::FfiResultKind::NotFound.code(),
+                                payload: Vec::new(),
+                            },
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        contract::OperationResponseKind::SetOutcome,
+                    ) => {
+                        let item_id = ItemId::from_slice(item_id.as_ref())?;
+                        let result = match self
+                            .set_in_namespace(
+                                namespace_id,
+                                item_id,
+                                ItemValue::new(value.as_ref().to_vec()),
+                                set_options,
+                            )
+                            .await?
+                        {
+                            SetOutcome::Created => contract::FfiResultKind::Created,
+                            SetOutcome::Replaced => contract::FfiResultKind::Replaced,
+                            SetOutcome::NotStored => contract::FfiResultKind::NotStored,
+                        };
+                        Ok(OperationResult {
+                            kind: result.code(),
+                            payload: Vec::new(),
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        contract::OperationResponseKind::DeleteOutcome,
+                    ) => {
+                        let item_id = ItemId::from_slice(item_id.as_ref())?;
+                        let result = match self.delete_in_namespace(namespace_id, item_id).await? {
+                            DeleteOutcome::Deleted => contract::FfiResultKind::Deleted,
+                            DeleteOutcome::NotFound => contract::FfiResultKind::NotDeleted,
+                        };
+                        Ok(OperationResult {
+                            kind: result.code(),
+                            payload: Vec::new(),
+                        })
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedNamespace,
+                        contract::OperationResponseKind::StatsJson,
+                    ) => Ok(OperationResult {
+                        kind: contract::FfiResultKind::Value.code(),
+                        payload: self.stats_in_namespace(namespace_id).await?.into_bytes(),
+                    }),
+                    (
+                        contract::OperationRequestKind::ScopedNamespace,
+                        contract::OperationResponseKind::Empty,
+                    ) => {
+                        self.sync_in_namespace(namespace_id).await?;
+                        Ok(OperationResult {
+                            kind: contract::FfiResultKind::Ok.code(),
+                            payload: Vec::new(),
+                        })
+                    }
+                    _ => Err(Error::configuration(
+                        "operation",
+                        format!(
+                            "operation {operation:?} is not available through the namespace-scoped exact-ID ABI"
+                        ),
+                    )),
+                }
             }
 
             /// Sends a validated protocol request through the shared retry and response-contract

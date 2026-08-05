@@ -5741,30 +5741,27 @@ ${operations.join("\n")}
 `
 }
 
-function typescript_operation_transport_result(
+function typescript_operation_result_kinds(
   operation: Managed_Api_Operation,
 ): string {
   switch (operation.contract.response_kind) {
     case "pong":
     case "empty":
-      return "void"
+      return "SMITHY_FFI_RESULT_OK"
     case "application_value":
     case "stats_json":
-      return "string"
+      return "SMITHY_FFI_RESULT_VALUE"
     case "value":
-      return "Uint8Array | null"
+      return "SMITHY_FFI_RESULT_VALUE, SMITHY_FFI_RESULT_NOT_FOUND"
     case "set_outcome":
-      return "Smithy_Set_Outcome"
+      return (
+        "SMITHY_FFI_RESULT_CREATED, SMITHY_FFI_RESULT_REPLACED, "
+        + "SMITHY_FFI_RESULT_NOT_STORED"
+      )
     case "delete_outcome":
-      return "boolean"
+      return "SMITHY_FFI_RESULT_DELETED, SMITHY_FFI_RESULT_NOT_DELETED"
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
-        return "Smithy_Namespace_Open_Output"
-      }
-      if (operation.contract.request_kind === "namespace_update_policy") {
-        return "Smithy_Namespace_Descriptor"
-      }
-      throw new Error(`unsupported generated TypeScript namespace operation ${operation.name}`)
+      return ""
     default:
       throw new Error(
         `unsupported generated TypeScript response kind ${operation.contract.response_kind}`,
@@ -5774,7 +5771,8 @@ function typescript_operation_transport_result(
 
 function render_typescript_operation_method(operation: Managed_Api_Operation): string {
   const method_name = snake_case(operation.name)
-  const transport_result = `await this.#transport.${method_name}(input)`
+  const operation_value = operation.opcode.value
+  const result_kinds = typescript_operation_result_kinds(operation)
   switch (operation.contract.response_kind) {
     case "pong":
       return `  async ${method_name}(
@@ -5782,7 +5780,9 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
     void input;
-    await this.#transport.${method_name}(input);
+    await this.#transport.invoke(${operation_value}, {
+      expected_kinds: [${result_kinds}],
+    });
     return {};
   }`
     case "application_value":
@@ -5795,12 +5795,17 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
           operation_field(operation, "output", "payload"),
           "typescript",
         )
-        const application_value = `await this.#transport.invoke_application_value(${operation.opcode.value}, input.${input_payload})`
         return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { ${output_payload}: ${application_value} };
+    const result = await this.#transport.invoke(${operation_value}, {
+      value: new TextEncoder().encode(input.${input_payload}),
+      expected_kinds: [${result_kinds}],
+    });
+    return {
+      ${output_payload}: this.#transport.decode_utf8(result.payload, ${operation_value}),
+    };
   }`
       }
     case "value":
@@ -5808,36 +5813,102 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    const value = ${transport_result};
-    return value === null ? {} : { value };
+    const result = await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.namespace_id,
+      {
+        item_id: input.item_id,
+        expected_kinds: [${result_kinds}],
+      },
+    );
+    return result.kind === SMITHY_FFI_RESULT_NOT_FOUND
+      ? {}
+      : { value: result.payload };
   }`
     case "set_outcome":
       return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { outcome: ${transport_result} };
+    const result = await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.namespace_id,
+      {
+        item_id: input.item_id,
+        value: input.value,
+        condition: input.condition,
+        expiration_mode: input.expiration_mode,
+        eviction_mode: input.eviction_mode,
+        ttl_milliseconds: input.ttl_milliseconds,
+        expected_kinds: [${result_kinds}],
+      },
+    );
+    switch (result.kind) {
+      case SMITHY_FFI_RESULT_CREATED:
+        return { outcome: "created" };
+      case SMITHY_FFI_RESULT_REPLACED:
+        return { outcome: "replaced" };
+      case SMITHY_FFI_RESULT_NOT_STORED:
+        return { outcome: "not_stored" };
+      default:
+        throw new Error("SET returned an unexpected native result");
+    }
   }`
     case "delete_outcome":
       return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { deleted: ${transport_result} };
+    const result = await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.namespace_id,
+      {
+        item_id: input.item_id,
+        expected_kinds: [${result_kinds}],
+      },
+    );
+    return { deleted: result.kind === SMITHY_FFI_RESULT_DELETED };
   }`
     case "stats_json":
       return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { json: ${transport_result} };
+    const result = await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.namespace_id,
+      {
+        expected_kinds: [${result_kinds}],
+      },
+    );
+    return {
+      json: this.#transport.decode_utf8(result.payload, ${operation_value}),
+    };
   }`
     case "empty":
+      if (operation.contract.request_kind === "namespace_delete") {
+        return `  async ${method_name}(
+    input: ${typescript_api_name(operation.input)},
+  ): Promise<${typescript_api_name(operation.output)}> {
+    this.#transport.assert_open();
+    await this.#transport.namespace_delete(input);
+    return {};
+  }`
+      }
+      if (operation.contract.request_kind !== "scoped_namespace") {
+        throw new Error(`unsupported generated TypeScript empty operation ${operation.name}`)
+      }
       return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    await this.#transport.${method_name}(input);
+    await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.namespace_id,
+      {
+        expected_kinds: [${result_kinds}],
+      },
+    );
     return {};
   }`
     case "namespace_descriptor":
@@ -5846,7 +5917,7 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return ${transport_result};
+    return await this.#transport.namespace_open(input);
   }`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
@@ -5854,7 +5925,7 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { descriptor: ${transport_result} };
+    return { descriptor: await this.#transport.namespace_update_policy(input) };
   }`
       }
       throw new Error(`unsupported generated TypeScript namespace operation ${operation.name}`)
@@ -5873,27 +5944,12 @@ export function render_typescript_operations(contract: Client_Contract): string 
     imported_types.add(typescript_api_name(operation.input))
     imported_types.add(typescript_api_name(operation.output))
   }
-  imported_types.add("Smithy_Set_Outcome")
   imported_types.add("Smithy_Namespace_Descriptor")
   imported_types.add("Smithy_Namespace_Open_Output")
+  imported_types.add("Smithy_Set_Condition")
+  imported_types.add("Smithy_Expiration_Mode")
+  imported_types.add("Smithy_Eviction_Mode")
   const imports = [...imported_types].sort().join(",\n  ")
-  const transports = managed_operations
-    .filter((operation) => operation.contract.response_kind !== "application_value")
-    .map(
-      (operation) =>
-        `  ${snake_case(operation.name)}(
-    input: ${typescript_api_name(operation.input)},
-  ): Promise<${typescript_operation_transport_result(operation)}>`,
-    )
-    .join("\n")
-  const application_value_transport = managed_operations.some(
-    (operation) => operation.contract.response_kind === "application_value",
-  )
-    ? `  invoke_application_value(
-    operation: number,
-    payload: string,
-  ): Promise<string>`
-    : ""
   const methods = managed_operations
     .map(render_typescript_operation_method)
     .join("\n\n")
@@ -5902,12 +5958,52 @@ export function render_typescript_operations(contract: Client_Contract): string 
 import type {
   ${imports},
 } from "./smithy-api.js"
+import {
+  SMITHY_FFI_RESULT_CREATED,
+  SMITHY_FFI_RESULT_DELETED,
+  SMITHY_FFI_RESULT_NOT_DELETED,
+  SMITHY_FFI_RESULT_NOT_FOUND,
+  SMITHY_FFI_RESULT_NOT_STORED,
+  SMITHY_FFI_RESULT_OK,
+  SMITHY_FFI_RESULT_REPLACED,
+  SMITHY_FFI_RESULT_VALUE,
+} from "./smithy-api.js"
+
+export interface Smithy_Operation_Request {
+  readonly item_id?: Uint8Array
+  readonly value?: Uint8Array
+  readonly condition?: Smithy_Set_Condition
+  readonly expiration_mode?: Smithy_Expiration_Mode
+  readonly eviction_mode?: Smithy_Eviction_Mode
+  readonly ttl_milliseconds?: bigint
+  readonly expected_kinds: readonly number[]
+}
+
+export interface Smithy_Operation_Result {
+  readonly kind: number
+  readonly payload: Uint8Array
+}
 
 /** Native-facing hooks used by generated Smithy operations. */
 export interface Smithy_Operation_Transport {
   assert_open(): void
-${transports}
-${application_value_transport}
+  invoke(
+    operation: number,
+    request: Smithy_Operation_Request,
+  ): Promise<Smithy_Operation_Result>
+  invoke_scoped(
+    operation: number,
+    namespace_id: bigint,
+    request: Smithy_Operation_Request,
+  ): Promise<Smithy_Operation_Result>
+  decode_utf8(payload: Uint8Array, operation: number): string
+  namespace_open(
+    input: Smithy_Namespace_Open_Input,
+  ): Promise<Smithy_Namespace_Open_Output>
+  namespace_update_policy(
+    input: Smithy_Namespace_Update_Policy_Input,
+  ): Promise<Smithy_Namespace_Descriptor>
+  namespace_delete(input: Smithy_Namespace_Delete_Input): Promise<void>
 }
 
 /** Generated Smithy operations backed by the language adapter's native hooks. */
@@ -6691,30 +6787,27 @@ ${operations}
 `
 }
 
-function python_operation_transport_result(
+function python_operation_result_kinds(
   operation: Managed_Api_Operation,
 ): string {
   switch (operation.contract.response_kind) {
     case "pong":
     case "empty":
-      return "None"
+      return "SMITHY_FFI_RESULT_OK"
     case "application_value":
     case "stats_json":
-      return "str"
+      return "SMITHY_FFI_RESULT_VALUE"
     case "value":
-      return "bytes | None"
+      return "SMITHY_FFI_RESULT_VALUE, SMITHY_FFI_RESULT_NOT_FOUND"
     case "set_outcome":
-      return "SmithySetOutcome"
+      return (
+        "SMITHY_FFI_RESULT_CREATED, SMITHY_FFI_RESULT_REPLACED, "
+        + "SMITHY_FFI_RESULT_NOT_STORED"
+      )
     case "delete_outcome":
-      return "bool"
+      return "SMITHY_FFI_RESULT_DELETED, SMITHY_FFI_RESULT_NOT_DELETED"
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
-        return "SmithyNamespaceOpenOutput"
-      }
-      if (operation.contract.request_kind === "namespace_update_policy") {
-        return "SmithyNamespaceDescriptor"
-      }
-      throw new Error(`unsupported generated Python namespace operation ${operation.name}`)
+      return ""
     default:
       throw new Error(
         `unsupported generated Python response kind ${operation.contract.response_kind}`,
@@ -6726,11 +6819,16 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
   const method_name = snake_case(operation.name)
   const input = python_api_name(operation.input)
   const output = python_api_name(operation.output)
+  const operation_value = operation.opcode.value
+  const result_kinds = python_operation_result_kinds(operation)
   switch (operation.contract.response_kind) {
     case "pong":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.${method_name}(input)
+        await self._smithy_transport.invoke(
+            ${operation_value},
+            expected_kinds=(${result_kinds},),
+        )
         return ${output}()`
     case "application_value":
       {
@@ -6744,42 +6842,103 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
         )
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return ${output}(${output_payload}=await self._smithy_transport.invoke_application_value(
-            ${operation.opcode.value}, input.${input_payload}
-        ))`
+        _, payload = await self._smithy_transport.invoke(
+            ${operation_value},
+            value=input.${input_payload}.encode("utf-8"),
+            expected_kinds=(${result_kinds},),
+        )
+        return ${output}(
+            ${output_payload}=self._smithy_transport.decode_utf8(
+                payload, ${operation_value}
+            )
+        )`
       }
     case "value":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return ${output}(value=await self._smithy_transport.${method_name}(input))`
+        kind, payload = await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.namespace_id,
+            item_id=input.item_id,
+            expected_kinds=(${result_kinds},),
+        )
+        return ${output}(
+            value=None
+            if kind == SMITHY_FFI_RESULT_NOT_FOUND
+            else payload
+        )`
     case "set_outcome":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return ${output}(outcome=await self._smithy_transport.${method_name}(input))`
+        kind, _ = await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.namespace_id,
+            item_id=input.item_id,
+            value=input.value,
+            condition=input.condition,
+            expiration_mode=input.expiration_mode,
+            eviction_mode=input.eviction_mode,
+            ttl_milliseconds=input.ttl_milliseconds,
+            expected_kinds=(${result_kinds},),
+        )
+        outcome = {
+            SMITHY_FFI_RESULT_CREATED: SmithySetOutcome.CREATED,
+            SMITHY_FFI_RESULT_REPLACED: SmithySetOutcome.REPLACED,
+            SMITHY_FFI_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
+        }[kind]
+        return ${output}(outcome=outcome)`
     case "delete_outcome":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return ${output}(deleted=await self._smithy_transport.${method_name}(input))`
+        kind, _ = await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.namespace_id,
+            item_id=input.item_id,
+            expected_kinds=(${result_kinds},),
+        )
+        return ${output}(
+            deleted=kind == SMITHY_FFI_RESULT_DELETED
+        )`
     case "stats_json":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return ${output}(json=await self._smithy_transport.${method_name}(input))`
+        _, payload = await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.namespace_id,
+            expected_kinds=(${result_kinds},),
+        )
+        return ${output}(
+            json=self._smithy_transport.decode_utf8(payload, ${operation_value})
+        )`
     case "empty":
+      if (operation.contract.request_kind === "namespace_delete") {
+        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        self._smithy_transport.assert_open()
+        await self._smithy_transport.namespace_delete(input)
+        return ${output}()`
+      }
+      if (operation.contract.request_kind !== "scoped_namespace") {
+        throw new Error(`unsupported generated Python empty operation ${operation.name}`)
+      }
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.${method_name}(input)
+        await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.namespace_id,
+            expected_kinds=(${result_kinds},),
+        )
         return ${output}()`
     case "namespace_descriptor":
       if (operation.contract.request_kind === "namespace_open") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return await self._smithy_transport.${method_name}(input)`
+        return await self._smithy_transport.namespace_open(input)`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         return ${output}(
-            descriptor=await self._smithy_transport.${method_name}(input)
+            descriptor=await self._smithy_transport.namespace_update_policy(input)
         )`
       }
       throw new Error(`unsupported generated Python namespace operation ${operation.name}`)
@@ -6801,23 +6960,10 @@ export function render_python_operations(contract: Client_Contract): string {
   imported_types.add("SmithyNamespaceDescriptor")
   imported_types.add("SmithyNamespaceOpenOutput")
   imported_types.add("SmithySetOutcome")
+  imported_types.add("SmithySetCondition")
+  imported_types.add("SmithyExpirationMode")
+  imported_types.add("SmithyEvictionMode")
   const imports = [...imported_types].sort().join(",\n    ")
-  const transports = managed_operations
-    .filter((operation) => operation.contract.response_kind !== "application_value")
-    .map(
-      (operation) =>
-        `    async def ${snake_case(operation.name)}(
-        self, input: ${python_api_name(operation.input)}
-    ) -> ${python_operation_transport_result(operation)}: ...`,
-    )
-    .join("\n")
-  const application_value_transport = managed_operations.some(
-    (operation) => operation.contract.response_kind === "application_value",
-  )
-    ? `    async def invoke_application_value(
-        self, operation: int, payload: str
-    ) -> str: ...`
-    : ""
   const methods = managed_operations
     .map(render_python_operation_method)
     .join("\n\n")
@@ -6830,6 +6976,16 @@ from typing import Protocol
 from .smithy_api import (
     ${imports},
 )
+from .smithy_contract import (
+    SMITHY_FFI_RESULT_CREATED,
+    SMITHY_FFI_RESULT_DELETED,
+    SMITHY_FFI_RESULT_NOT_DELETED,
+    SMITHY_FFI_RESULT_NOT_FOUND,
+    SMITHY_FFI_RESULT_NOT_STORED,
+    SMITHY_FFI_RESULT_OK,
+    SMITHY_FFI_RESULT_REPLACED,
+    SMITHY_FFI_RESULT_VALUE,
+)
 
 
 class SmithyOperationTransport(Protocol):
@@ -6837,8 +6993,46 @@ class SmithyOperationTransport(Protocol):
 
     def assert_open(self) -> None: ...
 
-${transports}
-${application_value_transport}
+    async def invoke(
+        self,
+        operation: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        condition: SmithySetCondition | None = None,
+        expiration_mode: SmithyExpirationMode | None = None,
+        eviction_mode: SmithyEvictionMode | None = None,
+        ttl_milliseconds: int | None = None,
+        expected_kinds: tuple[int, ...],
+    ) -> tuple[int, bytes]: ...
+
+    async def invoke_scoped(
+        self,
+        operation: int,
+        *,
+        namespace_id: int,
+        item_id: bytes = b"",
+        value: bytes = b"",
+        condition: SmithySetCondition | None = None,
+        expiration_mode: SmithyExpirationMode | None = None,
+        eviction_mode: SmithyEvictionMode | None = None,
+        ttl_milliseconds: int | None = None,
+        expected_kinds: tuple[int, ...],
+    ) -> tuple[int, bytes]: ...
+
+    def decode_utf8(self, payload: bytes, operation: int) -> str: ...
+
+    async def namespace_open(
+        self, input: SmithyNamespaceOpenInput
+    ) -> SmithyNamespaceOpenOutput: ...
+
+    async def namespace_update_policy(
+        self, input: SmithyNamespaceUpdatePolicyInput
+    ) -> SmithyNamespaceDescriptor: ...
+
+    async def namespace_delete(
+        self, input: SmithyNamespaceDeleteInput
+    ) -> None: ...
 
 
 class SmithyGeneratedOperations:
@@ -7451,22 +7645,22 @@ ${swift_descriptor_offsets}
 `
 }
 
-function swift_operation_hook_name(operation: Managed_Api_Operation): string {
-  return `smithy${pascal_case(snake_case(operation.name))}`
-}
-
 function render_swift_operation_method(operation: Managed_Api_Operation): string {
   const method_name = swift_property_name(operation.name)
-  const hook = swift_operation_hook_name(operation)
+  const operation_constant = `UInt32(Smithy_Opcode.${method_name}.rawValue)`
   const input = `Smithy_${typescript_name(operation.input)}`
   const output = `Smithy_${typescript_name(operation.output)}`
+  const operation_label = managed_operation_label(operation)
   switch (operation.contract.response_kind) {
     case "pong":
       return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
     _ = input
-    try await ${hook}()
+    let result = try await smithyInvoke(${operation_constant})
+    guard result.kind == Smithy_Native_Contract.resultOk else {
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
     return ${output}()
   }`
     case "application_value":
@@ -7482,42 +7676,110 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(${output_payload}: try await smithyInvokeApplication(
-      UInt32(Smithy_Opcode.${swift_property_name(operation.name)}.rawValue),
-      input.${input_payload}
-    ))
+    let result = try await smithyInvoke(
+      ${operation_constant},
+      value: Data(input.${input_payload}.utf8)
+    )
+    guard result.kind == Smithy_Native_Contract.resultValue else {
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
+    guard let value = String(data: result.payload, encoding: .utf8) else {
+      throw OpenKacheError("${operation_label} response is not valid UTF-8")
+    }
+    return ${output}(${output_payload}: value)
   }`
       }
     case "value":
       return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(value: try await ${hook}(input.namespaceId, itemID: input.itemId))
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.namespaceId,
+      itemID: input.itemId
+    )
+    switch result.kind {
+    case Smithy_Native_Contract.resultValue:
+      return ${output}(value: result.payload)
+    case Smithy_Native_Contract.resultNotFound:
+      return ${output}(value: nil)
+    default:
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
   }`
     case "set_outcome":
       return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(outcome: try await ${hook}(input))
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.namespaceId,
+      itemID: input.itemId,
+      value: input.value,
+      condition: input.condition,
+      expirationMode: input.expirationMode,
+      evictionMode: input.evictionMode,
+      ttlMilliseconds: input.ttlMilliseconds
+    )
+    let outcome: Smithy_Set_Outcome
+    switch result.kind {
+    case Smithy_Native_Contract.resultCreated:
+      outcome = .created
+    case Smithy_Native_Contract.resultReplaced:
+      outcome = .replaced
+    case Smithy_Native_Contract.resultNotStored:
+      outcome = .notStored
+    default:
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
+    return ${output}(outcome: outcome)
   }`
     case "delete_outcome":
       return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(deleted: try await ${hook}(input.namespaceId, itemID: input.itemId))
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.namespaceId,
+      itemID: input.itemId
+    )
+    switch result.kind {
+    case Smithy_Native_Contract.resultDeleted:
+      return ${output}(deleted: true)
+    case Smithy_Native_Contract.resultNotDeleted:
+      return ${output}(deleted: false)
+    default:
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
   }`
     case "stats_json":
       return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(json: try await ${hook}(input.namespaceId))
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.namespaceId
+    )
+    guard result.kind == Smithy_Native_Contract.resultValue else {
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
+    guard let json = String(data: result.payload, encoding: .utf8) else {
+      throw OpenKacheError("${operation_label} response is not valid UTF-8")
+    }
+    return ${output}(json: json)
   }`
     case "empty":
       if (operation.contract.request_kind === "scoped_namespace") {
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    _ = try await ${hook}(input.namespaceId)
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.namespaceId
+    )
+    guard result.kind == Smithy_Native_Contract.resultOk else {
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
     return ${output}()
   }`
       }
@@ -7525,7 +7787,10 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    try await ${hook}(input.namespaceId, expectedRevision: input.expectedRevision)
+    try await smithyNamespaceDelete(
+      input.namespaceId,
+      expectedRevision: input.expectedRevision
+    )
     return ${output}()
   }`
       }
@@ -7535,7 +7800,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    let result = try await ${hook}(input)
+    let result = try await smithyNamespaceOpen(input)
     return ${output}(descriptor: result.descriptor, created: result.created)
   }`
       }
@@ -7543,7 +7808,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(descriptor: try await ${hook}(input))
+    ${output}(descriptor: try await smithyNamespaceUpdatePolicy(input))
   }`
       }
       throw new Error(`unsupported generated Swift namespace operation ${operation.name}`)

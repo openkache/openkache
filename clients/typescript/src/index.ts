@@ -55,31 +55,11 @@ import {
   SMITHY_SET_OUTCOME_CREATED,
   SMITHY_SET_OUTCOME_NOT_STORED,
   SMITHY_SET_OUTCOME_REPLACED,
-  type Smithy_Delete_Input,
-  type Smithy_Delete_Output,
-  type Smithy_Get_Input,
-  type Smithy_Get_Output,
   type Smithy_Eviction_Mode,
   type Smithy_Expiration_Mode,
-  type Smithy_Namespace_Delete_Input,
-  type Smithy_Namespace_Delete_Output,
-  type Smithy_Namespace_Descriptor,
-  type Smithy_Namespace_Open_Input,
-  type Smithy_Namespace_Open_Output,
-  type Smithy_Namespace_Policy,
-  type Smithy_Namespace_Update_Policy_Input,
-  type Smithy_Namespace_Update_Policy_Output,
   type Smithy_OpenKache_Api,
-  type Smithy_Ping_Input,
-  type Smithy_Ping_Output,
   type Smithy_Set_Condition,
-  type Smithy_Set_Input,
   type Smithy_Set_Outcome,
-  type Smithy_Set_Output,
-  type Smithy_Stats_Input,
-  type Smithy_Stats_Output,
-  type Smithy_Sync_Input,
-  type Smithy_Sync_Output,
 } from "./generated_local/smithy-api.js"
 import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
@@ -790,80 +770,51 @@ function raw_operation_transport(
 ): Smithy_Operation_Transport {
   return {
     assert_open: (): void => assert_lifecycle_open(lifecycle),
-    ping: async (): Promise<void> => {
+    invoke: async (operation, request) => {
       try {
-        await native_client.ping()
-      } catch (error) {
-        throw as_openkache_error(error)
-      }
-    },
-    invoke_application_value: async (
-      operation: number,
-      payload: string,
-    ): Promise<string> => {
-      try {
-        const value = await native_client.invoke_application_value(
+        const result = await native_client.execute_raw(
           operation,
-          TEXT_ENCODER.encode(payload),
+          request.item_id?.slice() ?? new Uint8Array(),
+          request.value?.slice() ?? new Uint8Array(),
+          request.condition,
+          request.expiration_mode,
+          request.eviction_mode,
+          request.ttl_milliseconds,
         )
-        return new TextDecoder("utf-8", { fatal: true }).decode(value)
+        assert_expected_result(operation, result.kind, request.expected_kinds)
+        return result
       } catch (error) {
         throw as_openkache_error(error)
       }
     },
-    get: async (input: Smithy_Get_Input): Promise<Uint8Array | null> => {
+    invoke_scoped: async (operation, namespace_id, request) => {
       try {
-        return await native_client.raw_get_in_namespace(
-          input.namespace_id,
-          owned_item_id(input.item_id),
+        const result = await native_client.execute_scoped(
+          operation,
+          namespace_id,
+          request.item_id?.slice() ?? new Uint8Array(),
+          request.value?.slice() ?? new Uint8Array(),
+          request.condition,
+          request.expiration_mode,
+          request.eviction_mode,
+          request.ttl_milliseconds,
         )
+        assert_expected_result(operation, result.kind, request.expected_kinds)
+        return result
       } catch (error) {
         throw as_openkache_error(error)
       }
     },
-    set: async (input: Smithy_Set_Input): Promise<Set_Outcome> => {
+    decode_utf8: (payload, operation): string => {
       try {
-        const outcome = await native_client.raw_set_in_namespace(
-          input.namespace_id,
-          owned_item_id(input.item_id),
-          owned_raw_value(input.value),
-          input.condition,
-          input.expiration_mode,
-          input.eviction_mode,
-          input.ttl_milliseconds,
+        return new TextDecoder("utf-8", { fatal: true }).decode(payload)
+      } catch (error) {
+        throw new OpenKache_Error(
+          `operation ${operation} response is not valid UTF-8`,
         )
-        return parse_set_outcome(outcome)
-      } catch (error) {
-        throw as_openkache_error(error)
       }
     },
-    delete: async (input: Smithy_Delete_Input): Promise<boolean> => {
-      try {
-        return await native_client.raw_delete_in_namespace(
-          input.namespace_id,
-          owned_item_id(input.item_id),
-        )
-      } catch (error) {
-        throw as_openkache_error(error)
-      }
-    },
-    stats: async (input: Smithy_Stats_Input): Promise<string> => {
-      try {
-        return await native_client.stats_in_namespace(input.namespace_id)
-      } catch (error) {
-        throw as_openkache_error(error)
-      }
-    },
-    sync: async (input: Smithy_Sync_Input): Promise<void> => {
-      try {
-        await native_client.sync_in_namespace(input.namespace_id)
-      } catch (error) {
-        throw as_openkache_error(error)
-      }
-    },
-    namespace_open: async (
-      input: Smithy_Namespace_Open_Input,
-    ): Promise<Smithy_Namespace_Open_Output> => {
+    namespace_open: async (input) => {
       try {
         return await native_client.namespace_open(
           input.name,
@@ -874,9 +825,7 @@ function raw_operation_transport(
         throw as_openkache_error(error)
       }
     },
-    namespace_update_policy: async (
-      input: Smithy_Namespace_Update_Policy_Input,
-    ): Promise<Smithy_Namespace_Descriptor> => {
+    namespace_update_policy: async (input) => {
       try {
         return await native_client.namespace_update_policy(
           input.namespace_id,
@@ -887,9 +836,7 @@ function raw_operation_transport(
         throw as_openkache_error(error)
       }
     },
-    namespace_delete: async (
-      input: Smithy_Namespace_Delete_Input,
-    ): Promise<void> => {
+    namespace_delete: async (input) => {
       try {
         await native_client.namespace_delete(
           input.namespace_id,
@@ -899,6 +846,18 @@ function raw_operation_transport(
         throw as_openkache_error(error)
       }
     },
+  }
+}
+
+function assert_expected_result(
+  operation: number,
+  kind: number,
+  expected_kinds: readonly number[],
+): void {
+  if (!expected_kinds.includes(kind)) {
+    throw new OpenKache_Error(
+      `operation ${operation} returned unexpected native result ${kind}`,
+    )
   }
 }
 

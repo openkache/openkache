@@ -15,14 +15,10 @@ from pathlib import Path
 from typing import Any, Final, Iterable, Sequence
 
 from ._generated import (
-    SmithyDeleteInput,
-    SmithyDeleteOutput,
     SmithyEvictionDefault,
     SmithyEvictionMode,
     SmithyExpirationDefault,
     SmithyExpirationMode,
-    SmithyGetInput,
-    SmithyGetOutput,
     SmithyNamespaceDeleteInput,
     SmithyNamespaceDeleteOutput,
     SmithyNamespaceDescriptor,
@@ -32,16 +28,8 @@ from ._generated import (
     SmithyNamespaceUpdatePolicyInput,
     SmithyNamespaceUpdatePolicyOutput,
     SmithyOverridePolicy,
-    SmithyPingInput,
-    SmithyPingOutput,
     SmithySetCondition,
-    SmithySetInput,
     SmithySetOutcome,
-    SmithySetOutput,
-    SmithyStatsInput,
-    SmithyStatsOutput,
-    SmithySyncInput,
-    SmithySyncOutput,
 )
 from ._generated.smithy_operations import (
     SmithyGeneratedOperations,
@@ -691,84 +679,78 @@ class _RawOperationTransport(SmithyOperationTransport):
     def assert_open(self) -> None:
         self._owner._assert_open()
 
-    async def ping(self, input: SmithyPingInput) -> None:
-        del input
-        await self._owner.ping()
-
-    async def invoke_application_value(self, operation: int, payload: str) -> str:
-        kind, value = await self._owner._execute(
-            operation,
-            value=payload.encode("utf-8"),
-        )
-        if kind != SMITHY_FFI_RESULT_VALUE:
-            raise OpenKacheError(
-                f"application operation {operation} returned unexpected native result {kind}"
-            )
-        try:
-            return value.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise OpenKacheError(
-                f"application operation {operation} response is not UTF-8: {error}"
-            ) from error
-
-    async def get(self, input: SmithyGetInput) -> bytes | None:
-        kind, payload = await self._owner._execute_scoped(
-            SMITHY_OPCODE_GET,
-            namespace_id=input.namespace_id,
-            item_id=_item_id(input.item_id),
-        )
-        if kind == SMITHY_FFI_RESULT_NOT_FOUND:
-            return None
-        if kind != SMITHY_FFI_RESULT_VALUE:
-            raise OpenKacheError(f"GET returned unexpected native result {kind}")
-        return payload
-
-    async def set(self, input: SmithySetInput) -> SmithySetOutcome:
-        if input.expiration_mode is None and input.ttl_milliseconds is not None:
-            raise OpenKacheValueError(
-                "ttl_milliseconds is only valid with "
-                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
-            )
+    async def invoke(
+        self,
+        operation: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        condition: SmithySetCondition | None = None,
+        expiration_mode: SmithyExpirationMode | None = None,
+        eviction_mode: SmithyEvictionMode | None = None,
+        ttl_milliseconds: int | None = None,
+        expected_kinds: tuple[int, ...],
+    ) -> tuple[int, bytes]:
         options = SetOptions(
-            condition=input.condition,
-            expiration_mode=input.expiration_mode,
-            eviction_mode=input.eviction_mode,
-            ttl_ms=input.ttl_milliseconds,
+            condition=condition,
+            expiration_mode=expiration_mode,
+            eviction_mode=eviction_mode,
+            ttl_ms=ttl_milliseconds,
         )
-        kind, _ = await self._owner._execute_scoped(
-            SMITHY_OPCODE_SET,
-            namespace_id=input.namespace_id,
-            item_id=_item_id(input.item_id),
-            value=_value_bytes(input.value),
+        kind, payload = await self._owner._execute(
+            operation,
+            key=key,
+            value=value,
             options=options,
         )
-        return _set_outcome(kind)
+        self._require_result(operation, kind, expected_kinds)
+        return kind, payload
 
-    async def delete(self, input: SmithyDeleteInput) -> bool:
-        kind, _ = await self._owner._execute_scoped(
-            SMITHY_OPCODE_DELETE,
-            namespace_id=input.namespace_id,
-            item_id=_item_id(input.item_id),
+    async def invoke_scoped(
+        self,
+        operation: int,
+        *,
+        namespace_id: int,
+        item_id: bytes = b"",
+        value: bytes = b"",
+        condition: SmithySetCondition | None = None,
+        expiration_mode: SmithyExpirationMode | None = None,
+        eviction_mode: SmithyEvictionMode | None = None,
+        ttl_milliseconds: int | None = None,
+        expected_kinds: tuple[int, ...],
+    ) -> tuple[int, bytes]:
+        options = SetOptions(
+            condition=condition,
+            expiration_mode=expiration_mode,
+            eviction_mode=eviction_mode,
+            ttl_ms=ttl_milliseconds,
         )
-        return _delete_outcome(kind)
-
-    async def stats(self, input: SmithyStatsInput) -> str:
         kind, payload = await self._owner._execute_scoped(
-            SMITHY_OPCODE_STATS,
-            namespace_id=input.namespace_id,
+            operation,
+            namespace_id=namespace_id,
+            item_id=_item_id(item_id) if item_id else b"",
+            value=value,
+            options=options,
         )
-        if kind != SMITHY_FFI_RESULT_VALUE:
-            raise OpenKacheError(f"STATS returned unexpected native result {kind}")
+        self._require_result(operation, kind, expected_kinds)
+        return kind, payload
+
+    def decode_utf8(self, payload: bytes, operation: int) -> str:
         try:
             return payload.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise OpenKacheError(f"STATS response is not UTF-8: {error}") from error
+            raise OpenKacheError(
+                f"operation {operation} response is not UTF-8: {error}"
+            ) from error
 
-    async def sync(self, input: SmithySyncInput) -> None:
-        await self._owner._execute_scoped(
-            SMITHY_OPCODE_SYNC,
-            namespace_id=input.namespace_id,
-        )
+    @staticmethod
+    def _require_result(operation: int, kind: int, expected_kinds: tuple[int, ...]) -> None:
+        if kind not in expected_kinds:
+            expected = ", ".join(str(value) for value in expected_kinds)
+            raise OpenKacheError(
+                f"operation {operation} returned unexpected native result {kind}; "
+                f"expected one of {expected}"
+            )
 
     async def namespace_open(
         self, input: SmithyNamespaceOpenInput
