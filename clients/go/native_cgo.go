@@ -119,19 +119,17 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_SMITHY_NATIVE_FUNCTIONS(OPENKACHE_GO_LOAD)
 #undef OPENKACHE_GO_LOAD
 
-    if (library->abi == NULL || library->connect == NULL || library->execute == NULL ||
-        library->execute_with_options == NULL || library->execute_raw_with_options == NULL ||
-        library->execute_scoped == NULL || library->namespace_open == NULL ||
-        library->namespace_update_policy == NULL || library->namespace_delete == NULL ||
-        library->namespace_descriptor_decode == NULL ||
-        library->result_kind == NULL || library->result_data == NULL ||
-        library->result_data_length == NULL || library->result_take_client == NULL ||
-        library->result_free == NULL || library->client_free == NULL) {
-        openkache_go_close(handle);
-        free(library);
-        *error_message = openkache_go_error_copy("native library is missing the OpenKache ABI");
-        return NULL;
-    }
+#define OPENKACHE_GO_REQUIRE(field, function_type, symbol_name) \
+    do { \
+        if (library->field == NULL) { \
+            openkache_go_close(handle); \
+            free(library); \
+            *error_message = openkache_go_error_copy("native library is missing the OpenKache ABI"); \
+            return NULL; \
+        } \
+    } while (0);
+OPENKACHE_SMITHY_NATIVE_REQUIRED_FUNCTIONS(OPENKACHE_GO_REQUIRE)
+#undef OPENKACHE_GO_REQUIRE
     if (library->abi() != OPENKACHE_CLIENT_ABI_VERSION) {
         openkache_go_close(handle);
         free(library);

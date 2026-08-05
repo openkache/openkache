@@ -203,6 +203,7 @@ interface Native_Abi_Parameter {
 
 interface Native_Abi_Function {
   readonly name: string
+  readonly optional: boolean
   readonly return_type: Native_Abi_Type
   readonly parameters: readonly Native_Abi_Parameter[]
 }
@@ -386,6 +387,15 @@ function boolean_member(object: Json_Object, member: string, location: string): 
     throw new Error(`${location}.${member} must be a boolean`)
   }
   return value
+}
+
+function optional_boolean_member(
+  object: Json_Object,
+  member: string,
+  location: string,
+): boolean {
+  const value = object[member]
+  return value === undefined ? false : boolean_member(object, member, location)
 }
 
 function integer_member(
@@ -867,6 +877,7 @@ function native_abi_functions(value: Json_Object): readonly Native_Abi_Function[
       const location = `${FFI_CONTRACT_TRAIT_ID}.nativeFunctions[${index}]`
       return {
         name: string_member(function_value, "name", location),
+        optional: optional_boolean_member(function_value, "optional", location),
         return_type: native_abi_type(function_value, "returnType", location),
         parameters: native_abi_parameters(function_value, "parameters", location),
       }
@@ -4186,12 +4197,28 @@ function native_abi_go_field_name(function_name: string): string {
 
 /** Renders the generated C preprocessor list consumed by the Go cgo loader. */
 export function render_go_native_abi(contract: Client_Contract): string {
-  const functions = contract.ffi.native_abi_functions
-    .map((function_, index, entries) => {
-      const continuation = index === entries.length - 1 ? "" : " \\"
-      return `    X(${native_abi_go_field_name(function_.name)}, ${native_abi_c_function_typedef_name(function_.name)}, "${function_.name}")${continuation}`
-    })
-    .join("\n")
+  const render_function_list = (
+    macro_name: string,
+    functions: readonly Native_Abi_Function[],
+  ): string => {
+    if (functions.length === 0) {
+      return `#define ${macro_name}(X)`
+    }
+    const entries = functions
+      .map((function_, index) => {
+        const continuation = index === functions.length - 1 ? "" : " \\"
+        return `    X(${native_abi_go_field_name(function_.name)}, ${native_abi_c_function_typedef_name(function_.name)}, "${function_.name}")${continuation}`
+      })
+      .join("\n")
+    return `#define ${macro_name}(X) \\
+${entries}`
+  }
+  const required_functions = contract.ffi.native_abi_functions.filter(
+    (function_) => !function_.optional,
+  )
+  const optional_functions = contract.ffi.native_abi_functions.filter(
+    (function_) => function_.optional,
+  )
   return `/* Generated from the OpenKache Smithy client ABI contract. Do not edit. */
 #ifndef OPENKACHE_SMITHY_NATIVE_ABI_H
 #define OPENKACHE_SMITHY_NATIVE_ABI_H
@@ -4204,8 +4231,15 @@ export function render_go_native_abi(contract: Client_Contract): string {
  * symbol registration, so adding an ABI function to Smithy cannot silently
  * leave the loader stale.
  */
-#define OPENKACHE_SMITHY_NATIVE_FUNCTIONS(X) \\
-${functions}
+${render_function_list("OPENKACHE_SMITHY_NATIVE_FUNCTIONS", contract.ffi.native_abi_functions)}
+
+/*
+ * Required symbols must be present in every ABI implementation. Optional
+ * symbols are exposed separately so loaders can preserve older-library
+ * compatibility without maintaining a second hand-written list.
+ */
+${render_function_list("OPENKACHE_SMITHY_NATIVE_REQUIRED_FUNCTIONS", required_functions)}
+${render_function_list("OPENKACHE_SMITHY_NATIVE_OPTIONAL_FUNCTIONS", optional_functions)}
 
 #endif /* OPENKACHE_SMITHY_NATIVE_ABI_H */
 `
@@ -5237,7 +5271,10 @@ function native_abi_csharp_structure_name(structure_name: string): string {
   if (structure_name === "FfiNamespaceDescriptor") {
     return "Protocol.FfiNamespaceDescriptor"
   }
-  return "ConnectOptions"
+  if (structure_name === "FfiConnectOptions") {
+    return "ConnectOptions"
+  }
+  return `Native${pascal_case(snake_case(structure_name.replace(/^Ffi/, "")))}`
 }
 
 function native_abi_csharp_scalar_type(type: Native_Abi_Type): string {
@@ -5281,13 +5318,23 @@ function native_abi_csharp_identifier(identifier: string): string {
 
 /** Renders .NET P/Invoke declarations from the Smithy native ABI contract. */
 export function render_csharp_native_abi(contract: Client_Contract): string {
-  const options = required_native_structure(contract, "FfiConnectOptions")
-  const option_fields = options.fields
-    .map(
-      (field) =>
-      `        internal ${native_abi_csharp_scalar_type(field.type)} ${native_abi_csharp_identifier(field.name)};`,
-    )
-    .join("\n")
+  required_native_structure(contract, "FfiConnectOptions")
+  const native_structures = contract.ffi.native_abi_structures
+    .filter((structure) => structure.name !== "FfiNamespaceDescriptor")
+    .map((structure) => {
+      const fields = structure.fields
+        .map(
+          (field) =>
+            `        internal ${native_abi_csharp_scalar_type(field.type)} ${native_abi_csharp_identifier(field.name)};`,
+        )
+        .join("\n")
+      return `    [StructLayout(LayoutKind.Sequential)]
+    internal struct ${native_abi_csharp_structure_name(structure.name)}
+    {
+${fields}
+    }`
+    })
+    .join("\n\n")
   const functions = contract.ffi.native_abi_functions
     .map((function_) => {
       const parameters = function_.parameters.length === 0
@@ -5312,11 +5359,7 @@ namespace OpenKache;
 
 internal static partial class NativeMethods
 {
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct ConnectOptions
-    {
-${option_fields}
-    }
+${native_structures}
 
 ${functions}
 }
