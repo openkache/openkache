@@ -4,6 +4,15 @@
 
 import { createRequire } from "node:module"
 import { fileURLToPath } from "node:url"
+import type {
+  Smithy_Eviction_Mode,
+  Smithy_Expiration_Mode,
+  Smithy_Namespace_Descriptor,
+  Smithy_Namespace_Open_Output,
+  Smithy_Namespace_Policy,
+  Smithy_Set_Condition,
+  Smithy_Set_Outcome,
+} from "./generated_local/smithy-api.js"
 
 export interface Native_Identity {
   readonly certificate_chain: readonly Uint8Array[]
@@ -27,24 +36,11 @@ export interface Native_Client_Options {
   readonly encryption?: "compact" | "robust"
 }
 
-export interface Native_Namespace_Policy {
-  readonly default_expiration: "no_expiry" | "fixed_ttl"
-  readonly default_ttl_milliseconds?: bigint
-  readonly expiration_override: "allowed" | "disallowed"
-  readonly default_eviction: "evictable" | "eviction_protected"
-  readonly eviction_override: "allowed" | "disallowed"
-}
+export type Native_Namespace_Policy = Smithy_Namespace_Policy
 
-export interface Native_Namespace_Descriptor {
-  readonly namespace_id: bigint
-  readonly revision: bigint
-  readonly policy: Native_Namespace_Policy
-}
+export type Native_Namespace_Descriptor = Smithy_Namespace_Descriptor
 
-export interface Native_Namespace_Open_Output {
-  readonly descriptor: Native_Namespace_Descriptor
-  readonly created: boolean
-}
+export type Native_Namespace_Open_Output = Smithy_Namespace_Open_Output
 
 interface Native_Value_Envelope {
   readonly encoding: string
@@ -60,29 +56,29 @@ export interface Native_Client {
   set(
     key: Uint8Array,
     value: Uint8Array,
-    condition?: "any" | "if_absent" | "if_present",
-    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
-    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
-  ): Promise<string>
+  ): Promise<Smithy_Set_Outcome>
   set_value(
     key: Uint8Array,
     encoding: string,
     type_name: string,
     payload: Uint8Array,
-    condition?: "any" | "if_absent" | "if_present",
-    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
-    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
-  ): Promise<string>
+  ): Promise<Smithy_Set_Outcome>
   set_json(
     key: Uint8Array,
     value: unknown,
-    condition?: "any" | "if_absent" | "if_present",
-    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
-    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
-  ): Promise<string>
+  ): Promise<Smithy_Set_Outcome>
   delete(key: Uint8Array): Promise<boolean>
   stats(): Promise<string>
   sync(): Promise<void>
@@ -98,20 +94,20 @@ export interface Native_Client {
   raw_set(
     item_id: Uint8Array,
     value: Uint8Array,
-    condition?: "any" | "if_absent" | "if_present",
-    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
-    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
-  ): Promise<string>
+  ): Promise<Smithy_Set_Outcome>
   raw_set_in_namespace(
     namespace_id: bigint,
     item_id: Uint8Array,
     value: Uint8Array,
-    condition?: "any" | "if_absent" | "if_present",
-    expiration_mode?: "inherit" | "no_expiry" | "explicit_ttl",
-    eviction_mode?: "inherit" | "evictable" | "eviction_protected",
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: bigint,
-  ): Promise<string>
+  ): Promise<Smithy_Set_Outcome>
   raw_delete(item_id: Uint8Array): Promise<boolean>
   raw_delete_in_namespace(
     namespace_id: bigint,

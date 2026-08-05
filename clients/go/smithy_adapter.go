@@ -2,6 +2,7 @@ package openkache
 
 import (
 	"context"
+	"fmt"
 )
 
 // Smithy returns a context-aware adapter implementing the generated Smithy
@@ -240,7 +241,10 @@ func smithySetOptions(input SmithySetInput) (SetOptions, error) {
 	if input.ExpirationMode == nil && input.TTLMilliseconds != nil {
 		return SetOptions{}, validationError(
 			"set.ttl_milliseconds",
-			"is only valid with explicit_ttl expiration mode",
+			fmt.Sprintf(
+				"is only valid with %s expiration mode",
+				SmithyExpirationModeExplicitTtlValue,
+			),
 		)
 	}
 	options := SetOptions{}
@@ -268,7 +272,7 @@ func smithyNamespacePolicyWire(
 	if policy == nil {
 		return 0, 0, nil
 	}
-	var flags uint8
+	var flags uint8 = uint8(SmithyPolicyNoExpiry)
 	var ttl uint64
 	switch policy.DefaultExpiration {
 	case SmithyExpirationDefaultNoExpiry:
@@ -322,44 +326,38 @@ func smithyNamespacePolicyWire(
 	return flags, ttl, nil
 }
 
-const (
-	nativeNamespaceFixedTTL  uint32 = 1
-	nativeNamespaceAllowed   uint32 = 1
-	nativeNamespaceProtected uint32 = 1
-)
-
 func smithyNamespaceDescriptor(
 	decoded nativeNamespaceDescriptor,
 ) SmithyNamespaceDescriptor {
 	defaultExpiration := SmithyExpirationDefaultNoExpiry
 	var defaultTTL *uint64
-	if decoded.defaultExpiration == nativeNamespaceFixedTTL {
+	if decoded.DefaultExpiration == SmithyFFINamespaceDefaultExpirationFixedTtl {
 		defaultExpiration = SmithyExpirationDefaultFixedTtl
-		ttl := decoded.defaultTTLMillis
+		ttl := decoded.DefaultTtlMs
 		defaultTTL = &ttl
 	}
 	return SmithyNamespaceDescriptor{
-		NamespaceID: decoded.namespaceID,
-		Revision:    decoded.revision,
+		NamespaceID: decoded.NamespaceID,
+		Revision:    decoded.Revision,
 		Policy: SmithyNamespacePolicy{
 			DefaultExpiration:      defaultExpiration,
 			DefaultTtlMilliseconds: defaultTTL,
-			ExpirationOverride:     smithyOverridePolicy(decoded.expirationOverride),
-			DefaultEviction:        smithyEvictionDefault(decoded.defaultEviction),
-			EvictionOverride:       smithyOverridePolicy(decoded.evictionOverride),
+			ExpirationOverride:     smithyOverridePolicy(decoded.ExpirationOverride),
+			DefaultEviction:        smithyEvictionDefault(decoded.DefaultEviction),
+			EvictionOverride:       smithyOverridePolicy(decoded.EvictionOverride),
 		},
 	}
 }
 
 func smithyOverridePolicy(value uint32) SmithyOverridePolicy {
-	if value == nativeNamespaceAllowed {
+	if value == SmithyFFINamespaceOverrideAllowed {
 		return SmithyOverridePolicyAllowed
 	}
 	return SmithyOverridePolicyDisallowed
 }
 
 func smithyEvictionDefault(value uint32) SmithyEvictionDefault {
-	if value == nativeNamespaceProtected {
+	if value == SmithyFFINamespaceDefaultEvictionProtected {
 		return SmithyEvictionDefaultEvictionProtected
 	}
 	return SmithyEvictionDefaultEvictable

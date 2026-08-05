@@ -2,6 +2,18 @@
 
 package openkache
 
+// SmithyFFINamespaceDescriptor is the C-compatible namespace descriptor
+// returned by the shared native ABI decoder.
+type SmithyFFINamespaceDescriptor struct {
+	NamespaceID        uint64
+	Revision           uint64
+	DefaultTtlMs       uint64
+	DefaultExpiration  uint32
+	ExpirationOverride uint32
+	DefaultEviction    uint32
+	EvictionOverride   uint32
+}
+
 const (
 	// SmithyProtocolALPN is the negotiated protocol identifier.
 	SmithyProtocolALPN = "openkache/1"
@@ -115,14 +127,49 @@ const (
 	SmithyFFISetConditionIfPresent uint32 = 2
 	// SmithyFFIConnectionStateConnected identifies a native connection state.
 	SmithyFFIConnectionStateConnected uint32 = 0
+	// SmithyFFIConnectionStateConnectedName is its stable text name.
+	SmithyFFIConnectionStateConnectedName = "connected"
 	// SmithyFFIConnectionStateReconnecting identifies a native connection state.
 	SmithyFFIConnectionStateReconnecting uint32 = 1
+	// SmithyFFIConnectionStateReconnectingName is its stable text name.
+	SmithyFFIConnectionStateReconnectingName = "reconnecting"
 	// SmithyFFIConnectionStateDisconnected identifies a native connection state.
 	SmithyFFIConnectionStateDisconnected uint32 = 2
+	// SmithyFFIConnectionStateDisconnectedName is its stable text name.
+	SmithyFFIConnectionStateDisconnectedName = "disconnected"
 	// SmithyFFIConnectionStateClosed identifies a native connection state.
 	SmithyFFIConnectionStateClosed uint32 = 3
+	// SmithyFFIConnectionStateClosedName is its stable text name.
+	SmithyFFIConnectionStateClosedName = "closed"
 	// SmithyFFIConnectionStateUnknown identifies a native connection state.
 	SmithyFFIConnectionStateUnknown uint32 = 4
+	// SmithyFFIConnectionStateUnknownName is its stable text name.
+	SmithyFFIConnectionStateUnknownName = "unknown"
+	// SmithyFFINamespaceDescriptorDecodeOK is the namespace descriptor decode status Ok.
+	SmithyFFINamespaceDescriptorDecodeOK uint32 = 0
+	// SmithyFFINamespaceDescriptorDecodeInvalid is the namespace descriptor decode status Invalid.
+	SmithyFFINamespaceDescriptorDecodeInvalid uint32 = 1
+	// SmithyFFINamespaceDefaultExpirationNoExpiry is the namespace default expiration value NoExpiry.
+	SmithyFFINamespaceDefaultExpirationNoExpiry uint32 = 0
+	// SmithyFFINamespaceDefaultExpirationFixedTtl is the namespace default expiration value FixedTtl.
+	SmithyFFINamespaceDefaultExpirationFixedTtl uint32 = 1
+	// SmithyFFINamespaceDefaultEvictionEvictable is the namespace default eviction value Evictable.
+	SmithyFFINamespaceDefaultEvictionEvictable uint32 = 0
+	// SmithyFFINamespaceDefaultEvictionProtected is the namespace default eviction value Protected.
+	SmithyFFINamespaceDefaultEvictionProtected uint32 = 1
+	// SmithyFFINamespaceOverrideDisallowed is the namespace override-policy value Disallowed.
+	SmithyFFINamespaceOverrideDisallowed uint32 = 0
+	// SmithyFFINamespaceOverrideAllowed is the namespace override-policy value Allowed.
+	SmithyFFINamespaceOverrideAllowed uint32 = 1
+	// SmithyFFINamespaceDescriptorSizeBytes and offsets describe the C-compatible descriptor ABI.
+	SmithyFFINamespaceDescriptorSizeBytes                = 40
+	SmithyFFINamespaceDescriptorNamespaceIDOffset        = 0
+	SmithyFFINamespaceDescriptorRevisionOffset           = 8
+	SmithyFFINamespaceDescriptorDefaultTtlMsOffset       = 16
+	SmithyFFINamespaceDescriptorDefaultExpirationOffset  = 24
+	SmithyFFINamespaceDescriptorExpirationOverrideOffset = 28
+	SmithyFFINamespaceDescriptorDefaultEvictionOffset    = 32
+	SmithyFFINamespaceDescriptorEvictionOverrideOffset   = 36
 )
 
 // Shared client defaults extracted from the Smithy service contract.

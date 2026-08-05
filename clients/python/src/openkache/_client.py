@@ -50,6 +50,9 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
     SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
     SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
+    SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
+    SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
+    SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
     SMITHY_FFI_OPERATION_GET_JSON,
     SMITHY_FFI_OPERATION_RECONNECT,
     SMITHY_FFI_OPERATION_SET_JSON,
@@ -243,12 +246,17 @@ class SetOptions:
                 condition = SmithySetCondition(condition)
             except ValueError as error:
                 raise OpenKacheValueError(
-                    "condition must be 'if_absent' or 'if_present'"
+                    "condition must be "
+                    + ", ".join(
+                        f"'{member.value}'" for member in SmithySetCondition
+                    )
                 ) from error
             object.__setattr__(self, "condition", condition)
         elif condition is not None and not isinstance(condition, SmithySetCondition):
             raise OpenKacheValueError(
-                "condition must be 'if_absent', 'if_present', or None"
+                "condition must be "
+                + ", ".join(f"'{member.value}'" for member in SmithySetCondition)
+                + ", or None"
             )
         expiration_mode = self.expiration_mode
         if isinstance(expiration_mode, str):
@@ -256,7 +264,10 @@ class SetOptions:
                 expiration_mode = SmithyExpirationMode(expiration_mode)
             except ValueError as error:
                 raise OpenKacheValueError(
-                    "expiration_mode must be 'inherit', 'no_expiry', or 'explicit_ttl'"
+                    "expiration_mode must be "
+                    + ", ".join(
+                        f"'{member.value}'" for member in SmithyExpirationMode
+                    )
                 ) from error
             object.__setattr__(self, "expiration_mode", expiration_mode)
         elif expiration_mode is not None and not isinstance(
@@ -271,8 +282,10 @@ class SetOptions:
                 eviction_mode = SmithyEvictionMode(eviction_mode)
             except ValueError as error:
                 raise OpenKacheValueError(
-                    "eviction_mode must be 'inherit', 'evictable', or "
-                    "'eviction_protected'"
+                    "eviction_mode must be "
+                    + ", ".join(
+                        f"'{member.value}'" for member in SmithyEvictionMode
+                    )
                 ) from error
             object.__setattr__(self, "eviction_mode", eviction_mode)
         elif eviction_mode is not None and not isinstance(eviction_mode, SmithyEvictionMode):
@@ -294,11 +307,13 @@ class SetOptions:
         if selected_expiration is SmithyExpirationMode.EXPLICIT_TTL:
             if self.ttl_ms is None:
                 raise OpenKacheValueError(
-                    "ttl_ms is required with explicit_ttl expiration_mode"
+                    "ttl_ms is required with "
+                    f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration_mode"
                 )
         elif self.ttl_ms is not None:
             raise OpenKacheValueError(
-                "ttl_ms is only valid with explicit_ttl expiration_mode"
+                "ttl_ms is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration_mode"
             )
         object.__setattr__(self, "expiration_mode", selected_expiration)
         object.__setattr__(
@@ -673,7 +688,8 @@ class RawClient(SmithyOpenKacheApi):
     async def set(self, input: SmithySetInput) -> SmithySetOutput:
         if input.expiration_mode is None and input.ttl_milliseconds is not None:
             raise OpenKacheValueError(
-                "ttl_milliseconds is only valid with explicit_ttl expiration mode"
+                "ttl_milliseconds is only valid with "
+                f"{SmithyExpirationMode.EXPLICIT_TTL.value} expiration mode"
             )
         options = SetOptions(
             condition=input.condition,
@@ -1083,17 +1099,19 @@ def _namespace_policy_wire(
         eviction_override = SmithyOverridePolicy(policy.eviction_override)
     except ValueError as error:
         raise OpenKacheValueError(f"invalid namespace policy enum: {error}") from error
-    flags = 0
+    flags = SMITHY_POLICY_NO_EXPIRY
     ttl_ms = policy.default_ttl_milliseconds
     if default_expiration is SmithyExpirationDefault.NO_EXPIRY:
         if ttl_ms is not None:
             raise OpenKacheValueError(
-                "default_ttl_milliseconds requires fixed_ttl default_expiration"
+                "default_ttl_milliseconds requires "
+                f"{SmithyExpirationDefault.FIXED_TTL.value} default_expiration"
             )
     else:
         if ttl_ms is None:
             raise OpenKacheValueError(
-                "default_ttl_milliseconds is required with fixed_ttl default_expiration"
+                "default_ttl_milliseconds is required with "
+                f"{SmithyExpirationDefault.FIXED_TTL.value} default_expiration"
             )
         _positive_or_zero(
             ttl_ms,
@@ -1126,23 +1144,27 @@ def _namespace_descriptor(
     policy = SmithyNamespacePolicy(
         default_expiration=(
             SmithyExpirationDefault.FIXED_TTL
-            if default_expiration == 1
+            if default_expiration == SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
             else SmithyExpirationDefault.NO_EXPIRY
         ),
-        default_ttl_milliseconds=default_ttl if default_expiration == 1 else None,
+        default_ttl_milliseconds=(
+            default_ttl
+            if default_expiration == SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
+            else None
+        ),
         expiration_override=(
             SmithyOverridePolicy.ALLOWED
-            if expiration_override == 1
+            if expiration_override == SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED
             else SmithyOverridePolicy.DISALLOWED
         ),
         default_eviction=(
             SmithyEvictionDefault.EVICTION_PROTECTED
-            if default_eviction == 1
+            if default_eviction == SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED
             else SmithyEvictionDefault.EVICTABLE
         ),
         eviction_override=(
             SmithyOverridePolicy.ALLOWED
-            if eviction_override == 1
+            if eviction_override == SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED
             else SmithyOverridePolicy.DISALLOWED
         ),
     )

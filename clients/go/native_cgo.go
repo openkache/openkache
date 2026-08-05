@@ -436,6 +436,7 @@ import "C"
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -460,6 +461,9 @@ type nativeHandle struct {
 }
 
 func connectNative(ctx context.Context, options normalizedOptions) (nativeClient, error) {
+	if err := validateSmithyFFINamespaceDescriptorLayout(); err != nil {
+		return nil, &Error{Operation: "connect", Message: err.Error()}
+	}
 	path := options.nativeLibrary
 	if path == "" {
 		path = os.Getenv("OPENKACHE_CLIENT_LIBRARY")
@@ -577,6 +581,67 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func validateSmithyFFINamespaceDescriptorLayout() error {
+	var descriptor SmithyFFINamespaceDescriptor
+	layout := []struct {
+		name   string
+		actual uintptr
+		want   uintptr
+	}{
+		{
+			name:   "size",
+			actual: unsafe.Sizeof(descriptor),
+			want:   SmithyFFINamespaceDescriptorSizeBytes,
+		},
+		{
+			name:   "namespace_id offset",
+			actual: unsafe.Offsetof(descriptor.NamespaceID),
+			want:   SmithyFFINamespaceDescriptorNamespaceIDOffset,
+		},
+		{
+			name:   "revision offset",
+			actual: unsafe.Offsetof(descriptor.Revision),
+			want:   SmithyFFINamespaceDescriptorRevisionOffset,
+		},
+		{
+			name:   "default_ttl_ms offset",
+			actual: unsafe.Offsetof(descriptor.DefaultTtlMs),
+			want:   SmithyFFINamespaceDescriptorDefaultTtlMsOffset,
+		},
+		{
+			name:   "default_expiration offset",
+			actual: unsafe.Offsetof(descriptor.DefaultExpiration),
+			want:   SmithyFFINamespaceDescriptorDefaultExpirationOffset,
+		},
+		{
+			name:   "expiration_override offset",
+			actual: unsafe.Offsetof(descriptor.ExpirationOverride),
+			want:   SmithyFFINamespaceDescriptorExpirationOverrideOffset,
+		},
+		{
+			name:   "default_eviction offset",
+			actual: unsafe.Offsetof(descriptor.DefaultEviction),
+			want:   SmithyFFINamespaceDescriptorDefaultEvictionOffset,
+		},
+		{
+			name:   "eviction_override offset",
+			actual: unsafe.Offsetof(descriptor.EvictionOverride),
+			want:   SmithyFFINamespaceDescriptorEvictionOverrideOffset,
+		},
+	}
+	for _, field := range layout {
+		if field.actual != field.want {
+			return fmt.Errorf(
+				"native namespace descriptor %s is %d, Smithy contract requires %d",
+				field.name,
+				field.actual,
+				field.want,
+			)
+		}
+	}
+	return nil
 }
 
 func decodeConnectResult(
@@ -836,13 +901,13 @@ func (h *nativeHandle) decodeNamespaceDescriptor(
 		}
 	}
 	return nativeNamespaceDescriptor{
-		namespaceID:        uint64(decoded.namespace_id),
-		revision:           uint64(decoded.revision),
-		defaultTTLMillis:   uint64(decoded.default_ttl_ms),
-		defaultExpiration:  uint32(decoded.default_expiration),
-		expirationOverride: uint32(decoded.expiration_override),
-		defaultEviction:    uint32(decoded.default_eviction),
-		evictionOverride:   uint32(decoded.eviction_override),
+		NamespaceID:        uint64(decoded.namespace_id),
+		Revision:           uint64(decoded.revision),
+		DefaultTtlMs:       uint64(decoded.default_ttl_ms),
+		DefaultExpiration:  uint32(decoded.default_expiration),
+		ExpirationOverride: uint32(decoded.expiration_override),
+		DefaultEviction:    uint32(decoded.default_eviction),
+		EvictionOverride:   uint32(decoded.eviction_override),
 	}, nil
 }
 

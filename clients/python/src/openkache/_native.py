@@ -14,8 +14,18 @@ from pathlib import Path
 from threading import Condition
 
 from ._generated.smithy_contract import (
+    SmithyFFINamespaceDescriptor,
     SMITHY_FFI_ABI_VERSION,
     SMITHY_FFI_CONNECTION_STATE_CLOSED,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EXPIRATION_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EVICTION_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_TTL_MS_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_EVICTION_OVERRIDE_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_EXPIRATION_OVERRIDE_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
+    SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
     SMITHY_FFI_RESULT_CONNECTED,
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_SET_CONDITION_ANY,
@@ -31,17 +41,25 @@ _U8_POINTER = ctypes.POINTER(_U8)
 _RESULT_POINTER = ctypes.c_void_p
 _CLIENT_POINTER = ctypes.c_void_p
 
+_NamespaceDescriptor = SmithyFFINamespaceDescriptor
 
-class _NamespaceDescriptor(ctypes.Structure):
-    _fields_ = [
-        ("namespace_id", ctypes.c_uint64),
-        ("revision", ctypes.c_uint64),
-        ("default_ttl_ms", ctypes.c_uint64),
-        ("default_expiration", ctypes.c_uint32),
-        ("expiration_override", ctypes.c_uint32),
-        ("default_eviction", ctypes.c_uint32),
-        ("eviction_override", ctypes.c_uint32),
-    ]
+
+if ctypes.sizeof(_NamespaceDescriptor) != SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES:
+    raise RuntimeError("native namespace descriptor size does not match the Smithy contract")
+if _NamespaceDescriptor.namespace_id.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET:
+    raise RuntimeError("native namespace descriptor namespace_id offset does not match the Smithy contract")
+if _NamespaceDescriptor.revision.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET:
+    raise RuntimeError("native namespace descriptor revision offset does not match the Smithy contract")
+if _NamespaceDescriptor.default_ttl_ms.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_TTL_MS_OFFSET:
+    raise RuntimeError("native namespace descriptor default_ttl_ms offset does not match the Smithy contract")
+if _NamespaceDescriptor.default_expiration.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EXPIRATION_OFFSET:
+    raise RuntimeError("native namespace descriptor default_expiration offset does not match the Smithy contract")
+if _NamespaceDescriptor.expiration_override.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_EXPIRATION_OVERRIDE_OFFSET:
+    raise RuntimeError("native namespace descriptor expiration_override offset does not match the Smithy contract")
+if _NamespaceDescriptor.default_eviction.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EVICTION_OFFSET:
+    raise RuntimeError("native namespace descriptor default_eviction offset does not match the Smithy contract")
+if _NamespaceDescriptor.eviction_override.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_EVICTION_OVERRIDE_OFFSET:
+    raise RuntimeError("native namespace descriptor eviction_override offset does not match the Smithy contract")
 
 
 def _as_native_buffer(data: bytes) -> tuple[object | None, _U8_POINTER | None]:
@@ -573,7 +591,7 @@ class NativeClient:
             ctypes.byref(decoded),
         )
         del payload_buffer
-        if status != 0:
+        if status != SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK:
             raise NativeError("native ABI returned an invalid namespace descriptor")
         return (
             int(decoded.namespace_id),

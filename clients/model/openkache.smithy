@@ -10,6 +10,13 @@ namespace openkache.client
 @trait(selector: "member")
 structure unsignedLong {}
 
+/// Assigns a numeric discriminator to a native FFI enum member.
+@trait(selector: "enum > member")
+structure ffiValue {
+    @required
+    value: Long
+}
+
 /// Defaults used by the shared client core and language adapters.
 @trait(selector: "service")
 structure clientDefaults {
@@ -60,69 +67,6 @@ structure clientDefaults {
 structure ffiContract {
     @required
     abiVersion: Integer
-
-    @required
-    operationGetJson: Integer
-
-    @required
-    operationSetJson: Integer
-
-    @required
-    operationReconnect: Long
-
-    @required
-    resultError: Integer
-
-    @required
-    resultOk: Integer
-
-    @required
-    resultValue: Integer
-
-    @required
-    resultNotFound: Integer
-
-    @required
-    resultCreated: Integer
-
-    @required
-    resultReplaced: Integer
-
-    @required
-    resultDeleted: Integer
-
-    @required
-    resultNotDeleted: Integer
-
-    @required
-    resultConnected: Integer
-
-    @required
-    resultNotStored: Integer
-
-    @required
-    setConditionAny: Integer
-
-    @required
-    setConditionIfAbsent: Integer
-
-    @required
-    setConditionIfPresent: Integer
-
-    @required
-    connectionStateConnected: Integer
-
-    @required
-    connectionStateReconnecting: Integer
-
-    @required
-    connectionStateDisconnected: Integer
-
-    @required
-    connectionStateClosed: Integer
-
-    @required
-    connectionStateUnknown: Integer
 }
 
 /// Client-owned v1 value container and protection contract.
@@ -226,28 +170,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 4,
-    operationGetJson: 16,
-    operationSetJson: 17,
-    operationReconnect: 4294967041,
-    resultError: 0,
-    resultOk: 1,
-    resultValue: 2,
-    resultNotFound: 3,
-    resultCreated: 4,
-    resultReplaced: 5,
-    resultDeleted: 6,
-    resultNotDeleted: 7,
-    resultConnected: 8,
-    resultNotStored: 9,
-    setConditionAny: 0,
-    setConditionIfAbsent: 1,
-    setConditionIfPresent: 2,
-    connectionStateConnected: 0,
-    connectionStateReconnecting: 1,
-    connectionStateDisconnected: 2,
-    connectionStateClosed: 3,
-    connectionStateUnknown: 4
+    abiVersion: 4
 )
 @valueFormat(
     version: 1,
@@ -476,6 +399,141 @@ structure NamespaceDescriptor {
 
     @required
     policy: NamespacePolicy
+}
+
+/// Flattened C-compatible projection used by the native client ABI.
+///
+/// This shape deliberately mirrors the fields returned by the canonical
+/// descriptor decoder. Its member types and names are the source of truth for
+/// every generated native binding. Its declaration order and member types
+/// determine the natural C-compatible layout.
+structure FfiNamespaceDescriptor {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    revision: Long
+
+    @required
+    @unsignedLong
+    defaultTtlMs: Long
+
+    @required
+    defaultExpiration: Integer
+
+    @required
+    expirationOverride: Integer
+
+    @required
+    defaultEviction: Integer
+
+    @required
+    evictionOverride: Integer
+}
+
+enum FfiOperation {
+    @ffiValue(value: 16)
+    GET_JSON = "get_json"
+
+    @ffiValue(value: 17)
+    SET_JSON = "set_json"
+
+    @ffiValue(value: 4294967041)
+    RECONNECT = "reconnect"
+}
+
+enum FfiResultKind {
+    @ffiValue(value: 0)
+    ERROR = "error"
+
+    @ffiValue(value: 1)
+    OK = "ok"
+
+    @ffiValue(value: 2)
+    VALUE = "value"
+
+    @ffiValue(value: 3)
+    NOT_FOUND = "not_found"
+
+    @ffiValue(value: 4)
+    CREATED = "created"
+
+    @ffiValue(value: 5)
+    REPLACED = "replaced"
+
+    @ffiValue(value: 6)
+    DELETED = "deleted"
+
+    @ffiValue(value: 7)
+    NOT_DELETED = "not_deleted"
+
+    @ffiValue(value: 8)
+    CONNECTED = "connected"
+
+    @ffiValue(value: 9)
+    NOT_STORED = "not_stored"
+}
+
+enum FfiSetCondition {
+    @ffiValue(value: 0)
+    ANY = "any"
+
+    @ffiValue(value: 1)
+    IF_ABSENT = "if_absent"
+
+    @ffiValue(value: 2)
+    IF_PRESENT = "if_present"
+}
+
+enum FfiConnectionState {
+    @ffiValue(value: 0)
+    CONNECTED = "connected"
+
+    @ffiValue(value: 1)
+    RECONNECTING = "reconnecting"
+
+    @ffiValue(value: 2)
+    DISCONNECTED = "disconnected"
+
+    @ffiValue(value: 3)
+    CLOSED = "closed"
+
+    @ffiValue(value: 4)
+    UNKNOWN = "unknown"
+}
+
+enum FfiNamespaceDescriptorDecodeStatus {
+    @ffiValue(value: 0)
+    OK = "ok"
+
+    @ffiValue(value: 1)
+    INVALID = "invalid"
+}
+
+enum FfiNamespaceDefaultExpiration {
+    @ffiValue(value: 0)
+    NO_EXPIRY = "no_expiry"
+
+    @ffiValue(value: 1)
+    FIXED_TTL = "fixed_ttl"
+}
+
+enum FfiNamespaceDefaultEviction {
+    @ffiValue(value: 0)
+    EVICTABLE = "evictable"
+
+    @ffiValue(value: 1)
+    PROTECTED = "eviction_protected"
+}
+
+enum FfiNamespaceOverridePolicy {
+    @ffiValue(value: 0)
+    DISALLOWED = "disallowed"
+
+    @ffiValue(value: 1)
+    ALLOWED = "allowed"
 }
 
 structure NamespacePolicy {

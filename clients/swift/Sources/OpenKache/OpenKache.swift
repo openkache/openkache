@@ -7,15 +7,50 @@ import Foundation
 private typealias NativeClientPointer = OpaquePointer
 private typealias NativeResultPointer = OpaquePointer
 
-private struct NativeNamespaceDescriptor {
-    var namespaceId: UInt64 = 0
-    var revision: UInt64 = 0
-    var defaultTtlMs: UInt64 = 0
-    var defaultExpiration: UInt32 = 0
-    var expirationOverride: UInt32 = 0
-    var defaultEviction: UInt32 = 0
-    var evictionOverride: UInt32 = 0
-}
+private typealias NativeNamespaceDescriptor = Smithy_Native_Namespace_Descriptor
+
+private let nativeNamespaceDescriptorLayoutIsValid: Void = {
+    let layout = MemoryLayout<NativeNamespaceDescriptor>.self
+    precondition(
+        layout.size == Smithy_Native_Contract.namespaceDescriptorSizeBytes,
+        "native namespace descriptor size does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.namespaceId)
+            == Smithy_Native_Contract.namespaceDescriptorNamespaceIdOffset,
+        "native namespace descriptor namespaceId offset does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.revision)
+            == Smithy_Native_Contract.namespaceDescriptorRevisionOffset,
+        "native namespace descriptor revision offset does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.defaultTtlMs)
+            == Smithy_Native_Contract.namespaceDescriptorDefaultTtlMsOffset,
+        "native namespace descriptor defaultTtlMs offset does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.defaultExpiration)
+            == Smithy_Native_Contract.namespaceDescriptorDefaultExpirationOffset,
+        "native namespace descriptor defaultExpiration offset does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.expirationOverride)
+            == Smithy_Native_Contract.namespaceDescriptorExpirationOverrideOffset,
+        "native namespace descriptor expirationOverride offset does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.defaultEviction)
+            == Smithy_Native_Contract.namespaceDescriptorDefaultEvictionOffset,
+        "native namespace descriptor defaultEviction offset does not match the Smithy contract"
+    )
+    precondition(
+        layout.offset(of: \NativeNamespaceDescriptor.evictionOverride)
+            == Smithy_Native_Contract.namespaceDescriptorEvictionOverrideOffset,
+        "native namespace descriptor evictionOverride offset does not match the Smithy contract"
+    )
+}()
 
 @_silgen_name("openkache_client_abi_version")
 private func nativeAbiVersion() -> UInt32
@@ -647,11 +682,12 @@ private enum NativeBridge {
     static func decodeNamespaceDescriptor(
         _ payload: Data
     ) throws -> NativeNamespaceDescriptor {
+        _ = nativeNamespaceDescriptorLayoutIsValid
         var decoded = NativeNamespaceDescriptor()
         let status = withBytes(Array(payload)) { pointer, length in
             nativeNamespaceDescriptorDecode(pointer, length, &decoded)
         }
-        guard status == 0 else {
+        guard status == Smithy_Native_Contract.namespaceDescriptorDecodeOk else {
             throw OpenKacheError("native ABI returned an invalid namespace descriptor")
         }
         return decoded
@@ -1456,17 +1492,24 @@ private func smithyNamespaceDescriptor(
         namespaceId: decoded.namespaceId,
         revision: decoded.revision,
         policy: Smithy_Namespace_Policy(
-            defaultExpiration: decoded.defaultExpiration == 1 ? .fixedTtl : .noExpiry,
-            defaultTtlMilliseconds: decoded.defaultExpiration == 1
+            defaultExpiration: decoded.defaultExpiration
+                == Smithy_Native_Contract.namespaceDefaultExpirationFixedTtl
+                ? .fixedTtl
+                : .noExpiry,
+            defaultTtlMilliseconds: decoded.defaultExpiration
+                == Smithy_Native_Contract.namespaceDefaultExpirationFixedTtl
                 ? decoded.defaultTtlMs
                 : nil,
-            expirationOverride: decoded.expirationOverride == 1
+            expirationOverride: decoded.expirationOverride
+                == Smithy_Native_Contract.namespaceOverrideAllowed
                 ? .allowed
                 : .disallowed,
-            defaultEviction: decoded.defaultEviction == 1
+            defaultEviction: decoded.defaultEviction
+                == Smithy_Native_Contract.namespaceDefaultEvictionProtected
                 ? .evictionProtected
                 : .evictable,
-            evictionOverride: decoded.evictionOverride == 1
+            evictionOverride: decoded.evictionOverride
+                == Smithy_Native_Contract.namespaceOverrideAllowed
                 ? .allowed
                 : .disallowed
         )

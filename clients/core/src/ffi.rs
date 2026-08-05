@@ -15,6 +15,25 @@ use std::time::{Duration, Instant};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
 pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
+pub use crate::contract::FfiNamespaceDescriptor;
+pub use crate::contract::{
+    FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
+    FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
+    FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
+    FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
+    FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID,
+    FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
+    FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EVICTION_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EXPIRATION_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_DEFAULT_TTL_MS_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_EVICTION_OVERRIDE_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_EXPIRATION_OVERRIDE_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
+    FFI_NAMESPACE_OVERRIDE_ALLOWED,
+    FFI_NAMESPACE_OVERRIDE_DISALLOWED,
+};
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
@@ -81,33 +100,6 @@ pub struct FfiConnectOptions {
     /// Maximum in-flight lanes; zero selects the core default.
     pub max_in_flight: usize,
 }
-
-/// Decoded namespace descriptor exposed through the stable native ABI.
-///
-/// The descriptor payload itself remains the protocol's canonical variable-length
-/// representation. Native language adapters must use
-/// [`openkache_client_namespace_descriptor_decode`] instead of reimplementing
-/// protocol parsing.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FfiNamespaceDescriptor {
-    pub namespace_id: u64,
-    pub revision: u64,
-    pub default_ttl_ms: u64,
-    /// `0` = no expiry, `1` = fixed TTL.
-    pub default_expiration: u32,
-    /// `0` = disallowed, `1` = allowed.
-    pub expiration_override: u32,
-    /// `0` = evictable, `1` = eviction protected.
-    pub default_eviction: u32,
-    /// `0` = disallowed, `1` = allowed.
-    pub eviction_override: u32,
-}
-
-/// Successful namespace-descriptor decode status.
-pub const FFI_NAMESPACE_DESCRIPTOR_DECODE_OK: u32 = 0;
-/// Invalid input or malformed descriptor status.
-pub const FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID: u32 = 1;
 
 /// Opaque native handle to a dedicated Rust client worker.
 pub struct FfiClient {
@@ -1472,22 +1464,34 @@ pub unsafe extern "C" fn openkache_client_namespace_descriptor_decode(
         return FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
     };
     let (default_expiration, default_ttl_ms) = match descriptor.policy.default_expiration {
-        ExpirationDefault::NoExpiry => (0, 0),
-        ExpirationDefault::FixedTtl { ttl_ms } => (1, ttl_ms),
+        ExpirationDefault::NoExpiry => (FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY, 0),
+        ExpirationDefault::FixedTtl { ttl_ms } => {
+            (FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL, ttl_ms)
+        }
     };
     let decoded = FfiNamespaceDescriptor {
         namespace_id: descriptor.namespace_id,
         revision: descriptor.revision,
         default_ttl_ms,
         default_expiration,
-        expiration_override: u32::from(descriptor.policy.expiration_override
-            == OverridePolicy::Allowed),
-        default_eviction: u32::from(
-            descriptor.policy.default_eviction == EvictionDefault::EvictionProtected,
-        ),
-        eviction_override: u32::from(
-            descriptor.policy.eviction_override == OverridePolicy::Allowed,
-        ),
+        expiration_override: if descriptor.policy.expiration_override == OverridePolicy::Allowed
+        {
+            FFI_NAMESPACE_OVERRIDE_ALLOWED
+        } else {
+            FFI_NAMESPACE_OVERRIDE_DISALLOWED
+        },
+        default_eviction: if descriptor.policy.default_eviction
+            == EvictionDefault::EvictionProtected
+        {
+            FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED
+        } else {
+            FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE
+        },
+        eviction_override: if descriptor.policy.eviction_override == OverridePolicy::Allowed {
+            FFI_NAMESPACE_OVERRIDE_ALLOWED
+        } else {
+            FFI_NAMESPACE_OVERRIDE_DISALLOWED
+        },
     };
     unsafe { output.write(decoded) };
     FFI_NAMESPACE_DESCRIPTOR_DECODE_OK

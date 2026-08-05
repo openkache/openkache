@@ -27,9 +27,9 @@ public:
 
 /// Atomic existence condition for one SET operation.
 enum class Set_Condition : std::uint32_t {
-    Any = OPENKACHE_CLIENT_SET_CONDITION_ANY,
-    If_Absent = OPENKACHE_CLIENT_SET_CONDITION_IF_ABSENT,
-    If_Present = OPENKACHE_CLIENT_SET_CONDITION_IF_PRESENT,
+    Any = OPENKACHE_SMITHY_FFI_SET_CONDITION_ANY,
+    If_Absent = OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_ABSENT,
+    If_Present = OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_PRESENT,
 };
 
 /// Item-level expiration selection for one SET operation.
@@ -48,20 +48,20 @@ enum class Eviction_Mode : Byte {
 
 /// Namespace-level expiration default.
 enum class Namespace_Expiration_Default : std::uint32_t {
-    No_Expiry = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
-    Fixed_Ttl = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
+    No_Expiry = OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
+    Fixed_Ttl = OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
 };
 
 /// Namespace-level capacity-eviction default.
 enum class Namespace_Eviction_Default : std::uint32_t {
-    Evictable = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
-    Eviction_Protected = OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
+    Evictable = OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
+    Eviction_Protected = OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
 };
 
 /// Whether namespace policy defaults may be overridden by individual SETs.
 enum class Namespace_Override_Policy : std::uint32_t {
-    Disallowed = OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED,
-    Allowed = OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED,
+    Disallowed = OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_DISALLOWED,
+    Allowed = OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
 };
 
 /// Namespace policy supplied when creating or replacing a namespace policy.
@@ -92,8 +92,8 @@ struct Namespace_Open_Result {
 
 /// Authenticated-encryption profile for formatted values.
 enum class Encryption : std::uint32_t {
-    Compact = OPENKACHE_CLIENT_ENCRYPTION_COMPACT,
-    Robust = OPENKACHE_CLIENT_ENCRYPTION_ROBUST,
+    Compact = OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT,
+    Robust = OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST,
 };
 
 /// Successful SET outcome.
@@ -105,11 +105,11 @@ enum class Set_Outcome {
 
 /// Best-effort state of the native connection worker.
 enum class Connection_State : std::uint32_t {
-    Connected = OPENKACHE_CLIENT_CONNECTION_CONNECTED,
-    Reconnecting = OPENKACHE_CLIENT_CONNECTION_RECONNECTING,
-    Disconnected = OPENKACHE_CLIENT_CONNECTION_DISCONNECTED,
-    Closed = OPENKACHE_CLIENT_CONNECTION_CLOSED,
-    Unknown = OPENKACHE_CLIENT_CONNECTION_UNKNOWN,
+    Connected = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_CONNECTED,
+    Reconnecting = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
+    Disconnected = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
+    Closed = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_CLOSED,
+    Unknown = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
 };
 
 /// Optional behavior for one SET operation.
@@ -128,7 +128,7 @@ struct Connect_Options {
     std::string server_name;
     /// One DER certificate or PEM chain. Empty selects system trust roots.
     std::vector<Byte> certificate;
-    std::array<Byte, OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES> data_protection_key{};
+    std::array<Byte, OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES> data_protection_key{};
     bool compression_enabled = false;
     std::int32_t compression_level = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL;
     std::size_t minimum_input_size = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES;
@@ -215,7 +215,7 @@ public:
         }
 
         const auto kind = result_kind(result);
-        if (kind != OPENKACHE_CLIENT_RESULT_CONNECTED) {
+        if (kind != OPENKACHE_SMITHY_FFI_RESULT_CONNECTED) {
             const auto message = result_payload(result);
             openkache_client_result_free(result);
             throw Error(message.empty() ? "OpenKache connection failed" : message);
@@ -248,13 +248,13 @@ public:
         }
         const auto state = openkache_client_connection_state(client_);
         switch (state) {
-        case OPENKACHE_CLIENT_CONNECTION_CONNECTED:
+        case OPENKACHE_SMITHY_FFI_CONNECTION_STATE_CONNECTED:
             return Connection_State::Connected;
-        case OPENKACHE_CLIENT_CONNECTION_RECONNECTING:
+        case OPENKACHE_SMITHY_FFI_CONNECTION_STATE_RECONNECTING:
             return Connection_State::Reconnecting;
-        case OPENKACHE_CLIENT_CONNECTION_DISCONNECTED:
+        case OPENKACHE_SMITHY_FFI_CONNECTION_STATE_DISCONNECTED:
             return Connection_State::Disconnected;
-        case OPENKACHE_CLIENT_CONNECTION_CLOSED:
+        case OPENKACHE_SMITHY_FFI_CONNECTION_STATE_CLOSED:
             return Connection_State::Closed;
         default:
             return Connection_State::Unknown;
@@ -264,8 +264,8 @@ public:
     /// Replaces a failed connection without replaying an operation.
     void reconnect() const {
         const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_RECONNECT, {}, {}, Set_Options{});
-        if (result.kind != OPENKACHE_CLIENT_RESULT_OK) {
+            OPENKACHE_SMITHY_FFI_OPERATION_RECONNECT, {}, {}, Set_Options{});
+        if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid RECONNECT outcome");
         }
     }
@@ -273,8 +273,8 @@ public:
     /// Verifies the connection.
     void ping() const {
         const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_PING, {}, {}, Set_Options{});
-        if (result.kind != OPENKACHE_CLIENT_RESULT_OK) {
+            OPENKACHE_SMITHY_OPCODE_PING, {}, {}, Set_Options{});
+        if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid PING outcome");
         }
     }
@@ -282,7 +282,7 @@ public:
     /// Retrieves an application-key value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
         return get_outcome(
-            execute(OPENKACHE_CLIENT_OPERATION_GET, key, {}, Set_Options{}),
+            execute(OPENKACHE_SMITHY_OPCODE_GET, key, {}, Set_Options{}),
             "GET");
     }
 
@@ -297,7 +297,7 @@ public:
         std::span<const Byte> value,
         Set_Options options = {}) const {
         return set_outcome(
-            execute(OPENKACHE_CLIENT_OPERATION_SET, key, value, options),
+            execute(OPENKACHE_SMITHY_OPCODE_SET, key, value, options),
             "SET");
     }
 
@@ -312,7 +312,7 @@ public:
     /// Deletes an application-key value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
         return delete_outcome(
-            execute(OPENKACHE_CLIENT_OPERATION_DELETE, key, {}, Set_Options{}));
+            execute(OPENKACHE_SMITHY_OPCODE_DELETE, key, {}, Set_Options{}));
     }
 
     /// Convenience overload for textual application keys.
@@ -324,7 +324,7 @@ public:
     std::optional<Bytes> get_raw(std::span<const Byte> item_id) const {
         return get_outcome(
             execute(
-                OPENKACHE_CLIENT_OPERATION_GET,
+                OPENKACHE_SMITHY_OPCODE_GET,
                 item_id,
                 {},
                 Set_Options{},
@@ -339,7 +339,7 @@ public:
         Set_Options options = {}) const {
         return set_outcome(
             execute(
-                OPENKACHE_CLIENT_OPERATION_SET,
+                OPENKACHE_SMITHY_OPCODE_SET,
                 item_id,
                 value,
                 options,
@@ -351,7 +351,7 @@ public:
     bool remove_raw(std::span<const Byte> item_id) const {
         return delete_outcome(
             execute(
-                OPENKACHE_CLIENT_OPERATION_DELETE,
+                OPENKACHE_SMITHY_OPCODE_DELETE,
                 item_id,
                 {},
                 Set_Options{},
@@ -361,8 +361,8 @@ public:
     /// Returns the server's JSON statistics document.
     std::string stats() const {
         const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_STATS, {}, {}, Set_Options{});
-        if (result.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
+            OPENKACHE_SMITHY_OPCODE_STATS, {}, {}, Set_Options{});
+        if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_VALUE) {
             throw Error("OpenKache returned an invalid STATS outcome");
         }
         if (result.payload.empty()) {
@@ -376,8 +376,8 @@ public:
     /// Waits for the server durability barrier.
     void sync() const {
         const auto result = execute(
-            OPENKACHE_CLIENT_OPERATION_SYNC, {}, {}, Set_Options{});
-        if (result.kind != OPENKACHE_CLIENT_RESULT_OK) {
+            OPENKACHE_SMITHY_OPCODE_SYNC, {}, {}, Set_Options{});
+        if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid SYNC outcome");
         }
     }
@@ -412,17 +412,18 @@ public:
             client_,
             name_data,
             name.size(),
-            static_cast<Byte>(create_if_missing ? 1u : 0u),
+            static_cast<Byte>(
+                create_if_missing ? OPENKACHE_SMITHY_OPEN_CREATE_IF_MISSING : 0u),
             create_if_missing ? flags : 0,
             create_if_missing ? ttl_ms : 0);
         const auto operation = take_result(result);
-        if (operation.kind != OPENKACHE_CLIENT_RESULT_OK
-            && operation.kind != OPENKACHE_CLIENT_RESULT_CREATED) {
+        if (operation.kind != OPENKACHE_SMITHY_FFI_RESULT_OK
+            && operation.kind != OPENKACHE_SMITHY_FFI_RESULT_CREATED) {
             throw Error("OpenKache returned an invalid NAMESPACE_OPEN outcome");
         }
         return {
             decode_namespace_descriptor(operation.payload),
-            operation.kind == OPENKACHE_CLIENT_RESULT_CREATED,
+            operation.kind == OPENKACHE_SMITHY_FFI_RESULT_CREATED,
         };
     }
 
@@ -439,7 +440,7 @@ public:
             flags,
             ttl_ms);
         const auto operation = take_result(result);
-        if (operation.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
+        if (operation.kind != OPENKACHE_SMITHY_FFI_RESULT_VALUE) {
             throw Error("OpenKache returned an invalid NAMESPACE_UPDATE_POLICY outcome");
         }
         return decode_namespace_descriptor(operation.payload);
@@ -454,7 +455,7 @@ public:
             namespace_id,
             expected_revision);
         const auto operation = take_result(result);
-        if (operation.kind != OPENKACHE_CLIENT_RESULT_OK) {
+        if (operation.kind != OPENKACHE_SMITHY_FFI_RESULT_OK) {
             throw Error("OpenKache returned an invalid NAMESPACE_DELETE outcome");
         }
     }
@@ -468,10 +469,10 @@ private:
     static std::optional<Bytes> get_outcome(
         Operation_Result result,
         const char* operation) {
-        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_FOUND) {
+        if (result.kind == OPENKACHE_SMITHY_FFI_RESULT_NOT_FOUND) {
             return std::nullopt;
         }
-        if (result.kind != OPENKACHE_CLIENT_RESULT_VALUE) {
+        if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_VALUE) {
             throw Error(
                 std::string("OpenKache returned an invalid ") + operation +
                 " outcome");
@@ -483,11 +484,11 @@ private:
         const Operation_Result& result,
         const char* operation) {
         switch (result.kind) {
-        case OPENKACHE_CLIENT_RESULT_CREATED:
+        case OPENKACHE_SMITHY_FFI_RESULT_CREATED:
             return Set_Outcome::Created;
-        case OPENKACHE_CLIENT_RESULT_REPLACED:
+        case OPENKACHE_SMITHY_FFI_RESULT_REPLACED:
             return Set_Outcome::Replaced;
-        case OPENKACHE_CLIENT_RESULT_NOT_STORED:
+        case OPENKACHE_SMITHY_FFI_RESULT_NOT_STORED:
             return Set_Outcome::Not_Stored;
         default:
             throw Error(
@@ -497,10 +498,10 @@ private:
     }
 
     static bool delete_outcome(const Operation_Result& result) {
-        if (result.kind == OPENKACHE_CLIENT_RESULT_DELETED) {
+        if (result.kind == OPENKACHE_SMITHY_FFI_RESULT_DELETED) {
             return true;
         }
-        if (result.kind == OPENKACHE_CLIENT_RESULT_NOT_DELETED) {
+        if (result.kind == OPENKACHE_SMITHY_FFI_RESULT_NOT_DELETED) {
             return false;
         }
         throw Error("OpenKache returned an invalid DELETE outcome");
@@ -557,27 +558,27 @@ private:
             data,
             payload.size(),
             &decoded);
-        if (status != OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK) {
+        if (status != OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK) {
             throw Error("OpenKache returned an invalid namespace descriptor");
         }
         Namespace_Policy policy;
         policy.default_expiration = decoded.default_expiration
-            == OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
+            == OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
             ? Namespace_Expiration_Default::Fixed_Ttl
             : Namespace_Expiration_Default::No_Expiry;
         if (policy.default_expiration == Namespace_Expiration_Default::Fixed_Ttl) {
             policy.default_ttl_ms = decoded.default_ttl_ms;
         }
         policy.expiration_override = decoded.expiration_override
-            == OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED
+            == OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED
             ? Namespace_Override_Policy::Allowed
             : Namespace_Override_Policy::Disallowed;
         policy.default_eviction = decoded.default_eviction
-            == OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED
+            == OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED
             ? Namespace_Eviction_Default::Eviction_Protected
             : Namespace_Eviction_Default::Evictable;
         policy.eviction_override = decoded.eviction_override
-            == OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED
+            == OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED
             ? Namespace_Override_Policy::Allowed
             : Namespace_Override_Policy::Disallowed;
         return {decoded.namespace_id, decoded.revision, policy};
@@ -607,7 +608,7 @@ private:
             throw Error("OpenKache operation returned a null result");
         }
         const auto kind = result_kind(result);
-        if (kind == OPENKACHE_CLIENT_RESULT_ERROR) {
+        if (kind == OPENKACHE_SMITHY_FFI_RESULT_ERROR) {
             const auto message = result_payload(result);
             openkache_client_result_free(result);
             throw Error(message.empty() ? "OpenKache operation failed" : message);

@@ -387,15 +387,7 @@ type nativeResult struct {
 	data []byte
 }
 
-type nativeNamespaceDescriptor struct {
-	namespaceID        uint64
-	revision           uint64
-	defaultTTLMillis   uint64
-	defaultExpiration  uint32
-	expirationOverride uint32
-	defaultEviction    uint32
-	evictionOverride   uint32
-}
+type nativeNamespaceDescriptor = SmithyFFINamespaceDescriptor
 
 type nativeClient interface {
 	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
