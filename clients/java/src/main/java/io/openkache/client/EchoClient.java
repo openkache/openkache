@@ -27,8 +27,6 @@ import java.util.concurrent.TimeUnit;
  * client core.</p>
  */
 public final class EchoClient implements OpenKacheClient, AutoCloseable {
-    private record NativeResult(int kind, byte[] payload, Pointer client) {}
-
     private static final class NativeBuffer implements AutoCloseable {
         private final Memory memory;
 
@@ -137,229 +135,19 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    @Override
-    public CompletionStage<PingOutput> ping(PingInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            NativeResult result = execute(
-                SmithyContract.OPERATION_PING,
-                new byte[0],
-                new byte[0],
-                0,
-                0);
-            requireKind(result, SmithyContract.RESULT_OK, "PING");
-            return new PingOutput();
-        });
-    }
-
-    @Override
-    public CompletionStage<EchoOutput> echo(EchoInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> new EchoOutput(echoText(input.message())));
-    }
-
     /** Sends one message and decodes the strict UTF-8 response. */
     public CompletionStage<String> echo(String message) {
         return echo(new EchoInput(Objects.requireNonNull(message, "message")))
             .thenApply(EchoOutput::message);
     }
-
     @Override
-    public CompletionStage<GetOutput> get(GetInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            NativeResult result = executeScoped(
-                SmithyContract.OPERATION_GET,
-                input.namespaceId(),
-                input.itemId(),
-                new byte[0],
-                0,
-                0);
-            if (result.kind() == SmithyContract.RESULT_NOT_FOUND) {
-                return new GetOutput(null);
-            }
-            requireKind(result, SmithyContract.RESULT_VALUE, "GET");
-            return new GetOutput(result.payload());
-        });
-    }
-
-    @Override
-    public CompletionStage<SetOutput> set(SetInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            SetFlags flags = setFlags(input);
-            NativeResult result = executeScoped(
-                SmithyContract.OPERATION_SET,
-                input.namespaceId(),
-                input.itemId(),
-                input.value(),
-                flags.flags(),
-                flags.ttlMilliseconds());
-            SetOutcome outcome;
-            if (result.kind() == SmithyContract.RESULT_CREATED) {
-                outcome = SetOutcome.CREATED;
-            } else if (result.kind() == SmithyContract.RESULT_REPLACED) {
-                outcome = SetOutcome.REPLACED;
-            } else if (result.kind() == SmithyContract.RESULT_NOT_STORED) {
-                outcome = SetOutcome.NOT_STORED;
-            } else {
-                throw unexpectedKind("SET", result.kind());
-            }
-            return new SetOutput(outcome);
-        });
-    }
-
-    @Override
-    public CompletionStage<DeleteOutput> delete(DeleteInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            NativeResult result = executeScoped(
-                SmithyContract.OPERATION_DELETE,
-                input.namespaceId(),
-                input.itemId(),
-                new byte[0],
-                0,
-                0);
-            if (result.kind() == SmithyContract.RESULT_DELETED) {
-                return new DeleteOutput(true);
-            }
-            if (result.kind() == SmithyContract.RESULT_NOT_DELETED) {
-                return new DeleteOutput(false);
-            }
-            throw unexpectedKind("DELETE", result.kind());
-        });
-    }
-
-    @Override
-    public CompletionStage<StatsOutput> stats(StatsInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            NativeResult result = executeScoped(
-                SmithyContract.OPERATION_STATS,
-                input.namespaceId(),
-                new byte[0],
-                new byte[0],
-                0,
-                0);
-            requireKind(result, SmithyContract.RESULT_VALUE, "STATS");
-            return new StatsOutput(decodeUtf8(result.payload(), "STATS"));
-        });
-    }
-
-    @Override
-    public CompletionStage<SyncOutput> sync(SyncInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            NativeResult result = executeScoped(
-                SmithyContract.OPERATION_SYNC,
-                input.namespaceId(),
-                new byte[0],
-                new byte[0],
-                0,
-                0);
-            requireKind(result, SmithyContract.RESULT_OK, "SYNC");
-            return new SyncOutput();
-        });
-    }
-
-    @Override
-    public CompletionStage<NamespaceOpenOutput> namespaceOpen(NamespaceOpenInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            byte[] name = input.name().getBytes(StandardCharsets.UTF_8);
-            if (name.length > SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
-                throw new EchoClientException("namespace name exceeds protocol limit");
-            }
-            PolicyFlags policy = policyFlags(input.policy(), input.createIfMissing());
-            try (NativeBuffer nameBuffer = new NativeBuffer(name)) {
-                NativeResult result;
-                synchronized (lifecycle) {
-                    ensureOpen();
-                    result = readResult(
-                        nativeApi,
-                        nativeApi.openkache_client_namespace_open(
-                            handle,
-                            nameBuffer.pointer(),
-                            nameBuffer.length(),
-                            (byte) (input.createIfMissing() ? 1 : 0),
-                            (byte) policy.flags(),
-                            policy.ttlMilliseconds()),
-                        false);
-                }
-                boolean created = result.kind() == SmithyContract.RESULT_CREATED;
-                if (!created && result.kind() != SmithyContract.RESULT_OK) {
-                    throw unexpectedKind("NAMESPACE_OPEN", result.kind());
-                }
-                return new NamespaceOpenOutput(
-                    decodeDescriptor(result.payload()),
-                    created);
-            }
-        });
-    }
-
-    @Override
-    public CompletionStage<NamespaceUpdatePolicyOutput> namespaceUpdatePolicy(
-        NamespaceUpdatePolicyInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            PolicyFlags policy = policyFlags(input.policy(), true);
-            NativeResult result;
-            synchronized (lifecycle) {
-                ensureOpen();
-                result = readResult(
-                    nativeApi,
-                    nativeApi.openkache_client_namespace_update_policy(
-                        handle,
-                        input.namespaceId(),
-                        input.expectedRevision(),
-                        (byte) policy.flags(),
-                        policy.ttlMilliseconds()),
-                    false);
-            }
-            requireKind(result, SmithyContract.RESULT_VALUE, "NAMESPACE_UPDATE_POLICY");
-            return new NamespaceUpdatePolicyOutput(decodeDescriptor(result.payload()));
-        });
-    }
-
-    @Override
-    public CompletionStage<NamespaceDeleteOutput> namespaceDelete(NamespaceDeleteInput input) {
-        Objects.requireNonNull(input, "input");
-        return submit(() -> {
-            NativeResult result;
-            synchronized (lifecycle) {
-                ensureOpen();
-                result = readResult(
-                    nativeApi,
-                    nativeApi.openkache_client_namespace_delete(
-                        handle,
-                        input.namespaceId(),
-                        input.expectedRevision()),
-                    false);
-            }
-            requireKind(result, SmithyContract.RESULT_OK, "NAMESPACE_DELETE");
-            return new NamespaceDeleteOutput();
-        });
-    }
-
-    private CompletionStage<Void> submit(Runnable operation) {
-        return CompletableFuture.runAsync(operation, executor);
-    }
-
-    private <T> CompletionStage<T> submit(java.util.function.Supplier<T> operation) {
+    public <T> CompletionStage<T> smithySubmit(
+        java.util.function.Supplier<T> operation) {
         return CompletableFuture.supplyAsync(operation, executor);
     }
 
-    private String echoText(String message) {
-        byte[] bytes = execute(
-            SmithyContract.OPERATION_ECHO,
-            new byte[0],
-            message.getBytes(StandardCharsets.UTF_8),
-            0,
-            0).payload();
-        return decodeUtf8(bytes, "ECHO");
-    }
-
-    private NativeResult execute(
+    @Override
+    public NativeResult smithyExecute(
         int operation,
         byte[] applicationKey,
         byte[] value,
@@ -388,7 +176,8 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private NativeResult executeScoped(
+    @Override
+    public NativeResult smithyExecuteScoped(
         int operation,
         long namespaceId,
         byte[] itemId,
@@ -419,10 +208,60 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private Pointer requireHandle() {
+    @Override
+    public NativeResult smithyNamespaceOpen(
+        byte[] name,
+        boolean createIfMissing,
+        int policyFlags,
+        long ttlMilliseconds) {
+        try (NativeBuffer nameBuffer = new NativeBuffer(name)) {
+            synchronized (lifecycle) {
+                ensureOpen();
+                return readResult(
+                    nativeApi,
+                    nativeApi.openkache_client_namespace_open(
+                        handle,
+                        nameBuffer.pointer(),
+                        nameBuffer.length(),
+                        (byte) (createIfMissing ? 1 : 0),
+                        (byte) policyFlags,
+                        ttlMilliseconds),
+                    false);
+            }
+        }
+    }
+
+    @Override
+    public NativeResult smithyNamespaceUpdatePolicy(
+        long namespaceId,
+        long expectedRevision,
+        int policyFlags,
+        long ttlMilliseconds) {
         synchronized (lifecycle) {
             ensureOpen();
-            return handle;
+            return readResult(
+                nativeApi,
+                nativeApi.openkache_client_namespace_update_policy(
+                    handle,
+                    namespaceId,
+                    expectedRevision,
+                    (byte) policyFlags,
+                    ttlMilliseconds),
+                false);
+        }
+    }
+
+    @Override
+    public NativeResult smithyNamespaceDelete(long namespaceId, long expectedRevision) {
+        synchronized (lifecycle) {
+            ensureOpen();
+            return readResult(
+                nativeApi,
+                nativeApi.openkache_client_namespace_delete(
+                    handle,
+                    namespaceId,
+                    expectedRevision),
+                false);
         }
     }
 
@@ -437,85 +276,8 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private SetFlags setFlags(SetInput input) {
-        int flags = switch (input.condition() == null ? SetCondition.ANY : input.condition()) {
-            case ANY -> SmithyContract.SET_CONDITION_ANY;
-            case IF_ABSENT -> SmithyContract.SET_CONDITION_IF_ABSENT;
-            case IF_PRESENT -> SmithyContract.SET_CONDITION_IF_PRESENT;
-        };
-        ExpirationMode expiration = input.expirationMode() == null
-            ? (input.ttlMilliseconds() == null
-                ? ExpirationMode.INHERIT
-                : ExpirationMode.EXPLICIT_TTL)
-            : input.expirationMode();
-        switch (expiration) {
-            case INHERIT -> {
-                if (input.ttlMilliseconds() != null) {
-                    throw new IllegalArgumentException("INHERIT cannot carry a TTL");
-                }
-                flags |= SmithyContract.SET_INHERIT_EXPIRATION_BITS;
-            }
-            case NO_EXPIRY -> {
-                if (input.ttlMilliseconds() != null) {
-                    throw new IllegalArgumentException("NO_EXPIRY cannot carry a TTL");
-                }
-                flags |= SmithyContract.SET_NO_EXPIRY_BITS;
-            }
-            case EXPLICIT_TTL -> {
-                if (input.ttlMilliseconds() == null || input.ttlMilliseconds() <= 0) {
-                    throw new IllegalArgumentException("EXPLICIT_TTL requires a positive TTL");
-                }
-                flags |= SmithyContract.SET_EXPLICIT_TTL_BITS;
-            }
-        }
-        EvictionMode eviction = input.evictionMode() == null
-            ? EvictionMode.INHERIT
-            : input.evictionMode();
-        flags |= switch (eviction) {
-            case INHERIT -> SmithyContract.SET_INHERIT_EVICTION_BITS;
-            case EVICTABLE -> SmithyContract.SET_EVICTABLE_BITS;
-            case EVICTION_PROTECTED -> SmithyContract.SET_EVICTION_PROTECTED_BITS;
-        };
-        if (input.value().length > SmithyContract.MAX_VALUE_BYTES) {
-            throw new IllegalArgumentException("value exceeds protocol limit");
-        }
-        return new SetFlags(flags, input.ttlMilliseconds() == null ? 0 : input.ttlMilliseconds());
-    }
-
-    private PolicyFlags policyFlags(NamespacePolicy policy, boolean required) {
-        if (required && policy == null) {
-            throw new IllegalArgumentException("namespace policy is required");
-        }
-        if (!required && policy != null) {
-            throw new IllegalArgumentException("namespace policy requires createIfMissing");
-        }
-        if (policy == null) {
-            return new PolicyFlags(0, 0);
-        }
-        int flags = switch (policy.defaultExpiration()) {
-            case NO_EXPIRY -> SmithyContract.POLICY_NO_EXPIRY_BITS;
-            case FIXED_TTL -> SmithyContract.POLICY_FIXED_TTL_BITS;
-        };
-        long ttl = policy.defaultTtlMilliseconds() == null ? 0 : policy.defaultTtlMilliseconds();
-        if (policy.defaultExpiration() == ExpirationDefault.FIXED_TTL && ttl <= 0) {
-            throw new IllegalArgumentException("FIXED_TTL requires a positive TTL");
-        }
-        if (policy.defaultExpiration() == ExpirationDefault.NO_EXPIRY && ttl != 0) {
-            throw new IllegalArgumentException("NO_EXPIRY cannot carry a TTL");
-        }
-        if (policy.expirationOverride() == OverridePolicy.ALLOWED) {
-            flags |= SmithyContract.POLICY_EXPIRATION_OVERRIDE_FLAG;
-        }
-        if (policy.defaultEviction() == EvictionDefault.EVICTION_PROTECTED) {
-            flags |= SmithyContract.POLICY_EVICTION_PROTECTED_FLAG;
-        }
-        if (policy.evictionOverride() == OverridePolicy.ALLOWED) {
-            flags |= SmithyContract.POLICY_EVICTION_OVERRIDE_FLAG;
-        }
-        return new PolicyFlags(flags, ttl);
-    }
-
-    private NamespaceDescriptor decodeDescriptor(byte[] payload) {
+    @Override
+    public NamespaceDescriptor smithyDecodeDescriptor(byte[] payload) {
         try (NativeBuffer buffer = new NativeBuffer(payload)) {
             SmithyNativeDescriptor nativeDescriptor = new SmithyNativeDescriptor();
             int status = nativeApi.openkache_client_namespace_descriptor_decode(
@@ -553,7 +315,8 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private static String decodeUtf8(byte[] payload, String operation) {
+    @Override
+    public String smithyDecodeUtf8(byte[] payload, String operation) {
         try {
             CharBuffer decoded = StandardCharsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)
@@ -563,16 +326,6 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         } catch (CharacterCodingException error) {
             throw new EchoClientException(operation + " response is not valid UTF-8", error);
         }
-    }
-
-    private static void requireKind(NativeResult result, int expected, String operation) {
-        if (result.kind() != expected) {
-            throw unexpectedKind(operation, result.kind());
-        }
-    }
-
-    private static EchoClientException unexpectedKind(String operation, int kind) {
-        return new EchoClientException(operation + " returned unexpected native result " + kind);
     }
 
     private void ensureOpen() {
@@ -639,7 +392,4 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private record SetFlags(int flags, long ttlMilliseconds) {}
-
-    private record PolicyFlags(int flags, long ttlMilliseconds) {}
 }

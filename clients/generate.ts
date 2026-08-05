@@ -372,6 +372,9 @@ const GENERATED_OUTPUTS = {
   java_native_connect_options: generated_path(
     "clients/java/src/main/java/io/openkache/client/generated_local/SmithyNativeConnectOptions.java",
   ),
+  java_operations: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated_local/SmithyGeneratedOperations.java",
+  ),
   kotlin_api: generated_path(
     "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyApi.kt",
   ),
@@ -381,9 +384,13 @@ const GENERATED_OUTPUTS = {
   kotlin_native_api: generated_path(
     "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyNativeApi.kt",
   ),
+  kotlin_operations: generated_path(
+    "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyGeneratedOperations.kt",
+  ),
   dart_api: generated_path("clients/dart/lib/generated_local/smithy_api.dart"),
   dart_contract: generated_path("clients/dart/lib/generated_local/smithy_contract.dart"),
   dart_native_api: generated_path("clients/dart/lib/generated_local/smithy_native_api.dart"),
+  dart_operations: generated_path("clients/dart/lib/generated_local/smithy_operations.dart"),
 } as const
 
 function object_value(value: unknown, location: string): Json_Object {
@@ -3939,6 +3946,980 @@ abstract interface class SmithyOpenKacheApi implements ${interfaces} {}
 `
 }
 
+function managed_operation_entries(
+  contract: Client_Contract,
+): readonly Managed_Api_Operation[] {
+  return contract.api.operations.filter(
+    (operation): operation is Api_Operation & {
+      readonly contract: Api_Operation_Contract
+    } => operation.contract !== undefined,
+  )
+}
+
+function managed_operation_constant(
+  operation: Api_Operation,
+  language: "java" | "kotlin" | "dart",
+): string {
+  const identifier = snake_case(operation.name).toUpperCase()
+  if (language === "dart") {
+    return `smithyOperation${pascal_case(snake_case(operation.name))}`
+  }
+  return `SmithyContract.OPERATION_${identifier}`
+}
+
+function managed_operation_label(operation: Api_Operation): string {
+  return snake_case(operation.name).toUpperCase()
+}
+
+type Managed_Api_Operation = Api_Operation & {
+  readonly contract: Api_Operation_Contract
+}
+
+function render_java_operation_method(operation: Managed_Api_Operation): string {
+  const operation_constant = managed_operation_constant(operation, "java")
+  const operation_label = managed_operation_label(operation)
+  const method_name = lower_camel_case(operation.name)
+  switch (operation.contract.response_kind) {
+    case "pong":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecute(
+                ${operation_constant},
+                new byte[0],
+                new byte[0],
+                0,
+                0);
+            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
+            return new ${operation.output}();
+        });
+    }`
+    case "echo":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecute(
+                ${operation_constant},
+                new byte[0],
+                input.message().getBytes(StandardCharsets.UTF_8),
+                0,
+                0);
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            return new ${operation.output}(
+                smithyDecodeUtf8(result.payload(), "${operation_label}"));
+        });
+    }`
+    case "value":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.namespaceId(),
+                input.itemId(),
+                new byte[0],
+                0,
+                0);
+            if (result.kind() == SmithyContract.RESULT_NOT_FOUND) {
+                return new ${operation.output}(null);
+            }
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            return new ${operation.output}(result.payload());
+        });
+    }`
+    case "set_outcome":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            SmithySetFlags flags = smithySetFlags(input);
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.namespaceId(),
+                input.itemId(),
+                input.value(),
+                flags.flags(),
+                flags.ttlMilliseconds());
+            SetOutcome outcome = switch (result.kind()) {
+                case SmithyContract.RESULT_CREATED -> SetOutcome.CREATED;
+                case SmithyContract.RESULT_REPLACED -> SetOutcome.REPLACED;
+                case SmithyContract.RESULT_NOT_STORED -> SetOutcome.NOT_STORED;
+                default -> throw smithyUnexpectedKind("${operation_label}", result.kind());
+            };
+            return new ${operation.output}(outcome);
+        });
+    }`
+    case "delete_outcome":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.namespaceId(),
+                input.itemId(),
+                new byte[0],
+                0,
+                0);
+            if (result.kind() == SmithyContract.RESULT_DELETED) {
+                return new ${operation.output}(true);
+            }
+            if (result.kind() == SmithyContract.RESULT_NOT_DELETED) {
+                return new ${operation.output}(false);
+            }
+            throw smithyUnexpectedKind("${operation_label}", result.kind());
+        });
+    }`
+    case "stats_json":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.namespaceId(),
+                new byte[0],
+                new byte[0],
+                0,
+                0);
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            return new ${operation.output}(
+                smithyDecodeUtf8(result.payload(), "${operation_label}"));
+        });
+    }`
+    case "empty":
+      if (operation.contract.scope === "namespace") {
+        return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.namespaceId(),
+                new byte[0],
+                new byte[0],
+                0,
+                0);
+            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
+            return new ${operation.output}();
+        });
+    }`
+      }
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyNamespaceDelete(
+                input.namespaceId(),
+                input.expectedRevision());
+            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
+            return new ${operation.output}();
+        });
+    }`
+    case "namespace_descriptor":
+      if (operation.name === "NamespaceOpen") {
+        return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            byte[] name = input.name().getBytes(StandardCharsets.UTF_8);
+            if (name.length > SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
+                throw new EchoClientException("namespace name exceeds protocol limit");
+            }
+            SmithyPolicyFlags policy = smithyPolicyFlags(input.policy(), input.createIfMissing());
+            NativeResult result = smithyNamespaceOpen(
+                name,
+                input.createIfMissing(),
+                policy.flags(),
+                policy.ttlMilliseconds());
+            boolean created = result.kind() == SmithyContract.RESULT_CREATED;
+            if (!created && result.kind() != SmithyContract.RESULT_OK) {
+                throw smithyUnexpectedKind("${operation_label}", result.kind());
+            }
+            return new ${operation.output}(
+                smithyDecodeDescriptor(result.payload()),
+                created);
+        });
+    }`
+      }
+      if (operation.name === "NamespaceUpdatePolicy") {
+        return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            SmithyPolicyFlags policy = smithyPolicyFlags(input.policy(), true);
+            NativeResult result = smithyNamespaceUpdatePolicy(
+                input.namespaceId(),
+                input.expectedRevision(),
+                policy.flags(),
+                policy.ttlMilliseconds());
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            return new ${operation.output}(smithyDecodeDescriptor(result.payload()));
+        });
+    }`
+      }
+      throw new Error(`unsupported generated Java namespace operation ${operation.name}`)
+    default:
+      throw new Error(
+        `unsupported generated Java response kind ${operation.contract.response_kind}`,
+      )
+  }
+}
+
+export function render_java_operations(contract: Client_Contract): string {
+  const methods = managed_operation_entries(contract)
+    .map(render_java_operation_method)
+    .join("\n\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client;
+
+import io.openkache.client.generated_local.SmithyContract;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Objects;
+import java.util.concurrent.CompletionStage;
+import java.util.function.Supplier;
+
+/** Generated operation implementations backed by the shared native contract. */
+public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
+    record SmithySetFlags(int flags, long ttlMilliseconds) {}
+
+    record SmithyPolicyFlags(int flags, long ttlMilliseconds) {}
+
+    <T> CompletionStage<T> smithySubmit(Supplier<T> operation);
+
+    NativeResult smithyExecute(
+        int operation,
+        byte[] applicationKey,
+        byte[] value,
+        int setCondition,
+        long ttlMilliseconds);
+
+    NativeResult smithyExecuteScoped(
+        int operation,
+        long namespaceId,
+        byte[] itemId,
+        byte[] value,
+        int flags,
+        long ttlMilliseconds);
+
+    NativeResult smithyNamespaceOpen(
+        byte[] name,
+        boolean createIfMissing,
+        int policyFlags,
+        long ttlMilliseconds);
+
+    NativeResult smithyNamespaceUpdatePolicy(
+        long namespaceId,
+        long expectedRevision,
+        int policyFlags,
+        long ttlMilliseconds);
+
+    NativeResult smithyNamespaceDelete(long namespaceId, long expectedRevision);
+
+    NamespaceDescriptor smithyDecodeDescriptor(byte[] payload);
+
+    String smithyDecodeUtf8(byte[] payload, String operation);
+
+    ${methods}
+
+    private static SmithySetFlags smithySetFlags(SetInput input) {
+        int flags = switch (input.condition() == null ? SetCondition.ANY : input.condition()) {
+            case ANY -> SmithyContract.SET_CONDITION_ANY;
+            case IF_ABSENT -> SmithyContract.SET_CONDITION_IF_ABSENT;
+            case IF_PRESENT -> SmithyContract.SET_CONDITION_IF_PRESENT;
+        };
+        ExpirationMode expiration = input.expirationMode()
+            == null
+            ? (input.ttlMilliseconds() == null
+                ? ExpirationMode.INHERIT
+                : ExpirationMode.EXPLICIT_TTL)
+            : input.expirationMode();
+        switch (expiration) {
+            case INHERIT -> {
+                if (input.ttlMilliseconds() != null) {
+                    throw new IllegalArgumentException("INHERIT cannot carry a TTL");
+                }
+                flags |= SmithyContract.SET_INHERIT_EXPIRATION_BITS;
+            }
+            case NO_EXPIRY -> {
+                if (input.ttlMilliseconds() != null) {
+                    throw new IllegalArgumentException("NO_EXPIRY cannot carry a TTL");
+                }
+                flags |= SmithyContract.SET_NO_EXPIRY_BITS;
+            }
+            case EXPLICIT_TTL -> {
+                if (input.ttlMilliseconds() == null || input.ttlMilliseconds() <= 0) {
+                    throw new IllegalArgumentException("EXPLICIT_TTL requires a positive TTL");
+                }
+                flags |= SmithyContract.SET_EXPLICIT_TTL_BITS;
+            }
+        }
+        flags |= switch (input.evictionMode() == null
+            ? EvictionMode.INHERIT
+            : input.evictionMode()) {
+            case INHERIT -> SmithyContract.SET_INHERIT_EVICTION_BITS;
+            case EVICTABLE -> SmithyContract.SET_EVICTABLE_BITS;
+            case EVICTION_PROTECTED -> SmithyContract.SET_EVICTION_PROTECTED_BITS;
+        };
+        if (input.value().length > SmithyContract.MAX_VALUE_BYTES) {
+            throw new IllegalArgumentException("value exceeds protocol limit");
+        }
+        return new SmithySetFlags(
+            flags,
+            input.ttlMilliseconds() == null ? 0 : input.ttlMilliseconds());
+    }
+
+    private static SmithyPolicyFlags smithyPolicyFlags(
+        NamespacePolicy policy,
+        boolean required) {
+        if (required && policy == null) {
+            throw new IllegalArgumentException("namespace policy is required");
+        }
+        if (!required && policy != null) {
+            throw new IllegalArgumentException("namespace policy requires createIfMissing");
+        }
+        if (policy == null) {
+            return new SmithyPolicyFlags(0, 0);
+        }
+        int flags = switch (policy.defaultExpiration()) {
+            case NO_EXPIRY -> SmithyContract.POLICY_NO_EXPIRY_BITS;
+            case FIXED_TTL -> SmithyContract.POLICY_FIXED_TTL_BITS;
+        };
+        long ttl = policy.defaultTtlMilliseconds() == null
+            ? 0
+            : policy.defaultTtlMilliseconds();
+        if (policy.defaultExpiration() == ExpirationDefault.FIXED_TTL && ttl <= 0) {
+            throw new IllegalArgumentException("FIXED_TTL requires a positive TTL");
+        }
+        if (policy.defaultExpiration() == ExpirationDefault.NO_EXPIRY && ttl != 0) {
+            throw new IllegalArgumentException("NO_EXPIRY cannot carry a TTL");
+        }
+        if (policy.expirationOverride() == OverridePolicy.ALLOWED) {
+            flags |= SmithyContract.POLICY_EXPIRATION_OVERRIDE_FLAG;
+        }
+        if (policy.defaultEviction() == EvictionDefault.EVICTION_PROTECTED) {
+            flags |= SmithyContract.POLICY_EVICTION_PROTECTED_FLAG;
+        }
+        if (policy.evictionOverride() == OverridePolicy.ALLOWED) {
+            flags |= SmithyContract.POLICY_EVICTION_OVERRIDE_FLAG;
+        }
+        return new SmithyPolicyFlags(flags, ttl);
+    }
+
+    private static void smithyRequireKind(
+        NativeResult result,
+        int expected,
+        String operation) {
+        if (result.kind() != expected) {
+            throw smithyUnexpectedKind(operation, result.kind());
+        }
+    }
+
+    private static EchoClientException smithyUnexpectedKind(String operation, int kind) {
+        return new EchoClientException(
+            operation + " returned unexpected native result " + kind);
+    }
+}
+`
+}
+
+function render_kotlin_operation_method(operation: Managed_Api_Operation): string {
+  const operation_constant = managed_operation_constant(operation, "kotlin")
+  const operation_label = managed_operation_label(operation)
+  const method_name = lower_camel_case(operation.name)
+  const prefix = `    override suspend fun ${method_name}(input: ${operation.input}): ${operation.output} =
+        withContext(Dispatchers.IO) {
+            requireNotNull(input)
+`
+  switch (operation.contract.response_kind) {
+    case "pong":
+      return `${prefix}            val result = smithyInvoke(
+                ${operation_constant},
+                byteArrayOf(),
+                byteArrayOf(),
+            )
+            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
+            ${operation.output}()
+        }`
+    case "echo":
+      return `${prefix}            val result = smithyInvoke(
+                ${operation_constant},
+                byteArrayOf(),
+                input.message.toByteArray(),
+            )
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
+            ${operation.output}(
+                message = smithyDecodeUtf8(result.payload, "${operation_label}"),
+            )
+        }`
+    case "value":
+      return `${prefix}            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.namespaceId,
+                input.itemId,
+                byteArrayOf(),
+            )
+            when (result.kind) {
+                SmithyContract.RESULT_VALUE -> ${operation.output}(value = result.payload)
+                SmithyContract.RESULT_NOT_FOUND -> ${operation.output}(value = null)
+                else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
+            }
+        }`
+    case "set_outcome":
+      return `${prefix}            val flags = smithySetFlags(input)
+            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.namespaceId,
+                input.itemId,
+                input.value,
+                flags.first,
+                flags.second,
+            )
+            val outcome = when (result.kind) {
+                SmithyContract.RESULT_CREATED -> SetOutcome.Created
+                SmithyContract.RESULT_REPLACED -> SetOutcome.Replaced
+                SmithyContract.RESULT_NOT_STORED -> SetOutcome.NotStored
+                else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
+            }
+            ${operation.output}(outcome = outcome)
+        }`
+    case "delete_outcome":
+      return `${prefix}            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.namespaceId,
+                input.itemId,
+                byteArrayOf(),
+            )
+            when (result.kind) {
+                SmithyContract.RESULT_DELETED -> ${operation.output}(deleted = true)
+                SmithyContract.RESULT_NOT_DELETED -> ${operation.output}(deleted = false)
+                else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
+            }
+        }`
+    case "stats_json":
+      return `${prefix}            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.namespaceId,
+                byteArrayOf(),
+                byteArrayOf(),
+            )
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
+            ${operation.output}(
+                json = smithyDecodeUtf8(result.payload, "${operation_label}"),
+            )
+        }`
+    case "empty":
+      if (operation.contract.scope === "namespace") {
+        return `${prefix}            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.namespaceId,
+                byteArrayOf(),
+                byteArrayOf(),
+            )
+            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
+            ${operation.output}()
+        }`
+      }
+      return `${prefix}            val result = smithyNamespaceDelete(
+                input.namespaceId,
+                input.expectedRevision,
+            )
+            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
+            ${operation.output}()
+        }`
+    case "namespace_descriptor":
+      if (operation.name === "NamespaceOpen") {
+        return `${prefix}            val name = input.name.toByteArray(StandardCharsets.UTF_8)
+            require(name.size <= SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
+                "namespace name exceeds protocol limit"
+            }
+            val policy = smithyPolicyFlags(input.policy, input.createIfMissing)
+            val result = smithyNamespaceOpen(
+                name,
+                input.createIfMissing,
+                policy.first,
+                policy.second,
+            )
+            val created = result.kind == SmithyContract.RESULT_CREATED
+            if (!created && result.kind != SmithyContract.RESULT_OK) {
+                throw smithyUnexpectedKind("${operation_label}", result.kind)
+            }
+            ${operation.output}(
+                descriptor = smithyDecodeDescriptor(result.payload),
+                created = created,
+            )
+        }`
+      }
+      if (operation.name === "NamespaceUpdatePolicy") {
+        return `${prefix}            val policy = smithyPolicyFlags(input.policy, true)
+            val result = smithyNamespaceUpdatePolicy(
+                input.namespaceId,
+                input.expectedRevision,
+                policy.first,
+                policy.second,
+            )
+            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
+            ${operation.output}(descriptor = smithyDecodeDescriptor(result.payload))
+        }`
+      }
+      throw new Error(`unsupported generated Kotlin namespace operation ${operation.name}`)
+    default:
+      throw new Error(
+        `unsupported generated Kotlin response kind ${operation.contract.response_kind}`,
+      )
+  }
+}
+
+export function render_kotlin_operations(contract: Client_Contract): string {
+  const methods = managed_operation_entries(contract)
+    .map(render_kotlin_operation_method)
+    .join("\n\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+package io.openkache.client
+
+import io.openkache.client.generated_local.SmithyContract
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.nio.charset.StandardCharsets
+
+/** Generated operation implementations backed by the shared native contract. */
+public interface SmithyGeneratedOperations : SmithyOpenKacheApi {
+    public fun smithyInvoke(
+        operation: Int,
+        applicationKey: ByteArray,
+        value: ByteArray,
+        setCondition: Int = SmithyContract.SET_CONDITION_ANY,
+        ttlMilliseconds: Long = 0,
+    ): NativeResult
+
+    public fun smithyInvokeScoped(
+        operation: Int,
+        namespaceId: Long,
+        itemId: ByteArray,
+        value: ByteArray,
+        flags: Int = 0,
+        ttlMilliseconds: Long = 0,
+    ): NativeResult
+
+    public fun smithyNamespaceOpen(
+        name: ByteArray,
+        createIfMissing: Boolean,
+        policyFlags: Int,
+        ttlMilliseconds: Long,
+    ): NativeResult
+
+    public fun smithyNamespaceUpdatePolicy(
+        namespaceId: Long,
+        expectedRevision: Long,
+        policyFlags: Int,
+        ttlMilliseconds: Long,
+    ): NativeResult
+
+    public fun smithyNamespaceDelete(
+        namespaceId: Long,
+        expectedRevision: Long,
+    ): NativeResult
+
+    public fun smithyDecodeDescriptor(payload: ByteArray): NamespaceDescriptor
+
+    public fun smithyDecodeUtf8(payload: ByteArray, operation: String): String
+
+${methods}
+
+    private fun smithySetFlags(input: SetInput): Pair<Int, Long> {
+        var flags = when (input.condition ?: SetCondition.Any) {
+            SetCondition.Any -> SmithyContract.SET_CONDITION_ANY
+            SetCondition.IfAbsent -> SmithyContract.SET_CONDITION_IF_ABSENT
+            SetCondition.IfPresent -> SmithyContract.SET_CONDITION_IF_PRESENT
+        }
+        val expiration = input.expirationMode
+            ?: if (input.ttlMilliseconds == null) ExpirationMode.Inherit else ExpirationMode.ExplicitTtl
+        when (expiration) {
+            ExpirationMode.Inherit -> {
+                require(input.ttlMilliseconds == null) { "INHERIT cannot carry a TTL" }
+                flags = flags or SmithyContract.SET_INHERIT_EXPIRATION_BITS
+            }
+            ExpirationMode.NoExpiry -> {
+                require(input.ttlMilliseconds == null) { "NO_EXPIRY cannot carry a TTL" }
+                flags = flags or SmithyContract.SET_NO_EXPIRY_BITS
+            }
+            ExpirationMode.ExplicitTtl -> {
+                require(input.ttlMilliseconds != null && input.ttlMilliseconds > 0) {
+                    "EXPLICIT_TTL requires a positive TTL"
+                }
+                flags = flags or SmithyContract.SET_EXPLICIT_TTL_BITS
+            }
+        }
+        flags = flags or when (input.evictionMode ?: EvictionMode.Inherit) {
+            EvictionMode.Inherit -> SmithyContract.SET_INHERIT_EVICTION_BITS
+            EvictionMode.Evictable -> SmithyContract.SET_EVICTABLE_BITS
+            EvictionMode.EvictionProtected -> SmithyContract.SET_EVICTION_PROTECTED_BITS
+        }
+        require(input.value.size <= SmithyContract.MAX_VALUE_BYTES) {
+            "value exceeds protocol limit"
+        }
+        return flags to (input.ttlMilliseconds ?: 0)
+    }
+
+    private fun smithyPolicyFlags(
+        policy: NamespacePolicy?,
+        required: Boolean,
+    ): Pair<Int, Long> {
+        if (required) requireNotNull(policy) { "namespace policy is required" }
+        if (!required) require(policy == null) { "namespace policy requires createIfMissing" }
+        if (policy == null) return 0 to 0
+        var flags = when (policy.defaultExpiration) {
+            ExpirationDefault.NoExpiry -> SmithyContract.POLICY_NO_EXPIRY_BITS
+            ExpirationDefault.FixedTtl -> SmithyContract.POLICY_FIXED_TTL_BITS
+        }
+        val ttl = policy.defaultTtlMilliseconds ?: 0
+        if (policy.defaultExpiration == ExpirationDefault.FixedTtl) {
+            require(ttl > 0) { "FIXED_TTL requires a positive TTL" }
+        } else {
+            require(ttl == 0L) { "NO_EXPIRY cannot carry a TTL" }
+        }
+        if (policy.expirationOverride == OverridePolicy.Allowed) {
+            flags = flags or SmithyContract.POLICY_EXPIRATION_OVERRIDE_FLAG
+        }
+        if (policy.defaultEviction == EvictionDefault.EvictionProtected) {
+            flags = flags or SmithyContract.POLICY_EVICTION_PROTECTED_FLAG
+        }
+        if (policy.evictionOverride == OverridePolicy.Allowed) {
+            flags = flags or SmithyContract.POLICY_EVICTION_OVERRIDE_FLAG
+        }
+        return flags to ttl
+    }
+
+    private fun smithyRequireKind(
+        result: NativeResult,
+        expected: Int,
+        operation: String,
+    ) {
+        if (result.kind != expected) {
+            throw smithyUnexpectedKind(operation, result.kind)
+        }
+    }
+
+    private fun smithyUnexpectedKind(operation: String, kind: Int) =
+        EchoClientException("$operation returned unexpected native result $kind")
+}
+`
+}
+
+function render_dart_operation_method(operation: Managed_Api_Operation): string {
+  const operation_constant = managed_operation_constant(operation, "dart")
+  const operation_label = managed_operation_label(operation)
+  const method_name = lower_camel_case(operation.name)
+  const prefix = `  @override
+  Future<${operation.output}> ${method_name}(${operation.input} input) => _run(() {
+`
+  switch (operation.contract.response_kind) {
+    case "pong":
+      return `${prefix}    final result = _invoke(
+      ${operation_constant},
+      const <int>[],
+      const <int>[],
+    );
+    _smithyRequireKind(result, smithyResultOk, '${operation_label}');
+    return const ${operation.output}();
+  });`
+    case "echo":
+      return `${prefix}    final result = _invoke(
+      ${operation_constant},
+      const <int>[],
+      utf8.encode(input.message),
+    );
+    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    return ${operation.output}(
+      message: _smithyDecodeUtf8(result.payload, '${operation_label}'),
+    );
+  });`
+    case "value":
+      return `${prefix}    final result = _invokeScoped(
+      ${operation_constant},
+      input.namespaceId,
+      input.itemId,
+      const <int>[],
+    );
+    if (result.kind == smithyResultNotFound) {
+      return const ${operation.output}();
+    }
+    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    return ${operation.output}(value: result.payload);
+  });`
+    case "set_outcome":
+      return `${prefix}    final flags = _smithySetFlags(input);
+    final result = _invokeScoped(
+      ${operation_constant},
+      input.namespaceId,
+      input.itemId,
+      input.value,
+      flags: flags.flags,
+      ttlMilliseconds: flags.ttlMilliseconds,
+    );
+    final outcome = switch (result.kind) {
+      smithyResultCreated => SetOutcome.created,
+      smithyResultReplaced => SetOutcome.replaced,
+      smithyResultNotStored => SetOutcome.notStored,
+      _ => throw _smithyUnexpectedKind('${operation_label}', result.kind),
+    };
+    return ${operation.output}(outcome: outcome);
+  });`
+    case "delete_outcome":
+      return `${prefix}    final result = _invokeScoped(
+      ${operation_constant},
+      input.namespaceId,
+      input.itemId,
+      const <int>[],
+    );
+    return switch (result.kind) {
+      smithyResultDeleted => const ${operation.output}(deleted: true),
+      smithyResultNotDeleted => const ${operation.output}(deleted: false),
+      _ => throw _smithyUnexpectedKind('${operation_label}', result.kind),
+    };
+  });`
+    case "stats_json":
+      return `${prefix}    final result = _invokeScoped(
+      ${operation_constant},
+      input.namespaceId,
+      const <int>[],
+      const <int>[],
+    );
+    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    return ${operation.output}(
+      json: _smithyDecodeUtf8(result.payload, '${operation_label}'),
+    );
+  });`
+    case "empty":
+      if (operation.contract.scope === "namespace") {
+        return `${prefix}    final result = _invokeScoped(
+      ${operation_constant},
+      input.namespaceId,
+      const <int>[],
+      const <int>[],
+    );
+    _smithyRequireKind(result, smithyResultOk, '${operation_label}');
+    return const ${operation.output}();
+  });`
+      }
+      return `${prefix}    final result = _readResult(
+      _api,
+      _api.namespaceDelete(
+        _requireOpenHandle(),
+        input.namespaceId,
+        input.expectedRevision,
+      ),
+    );
+    _smithyRequireKind(result, smithyResultOk, '${operation_label}');
+    return const ${operation.output}();
+  });`
+    case "namespace_descriptor":
+      if (operation.name === "NamespaceOpen") {
+        return `${prefix}    final name = utf8.encode(input.name);
+    if (name.length > smithyNamespaceNameMaxBytes) {
+      throw const EchoClientException('namespace name exceeds protocol limit');
+    }
+    final policy = _smithyPolicyFlags(input.policy, input.createIfMissing);
+    final nameBuffer = _Buffer(name);
+    try {
+      final result = _readResult(
+        _api,
+        _api.namespaceOpen(
+          _requireOpenHandle(),
+          nameBuffer.pointer,
+          nameBuffer.length,
+          input.createIfMissing ? 1 : 0,
+          policy.flags,
+          policy.ttlMilliseconds,
+        ),
+      );
+      final created = result.kind == smithyResultCreated;
+      if (!created && result.kind != smithyResultOk) {
+        throw _smithyUnexpectedKind('${operation_label}', result.kind);
+      }
+      return ${operation.output}(
+        descriptor: _decodeDescriptor(result.payload),
+        created: created,
+      );
+    } finally {
+      nameBuffer.close();
+    }
+  });`
+      }
+      if (operation.name === "NamespaceUpdatePolicy") {
+        return `${prefix}    final policy = _smithyPolicyFlags(input.policy, true);
+    final result = _readResult(
+      _api,
+      _api.namespaceUpdatePolicy(
+        _requireOpenHandle(),
+        input.namespaceId,
+        input.expectedRevision,
+        policy.flags,
+        policy.ttlMilliseconds,
+      ),
+    );
+    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    return ${operation.output}(
+      descriptor: _decodeDescriptor(result.payload),
+    );
+  });`
+      }
+      throw new Error(`unsupported generated Dart namespace operation ${operation.name}`)
+    default:
+      throw new Error(
+        `unsupported generated Dart response kind ${operation.contract.response_kind}`,
+      )
+  }
+}
+
+export function render_dart_operations(contract: Client_Contract): string {
+  const methods = managed_operation_entries(contract)
+    .map(render_dart_operation_method)
+    .join("\n\n")
+  return `// Generated from the OpenKache Smithy contract. Do not edit.
+part of '../openkache.dart';
+// The generated hook keeps optional arguments aligned with the native ABI.
+// ignore_for_file: unused_element_parameter
+
+/// Generated operation implementations backed by the shared native contract.
+mixin SmithyGeneratedOperations implements SmithyOpenKacheApi {
+  Future<T> _run<T>(T Function() operation);
+
+  _NativeResult _invoke(
+    int operation,
+    List<int> applicationKey,
+    List<int> value, {
+    int setCondition = smithySetConditionAny,
+    int ttlMilliseconds = 0,
+  });
+
+  _NativeResult _invokeScoped(
+    int operation,
+    int namespaceId,
+    List<int> itemId,
+    List<int> value, {
+    int flags = 0,
+    int ttlMilliseconds = 0,
+  });
+
+  SmithyNativeApi get _api;
+
+  ffi.Pointer<SmithyNativeClient> _requireOpenHandle();
+
+  NamespaceDescriptor _decodeDescriptor(List<int> payload);
+
+${methods}
+}
+
+_SmithySetFlags _smithySetFlags(SetInput input) {
+  var flags = switch (input.condition ?? SetCondition.any) {
+    SetCondition.any => smithySetConditionAny,
+    SetCondition.ifAbsent => smithySetConditionIfAbsent,
+    SetCondition.ifPresent => smithySetConditionIfPresent,
+  };
+  final expiration =
+      input.expirationMode ??
+      (input.ttlMilliseconds == null
+          ? ExpirationMode.inherit
+          : ExpirationMode.explicitTtl);
+  switch (expiration) {
+    case ExpirationMode.inherit:
+      if (input.ttlMilliseconds != null) {
+        throw ArgumentError('INHERIT cannot carry a TTL');
+      }
+      flags |= smithySetInheritExpirationBits;
+    case ExpirationMode.noExpiry:
+      if (input.ttlMilliseconds != null) {
+        throw ArgumentError('NO_EXPIRY cannot carry a TTL');
+      }
+      flags |= smithySetNoExpiryBits;
+    case ExpirationMode.explicitTtl:
+      if (input.ttlMilliseconds == null || input.ttlMilliseconds! <= 0) {
+        throw ArgumentError('EXPLICIT_TTL requires a positive TTL');
+      }
+      flags |= smithySetExplicitTtlBits;
+  }
+  flags |= switch (input.evictionMode ?? EvictionMode.inherit) {
+    EvictionMode.inherit => smithySetInheritEvictionBits,
+    EvictionMode.evictable => smithySetEvictableBits,
+    EvictionMode.evictionProtected => smithySetEvictionProtectedBits,
+  };
+  if (input.value.length > smithyMaxValueBytes) {
+    throw ArgumentError('value exceeds protocol limit');
+  }
+  return _SmithySetFlags(flags, input.ttlMilliseconds ?? 0);
+}
+
+_SmithyPolicyFlags _smithyPolicyFlags(
+  NamespacePolicy? policy,
+  bool required,
+) {
+  if (required && policy == null) {
+    throw ArgumentError('namespace policy is required');
+  }
+  if (!required && policy != null) {
+    throw ArgumentError('namespace policy requires createIfMissing');
+  }
+  if (policy == null) return const _SmithyPolicyFlags(0, 0);
+  var flags = switch (policy.defaultExpiration) {
+    ExpirationDefault.noExpiry => smithyPolicyNoExpiryBits,
+    ExpirationDefault.fixedTtl => smithyPolicyFixedTtlBits,
+  };
+  final ttl = policy.defaultTtlMilliseconds ?? 0;
+  if (policy.defaultExpiration == ExpirationDefault.fixedTtl) {
+    if (ttl <= 0) throw ArgumentError('FIXED_TTL requires a positive TTL');
+  } else if (ttl != 0) {
+    throw ArgumentError('NO_EXPIRY cannot carry a TTL');
+  }
+  if (policy.expirationOverride == OverridePolicy.allowed) {
+    flags |= smithyPolicyExpirationOverrideFlag;
+  }
+  if (policy.defaultEviction == EvictionDefault.evictionProtected) {
+    flags |= smithyPolicyEvictionProtectedFlag;
+  }
+  if (policy.evictionOverride == OverridePolicy.allowed) {
+    flags |= smithyPolicyEvictionOverrideFlag;
+  }
+  return _SmithyPolicyFlags(flags, ttl);
+}
+
+String _smithyDecodeUtf8(List<int> payload, String operation) {
+  try {
+    return utf8.decode(payload, allowMalformed: false);
+  } on FormatException catch (error) {
+    throw EchoClientException('$operation response is not valid UTF-8', error);
+  }
+}
+
+void _smithyRequireKind(_NativeResult result, int expected, String operation) {
+  if (result.kind != expected) {
+    throw _smithyUnexpectedKind(operation, result.kind);
+  }
+}
+
+EchoClientException _smithyUnexpectedKind(String operation, int kind) =>
+    EchoClientException('$operation returned unexpected native result $kind');
+
+final class _SmithySetFlags {
+  const _SmithySetFlags(this.flags, this.ttlMilliseconds);
+
+  final int flags;
+  final int ttlMilliseconds;
+}
+
+final class _SmithyPolicyFlags {
+  const _SmithyPolicyFlags(this.flags, this.ttlMilliseconds);
+
+  final int flags;
+  final int ttlMilliseconds;
+}
+`
+}
+
 /** Renders the native constants consumed by the Java JNA adapter. */
 export function render_java_contract(contract: Client_Contract): string {
   const values = adapter_contract_values(contract)
@@ -6215,12 +7196,15 @@ function expected_outputs(
         [GENERATED_OUTPUTS.java_native_descriptor]: render_java_native_descriptor(contract),
         [GENERATED_OUTPUTS.java_native_connect_options]:
           render_java_native_connect_options(contract),
+        [GENERATED_OUTPUTS.java_operations]: render_java_operations(contract),
         [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
         [GENERATED_OUTPUTS.kotlin_native_api]: render_kotlin_native_api(contract),
+        [GENERATED_OUTPUTS.kotlin_operations]: render_kotlin_operations(contract),
         [GENERATED_OUTPUTS.dart_api]: render_dart_api(contract),
         [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
         [GENERATED_OUTPUTS.dart_native_api]: render_dart_native_api(contract),
+        [GENERATED_OUTPUTS.dart_operations]: render_dart_operations(contract),
       }
     case "c-contract":
       return {
@@ -6231,6 +7215,7 @@ function expected_outputs(
         [GENERATED_OUTPUTS.dart_api]: render_dart_api(contract),
         [GENERATED_OUTPUTS.dart_contract]: render_dart_contract(contract),
         [GENERATED_OUTPUTS.dart_native_api]: render_dart_native_api(contract),
+        [GENERATED_OUTPUTS.dart_operations]: render_dart_operations(contract),
       }
     case "dotnet":
       return {
@@ -6252,12 +7237,14 @@ function expected_outputs(
         [GENERATED_OUTPUTS.java_native_descriptor]: render_java_native_descriptor(contract),
         [GENERATED_OUTPUTS.java_native_connect_options]:
           render_java_native_connect_options(contract),
+        [GENERATED_OUTPUTS.java_operations]: render_java_operations(contract),
       }
     case "kotlin":
       return {
         [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
         [GENERATED_OUTPUTS.kotlin_native_api]: render_kotlin_native_api(contract),
+        [GENERATED_OUTPUTS.kotlin_operations]: render_kotlin_operations(contract),
       }
     case "rust-api":
       return {

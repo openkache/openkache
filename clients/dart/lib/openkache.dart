@@ -9,6 +9,8 @@ import 'generated_local/smithy_api.dart';
 import 'generated_local/smithy_contract.dart';
 import 'generated_local/smithy_native_api.dart';
 
+part 'generated_local/smithy_operations.dart';
+
 /// Failure reported by the shared Rust client-core ABI.
 final class EchoClientException implements Exception {
   const EchoClientException(this.message, [this.cause]);
@@ -28,7 +30,7 @@ abstract interface class OpenKacheClient implements SmithyOpenKacheApi {}
 /// QUIC, TLS, framing, retries, namespace handling, and response ownership
 /// remain in the shared Rust client core. This adapter only marshals Dart DTOs
 /// through the stable C ABI.
-final class EchoClient implements OpenKacheClient {
+final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient {
   EchoClient._(this._api, this._handle);
 
   final SmithyNativeApi _api;
@@ -104,185 +106,9 @@ final class EchoClient implements OpenKacheClient {
     }
   }
 
-  @override
-  Future<PingOutput> ping(PingInput input) => _run(() {
-    final result = _invoke(smithyOperationPing, const <int>[], const <int>[]);
-    _requireKind(result, smithyResultOk, 'PING');
-    return const PingOutput();
-  });
-
-  @override
-  Future<EchoOutput> echo(EchoInput input) => _run(() {
-    final result = _invoke(
-      smithyOperationEcho,
-      const <int>[],
-      utf8.encode(input.message),
-    );
-    _requireKind(result, smithyResultValue, 'ECHO');
-    try {
-      return EchoOutput(
-        message: utf8.decode(result.payload, allowMalformed: false),
-      );
-    } on FormatException catch (error) {
-      throw EchoClientException('ECHO response is not valid UTF-8', error);
-    }
-  });
-
   /// Sends one message and returns the echoed text.
   Future<String> echoMessage(String message) async =>
       (await echo(EchoInput(message: message))).message;
-
-  @override
-  Future<GetOutput> get(GetInput input) => _run(() {
-    final result = _invokeScoped(
-      smithyOperationGet,
-      input.namespaceId,
-      input.itemId,
-      const <int>[],
-    );
-    if (result.kind == smithyResultNotFound) {
-      return const GetOutput();
-    }
-    _requireKind(result, smithyResultValue, 'GET');
-    return GetOutput(value: result.payload);
-  });
-
-  @override
-  Future<SetOutput> set(SetInput input) => _run(() {
-    final flags = _setFlags(input);
-    final result = _invokeScoped(
-      smithyOperationSet,
-      input.namespaceId,
-      input.itemId,
-      input.value,
-      flags: flags.flags,
-      ttlMilliseconds: flags.ttlMilliseconds,
-    );
-    final outcome = switch (result.kind) {
-      smithyResultCreated => SetOutcome.created,
-      smithyResultReplaced => SetOutcome.replaced,
-      smithyResultNotStored => SetOutcome.notStored,
-      _ => throw _unexpectedKind('SET', result.kind),
-    };
-    return SetOutput(outcome: outcome);
-  });
-
-  @override
-  Future<DeleteOutput> delete(DeleteInput input) => _run(() {
-    final result = _invokeScoped(
-      smithyOperationDelete,
-      input.namespaceId,
-      input.itemId,
-      const <int>[],
-    );
-    return switch (result.kind) {
-      smithyResultDeleted => const DeleteOutput(deleted: true),
-      smithyResultNotDeleted => const DeleteOutput(deleted: false),
-      _ => throw _unexpectedKind('DELETE', result.kind),
-    };
-  });
-
-  @override
-  Future<StatsOutput> stats(StatsInput input) => _run(() {
-    final result = _invokeScoped(
-      smithyOperationStats,
-      input.namespaceId,
-      const <int>[],
-      const <int>[],
-    );
-    _requireKind(result, smithyResultValue, 'STATS');
-    try {
-      return StatsOutput(
-        json: utf8.decode(result.payload, allowMalformed: false),
-      );
-    } on FormatException catch (error) {
-      throw EchoClientException('STATS response is not valid UTF-8', error);
-    }
-  });
-
-  @override
-  Future<SyncOutput> sync(SyncInput input) => _run(() {
-    final result = _invokeScoped(
-      smithyOperationSync,
-      input.namespaceId,
-      const <int>[],
-      const <int>[],
-    );
-    _requireKind(result, smithyResultOk, 'SYNC');
-    return const SyncOutput();
-  });
-
-  @override
-  Future<NamespaceOpenOutput> namespaceOpen(NamespaceOpenInput input) =>
-      _run(() {
-        final name = utf8.encode(input.name);
-        if (name.length > smithyNamespaceNameMaxBytes) {
-          throw const EchoClientException(
-            'namespace name exceeds protocol limit',
-          );
-        }
-        final policy = _policyFlags(input.policy, input.createIfMissing);
-        final nameBuffer = _Buffer(name);
-        try {
-          final result = _readResult(
-            _api,
-            _api.namespaceOpen(
-              _requireOpenHandle(),
-              nameBuffer.pointer,
-              nameBuffer.length,
-              input.createIfMissing ? 1 : 0,
-              policy.flags,
-              policy.ttlMilliseconds,
-            ),
-          );
-          final created = result.kind == smithyResultCreated;
-          if (!created && result.kind != smithyResultOk) {
-            throw _unexpectedKind('NAMESPACE_OPEN', result.kind);
-          }
-          return NamespaceOpenOutput(
-            descriptor: _decodeDescriptor(result.payload),
-            created: created,
-          );
-        } finally {
-          nameBuffer.close();
-        }
-      });
-
-  @override
-  Future<NamespaceUpdatePolicyOutput> namespaceUpdatePolicy(
-    NamespaceUpdatePolicyInput input,
-  ) => _run(() {
-    final policy = _policyFlags(input.policy, true);
-    final result = _readResult(
-      _api,
-      _api.namespaceUpdatePolicy(
-        _requireOpenHandle(),
-        input.namespaceId,
-        input.expectedRevision,
-        policy.flags,
-        policy.ttlMilliseconds,
-      ),
-    );
-    _requireKind(result, smithyResultValue, 'NAMESPACE_UPDATE_POLICY');
-    return NamespaceUpdatePolicyOutput(
-      descriptor: _decodeDescriptor(result.payload),
-    );
-  });
-
-  @override
-  Future<NamespaceDeleteOutput> namespaceDelete(NamespaceDeleteInput input) =>
-      _run(() {
-        final result = _readResult(
-          _api,
-          _api.namespaceDelete(
-            _requireOpenHandle(),
-            input.namespaceId,
-            input.expectedRevision,
-          ),
-        );
-        _requireKind(result, smithyResultOk, 'NAMESPACE_DELETE');
-        return const NamespaceDeleteOutput();
-      });
 
   /// Releases the shared native client handle.
   void close() {
@@ -364,75 +190,6 @@ final class EchoClient implements OpenKacheClient {
     }
   }
 
-  _SetFlags _setFlags(SetInput input) {
-    var flags = switch (input.condition ?? SetCondition.any) {
-      SetCondition.any => smithySetConditionAny,
-      SetCondition.ifAbsent => smithySetConditionIfAbsent,
-      SetCondition.ifPresent => smithySetConditionIfPresent,
-    };
-    final expiration =
-        input.expirationMode ??
-        (input.ttlMilliseconds == null
-            ? ExpirationMode.inherit
-            : ExpirationMode.explicitTtl);
-    switch (expiration) {
-      case ExpirationMode.inherit:
-        if (input.ttlMilliseconds != null) {
-          throw ArgumentError('INHERIT cannot carry a TTL');
-        }
-        flags |= smithySetInheritExpirationBits;
-      case ExpirationMode.noExpiry:
-        if (input.ttlMilliseconds != null) {
-          throw ArgumentError('NO_EXPIRY cannot carry a TTL');
-        }
-        flags |= smithySetNoExpiryBits;
-      case ExpirationMode.explicitTtl:
-        if (input.ttlMilliseconds == null || input.ttlMilliseconds! <= 0) {
-          throw ArgumentError('EXPLICIT_TTL requires a positive TTL');
-        }
-        flags |= smithySetExplicitTtlBits;
-    }
-    flags |= switch (input.evictionMode ?? EvictionMode.inherit) {
-      EvictionMode.inherit => smithySetInheritEvictionBits,
-      EvictionMode.evictable => smithySetEvictableBits,
-      EvictionMode.evictionProtected => smithySetEvictionProtectedBits,
-    };
-    if (input.value.length > smithyMaxValueBytes) {
-      throw ArgumentError('value exceeds protocol limit');
-    }
-    return _SetFlags(flags, input.ttlMilliseconds ?? 0);
-  }
-
-  _PolicyFlags _policyFlags(NamespacePolicy? policy, bool required) {
-    if (required && policy == null) {
-      throw ArgumentError('namespace policy is required');
-    }
-    if (!required && policy != null) {
-      throw ArgumentError('namespace policy requires createIfMissing');
-    }
-    if (policy == null) return const _PolicyFlags(0, 0);
-    var flags = switch (policy.defaultExpiration) {
-      ExpirationDefault.noExpiry => smithyPolicyNoExpiryBits,
-      ExpirationDefault.fixedTtl => smithyPolicyFixedTtlBits,
-    };
-    final ttl = policy.defaultTtlMilliseconds ?? 0;
-    if (policy.defaultExpiration == ExpirationDefault.fixedTtl) {
-      if (ttl <= 0) throw ArgumentError('FIXED_TTL requires a positive TTL');
-    } else if (ttl != 0) {
-      throw ArgumentError('NO_EXPIRY cannot carry a TTL');
-    }
-    if (policy.expirationOverride == OverridePolicy.allowed) {
-      flags |= smithyPolicyExpirationOverrideFlag;
-    }
-    if (policy.defaultEviction == EvictionDefault.evictionProtected) {
-      flags |= smithyPolicyEvictionProtectedFlag;
-    }
-    if (policy.evictionOverride == OverridePolicy.allowed) {
-      flags |= smithyPolicyEvictionOverrideFlag;
-    }
-    return _PolicyFlags(flags, ttl);
-  }
-
   NamespaceDescriptor _decodeDescriptor(List<int> payload) {
     final bytes = _Buffer(payload);
     final descriptor = calloc<SmithyNativeDescriptor>();
@@ -487,18 +244,6 @@ final class EchoClient implements OpenKacheClient {
     return _handle;
   }
 
-  static void _requireKind(
-    _NativeResult result,
-    int expected,
-    String operation,
-  ) {
-    if (result.kind != expected) {
-      throw _unexpectedKind(operation, result.kind);
-    }
-  }
-
-  static EchoClientException _unexpectedKind(String operation, int kind) =>
-      EchoClientException('$operation returned unexpected native result $kind');
 }
 
 final class _Buffer {
@@ -565,18 +310,4 @@ final class _NativeResult {
   final int kind;
   final List<int> payload;
   final ffi.Pointer<SmithyNativeClient> client;
-}
-
-final class _SetFlags {
-  const _SetFlags(this.flags, this.ttlMilliseconds);
-
-  final int flags;
-  final int ttlMilliseconds;
-}
-
-final class _PolicyFlags {
-  const _PolicyFlags(this.flags, this.ttlMilliseconds);
-
-  final int flags;
-  final int ttlMilliseconds;
 }
