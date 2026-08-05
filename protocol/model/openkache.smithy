@@ -33,7 +33,7 @@ enum OperationRequestKind {
 enum OperationResponseKind {
     EMPTY = "empty"
     PONG = "pong"
-    ECHO = "echo"
+    APPLICATION_VALUE = "application_value"
     VALUE = "value"
     SET_OUTCOME = "set_outcome"
     DELETE_OUTCOME = "delete_outcome"
@@ -407,7 +407,7 @@ operation Sync {
 @operationContract(
     scope: "global",
     requestKind: "application_value",
-    responseKind: "echo",
+    responseKind: "application_value",
     retryMode: "always",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]

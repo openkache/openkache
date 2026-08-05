@@ -1740,7 +1740,7 @@ fn validate_response_contract(
                 invalid_payload("PING success payload must be PONG")
             }
         }
-        contract::OperationResponseKind::Echo => Ok(()),
+        contract::OperationResponseKind::ApplicationValue => Ok(()),
         contract::OperationResponseKind::Value => {
             if response.status == Status::NotFound && !response.payload.is_empty() {
                 invalid_payload("GET NotFound responses must have an empty payload")

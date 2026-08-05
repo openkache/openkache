@@ -18,8 +18,8 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId,
-    MAX_REQUEST_FRAME_BYTES, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy,
-    ProtocolError, Request, Response, SetOptions, Status,
+    MAX_REQUEST_FRAME_BYTES, NamespaceDescriptor, NamespacePolicy, Opcode, OperationRequestKind,
+    OperationResponseKind, OverridePolicy, ProtocolError, Request, Response, SetOptions, Status,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -1711,12 +1711,9 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let operation = Operation::from_opcode(request.opcode);
                 let request_started = std::time::Instant::now();
                 let may_mutate = request_may_mutate(&request);
-                let response_permit = if matches!(request.opcode, Opcode::Get | Opcode::Echo) {
-                    let response_budget_bytes = if request.opcode == Opcode::Echo {
-                        request.value.len()
-                    } else {
-                        max_item_bytes
-                    };
+                let response_permit = if let Some(response_budget_bytes) =
+                    response_budget_bytes(request.opcode, request.value.len(), max_item_bytes)
+                {
                     match request_budget
                         .acquire(response_budget_bytes, request_timeout)
                         .await
@@ -1844,14 +1841,51 @@ async fn write_response<S: SendStream>(
 }
 
 fn request_may_mutate(request: &Request) -> bool {
+    let contract = openkache_protocol::operation_contract(request.opcode);
+    match contract.request_kind {
+        OperationRequestKind::ScopedItem => matches!(
+            contract.response_kind,
+            OperationResponseKind::SetOutcome | OperationResponseKind::DeleteOutcome
+        ),
+        OperationRequestKind::ScopedNamespace => {
+            contract.response_kind == OperationResponseKind::Empty
+        }
+        OperationRequestKind::NamespaceOpen => request.create_if_missing,
+        OperationRequestKind::NamespaceUpdatePolicy | OperationRequestKind::NamespaceDelete => true,
+        _ => false,
+    }
+}
+
+fn response_budget_bytes(
+    opcode: Opcode,
+    request_value_bytes: usize,
+    max_item_bytes: usize,
+) -> Option<usize> {
+    match openkache_protocol::operation_contract(opcode).response_kind {
+        OperationResponseKind::ApplicationValue => Some(request_value_bytes),
+        OperationResponseKind::Value => Some(max_item_bytes),
+        _ => None,
+    }
+}
+
+fn immediate_response(opcode: Opcode) -> bool {
+    let contract = openkache_protocol::operation_contract(opcode);
     matches!(
-        request.opcode,
-        Opcode::Set
-            | Opcode::Delete
-            | Opcode::Sync
-            | Opcode::NamespaceUpdatePolicy
-            | Opcode::NamespaceDelete
-    ) || (request.opcode == Opcode::NamespaceOpen && request.create_if_missing)
+        (contract.request_kind, contract.response_kind),
+        (OperationRequestKind::Empty, OperationResponseKind::Pong)
+            | (
+                OperationRequestKind::ApplicationValue,
+                OperationResponseKind::ApplicationValue
+            )
+    )
+}
+
+fn immediate_response_value(opcode: Opcode, value: Vec<u8>) -> Response {
+    match openkache_protocol::operation_contract(opcode).response_kind {
+        OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
+        OperationResponseKind::ApplicationValue => response(Status::Ok, value),
+        _ => response_bytes(Status::InternalError, b"invalid immediate operation contract"),
+    }
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
@@ -1873,6 +1907,9 @@ async fn execute_request(
         expected_revision,
         create_if_missing,
     } = request;
+    if immediate_response(opcode) {
+        return Some(immediate_response_value(opcode, value));
+    }
     // Do not reveal whether an administrative namespace exists to a peer that
     // is not authorized to inspect or synchronize server diagnostics.
     if matches!(opcode, Opcode::Stats | Opcode::Sync) && !administrator {
@@ -1888,7 +1925,10 @@ async fn execute_request(
     // Namespace open and delete are identity operations. Serialize them with
     // one lifecycle lock so an open cannot observe a descriptor while delete
     // is concurrently removing it (or vice versa).
-    let lifecycle_lock = if matches!(opcode, Opcode::NamespaceOpen | Opcode::NamespaceDelete) {
+    let lifecycle_lock = if matches!(
+        openkache_protocol::operation_contract(opcode).request_kind,
+        OperationRequestKind::NamespaceOpen | OperationRequestKind::NamespaceDelete
+    ) {
         match namespaces.lock() {
             Ok(registry) => Some(registry.lifecycle_lock()),
             Err(_) => {
@@ -1911,14 +1951,11 @@ async fn execute_request(
     // mutex only protects map metadata; this async lock covers the cache
     // operation and its corresponding item-tracking update.
     let namespace_lock = if matches!(
-        opcode,
-        Opcode::Get
-            | Opcode::Set
-            | Opcode::Delete
-            | Opcode::Stats
-            | Opcode::Sync
-            | Opcode::NamespaceUpdatePolicy
-            | Opcode::NamespaceDelete
+        openkache_protocol::operation_contract(opcode).request_kind,
+        OperationRequestKind::ScopedItem
+            | OperationRequestKind::ScopedNamespace
+            | OperationRequestKind::NamespaceUpdatePolicy
+            | OperationRequestKind::NamespaceDelete
     ) {
         let namespace_id = namespace_id.expect("namespace-scoped requests have a validated ID");
         let operation_lock = namespaces
@@ -1954,8 +1991,6 @@ async fn execute_request(
         ));
     }
     let result = match opcode {
-        Opcode::Ping => return Some(response_bytes(Status::Ok, b"PONG")),
-        Opcode::Echo => return Some(response(Status::Ok, value)),
         Opcode::NamespaceOpen => {
             let name = namespace_name.expect("namespace-open requests have a validated name");
             let result = namespaces

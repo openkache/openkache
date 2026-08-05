@@ -634,7 +634,7 @@ function operation_contract(
     ![
       "empty",
       "pong",
-      "echo",
+      "application_value",
       "value",
       "set_outcome",
       "delete_outcome",
@@ -2048,7 +2048,7 @@ pub use openkache_protocol::{
   const response_variants = [
     "empty",
     "pong",
-    "echo",
+    "application_value",
     "value",
     "set_outcome",
     "delete_outcome",
@@ -4081,7 +4081,7 @@ function required_string_member(
   )
   if (structure.members.length !== 1 || members.length !== 1) {
     throw new Error(
-      `operation ${operation.name} ${direction} shape ${structure.name} must define exactly one required String member and no other members for responseKind echo`,
+      `operation ${operation.name} ${direction} shape ${structure.name} must define exactly one required String member and no other members for responseKind application_value`,
     )
   }
   return members[0]!
@@ -4091,7 +4091,7 @@ function operation_field_binding(
   contract: Client_Contract,
   operation: Api_Operation & { readonly contract: Api_Operation_Contract },
 ): Operation_Field_Binding {
-  if (operation.contract.response_kind !== "echo") return {}
+  if (operation.contract.response_kind !== "application_value") return {}
   return {
     input_payload: required_string_member(contract, operation, "input"),
     output_payload: required_string_member(contract, operation, "output"),
@@ -4194,7 +4194,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             return new ${operation.output}();
         });
     }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -4554,7 +4554,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
             ${operation.output}()
         }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -4849,7 +4849,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     _smithyRequireKind(result, smithyResultOk, '${operation_label}');
     return const ${operation.output}();
   });`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -5738,7 +5738,7 @@ function typescript_operation_transport_result(
     case "pong":
     case "empty":
       return "void"
-    case "echo":
+    case "application_value":
     case "stats_json":
       return "string"
     case "value":
@@ -5775,7 +5775,7 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     await this.#transport.${method_name}(input);
     return {};
   }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -5868,7 +5868,7 @@ export function render_typescript_operations(contract: Client_Contract): string 
   imported_types.add("Smithy_Namespace_Open_Output")
   const imports = [...imported_types].sort().join(",\n  ")
   const transports = managed_operations
-    .filter((operation) => operation.contract.response_kind !== "echo")
+    .filter((operation) => operation.contract.response_kind !== "application_value")
     .map(
       (operation) =>
         `  ${snake_case(operation.name)}(
@@ -5877,7 +5877,7 @@ export function render_typescript_operations(contract: Client_Contract): string 
     )
     .join("\n")
   const application_value_transport = managed_operations.some(
-    (operation) => operation.contract.response_kind === "echo",
+    (operation) => operation.contract.response_kind === "application_value",
   )
     ? `  invoke_application_value(
     operation: number,
@@ -6242,7 +6242,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	}
 	return ${output}{}, nil
 }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -6688,7 +6688,7 @@ function python_operation_transport_result(
     case "pong":
     case "empty":
       return "None"
-    case "echo":
+    case "application_value":
     case "stats_json":
       return "str"
     case "value":
@@ -6722,7 +6722,7 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
         self._smithy_transport.assert_open()
         await self._smithy_transport.${method_name}(input)
         return ${output}()`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -6793,7 +6793,7 @@ export function render_python_operations(contract: Client_Contract): string {
   imported_types.add("SmithySetOutcome")
   const imports = [...imported_types].sort().join(",\n    ")
   const transports = managed_operations
-    .filter((operation) => operation.contract.response_kind !== "echo")
+    .filter((operation) => operation.contract.response_kind !== "application_value")
     .map(
       (operation) =>
         `    async def ${snake_case(operation.name)}(
@@ -6802,7 +6802,7 @@ export function render_python_operations(contract: Client_Contract): string {
     )
     .join("\n")
   const application_value_transport = managed_operations.some(
-    (operation) => operation.contract.response_kind === "echo",
+    (operation) => operation.contract.response_kind === "application_value",
   )
     ? `    async def invoke_application_value(
         self, operation: int, payload: str
@@ -7459,7 +7459,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
     try await ${hook}()
     return ${output}()
   }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -7882,7 +7882,7 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         ExpectKind("${label}", result, Protocol.FfiResultOk);
         return new Smithy.${operation.output}();
     }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),
@@ -8367,7 +8367,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 $client::ping(self).await?;
                 Ok(smithy::${operation.output})
             }`
-    case "echo":
+    case "application_value":
       {
         const input_payload = operation_field_name(
           operation_field(operation, "input", "payload"),

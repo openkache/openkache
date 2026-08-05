@@ -28,7 +28,7 @@ export interface Wire_Operation_Contract {
   readonly response_kind:
     | "empty"
     | "pong"
-    | "echo"
+    | "application_value"
     | "value"
     | "set_outcome"
     | "delete_outcome"
@@ -748,7 +748,7 @@ function operation_contract(
   const response_kinds = [
     "empty",
     "pong",
-    "echo",
+    "application_value",
     "value",
     "set_outcome",
     "delete_outcome",
