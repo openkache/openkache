@@ -89,7 +89,7 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
         Ok(())
     } else {
         Err(std::io::Error::other(
-            "openkache-server cannot start: the selected network runtime fell back \
+            "openkache-server cannot start: the network runtime fell back \
              to polling because Linux io_uring could not be initialized. Required syscalls: \
              io_uring_setup, io_uring_enter, io_uring_register. Check the \
              container seccomp policy and /proc/sys/kernel/io_uring_disabled \
@@ -104,7 +104,7 @@ fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<
         Ok(())
     } else {
         Err(std::io::Error::other(
-            "openkache-server requires the selected network runtime's polling driver \
+            "openkache-server requires the network runtime's polling driver \
              on Apple Silicon macOS",
         ))
     }
@@ -126,7 +126,7 @@ fn runtime_initialization_error(error: io::Error) -> io::Error {
     io::Error::new(
         error.kind(),
         format!(
-            "openkache-server cannot start: the selected network runtime requires \
+            "openkache-server cannot start: the network runtime requires \
              Linux io_uring ({error}); {cause}. \
              Required syscalls: io_uring_setup, io_uring_enter, io_uring_register. \
              Also check /proc/sys/kernel/io_uring_disabled (0 enables io_uring)."
@@ -139,7 +139,7 @@ fn runtime_initialization_error(error: io::Error) -> io::Error {
     io::Error::new(
         error.kind(),
         format!(
-            "openkache-server cannot start: the selected network runtime requires \
+            "openkache-server cannot start: the network runtime requires \
              the polling driver on Apple Silicon macOS ({error})"
         ),
     )
