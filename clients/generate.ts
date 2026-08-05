@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -1689,6 +1690,42 @@ ${variants}
 } ${name};`
 }
 
+function c_contract_client_operation_enum(contract: Client_Contract): string {
+  const protocol_entries = contract.opcodes.map((entry) => ({
+    ...entry,
+    expression: `OPENKACHE_SMITHY_OPCODE_${snake_case(entry.name).toUpperCase()}`,
+  }))
+  const ffi_entries = contract.ffi.operations
+    .filter((entry) => entry.value <= 0x7fff_ffff)
+    .map((entry) => ({
+      ...entry,
+      expression: `OPENKACHE_SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()}`,
+    }))
+  const enum_entries = [...protocol_entries, ...ffi_entries]
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_OPERATION_${snake_case(entry.name).toUpperCase()} = ${entry.expression},`,
+    )
+    .join("\n")
+  const macro_entries = contract.ffi.operations
+    .filter((entry) => entry.value > 0x7fff_ffff)
+    .map(
+      (entry) =>
+        `#define OPENKACHE_CLIENT_OPERATION_${snake_case(entry.name).toUpperCase()} OPENKACHE_SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()}`,
+    )
+    .join("\n")
+  return `/*
+ * Client operation identifiers combine protocol opcodes with local FFI
+ * operations. Values that do not fit a C enum remain macros so the public
+ * uint32_t ABI can represent the complete Smithy contract.
+ */
+typedef enum openkache_client_operation {
+${enum_entries}
+} openkache_client_operation_t;
+
+${macro_entries}`
+}
+
 function c_contract_api_enum(
   contract: Client_Contract,
   name: string,
@@ -1879,6 +1916,8 @@ ${ffi_defines}
 ${operation_enum}
 
 ${status_enum}
+
+${c_contract_client_operation_enum(contract)}
 
 /* Smithy string-enum values used by the language-neutral set API. */
 ${c_contract_api_enum(contract, "SetCondition", "OPENKACHE_SMITHY_SET_CONDITION")}
@@ -4138,9 +4177,56 @@ function expected_outputs(
   }
 }
 
+/** Directory whose files are fully owned by one generated target. */
+export interface Generated_Output_Scope {
+  readonly directory: string
+  readonly extensions?: readonly string[]
+}
+
+function generated_scope_files(scope: Generated_Output_Scope): readonly string[] {
+  const files: string[] = []
+  const extensions = scope.extensions === undefined ? undefined : new Set(scope.extensions)
+  const visit = (directory: string): void => {
+    let entries
+    try {
+      entries = readdirSync(directory, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) {
+        visit(path)
+      } else if (
+        entry.isFile() &&
+        (extensions === undefined || extensions.has(entry.name.slice(entry.name.lastIndexOf("."))))
+      ) {
+        files.push(path)
+      }
+    }
+  }
+  visit(scope.directory)
+  return files.sort()
+}
+
+function generated_scope_obsolete_files(
+  outputs: Readonly<Record<string, string>>,
+  scopes: readonly Generated_Output_Scope[],
+): readonly string[] {
+  const expected_paths = new Set(Object.keys(outputs).map((path) => resolve(path)))
+  const obsolete = new Set<string>()
+  for (const scope of scopes) {
+    for (const path of generated_scope_files(scope)) {
+      if (!expected_paths.has(resolve(path))) obsolete.add(path)
+    }
+  }
+  return [...obsolete].sort()
+}
+
 /** Returns generated outputs that are missing or differ from the contract. */
 export function generated_output_issues(
   outputs: Readonly<Record<string, string>>,
+  scopes: readonly Generated_Output_Scope[] = [],
 ): readonly string[] {
   const mismatches: string[] = []
   for (const [output_path, content] of Object.entries(outputs)) {
@@ -4153,15 +4239,29 @@ export function generated_output_issues(
     }
     if (existing !== content) mismatches.push(output_path)
   }
+  for (const output_path of generated_scope_obsolete_files(outputs, scopes)) {
+    mismatches.push(`${output_path} (obsolete)`)
+  }
   return mismatches
+}
+
+function generated_output_scopes(target: Generation_Target): readonly Generated_Output_Scope[] {
+  switch (target) {
+    case "all":
+    case "java":
+      return [{ directory: GENERATED_OUTPUTS.java_api_root, extensions: [".java"] }]
+    default:
+      return []
+  }
 }
 
 function write_outputs(
   outputs: Readonly<Record<string, string>>,
   check_only: boolean,
+  scopes: readonly Generated_Output_Scope[],
 ): void {
   if (check_only) {
-    const mismatches = generated_output_issues(outputs)
+    const mismatches = generated_output_issues(outputs, scopes)
     if (mismatches.length > 0) {
       throw new Error(
         "generated contract outputs are stale:\n" +
@@ -4170,6 +4270,10 @@ function write_outputs(
       )
     }
     return
+  }
+  for (const output_path of generated_scope_obsolete_files(outputs, scopes)) {
+    rmSync(output_path, { force: true })
+    console.log(`Removed obsolete generated output ${output_path}`)
   }
   for (const [output_path, content] of Object.entries(outputs)) {
     const output_directory = dirname(output_path)
@@ -4199,7 +4303,11 @@ export function main(): number {
       target === "rust-wire"
         ? expected_wire_outputs(extract_protocol_wire_contract(smithy_ast(false)), target)
         : expected_outputs(extract_client_contract(smithy_ast(true)), target)
-    write_outputs(outputs, process.env.OPENKACHE_GENERATION_CHECK === "1")
+    write_outputs(
+      outputs,
+      process.env.OPENKACHE_GENERATION_CHECK === "1",
+      generated_output_scopes(target),
+    )
     return 0
   } catch (error) {
     console.error(
