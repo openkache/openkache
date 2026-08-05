@@ -11,7 +11,8 @@ use crate::error::Result;
 /// NVMe is the intended production medium, but it is not a correctness
 /// requirement. `Unknown` is deliberately separate from `NonNvme`: containers,
 /// device-mapper stacks, and restricted macOS environments may not expose
-/// enough metadata to identify the physical device.
+/// enough metadata to identify the physical device. `NotApplicable` is used by
+/// the simulated storage backend, which has no physical storage file to inspect.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageDeviceKind {
     /// Every inspected storage file resolves directly to an NVMe block device.
@@ -22,6 +23,8 @@ pub enum StorageDeviceKind {
     /// At least one inspected storage file could not be classified, and no
     /// inspected file was known to be non-NVMe.
     Unknown,
+    /// The selected storage backend does not use physical storage.
+    NotApplicable,
 }
 
 impl StorageDeviceKind {
@@ -29,11 +32,14 @@ impl StorageDeviceKind {
     ///
     /// A known non-NVMe file takes precedence because it is enough to make the
     /// intended all-NVMe recommendation inapplicable. Otherwise, an unknown
-    /// file prevents claiming that every storage file is on NVMe.
+    /// file prevents claiming that every storage file is on NVMe. A
+    /// `NotApplicable` value is neutral so aggregation can start without
+    /// assuming that a physical device exists.
     pub(crate) const fn combine(self, other: Self) -> Self {
         match (self, other) {
             (Self::NonNvme, _) | (_, Self::NonNvme) => Self::NonNvme,
             (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::NotApplicable, other) | (other, Self::NotApplicable) => other,
             (Self::Nvme, Self::Nvme) => Self::Nvme,
         }
     }

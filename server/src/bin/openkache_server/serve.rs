@@ -64,7 +64,14 @@ fn report_common(
     storage_device: StorageDeviceKind,
 ) {
     println!("OpenKache listening on {address}");
-    println!("Storage directory: {}", storage_directory.display());
+    if storage_device == StorageDeviceKind::NotApplicable {
+        println!(
+            "Storage directory: {} (not used by simulated storage)",
+            storage_directory.display()
+        );
+    } else {
+        println!("Storage directory: {}", storage_directory.display());
+    }
     println!("Storage runtime: {}", openkache::storage_runtime_name());
     report_storage_device(storage_device);
     println!("Allocator: {}", allocator::NAME);
@@ -88,6 +95,11 @@ fn report_storage_device(kind: StorageDeviceKind) {
                 "WARNING: could not verify the devices used by the opened storage \
                  files. OpenKache will continue, but NVMe SSD is the intended \
                  production medium for predictable latency."
+            );
+        }
+        StorageDeviceKind::NotApplicable => {
+            println!(
+                "Storage device: not applicable (simulated storage uses no physical files)"
             );
         }
     }

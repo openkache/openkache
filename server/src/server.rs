@@ -266,6 +266,7 @@ struct NamespaceRegistry {
     by_id: HashMap<u64, NamespaceEntry>,
     by_name: HashMap<Vec<u8>, u64>,
     metadata_path: std::path::PathBuf,
+    persistent: bool,
     lifecycle_lock: Arc<AsyncMutex<()>>,
 }
 
@@ -277,6 +278,7 @@ impl NamespaceRegistry {
             by_id: HashMap::new(),
             by_name: HashMap::new(),
             metadata_path,
+            persistent: true,
             lifecycle_lock: Arc::new(AsyncMutex::new(())),
         };
         let mut file = match std::fs::File::open(&registry.metadata_path) {
@@ -296,6 +298,17 @@ impl NamespaceRegistry {
         file.read_to_end(&mut bytes)?;
         registry.decode_metadata(&bytes)?;
         Ok(registry)
+    }
+
+    fn ephemeral(directory: &Path) -> Self {
+        Self {
+            next_id: Some(1),
+            by_id: HashMap::new(),
+            by_name: HashMap::new(),
+            metadata_path: directory.join(NAMESPACE_METADATA_FILE),
+            persistent: false,
+            lifecycle_lock: Arc::new(AsyncMutex::new(())),
+        }
     }
 
     fn lifecycle_lock(&self) -> Arc<AsyncMutex<()>> {
@@ -615,6 +628,9 @@ impl NamespaceRegistry {
     }
 
     fn persist(&self) -> std::io::Result<()> {
+        if !self.persistent {
+            return Ok(());
+        }
         let mut entries = self.by_id.values().collect::<Vec<_>>();
         entries.sort_unstable_by_key(|entry| entry.descriptor.namespace_id);
         let mut bytes = Vec::new();
@@ -1026,21 +1042,28 @@ impl KacheServer {
         let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
         let storage_directory = config.storage.directory.clone();
-        let existing_storage = (0..config.runtime.thread_count)
-            .any(|thread_id| config.worker_config(thread_id).data_path.exists());
+        let existing_storage = crate::storage_runtime::USES_PHYSICAL_STORAGE
+            && (0..config.runtime.thread_count)
+                .any(|thread_id| config.worker_config(thread_id).data_path.exists());
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
         let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
-        let namespaces = match NamespaceRegistry::load(&storage_directory, existing_storage) {
-            Ok(registry) => registry,
-            Err(error) => {
+        let namespaces = if crate::storage_runtime::USES_PHYSICAL_STORAGE {
+            match NamespaceRegistry::load(&storage_directory, existing_storage) {
+                Ok(registry) => registry,
+                Err(error) => {
+                    cache.shutdown()?;
+                    return Err(ServerError::NamespaceMetadata(error.to_string()));
+                }
+            }
+        } else {
+            NamespaceRegistry::ephemeral(&storage_directory)
+        };
+        if crate::storage_runtime::USES_PHYSICAL_STORAGE {
+            if let Err(error) = namespaces.persist() {
                 cache.shutdown()?;
                 return Err(ServerError::NamespaceMetadata(error.to_string()));
             }
-        };
-        if let Err(error) = namespaces.persist() {
-            cache.shutdown()?;
-            return Err(ServerError::NamespaceMetadata(error.to_string()));
         }
         let sockets = match bind_reuse_port_sockets(address, network.worker_count) {
             Ok(sockets) => sockets,

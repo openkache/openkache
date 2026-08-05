@@ -113,8 +113,9 @@ const fn native_compio_driver() -> DriverRequirement {
 /// The required-driver setting is applied to the underlying `ProactorBuilder`
 /// before `RuntimeBuilder::build`, so a requested native or SQPOLL runtime
 /// cannot silently become Compio's polling fallback. The returned runtime first
-/// exercises its production event loop, then storage workers run the real
-/// file-open and reservation path on that same runtime.
+/// exercises its production event loop. Native storage workers then run the
+/// real file-open and reservation path on that runtime; simulated workers use
+/// the same worker calls with their in-memory completion facade.
 pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
     if config.sqpoll && config.driver != DriverRequirement::IoUring {
         return Err(io::Error::new(
@@ -287,6 +288,7 @@ mod backend {
 
     pub(crate) const NAME: &str = "kimojio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = false;
+    pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(_configured: u32) -> u32 {
         128
@@ -459,6 +461,9 @@ mod backend {
 
     pub(crate) const NAME: &str = "simulated";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
+    /// Simulated storage keeps the production worker and buffer path while
+    /// completing file operations without opening or persisting an OS file.
+    pub(crate) const USES_PHYSICAL_STORAGE: bool = false;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
         configured
@@ -577,6 +582,7 @@ mod backend {
 
     pub(crate) const NAME: &str = "compio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
+    pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
         configured
@@ -706,6 +712,7 @@ mod backend {
 
     pub(crate) const NAME: &str = "monoio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = false;
+    pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
         configured
@@ -850,7 +857,7 @@ pub(crate) use backend::*;
 
 #[cfg(feature = "storage-runtime-simulated")]
 pub(crate) fn file_device_kind(_file: &File) -> crate::platform::StorageDeviceKind {
-    crate::platform::StorageDeviceKind::Unknown
+    crate::platform::StorageDeviceKind::NotApplicable
 }
 
 #[cfg(not(feature = "storage-runtime-simulated"))]
