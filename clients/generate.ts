@@ -366,6 +366,7 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/core/generated_local/smithy_contract.h"),
   go_api: generated_path("clients/go/smithy_api.go"),
   go_contract: generated_path("clients/go/smithy_contract.go"),
+  go_operations: generated_path("clients/go/smithy_operations.go"),
   go_native_abi: generated_path("clients/go/generated_local/smithy_native_abi.h"),
   java_api_root: generated_path(
     "clients/java/src/main/java/io/openkache/client/generated_local",
@@ -5882,6 +5883,288 @@ ${contract.api.enums
 `
 }
 
+function go_operation_label(operation: Api_Operation): string {
+  return snake_case(operation.name).replaceAll("_", " ")
+}
+
+function render_go_operation_method(operation: Managed_Api_Operation): string {
+  const input = go_api_name(operation.input)
+  const output = go_api_name(operation.output)
+  const method = operation.name
+  const opcode = `SmithyOpcode${operation.name}`
+  const label = go_operation_label(operation)
+  switch (operation.contract.response_kind) {
+    case "pong":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	_ ${input},
+) (${output}, error) {
+	result, err := s.client.invoke(ctx, ${opcode}, nil, nil, SetOptions{})
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultOK {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	return ${output}{}, nil
+}`
+    case "echo":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	result, err := s.client.invoke(
+		ctx,
+		${opcode},
+		nil,
+		[]byte(input.Message),
+		SetOptions{},
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultValue {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	return ${output}{Message: string(result.data)}, nil
+}`
+    case "value":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	itemID, err := NewItemID(input.ItemID)
+	if err != nil {
+		return ${output}{}, err
+	}
+	result, err := s.client.invokeScoped(
+		ctx,
+		${opcode},
+		input.NamespaceID,
+		itemID,
+		nil,
+		SetOptions{},
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	value, found, err := getResult("${label}", result)
+	if err != nil || !found {
+		return ${output}{}, err
+	}
+	return ${output}{Value: &value}, nil
+}`
+    case "set_outcome":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	itemID, err := NewItemID(input.ItemID)
+	if err != nil {
+		return ${output}{}, err
+	}
+	options, err := smithySetOptions(input)
+	if err != nil {
+		return ${output}{}, err
+	}
+	result, err := s.client.invokeScoped(
+		ctx,
+		${opcode},
+		input.NamespaceID,
+		itemID,
+		input.Value,
+		options,
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	outcome, err := setResult("${label}", result)
+	return ${output}{Outcome: SmithySetOutcome(outcome)}, err
+}`
+    case "delete_outcome":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	itemID, err := NewItemID(input.ItemID)
+	if err != nil {
+		return ${output}{}, err
+	}
+	result, err := s.client.invokeScoped(
+		ctx,
+		${opcode},
+		input.NamespaceID,
+		itemID,
+		nil,
+		SetOptions{},
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	deleted, err := deleteResult("${label}", result)
+	return ${output}{Deleted: deleted}, err
+}`
+    case "stats_json":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	result, err := s.client.invokeScoped(
+		ctx,
+		${opcode},
+		input.NamespaceID,
+		ItemID{},
+		nil,
+		SetOptions{},
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultValue {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	return ${output}{JSON: string(result.data)}, nil
+}`
+    case "empty":
+      if (operation.contract.request_kind === "scoped_namespace") {
+        return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	result, err := s.client.invokeScoped(
+		ctx,
+		${opcode},
+		input.NamespaceID,
+		ItemID{},
+		nil,
+		SetOptions{},
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultOK {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	return ${output}{}, nil
+}`
+      }
+      if (operation.contract.request_kind === "namespace_delete") {
+        return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	result, err := s.client.invokeNamespaceDelete(
+		ctx,
+		input.NamespaceID,
+		input.ExpectedRevision,
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultOK {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	return ${output}{}, nil
+}`
+      }
+      throw new Error(`unsupported generated Go empty operation ${operation.name}`)
+    case "namespace_descriptor":
+      if (operation.contract.request_kind === "namespace_open") {
+        return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	if input.CreateIfMissing && input.Policy == nil {
+		return ${output}{}, validationError(
+			"namespace.policy",
+			"is required when create_if_missing is true",
+		)
+	}
+	if !input.CreateIfMissing && input.Policy != nil {
+		return ${output}{}, validationError(
+			"namespace.policy",
+			"is only valid when create_if_missing is true",
+		)
+	}
+	policyFlags, ttl, err := smithyNamespacePolicyWire(input.Policy)
+	if err != nil {
+		return ${output}{}, err
+	}
+	result, err := s.client.invokeNamespaceOpen(
+		ctx,
+		[]byte(input.Name),
+		input.CreateIfMissing,
+		policyFlags,
+		ttl,
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultOK && result.kind != SmithyFFIResultCreated {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	decoded, err := s.client.decodeNamespaceDescriptor(ctx, result.data)
+	if err != nil {
+		return ${output}{}, err
+	}
+	return ${output}{
+		Descriptor: smithyNamespaceDescriptor(decoded),
+		Created:    result.kind == SmithyFFIResultCreated,
+	}, nil
+}`
+      }
+      if (operation.contract.request_kind === "namespace_update_policy") {
+        return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	policyFlags, ttl, err := smithyNamespacePolicyWire(&input.Policy)
+	if err != nil {
+		return ${output}{}, err
+	}
+	result, err := s.client.invokeNamespaceUpdatePolicy(
+		ctx,
+		input.NamespaceID,
+		input.ExpectedRevision,
+		policyFlags,
+		ttl,
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != SmithyFFIResultValue {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	decoded, err := s.client.decodeNamespaceDescriptor(ctx, result.data)
+	if err != nil {
+		return ${output}{}, err
+	}
+	return ${output}{Descriptor: smithyNamespaceDescriptor(decoded)}, nil
+}`
+      }
+      throw new Error(`unsupported generated Go descriptor operation ${operation.name}`)
+    default:
+      throw new Error(
+        `unsupported generated Go response kind ${operation.contract.response_kind}`,
+      )
+  }
+}
+
+/** Renders generated Go operation implementations backed by the shared client core. */
+export function render_go_operations(contract: Client_Contract): string {
+  const methods = managed_operation_entries(contract)
+    .map(render_go_operation_method)
+    .join("\n\n")
+  return `// Code generated from the OpenKache Smithy client contract. DO NOT EDIT.
+
+package openkache
+
+import "context"
+
+${methods}
+`
+}
+
 function native_abi_go_field_name(function_name: string): string {
   const suffix = native_abi_dart_suffix(function_name)
   return suffix === "abi_version" ? "abi" : suffix
@@ -7271,6 +7554,7 @@ function expected_outputs(
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        [GENERATED_OUTPUTS.go_operations]: format_go_source(render_go_operations(contract)),
         [GENERATED_OUTPUTS.go_native_abi]: render_go_native_abi(contract),
         ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
@@ -7309,6 +7593,7 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        [GENERATED_OUTPUTS.go_operations]: format_go_source(render_go_operations(contract)),
         [GENERATED_OUTPUTS.go_native_abi]: render_go_native_abi(contract),
       }
     case "java":
