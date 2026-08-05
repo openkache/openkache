@@ -91,7 +91,7 @@ Use `client.Smithy()` when an application needs the generated
 - `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
   `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
-  artifact. The native artifact must have ABI version 3 and the extended
+  artifact. The native artifact must have ABI version 4 and the extended
   connect symbol when `Identity` is used.
 
 Protocol operations, Smithy models, and value-format identifiers are generated

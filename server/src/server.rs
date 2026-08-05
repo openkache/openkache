@@ -1953,7 +1953,7 @@ async fn execute_request(
                         Err(_) => None,
                     }
                 }
-                Err(error) => match mutation_cache_error_response(error) {
+                Err(error) => match mutation_cache_error_response(Opcode::Set, error) {
                     Some(response) => {
                         let rollback = namespaces
                             .lock()
@@ -2018,7 +2018,7 @@ async fn execute_request(
                         Vec::new(),
                     ))
                 }
-                Err(error) => mutation_cache_error_response(error),
+                Err(error) => mutation_cache_error_response(Opcode::Delete, error),
             };
         }
         Opcode::Stats if !administrator => {
@@ -2190,7 +2190,7 @@ fn cache_error_response(error: KvError) -> Response {
 /// reported after the storage worker crossed its mutation linearization point.
 /// Returning a protocol error for those cases would violate the v1 guarantee
 /// that every mutating error response means "no mutation".
-fn mutation_cache_error_response(error: KvError) -> Option<Response> {
+fn mutation_cache_error_response(opcode: Opcode, error: KvError) -> Option<Response> {
     let safe_before_mutation = matches!(
         &error,
         KvError::InvalidRequest(_)
@@ -2200,7 +2200,19 @@ fn mutation_cache_error_response(error: KvError) -> Option<Response> {
             | KvError::CapacityExhausted { .. }
             | KvError::NoCapacity
     );
-    safe_before_mutation.then(|| cache_error_response(error))
+    if !safe_before_mutation {
+        return None;
+    }
+
+    // `NoCapacity` precisely describes SET admission blocked by protected
+    // items. DELETE can encounter the same storage condition while driving
+    // background work, but the v1 response contract reserves `NoCapacity` for
+    // SET; use the applicable generic overload status for other mutations.
+    Some(if matches!(error, KvError::NoCapacity) && opcode != Opcode::Set {
+        response_display(Status::Overloaded, error)
+    } else {
+        cache_error_response(error)
+    })
 }
 
 /// Maps framing and validation failures to stable protocol statuses.

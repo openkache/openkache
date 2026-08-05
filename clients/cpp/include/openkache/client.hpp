@@ -391,7 +391,10 @@ public:
             throw Error("OpenKache client is closed");
         }
         if (name.size() > OPENKACHE_SMITHY_NAMESPACE_NAME_MAX_BYTES) {
-            throw Error("OpenKache namespace name exceeds 255 UTF-8 octets");
+            throw Error(
+                "OpenKache namespace name exceeds "
+                + std::to_string(OPENKACHE_SMITHY_NAMESPACE_NAME_MAX_BYTES)
+                + " UTF-8 octets");
         }
         if (create_if_missing && !policy.has_value()) {
             throw Error("namespace policy is required when create_if_missing is true");

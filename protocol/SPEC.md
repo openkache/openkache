@@ -667,13 +667,19 @@ Item ID.
 The JSON object is a point-in-time diagnostic snapshot of the server and its
 storage workers. Version 1 does not require the `storage` or `workers` values
 to be filtered to the requested namespace; `namespace_id` scopes the request,
-checks that the namespace exists, and provides the authorization boundary.
+checks that the namespace exists for an authorized request, and provides the
+authorization boundary.
 Per-namespace diagnostic members MAY be added in future responses. Clients
 MUST ignore unknown object members so diagnostics can grow without changing
 the frame protocol. The JSON payload remains subject to the 64 MiB response
 limit.
 
 ### `SYNC`
+
+An implementation MAY perform the authorization check before namespace lookup.
+For an unauthorized caller, `Forbidden` MAY therefore mask whether the supplied
+namespace ID exists. An authorized request for a missing namespace returns
+`NamespaceNotFound`.
 
 `SYNC` has the request layout `06 | namespace_id:u64be`.
 
@@ -690,6 +696,10 @@ linearized after that point need not be included.
 
 Protocol v1 does not express selectable durability levels. The storage and
 deployment durability contract is outside the frame protocol.
+
+As with `STATS`, an implementation MAY authorize before looking up the
+namespace, so `Forbidden` may mask a missing namespace. An authorized request
+for a missing namespace returns `NamespaceNotFound`.
 
 ### `NAMESPACE_OPEN`
 
@@ -827,9 +837,10 @@ malformed and discard the lane.
 
 `PolicyConflict` and `NoCapacity` apply to `SET`. `Conflict` applies to
 `NAMESPACE_UPDATE_POLICY` and `NAMESPACE_DELETE`. `NamespaceNotFound` applies
-to namespace operations that address a missing namespace. `NamespaceNotEmpty`
-applies to `NAMESPACE_DELETE`. These errors guarantee that the requested
-mutation was not applied.
+to any request that carries a namespace ID, including `GET`, `SET`, `DELETE`,
+`STATS`, and `SYNC`, as well as namespace-management operations that address a
+missing namespace. `NamespaceNotEmpty` applies to `NAMESPACE_DELETE`. These
+errors guarantee that the requested mutation was not applied.
 
 ## Validation and malformed frames
 
