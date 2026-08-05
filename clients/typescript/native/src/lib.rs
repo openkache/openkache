@@ -10,8 +10,8 @@ use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, Zs
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
     DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
-    NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RetryPolicy,
-    SetCondition, SetOptions, SetOutcome,
+    NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy, PrivateKey, ProtectedClient,
+    RetryPolicy, SetCondition, SetOptions, SetOutcome,
     contract::{
         ConnectionState, SMITHY_EVICTION_DEFAULT_EVICTABLE,
         SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED, SMITHY_EVICTION_MODE_EVICTABLE,
@@ -129,6 +129,24 @@ impl NativeClient {
     pub async fn echo(&self, value: Uint8Array) -> Result<Uint8Array> {
         self.active_client()?
             .echo(value.as_ref())
+            .await
+            .map(Uint8Array::new)
+            .map_err(native_error)
+    }
+
+    /// Sends an application payload through a Smithy-declared global operation.
+    #[napi(js_name = "invoke_application_value")]
+    pub async fn invoke_application_value(
+        &self,
+        operation: u32,
+        value: Uint8Array,
+    ) -> Result<Uint8Array> {
+        let opcode = Opcode::try_from(
+            u8::try_from(operation).map_err(|_| native_error("protocol opcode exceeds one byte"))?,
+        )
+        .map_err(native_error)?;
+        self.active_client()?
+            .execute_application(opcode, value.as_ref())
             .await
             .map(Uint8Array::new)
             .map_err(native_error)

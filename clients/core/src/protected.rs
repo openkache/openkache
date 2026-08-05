@@ -137,6 +137,15 @@ macro_rules! protected_client_methods {
             self.raw.echo(value).await
         }
 
+        /// Sends an application payload through a Smithy-declared global operation.
+        pub async fn execute_application(
+            &self,
+            operation: crate::Opcode,
+            value: impl AsRef<[u8]>,
+        ) -> Result<Vec<u8>> {
+            self.raw.execute_application(operation, value).await
+        }
+
         /// Returns the currently selected server-assigned namespace ID.
         pub fn namespace_id(&self) -> Option<u64> {
             self.raw.namespace_id()

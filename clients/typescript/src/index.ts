@@ -57,8 +57,6 @@ import {
   SMITHY_SET_OUTCOME_REPLACED,
   type Smithy_Delete_Input,
   type Smithy_Delete_Output,
-  type Smithy_Echo_Input,
-  type Smithy_Echo_Output,
   type Smithy_Get_Input,
   type Smithy_Get_Output,
   type Smithy_Eviction_Mode,
@@ -799,9 +797,15 @@ function raw_operation_transport(
         throw as_openkache_error(error)
       }
     },
-    echo: async (input: Smithy_Echo_Input): Promise<string> => {
+    invoke_application_value: async (
+      operation: number,
+      payload: string,
+    ): Promise<string> => {
       try {
-        const value = await native_client.echo(TEXT_ENCODER.encode(input.message))
+        const value = await native_client.invoke_application_value(
+          operation,
+          TEXT_ENCODER.encode(payload),
+        )
         return new TextDecoder("utf-8", { fatal: true }).decode(value)
       } catch (error) {
         throw as_openkache_error(error)

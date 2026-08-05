@@ -50,15 +50,16 @@ variable-integer parsing.
 
 ## Core components
 
-- `model/openkache.smithy` is the canonical source for server-visible wire
-  values: operation and status assignments, shared limits, fixed widths, and
-  version-specific frame and flag layout.
+- `model/openkache.smithy` is the canonical source for server-visible wire and
+  API values: operation assignments and semantics, operation shapes, status
+  assignments, shared limits, fixed widths, and version-specific frame and
+  flag layout.
 - `wire.ts` owns wire-model AST extraction and deterministic rendering of the
   Rust and language-neutral wire contract.
 - `generate.ts` validates the wire Smithy model and emits only the Rust wire
   definitions used by this crate. The client generator consumes the same
-  extracted wire contract for C, C#, Go, Python, Swift, and TypeScript
-  constants; client defaults, API shapes, native ABI identifiers, and
+  protocol model for C, C#, Go, Python, Swift, TypeScript, JVM, and Dart API
+  shapes and constants; client defaults, native ABI identifiers, and
   value-format metadata belong to
   [`../clients/model/openkache.smithy`](../clients/model/openkache.smithy) and
   [`../clients/generate.ts`](../clients/generate.ts).

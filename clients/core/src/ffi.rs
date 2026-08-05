@@ -606,6 +606,27 @@ async fn execute(
     result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
 }
 
+async fn execute_protocol_application_value(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    value: Vec<u8>,
+) -> Option<std::result::Result<FfiResult, crate::Error>> {
+    let opcode = crate::contract::protocol_opcode(operation)?;
+    let contract = crate::contract::operation_contract(opcode);
+    if contract.request_kind != crate::contract::OperationRequestKind::ApplicationValue
+        || contract.response_kind != crate::contract::OperationResponseKind::Echo
+    {
+        return None;
+    }
+    Some(
+        client
+            .raw()
+            .execute_application(opcode, value)
+            .await
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
+    )
+}
+
 async fn execute_protected(
     client: &LocalProtectedClient,
     operation: FfiOperation,
@@ -613,13 +634,11 @@ async fn execute_protected(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
+    if let Some(result) = execute_protocol_application_value(client, operation, value.clone()).await {
+        return result;
+    }
     match operation {
         FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
-        FfiOperation::Echo => client
-            .raw()
-            .echo(value)
-            .await
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
         FfiOperation::Get => client
             .get(&application_key)
             .await
@@ -652,6 +671,10 @@ async fn execute_protected(
             "operation",
             "namespace management uses dedicated native ABI calls",
         )),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "protocol operation is not available through the protected ABI",
+        )),
     }
 }
 
@@ -662,13 +685,11 @@ async fn execute_raw(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
+    if let Some(result) = execute_protocol_application_value(client, operation, value.clone()).await {
+        return result;
+    }
     match operation {
         FfiOperation::Ping => client.raw().ping().await.map(|_| ok_result()),
-        FfiOperation::Echo => client
-            .raw()
-            .echo(value)
-            .await
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
         FfiOperation::Get => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
@@ -706,9 +727,14 @@ async fn execute_raw(
             "operation",
             "namespace management uses dedicated native ABI calls",
         )),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "protocol operation is not available through the exact item-ID ABI",
+        )),
     }
 }
 
+#[allow(unreachable_patterns)]
 async fn execute_scoped(
     client: &LocalProtectedClient,
     operation: FfiOperation,
@@ -765,6 +791,10 @@ async fn execute_scoped(
         | FfiOperation::Reconnect => Err(crate::Error::configuration(
             "operation",
             "namespace management and reconnect use dedicated native ABI calls",
+        )),
+        _ => Err(crate::Error::configuration(
+            "operation",
+            "protocol operation is not available through the exact item-ID ABI",
         )),
     }
 }
