@@ -33,66 +33,44 @@ pub(super) const OPERATION_NAMES: [&str; Opcode::COUNT + 1] = operation_names();
 
 pub(super) const STATUS_NAMES: [&str; Status::COUNT] = Status::NAMES;
 
-/// The operation names used by the wire protocol and the metrics registry.
+/// A protocol operation plus the transport-only unknown bucket used by RESP.
+///
+/// The known values wrap the generated `Opcode` instead of duplicating its
+/// variants. Metrics arrays are indexed by `Opcode::index()`, so sparse wire
+/// assignments and Smithy enum reordering cannot silently corrupt telemetry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Operation {
-    Ping,
-    Get,
-    Set,
-    Delete,
-    Stats,
-    Sync,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
-    Echo,
-    Unknown,
-}
+pub(crate) struct Operation(Option<Opcode>);
 
+#[allow(non_upper_case_globals)]
 impl Operation {
     const COUNT: usize = OPERATION_NAMES.len();
 
+    pub(crate) const Ping: Self = Self(Some(Opcode::Ping));
+    pub(crate) const Get: Self = Self(Some(Opcode::Get));
+    pub(crate) const Set: Self = Self(Some(Opcode::Set));
+    pub(crate) const Delete: Self = Self(Some(Opcode::Delete));
+    pub(crate) const Stats: Self = Self(Some(Opcode::Stats));
+    pub(crate) const Sync: Self = Self(Some(Opcode::Sync));
+    pub(crate) const Unknown: Self = Self(None);
+
     pub(crate) const fn name(self) -> &'static str {
-        OPERATION_NAMES[self as usize]
+        OPERATION_NAMES[self.index()]
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        match self.0 {
+            Some(opcode) => opcode.index(),
+            None => Opcode::COUNT,
+        }
     }
 
     pub(crate) const fn from_opcode(opcode: Opcode) -> Self {
-        match opcode {
-            Opcode::Ping => Self::Ping,
-            Opcode::Get => Self::Get,
-            Opcode::Set => Self::Set,
-            Opcode::Delete => Self::Delete,
-            Opcode::Stats => Self::Stats,
-            Opcode::Sync => Self::Sync,
-            Opcode::NamespaceOpen => Self::NamespaceOpen,
-            Opcode::NamespaceUpdatePolicy => Self::NamespaceUpdatePolicy,
-            Opcode::NamespaceDelete => Self::NamespaceDelete,
-            Opcode::Echo => Self::Echo,
-        }
+        Self(Some(opcode))
     }
 }
 
-fn status_index(status: Status) -> usize {
-    match status {
-        Status::Ok => 0,
-        Status::NotFound => 1,
-        Status::Created => 2,
-        Status::Replaced => 3,
-        Status::Deleted => 4,
-        Status::NotStored => 5,
-        Status::InvalidRequest => 6,
-        Status::UnsupportedOpcode => 7,
-        Status::TooLarge => 8,
-        Status::Overloaded => 9,
-        Status::Timeout => 10,
-        Status::Forbidden => 11,
-        Status::InternalError => 12,
-        Status::NoCapacity => 13,
-        Status::PolicyConflict => 14,
-        Status::Conflict => 15,
-        Status::NamespaceNotFound => 16,
-        Status::NamespaceNotEmpty => 17,
-    }
+const fn status_index(status: Status) -> usize {
+    status.index()
 }
 
 pub(super) struct Histogram {
@@ -596,7 +574,7 @@ impl ObservabilityState {
         let Some(metrics) = self.network.get(worker) else {
             return;
         };
-        let operation_index = operation as usize;
+        let operation_index = operation.index();
         metrics.request.totals[operation_index][status_index(status)]
             .fetch_add(1, Ordering::Relaxed);
         metrics.request.durations[operation_index].observe(elapsed);
@@ -636,7 +614,7 @@ impl ObservabilityState {
         if let Some(metrics) = self.network.get(network_worker)
             && let Some(histograms) = metrics.storage_wait.get(storage_worker)
         {
-            histograms[operation as usize].observe(elapsed);
+            histograms[operation.index()].observe(elapsed);
         }
     }
 
@@ -650,7 +628,7 @@ impl ObservabilityState {
             return;
         }
         if let Some(metrics) = self.storage.get(worker) {
-            let index = operation as usize;
+            let index = operation.index();
             metrics.operations_total[index].fetch_add(1, Ordering::Relaxed);
             metrics.durations[index].observe(elapsed);
         }
