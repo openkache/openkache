@@ -1169,28 +1169,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "direct-cargo-bazel-deps"
-version = "0.0.1"
-dependencies = [
- "boring",
- "event-listener",
- "flume 0.12.0",
- "glommio",
- "kanal",
- "kimojio",
- "mimalloc",
- "monoio",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "quiche",
- "rustix",
- "signal-hook 0.4.4",
- "snmalloc-rs",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
