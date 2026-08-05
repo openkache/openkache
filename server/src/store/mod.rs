@@ -4,7 +4,10 @@ use std::fs;
 #[cfg(feature = "storage-runtime-compio")]
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
-#[cfg(not(feature = "storage-runtime-kimojio"))]
+#[cfg(not(any(
+    feature = "storage-runtime-kimojio",
+    feature = "storage-runtime-simulated"
+)))]
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -38,6 +41,7 @@ pub(crate) use self::large_value_log::*;
 pub(crate) use self::sg_directory::*;
 
 const CAPACITY_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(not(feature = "storage-runtime-simulated"))]
 const FILE_RESERVATION_RETRY_DELAYS: [Duration; 6] = [
     Duration::from_millis(1),
     Duration::from_millis(2),
@@ -231,12 +235,23 @@ impl storage_runtime::ReadBuffer for DirectIoBuffer {
     }
 }
 
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::ReadBuffer for DirectIoBuffer {
+    fn set_read_len(&mut self, initialized_len: usize) {
+        debug_assert!(initialized_len <= self.capacity());
+        self.initialized_len = self.initialized_len.max(initialized_len);
+    }
+}
+
 #[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::WriteBuffer for DirectIoBuffer {
     fn initialized(&self) -> &[u8] {
         self
     }
 }
+
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::WriteBuffer for DirectIoBuffer {}
 
 #[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::ReadBuffer for DirectIoBufferLease {
@@ -249,12 +264,22 @@ impl storage_runtime::ReadBuffer for DirectIoBufferLease {
     }
 }
 
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::ReadBuffer for DirectIoBufferLease {
+    fn set_read_len(&mut self, initialized_len: usize) {
+        self.buffer_mut().set_read_len(initialized_len);
+    }
+}
+
 #[cfg(feature = "storage-runtime-kimojio")]
 impl storage_runtime::WriteBuffer for DirectIoBufferLease {
     fn initialized(&self) -> &[u8] {
         self
     }
 }
+
+#[cfg(feature = "storage-runtime-simulated")]
+impl storage_runtime::WriteBuffer for DirectIoBufferLease {}
 
 #[cfg(feature = "storage-runtime-compio")]
 impl IoBuf for DirectIoBufferLease {
@@ -446,6 +471,7 @@ async fn open_direct_file_with_flags(
 ) -> std::io::Result<File> {
     let file =
         storage_runtime::open_file(path, create, write, flags | direct_io_open_flag()).await?;
+    #[cfg(not(feature = "storage-runtime-simulated"))]
     configure_direct_io(file.raw_fd())?;
     Ok(file)
 }
@@ -460,12 +486,12 @@ pub(super) const fn direct_io_open_flag() -> i32 {
     0
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
 pub(super) fn configure_direct_io(_file_descriptor: i32) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(feature = "storage-runtime-simulated")))]
 pub(super) fn configure_direct_io(file_descriptor: i32) -> std::io::Result<()> {
     if unsafe { libc::fcntl(file_descriptor, libc::F_NOCACHE, 1) } == -1 {
         Err(std::io::Error::last_os_error())
@@ -674,7 +700,10 @@ fn allocated_file_bytes(path: &Path) -> Result<u64> {
     }
 }
 
-#[cfg(not(feature = "storage-runtime-kimojio"))]
+#[cfg(not(any(
+    feature = "storage-runtime-kimojio",
+    feature = "storage-runtime-simulated"
+)))]
 pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
     if len == 0 {
         return Ok(());
@@ -699,6 +728,15 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
     .map_err(std::io::Error::from)?
 }
 
+#[cfg(feature = "storage-runtime-simulated")]
+pub(crate) async fn reserve_file_range(
+    _file: &File,
+    _offset: u64,
+    _len: u64,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
 #[cfg(feature = "storage-runtime-kimojio")]
 pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
     if len == 0 {
@@ -714,7 +752,13 @@ pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> st
     file.reserve_range(offset, len).await
 }
 
-#[cfg(all(target_os = "linux", not(feature = "storage-runtime-kimojio")))]
+#[cfg(all(
+    target_os = "linux",
+    not(any(
+        feature = "storage-runtime-kimojio",
+        feature = "storage-runtime-simulated"
+    ))
+))]
 fn reserve_file_range_once(file_descriptor: i32, offset: i64, len: i64) -> i32 {
     unsafe { libc::posix_fallocate(file_descriptor, offset, len) }
 }
@@ -743,7 +787,10 @@ fn reserve_file_range_once(file_descriptor: i32, _offset: i64, len: i64) -> i32 
     }
 }
 
-#[cfg(not(feature = "storage-runtime-kimojio"))]
+#[cfg(not(any(
+    feature = "storage-runtime-kimojio",
+    feature = "storage-runtime-simulated"
+)))]
 pub(crate) fn reserve_with_transient_retry(
     mut reserve: impl FnMut() -> i32,
     mut wait: impl FnMut(Duration),
