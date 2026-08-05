@@ -76,14 +76,18 @@ runs:
                   | tr "," "\n" \
                   | tr -d "\""
               )"
-              if [ -n "$cache_paths" ]; then
-                if ! nix --extra-experimental-features "nix-command flakes" \
-                  path-info --recursive --store https://cache.nixos.org $cache_paths >/dev/null; then
-                  printf "cache.nixos.org does not contain every %s container package closure.\n" "$system" >&2
-                  printf "Why: a local Nix store could hide a missing substitute and make publication build locally.\n" >&2
-                  printf "Fix: pin a Nixpkgs revision whose container package outputs are published to cache.nixos.org.\n" >&2
-                  exit 1
-                fi
+              if [ -z "$cache_paths" ]; then
+                printf "Nix cache probe found an empty %s container package manifest.\n" "$system" >&2
+                printf "Why: an empty manifest cannot prove that any Nixpkgs output is substitutable.\n" >&2
+                printf "Fix: list every cacheable package in nixpkgs-cache-check.cachePaths, then rerun the container cache probe.\n" >&2
+                exit 1
+              fi
+              if ! nix --extra-experimental-features "nix-command flakes" \
+                path-info --recursive --store https://cache.nixos.org $cache_paths >/dev/null; then
+                printf "cache.nixos.org does not contain every %s container package closure.\n" "$system" >&2
+                printf "Why: a local Nix store could hide a missing substitute and make publication build locally.\n" >&2
+                printf "Fix: pin a Nixpkgs revision whose container package outputs are published to cache.nixos.org.\n" >&2
+                exit 1
               fi
             }
             check_cache x86_64-linux
