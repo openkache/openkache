@@ -17,17 +17,6 @@ filegroup(
     ],
 )
 
-# Checked-in Go outputs are part of the contract's source-level API. Expose
-# them explicitly so private Bazel checks can compare generated output without
-# reading undeclared files from the public checkout.
-filegroup(
-    name = "client_contract_outputs",
-    srcs = [
-        "go/smithy_api.go",
-        "go/smithy_contract.go",
-    ],
-)
-
 filegroup(
     name = "client_core_sources",
     srcs = ["//clients/core:source_tree"],
@@ -120,10 +109,12 @@ filegroup(
             "**/papers/**",
             "**/target/**",
             "**/_generated/**",
+            "**/smithy_api.go",
+            "**/smithy_contract.go",
         ],
     ) + [
-        # This package re-export is handwritten and tracked; generated
-        # Smithy modules in the same directory remain excluded above.
+        # This package facade is handwritten; generated Smithy modules in the
+        # same directory remain excluded above.
         "python/src/openkache/_generated/__init__.py",
     ],
 )

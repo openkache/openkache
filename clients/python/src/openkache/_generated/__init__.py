@@ -1,4 +1,4 @@
-"""Smithy-generated Python contract types and constants."""
+"""Handwritten package facade for generated Smithy contract modules."""
 
 from .smithy_api import *
 from .smithy_contract import *

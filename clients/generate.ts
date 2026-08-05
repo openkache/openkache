@@ -264,7 +264,6 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
   python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
     generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
-  python_init: generated_path("clients/python/src/openkache/_generated/__init__.py"),
   swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
     generated_path("clients/swift/generated_local/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
@@ -2692,17 +2691,6 @@ ${operations}
 `
 }
 
-/** Renders the Python generated-package facade without duplicating Smithy shape names. */
-export function render_python_generated_init(): string {
-  return `"""Smithy-generated Python contract types and constants."""
-
-from .smithy_api import *
-from .smithy_contract import *
-
-__all__ = tuple(name for name in globals() if not name.startswith("_"))
-`
-}
-
 /** Renders the Python constants shared with the core-backed adapter.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -3562,7 +3550,6 @@ function expected_outputs(
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
-        [GENERATED_OUTPUTS.python_init]: render_python_generated_init(),
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
@@ -3606,7 +3593,6 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
-        [GENERATED_OUTPUTS.python_init]: render_python_generated_init(),
       }
     case "swift":
       return {
