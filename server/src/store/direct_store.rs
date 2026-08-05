@@ -502,6 +502,7 @@ pub(crate) struct Kvkache {
     config: Config,
     data: File,
     large_values: File,
+    pub(crate) storage_device_kind: crate::platform::StorageDeviceKind,
     pub(crate) table: Table,
     directory: SgDirectory,
     mutable: Vec<Option<MutableGeneration>>,
@@ -597,6 +598,8 @@ impl Kvkache {
             .await
             .map_err(|error| storage_io_error(&resource_guard, error))?;
         resource_guard.observe_storage_reservation()?;
+        let storage_device_kind = storage_runtime::file_device_kind(&data)
+            .combine(storage_runtime::file_device_kind(&large_values));
         let large_value_log = LargeValueLog::new(config.large_value_capacity)?;
         let bucket_read_pool_capacity = config.bucket_read_pool_capacity;
         let lease_ssd_read_buffer = config.lease_ssd_read_buffer;
@@ -604,6 +607,7 @@ impl Kvkache {
             config,
             data,
             large_values,
+            storage_device_kind,
             table,
             directory,
             mutable,

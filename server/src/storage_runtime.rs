@@ -585,3 +585,13 @@ mod backend {
 }
 
 pub(crate) use backend::*;
+
+#[cfg(feature = "storage-runtime-simulated")]
+pub(crate) fn file_device_kind(_file: &File) -> crate::platform::StorageDeviceKind {
+    crate::platform::StorageDeviceKind::Unknown
+}
+
+#[cfg(not(feature = "storage-runtime-simulated"))]
+pub(crate) fn file_device_kind(file: &File) -> crate::platform::StorageDeviceKind {
+    crate::platform::storage_device_kind_from_fd(file.raw_fd())
+}

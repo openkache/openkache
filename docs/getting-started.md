@@ -58,9 +58,9 @@ serving with the calculated configuration.
 
 The calculated limits are advisory. The planner detects standard Linux cgroup
 memory limits or macOS host memory pressure plus filesystem availability, but
-not filesystem quotas, SSD type, or device throughput. At server startup,
-OpenKache best-effort checks the storage filesystem and emits a warning when it
-is not NVMe or the device cannot be identified; this warning is non-fatal.
+not filesystem quotas, SSD type, or device throughput. After storage workers
+open their data files, OpenKache best-effort checks those opened files and
+emits a non-fatal warning when any device is non-NVMe or cannot be identified.
 NVMe is recommended for the intended latency and throughput profile, but it is
 not a hard requirement. Its memory estimate covers the packed Table rather than
 whole-process peak RSS. `--cpus` selects

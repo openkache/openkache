@@ -76,10 +76,10 @@ message.
 Mount `/var/lib/openkache` to durable local or block storage. The server stores
 Segment files, the generated storage key, and the running-process marker there.
 Do not use an ephemeral container layer for data that must survive a restart.
-NVMe SSD is the intended production medium, but it is not required. Startup
-best-effort checks the mounted filesystem and emits a non-fatal warning when it
-is not NVMe or the container does not expose enough metadata to identify the
-device.
+NVMe SSD is the intended production medium, but it is not required. After the
+storage workers open their data files, startup best-effort checks those opened
+files and emits a non-fatal warning when any device is non-NVMe or the
+container does not expose enough metadata to identify it.
 The storage directory must be owned or writable by UID/GID `65532`; named
 Docker and Podman volumes satisfy this when first created.
 

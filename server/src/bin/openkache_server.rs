@@ -3,7 +3,7 @@
 use std::{io, net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
-use openkache::{platform, AppConfig, QuicBackend};
+use openkache::{AppConfig, QuicBackend};
 
 const DEFAULT_PORT: u16 = 4433;
 
@@ -79,7 +79,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let runtime = compio::runtime::Runtime::new().map_err(runtime_initialization_error)?;
     require_native_driver(runtime.driver_type())?;
-    report_storage_device(&config.storage.directory);
     runtime.block_on(serve::run(arguments, config))
 }
 
@@ -143,30 +142,6 @@ fn runtime_initialization_error(error: io::Error) -> io::Error {
              the polling driver on Apple Silicon macOS ({error})"
         ),
     )
-}
-
-fn report_storage_device(path: &std::path::Path) {
-    match platform::storage_device_kind(path) {
-        platform::StorageDeviceKind::Nvme => {
-            println!("Storage device: NVMe (detected)");
-        }
-        platform::StorageDeviceKind::NonNvme => {
-            eprintln!(
-                "WARNING: storage directory {} is on a non-NVMe block device. \
-                 OpenKache will continue, but NVMe SSD is the intended production \
-                 medium for predictable latency.",
-                path.display()
-            );
-        }
-        platform::StorageDeviceKind::Unknown => {
-            eprintln!(
-                "WARNING: could not verify that storage directory {} is on NVMe. \
-                 OpenKache will continue, but NVMe SSD is the intended production \
-                 medium for predictable latency.",
-                path.display()
-            );
-        }
-    }
 }
 
 /// Loads the cache configuration from TOML or returns the default configuration.

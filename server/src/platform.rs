@@ -1,13 +1,12 @@
 //! Host-specific runtime topology and diagnostics.
 
 use std::collections::HashSet;
-use std::path::Path;
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
 use std::path::PathBuf;
 
 use crate::error::Result;
 
-/// Best-effort classification of the filesystem backing the storage directory.
+/// Best-effort classification of the devices backing the worker storage files.
 ///
 /// NVMe is the intended production medium, but it is not a correctness
 /// requirement. `Unknown` is deliberately separate from `NonNvme`: containers,
@@ -15,64 +14,60 @@ use crate::error::Result;
 /// enough metadata to identify the physical device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageDeviceKind {
-    /// The storage filesystem resolves directly to an NVMe block device.
+    /// Every inspected storage file resolves directly to an NVMe block device.
     Nvme,
-    /// The storage filesystem resolves to a known non-NVMe block device.
+    /// At least one inspected storage file resolves to a known non-NVMe block
+    /// device.
     NonNvme,
-    /// The platform or container did not expose enough metadata to decide.
+    /// At least one inspected storage file could not be classified, and no
+    /// inspected file was known to be non-NVMe.
     Unknown,
 }
 
-/// Classifies the block device containing `path` without creating or opening
-/// the storage directory.
-///
-/// If the path does not exist yet, or filesystem metadata is unavailable,
-/// [`StorageDeviceKind::Unknown`] is returned instead of guessing from an
-/// ancestor directory.
-///
-/// # Arguments
-///
-/// * `path` - The storage directory or path whose backing filesystem is
-///   inspected.
-///
-/// # Returns
-///
-/// The best-effort classification of the filesystem backing `path`.
-///
-/// # Errors
-///
-/// This function does not return an error. Filesystem metadata that cannot be
-/// read is represented as [`StorageDeviceKind::Unknown`].
-pub fn storage_device_kind(path: &Path) -> StorageDeviceKind {
-    #[cfg(target_os = "linux")]
-    {
-        return linux_storage_device_kind(path);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = path;
-        // macOS does not expose a stable, unprivileged equivalent of Linux's
-        // /sys/dev/block mapping. Keep startup best-effort instead of invoking
-        // external tools or guessing from a /dev/diskN name.
-        return StorageDeviceKind::Unknown;
+impl StorageDeviceKind {
+    /// Conservatively combines classifications from all files used by storage.
+    ///
+    /// A known non-NVMe file takes precedence because it is enough to make the
+    /// intended all-NVMe recommendation inapplicable. Otherwise, an unknown
+    /// file prevents claiming that every storage file is on NVMe.
+    pub(crate) const fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::NonNvme, _) | (_, Self::NonNvme) => Self::NonNvme,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Nvme, Self::Nvme) => Self::Nvme,
+        }
     }
 }
 
-#[cfg(target_os = "linux")]
-fn linux_storage_device_kind(path: &Path) -> StorageDeviceKind {
-    use std::fs;
-    use std::os::unix::fs::MetadataExt;
-
-    let Ok(metadata) = fs::metadata(path) else {
+/// Classifies the block device owning an already-open storage file.
+///
+/// This is the authoritative path for server startup diagnostics: the
+/// descriptor was opened by the same storage worker that will issue reads and
+/// writes, so the result cannot drift from a separately inspected config path.
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+pub(crate) fn storage_device_kind_from_fd(fd: std::os::fd::RawFd) -> StorageDeviceKind {
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut metadata) } != 0 {
         return StorageDeviceKind::Unknown;
-    };
-    let device = metadata.dev();
+    }
+    linux_storage_device_kind_for_device(metadata.st_dev)
+}
+
+#[cfg(all(target_os = "macos", not(feature = "storage-runtime-simulated")))]
+pub(crate) fn storage_device_kind_from_fd(_fd: std::os::fd::RawFd) -> StorageDeviceKind {
+    // macOS does not expose a stable, unprivileged equivalent of Linux's
+    // /sys/dev/block mapping. Keep startup best-effort instead of guessing.
+    StorageDeviceKind::Unknown
+}
+
+#[cfg(all(target_os = "linux", not(feature = "storage-runtime-simulated")))]
+fn linux_storage_device_kind_for_device(device: u64) -> StorageDeviceKind {
     let sysfs_device = PathBuf::from("/sys/dev/block").join(format!(
         "{}:{}",
         libc::major(device),
         libc::minor(device)
     ));
-    let Ok(resolved) = fs::canonicalize(sysfs_device) else {
+    let Ok(resolved) = std::fs::canonicalize(sysfs_device) else {
         return StorageDeviceKind::Unknown;
     };
 

@@ -28,6 +28,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
+use crate::platform::StorageDeviceKind;
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
@@ -1078,6 +1079,17 @@ impl KacheServer {
     /// Returns an error when the stored socket address cannot be reported.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+
+    /// Returns the conservative classification of the files opened by the
+    /// storage workers during bind.
+    ///
+    /// # Returns
+    ///
+    /// The aggregate classification of every data and large-value file opened
+    /// by the storage workers.
+    pub fn storage_device_kind(&self) -> StorageDeviceKind {
+        self.cache.storage_device_kind()
     }
 
     /// Returns the leaf certificate clients must trust directly or through its issuing CA.
