@@ -12,8 +12,8 @@ import 'generated_local/smithy_native_api.dart';
 part 'generated_local/smithy_operations.dart';
 
 /// Failure reported by the shared Rust client-core ABI.
-final class EchoClientException implements Exception {
-  const EchoClientException(this.message, [this.cause]);
+final class OpenKacheClientException implements Exception {
+  const OpenKacheClientException(this.message, [this.cause]);
 
   final String message;
   final Object? cause;
@@ -30,15 +30,15 @@ abstract interface class OpenKacheClient implements SmithyOpenKacheApi {}
 /// QUIC, TLS, framing, retries, namespace handling, and response ownership
 /// remain in the shared Rust client core. This adapter only marshals Dart DTOs
 /// through the stable C ABI.
-final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient {
-  EchoClient._(this._api, this._handle);
+final class Client with SmithyGeneratedOperations implements OpenKacheClient {
+  Client._(this._api, this._handle);
 
   final SmithyNativeApi _api;
   ffi.Pointer<SmithyNativeClient> _handle;
   bool _closed = false;
 
   /// Connects to an OpenKache server through the shared native client core.
-  factory EchoClient.connect({
+  factory Client.connect({
     required String address,
     required String serverName,
     List<int> certificate = const <int>[],
@@ -56,13 +56,13 @@ final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient
     try {
       api = SmithyNativeApi.open(libraryPath);
     } on Object catch (error) {
-      throw EchoClientException(
+      throw OpenKacheClientException(
         'failed to load OpenKache native client',
         error,
       );
     }
     if (api.abiVersion() != smithyFfiAbiVersion) {
-      throw const EchoClientException(
+      throw const OpenKacheClientException(
         'unsupported OpenKache native ABI version',
       );
     }
@@ -93,11 +93,11 @@ final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient
       );
       final client = result.client;
       if (result.kind != smithyResultConnected || client == ffi.nullptr) {
-        throw const EchoClientException(
+        throw const OpenKacheClientException(
           'native client did not return a connected handle',
         );
       }
-      return EchoClient._(api, client);
+      return Client._(api, client);
     } finally {
       addressBuffer.close();
       serverBuffer.close();
@@ -105,10 +105,6 @@ final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient
       keyBuffer.close();
     }
   }
-
-  /// Sends one message and returns the echoed text.
-  Future<String> echoMessage(String message) async =>
-      (await echo(EchoInput(message: message))).message;
 
   /// Releases the shared native client handle.
   void close() {
@@ -200,7 +196,7 @@ final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient
         descriptor,
       );
       if (status != smithyDescriptorDecodeOk) {
-        throw const EchoClientException(
+        throw const OpenKacheClientException(
           'native client returned an invalid namespace descriptor',
         );
       }
@@ -239,11 +235,26 @@ final class EchoClient with SmithyGeneratedOperations implements OpenKacheClient
 
   ffi.Pointer<SmithyNativeClient> _requireOpenHandle() {
     if (_closed || _handle == ffi.nullptr) {
-      throw const EchoClientException('OpenKache client is closed');
+      throw const OpenKacheClientException('OpenKache client is closed');
     }
     return _handle;
   }
 
+}
+
+/// @deprecated Use [Client] and the generated Smithy operation DTOs.
+@Deprecated('Use Client')
+typedef EchoClient = Client;
+
+/// @deprecated Use [OpenKacheClientException].
+@Deprecated('Use OpenKacheClientException')
+typedef EchoClientException = OpenKacheClientException;
+
+/// Compatibility convenience for the experimental ECHO operation.
+@Deprecated('Use echo(EchoInput) from the generated Smithy API')
+extension EchoClientConvenience on Client {
+  Future<String> echoMessage(String message) async =>
+      (await echo(EchoInput(message: message))).message;
 }
 
 final class _Buffer {
@@ -271,19 +282,19 @@ _NativeResult _readResult(
   bool takeClient = false,
 }) {
   if (result == ffi.nullptr) {
-    throw const EchoClientException('native client returned a null result');
+    throw const OpenKacheClientException('native client returned a null result');
   }
   try {
     final kind = api.resultKind(result);
     final length = api.resultDataLength(result);
     if (length < 0 || length > 0x7fffffff) {
-      throw const EchoClientException(
+      throw const OpenKacheClientException(
         'native client returned an oversized payload',
       );
     }
     final data = api.resultData(result);
     if (length != 0 && data == ffi.nullptr) {
-      throw const EchoClientException(
+      throw const OpenKacheClientException(
         'native client returned a null payload pointer',
       );
     }
@@ -292,7 +303,7 @@ _NativeResult _readResult(
         : data.asTypedList(length).toList(growable: false);
     final client = takeClient ? api.resultTakeClient(result) : ffi.nullptr;
     if (kind == smithyResultError) {
-      throw EchoClientException(
+      throw OpenKacheClientException(
         utf8.decode(payload, allowMalformed: true).isEmpty
             ? 'native client operation failed'
             : utf8.decode(payload, allowMalformed: true),

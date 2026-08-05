@@ -4346,7 +4346,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         return smithySubmit(() -> {
             byte[] name = input.name().getBytes(StandardCharsets.UTF_8);
             if (name.length > SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
-                throw new EchoClientException("namespace name exceeds protocol limit");
+                throw new OpenKacheClientException("namespace name exceeds protocol limit");
             }
             SmithyPolicyFlags policy = smithyPolicyFlags(input.policy(), input.createIfMissing());
             NativeResult result = smithyNamespaceOpen(
@@ -4538,8 +4538,8 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
         }
     }
 
-    private static EchoClientException smithyUnexpectedKind(String operation, int kind) {
-        return new EchoClientException(
+    private static OpenKacheClientException smithyUnexpectedKind(String operation, int kind) {
+        return new OpenKacheClientException(
             operation + " returned unexpected native result " + kind);
     }
 }
@@ -4837,7 +4837,7 @@ ${methods}
     }
 
     private fun smithyUnexpectedKind(operation: String, kind: Int) =
-        EchoClientException("$operation returned unexpected native result $kind")
+        OpenKacheClientException("$operation returned unexpected native result $kind")
 }
 `
 }
@@ -4966,7 +4966,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       if (operation.contract.request_kind === "namespace_open") {
         return `${prefix}    final name = utf8.encode(input.name);
     if (name.length > smithyNamespaceNameMaxBytes) {
-      throw const EchoClientException('namespace name exceeds protocol limit');
+      throw const OpenKacheClientException('namespace name exceeds protocol limit');
     }
     final policy = _smithyPolicyFlags(input.policy, input.createIfMissing);
     final nameBuffer = _Buffer(name);
@@ -5136,7 +5136,7 @@ String _smithyDecodeUtf8(List<int> payload, String operation) {
   try {
     return utf8.decode(payload, allowMalformed: false);
   } on FormatException catch (error) {
-    throw EchoClientException('$operation response is not valid UTF-8', error);
+    throw OpenKacheClientException('$operation response is not valid UTF-8', error);
   }
 }
 
@@ -5146,8 +5146,8 @@ void _smithyRequireKind(_NativeResult result, int expected, String operation) {
   }
 }
 
-EchoClientException _smithyUnexpectedKind(String operation, int kind) =>
-    EchoClientException('$operation returned unexpected native result $kind');
+OpenKacheClientException _smithyUnexpectedKind(String operation, int kind) =>
+    OpenKacheClientException('$operation returned unexpected native result $kind');
 
 final class _SmithySetFlags {
   const _SmithySetFlags(this.flags, this.ttlMilliseconds);

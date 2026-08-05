@@ -1,9 +1,10 @@
 package io.openkache.client;
 
 /**
- * Failure reported by the shared Rust client-core ABI.
+ * @deprecated Use {@link OpenKacheClientException}; retained for source compatibility.
  */
-public final class EchoClientException extends RuntimeException {
+@Deprecated
+public final class EchoClientException extends OpenKacheClientException {
     public EchoClientException(String message) {
         super(message);
     }

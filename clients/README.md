@@ -86,7 +86,7 @@ analyzing their managed adapters.
 | C++ | `cmake -S . -B target/build && cmake --build target/build` | `include/openkache/client.hpp` |
 | Dart | `OPENKACHE_GENERATION_TARGET=dart ../generate.ts && dart pub get && dart analyze` | `lib/openkache.dart` plus generated Smithy types |
 | Go | `go generate && go vet ./... && go test ./... && go build ./...` | Context-aware protected client and generated Smithy API |
-| Java | `mvn package` | `src/main/java/io/openkache/client/EchoClient.java` plus generated Smithy types |
+| Java | `mvn package` | `src/main/java/io/openkache/client/Client.java` plus generated Smithy types |
 | Kotlin | `gradle build` | `src/main/kotlin/io/openkache/client/OpenKache.kt` plus generated Smithy types |
 | CLI | `cargo build --release -p openkache-cli` | `openkache-cli` binary |
 | Python | `python -m compileall src && python -m build` | `src/openkache/__init__.py`, generated Smithy API under `_generated/` |
