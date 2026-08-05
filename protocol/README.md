@@ -56,17 +56,20 @@ variable-integer parsing.
   flag layout.
 - `wire.ts` owns wire-model AST extraction and deterministic rendering of the
   Rust and language-neutral wire contract.
-- `generate.ts` validates the wire Smithy model and emits only the Rust wire
-  definitions used by this crate. The client generator consumes the same
-  protocol model for C, C#, Go, Python, Swift, TypeScript, JVM, and Dart API
-  shapes and constants; client defaults, native ABI identifiers, and
-  value-format metadata belong to
+- `generate.ts` validates the wire Smithy model and emits the Rust wire
+  definitions and operation semantic contracts used by this crate. The client
+  generator consumes the same protocol model for C, C#, Go, Python, Swift,
+  TypeScript, JVM, and Dart API shapes and constants; client defaults, native
+  ABI identifiers, and value-format metadata belong to
   [`../clients/model/openkache.smithy`](../clients/model/openkache.smithy) and
   [`../clients/generate.ts`](../clients/generate.ts).
 - `Opcode`, `Status`, and `SetOptions` represent assigned protocol values.
   `Opcode::ALL`, `Opcode::COUNT`, `Opcode::NAMES`, and `Opcode::name()` (and
   the corresponding `Status` metadata) are generated from the same Smithy
   enums so metrics and adapters do not repeat wire labels.
+- `OperationContract` and `operation_contract` expose each operation's
+  request/response shape, retry mode, scope, and applicable statuses from the
+  same Smithy operation traits.
 - `Request` and `Response` validate and encode complete frames.
 - `RequestHeader` and `ResponseHeader` support bounded incremental reads.
 - `ProtocolError` classifies malformed, unsupported, and oversized frames.
