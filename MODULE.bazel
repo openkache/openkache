@@ -50,9 +50,33 @@ crate.spec(package = "glommio", version = "0.9.0")
 crate.spec(package = "mimalloc", version = "0.1.52")
 crate.spec(
     default_features = False,
+    features = ["metrics"],
+    package = "opentelemetry",
+    version = "0.32.0",
+)
+crate.spec(
+    default_features = False,
+    features = ["http-proto", "metrics", "reqwest-blocking-client"],
+    package = "opentelemetry-otlp",
+    version = "0.32.0",
+)
+crate.spec(
+    default_features = False,
+    features = ["metrics"],
+    package = "opentelemetry_sdk",
+    version = "0.32.1",
+)
+crate.spec(
+    default_features = False,
     features = ["async-cancel", "iouring", "sync"],
     package = "monoio",
     version = "0.2.4",
+)
+crate.spec(
+    default_features = False,
+    features = ["fmt", "json"],
+    package = "tracing-subscriber",
+    version = "0.3.23",
 )
 crate.spec(
     default_features = False,

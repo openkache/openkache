@@ -5,6 +5,7 @@
 //! embeds recovery control pages used to rebuild committed state at startup.
 
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
@@ -362,6 +363,7 @@ pub struct AppConfig {
     pub quic: QuicConfig,
     pub tls: TlsConfig,
     pub network: NetworkConfig,
+    pub observability: ObservabilityConfig,
     pub runtime: RuntimeConfig,
     pub io_uring: IoUringConfig,
     pub timeouts: TimeoutConfig,
@@ -388,11 +390,38 @@ impl AppConfig {
             quic: QuicConfig::default(),
             tls: TlsConfig::default(),
             network: NetworkConfig::with_cpu_ids(cpu_ids),
+            observability: ObservabilityConfig::default(),
             runtime: RuntimeConfig::with_cpu_ids(storage_cpu_ids),
             io_uring: IoUringConfig::default(),
             timeouts: TimeoutConfig::default(),
             storage: StorageConfig::default(),
             table: TableConfig::default(),
+        }
+    }
+}
+
+/// Low-cardinality management endpoint and request-latency settings.
+///
+/// The endpoint is disabled by default. When enabled, it serves `/metrics`,
+/// `/livez`, and `/readyz` on a separate standard-library TCP listener so
+/// scrapes cannot consume data-plane worker capacity.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ObservabilityConfig {
+    /// Local address for the Prometheus-compatible management endpoint.
+    pub metrics_listen: Option<SocketAddr>,
+    /// Allow binding the management endpoint to a non-loopback address.
+    pub metrics_allow_remote: bool,
+    /// Requests at or above this duration emit a structured warning.
+    pub slow_request_us: u64,
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            metrics_listen: None,
+            metrics_allow_remote: false,
+            slow_request_us: 10_000,
         }
     }
 }
@@ -700,6 +729,20 @@ impl AppConfig {
                 "network SQPOLL and NAPI busy poll must remain false".into(),
             ));
         }
+        if self.observability.slow_request_us == 0 {
+            return Err(KvError::InvalidConfig(
+                "observability.slow_request_us must be non-zero".into(),
+            ));
+        }
+        if let Some(address) = self.observability.metrics_listen
+            && !self.observability.metrics_allow_remote
+            && !address.ip().is_loopback()
+        {
+            return Err(KvError::InvalidConfig(
+                "observability.metrics_listen must be loopback unless observability.metrics_allow_remote is true"
+                    .into(),
+            ));
+        }
         if self.runtime.thread_count == 0 {
             return Err(KvError::InvalidConfig(
                 "runtime.thread_count must be non-zero".into(),
@@ -910,6 +953,7 @@ impl AppConfig {
             quic: QuicConfig::default(),
             tls: TlsConfig::default(),
             network: NetworkConfig::default(),
+            observability: ObservabilityConfig::default(),
             runtime: RuntimeConfig {
                 thread_count,
                 cpu_ids,

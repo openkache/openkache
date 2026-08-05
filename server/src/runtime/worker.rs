@@ -5,12 +5,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, poll_fn};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::{ItemId, SetOptions};
 
 use crate::channel::{AsyncReceiver, TryRecvError};
+use crate::observability::{ObservabilityState, Operation, StorageWorkerId};
 use crate::types::StoredItemValue;
 use crate::*;
 
@@ -245,6 +246,14 @@ impl KeyedCommand {
     }
 }
 
+fn metric_operation(operation: &KeyedOperation) -> Operation {
+    match operation {
+        KeyedOperation::Get => Operation::Get,
+        KeyedOperation::Set { .. } => Operation::Set,
+        KeyedOperation::Delete => Operation::Delete,
+    }
+}
+
 pub(super) struct DeferredWorkerResponse {
     pub(super) sender: WorkerResponseSender,
     pub(super) value: WorkerResponse,
@@ -425,9 +434,12 @@ impl KeyScheduler {
         }
         lane.state = LaneState::Running;
         let (operation, response) = command.into_parts();
+        let telemetry_operation = metric_operation(&operation);
         Some(RunningKeyedCommand {
             storage_key,
             completion: RunningCompletion::Direct(response),
+            operation: telemetry_operation,
+            started_at: Instant::now(),
             job: cache.prepare_keyed(storage_key, operation),
         })
     }
@@ -510,6 +522,8 @@ struct RunningKeyedCommand {
     storage_key: StorageKey,
     completion: RunningCompletion,
     job: KeyedJob,
+    operation: Operation,
+    started_at: Instant,
 }
 
 enum RunningCompletion {
@@ -526,13 +540,24 @@ struct CompletedKeyedCommand {
     storage_key: StorageKey,
     completion: RunningCompletion,
     job: CompletedKeyedJob,
+    operation: Operation,
+    started_at: Instant,
 }
 
 async fn run_keyed_command(running: RunningKeyedCommand) -> CompletedKeyedCommand {
+    let RunningKeyedCommand {
+        storage_key,
+        completion,
+        job,
+        operation,
+        started_at,
+    } = running;
     CompletedKeyedCommand {
-        storage_key: running.storage_key,
-        completion: running.completion,
-        job: running.job.run().await,
+        storage_key,
+        completion,
+        job: job.run().await,
+        operation,
+        started_at,
     }
 }
 
@@ -604,6 +629,7 @@ fn finish_scheduler_lane(
             failure_state,
         } = batch;
         let operation = operation.expect("collapsed storage batch has a final mutation");
+        let telemetry_operation = metric_operation(&operation);
         RunningKeyedCommand {
             storage_key,
             completion: RunningCompletion::Collapsed {
@@ -612,6 +638,8 @@ fn finish_scheduler_lane(
                 success_state,
                 failure_state,
             },
+            operation: telemetry_operation,
+            started_at: Instant::now(),
             job: cache.prepare_keyed(storage_key, operation),
         }
     })
@@ -629,8 +657,13 @@ pub(super) async fn worker_loop(
     mut cache: Kvkache,
     receiver: AsyncReceiver<WorkerRequest>,
     io_config: IoUringConfig,
+    worker_id: usize,
     affinity_id: usize,
+    observability: Option<std::sync::Arc<ObservabilityState>>,
 ) -> Result<()> {
+    let storage_shard = observability
+        .as_deref()
+        .map(|state| state.storage_shard(StorageWorkerId(worker_id)));
     let waiting_capacity = io_config
         .batch_size
         .saturating_mul(io_config.max_inflight_per_worker)
@@ -883,6 +916,12 @@ pub(super) async fn worker_loop(
                 Err(error) => return Err(error),
             },
             WorkerEvent::Completed(completed) => {
+                if let Some(storage_shard) = storage_shard {
+                    storage_shard.record_operation(
+                        completed.operation,
+                        completed.started_at.elapsed(),
+                    );
+                }
                 let include_visible_state = scheduler.has_waiting(&completed.storage_key);
                 let KeyedFinish {
                     outcome,

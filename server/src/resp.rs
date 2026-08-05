@@ -15,13 +15,16 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver};
 use crate::network_runtime::{self, TcpListener, TcpStream};
+use crate::observability::{
+    NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
+};
 use crate::platform::StorageDeviceKind;
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,
 };
 use crate::types::StoredItemValue;
-use crate::{AppConfig, SetOutcome, ThreadedKvkache};
+use crate::{AppConfig, NetworkWorkerCache, SetOutcome, ThreadedKvkache};
 
 const MAX_ARRAY_ITEMS: usize = 64;
 const MAX_BULK_BYTES: usize = 16 * 1024 * 1024;
@@ -40,6 +43,7 @@ pub struct RespServer {
     cache: Arc<ThreadedKvkache>,
     network: crate::NetworkConfig,
     request_timeout: Duration,
+    observability: ObservabilityService,
 }
 
 impl RespServer {
@@ -68,7 +72,16 @@ impl RespServer {
         config.validate()?;
         let network = config.network.clone();
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
-        let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
+        let observability = ObservabilityService::new(
+            network.worker_count,
+            config.runtime.thread_count,
+            &config.observability,
+        )?;
+        let observability_state = observability.state();
+        let mut cache = ThreadedKvkache::start_validated_for_server_with_observability(
+            config,
+            observability_state,
+        )?;
         let sockets = match bind_reuse_port_tcp_listeners(address, network.worker_count) {
             Ok(sockets) => sockets,
             Err(error) => {
@@ -83,6 +96,7 @@ impl RespServer {
             cache: Arc::new(cache),
             network,
             request_timeout,
+            observability,
         })
     }
 
@@ -97,6 +111,16 @@ impl RespServer {
     /// This accessor returns the server result type for symmetry with the QUIC server.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+
+    /// Returns the bound observability management address, when enabled.
+    ///
+    /// # Returns
+    ///
+    /// The address bound for the management listener, or `None` when
+    /// observability metrics are disabled.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.observability.metrics_addr()
     }
 
     /// Returns the conservative classification of the files opened by the
@@ -129,8 +153,10 @@ impl RespServer {
             cache,
             network,
             request_timeout,
+            observability: observability_service,
             ..
         } = self;
+        let observability = observability_service.state();
         let (started_tx, started_rx) =
             channel::bounded::<std::result::Result<(), String>>(network.worker_count);
         let (finished_tx, finished_rx) =
@@ -143,6 +169,7 @@ impl RespServer {
             let started_tx = started_tx.clone();
             let finished_tx = finished_tx.clone();
             let worker_cache = Arc::clone(&cache);
+            let worker_observability = Arc::clone(&observability);
             let cpu_id = network.cpu_ids[worker_id];
             let entries = network.io_uring_entries_per_worker;
             let event_interval = network.event_interval;
@@ -164,6 +191,7 @@ impl RespServer {
                         cpu_id,
                         socket,
                         worker_cache,
+                        worker_observability,
                         request_timeout,
                         stop_rx,
                         reporter,
@@ -194,26 +222,42 @@ impl RespServer {
             }
         }
         if let Some(message) = startup_error {
+            observability.set_failed();
             let remaining_completions = workers.len();
             shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
                 .await?;
             return Err(ServerError::NetworkWorker(message));
         }
 
+        let metrics_handle = observability_service.start();
         let shutdown = shutdown.fuse();
         let worker_finished = finished_rx.recv_async_network().fuse();
         pin_mut!(shutdown, worker_finished);
-        let (worker_failure, completed_workers) = select! {
-            () = shutdown => (None, 0),
-            result = worker_finished => (Some(match result {
-                Ok((worker_id, Ok(()))) => format!("RESP worker {worker_id} exited unexpectedly"),
-                Ok((worker_id, Err(message))) => {
-                    format!("RESP worker {worker_id} failed: {message}")
-                }
-                Err(_) => "RESP worker completion channel closed".into(),
-            }), 1),
+        let (worker_failure, completed_workers, failed_worker) = select! {
+            () = shutdown => (None, 0, None),
+            result = worker_finished => match result {
+                Ok((worker_id, Ok(()))) => (
+                    Some(format!("RESP worker {worker_id} exited unexpectedly")),
+                    1,
+                    Some(worker_id),
+                ),
+                Ok((worker_id, Err(message))) => (
+                    Some(format!("RESP worker {worker_id} failed: {message}")),
+                    1,
+                    Some(worker_id),
+                ),
+                Err(_) => (Some("RESP worker completion channel closed".into()), 1, None),
+            },
         };
         let remaining_completions = workers.len().saturating_sub(completed_workers);
+        if let Some(worker_id) = failed_worker {
+            observability.network_worker_failed(worker_id);
+        } else if worker_failure.is_some() {
+            observability.set_failed();
+        } else {
+            observability.set_draining();
+        }
+        metrics_handle.stop();
         shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
             .await?;
         match worker_failure {
@@ -228,6 +272,7 @@ async fn run_resp_role(
     cpu_id: usize,
     socket: std::net::TcpListener,
     cache: Arc<ThreadedKvkache>,
+    observability: Arc<ObservabilityState>,
     request_timeout: Duration,
     stop: AsyncReceiver<()>,
     mut reporter: NetworkWorkerReporter,
@@ -235,6 +280,7 @@ async fn run_resp_role(
     let listener = match TcpListener::from_std(socket) {
         Ok(listener) => listener,
         Err(error) => {
+            observability.network_worker_failed(worker_id);
             reporter.startup_failed(error.to_string());
             return None;
         }
@@ -242,16 +288,25 @@ async fn run_resp_role(
     if let Some(error) =
         crate::platform::cpu_assignment_error(&format!("RESP worker {worker_id}"), cpu_id)
     {
+        observability.network_worker_failed(worker_id);
         reporter.startup_failed(error);
         return None;
     }
     if !reporter.started() {
         return None;
     }
+    observability.network_worker_started(worker_id);
     Some(
-        run_resp_worker(listener, &cache, request_timeout, stop)
-            .await
-            .map_err(|error| error.to_string()),
+        run_resp_worker(
+            listener,
+            &cache,
+            worker_id,
+            observability,
+            request_timeout,
+            stop,
+        )
+        .await
+        .map_err(|error| error.to_string()),
     )
 }
 
@@ -283,9 +338,13 @@ fn bind_reuse_port_tcp_listeners(
 async fn run_resp_worker(
     listener: TcpListener,
     cache: &ThreadedKvkache,
+    worker_id: usize,
+    observability: Arc<ObservabilityState>,
     request_timeout: Duration,
     stop: AsyncReceiver<()>,
 ) -> std::io::Result<()> {
+    let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
+    let cache = NetworkWorkerCache::new(cache, network_shard.worker_id());
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {
@@ -296,7 +355,13 @@ async fn run_resp_worker(
                 incoming = incoming => {
                     let (stream, _) = incoming?;
                     stream.set_nodelay(true)?;
-                    connections.push(serve_resp_connection(stream, cache, request_timeout));
+                    network_shard.connection_started();
+                    connections.push(serve_resp_connection(
+                        stream,
+                        &cache,
+                        network_shard,
+                        request_timeout,
+                    ));
                 }
                 _ = stopping => break,
             }
@@ -309,7 +374,13 @@ async fn run_resp_worker(
                 incoming = incoming => {
                     let (stream, _) = incoming?;
                     stream.set_nodelay(true)?;
-                    connections.push(serve_resp_connection(stream, cache, request_timeout));
+                    network_shard.connection_started();
+                    connections.push(serve_resp_connection(
+                        stream,
+                        &cache,
+                        network_shard,
+                        request_timeout,
+                    ));
                 }
                 _ = completed => {}
                 _ = stopping => break,
@@ -321,22 +392,36 @@ async fn run_resp_worker(
 
 async fn serve_resp_connection(
     mut stream: TcpStream,
-    cache: &ThreadedKvkache,
+    cache: &NetworkWorkerCache<'_>,
+    network_shard: NetworkShard<'_>,
     request_timeout: Duration,
 ) -> std::io::Result<()> {
+    let _connection_guard = ActiveRespConnection { network_shard };
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut responses = Vec::new();
     loop {
         let input = vec![0_u8; READ_BUFFER_BYTES];
-        let (bytes_read, input) = stream.read(input).await?;
+        let (bytes_read, input) = match stream.read(input).await {
+            Ok(result) => result,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    network_shard.request_read_timeout();
+                }
+                return Err(error);
+            }
+        };
         if bytes_read == 0 {
             return Ok(());
         }
         pending.extend_from_slice(&input[..bytes_read]);
         if pending.len() > MAX_BUFFER_BYTES {
+            network_shard.protocol_error();
             responses.clear();
             error(&mut responses, "request buffer exceeds RESP limit");
-            write_with_timeout(&mut stream, responses, request_timeout).await?;
+            if let Err(error) = write_with_timeout(&mut stream, responses, request_timeout).await {
+                network_shard.response_write_failure();
+                return Err(error);
+            }
             return Ok(());
         }
 
@@ -350,13 +435,22 @@ async fn serve_resp_connection(
                     consumed: command_bytes,
                 } => {
                     consumed += command_bytes;
+                    let response_start = responses.len();
+                    let request_started = std::time::Instant::now();
+                    let operation = operation_for_command(&command);
                     close = execute_command(cache, &command, &mut responses).await;
+                    network_shard.record_request(
+                        operation,
+                        status_for_resp_response(&responses[response_start..], operation),
+                        request_started.elapsed(),
+                    );
                     if close {
                         break;
                     }
                 }
                 ParseResult::Incomplete => break,
                 ParseResult::Invalid(message) => {
+                    network_shard.protocol_error();
                     error(&mut responses, &message);
                     close = true;
                     consumed = pending.len();
@@ -370,11 +464,27 @@ async fn serve_resp_connection(
             pending.drain(..consumed);
         }
         if !responses.is_empty() {
-            responses = write_with_timeout(&mut stream, responses, request_timeout).await?;
+            responses = match write_with_timeout(&mut stream, responses, request_timeout).await {
+                Ok(responses) => responses,
+                Err(error) => {
+                    network_shard.response_write_failure();
+                    return Err(error);
+                }
+            };
         }
         if close {
             return Ok(());
         }
+    }
+}
+
+struct ActiveRespConnection<'a> {
+    network_shard: NetworkShard<'a>,
+}
+
+impl Drop for ActiveRespConnection<'_> {
+    fn drop(&mut self) {
+        self.network_shard.connection_finished();
     }
 }
 
@@ -392,8 +502,58 @@ async fn write_with_timeout(
     }
 }
 
+pub(crate) fn operation_for_command(command: &[&[u8]]) -> Operation {
+    match command.first() {
+        Some(name) if name.eq_ignore_ascii_case(b"PING") => Operation::Ping,
+        Some(name) if name.eq_ignore_ascii_case(b"GET") => Operation::Get,
+        Some(name) if name.eq_ignore_ascii_case(b"SET") => Operation::Set,
+        Some(name) if name.eq_ignore_ascii_case(b"DEL") => Operation::Delete,
+        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") => Operation::Stats,
+        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") => Operation::Sync,
+        _ => Operation::Unknown,
+    }
+}
+
+pub(crate) fn status_for_resp_response(
+    response: &[u8],
+    operation: Operation,
+) -> openkache_protocol::Status {
+    if response.starts_with(b"+") {
+        return openkache_protocol::Status::Ok;
+    }
+    if response.starts_with(b"$-1\r\n") {
+        return if operation == Operation::Set {
+            openkache_protocol::Status::NotStored
+        } else {
+            openkache_protocol::Status::NotFound
+        };
+    }
+    if response.starts_with(b"$") {
+        return openkache_protocol::Status::Ok;
+    }
+    if response.starts_with(b":") {
+        return if operation == Operation::Delete {
+            if response.starts_with(b":0\r\n") {
+                openkache_protocol::Status::NotFound
+            } else {
+                openkache_protocol::Status::Deleted
+            }
+        } else {
+            openkache_protocol::Status::Ok
+        };
+    }
+    if response.starts_with(b"-ERR") {
+        return if operation == Operation::Unknown {
+            openkache_protocol::Status::UnsupportedOpcode
+        } else {
+            openkache_protocol::Status::InternalError
+        };
+    }
+    openkache_protocol::Status::InternalError
+}
+
 async fn execute_command(
-    cache: &ThreadedKvkache,
+    cache: &NetworkWorkerCache<'_>,
     command: &[&[u8]],
     response: &mut Vec<u8>,
 ) -> bool {

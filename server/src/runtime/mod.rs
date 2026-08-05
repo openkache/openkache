@@ -15,6 +15,7 @@ use openkache_protocol::{ItemId, NAMESPACE_ID_BYTES, SetOptions};
 
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
+use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
 use crate::types::StoredItemValue;
 use crate::*;
 
@@ -111,6 +112,122 @@ pub struct ThreadedKvkache {
     workers: Vec<WorkerHandle>,
     server_cipher: Aes256,
     storage_device_kind: crate::platform::StorageDeviceKind,
+    observability: Option<Arc<ObservabilityState>>,
+}
+
+/// A network-worker-owned view of the storage runtime and its request shard.
+///
+/// The wrapper carries the caller shard explicitly so queue and wait telemetry
+/// is recorded by the network worker that issued the request. The storage
+/// runtime remains shared only for request routing and response delivery.
+pub(crate) struct NetworkWorkerCache<'a> {
+    cache: &'a ThreadedKvkache,
+    network_worker: NetworkWorkerId,
+}
+
+impl<'a> NetworkWorkerCache<'a> {
+    pub(crate) fn new(cache: &'a ThreadedKvkache, network_worker: NetworkWorkerId) -> Self {
+        Self {
+            cache,
+            network_worker,
+        }
+    }
+
+    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
+        self.cache.namespace_item_worker(namespace_id, item_id)
+    }
+
+    pub(crate) async fn get_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<Option<StoredItemValue>> {
+        self.cache
+            .get_async_in_namespace_with_requester(
+                namespace_id,
+                item_id,
+                Some(self.network_worker),
+            )
+            .await
+    }
+
+    pub(crate) async fn set_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: StoredItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        self.cache
+            .set_async_in_namespace_with_requester(
+                namespace_id,
+                item_id,
+                value,
+                options,
+                Some(self.network_worker),
+            )
+            .await
+    }
+
+    pub(crate) async fn delete_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> Result<bool> {
+        self.cache
+            .delete_async_in_namespace_with_requester(
+                namespace_id,
+                item_id,
+                Some(self.network_worker),
+            )
+            .await
+    }
+
+    pub(crate) async fn get_stored(&self, item_id: ItemId) -> Result<Option<StoredItemValue>> {
+        self.cache
+            .get_async_with_requester(item_id, Some(self.network_worker))
+            .await
+    }
+
+    pub(crate) async fn set_with_options(
+        &self,
+        item_id: ItemId,
+        value: StoredItemValue,
+        options: SetOptions,
+    ) -> Result<SetOutcome> {
+        self.cache
+            .set_async_with_options_requester(
+                item_id,
+                value,
+                options,
+                Some(self.network_worker),
+            )
+            .await
+    }
+
+    pub(crate) async fn delete(&self, item_id: ItemId) -> Result<bool> {
+        self.cache
+            .delete_async_with_requester(item_id, Some(self.network_worker))
+            .await
+    }
+
+    pub(crate) async fn stats(&self) -> Result<Vec<String>> {
+        self.cache
+            .stats_async_with_requester(Some(self.network_worker))
+            .await
+    }
+
+    pub(crate) async fn sync(&self) -> Result<()> {
+        self.cache
+            .sync_async_with_requester(Some(self.network_worker))
+            .await
+    }
+
+    pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
+        self.cache
+            .sync_workers_async_with_requester(workers, Some(self.network_worker))
+            .await
+    }
 }
 
 impl ThreadedKvkache {
@@ -120,17 +237,26 @@ impl ThreadedKvkache {
     }
 
     pub(crate) fn start_validated(config: crate::config::AppConfig) -> Result<Self> {
-        Self::start_validated_with_network_roles(config, false)
+        Self::start_validated_with_network_roles(config, false, None)
     }
 
     /// Starts storage workers and attaches overlapping server network tasks when supported.
     pub(crate) fn start_validated_for_server(config: crate::config::AppConfig) -> Result<Self> {
-        Self::start_validated_with_network_roles(config, true)
+        Self::start_validated_with_network_roles(config, true, None)
+    }
+
+    /// Starts server storage workers with shared low-overhead observability state.
+    pub(crate) fn start_validated_for_server_with_observability(
+        config: crate::config::AppConfig,
+        observability: Arc<ObservabilityState>,
+    ) -> Result<Self> {
+        Self::start_validated_with_network_roles(config, true, Some(observability))
     }
 
     fn start_validated_with_network_roles(
         config: crate::config::AppConfig,
         attach_network_roles: bool,
+        observability: Option<Arc<ObservabilityState>>,
     ) -> Result<Self> {
         let has_combined_worker = attach_network_roles
             && config
@@ -171,6 +297,7 @@ impl ThreadedKvkache {
             combined_entries,
             true,
             false,
+            observability,
         )
     }
 
@@ -194,6 +321,7 @@ impl ThreadedKvkache {
             None,
             copy_ssd_inline_value_once,
             lease_ssd_read_buffer,
+            None,
         )
     }
 
@@ -204,6 +332,7 @@ impl ThreadedKvkache {
         combined_entries: Option<u32>,
         copy_ssd_inline_value_once: bool,
         lease_ssd_read_buffer: bool,
+        observability: Option<Arc<ObservabilityState>>,
     ) -> Result<Self> {
         let server_cipher = Aes256::new(&server_secret.key.into());
         let (started_tx, started_rx) = channel::bounded::<
@@ -247,6 +376,7 @@ impl ThreadedKvkache {
             };
             let storage_key_id = server_secret.id;
             let resource_guard = resource_guard.clone();
+            let observability = observability.clone();
             let thread = std::thread::Builder::new()
                 .name(format!("kvkache-worker-{thread_id}"))
                 .spawn(move || {
@@ -291,8 +421,31 @@ impl ThreadedKvkache {
                         if let Some(receiver) = core_task_receiver {
                             crate::storage_runtime::spawn_detached(run_core_tasks(receiver));
                         }
+                        if let Some(observability) = observability.as_ref() {
+                            observability.storage_worker_started(thread_id, cpu_id);
+                        }
                         let _ = started_tx.send(Ok(storage_device_kind));
-                        worker_loop(cache, receiver, io_config, cpu_id).await
+                        let result = worker_loop(
+                            cache,
+                            receiver,
+                            io_config,
+                            thread_id,
+                            cpu_id,
+                            observability.clone(),
+                        )
+                        .await;
+                        if let Err(error) = &result {
+                            tracing::error!(
+                                target: "openkache::storage",
+                                worker = thread_id,
+                                error = %error,
+                                "storage worker stopped"
+                            );
+                        }
+                        if let Some(observability) = observability.as_ref() {
+                            observability.storage_worker_stopped(thread_id);
+                        }
+                        result
                     });
                     match result {
                         Ok(result) => result,
@@ -343,6 +496,7 @@ impl ThreadedKvkache {
             workers,
             server_cipher,
             storage_device_kind,
+            observability,
         })
     }
 
@@ -415,27 +569,69 @@ impl ThreadedKvkache {
     async fn request(
         &self,
         worker: usize,
+        operation: Operation,
+        requester: Option<NetworkWorkerId>,
         build: impl FnOnce(WorkerResponseSender) -> WorkerRequest,
     ) -> Result<WorkerResponse> {
         let (response_tx, response_rx) = self.workers[worker].completions.register();
         let request_started = std::time::Instant::now();
-        crate::network_runtime::timeout(
+        let enqueue = crate::network_runtime::timeout(
             Duration::from_micros(self.config.timeouts.input_max_time_us),
             self.workers[worker]
                 .sender
                 .send_async_network(build(response_tx)),
         )
-        .await
-        .map_err(|_| KvError::Timeout("request input"))?
-        .map_err(|_| KvError::Worker("request queue disconnected".into()))?;
+        .await;
+        let enqueue_result = match enqueue {
+            Ok(result) => result.map_err(|_| KvError::Worker("request queue disconnected".into())),
+            Err(_) => {
+                if let Some(observability) = self.observability.as_ref() {
+                    if let Some(requester) = requester {
+                        observability.storage_queue_full(requester.index(), worker);
+                    }
+                }
+                Err(KvError::Timeout("request input"))
+            }
+        };
+        if let Err(error) = enqueue_result {
+            if let Some(observability) = self.observability.as_ref() {
+                if let Some(requester) = requester {
+                    observability.record_storage_wait(
+                        requester.index(),
+                        worker,
+                        operation,
+                        request_started.elapsed(),
+                    );
+                }
+            }
+            return Err(error);
+        }
         let elapsed = request_started.elapsed();
         let request_limit = Duration::from_micros(self.config.timeouts.request_max_time_us);
         let output_limit = Duration::from_micros(self.config.timeouts.output_max_time_us);
         let remaining = request_limit.saturating_sub(elapsed).min(output_limit);
-        crate::network_runtime::timeout(remaining, response_rx.recv_async_network())
-            .await
-            .map_err(|_| KvError::Timeout("request output"))?
-            .map_err(|_| KvError::Worker("worker response disconnected".into()))?
+        let result = match crate::network_runtime::timeout(
+            remaining,
+            response_rx.recv_async_network(),
+        )
+        .await
+        {
+            Ok(result) => result
+                .map_err(|_| KvError::Worker("worker response disconnected".into()))
+                .and_then(|result| result),
+            Err(_) => Err(KvError::Timeout("request output")),
+        };
+        if let Some(observability) = self.observability.as_ref() {
+            if let Some(requester) = requester {
+                observability.record_storage_wait(
+                    requester.index(),
+                    worker,
+                    operation,
+                    request_started.elapsed(),
+                );
+            }
+        }
+        result
     }
 
     pub async fn get(&self, item_id: ItemId) -> Result<Option<Vec<u8>>> {
@@ -446,13 +642,26 @@ impl ThreadedKvkache {
 
     /// Retrieves a value without blocking the caller's async executor thread.
     pub(crate) async fn get_stored(&self, item_id: ItemId) -> Result<Option<StoredItemValue>> {
+        self.get_async_with_requester(item_id, None).await
+    }
+
+    async fn get_async_with_requester(
+        &self,
+        item_id: ItemId,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<Option<StoredItemValue>> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(worker, |response| WorkerRequest::Get {
-                storage_key,
-                response,
-            })
+            .request(
+                worker,
+                Operation::Get,
+                requester,
+                |response| WorkerRequest::Get {
+                    storage_key,
+                    response,
+                },
+            )
             .await?
         {
             WorkerResponse::Value(value) => Ok(value),
@@ -468,13 +677,28 @@ impl ThreadedKvkache {
         namespace_id: u64,
         item_id: ItemId,
     ) -> Result<Option<StoredItemValue>> {
+        self.get_async_in_namespace_with_requester(namespace_id, item_id, None)
+            .await
+    }
+
+    async fn get_async_in_namespace_with_requester(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<Option<StoredItemValue>> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(worker, |response| WorkerRequest::Get {
-                storage_key,
-                response,
-            })
+            .request(
+                worker,
+                Operation::Get,
+                requester,
+                |response| WorkerRequest::Get {
+                    storage_key,
+                    response,
+                },
+            )
             .await?
         {
             WorkerResponse::Value(value) => Ok(value),
@@ -495,15 +719,31 @@ impl ThreadedKvkache {
         value: StoredItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
+        self.set_async_with_options_requester(item_id, value, options, None)
+            .await
+    }
+
+    async fn set_async_with_options_requester(
+        &self,
+        item_id: ItemId,
+        value: StoredItemValue,
+        options: SetOptions,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(worker, |response| WorkerRequest::Set {
-                storage_key,
-                value,
-                options,
-                response,
-            })
+            .request(
+                worker,
+                Operation::Set,
+                requester,
+                |response| WorkerRequest::Set {
+                    storage_key,
+                    value,
+                    options,
+                    response,
+                },
+            )
             .await?
         {
             WorkerResponse::Set(outcome) => Ok(outcome),
@@ -521,15 +761,32 @@ impl ThreadedKvkache {
         value: StoredItemValue,
         options: SetOptions,
     ) -> Result<SetOutcome> {
+        self.set_async_in_namespace_with_requester(namespace_id, item_id, value, options, None)
+            .await
+    }
+
+    async fn set_async_in_namespace_with_requester(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: StoredItemValue,
+        options: SetOptions,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<SetOutcome> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(worker, |response| WorkerRequest::Set {
-                storage_key,
-                value,
-                options,
-                response,
-            })
+            .request(
+                worker,
+                Operation::Set,
+                requester,
+                |response| WorkerRequest::Set {
+                    storage_key,
+                    value,
+                    options,
+                    response,
+                },
+            )
             .await?
         {
             WorkerResponse::Set(outcome) => Ok(outcome),
@@ -540,13 +797,26 @@ impl ThreadedKvkache {
     }
 
     pub async fn delete(&self, item_id: ItemId) -> Result<bool> {
+        self.delete_async_with_requester(item_id, None).await
+    }
+
+    async fn delete_async_with_requester(
+        &self,
+        item_id: ItemId,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<bool> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(worker, |response| WorkerRequest::Delete {
-                storage_key,
-                response,
-            })
+            .request(
+                worker,
+                Operation::Delete,
+                requester,
+                |response| WorkerRequest::Delete {
+                    storage_key,
+                    response,
+                },
+            )
             .await?
         {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
@@ -562,13 +832,28 @@ impl ThreadedKvkache {
         namespace_id: u64,
         item_id: ItemId,
     ) -> Result<bool> {
+        self.delete_async_in_namespace_with_requester(namespace_id, item_id, None)
+            .await
+    }
+
+    async fn delete_async_in_namespace_with_requester(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<bool> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(worker, |response| WorkerRequest::Delete {
-                storage_key,
-                response,
-            })
+            .request(
+                worker,
+                Operation::Delete,
+                requester,
+                |response| WorkerRequest::Delete {
+                    storage_key,
+                    response,
+                },
+            )
             .await?
         {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
@@ -942,10 +1227,22 @@ impl ThreadedKvkache {
     }
 
     pub async fn stats(&self) -> Result<Vec<String>> {
+        self.stats_async_with_requester(None).await
+    }
+
+    async fn stats_async_with_requester(
+        &self,
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<Vec<String>> {
         let mut stats = Vec::with_capacity(self.workers.len());
         for thread_id in 0..self.workers.len() {
             match self
-                .request(thread_id, |response| WorkerRequest::Stats { response })
+                .request(
+                    thread_id,
+                    Operation::Stats,
+                    requester,
+                    |response| WorkerRequest::Stats { response },
+                )
                 .await?
             {
                 WorkerResponse::Stats(worker_stats) => {
@@ -962,9 +1259,18 @@ impl ThreadedKvkache {
     }
 
     pub async fn sync(&self) -> Result<()> {
+        self.sync_async_with_requester(None).await
+    }
+
+    async fn sync_async_with_requester(&self, requester: Option<NetworkWorkerId>) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self
-                .request(thread_id, |response| WorkerRequest::Sync { response })
+                .request(
+                    thread_id,
+                    Operation::Sync,
+                    requester,
+                    |response| WorkerRequest::Sync { response },
+                )
                 .await?
             {
                 WorkerResponse::Synced => {}
@@ -980,6 +1286,14 @@ impl ThreadedKvkache {
 
     /// Flushes exactly the storage workers that have observed mutations for a namespace.
     pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
+        self.sync_workers_async_with_requester(workers, None).await
+    }
+
+    async fn sync_workers_async_with_requester(
+        &self,
+        workers: &[usize],
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<()> {
         for &worker in workers {
             if worker >= self.workers.len() {
                 return Err(KvError::Worker(format!(
@@ -987,7 +1301,12 @@ impl ThreadedKvkache {
                 )));
             }
             match self
-                .request(worker, |response| WorkerRequest::Sync { response })
+                .request(
+                    worker,
+                    Operation::Sync,
+                    requester,
+                    |response| WorkerRequest::Sync { response },
+                )
                 .await?
             {
                 WorkerResponse::Synced => {}

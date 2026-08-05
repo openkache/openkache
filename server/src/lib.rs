@@ -159,6 +159,7 @@ mod transport;
 pub mod types;
 
 pub(crate) mod channel;
+pub(crate) mod observability;
 pub(crate) mod storage_backend;
 pub(crate) mod storage_runtime;
 
@@ -169,8 +170,8 @@ pub use error::{KvError, Result};
 
 mod config;
 pub use config::{
-    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, NetworkConfig, QuicBackend,
-    QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, TlsConfig,
+    AppConfig, BucketSelectionPolicy, Config, IoUringConfig, NetworkConfig, ObservabilityConfig,
+    QuicBackend, QuicConfig, RuntimeConfig, StorageConfig, TableConfig, TimeoutConfig, TlsConfig,
     bits_for_count, expand_thread_pattern,
 };
 pub use platform::allowed_cpu_ids;
