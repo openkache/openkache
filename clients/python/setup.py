@@ -60,6 +60,9 @@ def generate_smithy_contract() -> None:
     environment["OPENKACHE_PYTHON_CONTRACT_OUTPUT"] = str(
         generated_root / "smithy_contract.py"
     )
+    environment["OPENKACHE_PYTHON_NATIVE_ABI_OUTPUT"] = str(
+        generated_root / "smithy_native_abi.py"
+    )
     try:
         subprocess.run(
             [

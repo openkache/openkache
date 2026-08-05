@@ -137,6 +137,8 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly native_abi_functions: readonly Native_Abi_Function[]
+  readonly native_abi_structures: readonly Native_Abi_Structure[]
   readonly namespace_default_evictions: readonly Ffi_Entry[]
   readonly namespace_default_expirations: readonly Ffi_Entry[]
   readonly namespace_descriptor_decode_statuses: readonly Ffi_Entry[]
@@ -182,9 +184,9 @@ export interface Client_Contract extends Wire_Contract {
 
 type Native_Abi_Type =
   | "client_pointer"
-  | "descriptor_pointer"
   | "result_pointer"
   | "u8_pointer"
+  | "struct_pointer"
   | "size"
   | "uint8"
   | "int32"
@@ -195,6 +197,8 @@ type Native_Abi_Type =
 interface Native_Abi_Parameter {
   readonly name: string
   readonly type: Exclude<Native_Abi_Type, "void">
+  readonly mutable: boolean
+  readonly structure_name?: string
 }
 
 interface Native_Abi_Function {
@@ -203,141 +207,10 @@ interface Native_Abi_Function {
   readonly parameters: readonly Native_Abi_Parameter[]
 }
 
-/**
- * Flat C ABI entry points consumed by the managed adapters.
- *
- * The C header remains the public ABI documentation. Keeping the declaration
- * list here gives Java, Kotlin, and Dart one generated binding surface instead
- * of three independently maintained copies of the same function signatures.
- */
-const NATIVE_ABI_FUNCTIONS: readonly Native_Abi_Function[] = [
-  {
-    name: "openkache_client_abi_version",
-    return_type: "uint32",
-    parameters: [],
-  },
-  {
-    name: "openkache_client_connect",
-    return_type: "result_pointer",
-    parameters: [
-      { name: "address", type: "u8_pointer" },
-      { name: "addressLength", type: "size" },
-      { name: "serverName", type: "u8_pointer" },
-      { name: "serverNameLength", type: "size" },
-      { name: "certificate", type: "u8_pointer" },
-      { name: "certificateLength", type: "size" },
-      { name: "dataProtectionKey", type: "u8_pointer" },
-      { name: "dataProtectionKeyLength", type: "size" },
-      { name: "compressionEnabled", type: "uint8" },
-      { name: "compressionLevel", type: "int32" },
-      { name: "minimumInputSize", type: "size" },
-      { name: "minimumSavings", type: "size" },
-      { name: "connectTimeoutMilliseconds", type: "uint64" },
-      { name: "requestTimeoutMilliseconds", type: "uint64" },
-    ],
-  },
-  {
-    name: "openkache_client_execute",
-    return_type: "result_pointer",
-    parameters: [
-      { name: "client", type: "client_pointer" },
-      { name: "operation", type: "uint32" },
-      { name: "applicationKey", type: "u8_pointer" },
-      { name: "applicationKeyLength", type: "size" },
-      { name: "value", type: "u8_pointer" },
-      { name: "valueLength", type: "size" },
-      { name: "setCondition", type: "uint32" },
-      { name: "ttlEnabled", type: "uint8" },
-      { name: "ttlMilliseconds", type: "uint64" },
-    ],
-  },
-  {
-    name: "openkache_client_execute_scoped",
-    return_type: "result_pointer",
-    parameters: [
-      { name: "client", type: "client_pointer" },
-      { name: "operation", type: "uint32" },
-      { name: "namespaceId", type: "uint64" },
-      { name: "itemId", type: "u8_pointer" },
-      { name: "itemIdLength", type: "size" },
-      { name: "value", type: "u8_pointer" },
-      { name: "valueLength", type: "size" },
-      { name: "setFlags", type: "uint8" },
-      { name: "ttlMilliseconds", type: "uint64" },
-    ],
-  },
-  {
-    name: "openkache_client_namespace_open",
-    return_type: "result_pointer",
-    parameters: [
-      { name: "client", type: "client_pointer" },
-      { name: "name", type: "u8_pointer" },
-      { name: "nameLength", type: "size" },
-      { name: "createIfMissing", type: "uint8" },
-      { name: "policyFlags", type: "uint8" },
-      { name: "ttlMilliseconds", type: "uint64" },
-    ],
-  },
-  {
-    name: "openkache_client_namespace_update_policy",
-    return_type: "result_pointer",
-    parameters: [
-      { name: "client", type: "client_pointer" },
-      { name: "namespaceId", type: "uint64" },
-      { name: "expectedRevision", type: "uint64" },
-      { name: "policyFlags", type: "uint8" },
-      { name: "ttlMilliseconds", type: "uint64" },
-    ],
-  },
-  {
-    name: "openkache_client_namespace_delete",
-    return_type: "result_pointer",
-    parameters: [
-      { name: "client", type: "client_pointer" },
-      { name: "namespaceId", type: "uint64" },
-      { name: "expectedRevision", type: "uint64" },
-    ],
-  },
-  {
-    name: "openkache_client_namespace_descriptor_decode",
-    return_type: "uint32",
-    parameters: [
-      { name: "payload", type: "u8_pointer" },
-      { name: "payloadLength", type: "size" },
-      { name: "output", type: "descriptor_pointer" },
-    ],
-  },
-  {
-    name: "openkache_client_result_kind",
-    return_type: "uint32",
-    parameters: [{ name: "result", type: "result_pointer" }],
-  },
-  {
-    name: "openkache_client_result_data",
-    return_type: "u8_pointer",
-    parameters: [{ name: "result", type: "result_pointer" }],
-  },
-  {
-    name: "openkache_client_result_data_length",
-    return_type: "size",
-    parameters: [{ name: "result", type: "result_pointer" }],
-  },
-  {
-    name: "openkache_client_result_take_client",
-    return_type: "client_pointer",
-    parameters: [{ name: "result", type: "result_pointer" }],
-  },
-  {
-    name: "openkache_client_result_free",
-    return_type: "void",
-    parameters: [{ name: "result", type: "result_pointer" }],
-  },
-  {
-    name: "openkache_client_free",
-    return_type: "void",
-    parameters: [{ name: "client", type: "client_pointer" }],
-  },
-]
+interface Native_Abi_Structure {
+  readonly name: string
+  readonly fields: readonly Native_Abi_Parameter[]
+}
 
 const CLIENTS_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_ROOT = dirname(CLIENTS_DIRECTORY)
@@ -407,6 +280,9 @@ function resolve_smithy_executable(): string {
 const GENERATED_OUTPUTS = {
   csharp_api: generated_path("clients/dotnet/OpenKache/generated_local/SmithyApi.g.cs"),
   csharp_wire: generated_path("clients/dotnet/OpenKache/generated_local/WireValues.g.cs"),
+  csharp_native_abi: generated_path(
+    "clients/dotnet/OpenKache/generated_local/SmithyNativeAbi.g.cs",
+  ),
   rust_client: process.env.OPENKACHE_RUST_CLIENT_OUTPUT ??
     generated_path("clients/core/generated_local/client_contract.rs"),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
@@ -424,12 +300,17 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
   python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
     generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
+  python_native_abi: process.env.OPENKACHE_PYTHON_NATIVE_ABI_OUTPUT ??
+    generated_path("clients/python/src/openkache/_generated/smithy_native_abi.py"),
   swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
     generated_path("clients/swift/generated_local/SmithyAPI.swift"),
+  swift_native_abi: process.env.OPENKACHE_SWIFT_NATIVE_ABI_OUTPUT ??
+    generated_path("clients/swift/generated_local/SmithyNativeABI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
     generated_path("clients/core/generated_local/smithy_contract.h"),
   go_api: generated_path("clients/go/smithy_api.go"),
   go_contract: generated_path("clients/go/smithy_contract.go"),
+  go_native_abi: generated_path("clients/go/generated_local/smithy_native_abi.h"),
   java_api_root: generated_path(
     "clients/java/src/main/java/io/openkache/client/generated_local",
   ),
@@ -441,6 +322,9 @@ const GENERATED_OUTPUTS = {
   ),
   java_native_descriptor: generated_path(
     "clients/java/src/main/java/io/openkache/client/generated_local/SmithyNativeDescriptor.java",
+  ),
+  java_native_connect_options: generated_path(
+    "clients/java/src/main/java/io/openkache/client/generated_local/SmithyNativeConnectOptions.java",
   ),
   kotlin_api: generated_path(
     "clients/kotlin/src/main/kotlin/io/openkache/client/generated_local/SmithyApi.kt",
@@ -481,6 +365,25 @@ function string_member(object: Json_Object, member: string, location: string): s
   const value = object[member]
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`${location}.${member} must be a non-empty string`)
+  }
+  return value
+}
+
+function optional_string_member(
+  object: Json_Object,
+  member: string,
+  location: string,
+): string | undefined {
+  const value = object[member]
+  return value === undefined
+    ? undefined
+    : string_member(object, member, location)
+}
+
+function boolean_member(object: Json_Object, member: string, location: string): boolean {
+  const value = object[member]
+  if (typeof value !== "boolean") {
+    throw new Error(`${location}.${member} must be a boolean`)
   }
   return value
 }
@@ -892,6 +795,133 @@ function namespace_descriptor_contract(
   }
 }
 
+const NATIVE_ABI_TYPES: readonly Native_Abi_Type[] = [
+  "client_pointer",
+  "result_pointer",
+  "u8_pointer",
+  "struct_pointer",
+  "size",
+  "uint8",
+  "int32",
+  "uint32",
+  "uint64",
+  "void",
+]
+
+function native_abi_type(
+  object: Json_Object,
+  member: string,
+  location: string,
+): Native_Abi_Type {
+  const value = string_member(object, member, location)
+  if (!(NATIVE_ABI_TYPES as readonly string[]).includes(value)) {
+    throw new Error(
+      `${location}.${member} must be one of ${NATIVE_ABI_TYPES.join(", ")}`,
+    )
+  }
+  return value as Native_Abi_Type
+}
+
+function native_abi_parameter(
+  value: unknown,
+  location: string,
+): Native_Abi_Parameter {
+  const parameter = object_value(value, location)
+  const type = native_abi_type(parameter, "type", location)
+  if (type === "void") {
+    throw new Error(`${location}.type cannot be void for a parameter`)
+  }
+  const structure_name = optional_string_member(parameter, "structureName", location)
+  if ((type === "struct_pointer") !== (structure_name !== undefined)) {
+    throw new Error(
+      `${location}.structureName is required only for struct_pointer parameters`,
+    )
+  }
+  return {
+    name: string_member(parameter, "name", location),
+    type,
+    mutable: boolean_member(parameter, "mutable", location),
+    ...(structure_name === undefined ? {} : { structure_name }),
+  }
+}
+
+function native_abi_parameters(
+  object: Json_Object,
+  member: string,
+  location: string,
+): readonly Native_Abi_Parameter[] {
+  const value = object[member]
+  if (value === undefined) return []
+  return array_member(object, member, location).map((parameter, index) =>
+    native_abi_parameter(parameter, `${location}.${member}[${index}]`),
+  )
+}
+
+function native_abi_functions(value: Json_Object): readonly Native_Abi_Function[] {
+  const functions = array_member(value, "nativeFunctions", FFI_CONTRACT_TRAIT_ID)
+    .map((entry, index): Native_Abi_Function => {
+      const function_value = object_value(
+        entry,
+        `${FFI_CONTRACT_TRAIT_ID}.nativeFunctions[${index}]`,
+      )
+      const location = `${FFI_CONTRACT_TRAIT_ID}.nativeFunctions[${index}]`
+      return {
+        name: string_member(function_value, "name", location),
+        return_type: native_abi_type(function_value, "returnType", location),
+        parameters: native_abi_parameters(function_value, "parameters", location),
+      }
+    })
+  if (functions.length === 0) {
+    throw new Error(`${FFI_CONTRACT_TRAIT_ID}.nativeFunctions must not be empty`)
+  }
+  const names = new Set<string>()
+  for (const function_ of functions) {
+    if (names.has(function_.name)) {
+      throw new Error(`duplicate native ABI function ${function_.name}`)
+    }
+    names.add(function_.name)
+    const parameters = new Set<string>()
+    for (const parameter of function_.parameters) {
+      if (parameters.has(parameter.name)) {
+        throw new Error(
+          `duplicate parameter ${parameter.name} in native ABI function ${function_.name}`,
+        )
+      }
+      parameters.add(parameter.name)
+    }
+  }
+  return functions
+}
+
+function native_abi_structures(value: Json_Object): readonly Native_Abi_Structure[] {
+  const structures = array_member(value, "nativeStructures", FFI_CONTRACT_TRAIT_ID)
+    .map((entry, index): Native_Abi_Structure => {
+      const structure_value = object_value(
+        entry,
+        `${FFI_CONTRACT_TRAIT_ID}.nativeStructures[${index}]`,
+      )
+      const location = `${FFI_CONTRACT_TRAIT_ID}.nativeStructures[${index}]`
+      const fields = array_member(structure_value, "fields", location).map((field, field_index) =>
+        native_abi_parameter(field, `${location}.fields[${field_index}]`),
+      )
+      if (fields.length === 0) {
+        throw new Error(`${location}.fields must not be empty`)
+      }
+      return {
+        name: string_member(structure_value, "name", location),
+        fields,
+      }
+    })
+  const names = new Set<string>()
+  for (const structure of structures) {
+    if (names.has(structure.name)) {
+      throw new Error(`duplicate native ABI structure ${structure.name}`)
+    }
+    names.add(structure.name)
+  }
+  return structures
+}
+
 function ffi_contract(
   value: unknown,
   shapes: Json_Object,
@@ -899,6 +929,45 @@ function ffi_contract(
 ): Ffi_Contract {
   const contract = object_value(value, FFI_CONTRACT_TRAIT_ID)
   const descriptor = namespace_descriptor_contract(shapes, namespace)
+  const native_functions = native_abi_functions(contract)
+  const native_structures = native_abi_structures(contract)
+  const structure_names = new Set([
+    "FfiNamespaceDescriptor",
+    ...native_structures.map((structure) => structure.name),
+  ])
+  for (const function_ of native_functions) {
+    for (const parameter of function_.parameters) {
+      if (
+        parameter.type === "struct_pointer" &&
+        parameter.structure_name !== undefined &&
+        !structure_names.has(parameter.structure_name)
+      ) {
+        throw new Error(
+          `native ABI function ${function_.name} references unknown structure ${parameter.structure_name}`,
+        )
+      }
+    }
+  }
+  for (const structure of native_structures) {
+    const field_names = new Set<string>()
+    for (const field of structure.fields) {
+      if (field_names.has(field.name)) {
+        throw new Error(
+          `duplicate field ${field.name} in native ABI structure ${structure.name}`,
+        )
+      }
+      field_names.add(field.name)
+      if (
+        field.type === "struct_pointer" &&
+        field.structure_name !== undefined &&
+        !structure_names.has(field.structure_name)
+      ) {
+        throw new Error(
+          `native ABI structure ${structure.name} references unknown structure ${field.structure_name}`,
+        )
+      }
+    }
+  }
   return {
     abi_version: integer_member(
       contract,
@@ -913,6 +982,8 @@ function ffi_contract(
       FFI_ENUMS.connection_states.name,
       FFI_ENUMS.connection_states.kind,
     ),
+    native_abi_functions: native_functions,
+    native_abi_structures: native_structures,
     namespace_default_evictions: ffi_enum_entries(
       shapes,
       namespace,
@@ -1933,6 +2004,69 @@ function c_contract_api_enum(
     .join("\n")
 }
 
+function c_contract_client_compatibility(contract: Client_Contract): string {
+  const result_entries = contract.ffi.result_kinds
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_RESULT_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  const connection_entries = contract.ffi.connection_states
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_CONNECTION_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  const set_condition_entries = contract.ffi.set_conditions
+    .map(
+      (entry) =>
+        `    OPENKACHE_CLIENT_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()},`,
+    )
+    .join("\n")
+  return `/* Source-compatible aliases generated from the Smithy FFI contract. */
+#define OPENKACHE_CLIENT_ABI_VERSION OPENKACHE_SMITHY_FFI_ABI_VERSION
+#define OPENKACHE_CLIENT_DATA_PROTECTION_KEY_BYTES \\
+    OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
+
+typedef openkache_client_t openkache_client_handle;
+typedef openkache_client_result_t openkache_client_result;
+
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_DISALLOWED
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED \\
+    OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED
+
+typedef enum openkache_client_result_kind {
+${result_entries}
+} openkache_client_result_kind_t;
+
+typedef enum openkache_client_connection_state {
+${connection_entries}
+} openkache_client_connection_state_t;
+
+typedef enum openkache_client_set_condition {
+${set_condition_entries}
+} openkache_client_set_condition_t;
+
+typedef enum openkache_client_encryption {
+    OPENKACHE_CLIENT_ENCRYPTION_NONE = OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE,
+    OPENKACHE_CLIENT_ENCRYPTION_COMPACT = OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT,
+    OPENKACHE_CLIENT_ENCRYPTION_ROBUST = OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST,
+} openkache_client_encryption_t;`
+}
+
 /** Renders the Smithy constants consumed by native C and C++ adapters.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -1993,6 +2127,10 @@ export function render_c_contract(contract: Client_Contract): string {
   const c_namespace_descriptor_fields = descriptor_fields.map(
     (field) => `    ${field.c_type} ${field.name};`,
   ).join("\n")
+  const native_structures = render_c_native_structures(contract)
+  const native_functions = render_c_native_functions(contract)
+  const native_function_typedefs = render_c_native_function_typedefs(contract)
+  const client_compatibility = c_contract_client_compatibility(contract)
   const descriptor_offset_defines = descriptor_fields
     .map(
       (field) =>
@@ -2018,6 +2156,26 @@ ${descriptor_offset_defines}
 typedef struct openkache_smithy_namespace_descriptor {
 ${c_namespace_descriptor_fields}
 } openkache_smithy_namespace_descriptor_t;
+
+typedef openkache_smithy_namespace_descriptor_t
+    openkache_client_namespace_descriptor_t;
+
+typedef struct openkache_client openkache_client_t;
+typedef struct openkache_client_result openkache_client_result_t;
+
+${native_structures}
+
+/* Stable native function declarations shared by every language adapter. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+${native_functions}
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+/* Function-pointer types used by dynamic language loaders. */
+${native_function_typedefs}
 
 _Static_assert(sizeof(openkache_smithy_namespace_descriptor_t) ==
                    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
@@ -2102,6 +2260,8 @@ ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES ${value.data_protection_key_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_ENCODING_BYTES ${envelope.max_encoding_bytes}u
 #define OPENKACHE_SMITHY_VALUE_ENVELOPE_MAX_TYPE_NAME_BYTES ${envelope.max_type_name_bytes}u
+
+${client_compatibility}
 
 ${operation_enum}
 
@@ -2416,14 +2576,25 @@ export function render_java_api(
   return outputs
 }
 
-function native_abi_java_type(type: Native_Abi_Type): string {
+function native_abi_structure_class_name(structure_name: string): string {
+  if (structure_name === "FfiNamespaceDescriptor") return "SmithyNativeDescriptor"
+  return `SmithyNative${structure_name.replace(/^Ffi/, "")}`
+}
+
+function native_abi_java_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
   switch (type) {
     case "client_pointer":
     case "result_pointer":
     case "u8_pointer":
       return "Pointer"
-    case "descriptor_pointer":
-      return "SmithyNativeDescriptor"
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("Java native struct pointer has no structure name")
+      }
+      return native_abi_structure_class_name(structure_name)
     case "size":
     case "uint64":
       return "long"
@@ -2437,14 +2608,20 @@ function native_abi_java_type(type: Native_Abi_Type): string {
   }
 }
 
-function native_abi_kotlin_type(type: Native_Abi_Type): string {
+function native_abi_kotlin_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
   switch (type) {
     case "client_pointer":
     case "result_pointer":
     case "u8_pointer":
       return "Pointer?"
-    case "descriptor_pointer":
-      return "SmithyNativeDescriptor"
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("Kotlin native struct pointer has no structure name")
+      }
+      return native_abi_structure_class_name(structure_name)
     case "size":
     case "uint64":
       return "Long"
@@ -2458,12 +2635,18 @@ function native_abi_kotlin_type(type: Native_Abi_Type): string {
   }
 }
 
-function native_abi_dart_native_type(type: Native_Abi_Type): string {
+function native_abi_dart_native_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
   switch (type) {
     case "client_pointer":
       return "ffi.Pointer<SmithyNativeClient>"
-    case "descriptor_pointer":
-      return "ffi.Pointer<SmithyNativeDescriptor>"
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("Dart native struct pointer has no structure name")
+      }
+      return `ffi.Pointer<${native_abi_structure_class_name(structure_name)}>`
     case "result_pointer":
       return "ffi.Pointer<SmithyNativeResult>"
     case "u8_pointer":
@@ -2483,12 +2666,18 @@ function native_abi_dart_native_type(type: Native_Abi_Type): string {
   }
 }
 
-function native_abi_dart_type(type: Native_Abi_Type): string {
+function native_abi_dart_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
   switch (type) {
     case "client_pointer":
       return "ffi.Pointer<SmithyNativeClient>"
-    case "descriptor_pointer":
-      return "ffi.Pointer<SmithyNativeDescriptor>"
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("Dart native struct pointer has no structure name")
+      }
+      return `ffi.Pointer<${native_abi_structure_class_name(structure_name)}>`
     case "result_pointer":
       return "ffi.Pointer<SmithyNativeResult>"
     case "u8_pointer":
@@ -2508,6 +2697,241 @@ function native_abi_dart_suffix(name: string): string {
   const prefix = "openkache_client_"
   const suffix = name.startsWith(prefix) ? name.slice(prefix.length) : name
   return suffix === "free" ? "client_free" : suffix
+}
+
+function native_abi_structure_c_type_name(structure_name: string): string {
+  if (structure_name === "FfiNamespaceDescriptor") {
+    return "openkache_client_namespace_descriptor_t"
+  }
+  return `openkache_client_${snake_case(structure_name.replace(/^Ffi/, ""))}_t`
+}
+
+function native_abi_c_identifier(identifier: string): string {
+  const normalized = snake_case(identifier)
+  return normalized
+    .replace(/_milliseconds\b/g, "_ms")
+    .replace(/_namespace_id\b/g, "_namespace_id")
+}
+
+function native_abi_c_type(
+  type: Native_Abi_Type,
+  mutable: boolean,
+  structure_name?: string,
+): string {
+  const pointer_qualifier = mutable ? "" : "const "
+  switch (type) {
+    case "client_pointer":
+      return `${pointer_qualifier}openkache_client_t *`
+    case "result_pointer":
+      return `${pointer_qualifier}openkache_client_result_t *`
+    case "u8_pointer":
+      return `${pointer_qualifier}uint8_t *`
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("C native struct pointer has no structure name")
+      }
+      return `${pointer_qualifier}${native_abi_structure_c_type_name(structure_name)} *`
+    case "size":
+      return "size_t"
+    case "uint8":
+      return "uint8_t"
+    case "int32":
+      return "int32_t"
+    case "uint32":
+      return "uint32_t"
+    case "uint64":
+      return "uint64_t"
+    case "void":
+      return "void"
+  }
+}
+
+function native_abi_c_return_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
+  if (type === "u8_pointer") return "const uint8_t *"
+  return native_abi_c_type(type, true, structure_name)
+}
+
+function render_c_native_structures(contract: Client_Contract): string {
+  return contract.ffi.native_abi_structures
+    .map((structure) => {
+      const fields = structure.fields
+        .map(
+          (field) =>
+            `    ${native_abi_c_type(field.type, field.mutable, field.structure_name)} ${native_abi_c_identifier(field.name)};`,
+        )
+        .join("\n")
+      return `typedef struct ${native_abi_structure_c_type_name(structure.name).replace(/_t$/, "")} {
+${fields}
+} ${native_abi_structure_c_type_name(structure.name)};`
+    })
+    .join("\n\n")
+}
+
+function render_c_native_functions(contract: Client_Contract): string {
+  return contract.ffi.native_abi_functions
+    .map((function_) => {
+      const parameters = function_.parameters.length === 0
+        ? "void"
+        : function_.parameters
+          .map(
+            (parameter) =>
+              `    ${native_abi_c_type(parameter.type, parameter.mutable, parameter.structure_name)} ${native_abi_c_identifier(parameter.name)}`,
+          )
+          .join(",\n")
+      return `${native_abi_c_return_type(function_.return_type)} ${function_.name}(
+${parameters}
+);`
+    })
+    .join("\n\n")
+}
+
+function native_abi_c_function_typedef_name(function_name: string): string {
+  return `${function_name}_fn`
+}
+
+function render_c_native_function_typedefs(contract: Client_Contract): string {
+  return contract.ffi.native_abi_functions
+    .map((function_) => {
+      const parameters = function_.parameters.length === 0
+        ? "void"
+        : function_.parameters
+          .map(
+            (parameter) =>
+              native_abi_c_type(parameter.type, parameter.mutable, parameter.structure_name),
+          )
+          .join(",\n")
+      return `typedef ${native_abi_c_return_type(function_.return_type)} (*${native_abi_c_function_typedef_name(function_.name)})(
+${parameters}
+);`
+    })
+    .join("\n\n")
+}
+
+function render_java_native_structure(
+  structure: Native_Abi_Structure,
+): string {
+  const fields = structure.fields
+    .map(
+      (field) =>
+        `    public ${native_abi_java_type(field.type, field.structure_name)} ${lower_camel_case(field.name)};`,
+    )
+    .join("\n")
+  const field_order = structure.fields
+    .map((field) => `"${lower_camel_case(field.name)}"`)
+    .join(",\n        ")
+  return `// Generated from the OpenKache Smithy client ABI contract. Do not edit.
+package io.openkache.client.generated_local;
+
+import com.sun.jna.Structure;
+${structure.fields.some((field) => ["client_pointer", "result_pointer", "u8_pointer", "struct_pointer"].includes(field.type)) ? "import com.sun.jna.Pointer;" : ""}
+
+/** C-compatible native ${structure.name} structure. */
+@Structure.FieldOrder({
+        ${field_order}
+})
+public final class ${native_abi_structure_class_name(structure.name)} extends Structure {
+${fields}
+}
+`
+}
+
+function render_kotlin_native_structure(
+  structure: Native_Abi_Structure,
+): string {
+  const fields = structure.fields
+    .map(
+      (field) =>
+        `    @JvmField var ${lower_camel_case(field.name)}: ${native_abi_kotlin_type(field.type, field.structure_name)} = ${native_abi_kotlin_default(field.type)}`,
+    )
+    .join("\n")
+  const field_order = structure.fields
+    .map((field) => `"${lower_camel_case(field.name)}"`)
+    .join(",\n        ")
+  return `/** C-compatible native ${structure.name} structure. */
+@Structure.FieldOrder(
+        ${field_order}
+)
+public class ${native_abi_structure_class_name(structure.name)} : Structure() {
+${fields}
+}`
+}
+
+function native_abi_kotlin_default(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+    case "result_pointer":
+    case "u8_pointer":
+    case "struct_pointer":
+      return "null"
+    case "size":
+    case "int32":
+    case "uint32":
+    case "uint64":
+    case "uint8":
+      return "0"
+    case "void":
+      throw new Error("Kotlin native structure field cannot be void")
+  }
+}
+
+function native_abi_dart_field(
+  field: Native_Abi_Parameter,
+): string {
+  const name = lower_camel_case(field.name)
+  switch (field.type) {
+    case "client_pointer":
+      return `  external ffi.Pointer<SmithyNativeClient> ${name};`
+    case "result_pointer":
+      return `  external ffi.Pointer<SmithyNativeResult> ${name};`
+    case "u8_pointer":
+      return `  external ffi.Pointer<ffi.Uint8> ${name};`
+    case "struct_pointer":
+      return `  external ffi.Pointer<${native_abi_structure_class_name(field.structure_name!)}> ${name};`
+    case "size":
+      return `  @ffi.UintPtr()
+  external int ${name};`
+    case "uint8":
+      return `  @ffi.Uint8()
+  external int ${name};`
+    case "int32":
+      return `  @ffi.Int32()
+  external int ${name};`
+    case "uint32":
+      return `  @ffi.Uint32()
+  external int ${name};`
+    case "uint64":
+      return `  @ffi.Uint64()
+  external int ${name};`
+  }
+}
+
+function render_dart_native_structure(
+  structure: Native_Abi_Structure,
+): string {
+  const fields = structure.fields.map(native_abi_dart_field).join("\n\n")
+  return `final class ${native_abi_structure_class_name(structure.name)} extends ffi.Struct {
+${fields}
+}`
+}
+
+function required_native_structure(
+  contract: Client_Contract,
+  name: string,
+): Native_Abi_Structure {
+  const structure = contract.ffi.native_abi_structures.find(
+    (candidate) => candidate.name === name,
+  )
+  if (structure === undefined) {
+    throw new Error(`Smithy native ABI structure ${name} is required`)
+  }
+  return structure
+}
+
+export function render_java_native_connect_options(contract: Client_Contract): string {
+  return render_java_native_structure(required_native_structure(contract, "FfiConnectOptions"))
 }
 
 export function render_java_native_descriptor(contract: Client_Contract): string {
@@ -2534,13 +2958,13 @@ ${declarations}
 `
 }
 
-export function render_java_native_api(): string {
-  const methods = NATIVE_ABI_FUNCTIONS
+export function render_java_native_api(contract: Client_Contract): string {
+  const methods = contract.ffi.native_abi_functions
     .map((function_) => {
       const parameters = function_.parameters
         .map(
           (parameter) =>
-            `${native_abi_java_type(parameter.type)} ${parameter.name}`,
+            `${native_abi_java_type(parameter.type, parameter.structure_name)} ${parameter.name}`,
         )
         .join(",\n            ")
       return `    ${native_abi_java_type(function_.return_type)} ${function_.name}(${parameters});`
@@ -2560,12 +2984,12 @@ ${methods}
 }
 
 export function render_kotlin_native_api(contract: Client_Contract): string {
-  const methods = NATIVE_ABI_FUNCTIONS
+  const methods = contract.ffi.native_abi_functions
     .map((function_) => {
       const parameters = function_.parameters
         .map(
           (parameter) =>
-            `${parameter.name}: ${native_abi_kotlin_type(parameter.type)}`,
+            `${parameter.name}: ${native_abi_kotlin_type(parameter.type, parameter.structure_name)}`,
         )
         .join(",\n            ")
       return `    fun ${function_.name}(${parameters}): ${native_abi_kotlin_type(function_.return_type)}`
@@ -2599,6 +3023,8 @@ ${methods}
 public class SmithyNativeDescriptor : Structure() {
 ${fields}
 }
+
+${contract.ffi.native_abi_structures.map(render_kotlin_native_structure).join("\n\n")}
 `
 }
 
@@ -2610,14 +3036,14 @@ export function render_dart_native_api(contract: Client_Contract): string {
   external int ${lower_camel_case(field.name)};`
     })
     .join("\n\n")
-  const typedefs = NATIVE_ABI_FUNCTIONS
+  const typedefs = contract.ffi.native_abi_functions
     .map((function_) => {
       const suffix = pascal_case(native_abi_dart_suffix(function_.name))
       const native_parameters = function_.parameters
-        .map((parameter) => `  ${native_abi_dart_native_type(parameter.type)}`)
+        .map((parameter) => `  ${native_abi_dart_native_type(parameter.type, parameter.structure_name)}`)
         .join(",\n")
       const dart_parameters = function_.parameters
-        .map((parameter) => `  ${native_abi_dart_type(parameter.type)}`)
+        .map((parameter) => `  ${native_abi_dart_type(parameter.type, parameter.structure_name)}`)
         .join(",\n")
       const native_signature = function_.parameters.length === 0
         ? "Function()"
@@ -2630,7 +3056,7 @@ export function render_dart_native_api(contract: Client_Contract): string {
 typedef Smithy${suffix}Dart = ${native_abi_dart_type(function_.return_type)} ${dart_signature};`
     })
     .join("\n\n")
-  const constructor_initializers = NATIVE_ABI_FUNCTIONS
+  const constructor_initializers = contract.ffi.native_abi_functions
     .map((function_) => {
       const suffix = pascal_case(native_abi_dart_suffix(function_.name))
       const field = lower_camel_case(native_abi_dart_suffix(function_.name))
@@ -2639,11 +3065,11 @@ typedef Smithy${suffix}Dart = ${native_abi_dart_type(function_.return_type)} ${d
         )`
     })
     .join(",\n")
-  const members = NATIVE_ABI_FUNCTIONS
+  const members = contract.ffi.native_abi_functions
     .map((function_) => {
       const field = lower_camel_case(native_abi_dart_suffix(function_.name))
       return `  final ${native_abi_dart_type(function_.return_type)} Function(${function_.parameters
-        .map((parameter) => native_abi_dart_type(parameter.type))
+        .map((parameter) => native_abi_dart_type(parameter.type, parameter.structure_name))
         .join(", ")}) ${field};`
     })
     .join("\n")
@@ -2659,6 +3085,8 @@ final class SmithyNativeResult extends ffi.Opaque {}
 final class SmithyNativeDescriptor extends ffi.Struct {
 ${fields}
 }
+
+${contract.ffi.native_abi_structures.map(render_dart_native_structure).join("\n\n")}
 
 ${typedefs}
 
@@ -3751,6 +4179,38 @@ ${contract.api.enums
 `
 }
 
+function native_abi_go_field_name(function_name: string): string {
+  const suffix = native_abi_dart_suffix(function_name)
+  return suffix === "abi_version" ? "abi" : suffix
+}
+
+/** Renders the generated C preprocessor list consumed by the Go cgo loader. */
+export function render_go_native_abi(contract: Client_Contract): string {
+  const functions = contract.ffi.native_abi_functions
+    .map((function_, index, entries) => {
+      const continuation = index === entries.length - 1 ? "" : " \\"
+      return `    X(${native_abi_go_field_name(function_.name)}, ${native_abi_c_function_typedef_name(function_.name)}, "${function_.name}")${continuation}`
+    })
+    .join("\n")
+  return `/* Generated from the OpenKache Smithy client ABI contract. Do not edit. */
+#ifndef OPENKACHE_SMITHY_NATIVE_ABI_H
+#define OPENKACHE_SMITHY_NATIVE_ABI_H
+
+#include <openkache/client_abi.h>
+
+/*
+ * Expands to (field name, function-pointer type, exported symbol) triples.
+ * The Go cgo loader uses this list for both its native-library state and
+ * symbol registration, so adding an ABI function to Smithy cannot silently
+ * leave the loader stale.
+ */
+#define OPENKACHE_SMITHY_NATIVE_FUNCTIONS(X) \\
+${functions}
+
+#endif /* OPENKACHE_SMITHY_NATIVE_ABI_H */
+`
+}
+
 function format_go_source(source: string): string {
   const result = Bun.spawnSync({
     cmd: ["gofmt"],
@@ -4063,6 +4523,114 @@ ${statuses}
 `
 }
 
+function native_abi_python_structure_name(structure_name: string): string {
+  if (structure_name === "FfiNamespaceDescriptor") {
+    return "SmithyFFINamespaceDescriptor"
+  }
+  return `SmithyNative${structure_name.replace(/^Ffi/, "")}`
+}
+
+function native_abi_python_type(
+  type: Native_Abi_Type,
+  structure_name?: string,
+): string {
+  switch (type) {
+    case "client_pointer":
+      return "_CLIENT_POINTER"
+    case "result_pointer":
+      return "_RESULT_POINTER"
+    case "u8_pointer":
+      return "_U8_POINTER"
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("Python native struct pointer has no structure name")
+      }
+      return `_ctypes.POINTER(${native_abi_python_structure_name(structure_name)})`
+    case "size":
+      return "_ctypes.c_size_t"
+    case "uint8":
+      return "_ctypes.c_uint8"
+    case "int32":
+      return "_ctypes.c_int32"
+    case "uint32":
+      return "_ctypes.c_uint32"
+    case "uint64":
+      return "_ctypes.c_uint64"
+    case "void":
+      return "None"
+  }
+}
+
+function native_abi_python_attribute(function_name: string): string {
+  const suffix = native_abi_dart_suffix(function_name)
+  switch (suffix) {
+    case "connect":
+      return "connect_legacy"
+    case "connect_ex":
+      return "connect"
+    case "result_data_length":
+      return "result_length"
+    default:
+      return suffix
+  }
+}
+
+/** Renders ctypes classes and signatures from the Smithy native ABI contract. */
+export function render_python_native_abi(contract: Client_Contract): string {
+  const structures = contract.ffi.native_abi_structures
+    .map((structure) => {
+      const fields = structure.fields
+        .map(
+          (field) =>
+            `        ("${snake_case(field.name)}", ${native_abi_python_type(field.type, field.structure_name)}),`,
+        )
+        .join("\n")
+      return `class ${native_abi_python_structure_name(structure.name)}(_ctypes.Structure):
+    """C-compatible ${structure.name} layout generated from Smithy."""
+
+    _fields_ = [
+${fields}
+    ]`
+    })
+    .join("\n\n")
+  const functions = contract.ffi.native_abi_functions
+    .map((function_) => {
+      const arguments_ = function_.parameters.length === 0
+        ? "()"
+        : `(
+${function_.parameters
+  .map(
+    (parameter) =>
+      `        ${native_abi_python_type(parameter.type, parameter.structure_name)},`,
+  )
+  .join("\n")}
+    )`
+      return `    "${native_abi_python_attribute(function_.name)}": (
+        "${function_.name}",
+        ${arguments_},
+        ${native_abi_python_type(function_.return_type)},
+    ),`
+    })
+    .join("\n")
+  return `# Generated from the OpenKache Smithy client ABI contract. Do not edit.
+
+import ctypes as _ctypes
+
+from .smithy_contract import SmithyFFINamespaceDescriptor
+
+_CLIENT_POINTER = _ctypes.c_void_p
+_RESULT_POINTER = _ctypes.c_void_p
+_U8 = _ctypes.c_uint8
+_U8_POINTER = _ctypes.POINTER(_U8)
+
+${structures}
+
+SMITHY_NATIVE_FUNCTIONS = {
+${functions}
+}
+`
+}
+
 function swift_api_type(type: Api_Type, required: boolean): string {
   let rendered: string
   switch (type.kind) {
@@ -4360,6 +4928,141 @@ ${swift_descriptor_offsets}
 `
 }
 
+function native_abi_swift_structure_name(structure_name: string): string {
+  if (structure_name === "FfiNamespaceDescriptor") {
+    return "Smithy_Native_Namespace_Descriptor"
+  }
+  return `Smithy_Native_${typescript_name(structure_name.replace(/^Ffi/, ""))}`
+}
+
+function native_abi_swift_type(
+  type: Native_Abi_Type,
+  mutable: boolean,
+  structure_name?: string,
+): string {
+  const pointer = mutable ? "UnsafeMutablePointer" : "UnsafePointer"
+  switch (type) {
+    case "client_pointer":
+    case "result_pointer":
+      return "OpaquePointer?"
+    case "u8_pointer":
+      return `${pointer}<UInt8>?`
+    case "struct_pointer":
+      if (structure_name === undefined) {
+        throw new Error("Swift native struct pointer has no structure name")
+      }
+      return `${pointer}<${native_abi_swift_structure_name(structure_name)}>?`
+    case "size":
+      return "Int"
+    case "uint8":
+      return "UInt8"
+    case "int32":
+      return "Int32"
+    case "uint32":
+      return "UInt32"
+    case "uint64":
+      return "UInt64"
+    case "void":
+      return "Void"
+  }
+}
+
+function native_abi_swift_function_name(function_name: string): string {
+  const suffix = native_abi_dart_suffix(function_name)
+  const names: Readonly<Record<string, string>> = {
+    abi_version: "nativeAbiVersion",
+    connect: "nativeConnectLegacy",
+    connect_ex: "nativeConnect",
+    connect_with_options: "nativeConnectWithOptions",
+    execute: "nativeExecute",
+    execute_raw: "nativeExecuteRaw",
+    execute_with_options: "nativeExecuteWithOptions",
+    execute_raw_with_options: "nativeExecuteRawWithOptions",
+    execute_scoped: "nativeExecuteScoped",
+    namespace_open: "nativeNamespaceOpen",
+    namespace_update_policy: "nativeNamespaceUpdatePolicy",
+    namespace_delete: "nativeNamespaceDelete",
+    namespace_descriptor_decode: "nativeNamespaceDescriptorDecode",
+    connection_state: "nativeConnectionState",
+    result_kind: "nativeResultKind",
+    result_data: "nativeResultData",
+    result_data_length: "nativeResultDataLength",
+    result_take_client: "nativeTakeClient",
+    result_free: "nativeFreeResult",
+    client_free: "nativeFreeClient",
+  }
+  const function_name_value = names[suffix]
+  if (function_name_value !== undefined) return function_name_value
+  return `native${pascal_case(suffix)}`
+}
+
+/** Renders Swift FFI declarations from the Smithy native ABI contract. */
+export function render_swift_native_abi(contract: Client_Contract): string {
+  const structures = contract.ffi.native_abi_structures.map((structure) => {
+    const fields = structure.fields
+      .map(
+        (field) =>
+          `  var ${swift_property_name(field.name)}: ${native_abi_swift_type(field.type, field.mutable, field.structure_name)} = ${native_abi_swift_default(field.type)}`,
+      )
+      .join("\n")
+    return `/// C-compatible ${structure.name} layout generated from Smithy.
+internal struct ${native_abi_swift_structure_name(structure.name)} {
+${fields}
+}`
+  })
+  const functions = contract.ffi.native_abi_functions
+    .map((function_) => {
+      const name = native_abi_swift_function_name(function_.name)
+      const parameters = function_.parameters
+        .map(
+          (parameter) =>
+            `  _ ${swift_property_name(parameter.name)}: ${native_abi_swift_type(parameter.type, parameter.mutable, parameter.structure_name)}`,
+        )
+        .join(",\n")
+      const return_type = native_abi_swift_type(
+        function_.return_type,
+        function_.return_type === "u8_pointer" ? false : true,
+      )
+      const declaration = function_.parameters.length === 0
+        ? `internal func ${name}()`
+        : `internal func ${name}(
+${parameters}
+)`
+      return `@_silgen_name("${function_.name}")
+${declaration}${return_type === "Void" ? "" : ` -> ${return_type}`}`
+    })
+    .join("\n\n")
+  return `// Generated from the OpenKache Smithy client ABI contract. Do not edit.
+
+import Foundation
+
+typealias Smithy_Native_Client_Pointer = OpaquePointer
+typealias Smithy_Native_Result_Pointer = OpaquePointer
+
+${structures.join("\n\n")}
+
+${functions}
+`
+}
+
+function native_abi_swift_default(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+    case "result_pointer":
+    case "u8_pointer":
+    case "struct_pointer":
+      return "nil"
+    case "size":
+    case "int32":
+    case "uint8":
+    case "uint32":
+    case "uint64":
+      return "0"
+    case "void":
+      throw new Error("Swift native structure field cannot be void")
+  }
+}
+
 /** Renders the cross-language value-format wire and cryptographic contract for TypeScript.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -4526,6 +5229,96 @@ ${[...enums, ...structures].join("\n\n")}
 public interface IOpenKacheApi
 {
 ${operations.join("\n")}
+}
+`
+}
+
+function native_abi_csharp_structure_name(structure_name: string): string {
+  if (structure_name === "FfiNamespaceDescriptor") {
+    return "Protocol.FfiNamespaceDescriptor"
+  }
+  return "ConnectOptions"
+}
+
+function native_abi_csharp_scalar_type(type: Native_Abi_Type): string {
+  switch (type) {
+    case "client_pointer":
+    case "result_pointer":
+    case "u8_pointer":
+    case "struct_pointer":
+      return "IntPtr"
+    case "size":
+      return "nuint"
+    case "uint8":
+      return "byte"
+    case "int32":
+      return "int"
+    case "uint32":
+      return "uint"
+    case "uint64":
+      return "ulong"
+    case "void":
+      return "void"
+  }
+}
+
+function native_abi_csharp_parameter_type(
+  parameter: Native_Abi_Parameter,
+): string {
+  if (parameter.type !== "struct_pointer") {
+    return native_abi_csharp_scalar_type(parameter.type)
+  }
+  const modifier = parameter.mutable ? "out " : "ref "
+  return `${modifier}${native_abi_csharp_structure_name(parameter.structure_name!)}`
+}
+
+function native_abi_csharp_identifier(identifier: string): string {
+  const camel = lower_camel_case(identifier)
+  return camel.length === 0
+    ? camel
+    : `${camel[0]?.toUpperCase()}${camel.slice(1)}`
+}
+
+/** Renders .NET P/Invoke declarations from the Smithy native ABI contract. */
+export function render_csharp_native_abi(contract: Client_Contract): string {
+  const options = required_native_structure(contract, "FfiConnectOptions")
+  const option_fields = options.fields
+    .map(
+      (field) =>
+      `        internal ${native_abi_csharp_scalar_type(field.type)} ${native_abi_csharp_identifier(field.name)};`,
+    )
+    .join("\n")
+  const functions = contract.ffi.native_abi_functions
+    .map((function_) => {
+      const parameters = function_.parameters.length === 0
+        ? ""
+        : function_.parameters
+          .map(
+            (parameter) =>
+              `        ${native_abi_csharp_parameter_type(parameter)} ${native_abi_csharp_identifier(parameter.name)}`,
+          )
+          .join(",\n")
+      return `[DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern ${native_abi_csharp_scalar_type(function_.return_type)} ${function_.name}(
+${parameters}
+    );`
+    })
+    .join("\n\n")
+  return `// Generated from the OpenKache Smithy client ABI contract. Do not edit.
+using System;
+using System.Runtime.InteropServices;
+
+namespace OpenKache;
+
+internal static partial class NativeMethods
+{
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ConnectOptions
+    {
+${option_fields}
+    }
+
+${functions}
 }
 `
 }
@@ -4726,6 +5519,7 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
+        [GENERATED_OUTPUTS.csharp_native_abi]: render_csharp_native_abi(contract),
         [GENERATED_OUTPUTS.rust_client]: render_rust_client(contract),
         [GENERATED_OUTPUTS.rust_api]: render_rust_api(contract),
         [GENERATED_OUTPUTS.rust_wire]: render_protocol_rust_wire(contract),
@@ -4736,14 +5530,19 @@ function expected_outputs(
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
+        [GENERATED_OUTPUTS.python_native_abi]: render_python_native_abi(contract),
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
+        [GENERATED_OUTPUTS.swift_native_abi]: render_swift_native_abi(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        [GENERATED_OUTPUTS.go_native_abi]: render_go_native_abi(contract),
         ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
-        [GENERATED_OUTPUTS.java_native_api]: render_java_native_api(),
+        [GENERATED_OUTPUTS.java_native_api]: render_java_native_api(contract),
         [GENERATED_OUTPUTS.java_native_descriptor]: render_java_native_descriptor(contract),
+        [GENERATED_OUTPUTS.java_native_connect_options]:
+          render_java_native_connect_options(contract),
         [GENERATED_OUTPUTS.kotlin_api]: render_kotlin_api(contract),
         [GENERATED_OUTPUTS.kotlin_contract]: render_kotlin_contract(contract),
         [GENERATED_OUTPUTS.kotlin_native_api]: render_kotlin_native_api(contract),
@@ -4765,18 +5564,22 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.csharp_api]: render_csharp_api(contract),
         [GENERATED_OUTPUTS.csharp_wire]: render_csharp(contract),
+        [GENERATED_OUTPUTS.csharp_native_abi]: render_csharp_native_abi(contract),
       }
     case "go":
       return {
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
+        [GENERATED_OUTPUTS.go_native_abi]: render_go_native_abi(contract),
       }
     case "java":
       return {
         ...render_java_api(contract),
         [GENERATED_OUTPUTS.java_contract]: render_java_contract(contract),
-        [GENERATED_OUTPUTS.java_native_api]: render_java_native_api(),
+        [GENERATED_OUTPUTS.java_native_api]: render_java_native_api(contract),
         [GENERATED_OUTPUTS.java_native_descriptor]: render_java_native_descriptor(contract),
+        [GENERATED_OUTPUTS.java_native_connect_options]:
+          render_java_native_connect_options(contract),
       }
     case "kotlin":
       return {
@@ -4808,10 +5611,12 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
+        [GENERATED_OUTPUTS.python_native_abi]: render_python_native_abi(contract),
       }
     case "swift":
       return {
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
+        [GENERATED_OUTPUTS.swift_native_abi]: render_swift_native_abi(contract),
       }
   }
 }

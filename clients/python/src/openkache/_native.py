@@ -30,16 +30,18 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_SET_CONDITION_ANY,
 )
+from ._generated.smithy_native_abi import SMITHY_NATIVE_FUNCTIONS
+from ._generated.smithy_native_abi import (
+    _CLIENT_POINTER,
+    _RESULT_POINTER,
+    _U8,
+    _U8_POINTER,
+)
 
 
 class NativeError(RuntimeError):
     """Failure reported by the Rust client-core ABI."""
 
-
-_U8 = ctypes.c_uint8
-_U8_POINTER = ctypes.POINTER(_U8)
-_RESULT_POINTER = ctypes.c_void_p
-_CLIENT_POINTER = ctypes.c_void_p
 
 _NamespaceDescriptor = SmithyFFINamespaceDescriptor
 
@@ -117,175 +119,12 @@ class _NativeApi:
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         library = _load_library(path)
         self.library = library
-        self.abi_version = self._function(
-            "openkache_client_abi_version", (), ctypes.c_uint32
-        )
+        for attribute_name, (symbol_name, arguments, result) in SMITHY_NATIVE_FUNCTIONS.items():
+            setattr(self, attribute_name, self._function(symbol_name, arguments, result))
         if self.abi_version() != SMITHY_FFI_ABI_VERSION:
             raise NativeError(
                 f"unsupported OpenKache native ABI version {self.abi_version()}"
             )
-        self.connect = self._function(
-            "openkache_client_connect_ex",
-            (
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_int32,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute = self._function(
-            "openkache_client_execute",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_raw = self._function(
-            "openkache_client_execute_raw",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_with_options = self._function(
-            "openkache_client_execute_with_options",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_raw_with_options = self._function(
-            "openkache_client_execute_raw_with_options",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_scoped = self._function(
-            "openkache_client_execute_scoped",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                ctypes.c_uint64,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_open = self._function(
-            "openkache_client_namespace_open",
-            (
-                _CLIENT_POINTER,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_update_policy = self._function(
-            "openkache_client_namespace_update_policy",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_delete = self._function(
-            "openkache_client_namespace_delete",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_descriptor_decode = self._function(
-            "openkache_client_namespace_descriptor_decode",
-            (_U8_POINTER, ctypes.c_size_t, ctypes.POINTER(_NamespaceDescriptor)),
-            ctypes.c_uint32,
-        )
-        self.connection_state = self._function(
-            "openkache_client_connection_state", (_CLIENT_POINTER,), ctypes.c_uint32
-        )
-        self.result_kind = self._function(
-            "openkache_client_result_kind", (_RESULT_POINTER,), ctypes.c_uint32
-        )
-        self.result_data = self._function(
-            "openkache_client_result_data", (_RESULT_POINTER,), _U8_POINTER
-        )
-        self.result_length = self._function(
-            "openkache_client_result_data_length",
-            (_RESULT_POINTER,),
-            ctypes.c_size_t,
-        )
-        self.result_take_client = self._function(
-            "openkache_client_result_take_client",
-            (_RESULT_POINTER,),
-            _CLIENT_POINTER,
-        )
-        self.result_free = self._function(
-            "openkache_client_result_free", (_RESULT_POINTER,), None
-        )
-        self.client_free = self._function(
-            "openkache_client_free", (_CLIENT_POINTER,), None
-        )
 
     def _function(
         self,

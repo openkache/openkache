@@ -136,11 +136,13 @@ does not provide one.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
   C++, Python, and other non-Rust bindings. It exposes both protected
   application-key operations and exact-item-ID raw operations, while the
-  worker owns one Compio runtime per native handle. The canonical declarations
-  are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
-  with [`include/openkache_client.h`](include/openkache_client.h) retained as
-  a compatibility include. Generated ABI/protocol constants are emitted to
-  each package build directory from the client model
+  worker owns one Compio runtime per native handle. The compatibility header
+  [`include/openkache/client_abi.h`](include/openkache/client_abi.h) consumes
+  the generated ABI declarations and retains source-compatible aliases, with
+  [`include/openkache_client.h`](include/openkache_client.h) retained as a
+  compatibility include. The complete ABI (opaque handles, options layout,
+  function signatures, and function-pointer types) is emitted to each package
+  build directory from the client model
   [`../model/openkache.smithy`](../model/openkache.smithy) and the wire model
   [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy);
   no header is a hand-maintained constants source.
