@@ -8657,7 +8657,19 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 _input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                $client::ping(self).await?;
+                let result = $client::execute_raw(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    [],
+                    [],
+                    SetOptions::new(),
+                )
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[openkache_client_core::contract::FFI_RESULT_OK],
+                    "${operation_label}",
+                )?;
                 Ok(smithy::${operation.output})
             }`
     case "application_value":
@@ -8674,20 +8686,22 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let payload = $client::execute_raw(
+                let result = $client::execute_raw(
                     self,
                     openkache_client_core::Opcode::${operation.name},
                     [],
                     input.${input_payload}.into_bytes(),
                     openkache_client_core::SetOptions::new(),
                 )
-                    .await
-                    .map(|result| result.payload)
-                    .and_then(|value| {
-                        String::from_utf8(value).map_err(|error| {
-                            Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
-                        })
-                    })?;
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[openkache_client_core::contract::FFI_RESULT_VALUE],
+                    "${operation_label}",
+                )?;
+                let payload = String::from_utf8(result.payload).map_err(|error| {
+                    Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
+                })?;
                 Ok(smithy::${operation.output} { ${output_payload}: payload })
             }`
       }
@@ -8696,16 +8710,29 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let item_id = ItemId::from_slice(&input.item_id)?;
-                let value = match $client::get_in_namespace(
+                let result = $client::execute_scoped(
                     self,
+                    openkache_client_core::Opcode::${operation.name},
                     input.namespace_id,
-                    item_id,
+                    input.item_id,
+                    [],
+                    SetOptions::new(),
                 )
-                .await?
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[
+                        openkache_client_core::contract::FFI_RESULT_VALUE,
+                        openkache_client_core::contract::FFI_RESULT_NOT_FOUND,
+                    ],
+                    "${operation_label}",
+                )?;
+                let value = if result.kind
+                    == openkache_client_core::contract::FFI_RESULT_NOT_FOUND
                 {
-                    GetOutcome::Found(value) => Some(value.into_bytes()),
-                    GetOutcome::NotFound => None,
+                    None
+                } else {
+                    Some(result.payload)
                 };
                 Ok(smithy::${operation.output} { value })
             }`
@@ -8714,25 +8741,41 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let item_id = ItemId::from_slice(&input.item_id)?;
                 let options = smithy_set_options(
                     input.condition,
                     input.expiration_mode,
                     input.ttl_milliseconds,
                     input.eviction_mode,
                 )?;
-                let outcome = $client::set_in_namespace(
+                let result = $client::execute_scoped(
                     self,
+                    openkache_client_core::Opcode::${operation.name},
                     input.namespace_id,
-                    item_id,
-                    ItemValue::new(input.value),
+                    input.item_id,
+                    input.value,
                     options,
                 )
-                .await?;
-                let outcome = match outcome {
-                    SetOutcome::Created => smithy::SetOutcome::Created,
-                    SetOutcome::Replaced => smithy::SetOutcome::Replaced,
-                    SetOutcome::NotStored => smithy::SetOutcome::NotStored,
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[
+                        openkache_client_core::contract::FFI_RESULT_CREATED,
+                        openkache_client_core::contract::FFI_RESULT_REPLACED,
+                        openkache_client_core::contract::FFI_RESULT_NOT_STORED,
+                    ],
+                    "${operation_label}",
+                )?;
+                let outcome = match result.kind {
+                    openkache_client_core::contract::FFI_RESULT_CREATED => {
+                        smithy::SetOutcome::Created
+                    }
+                    openkache_client_core::contract::FFI_RESULT_REPLACED => {
+                        smithy::SetOutcome::Replaced
+                    }
+                    openkache_client_core::contract::FFI_RESULT_NOT_STORED => {
+                        smithy::SetOutcome::NotStored
+                    }
+                    _ => unreachable!("smithy_require_kind validated SET result"),
                 };
                 Ok(smithy::${operation.output} { outcome })
             }`
@@ -8741,10 +8784,25 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let item_id = ItemId::from_slice(&input.item_id)?;
-                let deleted = $client::delete_in_namespace(self, input.namespace_id, item_id)
-                    .await?
-                    == DeleteOutcome::Deleted;
+                let result = $client::execute_scoped(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    input.namespace_id,
+                    input.item_id,
+                    [],
+                    SetOptions::new(),
+                )
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[
+                        openkache_client_core::contract::FFI_RESULT_DELETED,
+                        openkache_client_core::contract::FFI_RESULT_NOT_DELETED,
+                    ],
+                    "${operation_label}",
+                )?;
+                let deleted =
+                    result.kind == openkache_client_core::contract::FFI_RESULT_DELETED;
                 Ok(smithy::${operation.output} { deleted })
             }`
     case "stats_json":
@@ -8752,7 +8810,23 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let json = $client::stats_in_namespace(self, input.namespace_id).await?;
+                let result = $client::execute_scoped(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    input.namespace_id,
+                    [],
+                    [],
+                    SetOptions::new(),
+                )
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[openkache_client_core::contract::FFI_RESULT_VALUE],
+                    "${operation_label}",
+                )?;
+                let json = String::from_utf8(result.payload).map_err(|error| {
+                    Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
+                })?;
                 Ok(smithy::${operation.output} { json })
             }`
     case "empty":
@@ -8761,7 +8835,20 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                $client::sync_in_namespace(self, input.namespace_id).await?;
+                let result = $client::execute_scoped(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    input.namespace_id,
+                    [],
+                    [],
+                    SetOptions::new(),
+                )
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[openkache_client_core::contract::FFI_RESULT_OK],
+                    "${operation_label}",
+                )?;
                 Ok(smithy::${operation.output})
             }`
       }
@@ -8831,6 +8918,20 @@ export function render_rust_operations(contract: Client_Contract): string {
     .map(render_rust_operation_method)
     .join("\n\n")
   return `// Generated from the OpenKache Smithy client contract. Do not edit.
+
+fn smithy_require_kind(
+    result: &openkache_client_core::OperationResult,
+    expected: &[u32],
+    operation: &str,
+) -> std::result::Result<(), Error> {
+    if expected.contains(&result.kind) {
+        return Ok(());
+    }
+    Err(Error::Protocol(format!(
+        "{operation} returned unexpected result kind {}",
+        result.kind,
+    )))
+}
 
 macro_rules! impl_smithy_api {
     ($client:ident) => {
