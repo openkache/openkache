@@ -57,6 +57,9 @@ def generate_smithy_contract() -> None:
     environment["OPENKACHE_GENERATION_TARGET"] = "python"
     generated_root = PACKAGE_ROOT / "src" / "openkache" / "_generated"
     environment["OPENKACHE_PYTHON_API_OUTPUT"] = str(generated_root / "smithy_api.py")
+    environment["OPENKACHE_PYTHON_OPERATIONS_OUTPUT"] = str(
+        generated_root / "smithy_operations.py"
+    )
     environment["OPENKACHE_PYTHON_CONTRACT_OUTPUT"] = str(
         generated_root / "smithy_contract.py"
     )

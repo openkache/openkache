@@ -11,6 +11,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protocol_model = client_directory.join("../../protocol/model");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
         .join("smithy_api.rs");
+    let operations_output = PathBuf::from(
+        std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
+    )
+    .join("smithy_operations.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
     println!(
@@ -27,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(&generator)
         .env("OPENKACHE_GENERATION_TARGET", "rust-api")
         .env("OPENKACHE_RUST_API_OUTPUT", &output)
+        .env("OPENKACHE_RUST_OPERATIONS_OUTPUT", &operations_output)
         .status()
         .map_err(|error| {
             format!(
