@@ -36,12 +36,13 @@ formats or protocol behavior.
 | Swift | [`swift/`](swift/) | Actor-based async SDK over the shared native ABI and generated Smithy API |
 | Dart | `dart/` | Generated Smithy operations over the shared native ABI |
 
-Java, Kotlin, and Dart implement the generated Smithy operation surface,
+Go, Java, Kotlin, and Dart implement the generated Smithy operation surface,
 including namespace management and exact-item cache operations. Their adapters
 connect to the shared Rust client-core C ABI; the live managed-client smoke
 suite exercises ECHO, namespace open/delete, SET, GET, STATS, SYNC, and DELETE
-against one QUIC server. Their Smithy DTOs, enums, operation signatures, and
-FFI dispatch metadata are generated alongside the native constants.
+against one QUIC server. Their Smithy DTOs, enums, operation signatures,
+operation dispatch, and FFI metadata are generated alongside the native
+constants.
 
 The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
 format v1. The core owns Raw and canonical JSON serialization. TypeScript's
