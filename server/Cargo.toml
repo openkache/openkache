@@ -18,6 +18,11 @@ allocator-system = []
 allocator-mimalloc = ["dep:mimalloc"]
 allocator-jemalloc = ["dep:tikv-jemallocator"]
 allocator-snmalloc = ["dep:snmalloc-rs"]
+opentelemetry = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+]
 channel-crossfire = ["dep:crossfire"]
 channel-flume = ["dep:flume"]
 channel-kanal = ["dep:event-listener", "dep:kanal"]
@@ -57,6 +62,9 @@ glommio = { version = "*", optional = true }
 mimalloc = { version = "*", optional = true }
 monoio = { version = "*", default-features = false, features = ["async-cancel", "iouring", "sync"], optional = true }
 openkache-protocol = { path = "../protocol" }
+opentelemetry = { version = "*", optional = true, default-features = false, features = ["metrics"] }
+opentelemetry-otlp = { version = "*", optional = true, default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client"] }
+opentelemetry_sdk = { version = "*", optional = true, default-features = false, features = ["metrics"] }
 quiche = { version = "*", default-features = false, features = ["boringssl-boring-crate"], optional = true }
 rand = "*"
 rcgen = { version = "*", features = ["x509-parser"] }
@@ -72,3 +80,5 @@ thiserror = "*"
 tikv-jemallocator = { version = "*", optional = true }
 time = "*"
 toml = "*"
+tracing = "*"
+tracing-subscriber = { version = "*", default-features = false, features = ["fmt", "json"] }

@@ -27,6 +27,9 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
 use crate::network_runtime;
+use crate::observability::{
+    NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
+};
 use crate::platform::StorageDeviceKind;
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
@@ -34,7 +37,8 @@ use crate::transport::{
     ServerTlsConfig, StreamReadError, TransportError,
 };
 use crate::{
-    AppConfig, KvError, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache, TlsConfig,
+    AppConfig, KvError, NetworkCache, NetworkConfig, QuicBackend, SetOutcome, ThreadedKvkache,
+    TlsConfig,
 };
 
 pub(crate) type NetworkWorkerCompletion = (usize, std::result::Result<(), String>);
@@ -979,6 +983,7 @@ pub struct KacheServer {
     network: NetworkConfig,
     request_timeout: Duration,
     max_item_bytes: usize,
+    observability: ObservabilityService,
 }
 
 impl KacheServer {
@@ -1058,10 +1063,19 @@ impl KacheServer {
         let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
         let storage_directory = config.storage.directory.clone();
+        let observability = ObservabilityService::new(
+            network.worker_count,
+            config.runtime.thread_count,
+            &config.observability,
+        )?;
+        let observability_state = observability.state();
         let existing_storage = crate::storage_backend::existing_storage(&config);
         let quic_backend = config.quic.selected_backend()?;
         ServerEndpoint::validate_backend(quic_backend)?;
-        let mut cache = ThreadedKvkache::start_validated_for_server(config)?;
+        let mut cache = ThreadedKvkache::start_validated_for_server_with_observability(
+            config,
+            observability_state,
+        )?;
         let namespaces = match NamespaceRegistry::load(&storage_directory, existing_storage) {
             Ok(registry) => registry,
             Err(error) => {
@@ -1093,6 +1107,7 @@ impl KacheServer {
             network,
             request_timeout,
             max_item_bytes,
+            observability,
         })
     }
 
@@ -1107,6 +1122,16 @@ impl KacheServer {
     /// Returns an error when the stored socket address cannot be reported.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
+    }
+
+    /// Returns the bound observability management address, when enabled.
+    ///
+    /// # Returns
+    ///
+    /// The address bound for the management listener, or `None` when
+    /// observability metrics are disabled.
+    pub fn metrics_addr(&self) -> Option<SocketAddr> {
+        self.observability.metrics_addr()
     }
 
     /// Returns the conservative classification of the files opened by the
@@ -1157,8 +1182,10 @@ impl KacheServer {
             network,
             request_timeout,
             max_item_bytes,
+            observability: observability_service,
             ..
         } = self;
+        let observability = observability_service.state();
         let (started_tx, started_rx) =
             channel::bounded::<std::result::Result<(), String>>(network.worker_count);
         let (finished_tx, finished_rx) =
@@ -1178,11 +1205,13 @@ impl KacheServer {
             let entries = network.io_uring_entries_per_worker;
             let event_interval = network.event_interval;
             let limits = NetworkWorkerLimits {
+                worker_id,
                 request_timeout,
                 max_stream_lanes: network.max_stream_lanes_per_connection,
                 request_budget: request_budget.clone(),
                 max_item_bytes,
                 namespaces: Arc::clone(&namespaces),
+                observability: Arc::clone(&observability),
             };
             let reporter = NetworkWorkerReporter::new(worker_id, started_tx, finished_tx);
             let role = QuicNetworkRole {
@@ -1233,28 +1262,42 @@ impl KacheServer {
             }
         }
         if let Some(message) = startup_error {
+            observability.set_failed();
             let remaining_completions = workers.len();
             shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
                 .await?;
             return Err(ServerError::NetworkWorker(message));
         }
 
+        let metrics_handle = observability_service.start();
         let shutdown = shutdown.fuse();
         let worker_finished = finished_rx.recv_async_network().fuse();
         pin_mut!(shutdown, worker_finished);
-        let (worker_failure, completed_workers) = select! {
-            () = shutdown => (None, 0),
-            result = worker_finished => (Some(match result {
-                Ok((worker_id, Ok(()))) => {
-                    format!("network worker {worker_id} exited unexpectedly")
-                }
-                Ok((worker_id, Err(message))) => {
-                    format!("network worker {worker_id} failed: {message}")
-                }
-                Err(_) => "network worker completion channel closed".into(),
-            }), 1),
+        let (worker_failure, completed_workers, failed_worker) = select! {
+            () = shutdown => (None, 0, None),
+            result = worker_finished => match result {
+                Ok((worker_id, Ok(()))) => (
+                    Some(format!("network worker {worker_id} exited unexpectedly")),
+                    1,
+                    Some(worker_id),
+                ),
+                Ok((worker_id, Err(message))) => (
+                    Some(format!("network worker {worker_id} failed: {message}")),
+                    1,
+                    Some(worker_id),
+                ),
+                Err(_) => (Some("network worker completion channel closed".into()), 1, None),
+            },
         };
         let remaining_completions = workers.len().saturating_sub(completed_workers);
+        if let Some(worker_id) = failed_worker {
+            observability.network_worker_failed(worker_id);
+        } else if worker_failure.is_some() {
+            observability.set_failed();
+        } else {
+            observability.set_draining();
+        }
+        metrics_handle.stop();
         shutdown_network_workers_and_cache(workers, &finished_rx, remaining_completions, cache)
             .await?;
         match worker_failure {
@@ -1295,6 +1338,7 @@ async fn run_quic_role(
         match ServerEndpoint::bind(quic_backend, socket, tls, limits.max_stream_lanes).await {
             Ok(endpoint) => endpoint,
             Err(error) => {
+                limits.observability.network_worker_failed(worker_id);
                 reporter.startup_failed(error.to_string());
                 return None;
             }
@@ -1302,12 +1346,14 @@ async fn run_quic_role(
     if let Some(error) =
         crate::platform::cpu_assignment_error(&format!("network worker {worker_id}"), cpu_id)
     {
+        limits.observability.network_worker_failed(worker_id);
         reporter.startup_failed(error);
         return None;
     }
     if !reporter.started() {
         return None;
     }
+    limits.observability.network_worker_started(worker_id);
     Some(
         run_selected_endpoint(endpoint, &cache, &access_policy, limits, stop)
             .await
@@ -1404,11 +1450,13 @@ fn shutdown_cache(cache: Arc<ThreadedKvkache>) -> Result<()> {
 
 #[derive(Clone)]
 struct NetworkWorkerLimits {
+    worker_id: usize,
     request_timeout: Duration,
     max_stream_lanes: usize,
     request_budget: RequestBudget,
     max_item_bytes: usize,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
+    observability: Arc<ObservabilityState>,
 }
 
 async fn run_selected_endpoint(
@@ -1442,12 +1490,16 @@ async fn run_network_worker<E: TransportEndpoint>(
     stop: AsyncReceiver<()>,
 ) -> std::result::Result<(), TransportError> {
     let NetworkWorkerLimits {
+        worker_id,
         request_timeout,
         max_stream_lanes,
         request_budget,
         max_item_bytes,
         namespaces,
+        observability,
     } = limits;
+    let network_shard = observability.network_shard(NetworkWorkerId(worker_id));
+    let cache = NetworkCache::new(cache, network_shard.worker_id());
     let mut connections = FuturesUnordered::new();
     loop {
         if connections.is_empty() {
@@ -1458,8 +1510,9 @@ async fn run_network_worker<E: TransportEndpoint>(
                 incoming = incoming => {
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming, cache, access_policy, request_timeout, max_stream_lanes,
-                        request_budget.clone(), max_item_bytes, Arc::clone(&namespaces),
+                        incoming, &cache, network_shard, access_policy, request_timeout,
+                        max_stream_lanes, request_budget.clone(), max_item_bytes,
+                        Arc::clone(&namespaces),
                     ));
                 }
                 _ = stopping => break,
@@ -1473,8 +1526,9 @@ async fn run_network_worker<E: TransportEndpoint>(
                 incoming = incoming => {
                     let Some(incoming) = incoming else { break };
                     connections.push(serve_incoming(
-                        incoming, cache, access_policy, request_timeout, max_stream_lanes,
-                        request_budget.clone(), max_item_bytes, Arc::clone(&namespaces),
+                        incoming, &cache, network_shard, access_policy, request_timeout,
+                        max_stream_lanes, request_budget.clone(), max_item_bytes,
+                        Arc::clone(&namespaces),
                     ));
                 }
                 _ = completed => {}
@@ -1490,7 +1544,8 @@ async fn run_network_worker<E: TransportEndpoint>(
 /// Completes one QUIC handshake and serves the accepted connection.
 async fn serve_incoming<I: TransportIncoming>(
     incoming: I,
-    cache: &ThreadedKvkache,
+    cache: &NetworkCache<'_>,
+    network_shard: NetworkShard<'_>,
     access_policy: &AccessPolicy,
     request_timeout: Duration,
     max_stream_lanes: usize,
@@ -1498,27 +1553,35 @@ async fn serve_incoming<I: TransportIncoming>(
     max_item_bytes: usize,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
 ) {
-    if let Ok(mut connection) = incoming.connect().await {
-        let peer_certificate = connection.take_peer_certificate();
-        let administrator = access_policy.permits_administration(peer_certificate.as_ref());
-        serve_connection(
-            connection,
-            cache,
-            administrator,
-            request_timeout,
-            max_stream_lanes,
-            request_budget,
-            max_item_bytes,
-            namespaces,
-        )
-        .await;
+    match incoming.connect().await {
+        Ok(mut connection) => {
+            network_shard.connection_started();
+            network_shard.handshake_succeeded();
+            let peer_certificate = connection.take_peer_certificate();
+            let administrator = access_policy.permits_administration(peer_certificate.as_ref());
+            serve_connection(
+                connection,
+                cache,
+                network_shard,
+                administrator,
+                request_timeout,
+                max_stream_lanes,
+                request_budget,
+                max_item_bytes,
+                namespaces,
+            )
+            .await;
+            network_shard.connection_finished();
+        }
+        Err(_) => network_shard.handshake_failed(),
     }
 }
 
 /// Multiplexes bounded reusable request lanes for one QUIC connection.
 async fn serve_connection<C: TransportConnection>(
     connection: C,
-    cache: &ThreadedKvkache,
+    cache: &NetworkCache<'_>,
+    network_shard: NetworkShard<'_>,
     administrator: bool,
     request_timeout: Duration,
     max_stream_lanes: usize,
@@ -1535,10 +1598,12 @@ async fn serve_connection<C: TransportConnection>(
         if streams.is_empty() {
             match connection.accept_bi().await {
                 Ok((send, receive)) => {
+                    network_shard.stream_started();
                     streams.push(serve_stream(
                         send,
                         receive,
                         cache,
+                        network_shard,
                         administrator,
                         request_timeout,
                         request_budget.clone(),
@@ -1555,10 +1620,12 @@ async fn serve_connection<C: TransportConnection>(
             select! {
                 incoming = incoming => match incoming {
                     Ok((send, receive)) => {
+                        network_shard.stream_started();
                         streams.push(serve_stream(
                             send,
                             receive,
                             cache,
+                            network_shard,
                             administrator,
                             request_timeout,
                             request_budget.clone(),
@@ -1579,13 +1646,17 @@ async fn serve_connection<C: TransportConnection>(
 async fn serve_stream<S: SendStream, R: ReceiveStream>(
     mut send: S,
     mut receive: R,
-    cache: &ThreadedKvkache,
+    cache: &NetworkCache<'_>,
+    network_shard: NetworkShard<'_>,
     administrator: bool,
     request_timeout: Duration,
     request_budget: RequestBudget,
     max_item_bytes: usize,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
 ) {
+    let _stream_guard = ActiveStream {
+        network_shard,
+    };
     loop {
         let mut frame = match receive
             .read_request(
@@ -1598,26 +1669,37 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         {
             Ok(frame) => frame,
             Err(StreamReadError::Timeout) => {
-                let _ = write_response(
+                network_shard.request_read_timeout();
+                if !write_response(
                     &mut send,
                     response_bytes(Status::Timeout, b"request read timed out"),
                     request_timeout,
                 )
-                .await;
+                .await
+                {
+                    network_shard.response_write_failure();
+                }
                 break;
             }
             Err(StreamReadError::TooLarge) => {
-                let _ = write_response(
+                network_shard.protocol_error();
+                if !write_response(
                     &mut send,
                     response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
                     request_timeout,
                 )
-                .await;
+                .await
+                {
+                    network_shard.response_write_failure();
+                }
                 break;
             }
             Err(StreamReadError::Protocol(error)) => {
-                let _ = write_response(&mut send, protocol_error_response(error), request_timeout)
-                    .await;
+                network_shard.protocol_error();
+                if !write_response(&mut send, protocol_error_response(error), request_timeout).await
+                {
+                    network_shard.response_write_failure();
+                }
                 break;
             }
             Err(StreamReadError::Transport(_)) => break,
@@ -1626,6 +1708,8 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
         let mut terminal_after_response = frame.has_trailing_bytes;
         let response_result = match Request::decode_owned(request_bytes) {
             Ok(request) => {
+                let operation = Operation::from_opcode(request.opcode);
+                let request_started = std::time::Instant::now();
                 let may_mutate = request_may_mutate(&request);
                 let response_permit = if request.opcode == Opcode::Get {
                     match request_budget
@@ -1638,7 +1722,13 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Timeout,
                                 b"response memory budget timed out",
                             );
+                            network_shard.record_request(
+                                operation,
+                                Status::Timeout,
+                                request_started.elapsed(),
+                            );
                             if !write_response(&mut send, response, request_timeout).await {
+                                network_shard.response_write_failure();
                                 break;
                             }
                             continue;
@@ -1648,7 +1738,13 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                                 Status::Overloaded,
                                 b"response exceeds the server memory budget",
                             );
+                            network_shard.record_request(
+                                operation,
+                                Status::Overloaded,
+                                request_started.elapsed(),
+                            );
                             if !write_response(&mut send, response, request_timeout).await {
+                                network_shard.response_write_failure();
                                 break;
                             }
                             continue;
@@ -1659,41 +1755,75 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 };
                 match network_runtime::timeout(
                     request_timeout,
-                    execute_request(cache, request, administrator, namespaces.as_ref()),
+                    execute_request(
+                        cache,
+                        request,
+                        administrator,
+                        namespaces.as_ref(),
+                        network_shard.state(),
+                    ),
                 )
                 .await
                 {
-                    Ok(Some(response)) => (response, response_permit),
+                    Ok(Some(response)) => {
+                        network_shard.record_request(
+                            operation,
+                            response.status,
+                            request_started.elapsed(),
+                        );
+                        (response, response_permit)
+                    }
                     Ok(None) => {
                         // A mutating storage failure may have crossed its
                         // linearization point. Do not send an error response
                         // that would falsely guarantee that no mutation took
                         // effect.
+                        network_shard.abandoned_request();
                         return;
                     }
                     Err(_) if may_mutate => {
                         // The worker request may already have crossed its mutation
                         // linearization point when this wait expires. An error response
                         // would falsely guarantee that it did not take effect.
+                        network_shard.abandoned_request();
                         return;
                     }
-                    Err(_) => (
-                        response_bytes(Status::Timeout, b"request execution timed out"),
-                        response_permit,
-                    ),
+                    Err(_) => {
+                        network_shard.record_request(
+                            operation,
+                            Status::Timeout,
+                            request_started.elapsed(),
+                        );
+                        (
+                            response_bytes(Status::Timeout, b"request execution timed out"),
+                            response_permit,
+                        )
+                    }
                 }
             }
             Err(error) => {
+                network_shard.protocol_error();
                 terminal_after_response = true;
                 (protocol_error_response(error), None)
             }
         };
         if !write_response(&mut send, response_result.0, request_timeout).await {
+            network_shard.response_write_failure();
             break;
         }
         if terminal_after_response {
             break;
         }
+    }
+}
+
+struct ActiveStream<'a> {
+    network_shard: NetworkShard<'a>,
+}
+
+impl Drop for ActiveStream<'_> {
+    fn drop(&mut self) {
+        self.network_shard.stream_finished();
     }
 }
 
@@ -1721,10 +1851,11 @@ fn request_may_mutate(request: &Request) -> bool {
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.
 async fn execute_request(
-    cache: &ThreadedKvkache,
+    cache: &NetworkCache<'_>,
     request: Request,
     administrator: bool,
     namespaces: &Mutex<NamespaceRegistry>,
+    observability: &ObservabilityState,
 ) -> Option<Response> {
     let Request {
         opcode,
@@ -2089,7 +2220,9 @@ async fn execute_request(
                         }
                         write!(payload, "{worker:?}").expect("writing to a String cannot fail");
                     }
-                    payload.push_str("]}");
+                    payload.push_str(r#"],"observability":{"#);
+                    payload.push_str(&observability.stats_json_fields());
+                    payload.push_str("}}");
                     Some(response(Status::Ok, payload.into_bytes()))
                 }
                 Err(error) => Some(cache_error_response(error)),

@@ -21,6 +21,11 @@ pub(super) async fn run(
     arguments: Arguments,
     config: AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _ = tracing_subscriber::fmt()
+        .json()
+        .with_target(true)
+        .with_ansi(false)
+        .try_init();
     let storage_directory = config.storage.directory.clone();
     let listen = arguments.listen.unwrap_or_else(|| {
         SocketAddr::from(([127, 0, 0, 1], arguments.port.unwrap_or(DEFAULT_PORT)))
@@ -99,9 +104,7 @@ fn report_storage_device(kind: StorageDeviceKind) {
             );
         }
         StorageDeviceKind::NotApplicable => {
-            println!(
-                "Storage device: not applicable (simulated storage uses no physical files)"
-            );
+            println!("Storage device: not applicable (simulated storage uses no physical files)");
         }
     }
 }
