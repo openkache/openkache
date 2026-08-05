@@ -393,11 +393,15 @@ public:
         if (name.size() > OPENKACHE_SMITHY_NAMESPACE_NAME_MAX_BYTES) {
             throw Error("OpenKache namespace name exceeds 255 UTF-8 octets");
         }
-        const auto [flags, ttl_ms] = namespace_policy_wire(
-            policy.has_value() ? *policy : Namespace_Policy{});
+        if (create_if_missing && !policy.has_value()) {
+            throw Error("namespace policy is required when create_if_missing is true");
+        }
         if (!create_if_missing && policy.has_value()) {
             throw Error("namespace policy requires create_if_missing");
         }
+        const auto [flags, ttl_ms] = policy.has_value()
+            ? namespace_policy_wire(*policy)
+            : std::pair<Byte, std::uint64_t>{0, 0};
         const auto* name_data = name.empty()
             ? nullptr
             : reinterpret_cast<const Byte*>(name.data());
