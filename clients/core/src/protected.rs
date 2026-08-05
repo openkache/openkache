@@ -132,6 +132,11 @@ macro_rules! protected_client_methods {
             self.raw.ping().await
         }
 
+        /// Sends an experimental UTF-8-independent payload and returns the echoed bytes.
+        pub async fn echo(&self, value: impl AsRef<[u8]>) -> Result<Vec<u8>> {
+            self.raw.echo(value).await
+        }
+
         /// Returns the currently selected server-assigned namespace ID.
         pub fn namespace_id(&self) -> Option<u64> {
             self.raw.namespace_id()

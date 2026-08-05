@@ -22,6 +22,14 @@ func (s smithyClient) Ping(ctx context.Context, _ SmithyPingInput) (SmithyPingOu
 	return SmithyPingOutput{}, s.client.Ping(ctx)
 }
 
+func (s smithyClient) Echo(
+	ctx context.Context,
+	input SmithyEchoInput,
+) (SmithyEchoOutput, error) {
+	message, err := s.client.Echo(ctx, input.Message)
+	return SmithyEchoOutput{Message: message}, err
+}
+
 func (s smithyClient) Get(
 	ctx context.Context,
 	input SmithyGetInput,

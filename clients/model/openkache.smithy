@@ -213,7 +213,8 @@ service OpenKacheClient {
         Sync,
         NamespaceOpen,
         NamespaceUpdatePolicy,
-        NamespaceDelete
+        NamespaceDelete,
+        Echo
     ]
 }
 
@@ -338,6 +339,22 @@ operation NamespaceUpdatePolicy {
 operation NamespaceDelete {
     input: NamespaceDeleteInput
     output: NamespaceDeleteOutput
+}
+
+/// Experimental API used to verify cross-language contract propagation.
+operation Echo {
+    input: EchoInput
+    output: EchoOutput
+}
+
+structure EchoInput {
+    @required
+    message: String
+}
+
+structure EchoOutput {
+    @required
+    message: String
 }
 
 structure NamespaceOpenInput {

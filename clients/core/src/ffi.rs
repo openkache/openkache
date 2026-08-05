@@ -613,6 +613,11 @@ async fn execute_protected(
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
         FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
+        FfiOperation::Echo => client
+            .raw()
+            .echo(value)
+            .await
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
         FfiOperation::Get => client
             .get(&application_key)
             .await
@@ -655,6 +660,11 @@ async fn execute_raw(
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
         FfiOperation::Ping => client.raw().ping().await.map(|_| ok_result()),
+        FfiOperation::Echo => client
+            .raw()
+            .echo(value)
+            .await
+            .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
         FfiOperation::Get => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
@@ -1335,7 +1345,10 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
                 Err("operation does not accept a value".to_owned())
             }
-            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
+            FfiOperation::GetJson
+            | FfiOperation::SetJson
+            | FfiOperation::Ping
+            | FfiOperation::Echo => Err(
                 "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
             ),
             FfiOperation::NamespaceOpen
@@ -1634,6 +1647,7 @@ fn execute_entry_inner(
                 Err("application key must not be empty".to_owned())
             }
             FfiOperation::Ping
+            | FfiOperation::Echo
             | FfiOperation::Stats
             | FfiOperation::Sync
             | FfiOperation::Reconnect

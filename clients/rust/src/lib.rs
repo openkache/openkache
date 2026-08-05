@@ -203,6 +203,20 @@ macro_rules! impl_smithy_api {
                 Ok(smithy::PingOutput)
             }
 
+            async fn echo(
+                &self,
+                input: smithy::EchoInput,
+            ) -> std::result::Result<smithy::EchoOutput, Self::Error> {
+                let message = $client::echo(self, input.message.into_bytes())
+                    .await
+                    .and_then(|value| {
+                        String::from_utf8(value).map_err(|error| {
+                            Error::Protocol(format!("ECHO response is not UTF-8: {error}"))
+                        })
+                    })?;
+                Ok(smithy::EchoOutput { message })
+            }
+
             async fn get(
                 &self,
                 input: smithy::GetInput,
@@ -415,6 +429,14 @@ macro_rules! client_methods {
             /// Verifies the connection and returns the complete request round-trip time.
             pub async fn ping(&self) -> Result<Duration> {
                 self.inner.ping().await
+            }
+
+            /// Sends an experimental UTF-8 message and returns the echoed message.
+            pub async fn echo(&self, message: impl AsRef<str>) -> Result<String> {
+                let value = self.inner.echo(message.as_ref().as_bytes()).await?;
+                String::from_utf8(value).map_err(|error| {
+                    Error::Protocol(format!("ECHO response is not UTF-8: {error}"))
+                })
             }
 
             /// Returns the currently selected server-assigned namespace ID.

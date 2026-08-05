@@ -53,6 +53,8 @@ import {
   SMITHY_SET_OUTCOME_REPLACED,
   type Smithy_Delete_Input,
   type Smithy_Delete_Output,
+  type Smithy_Echo_Input,
+  type Smithy_Echo_Output,
   type Smithy_Get_Input,
   type Smithy_Get_Output,
   type Smithy_Eviction_Mode,
@@ -310,6 +312,26 @@ export class OpenKache_Client {
     this.#assert_open()
     try {
       await this.#native_client.ping()
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /**
+   * Sends an experimental UTF-8 message and returns the echoed message.
+   *
+   * @param message - UTF-8 text carried by the experimental ECHO operation.
+   * @returns The server's UTF-8 response.
+   * @throws {OpenKache_Error} When the client is closed or the response is not UTF-8.
+   */
+  async echo(message: string): Promise<string> {
+    this.#assert_open()
+    if (typeof message !== "string") {
+      throw new OpenKache_Error("message must be a string")
+    }
+    try {
+      const value = await this.#native_client.echo(TEXT_ENCODER.encode(message))
+      return new TextDecoder("utf-8", { fatal: true }).decode(value)
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -725,6 +747,19 @@ class Raw_Client implements OpenKache_Raw_Client {
     try {
       await this.#native_client.ping()
       return {}
+    } catch (error) {
+      throw as_openkache_error(error)
+    }
+  }
+
+  /** Invokes the experimental Smithy ECHO operation. */
+  async echo(input: Smithy_Echo_Input): Promise<Smithy_Echo_Output> {
+    assert_lifecycle_open(this.#lifecycle)
+    try {
+      const value = await this.#native_client.echo(TEXT_ENCODER.encode(input.message))
+      return {
+        message: new TextDecoder("utf-8", { fatal: true }).decode(value),
+      }
     } catch (error) {
       throw as_openkache_error(error)
     }

@@ -44,6 +44,7 @@ cargo install --path clients/cli
 
 ```bash
 openkache-cli ping
+openkache-cli echo "single-source-of-truth"
 openkache-cli get greeting
 openkache-cli set greeting "hello OpenKache"
 printf 'binary value' | openkache-cli set payload --value-stdin

@@ -893,6 +893,26 @@ public actor OpenKacheClient {
         }
     }
 
+    /// Sends an experimental UTF-8 message and returns the echoed message.
+    public func echo(_ message: String) async throws -> String {
+        try await perform { handle in
+            let result = try NativeBridge.execute(
+                handle,
+                operation: UInt32(Smithy_Opcode.echo.rawValue),
+                value: Data(message.utf8)
+            )
+            return try consumeResult(result) { kind, payload in
+                guard kind == Smithy_Native_Contract.resultValue else {
+                    throw OpenKacheError("unexpected ECHO result")
+                }
+                guard let text = String(data: payload, encoding: .utf8) else {
+                    throw OpenKacheError("ECHO response is not valid UTF-8")
+                }
+                return text
+            }
+        }
+    }
+
     /// Retrieves protected bytes, or nil when the key does not exist.
     public func get(_ key: Data) async throws -> Data? {
         try validateKey(key)
@@ -1094,6 +1114,26 @@ public actor OpenKacheRawClient {
         }
     }
 
+    /// Sends an experimental UTF-8 message and returns the echoed message.
+    public func echo(_ message: String) async throws -> String {
+        try await perform { handle in
+            let result = try NativeBridge.execute(
+                handle,
+                operation: UInt32(Smithy_Opcode.echo.rawValue),
+                value: Data(message.utf8)
+            )
+            return try consumeResult(result) { kind, payload in
+                guard kind == Smithy_Native_Contract.resultValue else {
+                    throw OpenKacheError("unexpected raw ECHO result")
+                }
+                guard let text = String(data: payload, encoding: .utf8) else {
+                    throw OpenKacheError("raw ECHO response is not valid UTF-8")
+                }
+                return text
+            }
+        }
+    }
+
     /// Retrieves exact bytes for a 32-byte protocol item ID.
     public func get(_ itemID: Data) async throws -> Data? {
         try validateItemID(itemID)
@@ -1237,6 +1277,10 @@ extension OpenKacheRawClient: Smithy_OpenKache_Api {
         _ = input
         try await ping()
         return Smithy_Ping_Output()
+    }
+
+    public func echo(_ input: Smithy_Echo_Input) async throws -> Smithy_Echo_Output {
+        Smithy_Echo_Output(message: try await echo(input.message))
     }
 
     public func get(_ input: Smithy_Get_Input) async throws -> Smithy_Get_Output {

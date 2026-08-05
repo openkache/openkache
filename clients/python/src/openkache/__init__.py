@@ -19,6 +19,8 @@ from ._client import (
 from ._generated import (
     SmithyDeleteInput,
     SmithyDeleteOutput,
+    SmithyEchoInput,
+    SmithyEchoOutput,
     SmithyEvictionDefault,
     SmithyEvictionMode,
     SmithyExpirationDefault,
@@ -64,6 +66,8 @@ __all__ = [
     "SetOutcome",
     "SmithyDeleteInput",
     "SmithyDeleteOutput",
+    "SmithyEchoInput",
+    "SmithyEchoOutput",
     "SmithyEvictionDefault",
     "SmithyEvictionMode",
     "SmithyExpirationDefault",

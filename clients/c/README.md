@@ -64,6 +64,10 @@ Namespace results carry the canonical descriptor payload; use
 `openkache_client_namespace_descriptor_decode` to obtain a typed descriptor
 without reimplementing the wire parser in the application.
 
+`openkache_client_echo` is a convenience wrapper for the experimental ECHO
+operation. It returns a borrowed result payload; copy it before calling
+`openkache_client_result_free`.
+
 Operation and value-format constants in the generated
 `openkache/smithy_contract.h` are sourced at build/package time from the client
 model [`../model/openkache.smithy`](../model/openkache.smithy) and wire model
