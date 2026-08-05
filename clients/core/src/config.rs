@@ -720,4 +720,31 @@ impl SetOptions {
             self.eviction_mode,
         ))
     }
+
+    #[cfg(feature = "ffi")]
+    pub(crate) fn from_protocol(
+        options: openkache_protocol::SetOptions,
+    ) -> Result<Self> {
+        let mut converted = match options.condition {
+            SetCondition::Any => Self::new(),
+            SetCondition::IfAbsent => Self::new().if_absent(),
+            SetCondition::IfPresent => Self::new().if_present(),
+        };
+        converted = match options.expiration_mode {
+            ExpirationMode::Inherit => converted.inherit_expiration(),
+            ExpirationMode::NoExpiry => converted.no_expiry(),
+            ExpirationMode::ExplicitTtl => converted
+                .expires_after_millis(options.ttl_ms.ok_or_else(|| {
+                    Error::configuration(
+                        "set.time_to_live_ms",
+                        "must be present with explicit TTL mode",
+                    )
+                })?),
+        };
+        Ok(match options.eviction_mode {
+            EvictionMode::Inherit => converted.inherit_eviction(),
+            EvictionMode::Evictable => converted.evictable(),
+            EvictionMode::EvictionProtected => converted.eviction_protected(),
+        })
+    }
 }

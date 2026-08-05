@@ -21,20 +21,10 @@ use crate::contract::{
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome, ItemId,
-    ItemValue, LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy,
-    ServerTrust, SetCondition, SetOptions, SetOutcome,
+    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
+    LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
+    SetCondition, SetOptions, SetOutcome,
 };
-use openkache_protocol::{
-    POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED,
-    POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_NO_EXPIRY, POLICY_RESERVED_MASK,
-    SET_CONDITION_ANY_BITS, SET_CONDITION_MASK, SET_CONDITION_RESERVED_BITS, SET_EVICTABLE_BITS,
-    SET_EVICTION_MASK, SET_EVICTION_PROTECTED_BITS, SET_EVICTION_RESERVED_BITS,
-    SET_EXPIRATION_MASK, SET_EXPIRATION_RESERVED_BITS, SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS,
-    SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS, SET_INHERIT_EXPIRATION_BITS,
-    SET_NO_EXPIRY_BITS, SET_RESERVED_MASK,
-};
-
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Opaque result allocated by the native ABI.
@@ -822,117 +812,18 @@ async fn namespace_delete(
 }
 
 fn set_options_from_flags(flags: u8, ttl_ms: u64) -> std::result::Result<SetOptions, String> {
-    if flags & SET_RESERVED_MASK != 0 {
-        return Err(format!(
-            "SET flags contain reserved bits 0x{:02x}",
-            flags & SET_RESERVED_MASK
-        ));
-    }
-    let condition = match flags & SET_CONDITION_MASK {
-        value if value == SET_CONDITION_ANY_BITS => SetCondition::Any,
-        SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
-        SET_IF_PRESENT_BITS => SetCondition::IfPresent,
-        value if value == SET_CONDITION_RESERVED_BITS => {
-            return Err("SET flags contain conflicting conditions".to_owned());
-        }
-        _ => return Err("SET flags contain an unknown condition".to_owned()),
-    };
-    let expiration_mode = match flags & SET_EXPIRATION_MASK {
-        value if value == SET_INHERIT_EXPIRATION_BITS => {
-            if ttl_ms != 0 {
-                return Err("SET TTL is only valid with explicit TTL mode".to_owned());
-            }
-            ExpirationMode::Inherit
-        }
-        value if value == SET_NO_EXPIRY_BITS => {
-            if ttl_ms != 0 {
-                return Err("SET TTL is only valid with explicit TTL mode".to_owned());
-            }
-            ExpirationMode::NoExpiry
-        }
-        value if value == SET_EXPLICIT_TTL_BITS => {
-            if ttl_ms == 0 {
-                return Err("SET TTL must be greater than zero milliseconds".to_owned());
-            }
-            ExpirationMode::ExplicitTtl
-        }
-        value if value == SET_EXPIRATION_RESERVED_BITS => {
-            return Err("SET flags contain a reserved expiration mode".to_owned());
-        }
-        _ => return Err("SET flags contain an unknown expiration mode".to_owned()),
-    };
-    let eviction_mode = match flags & SET_EVICTION_MASK {
-        value if value == SET_INHERIT_EVICTION_BITS => EvictionMode::Inherit,
-        SET_EVICTABLE_BITS => EvictionMode::Evictable,
-        SET_EVICTION_PROTECTED_BITS => EvictionMode::EvictionProtected,
-        value if value == SET_EVICTION_RESERVED_BITS => {
-            return Err("SET flags contain a reserved eviction mode".to_owned());
-        }
-        _ => return Err("SET flags contain an unknown eviction mode".to_owned()),
-    };
-    let mut options = match condition {
-        SetCondition::Any => SetOptions::new(),
-        SetCondition::IfAbsent => SetOptions::new().if_absent(),
-        SetCondition::IfPresent => SetOptions::new().if_present(),
-    };
-    options = match expiration_mode {
-        ExpirationMode::Inherit => options.inherit_expiration(),
-        ExpirationMode::NoExpiry => options.no_expiry(),
-        ExpirationMode::ExplicitTtl => options.expires_after_millis(ttl_ms),
-    };
-    options = match eviction_mode {
-        EvictionMode::Inherit => options.inherit_eviction(),
-        EvictionMode::Evictable => options.evictable(),
-        EvictionMode::EvictionProtected => options.eviction_protected(),
-    };
-    Ok(options)
+    let ttl_ms = (ttl_ms != 0).then_some(ttl_ms);
+    openkache_protocol::SetOptions::from_wire_parts(flags, ttl_ms)
+        .map_err(|error| error.to_string())
+        .and_then(|options| SetOptions::from_protocol(options).map_err(|error| error.to_string()))
 }
 
 fn namespace_policy_from_flags(
     flags: u8,
     ttl_ms: u64,
 ) -> std::result::Result<NamespacePolicy, String> {
-    if flags & POLICY_RESERVED_MASK != 0 {
-        return Err(format!(
-            "namespace policy flags contain reserved bits 0x{:02x}",
-            flags & POLICY_RESERVED_MASK
-        ));
-    }
-    let default_expiration = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
-        POLICY_NO_EXPIRY => {
-            if ttl_ms != 0 {
-                return Err("namespace policy TTL requires fixed TTL mode".to_owned());
-            }
-            ExpirationDefault::NoExpiry
-        }
-        POLICY_FIXED_TTL => {
-            if ttl_ms == 0 {
-                return Err(
-                    "namespace policy fixed TTL must be greater than zero milliseconds".to_owned(),
-                );
-            }
-            ExpirationDefault::FixedTtl { ttl_ms }
-        }
-        _ => return Err("namespace policy has an unknown default expiration".to_owned()),
-    };
-    Ok(NamespacePolicy {
-        default_expiration,
-        expiration_override: if flags & POLICY_EXPIRATION_OVERRIDE != 0 {
-            OverridePolicy::Allowed
-        } else {
-            OverridePolicy::Disallowed
-        },
-        default_eviction: if flags & POLICY_EVICTION_PROTECTED != 0 {
-            EvictionDefault::EvictionProtected
-        } else {
-            EvictionDefault::Evictable
-        },
-        eviction_override: if flags & POLICY_EVICTION_OVERRIDE != 0 {
-            OverridePolicy::Allowed
-        } else {
-            OverridePolicy::Disallowed
-        },
-    })
+    let ttl_ms = (ttl_ms != 0).then_some(ttl_ms);
+    NamespacePolicy::from_wire_parts(flags, ttl_ms).map_err(|error| error.to_string())
 }
 
 fn ffi_namespace_descriptor(

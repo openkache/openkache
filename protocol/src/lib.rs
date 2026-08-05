@@ -314,7 +314,26 @@ impl SetOptions {
         Ok(condition | expiration | eviction)
     }
 
-    fn decode(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
+    /// Decodes the wire SET flags and optional TTL into validated options.
+    ///
+    /// `ttl_ms` is present only when the wire expiration mode carries a TTL.
+    /// The method validates reserved bits, mutually exclusive conditions, and
+    /// the relationship between the expiration mode and TTL field.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - The complete one-octet SET flags field.
+    /// * `ttl_ms` - The optional TTL carried after the item ID.
+    ///
+    /// # Returns
+    ///
+    /// The validated SET options.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error when flags are reserved or contradictory, or
+    /// when the TTL does not match the selected expiration mode.
+    pub fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
         if flags & SET_RESERVED_MASK != 0 {
             return Err(ProtocolError::UnknownRequestFlags(
                 flags & SET_RESERVED_MASK,
@@ -409,6 +428,27 @@ impl NamespacePolicy {
     /// Decodes one complete policy from the beginning of `input`.
     pub fn decode(input: &[u8]) -> Result<Option<(Self, usize)>> {
         decode_namespace_policy(input)
+    }
+
+    /// Decodes the wire policy flags and optional default TTL.
+    ///
+    /// A TTL is required for `FixedTtl` and forbidden for `NoExpiry`.
+    ///
+    /// # Arguments
+    ///
+    /// * `flags` - The complete one-octet namespace policy flags field.
+    /// * `ttl_ms` - The optional namespace default TTL.
+    ///
+    /// # Returns
+    ///
+    /// The validated namespace policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error when flags are reserved or the TTL does not
+    /// match the selected default-expiration mode.
+    pub fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
+        decode_namespace_policy_parts(flags, ttl_ms)
     }
 }
 
@@ -788,7 +828,7 @@ impl Request {
             namespace_id: header.namespace_id,
             item_id,
             set_options: if header.opcode == Opcode::Set {
-                SetOptions::decode(
+                SetOptions::from_wire_parts(
                     frame[OPCODE_BYTES + NAMESPACE_ID_BYTES..]
                         .first()
                         .copied()
@@ -1097,7 +1137,7 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
     };
     let value_len = usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
     validate_value_length(value_len)?;
-    let set_options = SetOptions::decode(flags, ttl_ms)?;
+    let set_options = SetOptions::from_wire_parts(flags, ttl_ms)?;
     Ok(Some(RequestHeader {
         opcode: Opcode::Set,
         encoded_len: cursor + value_len_bytes,
@@ -1208,19 +1248,48 @@ fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usiz
     let Some(&flags) = input.first() else {
         return Ok(None);
     };
+    let (ttl_ms, encoded_len) = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
+        POLICY_NO_EXPIRY => (None, POLICY_FLAGS_BYTES),
+        POLICY_FIXED_TTL => {
+            let Some((ttl_ms, length)) =
+                decode_varuint(&input[POLICY_FLAGS_BYTES..], "namespace default TTL")?
+            else {
+                return Ok(None);
+            };
+            (Some(ttl_ms), POLICY_FLAGS_BYTES + length)
+        }
+        _ => {
+            return Err(ProtocolError::InvalidNamespacePolicy(
+                "namespace default expiration is reserved",
+            ));
+        }
+    };
+    let policy = decode_namespace_policy_parts(flags, ttl_ms)?;
+    Ok(Some((policy, encoded_len)))
+}
+
+fn decode_namespace_policy_parts(
+    flags: u8,
+    ttl_ms: Option<u64>,
+) -> Result<NamespacePolicy> {
     if flags & POLICY_RESERVED_MASK != 0 {
         return Err(ProtocolError::InvalidNamespacePolicy(
             "namespace policy contains reserved bits",
         ));
     }
     let default_expiration = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
-        POLICY_NO_EXPIRY => ExpirationDefault::NoExpiry,
+        POLICY_NO_EXPIRY => {
+            if ttl_ms.is_some() {
+                return Err(ProtocolError::InvalidNamespacePolicy(
+                    "namespace default TTL is only valid with fixed TTL mode",
+                ));
+            }
+            ExpirationDefault::NoExpiry
+        }
         POLICY_FIXED_TTL => {
-            let Some((ttl_ms, _length)) =
-                decode_varuint(&input[POLICY_FLAGS_BYTES..], "namespace default TTL")?
-            else {
-                return Ok(None);
-            };
+            let ttl_ms = ttl_ms.ok_or(ProtocolError::InvalidNamespacePolicy(
+                "fixed namespace TTL is missing",
+            ))?;
             if ttl_ms == 0 {
                 return Err(ProtocolError::InvalidNamespacePolicy(
                     "fixed namespace TTL must be positive",
@@ -1234,31 +1303,24 @@ fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usiz
             ));
         }
     };
-    let encoded_len = match default_expiration {
-        ExpirationDefault::NoExpiry => POLICY_FLAGS_BYTES,
-        ExpirationDefault::FixedTtl { ttl_ms } => POLICY_FLAGS_BYTES + encode_varuint(ttl_ms).1,
-    };
-    Ok(Some((
-        NamespacePolicy {
-            default_expiration,
-            expiration_override: if flags & POLICY_EXPIRATION_OVERRIDE != 0 {
-                OverridePolicy::Allowed
-            } else {
-                OverridePolicy::Disallowed
-            },
-            default_eviction: if flags & POLICY_EVICTION_PROTECTED != 0 {
-                EvictionDefault::EvictionProtected
-            } else {
-                EvictionDefault::Evictable
-            },
-            eviction_override: if flags & POLICY_EVICTION_OVERRIDE != 0 {
-                OverridePolicy::Allowed
-            } else {
-                OverridePolicy::Disallowed
-            },
+    Ok(NamespacePolicy {
+        default_expiration,
+        expiration_override: if flags & POLICY_EXPIRATION_OVERRIDE != 0 {
+            OverridePolicy::Allowed
+        } else {
+            OverridePolicy::Disallowed
         },
-        encoded_len,
-    )))
+        default_eviction: if flags & POLICY_EVICTION_PROTECTED != 0 {
+            EvictionDefault::EvictionProtected
+        } else {
+            EvictionDefault::Evictable
+        },
+        eviction_override: if flags & POLICY_EVICTION_OVERRIDE != 0 {
+            OverridePolicy::Allowed
+        } else {
+            OverridePolicy::Disallowed
+        },
+    })
 }
 
 fn validate_namespace_name(name: &[u8]) -> Result<()> {
