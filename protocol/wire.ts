@@ -835,6 +835,19 @@ ${all_variants}
 ${name_literals}
     ];
 
+    /// Zero-based position in the Smithy value-order arrays.
+    ///
+    /// Wire values are intentionally allowed to be sparse. Callers that use
+    /// an enum as an array index must use this generated position instead of
+    /// the wire discriminant.
+    pub const fn index(self) -> usize {
+        match self {
+${entries
+  .map((entry, index) => `        Self::${entry.name} => ${index},`)
+  .join("\n")}
+        }
+    }
+
     /// Stable lowercase Smithy name for this assigned value.
     pub const fn name(self) -> &'static str {
         match self {
