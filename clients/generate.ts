@@ -157,9 +157,24 @@ export interface Api_Contract {
 }
 
 /** Native binding ABI identifiers shared by language-neutral adapters. */
+type Ffi_Input_Kind = "none" | "application_key" | "item_id"
+
+/** Native dispatch and buffer contract for one FFI operation. */
+export interface Ffi_Operation_Contract {
+  readonly accepts_set_options: boolean
+  readonly accepts_value: boolean
+  readonly dedicated_abi: boolean
+  readonly input_kind: Ffi_Input_Kind
+  readonly supports_protected: boolean
+  readonly supports_raw: boolean
+  readonly supports_scoped: boolean
+}
+
 export interface Ffi_Entry extends Wire_Entry {
   /** Stable Smithy enum value exposed by language adapters. */
   readonly text: string
+  /** Native dispatch and buffer contract for FFI operation entries. */
+  readonly operation_contract?: Ffi_Operation_Contract
 }
 
 export interface Ffi_Contract {
@@ -252,6 +267,7 @@ const CLIENT_SERVICE_SHAPE_ID = "openkache.client#OpenKacheClient"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const OPERATION_CONTRACT_TRAIT_ID = "openkache.client#operationContract"
+const FFI_OPERATION_CONTRACT_TRAIT_ID = "openkache.client#ffiOperationContract"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
 const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
@@ -772,6 +788,58 @@ function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void 
   }
 }
 
+function ffi_operation_contract(
+  traits: Json_Object,
+  location: string,
+): Ffi_Operation_Contract | undefined {
+  const value = traits[FFI_OPERATION_CONTRACT_TRAIT_ID]
+  if (value === undefined) return undefined
+  const contract = object_value(value, `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`)
+  const input_kind = string_member(
+    contract,
+    "inputKind",
+    `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  if (!["none", "application_key", "item_id"].includes(input_kind)) {
+    throw new Error(
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}.inputKind must be none, application_key, or item_id`,
+    )
+  }
+  return {
+    accepts_set_options: boolean_member(
+      contract,
+      "acceptsSetOptions",
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+    ),
+    accepts_value: boolean_member(
+      contract,
+      "acceptsValue",
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+    ),
+    dedicated_abi: boolean_member(
+      contract,
+      "dedicatedAbi",
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+    ),
+    input_kind: input_kind as Ffi_Input_Kind,
+    supports_protected: boolean_member(
+      contract,
+      "supportsProtected",
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+    ),
+    supports_raw: boolean_member(
+      contract,
+      "supportsRaw",
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+    ),
+    supports_scoped: boolean_member(
+      contract,
+      "supportsScoped",
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
+    ),
+  }
+}
+
 function ffi_enum_entries(
   shapes: Json_Object,
   namespace: string,
@@ -792,6 +860,10 @@ function ffi_enum_entries(
       "openkache.client#ffiValue",
       `${shape_id}.${member_name}.traits`,
     )
+    const operation_contract =
+      enum_name === FFI_ENUMS.operations.name
+        ? ffi_operation_contract(traits, `${shape_id}.${member_name}.traits`)
+        : undefined
     return {
       name: pascal_case(snake_case(member_name)),
       text: string_member(
@@ -806,6 +878,9 @@ function ffi_enum_entries(
         0,
         0xffff_ffff,
       ),
+      ...(operation_contract === undefined
+        ? {}
+        : { operation_contract }),
     }
   })
     .sort((left, right) => left.value - right.value)
@@ -1587,6 +1662,18 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     }
   }
   const ffi = ffi_contract(ffi_trait, shapes, client_namespace)
+  if (
+    client_service_id === CLIENT_SERVICE_SHAPE_ID &&
+    ffi.operations.some((entry) => entry.operation_contract === undefined)
+  ) {
+    const missing = ffi.operations
+      .filter((entry) => entry.operation_contract === undefined)
+      .map((entry) => entry.name)
+      .join(", ")
+    throw new Error(
+      `FFI operations are missing ${FFI_OPERATION_CONTRACT_TRAIT_ID}: ${missing}`,
+    )
+  }
   const opcode_values = new Set(wire.opcodes.map((entry) => entry.value))
   for (const entry of ffi.operations) {
     if (opcode_values.has(entry.value)) {
@@ -1971,6 +2058,130 @@ ${metadata}
 `
 }
 
+type Resolved_Ffi_Operation_Contract = Ffi_Operation_Contract
+
+function protocol_ffi_operation_contract(
+  operation: Api_Operation,
+): Resolved_Ffi_Operation_Contract | undefined {
+  const semantic = operation.contract
+  if (semantic === undefined) return undefined
+  switch (semantic.scope) {
+    case "global":
+      return {
+        input_kind: "none",
+        accepts_value: semantic.response_kind === "echo",
+        accepts_set_options: false,
+        supports_protected: true,
+        supports_raw: true,
+        supports_scoped: false,
+        dedicated_abi: false,
+      }
+    case "item":
+      return {
+        input_kind: "item_id",
+        accepts_value: semantic.response_kind === "set_outcome",
+        accepts_set_options: semantic.response_kind === "set_outcome",
+        supports_protected: true,
+        supports_raw: true,
+        supports_scoped: true,
+        dedicated_abi: false,
+      }
+    case "namespace":
+      return {
+        input_kind: "none",
+        accepts_value: false,
+        accepts_set_options: false,
+        supports_protected: true,
+        supports_raw: true,
+        supports_scoped: true,
+        dedicated_abi: false,
+      }
+    case "namespace_management":
+      return {
+        input_kind: "none",
+        accepts_value: false,
+        accepts_set_options: false,
+        supports_protected: false,
+        supports_raw: false,
+        supports_scoped: false,
+        dedicated_abi: true,
+      }
+  }
+}
+
+function render_rust_ffi_operation_contract(contract: Client_Contract): string {
+  const protocol_contracts = new Map(
+    contract.api.operations.map((operation) => [
+      operation.name,
+      protocol_ffi_operation_contract(operation),
+    ]),
+  )
+  const ffi_contracts = new Map(
+    contract.ffi.operations.map((operation) => [
+      operation.name,
+      operation.operation_contract,
+    ]),
+  )
+  const entries = [...contract.opcodes, ...contract.ffi.operations]
+    .sort((left, right) => left.value - right.value)
+    .map((entry) => ({
+      entry,
+      operation_contract:
+        protocol_contracts.get(entry.name) ?? ffi_contracts.get(entry.name),
+    }))
+  if (
+    entries.some(
+      ({ operation_contract }) => operation_contract === undefined,
+    )
+  ) {
+    return ""
+  }
+  const rendered_entries = entries
+    .map(({ entry, operation_contract }) => {
+      const metadata = operation_contract!
+      const input_kind = pascal_case(snake_case(metadata.input_kind))
+      return `        FfiOperation::${entry.name} => FfiOperationContract {
+            input_kind: FfiInputKind::${input_kind},
+            accepts_value: ${metadata.accepts_value},
+            accepts_set_options: ${metadata.accepts_set_options},
+            supports_protected: ${metadata.supports_protected},
+            supports_raw: ${metadata.supports_raw},
+            supports_scoped: ${metadata.supports_scoped},
+            dedicated_abi: ${metadata.dedicated_abi},
+        },`
+    })
+    .join("\n")
+  return `/// Input buffer kind declared by the native FFI contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FfiInputKind {
+    None,
+    ApplicationKey,
+    ItemId,
+}
+
+/// Native dispatch and buffer contract for one FFI operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FfiOperationContract {
+    pub input_kind: FfiInputKind,
+    pub accepts_value: bool,
+    pub accepts_set_options: bool,
+    pub supports_protected: bool,
+    pub supports_raw: bool,
+    pub supports_scoped: bool,
+    pub dedicated_abi: bool,
+}
+
+/// Returns the generated native contract for one FFI operation.
+pub const fn ffi_operation_contract(
+    operation: FfiOperation,
+) -> FfiOperationContract {
+    match operation {
+${rendered_entries}
+    }
+}
+`
+}
+
 /** Renders the client-owned Rust defaults, ABI, and value-format declarations. */
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
@@ -2125,6 +2336,8 @@ ${rust_ffi_enum(
   "Native FFI operation",
   ffi_operation_entries,
 )}
+
+${render_rust_ffi_operation_contract(contract)}
 
 ${rust_ffi_enum(
   "FfiResultKind",
@@ -2554,6 +2767,15 @@ ${c_contract_api_enum(contract, "SetOutcome", "OPENKACHE_SMITHY_SET_OUTCOME")}
 
 interface Adapter_Contract_Values {
   readonly abi_version: number
+  readonly operation_contracts: readonly {
+    readonly accepts_value: boolean
+    readonly accepts_set_options: boolean
+    readonly input_kind: Ffi_Input_Kind
+    readonly name: string
+    readonly supports_protected: boolean
+    readonly supports_raw: boolean
+    readonly supports_scoped: boolean
+  }[]
   readonly operations: readonly Wire_Entry[]
   readonly result_error: number
   readonly result_ok: number
@@ -2594,6 +2816,33 @@ interface Adapter_Contract_Values {
   readonly default_zstandard_minimum_savings_bytes: number
   readonly default_connect_timeout_milliseconds: number
   readonly default_request_timeout_milliseconds: number
+}
+
+function adapter_operation_contracts(
+  contract: Client_Contract,
+): Adapter_Contract_Values["operation_contracts"] {
+  const contracts = contract.opcodes.map((opcode) => {
+    const operation = contract.api.operations.find(
+      (candidate) => candidate.name === opcode.name,
+    )
+    const operation_contract =
+      operation === undefined
+        ? undefined
+        : protocol_ffi_operation_contract(operation)
+    if (operation_contract === undefined) return undefined
+    return {
+      accepts_value: operation_contract.accepts_value,
+      accepts_set_options: operation_contract.accepts_set_options,
+      input_kind: operation_contract.input_kind,
+      name: opcode.name,
+      supports_protected: operation_contract.supports_protected,
+      supports_raw: operation_contract.supports_raw,
+      supports_scoped: operation_contract.supports_scoped,
+    }
+  })
+  return contracts.some((entry) => entry === undefined)
+    ? []
+    : contracts as Adapter_Contract_Values["operation_contracts"]
 }
 
 function required_contract_entry(
@@ -2647,6 +2896,7 @@ function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Va
     ).value
   return {
     abi_version: contract.ffi.abi_version,
+    operation_contracts: adapter_operation_contracts(contract),
     operations: contract.opcodes,
     result_error: result("Error"),
     result_ok: result("Ok"),
@@ -2692,6 +2942,118 @@ function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Va
     default_request_timeout_milliseconds:
       contract.client_defaults.request_timeout_milliseconds,
   }
+}
+
+function operation_cases(
+  operations: Adapter_Contract_Values["operation_contracts"],
+  predicate: (
+    operation: Adapter_Contract_Values["operation_contracts"][number],
+  ) => boolean,
+  render: (
+    operation: Adapter_Contract_Values["operation_contracts"][number],
+  ) => string,
+): string {
+  return operations.filter(predicate).map(render).join(", ")
+}
+
+function render_java_operation_metadata(
+  values: Adapter_Contract_Values,
+): string {
+  if (values.operation_contracts.length === 0) return ""
+  const scoped = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.supports_scoped,
+    (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
+  )
+  const item = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.input_kind === "item_id",
+    (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
+  )
+  const scoped_clause = scoped.length > 0
+    ? `case ${scoped} -> true;\n            default -> false;`
+    : "default -> false;"
+  const item_clause = item.length > 0
+    ? `case ${item} -> true;\n            default -> false;`
+    : "default -> false;"
+  return `    /** Returns whether the Smithy operation is valid on the scoped exact-ID ABI. */
+    public static boolean operationSupportsScoped(int operation) {
+        return switch (operation) {
+            ${scoped_clause}
+        };
+    }
+
+    /** Returns whether the scoped ABI requires one exact item ID. */
+    public static boolean operationRequiresItemId(int operation) {
+        return switch (operation) {
+            ${item_clause}
+        };
+    }
+`
+}
+
+function render_kotlin_operation_metadata(
+  values: Adapter_Contract_Values,
+): string {
+  if (values.operation_contracts.length === 0) return ""
+  const scoped = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.supports_scoped,
+    (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
+  )
+  const item = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.input_kind === "item_id",
+    (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
+  )
+  const scoped_clause = scoped.length > 0
+    ? `${scoped} -> true\n        else -> false`
+    : "else -> false"
+  const item_clause = item.length > 0
+    ? `${item} -> true\n        else -> false`
+    : "else -> false"
+  return `    /** Returns whether the Smithy operation is valid on the scoped exact-ID ABI. */
+    public fun operationSupportsScoped(operation: Int): Boolean = when (operation) {
+        ${scoped_clause}
+    }
+
+    /** Returns whether the scoped ABI requires one exact item ID. */
+    public fun operationRequiresItemId(operation: Int): Boolean = when (operation) {
+        ${item_clause}
+    }
+`
+}
+
+function render_dart_operation_metadata(
+  values: Adapter_Contract_Values,
+): string {
+  if (values.operation_contracts.length === 0) return ""
+  const scoped = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.supports_scoped,
+    (operation) => `smithyOperation${pascal_case(snake_case(operation.name))}`,
+  )
+  const item = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.input_kind === "item_id",
+    (operation) => `smithyOperation${pascal_case(snake_case(operation.name))}`,
+  )
+  const scoped_clause = scoped.length > 0
+    ? `${scoped.replaceAll(", ", " || ")} => true,\n  _ => false,`
+    : "_ => false,"
+  const item_clause = item.length > 0
+    ? `${item.replaceAll(", ", " || ")} => true,\n  _ => false,`
+    : "_ => false,"
+  return `/// Returns whether the Smithy operation is valid on the scoped exact-ID ABI.
+bool smithyOperationSupportsScoped(int operation) => switch (operation) {
+  ${scoped_clause}
+};
+
+/// Returns whether the scoped ABI requires one exact item ID.
+bool smithyOperationRequiresItemId(int operation) => switch (operation) {
+  ${item_clause}
+};
+`
 }
 
 function lower_camel_case(identifier: string): string {
@@ -3594,6 +3956,7 @@ ${values.operations
       `    public static final int OPERATION_${snake_case(entry.name).toUpperCase()} = ${entry.value};`,
   )
   .join("\n")}
+${render_java_operation_metadata(values)}
     public static final int RESULT_ERROR = ${values.result_error};
     public static final int RESULT_OK = ${values.result_ok};
     public static final int RESULT_VALUE = ${values.result_value};
@@ -3652,6 +4015,7 @@ ${values.operations
       `    public const val OPERATION_${snake_case(entry.name).toUpperCase()}: Int = ${entry.value}`,
   )
   .join("\n")}
+${render_kotlin_operation_metadata(values)}
     public const val RESULT_ERROR: Int = ${values.result_error}
     public const val RESULT_OK: Int = ${values.result_ok}
     public const val RESULT_VALUE: Int = ${values.result_value}
@@ -3708,6 +4072,7 @@ ${values.operations
       `const int smithyOperation${pascal_case(snake_case(entry.name))} = ${entry.value};`,
   )
   .join("\n")}
+${render_dart_operation_metadata(values)}
 const int smithyResultError = ${values.result_error};
 const int smithyResultOk = ${values.result_ok};
 const int smithyResultValue = ${values.result_value};

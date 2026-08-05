@@ -60,6 +60,38 @@ structure operationContract {
     errorStatuses: OperationStatuses
 }
 
+/// Input buffer shape exposed by one native FFI operation.
+enum FfiInputKind {
+    NONE = "none"
+    APPLICATION_KEY = "application_key"
+    ITEM_ID = "item_id"
+}
+
+/// Dispatch and buffer contract for an operation that exists only in the native ABI.
+@trait(selector: "enum > member")
+structure ffiOperationContract {
+    @required
+    inputKind: FfiInputKind
+
+    @required
+    acceptsValue: Boolean
+
+    @required
+    acceptsSetOptions: Boolean
+
+    @required
+    supportsProtected: Boolean
+
+    @required
+    supportsRaw: Boolean
+
+    @required
+    supportsScoped: Boolean
+
+    @required
+    dedicatedAbi: Boolean
+}
+
 /// Assigns a numeric discriminator to a native FFI enum member.
 @trait(selector: "enum > member")
 structure ffiValue {
@@ -912,12 +944,39 @@ structure FfiNamespaceDescriptor {
 
 enum FfiOperation {
     @ffiValue(value: 16)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: false,
+        acceptsSetOptions: false,
+        supportsProtected: true,
+        supportsRaw: false,
+        supportsScoped: false,
+        dedicatedAbi: false
+    )
     GET_JSON = "get_json"
 
     @ffiValue(value: 17)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: true,
+        acceptsSetOptions: true,
+        supportsProtected: true,
+        supportsRaw: false,
+        supportsScoped: false,
+        dedicatedAbi: false
+    )
     SET_JSON = "set_json"
 
     @ffiValue(value: 4294967041)
+    @ffiOperationContract(
+        inputKind: "none",
+        acceptsValue: false,
+        acceptsSetOptions: false,
+        supportsProtected: true,
+        supportsRaw: true,
+        supportsScoped: false,
+        dedicatedAbi: false
+    )
     RECONNECT = "reconnect"
 }
 

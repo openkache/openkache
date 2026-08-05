@@ -427,16 +427,12 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
     }
 
     private void validateItemId(byte[] itemId, int operation) {
-        if ((operation == SmithyContract.OPERATION_GET
-                || operation == SmithyContract.OPERATION_SET
-                || operation == SmithyContract.OPERATION_DELETE)
+        if (SmithyContract.operationRequiresItemId(operation)
             && itemId.length != SmithyContract.ITEM_ID_BYTES) {
             throw new IllegalArgumentException("itemId must contain exactly "
                 + SmithyContract.ITEM_ID_BYTES + " bytes");
         }
-        if (itemId.length != 0 && operation != SmithyContract.OPERATION_GET
-            && operation != SmithyContract.OPERATION_SET
-            && operation != SmithyContract.OPERATION_DELETE) {
+        if (itemId.length != 0 && !SmithyContract.operationSupportsScoped(operation)) {
             throw new IllegalArgumentException("operation does not accept an itemId");
         }
     }
