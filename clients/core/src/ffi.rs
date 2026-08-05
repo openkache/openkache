@@ -46,6 +46,7 @@ use crate::{
     LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
     SetCondition, SetOptions, SetOutcome,
 };
+use openkache_protocol::Request;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Opaque result allocated by the native ABI.
@@ -606,26 +607,43 @@ async fn execute(
     result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
 }
 
-async fn execute_protocol_application_value(
+async fn execute_protocol_global(
     client: &LocalProtectedClient,
     operation: FfiOperation,
     value: Vec<u8>,
 ) -> Option<std::result::Result<FfiResult, crate::Error>> {
     let opcode = crate::contract::protocol_opcode(operation)?;
     let contract = crate::contract::operation_contract(opcode);
-    if contract.request_kind != crate::contract::OperationRequestKind::ApplicationValue
-        || contract.response_kind
-            != crate::contract::OperationResponseKind::ApplicationValue
-    {
-        return None;
+    match (contract.request_kind, contract.response_kind) {
+        (
+            crate::contract::OperationRequestKind::ApplicationValue,
+            crate::contract::OperationResponseKind::ApplicationValue,
+        ) => Some(
+            client
+                .raw()
+                .execute_application(opcode, value)
+                .await
+                .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
+        ),
+        (
+            crate::contract::OperationRequestKind::Empty,
+            crate::contract::OperationResponseKind::Pong
+            | crate::contract::OperationResponseKind::Empty,
+        ) => {
+            let request = Request::new(opcode, None, value).map_err(crate::Error::protocol);
+            Some(match request {
+                Ok(request) => client.raw().execute_request(request).await.map(|_response| {
+                    match contract.response_kind {
+                        crate::contract::OperationResponseKind::Pong
+                        | crate::contract::OperationResponseKind::Empty => ok_result(),
+                        _ => unreachable!("global response kind checked above"),
+                    }
+                }),
+                Err(error) => Err(error),
+            })
+        }
+        _ => None,
     }
-    Some(
-        client
-            .raw()
-            .execute_application(opcode, value)
-            .await
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload)),
-    )
 }
 
 async fn execute_protected(
@@ -635,23 +653,14 @@ async fn execute_protected(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
-    if let Some(result) = execute_protocol_application_value(client, operation, value.clone()).await {
+    if let Some(result) = execute_protocol_global(client, operation, value.clone()).await {
         return result;
     }
     match operation {
-        FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
-        FfiOperation::Get => client
-            .get(&application_key)
-            .await
-            .map(|value| get_result(value, bytes_result)),
         FfiOperation::GetJson => client
             .get_value(&application_key)
             .await
             .and_then(json_result),
-        FfiOperation::Set => client
-            .set(&application_key, value, set_options)
-            .await
-            .map(set_result),
         FfiOperation::SetJson => match parse_json(&value) {
             Ok(json) => client
                 .set_value(&application_key, Value::Json(json), set_options)
@@ -659,19 +668,56 @@ async fn execute_protected(
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
-        FfiOperation::Delete => client.delete(&application_key).await.map(delete_result),
-        FfiOperation::Stats => client
+        FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
+        _ => execute_protected_data_plane(client, operation, application_key, value, set_options)
+            .await,
+    }
+}
+
+async fn execute_protected_data_plane(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    application_key: Vec<u8>,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> std::result::Result<FfiResult, crate::Error> {
+    let Some(opcode) = crate::contract::protocol_opcode(operation) else {
+        return Err(crate::Error::configuration(
+            "operation",
+            "operation is not available through the protected ABI",
+        ));
+    };
+    let contract = crate::contract::operation_contract(opcode);
+    match (contract.request_kind, contract.response_kind) {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::Value,
+        ) => client
+            .get(&application_key)
+            .await
+            .map(|value| get_result(value, bytes_result)),
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::SetOutcome,
+        ) => client
+            .set(&application_key, value, set_options)
+            .await
+            .map(set_result),
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::DeleteOutcome,
+        ) => client.delete(&application_key).await.map(delete_result),
+        (
+            crate::contract::OperationRequestKind::ScopedNamespace,
+            crate::contract::OperationResponseKind::StatsJson,
+        ) => client
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
-        FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
-        FfiOperation::NamespaceOpen
-        | FfiOperation::NamespaceUpdatePolicy
-        | FfiOperation::NamespaceDelete => Err(crate::Error::configuration(
-            "operation",
-            "namespace management uses dedicated native ABI calls",
-        )),
+        (
+            crate::contract::OperationRequestKind::ScopedNamespace,
+            crate::contract::OperationResponseKind::Empty,
+        ) => client.sync().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
             "protocol operation is not available through the protected ABI",
@@ -686,12 +732,24 @@ async fn execute_raw(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
-    if let Some(result) = execute_protocol_application_value(client, operation, value.clone()).await {
+    if let Some(result) = execute_protocol_global(client, operation, value.clone()).await {
         return result;
     }
-    match operation {
-        FfiOperation::Ping => client.raw().ping().await.map(|_| ok_result()),
-        FfiOperation::Get => {
+    if operation == FfiOperation::Reconnect {
+        return client.raw().reconnect().await.map(|()| ok_result());
+    }
+    let Some(opcode) = crate::contract::protocol_opcode(operation) else {
+        return Err(crate::Error::configuration(
+            "operation",
+            "operation is not available through the exact item-ID ABI",
+        ));
+    };
+    let contract = crate::contract::operation_contract(opcode);
+    match (contract.request_kind, contract.response_kind) {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::Value,
+        ) => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
                 .raw()
@@ -699,7 +757,10 @@ async fn execute_raw(
                 .await
                 .map(|value| get_result(value, value_result))
         }
-        FfiOperation::Set => {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::SetOutcome,
+        ) => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
                 .raw()
@@ -707,23 +768,25 @@ async fn execute_raw(
                 .await
                 .map(set_result)
         }
-        FfiOperation::Delete => {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::DeleteOutcome,
+        ) => {
             let item_id = ItemId::from_slice(&item_id)?;
             client.raw().delete(item_id).await.map(delete_result)
         }
-        FfiOperation::Stats => client
+        (
+            crate::contract::OperationRequestKind::ScopedNamespace,
+            crate::contract::OperationResponseKind::StatsJson,
+        ) => client
             .raw()
             .stats()
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
-        FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::NamespaceOpen
-        | FfiOperation::NamespaceUpdatePolicy
-        | FfiOperation::NamespaceDelete => Err(crate::Error::configuration(
-            "operation",
-            "namespace management uses dedicated native ABI calls",
-        )),
+        (
+            crate::contract::OperationRequestKind::ScopedNamespace,
+            crate::contract::OperationResponseKind::Empty,
+        ) => client.raw().sync().await.map(|()| ok_result()),
         _ => Err(crate::Error::configuration(
             "operation",
             "protocol operation is not available through the exact item-ID ABI",
@@ -731,7 +794,6 @@ async fn execute_raw(
     }
 }
 
-#[allow(unreachable_patterns)]
 async fn execute_scoped(
     client: &LocalProtectedClient,
     operation: FfiOperation,
@@ -740,8 +802,18 @@ async fn execute_scoped(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
-    match operation {
-        FfiOperation::Get => {
+    let Some(opcode) = crate::contract::protocol_opcode(operation) else {
+        return Err(crate::Error::configuration(
+            "operation",
+            "operation is not available through the namespace-scoped exact-ID ABI",
+        ));
+    };
+    let contract = crate::contract::operation_contract(opcode);
+    match (contract.request_kind, contract.response_kind) {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::Value,
+        ) => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
                 .raw()
@@ -749,7 +821,10 @@ async fn execute_scoped(
                 .await
                 .map(|value| get_result(value, value_result))
         }
-        FfiOperation::Set => {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::SetOutcome,
+        ) => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
                 .raw()
@@ -757,7 +832,10 @@ async fn execute_scoped(
                 .await
                 .map(set_result)
         }
-        FfiOperation::Delete => {
+        (
+            crate::contract::OperationRequestKind::ScopedItem,
+            crate::contract::OperationResponseKind::DeleteOutcome,
+        ) => {
             let item_id = ItemId::from_slice(&item_id)?;
             client
                 .raw()
@@ -765,26 +843,25 @@ async fn execute_scoped(
                 .await
                 .map(delete_result)
         }
-        FfiOperation::Stats => client
+        (
+            crate::contract::OperationRequestKind::ScopedNamespace,
+            crate::contract::OperationResponseKind::StatsJson,
+        ) => client
             .raw()
             .stats_in_namespace(namespace_id)
             .await
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client
+        (
+            crate::contract::OperationRequestKind::ScopedNamespace,
+            crate::contract::OperationResponseKind::Empty,
+        ) => client
             .raw()
             .sync_in_namespace(namespace_id)
             .await
             .map(|()| ok_result()),
-        FfiOperation::NamespaceOpen
-        | FfiOperation::NamespaceUpdatePolicy
-        | FfiOperation::NamespaceDelete
-        | FfiOperation::Reconnect => Err(crate::Error::configuration(
-            "operation",
-            "namespace management and reconnect use dedicated native ABI calls",
-        )),
         _ => Err(crate::Error::configuration(
             "operation",
-            "protocol operation is not available through the exact item-ID ABI",
+            "protocol operation is not available through the namespace-scoped exact-ID ABI",
         )),
     }
 }
