@@ -605,10 +605,10 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 Protocol.SetExplicitTtlBits,
             Smithy.ExpirationMode.NoExpiry or Smithy.ExpirationMode.Inherit =>
                 throw new ArgumentException(
-                    "ttlMilliseconds is only valid with explicit_ttl.",
+                    $"ttlMilliseconds is only valid with {Protocol.SmithyExpirationModeExplicitTtlValue}.",
                     nameof(input.TtlMilliseconds)),
             Smithy.ExpirationMode.ExplicitTtl => throw new ArgumentException(
-                "ttlMilliseconds must be positive with explicit_ttl.",
+                $"ttlMilliseconds must be positive with {Protocol.SmithyExpirationModeExplicitTtlValue}.",
                 nameof(input.TtlMilliseconds)),
             _ => throw new ArgumentOutOfRangeException(nameof(input.ExpirationMode)),
         };
@@ -637,7 +637,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
                 Protocol.PolicyFixedTtl,
             Smithy.ExpirationDefault.NoExpiry or Smithy.ExpirationDefault.FixedTtl =>
                 throw new ArgumentException(
-                    "defaultTtlMilliseconds must be present only for a positive fixed_ttl.",
+                    $"defaultTtlMilliseconds must be present only for a positive {Protocol.SmithyExpirationDefaultFixedTtlValue}.",
                     nameof(policy.DefaultTtlMilliseconds)),
             _ => throw new ArgumentOutOfRangeException(nameof(policy.DefaultExpiration)),
         };
@@ -675,7 +675,7 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
             buffer.Pointer,
             buffer.Length,
             out var decoded);
-        if (status != 0)
+        if (status != Protocol.FfiNamespaceDescriptorDecodeOk)
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
@@ -687,19 +687,24 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
             Revision = decoded.Revision,
             Policy = new Smithy.NamespacePolicy
             {
-                DefaultExpiration = decoded.DefaultExpiration == 1
+                DefaultExpiration = decoded.DefaultExpiration
+                    == Protocol.FfiNamespaceDefaultExpirationFixedTtl
                     ? Smithy.ExpirationDefault.FixedTtl
                     : Smithy.ExpirationDefault.NoExpiry,
-                DefaultTtlMilliseconds = decoded.DefaultExpiration == 1
-                    ? decoded.DefaultTtlMilliseconds
+                DefaultTtlMilliseconds = decoded.DefaultExpiration
+                    == Protocol.FfiNamespaceDefaultExpirationFixedTtl
+                    ? decoded.DefaultTtlMs
                     : null,
-                ExpirationOverride = decoded.ExpirationOverride == 1
+                ExpirationOverride = decoded.ExpirationOverride
+                    == Protocol.FfiNamespaceOverrideAllowed
                     ? Smithy.OverridePolicy.Allowed
                     : Smithy.OverridePolicy.Disallowed,
-                DefaultEviction = decoded.DefaultEviction == 1
+                DefaultEviction = decoded.DefaultEviction
+                    == Protocol.FfiNamespaceDefaultEvictionProtected
                     ? Smithy.EvictionDefault.EvictionProtected
                     : Smithy.EvictionDefault.Evictable,
-                EvictionOverride = decoded.EvictionOverride == 1
+                EvictionOverride = decoded.EvictionOverride
+                    == Protocol.FfiNamespaceOverrideAllowed
                     ? Smithy.OverridePolicy.Allowed
                     : Smithy.OverridePolicy.Disallowed,
             },

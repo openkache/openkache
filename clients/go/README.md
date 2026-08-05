@@ -7,11 +7,12 @@ wire or cryptographic implementation.
 
 ## Commands
 
-From the repository root, regenerate the native contract header before a CGO
-build. The header is a build artifact, not a hand-maintained Go constant file:
+From `clients/go`, generate the Smithy Go API and contract before compiling the
+package. The generated files are build artifacts and are intentionally ignored
+by Git:
 
 ```bash
-OPENKACHE_GENERATION_TARGET=c-contract ./openkache/clients/generate.ts
+go generate
 ```
 
 Then from `clients/go`:
@@ -97,9 +98,10 @@ Use `client.Smithy()` when an application needs the generated
 Protocol operations, Smithy models, and value-format identifiers are generated
 from [`../model/openkache.smithy`](../model/openkache.smithy) and
 [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
-The generated Go files are checked in for module consumers; the C contract
-header is emitted into `core/generated_local/` and is supplied to CGO via the
-package include path.
+`go generate` writes `smithy_api.go` and `smithy_contract.go` beside the
+handwritten adapter sources; both files are ignored and must never be staged.
+The C contract header is emitted into `core/generated_local/` and is supplied
+to CGO via the package include path.
 
 When using a pre-ABI-extension native library, `Identity`, `EncryptionCompact`,
 non-default `Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading

@@ -76,6 +76,7 @@ type Api_Type_Kind =
   | "blob"
   | "boolean"
   | "enum"
+  | "integer"
   | "long"
   | "string"
   | "structure"
@@ -127,12 +128,46 @@ export interface Api_Contract {
 }
 
 /** Native binding ABI identifiers shared by language-neutral adapters. */
+export interface Ffi_Entry extends Wire_Entry {
+  /** Stable Smithy enum value exposed by language adapters. */
+  readonly text: string
+}
+
 export interface Ffi_Contract {
   readonly abi_version: number
-  readonly connection_states: readonly Wire_Entry[]
-  readonly operations: readonly Wire_Entry[]
-  readonly result_kinds: readonly Wire_Entry[]
-  readonly set_conditions: readonly Wire_Entry[]
+  readonly connection_states: readonly Ffi_Entry[]
+  readonly namespace_default_evictions: readonly Ffi_Entry[]
+  readonly namespace_default_expirations: readonly Ffi_Entry[]
+  readonly namespace_descriptor_decode_statuses: readonly Ffi_Entry[]
+  readonly namespace_descriptor_fields: readonly Namespace_Descriptor_Field[]
+  readonly namespace_descriptor_layout: Namespace_Descriptor_Layout
+  readonly namespace_override_policies: readonly Ffi_Entry[]
+  readonly operations: readonly Ffi_Entry[]
+  readonly result_kinds: readonly Ffi_Entry[]
+  readonly set_conditions: readonly Ffi_Entry[]
+}
+
+/** C-compatible layout of the namespace descriptor returned by the native ABI. */
+export interface Namespace_Descriptor_Layout {
+  readonly size_bytes: number
+  readonly offsets: Readonly<Record<string, number>>
+}
+
+/** One field in the Smithy-defined native namespace descriptor projection. */
+export interface Namespace_Descriptor_Field {
+  readonly name: string
+  readonly csharp_name: string
+  readonly go_name: string
+  readonly swift_name: string
+  readonly rust_type: string
+  readonly c_type: string
+  readonly csharp_type: string
+  readonly go_type: string
+  readonly python_type: string
+  readonly swift_type: string
+  readonly size: number
+  readonly alignment: number
+  readonly offset: number
 }
 
 /** Wire contract combined with the client-owned Smithy model. */
@@ -157,35 +192,28 @@ const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
 const UNSIGNED_LONG_TRAIT_ID = "openkache.client#unsignedLong"
-const FFI_OPERATION_FIELDS = [
-  { name: "GetJson", field: "operationGetJson" },
-  { name: "SetJson", field: "operationSetJson" },
-  { name: "Reconnect", field: "operationReconnect" },
-] as const
-const FFI_RESULT_FIELDS = [
-  { name: "Error", field: "resultError" },
-  { name: "Ok", field: "resultOk" },
-  { name: "Value", field: "resultValue" },
-  { name: "NotFound", field: "resultNotFound" },
-  { name: "Created", field: "resultCreated" },
-  { name: "Replaced", field: "resultReplaced" },
-  { name: "Deleted", field: "resultDeleted" },
-  { name: "NotDeleted", field: "resultNotDeleted" },
-  { name: "Connected", field: "resultConnected" },
-  { name: "NotStored", field: "resultNotStored" },
-] as const
-const FFI_CONNECTION_STATE_FIELDS = [
-  { name: "Connected", field: "connectionStateConnected" },
-  { name: "Reconnecting", field: "connectionStateReconnecting" },
-  { name: "Disconnected", field: "connectionStateDisconnected" },
-  { name: "Closed", field: "connectionStateClosed" },
-  { name: "Unknown", field: "connectionStateUnknown" },
-] as const
-const FFI_SET_CONDITION_FIELDS = [
-  { name: "Any", field: "setConditionAny" },
-  { name: "IfAbsent", field: "setConditionIfAbsent" },
-  { name: "IfPresent", field: "setConditionIfPresent" },
-] as const
+const FFI_ENUMS = {
+  operations: { name: "FfiOperation", kind: "FFI operation" },
+  result_kinds: { name: "FfiResultKind", kind: "FFI result" },
+  connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
+  set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },
+  namespace_descriptor_decode_statuses: {
+    name: "FfiNamespaceDescriptorDecodeStatus",
+    kind: "FFI namespace descriptor decode status",
+  },
+  namespace_default_expirations: {
+    name: "FfiNamespaceDefaultExpiration",
+    kind: "FFI namespace default expiration",
+  },
+  namespace_default_evictions: {
+    name: "FfiNamespaceDefaultEviction",
+    kind: "FFI namespace default eviction",
+  },
+  namespace_override_policies: {
+    name: "FfiNamespaceOverridePolicy",
+    kind: "FFI namespace override policy",
+  },
+} as const
 const GENERATED_OUTPUT_ROOT = resolve(
   process.env.OPENKACHE_GENERATION_OUTPUT_ROOT ?? PUBLIC_ROOT,
 )
@@ -236,7 +264,6 @@ const GENERATED_OUTPUTS = {
     generated_path("clients/python/src/openkache/_generated/smithy_api.py"),
   python_contract: process.env.OPENKACHE_PYTHON_CONTRACT_OUTPUT ??
     generated_path("clients/python/src/openkache/_generated/smithy_contract.py"),
-  python_init: generated_path("clients/python/src/openkache/_generated/__init__.py"),
   swift_api: process.env.OPENKACHE_SWIFT_API_OUTPUT ??
     generated_path("clients/swift/generated_local/SmithyAPI.swift"),
   c_contract: process.env.OPENKACHE_C_CONTRACT_OUTPUT ??
@@ -350,6 +377,7 @@ function api_type(
 ): Api_Type {
   const prelude_types: Readonly<Record<string, Api_Type_Kind>> = {
     "smithy.api#Boolean": "boolean",
+    "smithy.api#Integer": "integer",
     "smithy.api#Long": "long",
     "smithy.api#String": "string",
   }
@@ -517,29 +545,160 @@ function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void 
   }
 }
 
-function ffi_entries(
-  contract: Json_Object,
-  fields: readonly { readonly name: string; readonly field: string }[],
+function ffi_enum_entries(
+  shapes: Json_Object,
+  namespace: string,
+  enum_name: string,
   kind: string,
-): readonly Wire_Entry[] {
-  const entries = fields.map(
-    ({ name, field }): Wire_Entry => ({
-      name,
+): readonly Ffi_Entry[] {
+  const shape_id = `${namespace}#${enum_name}`
+  const shape = object_member(shapes, shape_id, "Smithy AST.shapes")
+  if (shape_type(shape, `Smithy AST.shapes.${shape_id}`) !== "enum") {
+    throw new Error(`${shape_id} must be an enum`)
+  }
+  const members = object_member(shape, "members", shape_id)
+  const entries = Object.entries(members).map(([member_name, value]): Ffi_Entry => {
+    const member = object_value(value, `${shape_id}.${member_name}`)
+    const traits = object_member(member, "traits", `${shape_id}.${member_name}`)
+    const assignment = object_member(
+      traits,
+      "openkache.client#ffiValue",
+      `${shape_id}.${member_name}.traits`,
+    )
+    return {
+      name: pascal_case(snake_case(member_name)),
+      text: string_member(
+        traits,
+        "smithy.api#enumValue",
+        `${shape_id}.${member_name}.traits`,
+      ),
       value: integer_member(
-        contract,
-        field,
-        `${FFI_CONTRACT_TRAIT_ID}.${field}`,
+        assignment,
+        "value",
+        `${shape_id}.${member_name}.traits.${"openkache.client#ffiValue"}`,
         0,
         0xffff_ffff,
       ),
-    }),
-  )
+    }
+  })
+    .sort((left, right) => left.value - right.value)
+  if (entries.length === 0) {
+    throw new Error(`${kind} contract must define at least one entry`)
+  }
   unique_wire_values(entries, kind)
+  const text_values = new Set<string>()
+  for (const entry of entries) {
+    if (text_values.has(entry.text)) {
+      throw new Error(`duplicate ${kind} enum value ${entry.text}`)
+    }
+    text_values.add(entry.text)
+  }
   return entries
 }
 
-function ffi_contract(value: unknown): Ffi_Contract {
+function descriptor_field_metadata(
+  member: Api_Member,
+): Omit<Namespace_Descriptor_Field, "offset"> {
+  const name = snake_case(member.name)
+  const common = {
+    name,
+    csharp_name: pascal_case(name),
+    go_name: go_exported_name(member.name),
+    swift_name: swift_property_name(member.name),
+  }
+  switch (member.type.kind) {
+    case "unsigned_long":
+      return {
+        ...common,
+        rust_type: "u64",
+        c_type: "uint64_t",
+        csharp_type: "ulong",
+        go_type: "uint64",
+        python_type: "_ctypes.c_uint64",
+        swift_type: "UInt64",
+        size: 8,
+        alignment: 8,
+      }
+    case "integer":
+      return {
+        ...common,
+        rust_type: "u32",
+        c_type: "uint32_t",
+        csharp_type: "uint",
+        go_type: "uint32",
+        python_type: "_ctypes.c_uint32",
+        swift_type: "UInt32",
+        size: 4,
+        alignment: 4,
+      }
+    default:
+      throw new Error(
+        `Smithy FfiNamespaceDescriptor member ${member.name} must be an unsigned Long or Integer`,
+      )
+  }
+}
+
+interface Namespace_Descriptor_Contract {
+  readonly fields: readonly Namespace_Descriptor_Field[]
+  readonly layout: Namespace_Descriptor_Layout
+}
+
+function namespace_descriptor_contract(
+  shapes: Json_Object,
+  namespace: string,
+): Namespace_Descriptor_Contract {
+  const descriptor = api_structure(shapes, `${namespace}#FfiNamespaceDescriptor`)
+  if (descriptor.members.length === 0) {
+    throw new Error("Smithy FfiNamespaceDescriptor must define at least one member")
+  }
+  let offset = 0
+  let maximum_alignment = 1
+  const fields = descriptor.members.map((member): Namespace_Descriptor_Field => {
+    if (!member.required) {
+      throw new Error(
+        `Smithy FfiNamespaceDescriptor member ${member.name} must be required`,
+      )
+    }
+    const metadata = descriptor_field_metadata(member)
+    maximum_alignment = Math.max(maximum_alignment, metadata.alignment)
+    const remainder = offset % metadata.alignment
+    if (remainder !== 0) offset += metadata.alignment - remainder
+    const field_offset = offset
+    offset += metadata.size
+    return {
+      ...metadata,
+      offset: field_offset,
+    }
+  })
+  const trailing_remainder = offset % maximum_alignment
+  if (trailing_remainder !== 0) offset += maximum_alignment - trailing_remainder
+  const descriptor_size = offset
+  const offsets = Object.fromEntries(fields.map((field) => [field.name, field.offset]))
+  for (let index = 0; index < fields.length; index += 1) {
+    const left = fields[index]!
+    const left_end = left.offset + left.size
+    for (const right of fields.slice(index + 1)) {
+      const right_end = right.offset + right.size
+      if (left.offset < right_end && right.offset < left_end) {
+        throw new Error(
+          `namespace descriptor ABI fields ${left.name} and ${right.name} overlap`,
+        )
+      }
+    }
+  }
+  return {
+    fields,
+    layout: { size_bytes: descriptor_size, offsets },
+  }
+}
+
+function ffi_contract(
+  value: unknown,
+  shapes: Json_Object,
+  namespace: string,
+): Ffi_Contract {
   const contract = object_value(value, FFI_CONTRACT_TRAIT_ID)
+  const descriptor = namespace_descriptor_contract(shapes, namespace)
   return {
     abi_version: integer_member(
       contract,
@@ -548,17 +707,55 @@ function ffi_contract(value: unknown): Ffi_Contract {
       1,
       0xffff_ffff,
     ),
-    connection_states: ffi_entries(
-      contract,
-      FFI_CONNECTION_STATE_FIELDS,
-      "FFI connection state",
+    connection_states: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.connection_states.name,
+      FFI_ENUMS.connection_states.kind,
     ),
-    operations: ffi_entries(contract, FFI_OPERATION_FIELDS, "FFI operation"),
-    result_kinds: ffi_entries(contract, FFI_RESULT_FIELDS, "FFI result kind"),
-    set_conditions: ffi_entries(
-      contract,
-      FFI_SET_CONDITION_FIELDS,
-      "FFI SET condition",
+    namespace_default_evictions: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.namespace_default_evictions.name,
+      FFI_ENUMS.namespace_default_evictions.kind,
+    ),
+    namespace_default_expirations: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.namespace_default_expirations.name,
+      FFI_ENUMS.namespace_default_expirations.kind,
+    ),
+    namespace_descriptor_decode_statuses: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.namespace_descriptor_decode_statuses.name,
+      FFI_ENUMS.namespace_descriptor_decode_statuses.kind,
+    ),
+    namespace_descriptor_fields: descriptor.fields,
+    namespace_descriptor_layout: descriptor.layout,
+    namespace_override_policies: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.namespace_override_policies.name,
+      FFI_ENUMS.namespace_override_policies.kind,
+    ),
+    operations: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.operations.name,
+      FFI_ENUMS.operations.kind,
+    ),
+    result_kinds: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.result_kinds.name,
+      FFI_ENUMS.result_kinds.kind,
+    ),
+    set_conditions: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.set_conditions.name,
+      FFI_ENUMS.set_conditions.kind,
     ),
   }
 }
@@ -956,7 +1153,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
       )
     }
   }
-  const ffi = ffi_contract(ffi_trait)
+  const ffi = ffi_contract(ffi_trait, shapes, client_namespace)
   const opcode_values = new Set(wire.opcodes.map((entry) => entry.value))
   for (const entry of ffi.operations) {
     if (opcode_values.has(entry.value)) {
@@ -1152,23 +1349,11 @@ function swift_property_name(identifier: string): string {
   return name.length === 0 ? name : `${name[0]?.toLowerCase()}${name.slice(1)}`
 }
 
-function swift_ffi_value(
-  entries: readonly Wire_Entry[],
-  name: string,
-  kind: string,
-): number {
-  const entry = entries.find((candidate) => candidate.name === name)
-  if (entry === undefined) {
-    throw new Error(`Smithy FFI ${kind} is missing ${name}`)
-  }
-  return entry.value
-}
-
 function rust_ffi_enum(
   name: string,
   documentation: string,
   member_documentation: string,
-  entries: readonly Wire_Entry[],
+  entries: readonly (Wire_Entry & { readonly text?: string })[],
 ): string {
   const variants = entries
     .map(
@@ -1186,7 +1371,7 @@ function rust_ffi_enum(
   const display_arms = entries
     .map(
       (entry) =>
-        `            Self::${entry.name} => "${snake_case(entry.name)}",`,
+        `            Self::${entry.name} => ${rust_string_literal(entry.text ?? snake_case(entry.name))},`,
     )
     .join("\n")
   return `/// ${documentation}
@@ -1224,6 +1409,18 @@ ${display_arms}
 }`
 }
 
+function rust_api_enum_constants(contract: Client_Contract): string {
+  return contract.api.enums
+    .flatMap((enum_) =>
+      enum_.members.map(
+        (member) =>
+          `/// Smithy ${enum_.name} value ${member.name}.
+pub const SMITHY_${snake_case(enum_.name).toUpperCase()}_${snake_case(member.name).toUpperCase()}: &str = ${rust_string_literal(member.value)};`,
+      ),
+    )
+    .join("\n")
+}
+
 /** Renders the client-owned Rust defaults, ABI, and value-format declarations. */
 export function render_rust_client(contract: Client_Contract): string {
   const value = contract.value_format
@@ -1235,6 +1432,8 @@ export function render_rust_client(contract: Client_Contract): string {
     "value envelope magic",
   )
   const ffi = contract.ffi
+  const descriptor_layout = ffi.namespace_descriptor_layout
+  const api_enum_constants = rust_api_enum_constants(contract)
   const ffi_operations = ffi.operations
     .map(
       (entry) =>
@@ -1263,9 +1462,68 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_namespace_descriptor_decode_statuses =
+    ffi.namespace_descriptor_decode_statuses
+      .map(
+        (entry) =>
+          `/// Native namespace-descriptor decode status for ${entry.name}.
+pub const FFI_NAMESPACE_DESCRIPTOR_DECODE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+      )
+      .join("\n")
+  const ffi_namespace_default_expirations = ffi.namespace_default_expirations
+    .map(
+      (entry) =>
+        `/// Native namespace default-expiration value for ${entry.name}.
+pub const FFI_NAMESPACE_DEFAULT_EXPIRATION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_namespace_default_evictions = ffi.namespace_default_evictions
+    .map(
+      (entry) =>
+        `/// Native namespace default-eviction value for ${entry.name}.
+pub const FFI_NAMESPACE_DEFAULT_EVICTION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const ffi_namespace_override_policies = ffi.namespace_override_policies
+    .map(
+      (entry) =>
+        `/// Native namespace override-policy value for ${entry.name}.
+pub const FFI_NAMESPACE_OVERRIDE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
+  const descriptor_fields = ffi.namespace_descriptor_fields
+  const descriptor_offset_constants = descriptor_fields
+    .map(
+      (field) =>
+        `pub const FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET: usize = ${formatted_decimal(field.offset)};`,
+    )
+    .join("\n")
   const ffi_operation_entries = [...contract.opcodes, ...ffi.operations].sort(
     (left, right) => left.value - right.value,
   )
+  const ffi_namespace_descriptor = `/// C-compatible namespace descriptor returned by the native ABI.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FfiNamespaceDescriptor {
+${descriptor_fields.map(
+  (field) => `    pub ${field.name}: ${field.rust_type},`,
+).join("\n")}
+}
+
+const _: () = {
+    assert!(
+        core::mem::size_of::<FfiNamespaceDescriptor>()
+            == FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES
+    );
+${descriptor_fields.map(
+  (field) =>
+    `    assert!(
+        core::mem::offset_of!(FfiNamespaceDescriptor, ${field.name})
+            == FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET
+    );`,
+).join("\n")}
+};
+`
   return `// Generated from the OpenKache client Smithy contract. Do not edit.
 
 /// Default maximum number of concurrent request lanes.
@@ -1299,7 +1557,17 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${ffi_namespace_descriptor_decode_statuses}
+${ffi_namespace_default_expirations}
+${ffi_namespace_default_evictions}
+${ffi_namespace_override_policies}
+/// Size of the C-compatible native namespace descriptor.
+pub const FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES: usize = ${formatted_decimal(descriptor_layout.size_bytes)};
+/// Native namespace descriptor field offsets.
+${descriptor_offset_constants}
 
+${ffi_namespace_descriptor}
+${api_enum_constants}
 ${rust_ffi_enum(
   "FfiOperation",
   "Native FFI operation identifiers shared by every language adapter.",
@@ -1434,6 +1702,8 @@ export function render_c_contract(contract: Client_Contract): string {
   const defaults = contract.client_defaults
   const envelope = contract.value_envelope
   const ffi = contract.ffi
+  const descriptor_fields = ffi.namespace_descriptor_fields
+  const descriptor_layout = ffi.namespace_descriptor_layout
   const ffi_defines = [
     `#define OPENKACHE_SMITHY_FFI_ABI_VERSION ${c_unsigned_literal(ffi.abi_version)}`,
     ...ffi.operations.map(
@@ -1452,6 +1722,22 @@ export function render_c_contract(contract: Client_Contract): string {
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
+    ...ffi.namespace_descriptor_decode_statuses.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.namespace_default_expirations.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.namespace_default_evictions.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.namespace_override_policies.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
   ].join("\n")
   const operation_enum = c_contract_enum(
     "openkache_smithy_opcode",
@@ -1463,11 +1749,39 @@ export function render_c_contract(contract: Client_Contract): string {
     contract.statuses,
     "OPENKACHE_SMITHY_STATUS",
   )
+  const c_namespace_descriptor_fields = descriptor_fields.map(
+    (field) => `    ${field.c_type} ${field.name};`,
+  ).join("\n")
+  const descriptor_offset_defines = descriptor_fields
+    .map(
+      (field) =>
+        `#define OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET ${field.offset}u`,
+    )
+    .join("\n")
+  const descriptor_offset_asserts = descriptor_fields
+    .map(
+      (field) =>
+        `_Static_assert(offsetof(openkache_smithy_namespace_descriptor_t, ${field.name}) ==\n                   OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET,\n               "Smithy namespace descriptor ${field.name} offset changed");`,
+    )
+    .join("\n")
   return `/* Generated from the OpenKache Smithy contract. Do not edit. */
 #ifndef OPENKACHE_SMITHY_CONTRACT_H
 #define OPENKACHE_SMITHY_CONTRACT_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+#define OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES ${descriptor_layout.size_bytes}u
+${descriptor_offset_defines}
+
+typedef struct openkache_smithy_namespace_descriptor {
+${c_namespace_descriptor_fields}
+} openkache_smithy_namespace_descriptor_t;
+
+_Static_assert(sizeof(openkache_smithy_namespace_descriptor_t) ==
+                   OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
+               "Smithy namespace descriptor size changed");
+${descriptor_offset_asserts}
 
 #define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
@@ -1570,18 +1884,6 @@ ${variants}
     }`
 }
 
-function ffi_value(
-  entries: readonly Wire_Entry[],
-  name: string,
-  category: string,
-): number {
-  const entry = entries.find((candidate) => candidate.name === name)
-  if (entry === undefined) {
-    throw new Error(`missing ${category} entry ${name}`)
-  }
-  return entry.value
-}
-
 /** Renders protocol v1 C# definitions.
  *
  * @param contract - Validated language-neutral wire contract.
@@ -1591,23 +1893,49 @@ export function render_csharp(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
   const ffi = contract.ffi
-  const ffi_operation_reconnect = ffi_value(
-    ffi.operations,
-    "Reconnect",
-    "FFI operation",
-  )
-  const ffi_result = (name: string): number =>
-    ffi_value(ffi.result_kinds, name, "FFI result")
-  const ffi_connection = (name: string): number =>
-    ffi_value(ffi.connection_states, name, "FFI connection state")
-  const ffi_set_condition = (name: string): number =>
-    ffi_value(ffi.set_conditions, name, "FFI SET condition")
+  const descriptor_layout = ffi.namespace_descriptor_layout
+  const descriptor_fields = ffi.namespace_descriptor_fields
   const version_bytes = encode_vu128(value.version)
   const envelope = contract.value_envelope
   const envelope_magic = bytes_from_hex(
     envelope.magic_and_version_hex,
     "value envelope magic",
   )
+  const csharp_namespace_descriptor_fields = descriptor_fields.map(
+    (field) =>
+      `        internal ${field.csharp_type} ${field.csharp_name};`,
+  ).join("\n")
+  const csharp_descriptor_offsets = descriptor_fields
+    .map(
+      (field) =>
+        `    internal const int FfiNamespaceDescriptor${pascal_case(field.name)}Offset = ${formatted_decimal(field.offset)};`,
+    )
+    .join("\n")
+  const csharp_ffi_constants = [
+    ["FfiOperation", ffi.operations],
+    ["FfiResult", ffi.result_kinds],
+    ["FfiConnection", ffi.connection_states],
+    ["FfiSetCondition", ffi.set_conditions],
+    ["FfiNamespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
+    ["FfiNamespaceDefaultExpiration", ffi.namespace_default_expirations],
+    ["FfiNamespaceDefaultEviction", ffi.namespace_default_evictions],
+    ["FfiNamespaceOverride", ffi.namespace_override_policies],
+  ]
+    .flatMap(([prefix, entries]) =>
+      (entries as readonly Ffi_Entry[]).map(
+        (entry) =>
+          `    internal const uint ${prefix}${pascal_case(snake_case(entry.name))} = ${formatted_decimal(entry.value)}u;`,
+      ),
+    )
+    .join("\n")
+  const csharp_api_enum_constants = contract.api.enums
+    .flatMap((enum_) =>
+      enum_.members.map(
+        (member) =>
+          `    internal const string Smithy${enum_.name}${member.name}Value = ${JSON.stringify(member.value)};`,
+      ),
+    )
+    .join("\n")
   return `// SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1617,6 +1945,13 @@ namespace OpenKache;
 
 internal static partial class Protocol
 {
+    [System.Runtime.InteropServices.StructLayout(
+        System.Runtime.InteropServices.LayoutKind.Sequential)]
+    internal struct FfiNamespaceDescriptor
+    {
+${csharp_namespace_descriptor_fields}
+    }
+
     internal const string ApplicationProtocol = ${JSON.stringify(contract.v1.alpn)};
     internal const int MaximumValueBytes = ${formatted_decimal(contract.max_value_bytes)};
     internal const int OpcodeBytes = ${formatted_decimal(contract.v1.opcode_bytes)};
@@ -1669,25 +2004,10 @@ internal static partial class Protocol
     internal const int DefaultZstandardMinimumInputBytes = ${formatted_decimal(defaults.zstandard_minimum_input_bytes)};
     internal const int DefaultZstandardMinimumSavingsBytes = ${formatted_decimal(defaults.zstandard_minimum_savings_bytes)};
     internal const uint FfiAbiVersion = ${formatted_decimal(ffi.abi_version)}u;
-    internal const uint FfiOperationReconnect = ${formatted_decimal(ffi_operation_reconnect)}u;
-    internal const uint FfiResultError = ${formatted_decimal(ffi_result("Error"))}u;
-    internal const uint FfiResultOk = ${formatted_decimal(ffi_result("Ok"))}u;
-    internal const uint FfiResultValue = ${formatted_decimal(ffi_result("Value"))}u;
-    internal const uint FfiResultNotFound = ${formatted_decimal(ffi_result("NotFound"))}u;
-    internal const uint FfiResultCreated = ${formatted_decimal(ffi_result("Created"))}u;
-    internal const uint FfiResultReplaced = ${formatted_decimal(ffi_result("Replaced"))}u;
-    internal const uint FfiResultDeleted = ${formatted_decimal(ffi_result("Deleted"))}u;
-    internal const uint FfiResultNotDeleted = ${formatted_decimal(ffi_result("NotDeleted"))}u;
-    internal const uint FfiResultConnected = ${formatted_decimal(ffi_result("Connected"))}u;
-    internal const uint FfiResultNotStored = ${formatted_decimal(ffi_result("NotStored"))}u;
-    internal const uint FfiConnectionConnected = ${formatted_decimal(ffi_connection("Connected"))}u;
-    internal const uint FfiConnectionReconnecting = ${formatted_decimal(ffi_connection("Reconnecting"))}u;
-    internal const uint FfiConnectionDisconnected = ${formatted_decimal(ffi_connection("Disconnected"))}u;
-    internal const uint FfiConnectionClosed = ${formatted_decimal(ffi_connection("Closed"))}u;
-    internal const uint FfiConnectionUnknown = ${formatted_decimal(ffi_connection("Unknown"))}u;
-    internal const uint FfiSetConditionAny = ${formatted_decimal(ffi_set_condition("Any"))}u;
-    internal const uint FfiSetConditionIfAbsent = ${formatted_decimal(ffi_set_condition("IfAbsent"))}u;
-    internal const uint FfiSetConditionIfPresent = ${formatted_decimal(ffi_set_condition("IfPresent"))}u;
+${csharp_ffi_constants}
+${csharp_api_enum_constants}
+    internal const int FfiNamespaceDescriptorSizeBytes = ${formatted_decimal(descriptor_layout.size_bytes)};
+${csharp_descriptor_offsets}
 
     internal const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
     internal const byte SetIfAbsentBits = ${formatted_byte(contract.v1.set_if_absent_flag)};
@@ -1743,6 +2063,9 @@ function typescript_api_type(type: Api_Type, required: boolean): string {
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = typescript_api_name(type.name)
       break
+    case "integer":
+      rendered = "number"
+      break
     case "long":
       rendered = "number"
       break
@@ -1787,6 +2110,21 @@ ${members.join("\n")}
       `  /** Invokes the Smithy ${operation.name} operation. */
   ${snake_case(operation.name)}(input: ${typescript_api_name(operation.input)}): Promise<${typescript_api_name(operation.output)}>`,
   )
+  const enum_constants = contract.api.enums
+    .flatMap((enum_) =>
+      enum_.members.map(
+        (member) =>
+          `/** Smithy ${enum_.name} value ${member.name}. */
+export const SMITHY_${snake_case(enum_.name).toUpperCase()}_${snake_case(member.name).toUpperCase()} = ${JSON.stringify(member.value)} as const`,
+      ),
+    )
+    .join("\n")
+  const descriptor_offsets = contract.ffi.namespace_descriptor_fields
+    .map(
+      (field) =>
+        `export const SMITHY_FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET = ${field.offset}`,
+    )
+    .join("\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 /** Exact number of bytes in a protocol item identifier. */
@@ -1843,6 +2181,59 @@ export const SMITHY_POLICY_EVICTION_PROTECTED = ${contract.v1.policy_eviction_pr
 export const SMITHY_POLICY_EVICTION_OVERRIDE = ${contract.v1.policy_eviction_override_flag}
 export const SMITHY_POLICY_RESERVED_MASK = ${contract.v1.policy_reserved_mask}
 export const SMITHY_ERROR_STATUS_MINIMUM = ${contract.v1.error_status_minimum}
+/** Native ABI discriminators and namespace descriptor values. */
+export const SMITHY_FFI_ABI_VERSION = ${contract.ffi.abi_version}
+${contract.ffi.operations
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_OPERATION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.result_kinds
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_RESULT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.connection_states
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} = ${entry.value}
+export const SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSON.stringify(entry.text)} as const`,
+  )
+  .join("\n")}
+${contract.ffi.set_conditions
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_descriptor_decode_statuses
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_default_expirations
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_default_evictions
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_override_policies
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_NAMESPACE_OVERRIDE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+export const SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES = ${contract.ffi.namespace_descriptor_layout.size_bytes}
+${descriptor_offsets}
 /** Default maximum number of concurrent request lanes. */
 export const SMITHY_DEFAULT_MAX_IN_FLIGHT = ${contract.client_defaults.max_in_flight}
 /** Default connection-establishment timeout in milliseconds. */
@@ -1869,6 +2260,8 @@ export const SMITHY_CLIENT_CERTIFICATE_PEM_TYPE = ${JSON.stringify(contract.clie
 export const SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE = ${contract.client_defaults.minimum_positive_value}
 
 ${[...enums, ...structures].join("\n\n")}
+
+${enum_constants}
 
 /** Operations defined by the OpenKache Smithy service. */
 export interface Smithy_OpenKache_Api {
@@ -1909,6 +2302,9 @@ function go_api_type(type: Api_Type, required: boolean): string {
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = go_api_name(type.name)
+      break
+    case "integer":
+      rendered = "int32"
       break
     case "long":
       rendered = "int64"
@@ -1978,9 +2374,26 @@ ${operations.join("\n")}
 export function render_go_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const descriptor_layout = contract.ffi.namespace_descriptor_layout
+  const descriptor_fields = contract.ffi.namespace_descriptor_fields
+  const go_namespace_descriptor_fields = descriptor_fields.map(
+    (field) => `\t${field.go_name} ${field.go_type}`,
+  ).join("\n")
+  const go_descriptor_offsets = descriptor_fields
+    .map(
+      (field) =>
+        `\tSmithyFFINamespaceDescriptor${field.go_name}Offset = ${field.offset}`,
+    )
+    .join("\n")
   return `// Code generated from the OpenKache Smithy contract. DO NOT EDIT.
 
 package openkache
+
+// SmithyFFINamespaceDescriptor is the C-compatible namespace descriptor
+// returned by the shared native ABI decoder.
+type SmithyFFINamespaceDescriptor struct {
+${go_namespace_descriptor_fields}
+}
 
 const (
 \t// SmithyProtocolALPN is the negotiated protocol identifier.
@@ -2080,9 +2493,42 @@ ${contract.ffi.connection_states
   .map(
     (entry) =>
       `\t// SmithyFFIConnectionState${go_ffi_name(entry.name)} identifies a native connection state.
-\tSmithyFFIConnectionState${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+\tSmithyFFIConnectionState${go_ffi_name(entry.name)} uint32 = ${entry.value}
+\t// SmithyFFIConnectionState${go_ffi_name(entry.name)}Name is its stable text name.
+\tSmithyFFIConnectionState${go_ffi_name(entry.name)}Name = ${JSON.stringify(entry.text)}`,
   )
   .join("\n")}
+${contract.ffi.namespace_descriptor_decode_statuses
+  .map(
+    (entry) =>
+      `\t// SmithyFFINamespaceDescriptorDecode${go_ffi_name(entry.name)} is the namespace descriptor decode status ${entry.name}.
+\tSmithyFFINamespaceDescriptorDecode${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_default_expirations
+  .map(
+    (entry) =>
+      `\t// SmithyFFINamespaceDefaultExpiration${go_ffi_name(entry.name)} is the namespace default expiration value ${entry.name}.
+\tSmithyFFINamespaceDefaultExpiration${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_default_evictions
+  .map(
+    (entry) =>
+      `\t// SmithyFFINamespaceDefaultEviction${go_ffi_name(entry.name)} is the namespace default eviction value ${entry.name}.
+\tSmithyFFINamespaceDefaultEviction${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.namespace_override_policies
+  .map(
+    (entry) =>
+      `\t// SmithyFFINamespaceOverride${go_ffi_name(entry.name)} is the namespace override-policy value ${entry.name}.
+\tSmithyFFINamespaceOverride${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+\t// SmithyFFINamespaceDescriptorSizeBytes and offsets describe the C-compatible descriptor ABI.
+\tSmithyFFINamespaceDescriptorSizeBytes = ${descriptor_layout.size_bytes}
+${go_descriptor_offsets}
 )
 
 // Shared client defaults extracted from the Smithy service contract.
@@ -2163,6 +2609,9 @@ function python_api_type(type: Api_Type, required: boolean): string {
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = python_api_name(type.name)
       break
+    case "integer":
+      rendered = "int"
+      break
     case "long":
       rendered = "int"
       break
@@ -2242,17 +2691,6 @@ ${operations}
 `
 }
 
-/** Renders the Python generated-package facade without duplicating Smithy shape names. */
-export function render_python_generated_init(): string {
-  return `"""Smithy-generated Python contract types and constants."""
-
-from .smithy_api import *
-from .smithy_contract import *
-
-__all__ = tuple(name for name in globals() if not name.startswith("_"))
-`
-}
-
 /** Renders the Python constants shared with the core-backed adapter.
  *
  * @param contract - Validated language-neutral wire and value-format contract.
@@ -2262,6 +2700,8 @@ export function render_python_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
   const envelope = contract.value_envelope
+  const descriptor_layout = contract.ffi.namespace_descriptor_layout
+  const descriptor_fields = contract.ffi.namespace_descriptor_fields
   const version_bytes = encode_vu128(value.version)
   const magic = bytes_from_hex(envelope.magic_and_version_hex, "value envelope magic")
   const ffi_operations = contract.ffi.operations
@@ -2279,7 +2719,8 @@ export function render_python_contract(contract: Client_Contract): string {
   const ffi_connection_states = contract.ffi.connection_states
     .map(
       (entry) =>
-        `SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+        `SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()} = ${entry.value}
+SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSON.stringify(entry.text)}`,
     )
     .join("\n")
   const ffi_set_conditions = contract.ffi.set_conditions
@@ -2288,13 +2729,56 @@ export function render_python_contract(contract: Client_Contract): string {
         `SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_namespace_descriptor_decode_statuses =
+    contract.ffi.namespace_descriptor_decode_statuses
+      .map(
+        (entry) =>
+          `SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+      )
+      .join("\n")
+  const ffi_namespace_default_expirations = contract.ffi.namespace_default_expirations
+    .map(
+      (entry) =>
+        `SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_namespace_default_evictions = contract.ffi.namespace_default_evictions
+    .map(
+      (entry) =>
+        `SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
+  const ffi_namespace_override_policies = contract.ffi.namespace_override_policies
+    .map(
+      (entry) =>
+        `SMITHY_FFI_NAMESPACE_OVERRIDE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const opcodes = contract.opcodes
     .map((entry) => `SMITHY_OPCODE_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
     .join("\n")
   const statuses = contract.statuses
     .map((entry) => `SMITHY_STATUS_${snake_case(entry.name).toUpperCase()} = ${entry.value}`)
     .join("\n")
+  const python_namespace_descriptor_fields = descriptor_fields.map(
+    (field) => `        ("${field.name}", ${field.python_type}),`,
+  ).join("\n")
+  const python_descriptor_offsets = descriptor_fields
+    .map(
+      (field) =>
+        `SMITHY_FFI_NAMESPACE_DESCRIPTOR_${snake_case(field.name).toUpperCase()}_OFFSET = ${field.offset}`,
+    )
+    .join("\n")
   return `# Generated from the OpenKache Smithy contract. Do not edit.
+
+import ctypes as _ctypes
+
+class SmithyFFINamespaceDescriptor(_ctypes.Structure):
+    """C-compatible namespace descriptor returned by the native ABI decoder."""
+
+    _fields_ = [
+${python_namespace_descriptor_fields}
+    ]
 
 SMITHY_PROTOCOL_ALPN = ${JSON.stringify(contract.v1.alpn)}
 SMITHY_OPCODE_BYTES = ${contract.v1.opcode_bytes}
@@ -2360,6 +2844,12 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${ffi_namespace_descriptor_decode_statuses}
+${ffi_namespace_default_expirations}
+${ffi_namespace_default_evictions}
+${ffi_namespace_override_policies}
+SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES = ${descriptor_layout.size_bytes}
+${python_descriptor_offsets}
 SMITHY_SET_TTL_FLAG = ${contract.v1.set_ttl_flag}
 SMITHY_SET_IF_ABSENT_FLAG = ${contract.v1.set_if_absent_flag}
 SMITHY_SET_IF_PRESENT_FLAG = ${contract.v1.set_if_present_flag}
@@ -2408,6 +2898,9 @@ function swift_api_type(type: Api_Type, required: boolean): string {
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = `Smithy_${typescript_name(type.name)}`
+      break
+    case "integer":
+      rendered = "Int32"
       break
     case "long":
       rendered = "Int64"
@@ -2532,34 +3025,37 @@ ${assignments}
   const value = contract.value_format
   const ffi = contract.ffi
   const version_bytes = encode_vu128(value.version)
-  const operation_get_json = swift_ffi_value(ffi.operations, "GetJson", "operation")
-  const operation_set_json = swift_ffi_value(ffi.operations, "SetJson", "operation")
-  const operation_reconnect = swift_ffi_value(ffi.operations, "Reconnect", "operation")
-  const result_error = swift_ffi_value(ffi.result_kinds, "Error", "result")
-  const result_ok = swift_ffi_value(ffi.result_kinds, "Ok", "result")
-  const result_value = swift_ffi_value(ffi.result_kinds, "Value", "result")
-  const result_not_found = swift_ffi_value(ffi.result_kinds, "NotFound", "result")
-  const result_created = swift_ffi_value(ffi.result_kinds, "Created", "result")
-  const result_replaced = swift_ffi_value(ffi.result_kinds, "Replaced", "result")
-  const result_deleted = swift_ffi_value(ffi.result_kinds, "Deleted", "result")
-  const result_not_deleted = swift_ffi_value(ffi.result_kinds, "NotDeleted", "result")
-  const result_connected = swift_ffi_value(ffi.result_kinds, "Connected", "result")
-  const result_not_stored = swift_ffi_value(ffi.result_kinds, "NotStored", "result")
-  const set_condition_any = swift_ffi_value(ffi.set_conditions, "Any", "SET condition")
-  const set_condition_if_absent = swift_ffi_value(
-    ffi.set_conditions,
-    "IfAbsent",
-    "SET condition",
-  )
-  const set_condition_if_present = swift_ffi_value(
-    ffi.set_conditions,
-    "IfPresent",
-    "SET condition",
-  )
+  const descriptor_layout = ffi.namespace_descriptor_layout
+  const swift_native_constants = [
+    ["operation", ffi.operations],
+    ["result", ffi.result_kinds],
+    ["setCondition", ffi.set_conditions],
+    ["namespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
+    ["namespaceDefaultExpiration", ffi.namespace_default_expirations],
+    ["namespaceDefaultEviction", ffi.namespace_default_evictions],
+    ["namespaceOverride", ffi.namespace_override_policies],
+  ]
+    .flatMap(([prefix, entries]) =>
+      (entries as readonly Ffi_Entry[]).map(
+        (entry) =>
+          `  public static let ${prefix}${entry.name}: UInt32 = ${entry.value}`,
+      ),
+    )
+    .join("\n")
   const connection_states = ffi.connection_states
     .map(
       (entry) =>
         `  case ${swift_property_name(entry.name)} = ${entry.value}`,
+    )
+    .join("\n")
+  const descriptor_fields = ffi.namespace_descriptor_fields
+  const swift_namespace_descriptor_fields = descriptor_fields.map(
+    (field) => `  var ${field.swift_name}: ${field.swift_type} = 0`,
+  ).join("\n")
+  const swift_descriptor_offsets = descriptor_fields
+    .map(
+      (field) =>
+        `  public static let namespaceDescriptor${pascal_case(field.name)}Offset: Int = ${field.offset}`,
     )
     .join("\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
@@ -2672,25 +3168,17 @@ public enum Smithy_Connection_State: UInt32, Equatable, Sendable {
 ${connection_states}
 }
 
+/// C-compatible namespace descriptor returned by the native ABI decoder.
+internal struct Smithy_Native_Namespace_Descriptor {
+${swift_namespace_descriptor_fields}
+}
+
 /// Native ABI identifiers shared by every language adapter.
 public enum Smithy_Native_Contract: Sendable {
   public static let abiVersion: UInt32 = ${ffi.abi_version}
-  public static let operationGetJson: UInt32 = ${operation_get_json}
-  public static let operationSetJson: UInt32 = ${operation_set_json}
-  public static let operationReconnect: UInt32 = ${operation_reconnect}
-  public static let resultError: UInt32 = ${result_error}
-  public static let resultOk: UInt32 = ${result_ok}
-  public static let resultValue: UInt32 = ${result_value}
-  public static let resultNotFound: UInt32 = ${result_not_found}
-  public static let resultCreated: UInt32 = ${result_created}
-  public static let resultReplaced: UInt32 = ${result_replaced}
-  public static let resultDeleted: UInt32 = ${result_deleted}
-  public static let resultNotDeleted: UInt32 = ${result_not_deleted}
-  public static let resultConnected: UInt32 = ${result_connected}
-  public static let resultNotStored: UInt32 = ${result_not_stored}
-  public static let setConditionAny: UInt32 = ${set_condition_any}
-  public static let setConditionIfAbsent: UInt32 = ${set_condition_if_absent}
-  public static let setConditionIfPresent: UInt32 = ${set_condition_if_present}
+${swift_native_constants}
+  public static let namespaceDescriptorSizeBytes: Int = ${descriptor_layout.size_bytes}
+${swift_descriptor_offsets}
 }
 `
 }
@@ -2788,6 +3276,9 @@ function csharp_api_type(type: Api_Type, required: boolean): string {
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = type.name
       break
+    case "integer":
+      rendered = "int"
+      break
     case "long":
       rendered = "long"
       break
@@ -2874,6 +3365,9 @@ function rust_api_type(type: Api_Type, required: boolean): string {
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = type.name
+      break
+    case "integer":
+      rendered = "i32"
       break
     case "long":
       rendered = "i64"
@@ -3056,7 +3550,6 @@ function expected_outputs(
           render_typescript_value_envelope(contract),
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
-        [GENERATED_OUTPUTS.python_init]: render_python_generated_init(),
         [GENERATED_OUTPUTS.swift_api]: render_swift_api(contract),
         [GENERATED_OUTPUTS.c_contract]: render_c_contract(contract),
         [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
@@ -3100,7 +3593,6 @@ function expected_outputs(
       return {
         [GENERATED_OUTPUTS.python_api]: render_python_api(contract),
         [GENERATED_OUTPUTS.python_contract]: render_python_contract(contract),
-        [GENERATED_OUTPUTS.python_init]: render_python_generated_init(),
       }
     case "swift":
       return {

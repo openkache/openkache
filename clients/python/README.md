@@ -121,5 +121,7 @@ Call `close()` when finished; it is idempotent. The client also supports
 - `src/openkache/_client.py` contains the small Python API and validation.
 - `src/openkache/_native.py` contains only ctypes ownership and ABI conversion.
 - `native/` re-exports the core C ABI without protocol logic.
-- `src/openkache/_generated/` is regenerated from Smithy during every package
-  build and is intentionally not checked into source control.
+- `src/openkache/_generated/smithy_*.py` is regenerated from Smithy during
+  every package build and is intentionally not checked into source control.
+  The small `__init__.py` package facade is handwritten and tracked so the
+  generated modules remain importable after a clean checkout.

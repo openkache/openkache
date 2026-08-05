@@ -9,9 +9,21 @@ use napi_derive::napi;
 use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
-    DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault,
-    GetOutcome, ItemId, ItemValue, NamespaceDescriptor, NamespacePolicy, OverridePolicy,
-    PrivateKey, ProtectedClient, RetryPolicy, SetCondition, SetOptions, SetOutcome, value_envelope,
+    DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
+    NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RetryPolicy,
+    SetCondition, SetOptions, SetOutcome,
+    contract::{
+        ConnectionState, SMITHY_EVICTION_DEFAULT_EVICTABLE,
+        SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED, SMITHY_EVICTION_MODE_EVICTABLE,
+        SMITHY_EVICTION_MODE_EVICTION_PROTECTED, SMITHY_EVICTION_MODE_INHERIT,
+        SMITHY_EXPIRATION_DEFAULT_FIXED_TTL, SMITHY_EXPIRATION_DEFAULT_NO_EXPIRY,
+        SMITHY_EXPIRATION_MODE_EXPLICIT_TTL, SMITHY_EXPIRATION_MODE_INHERIT,
+        SMITHY_EXPIRATION_MODE_NO_EXPIRY, SMITHY_OVERRIDE_POLICY_ALLOWED,
+        SMITHY_OVERRIDE_POLICY_DISALLOWED, SMITHY_SET_CONDITION_ANY,
+        SMITHY_SET_CONDITION_IF_ABSENT, SMITHY_SET_CONDITION_IF_PRESENT,
+        SMITHY_SET_OUTCOME_CREATED, SMITHY_SET_OUTCOME_NOT_STORED, SMITHY_SET_OUTCOME_REPLACED,
+    },
+    value_envelope,
 };
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -194,7 +206,7 @@ impl NativeClient {
             eviction_mode,
             ttl_ms,
         )
-            .await
+        .await
     }
 
     /// Encodes and stores a canonical value envelope.
@@ -317,7 +329,7 @@ impl NativeClient {
         Ok(client
             .as_ref()
             .map(|client| client.connection_state().to_string())
-            .unwrap_or_else(|| "closed".to_string()))
+            .unwrap_or_else(|| ConnectionState::Closed.to_string()))
     }
 
     /// Reconnects the shared core without replaying a request.
@@ -699,34 +711,43 @@ fn bigint_u64(value: u64) -> BigInt {
 
 fn parse_namespace_policy(policy: NativeNamespacePolicy) -> Result<NamespacePolicy> {
     let default_expiration = match policy.default_expiration.as_str() {
-        "no_expiry" => {
+        value if value == SMITHY_EXPIRATION_DEFAULT_NO_EXPIRY => {
             if policy.default_ttl_milliseconds.is_some() {
-                return Err(invalid_argument(
-                    "default_ttl_milliseconds is only valid with fixed_ttl expiration",
-                ));
+                return Err(invalid_argument(format!(
+                    "default_ttl_milliseconds is only valid with {} expiration",
+                    SMITHY_EXPIRATION_DEFAULT_FIXED_TTL,
+                )));
             }
             ExpirationDefault::NoExpiry
         }
-        "fixed_ttl" => {
-            let ttl_ms = policy
-                .default_ttl_milliseconds
-                .ok_or_else(|| invalid_argument("fixed_ttl requires default_ttl_milliseconds"))?;
+        value if value == SMITHY_EXPIRATION_DEFAULT_FIXED_TTL => {
+            let ttl_ms = policy.default_ttl_milliseconds.ok_or_else(|| {
+                invalid_argument(format!(
+                    "{} requires default_ttl_milliseconds",
+                    SMITHY_EXPIRATION_DEFAULT_FIXED_TTL,
+                ))
+            })?;
             let ttl_ms = parse_bigint_u64(ttl_ms, "default_ttl_milliseconds", false)?;
             ExpirationDefault::FixedTtl { ttl_ms }
         }
         value => {
             return Err(invalid_argument(format!(
-                "default_expiration must be no_expiry or fixed_ttl, got {value}"
+                "default_expiration must be {} or {}, got {value}",
+                SMITHY_EXPIRATION_DEFAULT_NO_EXPIRY, SMITHY_EXPIRATION_DEFAULT_FIXED_TTL,
             )));
         }
     };
     let expiration_override = parse_override_policy(&policy.expiration_override)?;
     let default_eviction = match policy.default_eviction.as_str() {
-        "evictable" => EvictionDefault::Evictable,
-        "eviction_protected" => EvictionDefault::EvictionProtected,
+        value if value == SMITHY_EVICTION_DEFAULT_EVICTABLE => EvictionDefault::Evictable,
+        value if value == SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED => {
+            EvictionDefault::EvictionProtected
+        }
         value => {
             return Err(invalid_argument(format!(
-                "default_eviction must be evictable or eviction_protected, got {value}"
+                "default_eviction must be {} or {}, got {value}",
+                SMITHY_EVICTION_DEFAULT_EVICTABLE,
+                SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED,
             )));
         }
     };
@@ -741,10 +762,11 @@ fn parse_namespace_policy(policy: NativeNamespacePolicy) -> Result<NamespacePoli
 
 fn parse_override_policy(value: &str) -> Result<OverridePolicy> {
     match value {
-        "allowed" => Ok(OverridePolicy::Allowed),
-        "disallowed" => Ok(OverridePolicy::Disallowed),
+        value if value == SMITHY_OVERRIDE_POLICY_ALLOWED => Ok(OverridePolicy::Allowed),
+        value if value == SMITHY_OVERRIDE_POLICY_DISALLOWED => Ok(OverridePolicy::Disallowed),
         value => Err(invalid_argument(format!(
-            "override policy must be allowed or disallowed, got {value}"
+            "override policy must be {} or {}, got {value}",
+            SMITHY_OVERRIDE_POLICY_ALLOWED, SMITHY_OVERRIDE_POLICY_DISALLOWED,
         ))),
     }
 }
@@ -752,8 +774,11 @@ fn parse_override_policy(value: &str) -> Result<OverridePolicy> {
 fn native_namespace_descriptor(descriptor: NamespaceDescriptor) -> NativeNamespaceDescriptor {
     let (default_expiration, default_ttl_milliseconds) = match descriptor.policy.default_expiration
     {
-        ExpirationDefault::NoExpiry => ("no_expiry".to_owned(), None),
-        ExpirationDefault::FixedTtl { ttl_ms } => ("fixed_ttl".to_owned(), Some(bigint_u64(ttl_ms))),
+        ExpirationDefault::NoExpiry => (SMITHY_EXPIRATION_DEFAULT_NO_EXPIRY.to_owned(), None),
+        ExpirationDefault::FixedTtl { ttl_ms } => (
+            SMITHY_EXPIRATION_DEFAULT_FIXED_TTL.to_owned(),
+            Some(bigint_u64(ttl_ms)),
+        ),
     };
     NativeNamespaceDescriptor {
         namespace_id: bigint_u64(descriptor.namespace_id),
@@ -763,8 +788,10 @@ fn native_namespace_descriptor(descriptor: NamespaceDescriptor) -> NativeNamespa
             default_ttl_milliseconds,
             expiration_override: override_policy_string(descriptor.policy.expiration_override),
             default_eviction: match descriptor.policy.default_eviction {
-                EvictionDefault::Evictable => "evictable".to_owned(),
-                EvictionDefault::EvictionProtected => "eviction_protected".to_owned(),
+                EvictionDefault::Evictable => SMITHY_EVICTION_DEFAULT_EVICTABLE.to_owned(),
+                EvictionDefault::EvictionProtected => {
+                    SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED.to_owned()
+                }
             },
             eviction_override: override_policy_string(descriptor.policy.eviction_override),
         },
@@ -773,8 +800,8 @@ fn native_namespace_descriptor(descriptor: NamespaceDescriptor) -> NativeNamespa
 
 fn override_policy_string(policy: OverridePolicy) -> String {
     match policy {
-        OverridePolicy::Allowed => "allowed",
-        OverridePolicy::Disallowed => "disallowed",
+        OverridePolicy::Allowed => SMITHY_OVERRIDE_POLICY_ALLOWED,
+        OverridePolicy::Disallowed => SMITHY_OVERRIDE_POLICY_DISALLOWED,
     }
     .to_owned()
 }
@@ -782,11 +809,14 @@ fn override_policy_string(policy: OverridePolicy) -> String {
 fn parse_condition(condition: Option<&str>) -> Result<SetCondition> {
     match condition {
         None => Ok(SetCondition::Any),
-        Some("any") => Ok(SetCondition::Any),
-        Some("if_absent") => Ok(SetCondition::IfAbsent),
-        Some("if_present") => Ok(SetCondition::IfPresent),
+        Some(value) if value == SMITHY_SET_CONDITION_ANY => Ok(SetCondition::Any),
+        Some(value) if value == SMITHY_SET_CONDITION_IF_ABSENT => Ok(SetCondition::IfAbsent),
+        Some(value) if value == SMITHY_SET_CONDITION_IF_PRESENT => Ok(SetCondition::IfPresent),
         Some(value) => Err(invalid_argument(format!(
-            "condition must be if_absent or if_present, got {value}"
+            "condition must be {}, {}, or {}, got {value}",
+            SMITHY_SET_CONDITION_ANY,
+            SMITHY_SET_CONDITION_IF_ABSENT,
+            SMITHY_SET_CONDITION_IF_PRESENT,
         ))),
     }
 }
@@ -800,8 +830,11 @@ fn parse_set_options(
     let ttl_ms = ttl_ms
         .map(|value| parse_u64(value, "ttl_ms", false))
         .transpose()?;
-    let expiration_mode =
-        expiration_mode.or(if ttl_ms.is_some() { Some("explicit_ttl") } else { None });
+    let expiration_mode = expiration_mode.or(if ttl_ms.is_some() {
+        Some(SMITHY_EXPIRATION_MODE_EXPLICIT_TTL)
+    } else {
+        None
+    });
     parse_wire_set_options(
         condition,
         expiration_mode,
@@ -822,43 +855,57 @@ fn parse_wire_set_options(
         SetCondition::IfAbsent => SetOptions::new().if_absent(),
         SetCondition::IfPresent => SetOptions::new().if_present(),
     };
-    let expiration_mode = expiration_mode.unwrap_or("inherit");
+    let expiration_mode = expiration_mode.unwrap_or(SMITHY_EXPIRATION_MODE_INHERIT);
     match expiration_mode {
-        "inherit" => {
+        value if value == SMITHY_EXPIRATION_MODE_INHERIT => {
             if ttl_ms.is_some() {
-                return Err(invalid_argument(
-                    "ttl_milliseconds is only valid with explicit_ttl expiration",
-                ));
+                return Err(invalid_argument(format!(
+                    "ttl_milliseconds is only valid with {} expiration",
+                    SMITHY_EXPIRATION_MODE_EXPLICIT_TTL,
+                )));
             }
             options = options.inherit_expiration();
         }
-        "no_expiry" => {
+        value if value == SMITHY_EXPIRATION_MODE_NO_EXPIRY => {
             if ttl_ms.is_some() {
-                return Err(invalid_argument(
-                    "ttl_milliseconds is only valid with explicit_ttl expiration",
-                ));
+                return Err(invalid_argument(format!(
+                    "ttl_milliseconds is only valid with {} expiration",
+                    SMITHY_EXPIRATION_MODE_EXPLICIT_TTL,
+                )));
             }
             options = options.no_expiry();
         }
-        "explicit_ttl" => {
-            let ttl_ms = ttl_ms
-                .ok_or_else(|| invalid_argument("explicit_ttl requires ttl_milliseconds"))?;
+        value if value == SMITHY_EXPIRATION_MODE_EXPLICIT_TTL => {
+            let ttl_ms = ttl_ms.ok_or_else(|| {
+                invalid_argument(format!(
+                    "{} requires ttl_milliseconds",
+                    SMITHY_EXPIRATION_MODE_EXPLICIT_TTL,
+                ))
+            })?;
             let ttl_ms = parse_bigint_u64(ttl_ms, "ttl_milliseconds", false)?;
             options = options.expires_after_millis(ttl_ms);
         }
         value => {
             return Err(invalid_argument(format!(
-                "expiration_mode must be inherit, no_expiry, or explicit_ttl, got {value}"
+                "expiration_mode must be {}, {}, or {}, got {value}",
+                SMITHY_EXPIRATION_MODE_INHERIT,
+                SMITHY_EXPIRATION_MODE_NO_EXPIRY,
+                SMITHY_EXPIRATION_MODE_EXPLICIT_TTL,
             )));
         }
     }
-    match eviction_mode.unwrap_or("inherit") {
-        "inherit" => {}
-        "evictable" => options = options.evictable(),
-        "eviction_protected" => options = options.eviction_protected(),
+    match eviction_mode.unwrap_or(SMITHY_EVICTION_MODE_INHERIT) {
+        value if value == SMITHY_EVICTION_MODE_INHERIT => {}
+        value if value == SMITHY_EVICTION_MODE_EVICTABLE => options = options.evictable(),
+        value if value == SMITHY_EVICTION_MODE_EVICTION_PROTECTED => {
+            options = options.eviction_protected()
+        }
         value => {
             return Err(invalid_argument(format!(
-                "eviction_mode must be inherit, evictable, or eviction_protected, got {value}"
+                "eviction_mode must be {}, {}, or {}, got {value}",
+                SMITHY_EVICTION_MODE_INHERIT,
+                SMITHY_EVICTION_MODE_EVICTABLE,
+                SMITHY_EVICTION_MODE_EVICTION_PROTECTED,
             )));
         }
     }
@@ -956,9 +1003,9 @@ fn parse_u64(value: f64, name: &str, allow_zero: bool) -> Result<u64> {
 
 fn map_set_outcome(outcome: SetOutcome) -> String {
     match outcome {
-        SetOutcome::Created => "created".to_string(),
-        SetOutcome::Replaced => "replaced".to_string(),
-        SetOutcome::NotStored => "not_stored".to_string(),
+        SetOutcome::Created => SMITHY_SET_OUTCOME_CREATED.to_owned(),
+        SetOutcome::Replaced => SMITHY_SET_OUTCOME_REPLACED.to_owned(),
+        SetOutcome::NotStored => SMITHY_SET_OUTCOME_NOT_STORED.to_owned(),
     }
 }
 

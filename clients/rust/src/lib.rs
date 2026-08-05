@@ -57,7 +57,10 @@ fn smithy_set_options(
             if ttl_milliseconds.is_some() {
                 return Err(Error::Configuration {
                     field: "set.ttl_milliseconds",
-                    message: "is only valid with explicit_ttl expiration mode".into(),
+                    message: format!(
+                        "is only valid with {} expiration mode",
+                        contract::SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
+                    ),
                 });
             }
             options = options.inherit_expiration();
@@ -66,7 +69,10 @@ fn smithy_set_options(
             if ttl_milliseconds.is_some() {
                 return Err(Error::Configuration {
                     field: "set.ttl_milliseconds",
-                    message: "is only valid with explicit_ttl expiration mode".into(),
+                    message: format!(
+                        "is only valid with {} expiration mode",
+                        contract::SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
+                    ),
                 });
             }
             options = options.no_expiry();
@@ -74,7 +80,10 @@ fn smithy_set_options(
         smithy::ExpirationMode::ExplicitTtl => {
             let ttl_milliseconds = ttl_milliseconds.ok_or_else(|| Error::Configuration {
                 field: "set.ttl_milliseconds",
-                message: "is required with explicit_ttl expiration mode".into(),
+                message: format!(
+                    "is required with {} expiration mode",
+                    contract::SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
+                ),
             })?;
             if ttl_milliseconds == 0 {
                 return Err(Error::Configuration {
@@ -105,7 +114,10 @@ fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespaceP
             if policy.default_ttl_milliseconds.is_some() {
                 return Err(Error::Configuration {
                     field: "namespace.policy.default_ttl_milliseconds",
-                    message: "is only valid with fixed_ttl expiration".into(),
+                    message: format!(
+                        "is only valid with {} expiration",
+                        contract::SMITHY_EXPIRATION_DEFAULT_FIXED_TTL
+                    ),
                 });
             }
             ExpirationDefault::NoExpiry
@@ -115,7 +127,10 @@ fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespaceP
                 .default_ttl_milliseconds
                 .ok_or_else(|| Error::Configuration {
                     field: "namespace.policy.default_ttl_milliseconds",
-                    message: "is required with fixed_ttl expiration".into(),
+                    message: format!(
+                        "is required with {} expiration",
+                        contract::SMITHY_EXPIRATION_DEFAULT_FIXED_TTL
+                    ),
                 })?;
             if ttl_ms == 0 {
                 return Err(Error::Configuration {

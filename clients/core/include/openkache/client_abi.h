@@ -39,28 +39,28 @@ typedef openkache_client_result_t openkache_client_result;
 
 /*
  * Decoded namespace descriptor returned by the shared ABI helper.
- * `default_expiration` is 0 for no expiry and 1 for fixed TTL.
- * `default_eviction` is 0 for evictable and 1 for eviction protected.
- * Override fields are 0 for disallowed and 1 for allowed.
+ * The discriminator fields use the generated
+ * `OPENKACHE_SMITHY_FFI_NAMESPACE_*` values from smithy_contract.h.
  */
-typedef struct openkache_client_namespace_descriptor {
-    uint64_t namespace_id;
-    uint64_t revision;
-    uint64_t default_ttl_ms;
-    uint32_t default_expiration;
-    uint32_t expiration_override;
-    uint32_t default_eviction;
-    uint32_t eviction_override;
-} openkache_client_namespace_descriptor_t;
+typedef openkache_smithy_namespace_descriptor_t
+    openkache_client_namespace_descriptor_t;
 
-#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK 0u
-#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID 1u
-#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY 0u
-#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL 1u
-#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE 0u
-#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED 1u
-#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED 0u
-#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED 1u
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_OK \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK
+#define OPENKACHE_CLIENT_NAMESPACE_DESCRIPTOR_DECODE_INVALID \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_EVICTABLE \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE
+#define OPENKACHE_CLIENT_NAMESPACE_DEFAULT_EVICTION_PROTECTED \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_DISALLOWED \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_DISALLOWED
+#define OPENKACHE_CLIENT_NAMESPACE_OVERRIDE_ALLOWED \
+    OPENKACHE_SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED
 
 typedef enum openkache_client_result_kind {
     OPENKACHE_CLIENT_RESULT_ERROR = OPENKACHE_SMITHY_FFI_RESULT_ERROR,

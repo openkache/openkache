@@ -34,6 +34,23 @@ import {
   SMITHY_CLIENT_DEFAULT_SERVER_NAME,
   SMITHY_ITEM_ID_BYTES,
   SMITHY_MAX_VALUE_BYTES,
+  SMITHY_EVICTION_MODE_EVICTABLE,
+  SMITHY_EVICTION_MODE_EVICTION_PROTECTED,
+  SMITHY_EVICTION_MODE_INHERIT,
+  SMITHY_EXPIRATION_MODE_EXPLICIT_TTL,
+  SMITHY_EXPIRATION_MODE_INHERIT,
+  SMITHY_EXPIRATION_MODE_NO_EXPIRY,
+  SMITHY_FFI_CONNECTION_STATE_CLOSED_NAME,
+  SMITHY_FFI_CONNECTION_STATE_CONNECTED_NAME,
+  SMITHY_FFI_CONNECTION_STATE_DISCONNECTED_NAME,
+  SMITHY_FFI_CONNECTION_STATE_RECONNECTING_NAME,
+  SMITHY_FFI_CONNECTION_STATE_UNKNOWN_NAME,
+  SMITHY_SET_CONDITION_ANY,
+  SMITHY_SET_CONDITION_IF_ABSENT,
+  SMITHY_SET_CONDITION_IF_PRESENT,
+  SMITHY_SET_OUTCOME_CREATED,
+  SMITHY_SET_OUTCOME_NOT_STORED,
+  SMITHY_SET_OUTCOME_REPLACED,
   type Smithy_Delete_Input,
   type Smithy_Delete_Output,
   type Smithy_Get_Input,
@@ -184,11 +201,11 @@ export interface Server_Stats {
  * Best-effort lifecycle state reported by the shared Rust core.
  */
 export type Connection_State =
-  | "connected"
-  | "reconnecting"
-  | "disconnected"
-  | "closed"
-  | "unknown"
+  | typeof SMITHY_FFI_CONNECTION_STATE_CONNECTED_NAME
+  | typeof SMITHY_FFI_CONNECTION_STATE_RECONNECTING_NAME
+  | typeof SMITHY_FFI_CONNECTION_STATE_DISCONNECTED_NAME
+  | typeof SMITHY_FFI_CONNECTION_STATE_CLOSED_NAME
+  | typeof SMITHY_FFI_CONNECTION_STATE_UNKNOWN_NAME
 
 /**
  * Error returned by client validation, value codecs, native transport, or server failures.
@@ -1089,47 +1106,49 @@ function validate_set_options(options: Set_Options): void {
   }
   if (
     options.condition !== undefined &&
-    options.condition !== "any" &&
-    options.condition !== "if_absent" &&
-    options.condition !== "if_present"
+    options.condition !== SMITHY_SET_CONDITION_ANY &&
+    options.condition !== SMITHY_SET_CONDITION_IF_ABSENT &&
+    options.condition !== SMITHY_SET_CONDITION_IF_PRESENT
   ) {
     throw new OpenKache_Error(
-      `condition must be any, if_absent, or if_present, got ${String(options.condition)}`,
+      `condition must be ${SMITHY_SET_CONDITION_ANY}, ${SMITHY_SET_CONDITION_IF_ABSENT}, or ${SMITHY_SET_CONDITION_IF_PRESENT}, got ${String(options.condition)}`,
     )
   }
   if (
     options.expiration_mode !== undefined &&
-    options.expiration_mode !== "inherit" &&
-    options.expiration_mode !== "no_expiry" &&
-    options.expiration_mode !== "explicit_ttl"
+    options.expiration_mode !== SMITHY_EXPIRATION_MODE_INHERIT &&
+    options.expiration_mode !== SMITHY_EXPIRATION_MODE_NO_EXPIRY &&
+    options.expiration_mode !== SMITHY_EXPIRATION_MODE_EXPLICIT_TTL
   ) {
     throw new OpenKache_Error(
-      `expiration_mode must be inherit, no_expiry, or explicit_ttl, got ${String(options.expiration_mode)}`,
+      `expiration_mode must be ${SMITHY_EXPIRATION_MODE_INHERIT}, ${SMITHY_EXPIRATION_MODE_NO_EXPIRY}, or ${SMITHY_EXPIRATION_MODE_EXPLICIT_TTL}, got ${String(options.expiration_mode)}`,
     )
   }
   if (
     options.eviction_mode !== undefined &&
-    options.eviction_mode !== "inherit" &&
-    options.eviction_mode !== "evictable" &&
-    options.eviction_mode !== "eviction_protected"
+    options.eviction_mode !== SMITHY_EVICTION_MODE_INHERIT &&
+    options.eviction_mode !== SMITHY_EVICTION_MODE_EVICTABLE &&
+    options.eviction_mode !== SMITHY_EVICTION_MODE_EVICTION_PROTECTED
   ) {
     throw new OpenKache_Error(
-      `eviction_mode must be inherit, evictable, or eviction_protected, got ${String(options.eviction_mode)}`,
+      `eviction_mode must be ${SMITHY_EVICTION_MODE_INHERIT}, ${SMITHY_EVICTION_MODE_EVICTABLE}, or ${SMITHY_EVICTION_MODE_EVICTION_PROTECTED}, got ${String(options.eviction_mode)}`,
     )
   }
   if (
-    options.expiration_mode === "explicit_ttl" &&
+    options.expiration_mode === SMITHY_EXPIRATION_MODE_EXPLICIT_TTL &&
     options.ttl_ms === undefined
   ) {
-    throw new OpenKache_Error("ttl_ms is required with explicit_ttl expiration_mode")
+    throw new OpenKache_Error(
+      `ttl_ms is required with ${SMITHY_EXPIRATION_MODE_EXPLICIT_TTL} expiration_mode`,
+    )
   }
   if (
     options.expiration_mode !== undefined &&
-    options.expiration_mode !== "explicit_ttl" &&
+    options.expiration_mode !== SMITHY_EXPIRATION_MODE_EXPLICIT_TTL &&
     options.ttl_ms !== undefined
   ) {
     throw new OpenKache_Error(
-      "ttl_ms is only valid with explicit_ttl expiration_mode",
+      `ttl_ms is only valid with ${SMITHY_EXPIRATION_MODE_EXPLICIT_TTL} expiration_mode`,
     )
   }
   validate_positive_integer(options.ttl_ms, "ttl_ms")
@@ -1165,9 +1184,9 @@ function parse_stats(text: string): Server_Stats {
 
 function parse_set_outcome(value: string): Set_Outcome {
   switch (value) {
-    case "created":
-    case "replaced":
-    case "not_stored":
+    case SMITHY_SET_OUTCOME_CREATED:
+    case SMITHY_SET_OUTCOME_REPLACED:
+    case SMITHY_SET_OUTCOME_NOT_STORED:
       return value
     default:
       throw new OpenKache_Error(`SET returned unexpected native outcome ${value}`)
@@ -1176,11 +1195,11 @@ function parse_set_outcome(value: string): Set_Outcome {
 
 function parse_connection_state(value: string): Connection_State {
   switch (value) {
-    case "connected":
-    case "reconnecting":
-    case "disconnected":
-    case "closed":
-    case "unknown":
+    case SMITHY_FFI_CONNECTION_STATE_CONNECTED_NAME:
+    case SMITHY_FFI_CONNECTION_STATE_RECONNECTING_NAME:
+    case SMITHY_FFI_CONNECTION_STATE_DISCONNECTED_NAME:
+    case SMITHY_FFI_CONNECTION_STATE_CLOSED_NAME:
+    case SMITHY_FFI_CONNECTION_STATE_UNKNOWN_NAME:
       return value
     default:
       throw new OpenKache_Error(

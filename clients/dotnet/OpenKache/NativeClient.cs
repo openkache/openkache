@@ -24,6 +24,36 @@ internal static class NativeMethods
         NativeLibrary.SetDllImportResolver(
             typeof(NativeMethods).Assembly,
             ResolveLibrary);
+        ValidateNamespaceDescriptorLayout();
+    }
+
+    private static void ValidateNamespaceDescriptorLayout()
+    {
+        static int Offset(string fieldName) =>
+            checked((int)Marshal.OffsetOf<Protocol.FfiNamespaceDescriptor>(fieldName));
+
+        if (Marshal.SizeOf<Protocol.FfiNamespaceDescriptor>()
+                != Protocol.FfiNamespaceDescriptorSizeBytes
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.NamespaceId))
+                != Protocol.FfiNamespaceDescriptorNamespaceIdOffset
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.Revision))
+                != Protocol.FfiNamespaceDescriptorRevisionOffset
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.DefaultTtlMs))
+                != Protocol.FfiNamespaceDescriptorDefaultTtlMsOffset
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.DefaultExpiration))
+                != Protocol.FfiNamespaceDescriptorDefaultExpirationOffset
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.ExpirationOverride))
+                != Protocol.FfiNamespaceDescriptorExpirationOverrideOffset
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.DefaultEviction))
+                != Protocol.FfiNamespaceDescriptorDefaultEvictionOffset
+            || Offset(nameof(Protocol.FfiNamespaceDescriptor.EvictionOverride))
+                != Protocol.FfiNamespaceDescriptorEvictionOverrideOffset)
+        {
+            throw new TypeInitializationException(
+                typeof(NativeMethods).FullName,
+                new InvalidOperationException(
+                    "native namespace descriptor layout does not match the Smithy contract."));
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -50,18 +80,6 @@ internal static class NativeMethods
         internal ulong RequestTimeoutMilliseconds;
         internal nuint RetryMaxAttempts;
         internal nuint MaxInFlight;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct NamespaceDescriptor
-    {
-        internal ulong NamespaceId;
-        internal ulong Revision;
-        internal ulong DefaultTtlMilliseconds;
-        internal uint DefaultExpiration;
-        internal uint ExpirationOverride;
-        internal uint DefaultEviction;
-        internal uint EvictionOverride;
     }
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -135,7 +153,7 @@ internal static class NativeMethods
     internal static extern uint openkache_client_namespace_descriptor_decode(
         IntPtr payload,
         nuint payloadLength,
-        out NamespaceDescriptor output);
+        out Protocol.FfiNamespaceDescriptor output);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     internal static extern uint openkache_client_connection_state(IntPtr client);
