@@ -1952,9 +1952,39 @@ interface Adapter_Contract_Values {
   readonly abi_version: number
   readonly operations: readonly Wire_Entry[]
   readonly result_error: number
+  readonly result_ok: number
   readonly result_value: number
+  readonly result_not_found: number
+  readonly result_created: number
+  readonly result_replaced: number
+  readonly result_deleted: number
+  readonly result_not_deleted: number
   readonly result_connected: number
+  readonly result_not_stored: number
+  readonly descriptor_decode_ok: number
+  readonly default_expiration_no_expiry: number
+  readonly default_expiration_fixed_ttl: number
+  readonly default_eviction_evictable: number
+  readonly default_eviction_protected: number
+  readonly override_disallowed: number
+  readonly override_allowed: number
   readonly set_condition_any: number
+  readonly set_condition_if_absent: number
+  readonly set_condition_if_present: number
+  readonly set_inherit_expiration: number
+  readonly set_no_expiry: number
+  readonly set_explicit_ttl: number
+  readonly set_inherit_eviction: number
+  readonly set_evictable: number
+  readonly set_eviction_protected: number
+  readonly policy_no_expiry: number
+  readonly policy_fixed_ttl: number
+  readonly policy_expiration_override: number
+  readonly policy_eviction_protected: number
+  readonly policy_eviction_override: number
+  readonly item_id_bytes: number
+  readonly namespace_name_max_bytes: number
+  readonly max_value_bytes: number
   readonly default_zstandard_level: number
   readonly default_zstandard_minimum_input_bytes: number
   readonly default_zstandard_minimum_savings_bytes: number
@@ -1975,29 +2005,79 @@ function required_contract_entry(
 }
 
 function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Values {
+  const result = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.result_kinds,
+      name,
+      "FFI result-kind contract",
+    ).value
+  const set_condition = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.set_conditions,
+      name,
+      "FFI SET-condition contract",
+    ).value
+  const descriptor_decode = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.namespace_descriptor_decode_statuses,
+      name,
+      "FFI namespace-descriptor decode-status contract",
+    ).value
+  const default_expiration = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.namespace_default_expirations,
+      name,
+      "FFI namespace default-expiration contract",
+    ).value
+  const default_eviction = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.namespace_default_evictions,
+      name,
+      "FFI namespace default-eviction contract",
+    ).value
+  const override_policy = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.namespace_override_policies,
+      name,
+      "FFI namespace override-policy contract",
+    ).value
   return {
     abi_version: contract.ffi.abi_version,
     operations: contract.opcodes,
-    result_error: required_contract_entry(
-      contract.ffi.result_kinds,
-      "Error",
-      "FFI result-kind contract",
-    ).value,
-    result_value: required_contract_entry(
-      contract.ffi.result_kinds,
-      "Value",
-      "FFI result-kind contract",
-    ).value,
-    result_connected: required_contract_entry(
-      contract.ffi.result_kinds,
-      "Connected",
-      "FFI result-kind contract",
-    ).value,
-    set_condition_any: required_contract_entry(
-      contract.ffi.set_conditions,
-      "Any",
-      "FFI SET-condition contract",
-    ).value,
+    result_error: result("Error"),
+    result_ok: result("Ok"),
+    result_value: result("Value"),
+    result_not_found: result("NotFound"),
+    result_created: result("Created"),
+    result_replaced: result("Replaced"),
+    result_deleted: result("Deleted"),
+    result_not_deleted: result("NotDeleted"),
+    result_connected: result("Connected"),
+    result_not_stored: result("NotStored"),
+    descriptor_decode_ok: descriptor_decode("Ok"),
+    default_expiration_no_expiry: default_expiration("NoExpiry"),
+    default_expiration_fixed_ttl: default_expiration("FixedTtl"),
+    default_eviction_evictable: default_eviction("Evictable"),
+    default_eviction_protected: default_eviction("Protected"),
+    override_disallowed: override_policy("Disallowed"),
+    override_allowed: override_policy("Allowed"),
+    set_condition_any: set_condition("Any"),
+    set_condition_if_absent: set_condition("IfAbsent"),
+    set_condition_if_present: set_condition("IfPresent"),
+    set_inherit_expiration: contract.v1.set_inherit_expiration_bits,
+    set_no_expiry: contract.v1.set_no_expiry_bits,
+    set_explicit_ttl: contract.v1.set_ttl_flag,
+    set_inherit_eviction: contract.v1.set_inherit_eviction_bits,
+    set_evictable: contract.v1.set_evictable_bits,
+    set_eviction_protected: contract.v1.set_eviction_protected_bits,
+    policy_no_expiry: contract.v1.policy_no_expiry_bits,
+    policy_fixed_ttl: contract.v1.policy_fixed_ttl_bits,
+    policy_expiration_override: contract.v1.policy_expiration_override_flag,
+    policy_eviction_protected: contract.v1.policy_eviction_protected_flag,
+    policy_eviction_override: contract.v1.policy_eviction_override_flag,
+    item_id_bytes: contract.item_id_bytes,
+    namespace_name_max_bytes: contract.v1.namespace_name_max_bytes,
+    max_value_bytes: contract.max_value_bytes,
     default_zstandard_level: contract.client_defaults.zstandard_level,
     default_zstandard_minimum_input_bytes:
       contract.client_defaults.zstandard_minimum_input_bytes,
@@ -2285,12 +2365,13 @@ function dart_api_enum_source(enum_: Api_Enum): string {
   const members = enum_.members
     .map(
       (member) =>
-        `  ${lower_camel_case(member.name)}('${member.value.replaceAll("'", "\\'")}'),`,
+        `  ${lower_camel_case(member.name)}('${member.value.replaceAll("'", "\\'")}')`,
     )
-    .join("\n")
+    .join(",\n")
   return `/// Generated Smithy ${enum_.name} string enum.
 enum ${enum_.name} {
 ${members}
+;
 
   const ${enum_.name}(this.smithyValue);
 
@@ -2372,9 +2453,39 @@ ${values.operations
   )
   .join("\n")}
     public static final int RESULT_ERROR = ${values.result_error};
+    public static final int RESULT_OK = ${values.result_ok};
     public static final int RESULT_VALUE = ${values.result_value};
+    public static final int RESULT_NOT_FOUND = ${values.result_not_found};
+    public static final int RESULT_CREATED = ${values.result_created};
+    public static final int RESULT_REPLACED = ${values.result_replaced};
+    public static final int RESULT_DELETED = ${values.result_deleted};
+    public static final int RESULT_NOT_DELETED = ${values.result_not_deleted};
     public static final int RESULT_CONNECTED = ${values.result_connected};
+    public static final int RESULT_NOT_STORED = ${values.result_not_stored};
+    public static final int DESCRIPTOR_DECODE_OK = ${values.descriptor_decode_ok};
+    public static final int DEFAULT_EXPIRATION_NO_EXPIRY = ${values.default_expiration_no_expiry};
+    public static final int DEFAULT_EXPIRATION_FIXED_TTL = ${values.default_expiration_fixed_ttl};
+    public static final int DEFAULT_EVICTION_EVICTABLE = ${values.default_eviction_evictable};
+    public static final int DEFAULT_EVICTION_PROTECTED = ${values.default_eviction_protected};
+    public static final int OVERRIDE_DISALLOWED = ${values.override_disallowed};
+    public static final int OVERRIDE_ALLOWED = ${values.override_allowed};
     public static final int SET_CONDITION_ANY = ${values.set_condition_any};
+    public static final int SET_CONDITION_IF_ABSENT = ${values.set_condition_if_absent};
+    public static final int SET_CONDITION_IF_PRESENT = ${values.set_condition_if_present};
+    public static final int SET_INHERIT_EXPIRATION_BITS = ${values.set_inherit_expiration};
+    public static final int SET_NO_EXPIRY_BITS = ${values.set_no_expiry};
+    public static final int SET_EXPLICIT_TTL_BITS = ${values.set_explicit_ttl};
+    public static final int SET_INHERIT_EVICTION_BITS = ${values.set_inherit_eviction};
+    public static final int SET_EVICTABLE_BITS = ${values.set_evictable};
+    public static final int SET_EVICTION_PROTECTED_BITS = ${values.set_eviction_protected};
+    public static final int POLICY_NO_EXPIRY_BITS = ${values.policy_no_expiry};
+    public static final int POLICY_FIXED_TTL_BITS = ${values.policy_fixed_ttl};
+    public static final int POLICY_EXPIRATION_OVERRIDE_FLAG = ${values.policy_expiration_override};
+    public static final int POLICY_EVICTION_PROTECTED_FLAG = ${values.policy_eviction_protected};
+    public static final int POLICY_EVICTION_OVERRIDE_FLAG = ${values.policy_eviction_override};
+    public static final int ITEM_ID_BYTES = ${values.item_id_bytes};
+    public static final int NAMESPACE_NAME_MAX_BYTES = ${values.namespace_name_max_bytes};
+    public static final int MAX_VALUE_BYTES = ${values.max_value_bytes};
     public static final int DEFAULT_ZSTANDARD_LEVEL = ${values.default_zstandard_level};
     public static final long DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES = ${values.default_zstandard_minimum_input_bytes}L;
     public static final long DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES = ${values.default_zstandard_minimum_savings_bytes}L;
@@ -2400,9 +2511,39 @@ ${values.operations
   )
   .join("\n")}
     public const val RESULT_ERROR: Int = ${values.result_error}
+    public const val RESULT_OK: Int = ${values.result_ok}
     public const val RESULT_VALUE: Int = ${values.result_value}
+    public const val RESULT_NOT_FOUND: Int = ${values.result_not_found}
+    public const val RESULT_CREATED: Int = ${values.result_created}
+    public const val RESULT_REPLACED: Int = ${values.result_replaced}
+    public const val RESULT_DELETED: Int = ${values.result_deleted}
+    public const val RESULT_NOT_DELETED: Int = ${values.result_not_deleted}
     public const val RESULT_CONNECTED: Int = ${values.result_connected}
+    public const val RESULT_NOT_STORED: Int = ${values.result_not_stored}
+    public const val DESCRIPTOR_DECODE_OK: Int = ${values.descriptor_decode_ok}
+    public const val DEFAULT_EXPIRATION_NO_EXPIRY: Int = ${values.default_expiration_no_expiry}
+    public const val DEFAULT_EXPIRATION_FIXED_TTL: Int = ${values.default_expiration_fixed_ttl}
+    public const val DEFAULT_EVICTION_EVICTABLE: Int = ${values.default_eviction_evictable}
+    public const val DEFAULT_EVICTION_PROTECTED: Int = ${values.default_eviction_protected}
+    public const val OVERRIDE_DISALLOWED: Int = ${values.override_disallowed}
+    public const val OVERRIDE_ALLOWED: Int = ${values.override_allowed}
     public const val SET_CONDITION_ANY: Int = ${values.set_condition_any}
+    public const val SET_CONDITION_IF_ABSENT: Int = ${values.set_condition_if_absent}
+    public const val SET_CONDITION_IF_PRESENT: Int = ${values.set_condition_if_present}
+    public const val SET_INHERIT_EXPIRATION_BITS: Int = ${values.set_inherit_expiration}
+    public const val SET_NO_EXPIRY_BITS: Int = ${values.set_no_expiry}
+    public const val SET_EXPLICIT_TTL_BITS: Int = ${values.set_explicit_ttl}
+    public const val SET_INHERIT_EVICTION_BITS: Int = ${values.set_inherit_eviction}
+    public const val SET_EVICTABLE_BITS: Int = ${values.set_evictable}
+    public const val SET_EVICTION_PROTECTED_BITS: Int = ${values.set_eviction_protected}
+    public const val POLICY_NO_EXPIRY_BITS: Int = ${values.policy_no_expiry}
+    public const val POLICY_FIXED_TTL_BITS: Int = ${values.policy_fixed_ttl}
+    public const val POLICY_EXPIRATION_OVERRIDE_FLAG: Int = ${values.policy_expiration_override}
+    public const val POLICY_EVICTION_PROTECTED_FLAG: Int = ${values.policy_eviction_protected}
+    public const val POLICY_EVICTION_OVERRIDE_FLAG: Int = ${values.policy_eviction_override}
+    public const val ITEM_ID_BYTES: Int = ${values.item_id_bytes}
+    public const val NAMESPACE_NAME_MAX_BYTES: Int = ${values.namespace_name_max_bytes}
+    public const val MAX_VALUE_BYTES: Int = ${values.max_value_bytes}
     public const val DEFAULT_ZSTANDARD_LEVEL: Int = ${values.default_zstandard_level}
     public const val DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES: Long = ${values.default_zstandard_minimum_input_bytes}L
     public const val DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES: Long = ${values.default_zstandard_minimum_savings_bytes}L
@@ -2426,9 +2567,39 @@ ${values.operations
   )
   .join("\n")}
 const int smithyResultError = ${values.result_error};
+const int smithyResultOk = ${values.result_ok};
 const int smithyResultValue = ${values.result_value};
+const int smithyResultNotFound = ${values.result_not_found};
+const int smithyResultCreated = ${values.result_created};
+const int smithyResultReplaced = ${values.result_replaced};
+const int smithyResultDeleted = ${values.result_deleted};
+const int smithyResultNotDeleted = ${values.result_not_deleted};
 const int smithyResultConnected = ${values.result_connected};
+const int smithyResultNotStored = ${values.result_not_stored};
+const int smithyDescriptorDecodeOk = ${values.descriptor_decode_ok};
+const int smithyDefaultExpirationNoExpiry = ${values.default_expiration_no_expiry};
+const int smithyDefaultExpirationFixedTtl = ${values.default_expiration_fixed_ttl};
+const int smithyDefaultEvictionEvictable = ${values.default_eviction_evictable};
+const int smithyDefaultEvictionProtected = ${values.default_eviction_protected};
+const int smithyOverrideDisallowed = ${values.override_disallowed};
+const int smithyOverrideAllowed = ${values.override_allowed};
 const int smithySetConditionAny = ${values.set_condition_any};
+const int smithySetConditionIfAbsent = ${values.set_condition_if_absent};
+const int smithySetConditionIfPresent = ${values.set_condition_if_present};
+const int smithySetInheritExpirationBits = ${values.set_inherit_expiration};
+const int smithySetNoExpiryBits = ${values.set_no_expiry};
+const int smithySetExplicitTtlBits = ${values.set_explicit_ttl};
+const int smithySetInheritEvictionBits = ${values.set_inherit_eviction};
+const int smithySetEvictableBits = ${values.set_evictable};
+const int smithySetEvictionProtectedBits = ${values.set_eviction_protected};
+const int smithyPolicyNoExpiryBits = ${values.policy_no_expiry};
+const int smithyPolicyFixedTtlBits = ${values.policy_fixed_ttl};
+const int smithyPolicyExpirationOverrideFlag = ${values.policy_expiration_override};
+const int smithyPolicyEvictionProtectedFlag = ${values.policy_eviction_protected};
+const int smithyPolicyEvictionOverrideFlag = ${values.policy_eviction_override};
+const int smithyItemIdBytes = ${values.item_id_bytes};
+const int smithyNamespaceNameMaxBytes = ${values.namespace_name_max_bytes};
+const int smithyMaxValueBytes = ${values.max_value_bytes};
 const int smithyDefaultZstandardLevel = ${values.default_zstandard_level};
 const int smithyDefaultZstandardMinimumInputBytes =
     ${values.default_zstandard_minimum_input_bytes};

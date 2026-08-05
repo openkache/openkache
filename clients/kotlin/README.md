@@ -1,8 +1,8 @@
-# OpenKache Kotlin ECHO client
+# OpenKache Kotlin client
 
-This package is an experimental Kotlin adapter for the Smithy `ECHO`
-operation. It calls the shared Rust client-core C ABI through JNA and moves
-the blocking native call to `Dispatchers.IO`.
+This package is an experimental Kotlin adapter for the complete generated
+OpenKache Smithy API. It calls the shared Rust client-core C ABI through JNA
+and moves the blocking native call to `Dispatchers.IO`.
 
 ## Commands
 
@@ -40,5 +40,7 @@ try {
 }
 ```
 
-`dataProtectionKey` must contain 32 bytes. The remaining cache operations will
-reuse this ABI boundary as they are added to the Kotlin package.
+`dataProtectionKey` must contain 32 bytes. All cache operations use the same
+generated DTOs and ABI boundary. `EchoClient` implements every generated
+`SmithyOpenKacheApi` method, including exact-item data operations and namespace
+management.

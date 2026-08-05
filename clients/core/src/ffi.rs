@@ -644,9 +644,11 @@ async fn execute_protected(
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
+        FfiOperation::NamespaceOpen
+        | FfiOperation::NamespaceUpdatePolicy
+        | FfiOperation::NamespaceDelete => Err(crate::Error::configuration(
             "operation",
-            "unsupported operation from the generated Smithy contract",
+            "namespace management uses dedicated native ABI calls",
         )),
     }
 }
@@ -696,9 +698,11 @@ async fn execute_raw(
             "operation",
             "exact item-ID calls do not support formatted JSON operations",
         )),
-        _ => Err(crate::Error::configuration(
+        FfiOperation::NamespaceOpen
+        | FfiOperation::NamespaceUpdatePolicy
+        | FfiOperation::NamespaceDelete => Err(crate::Error::configuration(
             "operation",
-            "unsupported operation from the generated Smithy contract",
+            "namespace management uses dedicated native ABI calls",
         )),
     }
 }
@@ -746,9 +750,19 @@ async fn execute_scoped(
             .sync_in_namespace(namespace_id)
             .await
             .map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
+        FfiOperation::Ping
+        | FfiOperation::Echo
+        | FfiOperation::GetJson
+        | FfiOperation::SetJson => Err(crate::Error::configuration(
             "operation",
-            "unsupported namespace-scoped operation from the generated Smithy contract",
+            "operation is not available through the namespace-scoped exact-ID ABI",
+        )),
+        FfiOperation::NamespaceOpen
+        | FfiOperation::NamespaceUpdatePolicy
+        | FfiOperation::NamespaceDelete
+        | FfiOperation::Reconnect => Err(crate::Error::configuration(
+            "operation",
+            "namespace management and reconnect use dedicated native ABI calls",
         )),
     }
 }
@@ -1357,7 +1371,13 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             | FfiOperation::Reconnect => {
                 Err("namespace management and reconnect use dedicated native ABI calls".to_owned())
             }
-            _ => Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options)),
+            FfiOperation::Get
+            | FfiOperation::Set
+            | FfiOperation::Delete
+            | FfiOperation::Stats
+            | FfiOperation::Sync => {
+                Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options))
+            }
         }
     }))
 }
@@ -1673,7 +1693,21 @@ fn execute_entry_inner(
             {
                 Err("SET options require a SET operation".to_owned())
             }
-            _ => Ok(client.execute(operation, application_key, value, set_options, raw)),
+            FfiOperation::Ping
+            | FfiOperation::Echo
+            | FfiOperation::Get
+            | FfiOperation::GetJson
+            | FfiOperation::Set
+            | FfiOperation::SetJson
+            | FfiOperation::Delete
+            | FfiOperation::Stats
+            | FfiOperation::Sync
+            | FfiOperation::Reconnect
+            | FfiOperation::NamespaceOpen
+            | FfiOperation::NamespaceUpdatePolicy
+            | FfiOperation::NamespaceDelete => {
+                Ok(client.execute(operation, application_key, value, set_options, raw))
+            }
         }
     }))
 }
