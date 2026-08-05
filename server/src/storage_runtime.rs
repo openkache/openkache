@@ -49,6 +49,7 @@ impl CompioRuntimeConfig {
         }
     }
 
+    #[cfg_attr(not(feature = "storage-runtime-compio"), allow(dead_code))]
     pub(crate) fn storage(
         entries: u32,
         event_interval: usize,
@@ -173,6 +174,13 @@ pub(crate) fn build(config: CompioRuntimeConfig) -> io::Result<Runtime> {
 }
 
 /// Runs a production task on a runtime built by [`build`].
+#[cfg_attr(
+    any(
+        feature = "storage-runtime-kimojio",
+        feature = "storage-runtime-monoio"
+    ),
+    allow(dead_code)
+)]
 pub(crate) fn run_compio<F>(config: CompioRuntimeConfig, future: F) -> io::Result<F::Output>
 where
     F: Future,

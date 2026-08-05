@@ -121,7 +121,7 @@ impl ThreadedKvkache {
         Self::start_validated_with_network_roles(config, false)
     }
 
-    /// Starts storage workers whose overlapping CPUs can also host server network tasks.
+    /// Starts storage workers and attaches overlapping server network tasks when supported.
     pub(crate) fn start_validated_for_server(config: crate::config::AppConfig) -> Result<Self> {
         Self::start_validated_with_network_roles(config, true)
     }
