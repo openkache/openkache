@@ -321,7 +321,7 @@ mod backend {
     use super::*;
 
     pub(crate) const NAME: &str = "kimojio";
-    pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = false;
+    pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
     pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(_configured: u32) -> u32 {
@@ -745,7 +745,7 @@ mod backend {
     use super::*;
 
     pub(crate) const NAME: &str = "monoio";
-    pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = false;
+    pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
     pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
