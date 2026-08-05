@@ -310,6 +310,9 @@ pub(crate) struct RuntimeConfig {
     pub(crate) simulated_io_latency: Duration,
 }
 
+#[allow(unused_imports)]
+pub(crate) use crate::storage_backend::USES_PHYSICAL_STORAGE;
+
 #[cfg(feature = "storage-runtime-kimojio")]
 mod backend {
     use std::ffi::CString;
@@ -322,7 +325,6 @@ mod backend {
 
     pub(crate) const NAME: &str = "kimojio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
-    pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(_configured: u32) -> u32 {
         128
@@ -497,7 +499,6 @@ mod backend {
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
     /// Simulated storage keeps the production worker and buffer path while
     /// completing file operations without opening or persisting an OS file.
-    pub(crate) const USES_PHYSICAL_STORAGE: bool = false;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
         configured
@@ -616,7 +617,6 @@ mod backend {
 
     pub(crate) const NAME: &str = "compio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
-    pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
         configured
@@ -746,7 +746,6 @@ mod backend {
 
     pub(crate) const NAME: &str = "monoio";
     pub(crate) const SUPPORTS_COMBINED_NETWORK_ROLE: bool = true;
-    pub(crate) const USES_PHYSICAL_STORAGE: bool = true;
 
     pub(crate) const fn effective_ring_entries(configured: u32) -> u32 {
         configured
@@ -889,12 +888,7 @@ mod backend {
 
 pub(crate) use backend::*;
 
-#[cfg(feature = "storage-runtime-simulated")]
-pub(crate) fn file_device_kind(_file: &File) -> crate::platform::StorageDeviceKind {
-    crate::platform::StorageDeviceKind::NotApplicable
-}
-
-#[cfg(not(feature = "storage-runtime-simulated"))]
+#[allow(dead_code)]
 pub(crate) fn file_device_kind(file: &File) -> crate::platform::StorageDeviceKind {
-    crate::platform::storage_device_kind_from_fd(file.raw_fd())
+    crate::storage_backend::file_device_kind(file)
 }
