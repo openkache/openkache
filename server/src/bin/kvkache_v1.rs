@@ -13,6 +13,11 @@ fn item_id(application_key: &[u8]) -> ItemId {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let runtime = compio::runtime::Runtime::new()?;
+    runtime.block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn Error>> {
     let (config, command) = match AppConfig::parse() {
         Ok(parsed) => parsed,
         Err(KvError::Usage(message)) => {
@@ -22,19 +27,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         Err(error) => return Err(error.into()),
     };
     let mut cache = ThreadedKvkache::start(config)?;
-    let operation = (|| -> Result<(), Box<dyn Error>> {
+    let operation: Result<(), Box<dyn Error>> = async {
         match command {
-            Command::Get(application_key) => match cache.get(item_id(&application_key))? {
+            Command::Get(application_key) => match cache.get(item_id(&application_key)).await? {
                 Some(value) => println!("{}", String::from_utf8_lossy(&value)),
                 None => println!("(nil)"),
             },
             Command::Set(application_key, value) => {
-                println!("{:?}", cache.set(item_id(&application_key), value)?)
+                println!("{:?}", cache.set(item_id(&application_key), value).await?)
             }
             Command::Delete(application_key) => {
                 println!(
                     "{}",
-                    if cache.delete(item_id(&application_key))? {
+                    if cache.delete(item_id(&application_key)).await? {
                         "Deleted"
                     } else {
                         "NotFound"
@@ -42,17 +47,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 );
             }
             Command::Sync => {
-                cache.sync()?;
+                cache.sync().await?;
                 println!("Synced");
             }
             Command::Stats => {
-                for stats in cache.stats()? {
+                for stats in cache.stats().await? {
                     println!("{stats}");
                 }
             }
         }
         Ok(())
-    })();
+    }
+    .await;
     let shutdown = cache.shutdown();
     operation?;
     shutdown?;

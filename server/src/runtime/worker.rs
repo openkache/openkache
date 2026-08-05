@@ -10,7 +10,7 @@ use std::time::Duration;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use openkache_protocol::{ItemId, SetOptions};
 
-use crate::channel::{AsyncReceiver, Receiver, Sender, TryRecvError};
+use crate::channel::{AsyncReceiver, TryRecvError};
 use crate::types::StoredItemValue;
 use crate::*;
 
@@ -26,31 +26,7 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     }
 }
 
-pub(super) enum WorkerResponseSender {
-    Channel(Sender<Result<WorkerResponse>>),
-    Completion(CompletionSender<Result<WorkerResponse>>),
-}
-
-impl WorkerResponseSender {
-    pub(super) fn channel(sender: Sender<Result<WorkerResponse>>) -> Self {
-        Self::Channel(sender)
-    }
-
-    pub(super) fn completion(sender: CompletionSender<Result<WorkerResponse>>) -> Self {
-        Self::Completion(sender)
-    }
-
-    fn send(self, response: Result<WorkerResponse>) {
-        match self {
-            Self::Channel(sender) => {
-                let _ = sender.send(response);
-            }
-            Self::Completion(sender) => {
-                let _ = sender.send(response);
-            }
-        }
-    }
-}
+pub(super) type WorkerResponseSender = CompletionSender<Result<WorkerResponse>>;
 
 pub(super) enum WorkerRequest {
     Get {
@@ -73,9 +49,7 @@ pub(super) enum WorkerRequest {
     Sync {
         response: WorkerResponseSender,
     },
-    Shutdown {
-        response: WorkerResponseSender,
-    },
+    Shutdown,
 }
 
 #[derive(Debug)]
@@ -85,7 +59,6 @@ pub(super) enum WorkerResponse {
     Deleted(bool),
     Stats(String),
     Synced,
-    Shutdown,
 }
 
 #[derive(Debug)]
@@ -135,12 +108,6 @@ pub(super) enum BenchmarkResponseKind {
     Get,
     Set,
     Delete,
-}
-
-pub(super) struct PendingBenchmarkRequest {
-    pub(super) response: Receiver<Result<WorkerResponse>>,
-    pub(super) kind: BenchmarkResponseKind,
-    pub(super) started: std::time::Instant,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -596,7 +563,7 @@ enum DeferredLaneCompletion {
 
 fn send_success(responses: Vec<DeferredWorkerResponse>) {
     for response in responses {
-        response.sender.send(Ok(response.value));
+        let _ = response.sender.send(Ok(response.value));
     }
 }
 
@@ -614,7 +581,7 @@ fn send_pending_success(
 
 fn send_failure(responses: Vec<DeferredWorkerResponse>, message: &str) {
     for response in responses {
-        response
+        let _ = response
             .sender
             .send(Err(KvError::Worker(message.to_string())));
     }
@@ -695,7 +662,7 @@ pub(super) async fn worker_loop(
                                 storage_key,
                                 response,
                             } => {
-                                response.send(Ok(outcome_response(result.outcome)));
+                                let _ = response.send(Ok(outcome_response(result.outcome)));
                                 if let Some(running) = finish_scheduler_lane(
                                     &mut cache,
                                     &mut scheduler,
@@ -777,7 +744,7 @@ pub(super) async fn worker_loop(
                                 response,
                             } => {
                                 cache.cancel_pending_keyed_mutation(storage_key);
-                                response.send(Err(KvError::Worker(message.clone())));
+                                let _ = response.send(Err(KvError::Worker(message.clone())));
                                 (storage_key, None)
                             }
                             DeferredLaneCompletion::CollapsedPending {
@@ -886,7 +853,7 @@ pub(super) async fn worker_loop(
                                 response,
                             } => {
                                 cache.cancel_pending_keyed_mutation(storage_key);
-                                response.send(Err(KvError::NoCapacity));
+                                let _ = response.send(Err(KvError::NoCapacity));
                                 (storage_key, None)
                             }
                             DeferredLaneCompletion::CollapsedPending {
@@ -926,7 +893,7 @@ pub(super) async fn worker_loop(
                 let completion = match completed.completion {
                     RunningCompletion::Direct(response) => match outcome {
                         Ok(outcome) if !flush_required => {
-                            response.send(Ok(outcome_response(outcome)));
+                            let _ = response.send(Ok(outcome_response(outcome)));
                             if let Some(running) = finish_scheduler_lane(
                                 &mut cache,
                                 &mut scheduler,
@@ -951,7 +918,7 @@ pub(super) async fn worker_loop(
                             failure_state: None,
                         },
                         Err(error) => {
-                            response.send(Err(error));
+                            let _ = response.send(Err(error));
                             if let Some(running) = finish_scheduler_lane(
                                 &mut cache,
                                 &mut scheduler,
@@ -1112,7 +1079,7 @@ async fn process_worker_barrier(
 ) -> Result<bool> {
     match request {
         WorkerRequest::Stats { response } => {
-            response.send(Ok(WorkerResponse::Stats(format!(
+            let _ = response.send(Ok(WorkerResponse::Stats(format!(
                 "{} {}",
                 crate::platform::cpu_diagnostic(affinity_id),
                 cache.stats()
@@ -1121,25 +1088,13 @@ async fn process_worker_barrier(
         }
         WorkerRequest::Sync { response } => {
             let result = cache.sync().await.map(|()| WorkerResponse::Synced);
-            response.send(result);
+            let _ = response.send(result);
             Ok(false)
         }
-        WorkerRequest::Shutdown { response } => {
-            let result = match cache.sync().await {
-                Ok(()) => cache.checkpoint().await,
-                Err(error) => Err(error),
-            };
-            match result {
-                Ok(()) => {
-                    response.send(Ok(WorkerResponse::Shutdown));
-                    Ok(true)
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    response.send(Err(KvError::Worker(message.clone())));
-                    Err(KvError::Worker(message))
-                }
-            }
+        WorkerRequest::Shutdown => {
+            cache.sync().await?;
+            cache.checkpoint().await?;
+            Ok(true)
         }
         WorkerRequest::Get { .. } | WorkerRequest::Set { .. } | WorkerRequest::Delete { .. } => {
             Err(KvError::Worker(

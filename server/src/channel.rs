@@ -603,9 +603,7 @@ mod backend {
     }
 }
 
-pub(crate) use backend::{
-    AsyncReceiver, Receiver, Sender, bounded, bounded_async, bounded_sync_async,
-};
+pub(crate) use backend::{AsyncReceiver, Sender, bounded, bounded_async, bounded_sync_async};
 
 impl<T> Sender<T>
 where

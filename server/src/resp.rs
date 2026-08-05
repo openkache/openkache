@@ -400,7 +400,7 @@ async fn execute_command(
     match command.first() {
         Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
         Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
-            [_, application_key] => match cache.get_async(resp_item_id(application_key)).await {
+            [_, application_key] => match cache.get_stored(resp_item_id(application_key)).await {
                 Ok(Some(value)) => bulk(response, Some(&value.bytes)),
                 Ok(None) => bulk(response, None),
                 Err(cache_error) => resp_cache_error(response, cache_error),
@@ -409,7 +409,7 @@ async fn execute_command(
         },
         Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
             [_, application_key, value] => match cache
-                .set_async_with_options(
+                .set_with_options(
                     resp_item_id(application_key),
                     StoredItemValue::new(value.to_vec()),
                     SetOptions::NONE,
@@ -428,7 +428,7 @@ async fn execute_command(
             } else {
                 let mut deleted = 0;
                 for application_key in &command[1..] {
-                    match cache.delete_async(resp_item_id(application_key)).await {
+                    match cache.delete(resp_item_id(application_key)).await {
                         Ok(true) => deleted += 1,
                         Ok(false) => {}
                         Err(cache_error) => {
@@ -441,7 +441,7 @@ async fn execute_command(
             }
         }
         Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") => match command {
-            [_] => match cache.stats_async().await {
+            [_] => match cache.stats().await {
                 Ok(stats) => {
                     let stats = stats.join("\n");
                     bulk(response, Some(stats.as_bytes()));
@@ -451,7 +451,7 @@ async fn execute_command(
             _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
         },
         Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") => match command {
-            [_] => match cache.sync_async().await {
+            [_] => match cache.sync().await {
                 Ok(()) => simple(response, "OK"),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
