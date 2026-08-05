@@ -120,6 +120,21 @@ alias(
     actual = "@crates//snmalloc-rs",
 )
 
+alias(
+    name = "server_optional_opentelemetry",
+    actual = "@crates//opentelemetry",
+)
+
+alias(
+    name = "server_optional_opentelemetry_otlp",
+    actual = "@crates//opentelemetry-otlp",
+)
+
+alias(
+    name = "server_optional_opentelemetry_sdk",
+    actual = "@crates//opentelemetry_sdk",
+)
+
 filegroup(
     name = "runtime_sources",
     srcs = [
