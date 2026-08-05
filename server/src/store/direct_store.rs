@@ -577,6 +577,7 @@ impl Kvkache {
         resource_guard: Arc<ResourceGuard>,
         _allow_checkpoint: bool,
     ) -> Result<Self> {
+        #[cfg(not(feature = "storage-runtime-simulated"))]
         if let Some(parent) = config.data_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| startup_io_error("creating the data directory", error))?;
@@ -610,6 +611,7 @@ impl Kvkache {
             }));
         }
         let next_sequence = config.mutable_segment_count as u64;
+        #[cfg(not(feature = "storage-runtime-simulated"))]
         if let Some(parent) = config.large_value_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| startup_io_error("creating the large-value directory", error))?;

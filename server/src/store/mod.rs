@@ -1,5 +1,6 @@
 //! Direct mutable SG cache with worker-local variable generation files.
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::fs;
 #[cfg(feature = "storage-runtime-compio")]
 use std::mem::MaybeUninit;
@@ -9,6 +10,7 @@ use std::ops::{Deref, DerefMut};
     feature = "storage-runtime-simulated"
 )))]
 use std::os::fd::AsRawFd;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -50,6 +52,7 @@ const FILE_RESERVATION_RETRY_DELAYS: [Duration; 6] = [
     Duration::from_millis(16),
     Duration::from_millis(32),
 ];
+#[cfg_attr(feature = "storage-runtime-simulated", allow(dead_code))]
 const STORAGE_RESERVE_PERCENT: u64 = 5;
 /// Preallocates one 4 KiB read buffer for each default in-flight worker job.
 pub(crate) const BUCKET_READ_POOL_CAPACITY: usize = 64;
@@ -501,10 +504,13 @@ pub(super) fn configure_direct_io(file_descriptor: i32) -> std::io::Result<()> {
 }
 
 pub(crate) struct ResourceGuard {
+    #[cfg(not(feature = "storage-runtime-simulated"))]
     directory: std::path::PathBuf,
     memory_stop_available_bytes: u64,
     memory_resume_available_bytes: u64,
+    #[cfg(not(feature = "storage-runtime-simulated"))]
     storage_stop_available_bytes: u64,
+    #[cfg(not(feature = "storage-runtime-simulated"))]
     storage_resume_available_bytes: u64,
     memory_stop_writes: AtomicBool,
     storage_stop_writes: AtomicBool,
@@ -531,6 +537,8 @@ impl ResourceGuard {
     }
 
     fn new(directory: &Path, workers: &[Config]) -> Result<Self> {
+        #[cfg(feature = "storage-runtime-simulated")]
+        let _ = directory;
         let memory =
             crate::sizing::automatic_memory_capacity(crate::sizing::detected_memory_snapshot()?)?;
         let table_memory_bytes = workers.iter().try_fold(0u64, |total, worker| {
@@ -544,15 +552,22 @@ impl ResourceGuard {
                 "modeled Table requires {table_memory_bytes} bytes but current safe Table budget is {table_memory_budget_bytes} bytes"
             )));
         }
-        let storage_available_bytes = crate::sizing::filesystem_available_bytes(directory)?;
-        let storage_allocated_bytes = workers.iter().try_fold(0u64, |total, worker| {
-            let data = allocated_file_bytes(&worker.data_path)?;
-            let large_values = allocated_file_bytes(&worker.large_value_path)?;
-            total
-                .checked_add(data)
-                .and_then(|bytes| bytes.checked_add(large_values))
-                .ok_or_else(|| KvError::InvalidConfig("allocated storage size overflowed".into()))
-        })?;
+        #[cfg(not(feature = "storage-runtime-simulated"))]
+        let (storage_available_bytes, storage_allocated_bytes) = {
+            let available = crate::sizing::filesystem_available_bytes(directory)?;
+            let allocated = workers.iter().try_fold(0u64, |total, worker| {
+                let data = allocated_file_bytes(&worker.data_path)?;
+                let large_values = allocated_file_bytes(&worker.large_value_path)?;
+                total
+                    .checked_add(data)
+                    .and_then(|bytes| bytes.checked_add(large_values))
+                    .ok_or_else(|| {
+                        KvError::InvalidConfig("allocated storage size overflowed".into())
+                    })
+            })?;
+            (available, allocated)
+        };
+        #[cfg(not(feature = "storage-runtime-simulated"))]
         let generation_bytes = workers.iter().try_fold(0u64, |total, worker| {
             let worker_generation = (worker.segment_size as u64)
                 .checked_add(worker.blob_segment_size as u64)
@@ -565,6 +580,7 @@ impl ResourceGuard {
                 KvError::InvalidConfig("host storage generation size overflowed".into())
             })
         })?;
+        #[cfg(not(feature = "storage-runtime-simulated"))]
         let (storage_stop_available_bytes, storage_resume_available_bytes) =
             storage_capacity_thresholds(
                 storage_available_bytes,
@@ -573,18 +589,19 @@ impl ResourceGuard {
             )?;
 
         Ok(Self {
+            #[cfg(not(feature = "storage-runtime-simulated"))]
             directory: directory.to_path_buf(),
             memory_stop_available_bytes: memory.reserve_bytes,
             memory_resume_available_bytes: memory
                 .reserve_bytes
                 .saturating_add(memory.reserve_bytes / 4)
                 .min(memory.available_bytes),
+            #[cfg(not(feature = "storage-runtime-simulated"))]
             storage_stop_available_bytes,
+            #[cfg(not(feature = "storage-runtime-simulated"))]
             storage_resume_available_bytes,
             memory_stop_writes: AtomicBool::new(false),
-            storage_stop_writes: AtomicBool::new(
-                storage_available_bytes <= storage_stop_available_bytes,
-            ),
+            storage_stop_writes: AtomicBool::new(false),
             rejected_writes: AtomicU64::new(0),
         })
     }
@@ -608,6 +625,7 @@ impl ResourceGuard {
             return Err(KvError::CapacityExhausted { resource: "memory" });
         }
 
+        #[cfg(not(feature = "storage-runtime-simulated"))]
         if self.storage_stop_writes.load(Ordering::Acquire) {
             let available = crate::sizing::filesystem_available_bytes(&self.directory)?;
             let stopped = capacity_stop_writes(
@@ -627,6 +645,12 @@ impl ResourceGuard {
         Ok(())
     }
 
+    #[cfg(feature = "storage-runtime-simulated")]
+    fn observe_storage_reservation(&self) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(not(feature = "storage-runtime-simulated"))]
     fn observe_storage_reservation(&self) -> Result<()> {
         let available = crate::sizing::filesystem_available_bytes(&self.directory)?;
         if available <= self.storage_stop_available_bytes {
@@ -635,6 +659,10 @@ impl ResourceGuard {
         Ok(())
     }
 
+    #[cfg(feature = "storage-runtime-simulated")]
+    fn mark_storage_exhausted(&self) {}
+
+    #[cfg(not(feature = "storage-runtime-simulated"))]
     fn mark_storage_exhausted(&self) {
         self.storage_stop_writes.store(true, Ordering::Release);
     }
@@ -665,6 +693,7 @@ pub(crate) const fn capacity_stop_writes(
     }
 }
 
+#[cfg_attr(feature = "storage-runtime-simulated", allow(dead_code))]
 pub(crate) fn storage_capacity_thresholds(
     available_bytes: u64,
     allocated_bytes: u64,
@@ -689,6 +718,7 @@ pub(crate) fn storage_capacity_thresholds(
     Ok(((reserve_bytes / 2).max(generation_bytes), reserve_bytes))
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 fn allocated_file_bytes(path: &Path) -> Result<u64> {
     match fs::metadata(path) {
         Ok(metadata) => metadata

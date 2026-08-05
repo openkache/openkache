@@ -3,9 +3,13 @@
 //! request routing by key hash, benchmark batch execution, and graceful shutdown.
 
 use std::collections::VecDeque;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::fs;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::io::{ErrorKind, Read, Write};
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(not(feature = "storage-runtime-simulated"))]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,11 +31,17 @@ pub use worker::*;
 
 use self::completion::CompletionSlab;
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
+#[cfg(not(feature = "storage-runtime-simulated"))]
 pub(crate) const RUNNING_MARKER_FILE: &str = ".openkache-running";
+#[cfg(not(feature = "storage-runtime-simulated"))]
 const SERVER_KEY_MAGIC: &[u8; 8] = b"OKKEY\0\0\0";
+#[cfg(not(feature = "storage-runtime-simulated"))]
 const SERVER_KEY_VERSION: u32 = 1;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 const SERVER_KEY_FILE_BYTES: usize = 64;
+#[cfg(not(feature = "storage-runtime-simulated"))]
 const RUNNING_MARKER_MAGIC: &[u8; 8] = b"OKRUNNIN";
 
 #[derive(Clone, Copy)]
@@ -155,14 +165,29 @@ impl ThreadedKvkache {
                     })
             })
             .transpose()?;
-        fs::create_dir_all(&config.storage.directory)?;
-        let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
-            let worker = config.worker_config(thread_id);
-            worker.data_path.exists()
-        });
-        let server_secret =
-            load_or_create_server_secret(&config.storage.directory, existing_storage)?;
-        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
+        #[cfg(not(feature = "storage-runtime-simulated"))]
+        let (server_secret, allow_checkpoint) = {
+            fs::create_dir_all(&config.storage.directory)?;
+            let existing_storage = (0..config.runtime.thread_count).any(|thread_id| {
+                let worker = config.worker_config(thread_id);
+                worker.data_path.exists()
+            });
+            let server_secret =
+                load_or_create_server_secret(&config.storage.directory, existing_storage)?;
+            let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
+            (server_secret, allow_checkpoint)
+        };
+        #[cfg(feature = "storage-runtime-simulated")]
+        let (server_secret, allow_checkpoint) = (
+            ServerSecret {
+                // Simulated storage is intentionally ephemeral. A fixed
+                // secret keeps CPU benchmarks reproducible without an
+                // entropy or persistence dependency.
+                id: [0; 16],
+                key: [0; 32],
+            },
+            true,
+        );
         Self::start_with_server_secret(
             config,
             server_secret,
@@ -180,8 +205,13 @@ impl ThreadedKvkache {
         lease_ssd_read_buffer: bool,
     ) -> Result<Self> {
         config.validate()?;
-        fs::create_dir_all(&config.storage.directory)?;
-        let allow_checkpoint = begin_storage_run(&config.storage.directory)?;
+        #[cfg(not(feature = "storage-runtime-simulated"))]
+        let allow_checkpoint = {
+            fs::create_dir_all(&config.storage.directory)?;
+            begin_storage_run(&config.storage.directory)?
+        };
+        #[cfg(feature = "storage-runtime-simulated")]
+        let allow_checkpoint = true;
         let mut id = [0; 16];
         id.copy_from_slice(&server_key[..16]);
         Self::start_with_server_secret(
@@ -313,7 +343,7 @@ impl ThreadedKvkache {
         }
         drop(started_tx);
 
-        let mut storage_device_kind = crate::platform::StorageDeviceKind::Nvme;
+        let mut storage_device_kind = crate::platform::StorageDeviceKind::NotApplicable;
         for _ in 0..config.runtime.thread_count {
             match started_rx
                 .recv()
@@ -347,8 +377,10 @@ impl ThreadedKvkache {
         })
     }
 
-    /// Returns the conservative classification of the files opened by all
-    /// storage workers during startup.
+    /// Returns the conservative classification of storage used by all workers.
+    ///
+    /// Native backends classify the files opened during startup. The simulated
+    /// backend returns `NotApplicable` because it opens no physical files.
     pub(crate) fn storage_device_kind(&self) -> crate::platform::StorageDeviceKind {
         self.storage_device_kind
     }
@@ -1136,11 +1168,13 @@ impl ThreadedKvkache {
         if let Some(error) = shutdown_error {
             return Err(error);
         }
+        #[cfg(not(feature = "storage-runtime-simulated"))]
         finish_storage_run(&self.config.storage.directory)?;
         Ok(())
     }
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 pub(crate) fn begin_storage_run(directory: &Path) -> Result<bool> {
     let path = directory.join(RUNNING_MARKER_FILE);
     let allow_checkpoint = match fs::symlink_metadata(&path) {
@@ -1167,12 +1201,14 @@ pub(crate) fn begin_storage_run(directory: &Path) -> Result<bool> {
     Ok(allow_checkpoint)
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 pub(crate) fn finish_storage_run(directory: &Path) -> Result<()> {
     fs::remove_file(directory.join(RUNNING_MARKER_FILE))?;
     fs::File::open(directory)?.sync_all()?;
     Ok(())
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 pub(crate) fn load_or_create_server_secret(
     directory: &Path,
     existing_storage: bool,
@@ -1231,6 +1267,7 @@ pub(crate) fn load_or_create_server_secret(
     Ok(secret)
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 fn encode_server_secret(secret: ServerSecret) -> [u8; SERVER_KEY_FILE_BYTES] {
     let mut bytes = [0; SERVER_KEY_FILE_BYTES];
     bytes[..8].copy_from_slice(SERVER_KEY_MAGIC);
@@ -1242,6 +1279,7 @@ fn encode_server_secret(secret: ServerSecret) -> [u8; SERVER_KEY_FILE_BYTES] {
     bytes
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 fn decode_server_secret(bytes: &[u8]) -> Result<ServerSecret> {
     if bytes.len() != SERVER_KEY_FILE_BYTES
         || &bytes[..8] != SERVER_KEY_MAGIC
@@ -1257,6 +1295,7 @@ fn decode_server_secret(bytes: &[u8]) -> Result<ServerSecret> {
     })
 }
 
+#[cfg(not(feature = "storage-runtime-simulated"))]
 fn server_key_checksum(bytes: &[u8]) -> u32 {
     crc32fast::hash(bytes)
 }
