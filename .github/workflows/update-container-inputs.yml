@@ -40,6 +40,48 @@ jobs:
             sh -euxc \
             'git config --global --add safe.directory /workspace && nix --extra-experimental-features "nix-command flakes" flake update nixpkgs rust-overlay'
 
+      - name: Verify Nix binary-cache availability
+        run: |
+          builder_image="$(sed -n 's/^FROM \(nixos\/nix:[^ ]*\) AS builder$/\1/p' server/Dockerfile)"
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --workdir /workspace/server \
+            "${builder_image}" \
+            sh -euxc '
+              git config --global --add safe.directory /workspace
+              check_cache() {
+                system="$1"
+                reference=".#packages.${system}.nixpkgs-cache-check"
+                dry_run="$(nix --extra-experimental-features "nix-command flakes" \
+                  build --dry-run --json --no-update-lock-file "$reference")"
+                uncached_derivations="$(
+                  printf "%s\n" "$dry_run" \
+                    | grep -oE "/nix/store/[^\"]+\.drv" \
+                    | grep -v -- "-openkache-container-nixpkgs-cache-check\.drv$" \
+                    || true
+                )"
+                if [ -n "$uncached_derivations" ]; then
+                  printf "Uncached Nix derivations for %s would be built:\n%s\n" \
+                    "$system" "$uncached_derivations" >&2
+                  printf "Why: container input updates must not make publication compile an uncached Nixpkgs package.\n" >&2
+                  printf "Fix: pin a Nixpkgs revision whose outputs are available from cache.nixos.org.\n" >&2
+                  exit 1
+                fi
+                cache_paths="$(
+                  nix --extra-experimental-features "nix-command flakes" \
+                    eval --json --no-update-lock-file "${reference}.cachePaths" \
+                    | tr -d "[]" \
+                    | tr "," "\n" \
+                    | tr -d "\""
+                )"
+                if [ -n "$cache_paths" ]; then
+                  nix path-info --recursive --store https://cache.nixos.org $cache_paths >/dev/null
+                fi
+              }
+              check_cache x86_64-linux
+              check_cache aarch64-linux
+            '
+
       - name: Open update pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7769d076bb2fc7f1 # v8
         with:

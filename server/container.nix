@@ -1,4 +1,9 @@
-{ target ? "x86_64-unknown-linux-musl" }:
+{ target ? "x86_64-unknown-linux-musl"
+, system ? builtins.currentSystem
+, cache-check ? false
+, nixpkgs-input ? null
+, rust-overlay-input ? null
+}:
 
 let
   # Keep the container build independent from a host Nix installation. The
@@ -20,13 +25,19 @@ let
         inherit url;
         sha256 = locked.narHash;
       };
-  nixpkgs = locked-input "nixpkgs";
-  rust-overlay = locked-input "rust-overlay";
+  nixpkgs =
+    if nixpkgs-input == null
+    then locked-input "nixpkgs"
+    else nixpkgs-input;
+  rust-overlay =
+    if rust-overlay-input == null
+    then locked-input "rust-overlay"
+    else rust-overlay-input;
   # The Dockerfile evaluates this expression on the target platform, so the
   # native static compiler below emits the selected target without a separate
   # cross toolchain.
   pkgs = import nixpkgs {
-    system = builtins.currentSystem;
+    inherit system;
     overlays = [(import rust-overlay)];
   };
   rust = pkgs.rust-bin.nightly."2026-07-27".minimal.override {
@@ -50,9 +61,7 @@ let
     if target == "x86_64-unknown-linux-musl"
     then pkgs.pkgsCross.musl64.clangStdenv
     else pkgs.pkgsCross."aarch64-multiplatform-musl".clangStdenv;
-in
-pkgs.mkShell.override { stdenv = native-clang-stdenv; } {
-  packages = [
+  container-packages = [
     rust
     pkgs.bun
     pkgs.smithy-cli
@@ -61,6 +70,29 @@ pkgs.mkShell.override { stdenv = native-clang-stdenv; } {
     static-clang-stdenv.cc
     pkgs.llvmPackages.llvm
   ];
+  # The Rust overlay is intentionally excluded: it is not a nixpkgs output and
+  # is built from the pinned overlay toolchain when the container is compiled.
+  cacheable-container-packages = [
+    pkgs.bun
+    pkgs.smithy-cli
+    pkgs.gnumake
+    pkgs.binutils
+    pkgs.clangStdenv.cc
+    static-clang-stdenv.cc
+    pkgs.llvmPackages.llvm
+  ];
+  nixpkgs-cache-check = pkgs.linkFarm "openkache-container-nixpkgs-cache-check"
+    (pkgs.lib.imap0 (index: package: {
+      name = "package-${toString index}";
+      path = package;
+    }) cacheable-container-packages) // {
+      cachePaths = map toString cacheable-container-packages;
+    };
+in
+if cache-check
+then nixpkgs-cache-check
+else pkgs.mkShell.override { stdenv = native-clang-stdenv; } {
+  packages = container-packages;
 
   shellHook = ''
     # The prebuilt Rust package carries a GCC runtime closure as a propagated
