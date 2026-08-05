@@ -16,6 +16,7 @@ struct GenerateSmithyPlugin: BuildToolPlugin {
             .appending("generate.ts")
         let outputDirectory = context.pluginWorkDirectory.appending("Generated")
         let output = outputDirectory.appending("SmithyAPI.swift")
+        let nativeOutput = outputDirectory.appending("SmithyNativeABI.swift")
         let path = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin"
 
         return [
@@ -26,6 +27,7 @@ struct GenerateSmithyPlugin: BuildToolPlugin {
                 environment: [
                     "OPENKACHE_GENERATION_TARGET": "swift",
                     "OPENKACHE_SWIFT_API_OUTPUT": output.string,
+                    "OPENKACHE_SWIFT_NATIVE_ABI_OUTPUT": nativeOutput.string,
                     "PATH": path,
                 ],
                 outputFilesDirectory: outputDirectory

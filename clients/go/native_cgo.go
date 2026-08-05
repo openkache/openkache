@@ -3,7 +3,7 @@
 package openkache
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../core/include -I${SRCDIR}/../core/generated_local
+#cgo CFLAGS: -I${SRCDIR}/../core/include -I${SRCDIR}/../core/generated_local -I${SRCDIR}/generated_local
 #cgo linux LDFLAGS: -ldl
 
 #include <stdint.h>
@@ -11,6 +11,7 @@ package openkache
 #include <string.h>
 
 #include "openkache_client.h"
+#include "smithy_native_abi.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -20,69 +21,12 @@ typedef HMODULE openkache_go_library_handle;
 typedef void *openkache_go_library_handle;
 #endif
 
-typedef uint32_t (*openkache_go_abi_fn)(void);
-typedef openkache_client_result *(*openkache_go_connect_fn)(
-    const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint8_t, int32_t, size_t, size_t, uint64_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
-    const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
-    uint8_t, int32_t, size_t, size_t, uint32_t, size_t, size_t, uint64_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_execute_fn)(
-    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_execute_raw_fn)(
-    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_execute_with_options_fn)(
-    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_execute_raw_with_options_fn)(
-    const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_execute_scoped_fn)(
-    const openkache_client_handle *, uint32_t, uint64_t, const uint8_t *, size_t,
-    const uint8_t *, size_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_namespace_open_fn)(
-    const openkache_client_handle *, const uint8_t *, size_t, uint8_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_namespace_update_policy_fn)(
-    const openkache_client_handle *, uint64_t, uint64_t, uint8_t, uint64_t);
-typedef openkache_client_result *(*openkache_go_namespace_delete_fn)(
-    const openkache_client_handle *, uint64_t, uint64_t);
-typedef uint32_t (*openkache_go_namespace_descriptor_decode_fn)(
-    const uint8_t *, size_t, openkache_client_namespace_descriptor_t *);
-typedef uint32_t (*openkache_go_connection_state_fn)(
-    const openkache_client_handle *);
-typedef uint32_t (*openkache_go_result_kind_fn)(const openkache_client_result *);
-typedef const uint8_t *(*openkache_go_result_data_fn)(const openkache_client_result *);
-typedef size_t (*openkache_go_result_data_length_fn)(const openkache_client_result *);
-typedef openkache_client_handle *(*openkache_go_result_take_client_fn)(
-    openkache_client_result *);
-typedef void (*openkache_go_result_free_fn)(openkache_client_result *);
-typedef void (*openkache_go_client_free_fn)(openkache_client_handle *);
-
+#define OPENKACHE_GO_LIBRARY_FIELD(field, function_type, symbol_name) function_type field;
 typedef struct openkache_go_library {
     openkache_go_library_handle handle;
-    openkache_go_abi_fn abi;
-    openkache_go_connect_fn connect;
-    openkache_go_connect_ex_fn connect_ex;
-    openkache_go_execute_fn execute;
-    openkache_go_execute_raw_fn execute_raw;
-    openkache_go_execute_with_options_fn execute_with_options;
-    openkache_go_execute_raw_with_options_fn execute_raw_with_options;
-    openkache_go_execute_scoped_fn execute_scoped;
-    openkache_go_namespace_open_fn namespace_open;
-    openkache_go_namespace_update_policy_fn namespace_update_policy;
-    openkache_go_namespace_delete_fn namespace_delete;
-    openkache_go_namespace_descriptor_decode_fn namespace_descriptor_decode;
-    openkache_go_connection_state_fn connection_state;
-    openkache_go_result_kind_fn result_kind;
-    openkache_go_result_data_fn result_data;
-    openkache_go_result_data_length_fn result_data_length;
-    openkache_go_result_take_client_fn result_take_client;
-    openkache_go_result_free_fn result_free;
-    openkache_go_client_free_fn client_free;
+    OPENKACHE_SMITHY_NATIVE_FUNCTIONS(OPENKACHE_GO_LIBRARY_FIELD)
 } openkache_go_library;
+#undef OPENKACHE_GO_LIBRARY_FIELD
 
 static void *openkache_go_symbol(openkache_go_library_handle handle, const char *name) {
 #if defined(_WIN32)
@@ -169,28 +113,10 @@ openkache_go_library *openkache_go_library_load(
         return NULL;
     }
     library->handle = handle;
-#define OPENKACHE_GO_LOAD(field, symbol_name) \
+#define OPENKACHE_GO_LOAD(field, function_type, symbol_name) \
     openkache_go_assign(&library->field, sizeof(library->field), \
-                        openkache_go_symbol(handle, symbol_name))
-    OPENKACHE_GO_LOAD(abi, "openkache_client_abi_version");
-    OPENKACHE_GO_LOAD(connect, "openkache_client_connect");
-    OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
-    OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
-    OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
-    OPENKACHE_GO_LOAD(execute_with_options, "openkache_client_execute_with_options");
-    OPENKACHE_GO_LOAD(execute_raw_with_options, "openkache_client_execute_raw_with_options");
-    OPENKACHE_GO_LOAD(execute_scoped, "openkache_client_execute_scoped");
-    OPENKACHE_GO_LOAD(namespace_open, "openkache_client_namespace_open");
-    OPENKACHE_GO_LOAD(namespace_update_policy, "openkache_client_namespace_update_policy");
-    OPENKACHE_GO_LOAD(namespace_delete, "openkache_client_namespace_delete");
-    OPENKACHE_GO_LOAD(namespace_descriptor_decode, "openkache_client_namespace_descriptor_decode");
-    OPENKACHE_GO_LOAD(connection_state, "openkache_client_connection_state");
-    OPENKACHE_GO_LOAD(result_kind, "openkache_client_result_kind");
-    OPENKACHE_GO_LOAD(result_data, "openkache_client_result_data");
-    OPENKACHE_GO_LOAD(result_data_length, "openkache_client_result_data_length");
-    OPENKACHE_GO_LOAD(result_take_client, "openkache_client_result_take_client");
-    OPENKACHE_GO_LOAD(result_free, "openkache_client_result_free");
-    OPENKACHE_GO_LOAD(client_free, "openkache_client_free");
+                        openkache_go_symbol(handle, symbol_name));
+    OPENKACHE_SMITHY_NATIVE_FUNCTIONS(OPENKACHE_GO_LOAD)
 #undef OPENKACHE_GO_LOAD
 
     if (library->abi == NULL || library->connect == NULL || library->execute == NULL ||
