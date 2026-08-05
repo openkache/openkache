@@ -51,6 +51,13 @@ pub const MAX_REQUEST_FRAME_BYTES: usize =
 /// Conservative maximum complete response frame size.
 pub const MAX_RESPONSE_FRAME_BYTES: usize = STATUS_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
 
+const fn is_application_value_operation(opcode: Opcode) -> bool {
+    matches!(
+        operation_contract(opcode).request_kind,
+        OperationRequestKind::ApplicationValue
+    )
+}
+
 impl Status {
     /// Returns whether this status represents a server-side error.
     pub const fn is_error(self) -> bool {
@@ -484,7 +491,7 @@ impl RequestHeader {
         }
     }
 
-    /// Returns the opaque SET or ECHO value length, or zero for other operations.
+    /// Returns the opaque SET or application-value length, or zero for other operations.
     pub const fn value_len(self) -> usize {
         self.value_len
     }
@@ -666,7 +673,7 @@ impl Request {
         output.push(self.opcode as u8);
         match self.opcode {
             Opcode::Ping => {}
-            Opcode::Echo => {
+            opcode if is_application_value_operation(opcode) => {
                 let (encoded, length) = encode_varuint(self.value.len() as u64);
                 output.extend_from_slice(&encoded[..length]);
             }
@@ -743,6 +750,7 @@ impl Request {
                 put_namespace_id(&mut output, self.namespace_id)?;
                 put_revision(&mut output, self.expected_revision)?;
             }
+            _ => unreachable!("protocol operation contract has no request layout"),
         }
         Ok(output)
     }
@@ -871,7 +879,7 @@ impl Request {
             });
         }
         let mut request = Self::decode(&frame)?;
-        if matches!(header.opcode, Opcode::Set | Opcode::Echo) {
+        if header.opcode == Opcode::Set || is_application_value_operation(header.opcode) {
             frame.copy_within(header.encoded_len.., 0);
             frame.truncate(header.value_len);
             request.value = frame;
@@ -895,7 +903,9 @@ impl Request {
                 set_options: SetOptions::NONE,
                 has_ttl: false,
             })),
-            Opcode::Echo => decode_echo_header(prefix),
+            opcode if is_application_value_operation(opcode) => {
+                decode_application_value_header(prefix, opcode)
+            }
             Opcode::Get | Opcode::Delete => {
                 let required = OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
                 if prefix.len() < required {
@@ -932,6 +942,7 @@ impl Request {
             Opcode::NamespaceOpen => decode_namespace_open_header(prefix),
             Opcode::NamespaceUpdatePolicy => decode_namespace_update_header(prefix),
             Opcode::NamespaceDelete => decode_namespace_delete_header(prefix),
+            _ => unreachable!("protocol operation contract has no request layout"),
         }
     }
 
@@ -963,7 +974,7 @@ impl Request {
                     });
                 }
             }
-            Opcode::Echo => {
+            opcode if is_application_value_operation(opcode) => {
                 if self.namespace_id.is_some()
                     || self.item_id.is_some()
                     || self.set_options != SetOptions::NONE
@@ -1100,6 +1111,7 @@ impl Request {
                     });
                 }
             }
+            _ => unreachable!("protocol operation contract has no request layout"),
         }
         Ok(())
     }
@@ -1170,16 +1182,19 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
     }))
 }
 
-fn decode_echo_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
+fn decode_application_value_header(
+    prefix: &[u8],
+    opcode: Opcode,
+) -> Result<Option<RequestHeader>> {
     let Some((value_len, value_len_bytes)) =
-        decode_varuint(&prefix[OPCODE_BYTES..], "ECHO value length")?
+        decode_varuint(&prefix[OPCODE_BYTES..], "application value length")?
     else {
         return Ok(None);
     };
     let value_len = usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
     validate_value_length(value_len)?;
     Ok(Some(RequestHeader {
-        opcode: Opcode::Echo,
+        opcode,
         encoded_len: OPCODE_BYTES + value_len_bytes,
         value_len,
         namespace_id: None,

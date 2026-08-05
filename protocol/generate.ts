@@ -87,7 +87,7 @@ export function main(): number {
           "run `../clients/generate.ts` for client language or ABI outputs",
       )
     }
-    const contract: Wire_Contract = extract_wire_contract(smithy_wire_ast())
+    const contract: Wire_Contract = extract_wire_contract(smithy_wire_ast(), true)
     write_output(
       GENERATED_WIRE_OUTPUT,
       render_rust_wire(contract),

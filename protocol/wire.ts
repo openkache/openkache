@@ -14,6 +14,37 @@ export interface Wire_Entry {
   readonly value: number
 }
 
+/** Semantic contract declared by one Smithy protocol operation. */
+export interface Wire_Operation_Contract {
+  readonly error_statuses: readonly string[]
+  readonly request_kind:
+    | "empty"
+    | "application_value"
+    | "scoped_item"
+    | "scoped_namespace"
+    | "namespace_open"
+    | "namespace_update_policy"
+    | "namespace_delete"
+  readonly response_kind:
+    | "empty"
+    | "pong"
+    | "echo"
+    | "value"
+    | "set_outcome"
+    | "delete_outcome"
+    | "stats_json"
+    | "namespace_descriptor"
+  readonly retry_mode: "always" | "never" | "when_not_creating"
+  readonly scope: "global" | "item" | "namespace" | "namespace_management"
+  readonly success_statuses: readonly string[]
+}
+
+/** One protocol opcode and its Smithy semantic operation contract. */
+export interface Wire_Operation {
+  readonly contract: Wire_Operation_Contract
+  readonly name: string
+}
+
 /** Protocol v1 constants consumed by the Rust protocol crate. */
 export interface Wire_V1_Contract {
   readonly alpn: string
@@ -68,6 +99,11 @@ export interface Wire_V1_Contract {
 export interface Wire_Contract {
   readonly item_id_bytes: number
   readonly max_value_bytes: number
+  /**
+   * Operation metadata is optional for legacy AST fixtures. Production
+   * protocol generation runs in strict mode and always emits it.
+   */
+  readonly operations?: readonly Wire_Operation[]
   readonly opcodes: readonly Wire_Entry[]
   readonly statuses: readonly Wire_Entry[]
   readonly v1: Wire_V1_Contract
@@ -107,6 +143,7 @@ const STATUS_SHAPE_ID = "openkache.protocol#Status"
 const WIRE_CONTRACT_TRAIT_ID = "openkache.protocol#wireContract"
 const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
+const OPERATION_CONTRACT_TRAIT_ID = "openkache.protocol#operationContract"
 
 function object_value(value: unknown, location: string): Json_Object {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -644,8 +681,183 @@ function wire_enum_entries(
   return entries
 }
 
+function optional_object_member(
+  object: Json_Object,
+  member: string,
+  location: string,
+): Json_Object | undefined {
+  const value = object[member]
+  return value === undefined ? undefined : object_value(value, `${location}.${member}`)
+}
+
+function operation_contract(
+  shape: Json_Object,
+  target: string,
+  statuses: readonly Wire_Entry[],
+): Wire_Operation_Contract | undefined {
+  const traits = optional_object_member(shape, "traits", target)
+  const value = traits?.[OPERATION_CONTRACT_TRAIT_ID]
+  if (value === undefined) return undefined
+  const contract = object_value(value, `${target}.traits.${OPERATION_CONTRACT_TRAIT_ID}`)
+  const scope = string_member(contract, "scope", `${target}.${OPERATION_CONTRACT_TRAIT_ID}`)
+  const scopes = ["global", "item", "namespace", "namespace_management"] as const
+  if (!scopes.includes(scope as (typeof scopes)[number])) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
+    )
+  }
+  const request_kind = string_member(
+    contract,
+    "requestKind",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  const request_kinds = [
+    "empty",
+    "application_value",
+    "scoped_item",
+    "scoped_namespace",
+    "namespace_open",
+    "namespace_update_policy",
+    "namespace_delete",
+  ] as const
+  if (!request_kinds.includes(request_kind as (typeof request_kinds)[number])) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind is not a supported request kind`,
+    )
+  }
+  const request_scopes: Readonly<Record<(typeof request_kinds)[number], (typeof scopes)[number]>> = {
+    empty: "global",
+    application_value: "global",
+    scoped_item: "item",
+    scoped_namespace: "namespace",
+    namespace_open: "namespace_management",
+    namespace_update_policy: "namespace_management",
+    namespace_delete: "namespace_management",
+  }
+  if (request_scopes[request_kind as (typeof request_kinds)[number]] !== scope) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind ${request_kind} is incompatible with scope ${scope}`,
+    )
+  }
+
+  const response_kind = string_member(
+    contract,
+    "responseKind",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  const response_kinds = [
+    "empty",
+    "pong",
+    "echo",
+    "value",
+    "set_outcome",
+    "delete_outcome",
+    "stats_json",
+    "namespace_descriptor",
+  ] as const
+  if (!response_kinds.includes(response_kind as (typeof response_kinds)[number])) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
+    )
+  }
+
+  const retry_mode = string_member(
+    contract,
+    "retryMode",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  const retry_modes = ["always", "never", "when_not_creating"] as const
+  if (!retry_modes.includes(retry_mode as (typeof retry_modes)[number])) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
+    )
+  }
+
+  const status_names = new Set(
+    statuses.flatMap((status) => [
+      status.name,
+      status.text ?? wire_name(status.name),
+    ]),
+  )
+  const status_values = (member: string): readonly string[] => {
+    const values = array_member(
+      contract,
+      member,
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+    ).map((value, index) => {
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error(
+          `${target}.${OPERATION_CONTRACT_TRAIT_ID}.${member}[${index}] must be a non-empty string`,
+        )
+      }
+      if (!status_names.has(value)) {
+        throw new Error(
+          `${target}.${OPERATION_CONTRACT_TRAIT_ID}.${member}[${index}] references unknown protocol status ${value}`,
+        )
+      }
+      return value
+    })
+    if (new Set(values).size !== values.length) {
+      throw new Error(
+        `${target}.${OPERATION_CONTRACT_TRAIT_ID}.${member} must not contain duplicate statuses`,
+      )
+    }
+    if (values.length === 0) {
+      throw new Error(
+        `${target}.${OPERATION_CONTRACT_TRAIT_ID}.${member} must not be empty`,
+      )
+    }
+    return values
+  }
+  const success_statuses = status_values("successStatuses")
+  const error_statuses = status_values("errorStatuses")
+  if (success_statuses.some((status) => error_statuses.includes(status))) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID} has overlapping success and error statuses`,
+    )
+  }
+  return {
+    error_statuses,
+    request_kind: request_kind as Wire_Operation_Contract["request_kind"],
+    response_kind: response_kind as Wire_Operation_Contract["response_kind"],
+    retry_mode: retry_mode as Wire_Operation_Contract["retry_mode"],
+    scope: scope as Wire_Operation_Contract["scope"],
+    success_statuses,
+  }
+}
+
+function wire_operations(
+  shapes: Json_Object,
+  opcodes: readonly Wire_Entry[],
+  statuses: readonly Wire_Entry[],
+  strict: boolean,
+): readonly Wire_Operation[] | undefined {
+  const operations: Wire_Operation[] = []
+  for (const opcode of opcodes) {
+    const target = `${SERVICE_SHAPE_ID.slice(0, SERVICE_SHAPE_ID.lastIndexOf("#"))}#${opcode.name}`
+    const shape = shapes[target]
+    if (shape === undefined) {
+      if (strict) throw new Error(`opcode ${opcode.name} has no matching Smithy operation`)
+      return undefined
+    }
+    const contract = operation_contract(
+      object_value(shape, `Smithy AST.shapes.${target}`),
+      target,
+      statuses,
+    )
+    if (contract === undefined) {
+      if (strict) {
+        throw new Error(`operation ${opcode.name} is missing ${OPERATION_CONTRACT_TRAIT_ID}`)
+      }
+      return undefined
+    }
+    operations.push({ contract, name: opcode.name })
+  }
+  return operations
+}
+
 /** Extracts the server-visible wire contract from a Smithy AST. */
-export function extract_wire_contract(ast: unknown): Wire_Contract {
+export function extract_wire_contract(ast: unknown, strict_operations = false): Wire_Contract {
   const ast_object = object_value(ast, "Smithy AST")
   const shapes = object_member(ast_object, "shapes", "Smithy AST")
   const service = object_member(shapes, SERVICE_SHAPE_ID, "Smithy AST.shapes")
@@ -698,13 +910,15 @@ export function extract_wire_contract(ast: unknown): Wire_Contract {
     "status",
   )
 
-  return {
+  const contract = {
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
     v1: wire_v1_contract(contract_trait.v1),
   }
+  const operations = wire_operations(shapes, opcodes, statuses, strict_operations)
+  return operations === undefined ? contract : { ...contract, operations }
 }
 
 /** Loads the protocol Smithy AST from the model owned by this directory. */
@@ -857,6 +1071,101 @@ ${names}
 }`
 }
 
+function rust_operation_contract(contract: Wire_Contract): string {
+  const operations = contract.operations
+  if (operations === undefined) return ""
+  const status_variant = (status: string): string => {
+    const entry = contract.statuses.find(
+      (candidate) =>
+        candidate.name === status ||
+        candidate.text === status ||
+        wire_name(candidate.name) === status,
+    )
+    if (entry === undefined) {
+      throw new Error(`operation metadata references unknown status ${status}`)
+    }
+    return entry.name
+  }
+  const enum_variant = (value: string): string =>
+    pascal_case(value)
+  const status_slice = (statuses: readonly string[]): string =>
+    `&[${statuses
+      .map((status) => `Status::${status_variant(status)}`)
+      .join(", ")}]`
+  const metadata = operations
+    .map(
+      (operation) => `        Opcode::${operation.name} => OperationContract {
+            scope: OperationScope::${enum_variant(operation.contract.scope)},
+            request_kind: OperationRequestKind::${enum_variant(operation.contract.request_kind)},
+            response_kind: OperationResponseKind::${enum_variant(operation.contract.response_kind)},
+            retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
+            success_statuses: ${status_slice(operation.contract.success_statuses)},
+            error_statuses: ${status_slice(operation.contract.error_statuses)},
+        },`,
+    )
+    .join("\n")
+  return `/// Request scope declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationScope {
+    Global,
+    Item,
+    Namespace,
+    NamespaceManagement,
+}
+
+/// Native request shape declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationRequestKind {
+    Empty,
+    ApplicationValue,
+    ScopedItem,
+    ScopedNamespace,
+    NamespaceOpen,
+    NamespaceUpdatePolicy,
+    NamespaceDelete,
+}
+
+/// Response payload shape declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationResponseKind {
+    Empty,
+    Pong,
+    Echo,
+    Value,
+    SetOutcome,
+    DeleteOutcome,
+    StatsJson,
+    NamespaceDescriptor,
+}
+
+/// Retry behavior declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationRetryMode {
+    Always,
+    Never,
+    WhenNotCreating,
+}
+
+/// Generated semantic metadata for one protocol operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationContract {
+    pub scope: OperationScope,
+    pub request_kind: OperationRequestKind,
+    pub response_kind: OperationResponseKind,
+    pub retry_mode: OperationRetryMode,
+    pub success_statuses: &'static [Status],
+    pub error_statuses: &'static [Status],
+}
+
+/// Returns the generated contract for a protocol operation.
+pub const fn operation_contract(opcode: Opcode) -> OperationContract {
+    match opcode {
+${metadata}
+    }
+}
+`
+}
+
 /** Renders protocol v1 Rust definitions without client-only declarations. */
 export function render_rust_wire(contract: Wire_Contract): string {
   const v1 = contract.v1
@@ -934,5 +1243,7 @@ pub const ERROR_STATUS_MINIMUM: u8 = ${formatted_byte(v1.error_status_minimum)};
 ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 
 ${rust_wire_enum("Status", "Status returned in every protocol response.", contract.statuses, "UnknownStatus")}
+
+${rust_operation_contract(contract)}
 `
 }
