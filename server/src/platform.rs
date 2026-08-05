@@ -29,6 +29,20 @@ pub enum StorageDeviceKind {
 /// The path may not exist yet; in that case its nearest existing ancestor is
 /// inspected. Failure to inspect the filesystem is non-fatal and returns
 /// [`StorageDeviceKind::Unknown`].
+///
+/// # Arguments
+///
+/// * `path` - The storage directory or path whose backing filesystem is
+///   inspected.
+///
+/// # Returns
+///
+/// The best-effort classification of the filesystem backing `path`.
+///
+/// # Errors
+///
+/// This function does not return an error. Filesystem metadata that cannot be
+/// read is represented as [`StorageDeviceKind::Unknown`].
 pub fn storage_device_kind(path: &Path) -> StorageDeviceKind {
     #[cfg(target_os = "linux")]
     {
