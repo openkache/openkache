@@ -251,6 +251,16 @@ mod backend {
         128
     }
 
+    fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(message) = payload.downcast_ref::<String>() {
+            return message.clone();
+        }
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            return (*message).to_owned();
+        }
+        "non-string panic payload".into()
+    }
+
     #[derive(Clone)]
     pub(crate) struct File(Rc<kimojio::OwnedFd>);
 
@@ -288,10 +298,23 @@ mod backend {
         crate::platform::pin_current_thread(config.worker_cpu)?;
         let configuration =
             Configuration::new().set_exit_behavior(ExitBehavior::WhenMainTaskCompletes);
-        let mut runtime = kimojio::Runtime::new(worker_index, configuration);
+        let mut runtime = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            kimojio::Runtime::new(worker_index, configuration)
+        })) {
+            Ok(runtime) => runtime,
+            Err(payload) => {
+                return Err(io::Error::other(format!(
+                    "Kimojio io_uring runtime initialization panicked: {}",
+                    panic_payload_message(payload.as_ref())
+                )));
+            }
+        };
         match runtime.block_on(future) {
             Some(Ok(output)) => Ok(output),
-            Some(Err(_)) => Err(io::Error::other("Kimojio storage runtime task panicked")),
+            Some(Err(payload)) => Err(io::Error::other(format!(
+                "Kimojio storage runtime task panicked: {}",
+                panic_payload_message(payload.as_ref())
+            ))),
             None => Err(io::Error::other(
                 "Kimojio storage runtime shut down before its worker completed",
             )),
