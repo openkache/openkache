@@ -1,11 +1,11 @@
 package io.openkache.client;
 
-import com.sun.jna.Library;
 import com.sun.jna.Memory;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
-import com.sun.jna.Structure;
 import io.openkache.client.generated_local.SmithyContract;
+import io.openkache.client.generated_local.SmithyNativeApi;
+import io.openkache.client.generated_local.SmithyNativeDescriptor;
 
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
@@ -27,104 +27,6 @@ import java.util.concurrent.TimeUnit;
  * client core.</p>
  */
 public final class EchoClient implements OpenKacheClient, AutoCloseable {
-    private interface NativeApi extends Library {
-        int openkache_client_abi_version();
-
-        Pointer openkache_client_connect(
-            Pointer address,
-            long addressLength,
-            Pointer serverName,
-            long serverNameLength,
-            Pointer certificate,
-            long certificateLength,
-            Pointer dataProtectionKey,
-            long dataProtectionKeyLength,
-            byte compressionEnabled,
-            int compressionLevel,
-            long minimumInputSize,
-            long minimumSavings,
-            long connectTimeoutMilliseconds,
-            long requestTimeoutMilliseconds);
-
-        Pointer openkache_client_execute(
-            Pointer client,
-            int operation,
-            Pointer applicationKey,
-            long applicationKeyLength,
-            Pointer value,
-            long valueLength,
-            int setCondition,
-            byte ttlEnabled,
-            long ttlMilliseconds);
-
-        Pointer openkache_client_execute_scoped(
-            Pointer client,
-            int operation,
-            long namespaceId,
-            Pointer itemId,
-            long itemIdLength,
-            Pointer value,
-            long valueLength,
-            byte setFlags,
-            long ttlMilliseconds);
-
-        Pointer openkache_client_namespace_open(
-            Pointer client,
-            Pointer name,
-            long nameLength,
-            byte createIfMissing,
-            byte policyFlags,
-            long ttlMilliseconds);
-
-        Pointer openkache_client_namespace_update_policy(
-            Pointer client,
-            long namespaceId,
-            long expectedRevision,
-            byte policyFlags,
-            long ttlMilliseconds);
-
-        Pointer openkache_client_namespace_delete(
-            Pointer client,
-            long namespaceId,
-            long expectedRevision);
-
-        int openkache_client_namespace_descriptor_decode(
-            Pointer payload,
-            long payloadLength,
-            NativeDescriptor output);
-
-        int openkache_client_result_kind(Pointer result);
-
-        Pointer openkache_client_result_data(Pointer result);
-
-        long openkache_client_result_data_length(Pointer result);
-
-        Pointer openkache_client_result_take_client(Pointer result);
-
-        void openkache_client_result_free(Pointer result);
-
-        void openkache_client_free(Pointer client);
-    }
-
-    @Structure.FieldOrder({
-        "namespaceId",
-        "revision",
-        "defaultTtlMs",
-        "defaultExpiration",
-        "expirationOverride",
-        "defaultEviction",
-        "evictionOverride"
-    })
-    public static final class NativeDescriptor extends Structure {
-        public long namespaceId;
-        public long revision;
-        public long defaultTtlMs;
-        public int defaultExpiration;
-        public int expirationOverride;
-        public int defaultEviction;
-        public int evictionOverride;
-    }
-
     private record NativeResult(int kind, byte[] payload, Pointer client) {}
 
     private static final class NativeBuffer implements AutoCloseable {
@@ -153,13 +55,13 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private final NativeApi nativeApi;
+    private final SmithyNativeApi nativeApi;
     private final ExecutorService executor;
     private final Object lifecycle = new Object();
     private Pointer handle;
     private boolean closed;
 
-    private EchoClient(NativeApi nativeApi, Pointer handle) {
+    private EchoClient(SmithyNativeApi nativeApi, Pointer handle) {
         this.nativeApi = nativeApi;
         this.handle = handle;
         executor = Executors.newVirtualThreadPerTaskExecutor();
@@ -187,7 +89,7 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
             throw new IllegalArgumentException("dataProtectionKey must contain exactly 32 bytes");
         }
 
-        NativeApi nativeApi = loadNativeApi();
+        SmithyNativeApi nativeApi = loadNativeApi();
         if (nativeApi.openkache_client_abi_version() != SmithyContract.ABI_VERSION) {
             throw new EchoClientException("unsupported OpenKache native ABI version");
         }
@@ -222,14 +124,14 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
         }
     }
 
-    private static NativeApi loadNativeApi() {
+    private static SmithyNativeApi loadNativeApi() {
         String configured = System.getenv("OPENKACHE_CLIENT_NATIVE");
         try {
             return Native.load(
                 configured == null || configured.isBlank()
                     ? "openkache_client_core"
                     : configured,
-                NativeApi.class);
+                SmithyNativeApi.class);
         } catch (UnsatisfiedLinkError error) {
             throw new EchoClientException("failed to load OpenKache native client", error);
         }
@@ -619,7 +521,7 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
 
     private NamespaceDescriptor decodeDescriptor(byte[] payload) {
         try (NativeBuffer buffer = new NativeBuffer(payload)) {
-            NativeDescriptor nativeDescriptor = new NativeDescriptor();
+            SmithyNativeDescriptor nativeDescriptor = new SmithyNativeDescriptor();
             int status = nativeApi.openkache_client_namespace_descriptor_decode(
                 buffer.pointer(),
                 buffer.length(),
@@ -709,7 +611,7 @@ public final class EchoClient implements OpenKacheClient, AutoCloseable {
     }
 
     private static NativeResult readResult(
-        NativeApi nativeApi,
+        SmithyNativeApi nativeApi,
         Pointer result,
         boolean takeClient) {
         if (result == null) {

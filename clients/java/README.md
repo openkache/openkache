@@ -13,9 +13,10 @@ Run from the public repository root:
 mvn -f clients/java/pom.xml package
 ```
 
-Maven regenerates the Smithy-derived DTOs, complete operation signatures, and
-native constants before compiling the adapter. The generated sources live
-under `src/main/java/io/openkache/client/generated_local/` and are not edited
+Maven regenerates the Smithy-derived DTOs, complete operation signatures,
+native constants, JNA declarations, and the namespace descriptor layout before
+compiling the adapter. The generated sources live under
+`src/main/java/io/openkache/client/generated_local/` and are not edited
 manually.
 
 Build the native library with the `ffi` feature before connecting:
