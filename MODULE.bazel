@@ -73,6 +73,12 @@ crate.spec(
     package = "snmalloc-rs",
     version = "0.7.4",
 )
+crate.annotation(
+    crate = "snmalloc-sys",
+    version = "0.7.4",
+    patch_args = ["-p1"],
+    patches = ["//:bazel/snmalloc-sys-musl-runtime.patch"],
+)
 use_repo(crate, "crates")
 
 # glommio's vendored liburing declarations use `cpu_set_t`, which musl only

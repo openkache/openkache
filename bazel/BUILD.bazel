@@ -42,4 +42,8 @@ filegroup(
     }),
 )
 
-exports_files(["glommio-musl.patch", "openkache_defs.bzl"])
+exports_files([
+    "glommio-musl.patch",
+    "openkache_defs.bzl",
+    "snmalloc-sys-musl-runtime.patch",
+])
