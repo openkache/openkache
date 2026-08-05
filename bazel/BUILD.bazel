@@ -42,4 +42,4 @@ filegroup(
     }),
 )
 
-exports_files(["openkache_defs.bzl"])
+exports_files(["glommio-musl.patch", "openkache_defs.bzl"])

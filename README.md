@@ -36,6 +36,29 @@ The first production-grade Rust implementation of the state-of-the-art BCF53 Bre
 - **TLS 1.3 baked in**: Every connection is encrypted by default.
 - **Pluggable backends**: Choose between Quinn, Noq, or Quiche — swap with a feature flag.
 
+The server's network executor is selected at compile time. The four network
+runtime features are equal first-class options; `network-runtime-compio` is the
+default for compatibility with the standard build.
+
+| Network runtime feature | QUIC backends |
+| --- | --- |
+| `network-runtime-compio` | `quic-noq`, `quic-quinn`, `quic-quiche` |
+| `network-runtime-monoio` | `quic-quiche` |
+| `network-runtime-glommio` | `quic-quiche` |
+| `network-runtime-kimojio` | `quic-quiche` |
+
+Enable exactly one `network-runtime-*` feature. `quiche` is runtime-neutral:
+its UDP, timer, and task integration uses the network-runtime adapter.
+`quinn` and `noq` retain their Compio-native stream implementations and
+therefore require `network-runtime-compio`. The existing `quic.backend`
+configuration (or `--quic-backend` selection) remains unchanged.
+
+Network and storage workers share a combined worker and its io_uring ring only
+when both selected runtimes have the same name and support combined roles
+(currently Compio, Monoio, and Kimojio). If the runtime kinds differ, startup
+rejects overlapping network/storage CPUs and uses separate runtime instances
+and rings instead.
+
 ### 🔒 End-to-end encryption
 
 Secure clients compress values and encrypt them with XChaCha20-Poly1305 before

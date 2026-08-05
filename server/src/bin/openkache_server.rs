@@ -77,35 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(plan) = &sizing_plan {
         sizing::print_plan(plan);
     }
-    let runtime = openkache::build_server_runtime().map_err(runtime_initialization_error)?;
-    require_native_driver(runtime.driver_type())?;
-    runtime.block_on(serve::run(arguments, config))
-}
-
-#[cfg(target_os = "linux")]
-fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<()> {
-    if driver.is_iouring() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(format!(
-            "openkache-server cannot start: the network runtime fell back \
-                 to polling because Linux io_uring could not be initialized. Required \
-                 syscalls: io_uring_setup, io_uring_enter, io_uring_register. {}",
-            io_uring_kernel_hint()
-        )))
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn require_native_driver(driver: compio::driver::DriverType) -> std::io::Result<()> {
-    if driver.is_polling() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other(
-            "openkache-server requires the network runtime's polling driver \
-             on Apple Silicon macOS",
-        ))
-    }
+    openkache::block_on(serve::run(arguments, config)).map_err(runtime_initialization_error)?
 }
 
 #[cfg(target_os = "linux")]
@@ -124,8 +96,8 @@ fn runtime_initialization_error(error: io::Error) -> io::Error {
     io::Error::new(
         error.kind(),
         format!(
-            "openkache-server cannot start: the network runtime requires \
-             Linux io_uring ({error}); {cause}. \
+            "openkache-server cannot start: the selected network runtime \
+             requires Linux io_uring ({error}); {cause}. \
              Required syscalls: io_uring_setup, io_uring_enter, io_uring_register. \
              {}",
             io_uring_kernel_hint()
@@ -151,8 +123,8 @@ fn io_uring_kernel_hint() -> String {
     };
     format!(
         "Detected Linux kernel {release}; Linux 5.1 is the minimum io_uring syscall \
-         baseline. {recommendation} The server attempted the requested Compio \
-         driver directly; the exact failed operation and errno are reported above. \
+         baseline. {recommendation} The server attempted the selected network runtime \
+         directly; the exact failed operation and errno are reported above. \
          Kernel version alone is not sufficient: also check the container seccomp \
          policy, CONFIG_IO_URING, /proc/sys/kernel/io_uring_disabled (0 enables \
          io_uring), and the process's io_uring permissions."

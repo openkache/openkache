@@ -37,18 +37,6 @@ pub(crate) struct CompioRuntimeConfig {
 }
 
 impl CompioRuntimeConfig {
-    pub(crate) fn network(entries: u32, event_interval: usize, worker_cpu: Option<usize>) -> Self {
-        Self {
-            entries,
-            event_interval,
-            worker_cpu,
-            sqpoll: false,
-            sqpoll_cpu: None,
-            driver: native_compio_driver(),
-            role: "network",
-        }
-    }
-
     #[cfg_attr(not(feature = "storage-runtime-compio"), allow(dead_code))]
     pub(crate) fn storage(
         entries: u32,

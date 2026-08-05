@@ -1,0 +1,17 @@
+--- glommio-0.9.0/src/executor/stall.rs
++++ glommio-0.9.0/src/executor/stall.rs
+@@ -172,11 +172,9 @@ impl StallDetector {
+-        struct SendWrapper(libc::pthread_t);
+-        unsafe impl Send for SendWrapper {}
+-        let tid = SendWrapper(unsafe { nix::libc::pthread_self() });
+-        std::thread::spawn(enclose::enclose! { (terminated, timer) move || {
++        let tid = unsafe { nix::libc::pthread_self() as usize };
++        std::thread::spawn(enclose::enclose! { (terminated, timer, tid) move || {
+             while timer.wait().is_ok() {
+                 if terminated.load(Ordering::Relaxed) {
+                     return
+                 }
+-                unsafe { nix::libc::pthread_kill(tid.0, signal) };
++                unsafe { nix::libc::pthread_kill(tid as libc::pthread_t, signal) };
+             }
+         }})

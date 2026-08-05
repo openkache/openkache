@@ -159,7 +159,9 @@ pub(crate) fn cpu_assignment_error(_role: &str, _expected_cpu: usize) -> Option<
     target_os = "linux",
     any(
         feature = "storage-runtime-kimojio",
-        feature = "storage-runtime-monoio"
+        feature = "storage-runtime-monoio",
+        feature = "network-runtime-kimojio",
+        feature = "network-runtime-monoio"
     )
 ))]
 pub(crate) fn pin_current_thread(cpu_id: usize) -> std::io::Result<()> {

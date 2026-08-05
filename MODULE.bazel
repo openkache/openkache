@@ -32,7 +32,7 @@ crate.from_cargo(
     cargo_lockfile = "//:Cargo.lock",
     lockfile = "//:Cargo.Bazel.lock",
     manifests = ["//:Cargo.toml"],
-    skip_cargo_lockfile_overwrite = True,
+    skip_cargo_lockfile_overwrite = False,
 )
 # Keep optional server feature variants available to the Bazel graph. Cargo's
 # default workspace selection omits these crates even though the locked
@@ -46,6 +46,7 @@ crate.spec(
     package = "kimojio",
     version = "0.17.0",
 )
+crate.spec(package = "glommio", version = "0.9.0")
 crate.spec(package = "mimalloc", version = "0.1.52")
 crate.spec(
     default_features = False,
@@ -61,11 +62,42 @@ crate.spec(
 )
 crate.spec(
     default_features = False,
+    features = ["io_uring"],
+    package = "rustix",
+    version = "1.1.4",
+)
+crate.spec(package = "signal-hook", version = "0.4.4")
+crate.spec(
+    default_features = False,
     features = ["build_cc", "usewait-on-address"],
     package = "snmalloc-rs",
     version = "0.7.4",
 )
 use_repo(crate, "crates")
+
+# glommio's vendored liburing declarations use `cpu_set_t`, which musl only
+# exposes when GNU extensions are enabled. Keep the build-script environment
+# explicit so the Bazel musl graph matches Cargo's Linux build.
+crate.annotation(
+    crate = "glommio",
+    version = "0.9.0",
+    build_script_env = {
+        "CFLAGS": "-D_GNU_SOURCE -U_FORTIFY_SOURCE",
+    },
+    patch_args = ["-p1"],
+    patches = ["//:bazel/glommio-musl.patch"],
+)
+
+# Bazel's musl target does not synthesize Cargo's unstable libc cfg
+# environment variable. libc's build script needs it to expose the Linux
+# statx ABI consumed by Monoio.
+crate.annotation(
+    crate = "libc",
+    version = "0.2.189",
+    build_script_env = {
+        "CARGO_CFG_LIBC_UNSTABLE_MUSL_V1_2_3": "1",
+    },
+)
 
 # The protocol build script invokes the checked-in Bun/Smithy generators.
 # Archives are fetched lazily for the selected host platform.

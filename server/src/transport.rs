@@ -10,15 +10,11 @@ use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use compio::BufResult;
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use compio::buf::{IntoInner, IoBuf};
-#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-use compio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use openkache_protocol::Request;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
+use crate::network_runtime;
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
@@ -78,7 +74,7 @@ impl ServerEndpoint {
         }
     }
 
-    /// Binds the selected implementation to a Compio UDP socket.
+    /// Binds the selected implementation to the caller's UDP socket.
     pub(super) async fn bind(
         backend: QuicBackend,
         socket: std::net::UdpSocket,
@@ -277,7 +273,7 @@ impl RequestBudget {
         {
             return Err(StreamReadError::TooLarge);
         }
-        compio::runtime::time::timeout(
+        network_runtime::timeout(
             timeout,
             RequestBudgetAcquire {
                 inner: Arc::clone(&self.inner),
@@ -365,24 +361,36 @@ impl Drop for RequestBudgetPermit {
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
-async fn read_buffered_request(
-    stream: &mut impl AsyncRead,
+trait RequestByteStream {
+    fn read_chunk<'a>(
+        &'a mut self,
+        capacity: usize,
+        backend: &'static str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>>;
+}
+
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+async fn read_buffered_request<S: RequestByteStream>(
+    stream: &mut S,
     backend: &'static str,
     maximum: usize,
     maximum_value: usize,
     timeout: Duration,
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
-    let header = Vec::with_capacity(1).slice(..1);
-    let BufResult(result, header) =
-        compio::runtime::time::timeout(timeout, stream.read_exact(header))
-            .await
-            .map_err(|_| StreamReadError::Timeout)?;
-    result.map_err(|error| TransportError::backend(backend, "stream header read", error))?;
-
-    let frame = header.into_inner();
-    let (frame, header) = compio::runtime::time::timeout(timeout, async {
-        let mut frame = frame;
+    let first = network_runtime::timeout(timeout, stream.read_chunk(1, backend))
+        .await
+        .map_err(|_| StreamReadError::Timeout)?
+        .map_err(StreamReadError::Transport)?;
+    if first.is_empty() {
+        return Err(StreamReadError::Transport(TransportError::backend(
+            backend,
+            "stream header read",
+            "stream ended before a request frame",
+        )));
+    }
+    let (frame, header) = network_runtime::timeout(timeout, async {
+        let mut frame = first;
         loop {
             if let Some(header) = Request::decode_header(&frame)? {
                 break Ok::<_, StreamReadError>((frame, header));
@@ -390,12 +398,18 @@ async fn read_buffered_request(
             if frame.len() >= maximum {
                 return Err(StreamReadError::TooLarge);
             }
-            let start = frame.len();
-            frame.reserve(1);
-            let BufResult(result, next) = stream.read_exact(frame.slice(start..start + 1)).await;
-            result
-                .map_err(|error| TransportError::backend(backend, "stream header read", error))?;
-            frame = next.into_inner();
+            let next = stream
+                .read_chunk(1, backend)
+                .await
+                .map_err(StreamReadError::Transport)?;
+            if next.is_empty() {
+                return Err(StreamReadError::Transport(TransportError::backend(
+                    backend,
+                    "stream header read",
+                    "stream ended before request header completed",
+                )));
+            }
+            frame.extend_from_slice(&next);
         }
     })
     .await
@@ -403,7 +417,7 @@ async fn read_buffered_request(
     if header.value_len() > maximum_value {
         return Err(StreamReadError::TooLarge);
     }
-    let (mut frame, frame_len) = compio::runtime::time::timeout(timeout, async {
+    let (mut frame, frame_len) = network_runtime::timeout(timeout, async {
         let mut frame = frame;
         loop {
             if let Some(frame_len) = header.frame_len(&frame)? {
@@ -412,12 +426,18 @@ async fn read_buffered_request(
             if frame.len() >= maximum {
                 return Err(StreamReadError::TooLarge);
             }
-            let start = frame.len();
-            frame.reserve(1);
-            let BufResult(result, next) = stream.read_exact(frame.slice(start..start + 1)).await;
-            result
-                .map_err(|error| TransportError::backend(backend, "stream metadata read", error))?;
-            frame = next.into_inner();
+            let next = stream
+                .read_chunk(1, backend)
+                .await
+                .map_err(StreamReadError::Transport)?;
+            if next.is_empty() {
+                return Err(StreamReadError::Transport(TransportError::backend(
+                    backend,
+                    "stream metadata read",
+                    "stream ended before request metadata completed",
+                )));
+            }
+            frame.extend_from_slice(&next);
         }
     })
     .await
@@ -426,53 +446,38 @@ async fn read_buffered_request(
         return Err(StreamReadError::TooLarge);
     }
     let permit = budget.acquire(header.value_len(), timeout).await?;
-    let body_start = frame.len();
-    if body_start == frame_len {
-        let probe = Vec::with_capacity(1).slice(..1);
-        let has_trailing_bytes =
-            match compio::runtime::time::timeout(Duration::ZERO, stream.read(probe)).await {
-                Err(_) => false,
-                Ok(BufResult(result, _)) => {
-                    let bytes = result.map_err(|error| {
-                        TransportError::backend(backend, "trailing-byte probe", error)
-                    })?;
-                    bytes != 0
-                }
-            };
-        return Ok(RequestFrame::with_trailing_bytes(
-            frame,
-            permit,
-            has_trailing_bytes,
-        ));
-    }
-
-    frame.reserve(frame_len - body_start);
-    let BufResult(result, body) = compio::runtime::time::timeout(
-        timeout,
-        stream.read_exact(frame.slice(body_start..frame_len)),
-    )
+    let body = network_runtime::timeout(timeout, async {
+        while frame.len() < frame_len {
+            let next = stream
+                .read_chunk(frame_len - frame.len(), backend)
+                .await
+                .map_err(StreamReadError::Transport)?;
+            if next.is_empty() {
+                return Err(StreamReadError::Transport(TransportError::backend(
+                    backend,
+                    "stream body read",
+                    "stream ended before request body completed",
+                )));
+            }
+            frame.extend_from_slice(&next);
+        }
+        Ok::<_, StreamReadError>(frame)
+    })
     .await
-        .map_err(|_| StreamReadError::Timeout)?;
-    result.map_err(|error| TransportError::backend(backend, "stream body read", error))?;
-    let frame = body.into_inner();
-    // `read_exact` intentionally stops at the declared frame boundary. Probe the
-    // backend's already-readable bytes once so a client that pipelined a second
+    .map_err(|_| StreamReadError::Timeout)??;
+    // Probe the backend's already-readable bytes once so a client that pipelined a second
     // request cannot make us interpret that request after the first response.
     // The zero-duration timeout is non-blocking: when no byte is buffered the
     // receive future is cancelled and the lane remains reusable.
-    let probe = Vec::with_capacity(1).slice(..1);
-    let has_trailing_bytes = match compio::runtime::time::timeout(Duration::ZERO, stream.read(probe))
-        .await
-    {
-        Err(_) => false,
-        Ok(BufResult(result, _)) => {
-            let bytes = result
-                .map_err(|error| TransportError::backend(backend, "trailing-byte probe", error))?;
-            bytes != 0
-        }
-    };
+    let has_trailing_bytes =
+        match network_runtime::timeout(Duration::ZERO, stream.read_chunk(1, backend)).await {
+            Err(_) => false,
+            Ok(result) => !result
+                .map_err(StreamReadError::Transport)?
+                .is_empty(),
+        };
     Ok(RequestFrame::with_trailing_bytes(
-        frame,
+        body,
         permit,
         has_trailing_bytes,
     ))
@@ -548,6 +553,8 @@ fn tls_config(material: &ServerTlsConfig) -> Result<rustls::ServerConfig, rustls
 #[cfg(feature = "quic-quinn")]
 mod quinn_backend {
     use super::*;
+    use compio::BufResult;
+    use compio::io::AsyncWriteExt;
 
     const NAME: &str = "quinn";
 
@@ -643,6 +650,25 @@ mod quinn_backend {
 
     pub(crate) struct ReceiveStream(compio_quic::RecvStream);
 
+    impl super::RequestByteStream for ReceiveStream {
+        fn read_chunk<'a>(
+            &'a mut self,
+            capacity: usize,
+            backend: &'static str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>> {
+            Box::pin(async move {
+                use compio::io::AsyncRead;
+
+                let buffer = vec![0_u8; capacity.max(1)];
+                let compio::BufResult(result, mut buffer) = self.0.read(buffer).await;
+                let read = result
+                    .map_err(|error| TransportError::backend(backend, "stream read", error))?;
+                buffer.truncate(read);
+                Ok(buffer)
+            })
+        }
+    }
+
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
             &mut self,
@@ -651,7 +677,7 @@ mod quinn_backend {
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, maximum_value, timeout, budget).await
+            read_buffered_request(self, NAME, maximum, maximum_value, timeout, budget).await
         }
     }
 
@@ -663,12 +689,9 @@ mod quinn_backend {
             frame: Vec<u8>,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            let BufResult(result, _) =
-                compio::runtime::time::timeout(timeout, self.0.write_all(frame))
-                    .await
-                    .map_err(|error| {
-                        TransportError::backend(NAME, "stream write timeout", error)
-                    })?;
+            let BufResult(result, _) = network_runtime::timeout(timeout, self.0.write_all(frame))
+                .await
+                .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
             result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
             Ok(())
         }
@@ -678,6 +701,8 @@ mod quinn_backend {
 #[cfg(feature = "quic-noq")]
 mod noq_backend {
     use super::*;
+    use compio::BufResult;
+    use compio::io::AsyncWriteExt;
 
     const NAME: &str = "noq";
 
@@ -773,6 +798,25 @@ mod noq_backend {
 
     pub(crate) struct ReceiveStream(comnoq::RecvStream);
 
+    impl super::RequestByteStream for ReceiveStream {
+        fn read_chunk<'a>(
+            &'a mut self,
+            capacity: usize,
+            backend: &'static str,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>> {
+            Box::pin(async move {
+                use compio::io::AsyncRead;
+
+                let buffer = vec![0_u8; capacity.max(1)];
+                let compio::BufResult(result, mut buffer) = self.0.read(buffer).await;
+                let read = result
+                    .map_err(|error| TransportError::backend(backend, "stream read", error))?;
+                buffer.truncate(read);
+                Ok(buffer)
+            })
+        }
+    }
+
     impl super::ReceiveStream for ReceiveStream {
         async fn read_request(
             &mut self,
@@ -781,7 +825,7 @@ mod noq_backend {
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            read_buffered_request(&mut self.0, NAME, maximum, maximum_value, timeout, budget).await
+            read_buffered_request(self, NAME, maximum, maximum_value, timeout, budget).await
         }
     }
 
@@ -793,12 +837,9 @@ mod noq_backend {
             frame: Vec<u8>,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            let BufResult(result, _) =
-                compio::runtime::time::timeout(timeout, self.0.write_all(frame))
-                    .await
-                    .map_err(|error| {
-                        TransportError::backend(NAME, "stream write timeout", error)
-                    })?;
+            let BufResult(result, _) = network_runtime::timeout(timeout, self.0.write_all(frame))
+                .await
+                .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
             result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
             Ok(())
         }
@@ -813,9 +854,7 @@ mod quiche_backend {
     use boring::ssl::{SslContextBuilder, SslMethod, SslVerifyMode};
     use boring::x509::X509;
     use boring::x509::store::X509StoreBuilder;
-    use compio::buf::{IntoInner, IoBuf};
-    use compio::runtime::JoinHandle;
-    use futures_util::{FutureExt, StreamExt, pin_mut, select};
+    use futures_util::{FutureExt, pin_mut, select};
     use smallvec::SmallVec;
 
     use super::*;
@@ -833,7 +872,7 @@ mod quiche_backend {
     pub(crate) struct Endpoint {
         incoming: AsyncReceiver<Incoming>,
         commands: Sender<Command>,
-        driver: JoinHandle<Result<(), TransportError>>,
+        driver: AsyncReceiver<Result<(), TransportError>>,
     }
 
     impl Endpoint {
@@ -842,7 +881,7 @@ mod quiche_backend {
             material: Arc<ServerTlsConfig>,
             max_concurrent_streams: usize,
         ) -> Result<Self, TransportError> {
-            let socket = compio::net::UdpSocket::from_std(socket)
+            let socket = network_runtime::UdpSocket::from_std(socket)
                 .map_err(|error| TransportError::backend(NAME, "socket initialization", error))?;
             let local_address = socket
                 .local_addr()
@@ -851,25 +890,35 @@ mod quiche_backend {
             let (incoming_sender, incoming) = channel::unbounded_async();
             let (commands, command_receiver) = channel::unbounded_async();
             let driver_commands = commands.clone();
-            let driver = compio::runtime::spawn(async move {
-                Driver {
-                    socket,
-                    local_address,
-                    config,
-                    incoming: incoming_sender,
-                    command_sender: driver_commands,
-                    commands: Some(command_receiver),
-                    routes: HashMap::new(),
-                    clients: HashMap::new(),
-                    output_buffer: vec![0_u8; MAX_DATAGRAM_BYTES],
-                }
-                .run()
+            let (driver_done_sender, driver_done) =
+                channel::bounded_sync_async::<Result<(), TransportError>>(1);
+            network_runtime::spawn_detached(async move {
+                let result = std::panic::AssertUnwindSafe(
+                    Driver {
+                        socket,
+                        local_address,
+                        config,
+                        incoming: incoming_sender,
+                        command_sender: driver_commands,
+                        commands: Some(command_receiver),
+                        routes: HashMap::new(),
+                        clients: HashMap::new(),
+                        output_buffer: vec![0_u8; MAX_DATAGRAM_BYTES],
+                    }
+                    .run(),
+                )
+                .catch_unwind()
                 .await
+                .map_err(|panic| {
+                    TransportError::backend(NAME, "driver task", format!("panic: {panic:?}"))
+                })
+                .and_then(|result| result);
+                let _ = driver_done_sender.try_send(result);
             });
             Ok(Self {
                 incoming,
                 commands,
-                driver,
+                driver: driver_done,
             })
         }
     }
@@ -878,7 +927,7 @@ mod quiche_backend {
         type Incoming = Incoming;
 
         async fn wait_incoming(&self) -> Option<Self::Incoming> {
-            self.incoming.recv_async().await.ok()
+            self.incoming.recv_async_network().await.ok()
         }
 
         fn close(&self, reason: &[u8]) {
@@ -886,15 +935,12 @@ mod quiche_backend {
         }
 
         async fn shutdown(self) -> Result<(), TransportError> {
-            let _ = self.commands.send_async(Command::Shutdown).await;
-            match self.driver.await {
-                Ok(result) => result,
-                Err(error) => Err(TransportError::backend(
-                    NAME,
-                    "driver task",
-                    format!("{error:?}"),
-                )),
-            }
+            let _ = self.commands.send_async_network(Command::Shutdown).await;
+            network_runtime::timeout(Duration::from_secs(5), self.driver.recv_async_network())
+                .await
+                .map_err(|_| TransportError::backend(NAME, "driver task", "shutdown timed out"))?
+                .map_err(|error| TransportError::backend(NAME, "driver task", error))
+                .and_then(|result| result)
         }
     }
 
@@ -928,7 +974,7 @@ mod quiche_backend {
         ) -> Result<(Self::SendStream, Self::ReceiveStream), TransportError> {
             let stream = self
                 .streams
-                .recv_async()
+                .recv_async_network()
                 .await
                 .map_err(|error| TransportError::backend(NAME, "stream accept", error))?;
             Ok((
@@ -965,7 +1011,7 @@ mod quiche_backend {
         async fn next_chunk(&self, operation: &'static str) -> Result<Vec<u8>, TransportError> {
             let chunk = self
                 .chunks
-                .recv_async()
+                .recv_async_network()
                 .await
                 .map_err(|error| TransportError::backend(NAME, operation, error))?;
             let _ = self.commands.try_send(Command::ResumeRequest {
@@ -984,7 +1030,7 @@ mod quiche_backend {
             timeout: Duration,
             budget: &RequestBudget,
         ) -> Result<RequestFrame, StreamReadError> {
-            compio::runtime::time::timeout(timeout, async {
+            network_runtime::timeout(timeout, async {
                 while self.buffered.is_empty() {
                     self.buffered = self.next_chunk("stream header read").await?;
                 }
@@ -993,7 +1039,7 @@ mod quiche_backend {
             .await
             .map_err(|_| StreamReadError::Timeout)?
             .map_err(StreamReadError::Transport)?;
-            let header = compio::runtime::time::timeout(timeout, async {
+            let header = network_runtime::timeout(timeout, async {
                 loop {
                     if let Some(header) = Request::decode_header(&self.buffered)? {
                         break Ok::<_, StreamReadError>(header);
@@ -1010,7 +1056,7 @@ mod quiche_backend {
             if header.value_len() > maximum_value {
                 return Err(StreamReadError::TooLarge);
             }
-            let frame_len = compio::runtime::time::timeout(timeout, async {
+            let frame_len = network_runtime::timeout(timeout, async {
                 loop {
                     if let Some(frame_len) = header.frame_len(&self.buffered)? {
                         break Ok::<_, StreamReadError>(frame_len);
@@ -1028,7 +1074,7 @@ mod quiche_backend {
                 return Err(StreamReadError::TooLarge);
             }
             let permit = budget.acquire(header.value_len(), timeout).await?;
-            compio::runtime::time::timeout(timeout, async {
+            network_runtime::timeout(timeout, async {
                 while self.buffered.len() < frame_len {
                     let chunk = self.next_chunk("stream body read").await?;
                     self.buffered.extend_from_slice(&chunk);
@@ -1075,7 +1121,7 @@ mod quiche_backend {
         ) -> Result<(), TransportError> {
             let (reply, response) = channel::bounded_sync_async(1);
             self.commands
-                .send_async(Command::SendResponse {
+                .send_async_network(Command::SendResponse {
                     connection_id: self.connection_id.clone(),
                     stream_id: self.stream_id,
                     frame,
@@ -1083,9 +1129,9 @@ mod quiche_backend {
                 })
                 .await
                 .map_err(|error| TransportError::backend(NAME, "stream write", error))?;
-            let result = compio::runtime::time::timeout(timeout, response.recv_async())
+            let result = network_runtime::timeout(timeout, response.recv_async_network())
                 .await
-                .map_err(|error| TransportError::backend(NAME, "stream write timeout", error))?
+                .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?
                 .map_err(|error| TransportError::backend(NAME, "stream write", error))?;
             result.map_err(|message| TransportError::backend(NAME, "stream write", message))
         }
@@ -1131,7 +1177,7 @@ mod quiche_backend {
     }
 
     struct Driver {
-        socket: compio::net::UdpSocket,
+        socket: network_runtime::UdpSocket,
         local_address: SocketAddr,
         config: quiche::Config,
         incoming: Sender<Incoming>,
@@ -1144,25 +1190,39 @@ mod quiche_backend {
 
     impl Driver {
         async fn run(mut self) -> Result<(), TransportError> {
-            let receive_socket = self.socket.clone();
-            let mut packets = Box::pin(receive_socket.recv_from_multi());
+            let mut packets = self.socket.receiver();
+            let datagram_capability = packets.capability();
             let commands = self
                 .commands
                 .take()
                 .expect("QUIC driver command receiver is present");
             loop {
-                let packet = packets.next().fuse();
-                let command = commands.recv_async().fuse();
-                let timeout = compio::runtime::time::sleep(
+                let packet_batch = packets.recv_batch().fuse();
+                let command = commands.recv_async_network().fuse();
+                let timeout = network_runtime::sleep(
                     self.next_timeout()
                         .unwrap_or_else(|| Duration::from_secs(86_400)),
                 )
                 .fuse();
-                pin_mut!(packet, command, timeout);
+                pin_mut!(packet_batch, command, timeout);
 
                 let mut shutting_down = false;
                 select! {
-                    packet = packet => self.receive_packet(packet)?,
+                    packet_batch = packet_batch => {
+                        let packet_batch = packet_batch
+                            .map_err(|error| TransportError::backend(NAME, "receive", error))?;
+                        if datagram_capability
+                            == network_runtime::DatagramCapability::Single
+                        {
+                            debug_assert!(
+                                packet_batch.len() <= 1,
+                                "single-datagram runtime returned a batch"
+                            );
+                        }
+                        for packet in packet_batch {
+                            self.receive_packet(packet)?;
+                        }
+                    },
                     command = command => {
                         let Ok(command) = command else {
                             break;
@@ -1195,18 +1255,11 @@ mod quiche_backend {
 
         fn receive_packet(
             &mut self,
-            packet: Option<std::io::Result<compio::driver::op::RecvFromMultiResult>>,
+            mut packet: network_runtime::Datagram,
         ) -> Result<(), TransportError> {
-            let packet = packet
-                .ok_or_else(|| {
-                    TransportError::backend(NAME, "receive", "UDP receive stream ended")
-                })?
-                .map_err(|error| TransportError::backend(NAME, "receive", error))?;
-            let Some(peer_address) = packet.addr().and_then(|address| address.as_socket()) else {
-                return Ok(());
-            };
-            let mut datagram = packet.data().to_vec();
-            let header = match quiche::Header::from_slice(&mut datagram, quiche::MAX_CONN_ID_LEN) {
+            let peer_address = packet.address();
+            let datagram = packet.payload_mut();
+            let header = match quiche::Header::from_slice(datagram, quiche::MAX_CONN_ID_LEN) {
                 Ok(header) => header,
                 Err(_) => return Ok(()),
             };
@@ -1228,7 +1281,7 @@ mod quiche_backend {
                 from: peer_address,
                 to: self.local_address,
             };
-            if client.connection.recv(&mut datagram, receive_info).is_err() {
+            if client.connection.recv(datagram, receive_info).is_err() {
                 return Ok(());
             }
             Ok(())
@@ -1367,14 +1420,26 @@ mod quiche_backend {
                 loop {
                     match client.connection.send(&mut output) {
                         Ok((written, information)) => {
-                            let BufResult(result, returned) = self
+                            let (written_count, returned) = self
                                 .socket
-                                .send_to(output.slice(..written), information.to)
-                                .await;
-                            output = returned.into_inner();
-                            result.map_err(|error| {
-                                TransportError::backend(NAME, "packet send", error)
-                            })?;
+                                .send_to(output, written, information.to)
+                                .await
+                                .map_err(|error| {
+                                    TransportError::backend(NAME, "packet send", error)
+                                })?;
+                            output = returned;
+                            if output.len() < MAX_DATAGRAM_BYTES {
+                                output.resize(MAX_DATAGRAM_BYTES, 0);
+                            }
+                            if written_count != written {
+                                return Err(TransportError::backend(
+                                    NAME,
+                                    "packet send",
+                                    format!(
+                                        "UDP send was partial: wrote {written_count} of {written} bytes"
+                                    ),
+                                ));
+                            }
                         }
                         Err(quiche::Error::Done) => break,
                         Err(_) => {

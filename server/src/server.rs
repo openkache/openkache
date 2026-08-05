@@ -26,6 +26,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
+use crate::network_runtime;
 use crate::platform::StorageDeviceKind;
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
@@ -53,6 +54,7 @@ pub(crate) struct NetworkWorkerHandle {
 }
 
 pub(crate) struct NetworkRolePlacement {
+    worker_index: usize,
     cpu_id: usize,
     thread_name: String,
     entries: u32,
@@ -62,6 +64,7 @@ pub(crate) struct NetworkRolePlacement {
 
 impl NetworkRolePlacement {
     pub(crate) fn new(
+        worker_index: usize,
         cpu_id: usize,
         thread_name: String,
         entries: u32,
@@ -69,6 +72,7 @@ impl NetworkRolePlacement {
         stop: Sender<()>,
     ) -> Self {
         Self {
+            worker_index,
             cpu_id,
             thread_name,
             entries,
@@ -188,6 +192,7 @@ where
     Fut: Future<Output = Option<std::result::Result<(), String>>> + 'static,
 {
     let NetworkRolePlacement {
+        worker_index,
         cpu_id,
         thread_name,
         entries,
@@ -199,7 +204,7 @@ where
     if cache.can_run_on_storage_cpu(cpu_id) {
         let attached = cache.run_on_storage_cpu(cpu_id, move || {
             let task_reporter = NetworkTaskReporter::new(worker_id, finished);
-            compio::runtime::spawn(run_network_role_task(task_reporter, reporter, role)).detach();
+            network_runtime::spawn_detached(run_network_role_task(task_reporter, reporter, role));
         })?;
         if !attached {
             return Err(ServerError::NetworkWorker(format!(
@@ -213,21 +218,17 @@ where
         .name(thread_name)
         .spawn(move || {
             let task_reporter = NetworkTaskReporter::new(worker_id, finished);
-            let runtime = match crate::storage_runtime::build(
-                crate::storage_runtime::CompioRuntimeConfig::network(
+            if let Err(error) = network_runtime::run(
+                network_runtime::RuntimeConfig {
                     entries,
                     event_interval,
-                    Some(cpu_id),
-                ),
+                    cpu_id: Some(cpu_id),
+                    worker_index: Some(worker_index),
+                },
+                run_network_role_task(task_reporter, reporter, role),
             ) {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    reporter.startup_failed(error.to_string());
-                    task_reporter.finish(Ok(()));
-                    return;
-                }
-            };
-            runtime.block_on(run_network_role_task(task_reporter, reporter, role));
+                eprintln!("network worker {worker_id} runtime failed: {error}");
+            }
         })?;
     Ok(NetworkWorkerHandle {
         stop,
@@ -1191,6 +1192,7 @@ impl KacheServer {
             match launch_network_role(
                 &cache,
                 NetworkRolePlacement::new(
+                    worker_id,
                     cpu_id,
                     format!("openkache-network-{worker_id}"),
                     entries,
@@ -1231,7 +1233,7 @@ impl KacheServer {
         }
 
         let shutdown = shutdown.fuse();
-        let worker_finished = finished_rx.recv_async().fuse();
+        let worker_finished = finished_rx.recv_async_network().fuse();
         pin_mut!(shutdown, worker_finished);
         let (worker_failure, completed_workers) = select! {
             () = shutdown => (None, 0),
@@ -1341,7 +1343,7 @@ pub(crate) async fn shutdown_network_workers_and_cache(
     }
     let mut network_failure = None;
     for _ in 0..remaining_completions {
-        match finished.recv_async().await {
+        match finished.recv_async_network().await {
             Ok((_worker_id, Ok(()))) => {}
             Ok((worker_id, Err(message))) => {
                 network_failure.get_or_insert_with(|| {
@@ -1443,7 +1445,7 @@ async fn run_network_worker<E: TransportEndpoint>(
     loop {
         if connections.is_empty() {
             let incoming = endpoint.wait_incoming().fuse();
-            let stopping = stop.recv_async().fuse();
+            let stopping = stop.recv_async_network().fuse();
             pin_mut!(incoming, stopping);
             select! {
                 incoming = incoming => {
@@ -1458,7 +1460,7 @@ async fn run_network_worker<E: TransportEndpoint>(
         } else {
             let incoming = endpoint.wait_incoming().fuse();
             let completed = connections.next().fuse();
-            let stopping = stop.recv_async().fuse();
+            let stopping = stop.recv_async_network().fuse();
             pin_mut!(incoming, completed, stopping);
             select! {
                 incoming = incoming => {
@@ -1648,7 +1650,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 } else {
                     None
                 };
-                match compio::runtime::time::timeout(
+                match network_runtime::timeout(
                     request_timeout,
                     execute_request(cache, request, administrator, namespaces.as_ref()),
                 )
