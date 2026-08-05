@@ -174,6 +174,12 @@ pub struct NamespaceDescriptor {
 impl NamespaceDescriptor {
     /// Encodes the descriptor payload returned by namespace-management requests.
     pub fn encode(self) -> Result<Vec<u8>> {
+        if self.namespace_id == 0 {
+            return Err(ProtocolError::InvalidNamespaceId);
+        }
+        if self.revision == 0 {
+            return Err(ProtocolError::InvalidRevision);
+        }
         let mut payload =
             Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
         payload.extend_from_slice(&self.namespace_id.to_be_bytes());

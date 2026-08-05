@@ -840,6 +840,7 @@ impl<C: ClientConnection> Core<C> {
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
         let opcode = request.opcode;
+        let create_if_missing = request.create_if_missing;
         let mut stream = connection
             .acquire_lane(deadline)
             .await
@@ -867,7 +868,9 @@ impl<C: ClientConnection> Core<C> {
         // violation; the lane must be discarded even when the QUIC connection remains
         // usable. This also prevents a malformed success from being mistaken for a
         // definitive mutation result.
-        if let Err(error) = validate_response_contract(opcode, &response) {
+        if let Err(error) =
+            validate_response_contract(opcode, create_if_missing, &response)
+        {
             return Err(RequestFailure::after_response(error));
         }
         // Error responses may be emitted while the server is still parsing a request,
@@ -1639,7 +1642,11 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_response_contract(opcode: Opcode, response: &Response) -> Result<()> {
+fn validate_response_contract(
+    opcode: Opcode,
+    create_if_missing: bool,
+    response: &Response,
+) -> Result<()> {
     let operation = operation(opcode);
     if response.status.is_error() {
         let applicable = match response.status {
@@ -1692,6 +1699,14 @@ fn validate_response_contract(opcode: Opcode, response: &Response) -> Result<()>
             message: message.into(),
         })
     };
+    let descriptor_payload = || {
+        NamespaceDescriptor::decode(&response.payload).map(|_| ()).map_err(|error| {
+            Error::UnexpectedResponse {
+                operation,
+                message: format!("namespace descriptor is invalid: {error}"),
+            }
+        })
+    };
     match (opcode, response.status) {
         (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
         (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
@@ -1726,15 +1741,9 @@ fn validate_response_contract(opcode: Opcode, response: &Response) -> Result<()>
             invalid_payload("SYNC success responses must have an empty payload")
         }
 
-        (Opcode::NamespaceOpen, Status::Ok | Status::Created)
-        | (Opcode::NamespaceUpdatePolicy, Status::Ok) => {
-            NamespaceDescriptor::decode(&response.payload).map(|_| ()).map_err(|error| {
-                Error::UnexpectedResponse {
-                    operation,
-                    message: format!("namespace descriptor is invalid: {error}"),
-                }
-            })
-        }
+        (Opcode::NamespaceOpen, Status::Ok) => descriptor_payload(),
+        (Opcode::NamespaceOpen, Status::Created) if create_if_missing => descriptor_payload(),
+        (Opcode::NamespaceUpdatePolicy, Status::Ok) => descriptor_payload(),
         (Opcode::NamespaceDelete, Status::Deleted) if response.payload.is_empty() => Ok(()),
         (Opcode::NamespaceDelete, Status::Deleted) => {
             invalid_payload("NAMESPACE_DELETE success responses must have an empty payload")

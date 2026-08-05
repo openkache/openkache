@@ -1215,10 +1215,6 @@ impl Kvkache {
         previous_location: Option<TableLocation>,
         previous_mutable_value: Option<MutableValueHandle>,
     ) -> Result<Option<MutablePlacement>> {
-        // A pending SET may wait behind capacity work. Resolve its relative TTL
-        // only when an append is actually admitted, so the deadline starts at
-        // the mutation linearization point rather than at request admission.
-        let expires_at_ms = ttl_deadline(ttl_ms)?;
         let large = value.len() > self.config.large_value_threshold
             || value.len() > self.config.blob_segment_size;
         let blob = !large && value.len() > BLOB_ITEM_THRESHOLD_BYTES;
@@ -1229,15 +1225,16 @@ impl Kvkache {
         } else {
             STORED_VALUE_TAG_BYTES + value.len()
         };
+        let has_expiration = ttl_ms.is_some();
         for lane in 0..self.mutable.len() {
             let Some(generation) = self.mutable[lane].as_mut() else {
                 continue;
             };
             let fixed_item_bytes = ITEM_FIXED_BYTES
-                + if expires_at_ms == 0 {
-                    0
-                } else {
+                + if has_expiration {
                     ITEM_EXPIRATION_BYTES
+                } else {
+                    0
                 }
                 + encoded_len;
             let previous_in_generation =
@@ -1249,7 +1246,7 @@ impl Kvkache {
                     previous_location,
                     storage_key,
                     value,
-                    expires_at_ms,
+                    ttl_ms,
                     eviction_protected,
                     large,
                     blob,
@@ -1271,6 +1268,16 @@ impl Kvkache {
             }
             let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
                 continue;
+            };
+            // Resolve the relative TTL immediately before the append. Capacity
+            // work may have delayed this pending SET, so the deadline must not
+            // start at request admission or while the value is being staged.
+            let expires_at_ms = match ttl_deadline(ttl_ms) {
+                Ok(expires_at_ms) => expires_at_ms,
+                Err(error) => {
+                    clear_mutable_value(generation, lane, staged.mutable_value);
+                    return Err(error);
+                }
             };
             let item = live_item(
                 storage_key,
@@ -2462,7 +2469,7 @@ fn try_replace_value_in_place(
     previous_location: TableLocation,
     storage_key: StorageKey,
     value: &[u8],
-    expires_at_ms: u64,
+    ttl_ms: Option<u64>,
     eviction_protected: bool,
     large: bool,
     blob: bool,
@@ -2524,6 +2531,9 @@ fn try_replace_value_in_place(
         _ => None,
     };
     if let Some((mutable_value, encoded)) = same_slot {
+        // This replacement is the mutation linearization point for the
+        // in-place path; resolve the relative TTL immediately before it.
+        let expires_at_ms = ttl_deadline(ttl_ms)?;
         let item = live_item(storage_key, encoded, expires_at_ms, eviction_protected);
         if generation.segment.replace(previous_location, item, true) {
             match (previous, mutable_value) {
@@ -2553,6 +2563,13 @@ fn try_replace_value_in_place(
 
     let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
         return Ok(InPlaceValue::NotReplaced);
+    };
+    let expires_at_ms = match ttl_deadline(ttl_ms) {
+        Ok(expires_at_ms) => expires_at_ms,
+        Err(error) => {
+            clear_mutable_value(generation, lane, staged.mutable_value);
+            return Err(error);
+        }
     };
     let item = live_item(
         storage_key,
