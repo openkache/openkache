@@ -718,10 +718,6 @@ async fn execute_raw(
             .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
         FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
         FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
-            "operation",
-            "exact item-ID calls do not support formatted JSON operations",
-        )),
         FfiOperation::NamespaceOpen
         | FfiOperation::NamespaceUpdatePolicy
         | FfiOperation::NamespaceDelete => Err(crate::Error::configuration(
@@ -779,13 +775,6 @@ async fn execute_scoped(
             .sync_in_namespace(namespace_id)
             .await
             .map(|()| ok_result()),
-        FfiOperation::Ping
-        | FfiOperation::Echo
-        | FfiOperation::GetJson
-        | FfiOperation::SetJson => Err(crate::Error::configuration(
-            "operation",
-            "operation is not available through the namespace-scoped exact-ID ABI",
-        )),
         FfiOperation::NamespaceOpen
         | FfiOperation::NamespaceUpdatePolicy
         | FfiOperation::NamespaceDelete
@@ -808,7 +797,6 @@ enum FfiInvocation {
 }
 
 fn validate_ffi_operation(
-    operation: FfiOperation,
     operation_contract: FfiOperationContract,
     invocation: FfiInvocation,
     input: &[u8],
@@ -829,11 +817,7 @@ fn validate_ffi_operation(
                 "operation is not available through the protected ABI".to_owned()
             }
             FfiInvocation::Raw => {
-                if matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-                    "exact item-ID calls do not support formatted JSON operations".to_owned()
-                } else {
-                    "operation is not available through the exact item-ID ABI".to_owned()
-                }
+                "operation is not available through the exact item-ID ABI".to_owned()
             }
             FfiInvocation::Scoped => {
                 "operation is not available through the namespace-scoped exact-ID ABI".to_owned()
@@ -1455,7 +1439,6 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             SetOptions::new()
         };
         validate_ffi_operation(
-            operation,
             operation_contract,
             FfiInvocation::Scoped,
             &item_id,
@@ -1726,7 +1709,6 @@ fn execute_entry_inner(
             set_options
         };
         validate_ffi_operation(
-            operation,
             operation_contract,
             if raw {
                 FfiInvocation::Raw
