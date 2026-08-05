@@ -89,6 +89,15 @@ type Api_Operation_Scope =
   | "namespace"
   | "namespace_management"
 
+type Api_Operation_Request_Kind =
+  | "empty"
+  | "application_value"
+  | "scoped_item"
+  | "scoped_namespace"
+  | "namespace_open"
+  | "namespace_update_policy"
+  | "namespace_delete"
+
 type Api_Operation_Response_Kind =
   | "empty"
   | "pong"
@@ -104,6 +113,7 @@ type Api_Operation_Retry_Mode = "always" | "never" | "when_not_creating"
 /** Semantic operation metadata consumed by the shared client core. */
 export interface Api_Operation_Contract {
   readonly error_statuses: readonly string[]
+  readonly request_kind: Api_Operation_Request_Kind
   readonly response_kind: Api_Operation_Response_Kind
   readonly retry_mode: Api_Operation_Retry_Mode
   readonly scope: Api_Operation_Scope
@@ -590,6 +600,42 @@ function operation_contract(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
     )
   }
+  const request_kind = string_member(
+    contract,
+    "requestKind",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  const request_kinds = [
+    "empty",
+    "application_value",
+    "scoped_item",
+    "scoped_namespace",
+    "namespace_open",
+    "namespace_update_policy",
+    "namespace_delete",
+  ] as const
+  if (!request_kinds.includes(request_kind as Api_Operation_Request_Kind)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind is not a supported request kind`,
+    )
+  }
+  const request_scope: Record<
+    Api_Operation_Request_Kind,
+    Api_Operation_Scope
+  > = {
+    empty: "global",
+    application_value: "global",
+    scoped_item: "item",
+    scoped_namespace: "namespace",
+    namespace_open: "namespace_management",
+    namespace_update_policy: "namespace_management",
+    namespace_delete: "namespace_management",
+  }
+  if (request_scope[request_kind as Api_Operation_Request_Kind] !== scope) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind ${request_kind} is incompatible with scope ${scope}`,
+    )
+  }
   const response_kind = string_member(
     contract,
     "responseKind",
@@ -651,6 +697,7 @@ function operation_contract(
   }
   return {
     error_statuses,
+    request_kind: request_kind as Api_Operation_Request_Kind,
     response_kind: response_kind as Api_Operation_Response_Kind,
     retry_mode: retry_mode as Api_Operation_Retry_Mode,
     scope: scope as Api_Operation_Scope,
@@ -1980,6 +2027,15 @@ function render_rust_operation_contract(contract: Client_Contract): string {
     return pascal_case(snake_case(value))
   }
   const scope_variants = ["global", "item", "namespace", "namespace_management"] as const
+  const request_variants = [
+    "empty",
+    "application_value",
+    "scoped_item",
+    "scoped_namespace",
+    "namespace_open",
+    "namespace_update_policy",
+    "namespace_delete",
+  ] as const
   const response_variants = [
     "empty",
     "pong",
@@ -2007,6 +2063,7 @@ function render_rust_operation_contract(contract: Client_Contract): string {
       }
       return `        openkache_protocol::Opcode::${operation.name} => OperationContract {
             scope: OperationScope::${enum_variant(operation_contract.scope, scope_variants, `${operation.name}.scope`)},
+            request_kind: OperationRequestKind::${enum_variant(operation_contract.request_kind, request_variants, `${operation.name}.requestKind`)},
             response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind, response_variants, `${operation.name}.responseKind`)},
             retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode, retry_variants, `${operation.name}.retryMode`)},
             success_statuses: ${status_slice(operation_contract.success_statuses)},
@@ -2021,6 +2078,18 @@ pub enum OperationScope {
     Item,
     Namespace,
     NamespaceManagement,
+}
+
+/// Native request shape declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationRequestKind {
+    Empty,
+    ApplicationValue,
+    ScopedItem,
+    ScopedNamespace,
+    NamespaceOpen,
+    NamespaceUpdatePolicy,
+    NamespaceDelete,
 }
 
 /// Response payload shape declared by the Smithy operation contract.
@@ -2048,6 +2117,7 @@ pub enum OperationRetryMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
     pub scope: OperationScope,
+    pub request_kind: OperationRequestKind,
     pub response_kind: OperationResponseKind,
     pub retry_mode: OperationRetryMode,
     pub success_statuses: &'static [openkache_protocol::Status],
@@ -2072,18 +2142,19 @@ function protocol_ffi_operation_contract(
 ): Resolved_Ffi_Operation_Contract | undefined {
   const semantic = operation.contract
   if (semantic === undefined) return undefined
-  switch (semantic.scope) {
-    case "global":
+  switch (semantic.request_kind) {
+    case "empty":
+    case "application_value":
       return {
         input_kind: "none",
-        accepts_value: semantic.response_kind === "echo",
+        accepts_value: semantic.request_kind === "application_value",
         accepts_set_options: false,
         supports_protected: true,
         supports_raw: true,
         supports_scoped: false,
         dedicated_abi: false,
       }
-    case "item":
+    case "scoped_item":
       return {
         input_kind: "item_id",
         accepts_value: semantic.response_kind === "set_outcome",
@@ -2093,7 +2164,7 @@ function protocol_ffi_operation_contract(
         supports_scoped: true,
         dedicated_abi: false,
       }
-    case "namespace":
+    case "scoped_namespace":
       return {
         input_kind: "none",
         accepts_value: false,
@@ -2103,7 +2174,9 @@ function protocol_ffi_operation_contract(
         supports_scoped: true,
         dedicated_abi: false,
       }
-    case "namespace_management":
+    case "namespace_open":
+    case "namespace_update_policy":
+    case "namespace_delete":
       return {
         input_kind: "none",
         accepts_value: false,
@@ -4091,7 +4164,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
     case "empty":
-      if (operation.contract.scope === "namespace") {
+      if (operation.contract.request_kind === "scoped_namespace") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4108,7 +4181,8 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
       }
-      return `    @Override
+      if (operation.contract.request_kind === "namespace_delete") {
+        return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
         return smithySubmit(() -> {
@@ -4119,8 +4193,10 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             return new ${operation.output}();
         });
     }`
+      }
+      throw new Error(`unsupported generated Java empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.name === "NamespaceOpen") {
+      if (operation.contract.request_kind === "namespace_open") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4145,7 +4221,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
       }
-      if (operation.name === "NamespaceUpdatePolicy") {
+      if (operation.contract.request_kind === "namespace_update_policy") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4413,7 +4489,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
         }`
     case "empty":
-      if (operation.contract.scope === "namespace") {
+      if (operation.contract.request_kind === "scoped_namespace") {
         return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
                 input.namespaceId,
@@ -4424,15 +4500,18 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             ${operation.output}()
         }`
       }
-      return `${prefix}            val result = smithyNamespaceDelete(
+      if (operation.contract.request_kind === "namespace_delete") {
+        return `${prefix}            val result = smithyNamespaceDelete(
                 input.namespaceId,
                 input.expectedRevision,
             )
             smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
             ${operation.output}()
         }`
+      }
+      throw new Error(`unsupported generated Kotlin empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.name === "NamespaceOpen") {
+      if (operation.contract.request_kind === "namespace_open") {
         return `${prefix}            val name = input.name.toByteArray(StandardCharsets.UTF_8)
             require(name.size <= SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
                 "namespace name exceeds protocol limit"
@@ -4454,7 +4533,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
         }`
       }
-      if (operation.name === "NamespaceUpdatePolicy") {
+      if (operation.contract.request_kind === "namespace_update_policy") {
         return `${prefix}            val policy = smithyPolicyFlags(input.policy, true)
             val result = smithyNamespaceUpdatePolicy(
                 input.namespaceId,
@@ -4695,7 +4774,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     );
   });`
     case "empty":
-      if (operation.contract.scope === "namespace") {
+      if (operation.contract.request_kind === "scoped_namespace") {
         return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
       input.namespaceId,
@@ -4706,7 +4785,8 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     return const ${operation.output}();
   });`
       }
-      return `${prefix}    final result = _readResult(
+      if (operation.contract.request_kind === "namespace_delete") {
+        return `${prefix}    final result = _readResult(
       _api,
       _api.namespaceDelete(
         _requireOpenHandle(),
@@ -4717,8 +4797,10 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     _smithyRequireKind(result, smithyResultOk, '${operation_label}');
     return const ${operation.output}();
   });`
+      }
+      throw new Error(`unsupported generated Dart empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.name === "NamespaceOpen") {
+      if (operation.contract.request_kind === "namespace_open") {
         return `${prefix}    final name = utf8.encode(input.name);
     if (name.length > smithyNamespaceNameMaxBytes) {
       throw const EchoClientException('namespace name exceeds protocol limit');
@@ -4750,7 +4832,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     }
   });`
       }
-      if (operation.name === "NamespaceUpdatePolicy") {
+      if (operation.contract.request_kind === "namespace_update_policy") {
         return `${prefix}    final policy = _smithyPolicyFlags(input.policy, true);
     final result = _readResult(
       _api,

@@ -18,6 +18,17 @@ enum OperationScope {
     NAMESPACE_MANAGEMENT = "namespace_management"
 }
 
+/// Native request shape used by a generated client operation adapter.
+enum OperationRequestKind {
+    EMPTY = "empty"
+    APPLICATION_VALUE = "application_value"
+    SCOPED_ITEM = "scoped_item"
+    SCOPED_NAMESPACE = "scoped_namespace"
+    NAMESPACE_OPEN = "namespace_open"
+    NAMESPACE_UPDATE_POLICY = "namespace_update_policy"
+    NAMESPACE_DELETE = "namespace_delete"
+}
+
 /// Response payload contract used by the shared client core.
 enum OperationResponseKind {
     EMPTY = "empty"
@@ -46,6 +57,9 @@ list OperationStatuses {
 structure operationContract {
     @required
     scope: OperationScope
+
+    @required
+    requestKind: OperationRequestKind
 
     @required
     responseKind: OperationResponseKind
@@ -642,6 +656,7 @@ service OpenKacheClient {
 
 @operationContract(
     scope: "global",
+    requestKind: "empty",
     responseKind: "pong",
     retryMode: "always",
     successStatuses: ["ok"],
@@ -654,6 +669,7 @@ operation Ping {
 
 @operationContract(
     scope: "item",
+    requestKind: "scoped_item",
     responseKind: "value",
     retryMode: "always",
     successStatuses: ["ok", "not_found"],
@@ -666,6 +682,7 @@ operation Get {
 
 @operationContract(
     scope: "item",
+    requestKind: "scoped_item",
     responseKind: "set_outcome",
     retryMode: "never",
     successStatuses: ["created", "replaced", "not_stored"],
@@ -678,6 +695,7 @@ operation Set {
 
 @operationContract(
     scope: "item",
+    requestKind: "scoped_item",
     responseKind: "delete_outcome",
     retryMode: "never",
     successStatuses: ["deleted", "not_found"],
@@ -690,6 +708,7 @@ operation Delete {
 
 @operationContract(
     scope: "namespace",
+    requestKind: "scoped_namespace",
     responseKind: "stats_json",
     retryMode: "always",
     successStatuses: ["ok"],
@@ -702,6 +721,7 @@ operation Stats {
 
 @operationContract(
     scope: "namespace",
+    requestKind: "scoped_namespace",
     responseKind: "empty",
     retryMode: "never",
     successStatuses: ["ok"],
@@ -792,6 +812,7 @@ structure SyncOutput {}
 
 @operationContract(
     scope: "namespace_management",
+    requestKind: "namespace_open",
     responseKind: "namespace_descriptor",
     retryMode: "when_not_creating",
     successStatuses: ["ok", "created"],
@@ -804,6 +825,7 @@ operation NamespaceOpen {
 
 @operationContract(
     scope: "namespace_management",
+    requestKind: "namespace_update_policy",
     responseKind: "namespace_descriptor",
     retryMode: "never",
     successStatuses: ["ok"],
@@ -816,6 +838,7 @@ operation NamespaceUpdatePolicy {
 
 @operationContract(
     scope: "namespace_management",
+    requestKind: "namespace_delete",
     responseKind: "empty",
     retryMode: "never",
     successStatuses: ["deleted"],
@@ -829,6 +852,7 @@ operation NamespaceDelete {
 /// Experimental API used to verify cross-language contract propagation.
 @operationContract(
     scope: "global",
+    requestKind: "application_value",
     responseKind: "echo",
     retryMode: "always",
     successStatuses: ["ok"],
