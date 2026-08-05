@@ -19,7 +19,7 @@ pub(super) const HISTOGRAM_BUCKETS_US: [u64; 12] = [
     5_000_000, 10_000_000,
 ];
 
-pub(super) const OPERATION_NAMES: [&str; 10] = [
+pub(super) const OPERATION_NAMES: [&str; 11] = [
     "ping",
     "get",
     "set",
@@ -29,6 +29,7 @@ pub(super) const OPERATION_NAMES: [&str; 10] = [
     "namespace_open",
     "namespace_update_policy",
     "namespace_delete",
+    "echo",
     "unknown",
 ];
 
@@ -65,6 +66,7 @@ pub(crate) enum Operation {
     NamespaceOpen,
     NamespaceUpdatePolicy,
     NamespaceDelete,
+    Echo,
     Unknown,
 }
 
@@ -86,6 +88,7 @@ impl Operation {
             Opcode::NamespaceOpen => Self::NamespaceOpen,
             Opcode::NamespaceUpdatePolicy => Self::NamespaceUpdatePolicy,
             Opcode::NamespaceDelete => Self::NamespaceDelete,
+            Opcode::Echo => Self::Echo,
         }
     }
 }
