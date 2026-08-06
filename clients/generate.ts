@@ -11333,12 +11333,12 @@ fn smithy_require_kind(
     )))
 }
 
+${f64_array_helpers}
+
 macro_rules! impl_smithy_api {
     ($client:ident) => {
         impl smithy::OpenKacheApi for $client {
             type Error = Error;
-
-${f64_array_helpers}
 
 ${methods}
         }
