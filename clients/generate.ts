@@ -5743,7 +5743,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             val values = smithyDecodeValuePair(result.payload, "${operation_label}")
-            return ${operation.output}(
+            ${operation.output}(
                 ${output_value_a} = values[0],
                 ${output_value_b} = values[1],
             )
