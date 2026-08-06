@@ -13,9 +13,10 @@ use crate::contract::{
     DELETE_IF_EMPTY, NAMESPACE_NAME_MAX_BYTES, OPEN_CREATE_IF_MISSING, OperationRequestKind,
     POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED,
     POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_FLAGS_BYTES, POLICY_NO_EXPIRY,
-    POLICY_RESERVED_MASK, SET_CONDITION_ANY_BITS, SET_EVICTABLE_BITS, SET_EVICTION_PROTECTED_BITS,
-    SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
-    SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, operation_contract,
+    POLICY_RESERVED_MASK, SET_CONDITION_ANY_BITS, SET_CONDITION_MASK, SET_EVICTABLE_BITS,
+    SET_EVICTION_MASK, SET_EVICTION_PROTECTED_BITS, SET_EXPIRATION_MASK, SET_EXPLICIT_TTL_BITS,
+    SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
+    SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK, operation_contract,
 };
 
 /// Client-adapter validation errors.
@@ -37,6 +38,10 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("request flags contain unknown bits 0x{0:02x}")]
+    UnknownRequestFlags(u8),
+    #[error("if-absent and if-present conditions cannot be combined")]
+    ConflictingSetConditions,
     #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
     InvalidRequestShape {
         opcode: Opcode,
@@ -49,6 +54,8 @@ pub enum ProtocolError {
     MissingSetTtl,
     #[error("SET TTL is not allowed by this expiration mode")]
     UnexpectedSetTtl,
+    #[error("SET options are not valid for {opcode:?}")]
+    InvalidSetOptions { opcode: Opcode },
     #[error("namespace ID is missing")]
     MissingNamespaceId,
     #[error("namespace ID must be a positive non-zero u64")]
@@ -298,6 +305,66 @@ impl SetWireOptions {
             ttl_ms,
             eviction_mode,
         }
+    }
+
+    /// Decodes the wire SET flags and optional TTL into validated options.
+    ///
+    /// This semantic codec belongs to the client adapter because the shared
+    /// protocol crate only finds the request frame boundary.
+    pub fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
+        if flags & SET_RESERVED_MASK != 0 {
+            return Err(ProtocolError::UnknownRequestFlags(
+                flags & SET_RESERVED_MASK,
+            ));
+        }
+        let condition = match flags & SET_CONDITION_MASK {
+            SET_CONDITION_ANY_BITS => SetCondition::Any,
+            SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
+            SET_IF_PRESENT_BITS => SetCondition::IfPresent,
+            _ => return Err(ProtocolError::ConflictingSetConditions),
+        };
+        let expiration_mode = match flags & SET_EXPIRATION_MASK {
+            SET_INHERIT_EXPIRATION_BITS => {
+                if ttl_ms.is_some() {
+                    return Err(ProtocolError::UnexpectedSetTtl);
+                }
+                ExpirationMode::Inherit
+            }
+            SET_NO_EXPIRY_BITS => {
+                if ttl_ms.is_some() {
+                    return Err(ProtocolError::UnexpectedSetTtl);
+                }
+                ExpirationMode::NoExpiry
+            }
+            SET_EXPLICIT_TTL_BITS => {
+                let ttl_ms = ttl_ms.ok_or(ProtocolError::MissingSetTtl)?;
+                if ttl_ms == 0 {
+                    return Err(ProtocolError::InvalidSetTtl);
+                }
+                ExpirationMode::ExplicitTtl
+            }
+            _ => {
+                return Err(ProtocolError::InvalidSetOptions {
+                    opcode: Opcode::Set,
+                });
+            }
+        };
+        let eviction_mode = match flags & SET_EVICTION_MASK {
+            SET_INHERIT_EVICTION_BITS => EvictionMode::Inherit,
+            SET_EVICTABLE_BITS => EvictionMode::Evictable,
+            SET_EVICTION_PROTECTED_BITS => EvictionMode::EvictionProtected,
+            _ => {
+                return Err(ProtocolError::InvalidSetOptions {
+                    opcode: Opcode::Set,
+                });
+            }
+        };
+        Ok(Self {
+            condition,
+            expiration_mode,
+            ttl_ms,
+            eviction_mode,
+        })
     }
 
     pub(crate) fn flags(self) -> Result<u8> {
