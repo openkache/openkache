@@ -83,6 +83,7 @@ enum OperationResponseKind {
 enum OperationValueTransform {
     IDENTITY = "identity"
     REVERSE_UTF8 = "reverse_utf8"
+    SQUARE_ARRAY = "square_array"
 }
 
 /// Retry policy used by a generated operation contract.
@@ -375,6 +376,9 @@ enum Opcode {
     @wireOpcode(value: 11)
     EXPERIMENTAL_REVERSE = "experimental_reverse"
 
+    @wireOpcode(value: 12)
+    SQUARE_ARRAY = "square_array"
+
 }
 
 @operationContract(
@@ -416,6 +420,20 @@ operation ExperimentalEcho {
 operation ExperimentalReverse {
     input: ExperimentalReverseInput
     output: ExperimentalReverseOutput
+}
+
+@operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "application_value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
+    valueTransform: "square_array"
+)
+operation SquareArray {
+    input: SquareArrayInput
+    output: SquareArrayOutput
 }
 
 @operationContract(
@@ -524,6 +542,12 @@ operation NamespaceDelete {
 
 blob ItemId
 blob Value
+
+/// Dense finite IEEE-754 binary64 values. Application-value operations encode
+/// each value as one big-endian eight-octet payload with no count prefix.
+list FloatingPointArray {
+    member: Double
+}
 
 structure PingInput {}
 structure PingOutput {}
@@ -639,6 +663,18 @@ structure ExperimentalReverseOutput {
     @required
     @operationField(role: "payload")
     message: String
+}
+
+structure SquareArrayInput {
+    @required
+    @operationField(role: "payload")
+    values: FloatingPointArray
+}
+
+structure SquareArrayOutput {
+    @required
+    @operationField(role: "payload")
+    values: FloatingPointArray
 }
 
 structure NamespaceOpenInput {

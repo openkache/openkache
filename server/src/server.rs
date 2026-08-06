@@ -1903,6 +1903,38 @@ fn immediate_response_value(opcode: Opcode, value: Vec<u8>) -> Response {
                 b"application value must be valid UTF-8",
             ),
         },
+        (
+            OperationResponseKind::ApplicationValue,
+            OperationValueTransform::SquareArray,
+        ) => {
+            if value.len() % std::mem::size_of::<f64>() != 0 {
+                return response_bytes(
+                    Status::InvalidRequest,
+                    b"square_array payload length must be a multiple of eight",
+                );
+            }
+            let mut squared = Vec::with_capacity(value.len());
+            for chunk in value.chunks_exact(std::mem::size_of::<f64>()) {
+                let mut bytes = [0u8; std::mem::size_of::<f64>()];
+                bytes.copy_from_slice(chunk);
+                let input = f64::from_be_bytes(bytes);
+                if !input.is_finite() {
+                    return response_bytes(
+                        Status::InvalidRequest,
+                        b"square_array input must contain finite values",
+                    );
+                }
+                let output = input * input;
+                if !output.is_finite() {
+                    return response_bytes(
+                        Status::InvalidRequest,
+                        b"square_array result must contain finite values",
+                    );
+                }
+                squared.extend_from_slice(&output.to_be_bytes());
+            }
+            response(Status::Ok, squared)
+        }
         _ => response_bytes(Status::InternalError, b"invalid immediate operation contract"),
     }
 }

@@ -52,6 +52,7 @@ export type Wire_Operation_Response_Kind = (typeof OPERATION_RESPONSE_KINDS)[num
 export const OPERATION_VALUE_TRANSFORMS = [
   "identity",
   "reverse_utf8",
+  "square_array",
 ] as const
 
 export type Wire_Operation_Value_Transform =
@@ -830,7 +831,7 @@ function operation_contract(
     )
   ) {
     throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be identity or reverse_utf8`,
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be identity, reverse_utf8, or square_array`,
     )
   }
   const parsed_value_transform =
@@ -1218,6 +1219,7 @@ pub enum OperationRetryMode {
 pub enum OperationValueTransform {
     Identity,
     ReverseUtf8,
+    SquareArray,
 }
 
 /// Generated semantic metadata for one protocol operation.
