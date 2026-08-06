@@ -61,12 +61,18 @@ and rings instead.
 
 ### 🔒 End-to-end encryption
 
-Secure clients compress values and encrypt them with XChaCha20-Poly1305 before
-transmission. The compact authenticated value is bound to its exact 32-byte wire
-item ID, so moving ciphertext to another cache item fails authentication. Protected
-clients hide application keys behind HMAC-SHA-256 item IDs. The server observes
+Secure clients may compress values and encrypt them with the v1 Compact
+AES-SIV-CMAC or Robust AES-GCM-SIV profiles before transmission. The
+authenticated value is bound to its exact 32-byte wire item ID and namespace,
+so moving ciphertext to another cache item or namespace fails authentication.
+Protected clients hide typed application keys behind namespace-bound BLAKE3
+item IDs. The server observes
 deterministic item IDs and encoded sizes, but not application keys or value
 plaintext.
+
+The value-format design is pre-freeze; the checked-in SDKs still need the
+namespace-bound derivation and deterministic-CBOR migration described in
+[`clients/VALUE_FORMAT.md`](clients/VALUE_FORMAT.md).
 
 ### 📦 Transparent compression
 
@@ -408,7 +414,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Core engine | ✅ Done | Allocators, BCF53 filter, types, and client foundations |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl release artifacts, and capacity guidance |
-| E2E encryption | ✅ Done | Zstandard then compact XChaCha20-Poly1305 values |
+| E2E encryption | 🚧 Pre-freeze | Zstandard plus the v1 Compact/Robust value profiles are being migrated |
 | Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
 | General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
 

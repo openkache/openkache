@@ -16,7 +16,7 @@ The main API layers are:
   opaque values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
-- `ValueCodec`, which owns Raw and RFC 8785 JSON serialization, optional
+- `ValueCodec`, which will own Raw and deterministic CBOR serialization, optional
   Zstandard compression, and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
@@ -79,9 +79,11 @@ let outcome = client
 ```
 
 `ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. Use
-`DataProtectionKey::derive_item_id` or `DataProtection::item_id` for the
-shared BLAKE3 derivation.
+and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
+v1 contract renames the root secret to `ClientRootKey` and binds the selected
+namespace into both item-ID derivation and value AAD. The checked-in
+implementation still exposes the previous `DataProtectionKey` surface until
+that migration is completed.
 
 `ValueCodec` stores its metadata inside the opaque value:
 
