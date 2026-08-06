@@ -544,6 +544,66 @@ impl RequestHeader {
     }
 }
 
+/// A complete v1 request viewed as an opaque operation call.
+///
+/// The protocol runtime owns only frame delimiting here. It deliberately does
+/// not decode namespace IDs, item IDs, values, or operation semantics. A
+/// generated client codec or a server-owned handler may inspect [`body`] when
+/// it knows the operation's modeled shape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestFrame<'a> {
+    opcode: Opcode,
+    frame: &'a [u8],
+    body_offset: usize,
+}
+
+impl<'a> RequestFrame<'a> {
+    /// Decodes one complete request without interpreting its operation body.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error when the opcode, generated wire layout, or
+    /// complete frame length is invalid.
+    pub fn decode(frame: &'a [u8]) -> Result<Self> {
+        let header = Request::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
+            expected: REQUEST_FIXED_BYTES,
+            actual: frame.len(),
+        })?;
+        let expected = header
+            .frame_len(frame)?
+            .ok_or(ProtocolError::FrameTooShort {
+                expected: header.encoded_len,
+                actual: frame.len(),
+            })?;
+        if frame.len() != expected {
+            return Err(ProtocolError::FrameLength {
+                expected,
+                actual: frame.len(),
+            });
+        }
+        Ok(Self {
+            opcode: header.opcode,
+            frame,
+            body_offset: OPCODE_BYTES,
+        })
+    }
+
+    /// Returns the operation discriminator.
+    pub const fn opcode(self) -> Opcode {
+        self.opcode
+    }
+
+    /// Returns the opaque operation body after the opcode.
+    pub fn body(self) -> &'a [u8] {
+        &self.frame[self.body_offset..]
+    }
+
+    /// Returns the original complete encoded frame.
+    pub const fn encoded(self) -> &'a [u8] {
+        self.frame
+    }
+}
+
 /// A decoded OpenKache request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
@@ -1628,6 +1688,55 @@ impl ResponseHeader {
         self.encoded_len
             .checked_add(self.payload_len)
             .ok_or(ProtocolError::FrameLengthOverflow)
+    }
+}
+
+/// A complete response viewed as an opaque status and payload.
+///
+/// Unlike operation-specific response adapters, this type does not assign a
+/// meaning to the payload. Generated clients and server handlers decide how
+/// to decode the bytes for their modeled operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResponseFrame<'a> {
+    status: Status,
+    frame: &'a [u8],
+    payload_offset: usize,
+}
+
+impl<'a> ResponseFrame<'a> {
+    /// Decodes one complete response without interpreting its payload.
+    pub fn decode(frame: &'a [u8]) -> Result<Self> {
+        let header = Response::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
+            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+            actual: frame.len(),
+        })?;
+        let expected = header.frame_len()?;
+        if frame.len() != expected {
+            return Err(ProtocolError::FrameLength {
+                expected,
+                actual: frame.len(),
+            });
+        }
+        Ok(Self {
+            status: header.status,
+            frame,
+            payload_offset: header.encoded_len,
+        })
+    }
+
+    /// Returns the response status.
+    pub const fn status(self) -> Status {
+        self.status
+    }
+
+    /// Returns the opaque response payload.
+    pub fn payload(self) -> &'a [u8] {
+        &self.frame[self.payload_offset..]
+    }
+
+    /// Returns the original complete encoded frame.
+    pub const fn encoded(self) -> &'a [u8] {
+        self.frame
     }
 }
 
