@@ -19,7 +19,8 @@ use futures_util::{FutureExt, pin_mut, select};
 use openkache_protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId,
     MAX_REQUEST_FRAME_BYTES, NamespaceDescriptor, NamespacePolicy, Opcode, OperationRequestKind,
-    OperationResponseKind, OverridePolicy, ProtocolError, Request, Response, SetOptions, Status,
+    OperationResponseKind, OperationValueTransform, OverridePolicy, ProtocolError, Request,
+    Response, SetOptions, Status,
 };
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -1881,9 +1882,27 @@ fn immediate_response(opcode: Opcode) -> bool {
 }
 
 fn immediate_response_value(opcode: Opcode, value: Vec<u8>) -> Response {
-    match openkache_protocol::operation_contract(opcode).response_kind {
-        OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
-        OperationResponseKind::ApplicationValue => response(Status::Ok, value),
+    let contract = openkache_protocol::operation_contract(opcode);
+    // Application-value operations share this path. Their modeled transform,
+    // rather than the operation name, is the server-side behavior.
+    match (contract.response_kind, contract.value_transform) {
+        (OperationResponseKind::Pong, _) => response_bytes(Status::Ok, b"PONG"),
+        (OperationResponseKind::ApplicationValue, OperationValueTransform::Identity) => {
+            response(Status::Ok, value)
+        }
+        (
+            OperationResponseKind::ApplicationValue,
+            OperationValueTransform::ReverseUtf8,
+        ) => match String::from_utf8(value) {
+            Ok(value) => response(
+                Status::Ok,
+                value.chars().rev().collect::<String>().into_bytes(),
+            ),
+            Err(_) => response_bytes(
+                Status::InvalidRequest,
+                b"application value must be valid UTF-8",
+            ),
+        },
         _ => response_bytes(Status::InternalError, b"invalid immediate operation contract"),
     }
 }

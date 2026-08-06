@@ -79,6 +79,12 @@ enum OperationResponseKind {
     NAMESPACE_DESCRIPTOR = "namespace_descriptor"
 }
 
+/// Application-value transformation performed by the server before responding.
+enum OperationValueTransform {
+    IDENTITY = "identity"
+    REVERSE_UTF8 = "reverse_utf8"
+}
+
 /// Retry policy used by a generated operation contract.
 enum OperationRetryMode {
     ALWAYS = "always"
@@ -110,6 +116,10 @@ structure operationContract {
 
     @required
     errorStatuses: OperationStatuses
+
+    /// Optional application-value transform; omitted operations preserve their
+    /// request payload unchanged.
+    valueTransform: OperationValueTransform
 }
 
 /// Values that are visible on the client/server wire.
@@ -362,6 +372,9 @@ enum Opcode {
     @wireOpcode(value: 10)
     EXPERIMENTAL_ECHO = "experimental_echo"
 
+    @wireOpcode(value: 11)
+    EXPERIMENTAL_REVERSE = "experimental_reverse"
+
 }
 
 @operationContract(
@@ -383,11 +396,26 @@ operation Ping {
     responseKind: "application_value",
     retryMode: "always",
     successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
+    valueTransform: "identity"
 )
 operation ExperimentalEcho {
     input: ExperimentalEchoInput
     output: ExperimentalEchoOutput
+}
+
+@operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "application_value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
+    valueTransform: "reverse_utf8"
+)
+operation ExperimentalReverse {
+    input: ExperimentalReverseInput
+    output: ExperimentalReverseOutput
 }
 
 @operationContract(
@@ -596,6 +624,18 @@ structure ExperimentalEchoInput {
 }
 
 structure ExperimentalEchoOutput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure ExperimentalReverseInput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure ExperimentalReverseOutput {
     @required
     @operationField(role: "payload")
     message: String
