@@ -72,32 +72,16 @@ enum RequestLayout {
 /// layout, and adding another operation with an existing semantic contract must
 /// not require another protocol-framing branch.
 fn request_layout(opcode: Opcode) -> RequestLayout {
-    let contract = operation_contract(opcode);
-    match (contract.request_kind, contract.response_kind) {
-        (OperationRequestKind::Empty, OperationResponseKind::Pong) => RequestLayout::Empty,
-        (OperationRequestKind::ApplicationValue, OperationResponseKind::ApplicationValue) => {
-            RequestLayout::ApplicationValue
-        }
-        (OperationRequestKind::ScopedItem, OperationResponseKind::Value)
-        | (OperationRequestKind::ScopedItem, OperationResponseKind::DeleteOutcome) => {
-            RequestLayout::Item
-        }
-        (OperationRequestKind::ScopedItem, OperationResponseKind::SetOutcome) => RequestLayout::Set,
-        (OperationRequestKind::ScopedNamespace, OperationResponseKind::StatsJson)
-        | (OperationRequestKind::ScopedNamespace, OperationResponseKind::Empty) => {
-            RequestLayout::Namespace
-        }
-        (OperationRequestKind::NamespaceOpen, OperationResponseKind::NamespaceDescriptor) => {
-            RequestLayout::NamespaceOpen
-        }
-        (
-            OperationRequestKind::NamespaceUpdatePolicy,
-            OperationResponseKind::NamespaceDescriptor,
-        ) => RequestLayout::NamespaceUpdatePolicy,
-        (OperationRequestKind::NamespaceDelete, OperationResponseKind::Empty) => {
-            RequestLayout::NamespaceDelete
-        }
-        _ => unreachable!("unsupported protocol operation contract"),
+    let wire_layout = wire_request_layout(opcode);
+    match wire_layout.kind {
+        WireRequestLayoutKind::Empty => RequestLayout::Empty,
+        WireRequestLayoutKind::ApplicationValue => RequestLayout::ApplicationValue,
+        WireRequestLayoutKind::Item => RequestLayout::Item,
+        WireRequestLayoutKind::Set => RequestLayout::Set,
+        WireRequestLayoutKind::Namespace => RequestLayout::Namespace,
+        WireRequestLayoutKind::NamespaceOpen => RequestLayout::NamespaceOpen,
+        WireRequestLayoutKind::NamespaceUpdatePolicy => RequestLayout::NamespaceUpdatePolicy,
+        WireRequestLayoutKind::NamespaceDelete => RequestLayout::NamespaceDelete,
     }
 }
 
@@ -979,7 +963,7 @@ impl Request {
             })),
             RequestLayout::ApplicationValue => decode_application_value_header(prefix, opcode),
             RequestLayout::Item => {
-                let item_id_count = operation_contract(opcode).request_item_count;
+                let item_id_count = wire_request_layout(opcode).item_id_count;
                 let required = OPCODE_BYTES
                     + NAMESPACE_ID_BYTES
                     + ITEM_ID_BYTES
@@ -1070,7 +1054,7 @@ impl Request {
             }
             RequestLayout::Item => {
                 validate_namespace_id(self.namespace_id)?;
-                let expected_item_count = operation_contract(self.opcode).request_item_count;
+                let expected_item_count = wire_request_layout(self.opcode).item_id_count;
                 if self.item_ids.len() != expected_item_count
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()

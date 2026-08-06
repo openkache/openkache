@@ -1401,6 +1401,62 @@ ${metadata}
 `
 }
 
+/**
+ * Renders only the request metadata needed to find a v1 frame boundary.
+ *
+ * This is intentionally separate from the semantic operation contract below.
+ * The protocol runtime must not inspect response meanings, retry policy, or
+ * server behavior just to read a request from a stream. Those fields remain
+ * available to generated client/server adapters, while the wire crate gets a
+ * small, request-only descriptor.
+ */
+function rust_request_layout(contract: Wire_Contract): string {
+  const operations = contract.operations
+  if (operations === undefined) return ""
+  const request_kind = (operation: Wire_Operation): string => {
+    const { request_kind, response_kind } = operation.contract
+    if (request_kind === "scoped_item" && response_kind === "set_outcome") return "Set"
+    if (request_kind === "scoped_item") return "Item"
+    if (request_kind === "scoped_namespace") return "Namespace"
+    return pascal_case(request_kind)
+  }
+  const metadata = operations
+    .map(
+      (operation) => `        Opcode::${operation.name} => WireRequestLayout {
+            kind: WireRequestLayoutKind::${request_kind(operation)},
+            item_id_count: ${operation.contract.request_item_count},
+        },`,
+    )
+    .join("\n")
+  return `/// Wire-only request layouts used to delimit protocol v1 frames.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WireRequestLayoutKind {
+    Empty,
+    ApplicationValue,
+    Item,
+    Set,
+    Namespace,
+    NamespaceOpen,
+    NamespaceUpdatePolicy,
+    NamespaceDelete,
+}
+
+/// Generated request metadata used only to delimit protocol v1 frames.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WireRequestLayout {
+    pub kind: WireRequestLayoutKind,
+    pub item_id_count: usize,
+}
+
+/// Returns the wire-level request layout for one assigned opcode.
+pub const fn wire_request_layout(opcode: Opcode) -> WireRequestLayout {
+    match opcode {
+${metadata}
+    }
+}
+`
+}
+
 /** Renders protocol v1 Rust definitions without client-only declarations. */
 export function render_rust_wire(contract: Wire_Contract): string {
   const v1 = contract.v1
@@ -1479,6 +1535,7 @@ ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opco
 
 ${rust_wire_enum("Status", "Status returned in every protocol response.", contract.statuses, "UnknownStatus")}
 
+${rust_request_layout(contract)}
 ${rust_operation_contract(contract)}
 `
 }
