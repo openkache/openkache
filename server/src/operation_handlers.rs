@@ -14,12 +14,10 @@ use openkache_protocol::{
     SetOptions, Status,
 };
 
-use crate::observability::ObservabilityState;
-use crate::{NetworkWorkerCache, SetOutcome};
-
 use super::{
-    NamespaceRegistry, cache_error_response, descriptor_payload, mutation_cache_error_response,
-    namespace_exists, protocol_error_response, resolve_set_options, response, response_bytes,
+    NamespaceRegistry, NetworkWorkerCache, ObservabilityState, SetOutcome, cache_error_response,
+    descriptor_payload, mutation_cache_error_response, namespace_exists, protocol_error_response,
+    resolve_set_options, response, response_bytes,
 };
 
 /// Borrowed context passed from the protocol server to one concrete handler.
@@ -218,7 +216,7 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 .set_in_namespace(
                     namespace_id,
                     item_id,
-                    crate::types::StoredItemValue::new(value),
+                    super::super::types::StoredItemValue::new(value),
                     effective_options,
                 )
                 .await;

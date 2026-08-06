@@ -38,7 +38,7 @@ use crate::transport::{
 };
 use crate::{
     AppConfig, KvError, NetworkConfig, NetworkWorkerCache, QuicBackend, ThreadedKvkache,
-    TlsConfig,
+    SetOutcome, TlsConfig,
 };
 
 #[path = "operation_handlers.rs"]
