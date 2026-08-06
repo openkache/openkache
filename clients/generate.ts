@@ -6220,7 +6220,9 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     case "value":
       if (operation.contract.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
-          .map((_member, index) => `values[${index}]`)
+          .map((member, index) =>
+            `${operation_field_name(member, "dart")}: values[${index}]`,
+          )
           .join(",\n      ")
         return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
@@ -10151,7 +10153,9 @@ function render_swift_operation_method(
     case "value":
       if (operation.contract.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
-          .map((_member, index) => `values[${index}]`)
+          .map((member, index) =>
+            `${operation_field_name(member, "swift")}: values[${index}]`,
+          )
           .join(",\n      ")
         return `  public func ${method_name}(
     _ input: ${input}
