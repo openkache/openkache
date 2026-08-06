@@ -96,6 +96,12 @@ export const OPERATION_RESPONSE_KINDS_BY_REQUEST: Readonly<
 export interface Wire_Operation_Contract {
   readonly error_statuses: readonly string[]
   readonly request_kind: Wire_Operation_Request_Kind
+  /**
+   * Number of value fields in the request shape. Production extraction uses
+   * this role count to choose the SET wire layout without consulting the
+   * response contract. Legacy AST fixtures may omit it.
+   */
+  readonly request_value_count?: number
   /** Number of item IDs carried by a scoped-item request, derived from Smithy roles. */
   readonly request_item_count: number
   /** Number of optional values carried by a value response, derived from Smithy roles. */
@@ -932,6 +938,13 @@ function operation_contract(
     "input",
     "item_id",
   )
+  const request_value_count = operation_shape_field_count(
+    shapes,
+    shape,
+    target,
+    "input",
+    "value",
+  )
   const response_value_count = operation_shape_field_count(
     shapes,
     shape,
@@ -1001,6 +1014,7 @@ function operation_contract(
   return {
     error_statuses,
     request_kind: request_kind as Wire_Operation_Contract["request_kind"],
+    request_value_count,
     request_item_count,
     response_value_count,
     response_kind: response_kind as Wire_Operation_Contract["response_kind"],
@@ -1414,8 +1428,16 @@ function rust_request_layout(contract: Wire_Contract): string {
   const operations = contract.operations
   if (operations === undefined) return ""
   const request_kind = (operation: Wire_Operation): string => {
-    const { request_kind, response_kind } = operation.contract
-    if (request_kind === "scoped_item" && response_kind === "set_outcome") return "Set"
+    const { request_kind, request_value_count, response_kind } = operation.contract
+    // `request_value_count` is present for all production Smithy ASTs. Keep
+    // the response-kind fallback only for old unit fixtures that predate the
+    // role count; it is never used by generated production output.
+    if (
+      request_kind === "scoped_item" &&
+      (request_value_count ?? (response_kind === "set_outcome" ? 1 : 0)) > 0
+    ) {
+      return "Set"
+    }
     if (request_kind === "scoped_item") return "Item"
     if (request_kind === "scoped_namespace") return "Namespace"
     return pascal_case(request_kind)
