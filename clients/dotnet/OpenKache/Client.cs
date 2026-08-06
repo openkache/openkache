@@ -341,86 +341,89 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     }
 
     private static (byte Flags, ulong TtlMilliseconds) NativeSetOptions(
-        Smithy.SetInput input)
+        Smithy.SetCondition? condition,
+        Smithy.ExpirationMode? expirationMode,
+        ulong? ttlMilliseconds,
+        Smithy.EvictionMode? evictionMode)
     {
-        var flags = input.Condition switch
+        var flags = condition switch
         {
             null or Smithy.SetCondition.Any => Protocol.SetConditionAnyBits,
             Smithy.SetCondition.IfAbsent => Protocol.SetIfAbsentBits,
             Smithy.SetCondition.IfPresent => Protocol.SetIfPresentBits,
-            _ => throw new ArgumentOutOfRangeException(nameof(input.Condition)),
+            _ => throw new ArgumentOutOfRangeException(nameof(condition)),
         };
-        flags |= input.ExpirationMode switch
+        flags |= expirationMode switch
         {
-            null or Smithy.ExpirationMode.Inherit when input.TtlMilliseconds is null =>
+            null or Smithy.ExpirationMode.Inherit when ttlMilliseconds is null =>
                 Protocol.SetInheritExpirationBits,
-            Smithy.ExpirationMode.NoExpiry when input.TtlMilliseconds is null =>
+            Smithy.ExpirationMode.NoExpiry when ttlMilliseconds is null =>
                 Protocol.SetNoExpiryBits,
-            Smithy.ExpirationMode.ExplicitTtl when input.TtlMilliseconds is > 0 =>
+            Smithy.ExpirationMode.ExplicitTtl when ttlMilliseconds is > 0 =>
                 Protocol.SetExplicitTtlBits,
             Smithy.ExpirationMode.NoExpiry or Smithy.ExpirationMode.Inherit =>
                 throw new ArgumentException(
                     $"ttlMilliseconds is only valid with {Protocol.SmithyExpirationModeExplicitTtlValue}.",
-                    nameof(input.TtlMilliseconds)),
+                    nameof(ttlMilliseconds)),
             Smithy.ExpirationMode.ExplicitTtl => throw new ArgumentException(
                 $"ttlMilliseconds must be positive with {Protocol.SmithyExpirationModeExplicitTtlValue}.",
-                nameof(input.TtlMilliseconds)),
-            _ => throw new ArgumentOutOfRangeException(nameof(input.ExpirationMode)),
+                nameof(ttlMilliseconds)),
+            _ => throw new ArgumentOutOfRangeException(nameof(expirationMode)),
         };
-        flags |= input.EvictionMode switch
+        flags |= evictionMode switch
         {
             null or Smithy.EvictionMode.Inherit => Protocol.SetInheritEvictionBits,
             Smithy.EvictionMode.Evictable => Protocol.SetEvictableBits,
             Smithy.EvictionMode.EvictionProtected => Protocol.SetEvictionProtectedBits,
-            _ => throw new ArgumentOutOfRangeException(nameof(input.EvictionMode)),
+            _ => throw new ArgumentOutOfRangeException(nameof(evictionMode)),
         };
-        return (flags, input.TtlMilliseconds.GetValueOrDefault());
+        return (flags, ttlMilliseconds.GetValueOrDefault());
     }
 
     private static (byte Flags, ulong TtlMilliseconds) NativePolicy(
-        Smithy.NamespacePolicy? policy)
+        Smithy.ExpirationDefault defaultExpiration,
+        ulong? defaultTtlMilliseconds,
+        Smithy.OverridePolicy expirationOverride,
+        Smithy.EvictionDefault defaultEviction,
+        Smithy.OverridePolicy evictionOverride)
     {
-        if (policy is null)
+        var flags = defaultExpiration switch
         {
-            return (0, 0);
-        }
-        var flags = policy.DefaultExpiration switch
-        {
-            Smithy.ExpirationDefault.NoExpiry when policy.DefaultTtlMilliseconds is null =>
+            Smithy.ExpirationDefault.NoExpiry when defaultTtlMilliseconds is null =>
                 Protocol.PolicyNoExpiry,
-            Smithy.ExpirationDefault.FixedTtl when policy.DefaultTtlMilliseconds is > 0 =>
+            Smithy.ExpirationDefault.FixedTtl when defaultTtlMilliseconds is > 0 =>
                 Protocol.PolicyFixedTtl,
             Smithy.ExpirationDefault.NoExpiry or Smithy.ExpirationDefault.FixedTtl =>
                 throw new ArgumentException(
                     $"defaultTtlMilliseconds must be present only for a positive {Protocol.SmithyExpirationDefaultFixedTtlValue}.",
-                    nameof(policy.DefaultTtlMilliseconds)),
-            _ => throw new ArgumentOutOfRangeException(nameof(policy.DefaultExpiration)),
+                    nameof(defaultTtlMilliseconds)),
+            _ => throw new ArgumentOutOfRangeException(nameof(defaultExpiration)),
         };
-        if (policy.ExpirationOverride == Smithy.OverridePolicy.Allowed)
+        if (expirationOverride == Smithy.OverridePolicy.Allowed)
         {
             flags |= Protocol.PolicyExpirationOverride;
         }
-        else if (policy.ExpirationOverride != Smithy.OverridePolicy.Disallowed)
+        else if (expirationOverride != Smithy.OverridePolicy.Disallowed)
         {
-            throw new ArgumentOutOfRangeException(nameof(policy.ExpirationOverride));
+            throw new ArgumentOutOfRangeException(nameof(expirationOverride));
         }
-        if (policy.DefaultEviction == Smithy.EvictionDefault.EvictionProtected)
+        if (defaultEviction == Smithy.EvictionDefault.EvictionProtected)
         {
             flags |= Protocol.PolicyEvictionProtected;
         }
-        else if (policy.DefaultEviction != Smithy.EvictionDefault.Evictable)
+        else if (defaultEviction != Smithy.EvictionDefault.Evictable)
         {
-            throw new ArgumentOutOfRangeException(nameof(policy.DefaultEviction));
+            throw new ArgumentOutOfRangeException(nameof(defaultEviction));
         }
-        if (policy.EvictionOverride == Smithy.OverridePolicy.Allowed)
+        if (evictionOverride == Smithy.OverridePolicy.Allowed)
         {
             flags |= Protocol.PolicyEvictionOverride;
         }
-        else if (policy.EvictionOverride != Smithy.OverridePolicy.Disallowed)
+        else if (evictionOverride != Smithy.OverridePolicy.Disallowed)
         {
-            throw new ArgumentOutOfRangeException(nameof(policy.EvictionOverride));
+            throw new ArgumentOutOfRangeException(nameof(evictionOverride));
         }
-        return (flags, policy.DefaultTtlMilliseconds.GetValueOrDefault());
+        return (flags, defaultTtlMilliseconds.GetValueOrDefault());
     }
 
     private static Smithy.NamespaceDescriptor DecodeNamespaceDescriptor(byte[] payload)

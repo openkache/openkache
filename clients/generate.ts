@@ -85,6 +85,31 @@ type Api_Type_Kind =
   | "structure"
   | "unsigned_long"
 
+type Operation_Field_Role =
+  | "payload"
+  | "namespace_id"
+  | "item_id"
+  | "value"
+  | "condition"
+  | "expiration_mode"
+  | "ttl_milliseconds"
+  | "eviction_mode"
+  | "expected_revision"
+  | "name"
+  | "create_if_missing"
+  | "policy"
+  | "outcome"
+  | "deleted"
+  | "json"
+  | "descriptor"
+  | "created"
+  | "revision"
+  | "default_expiration"
+  | "default_ttl_milliseconds"
+  | "expiration_override"
+  | "default_eviction"
+  | "eviction_override"
+
 /** Semantic operation metadata consumed by the shared client core. */
 export type Api_Operation_Contract = Wire_Operation_Contract
 type Api_Operation_Scope = Api_Operation_Contract["scope"]
@@ -101,6 +126,7 @@ export interface Api_Type {
 /** One field in a Smithy operation input or output structure. */
 export interface Api_Member {
   readonly name: string
+  readonly operation_field_role?: Operation_Field_Role
   readonly required: boolean
   readonly type: Api_Type
 }
@@ -250,6 +276,7 @@ const API_NAMESPACE = "openkache.protocol"
 const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const OPERATION_CONTRACT_TRAIT_ID = "openkache.protocol#operationContract"
+const OPERATION_FIELD_TRAIT_ID = "openkache.protocol#operationField"
 const FFI_OPERATION_CONTRACT_TRAIT_ID = "openkache.client#ffiOperationContract"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
@@ -551,6 +578,52 @@ function api_type(
   }
 }
 
+const OPERATION_FIELD_ROLES: readonly Operation_Field_Role[] = [
+  "payload",
+  "namespace_id",
+  "item_id",
+  "value",
+  "condition",
+  "expiration_mode",
+  "ttl_milliseconds",
+  "eviction_mode",
+  "expected_revision",
+  "name",
+  "create_if_missing",
+  "policy",
+  "outcome",
+  "deleted",
+  "json",
+  "descriptor",
+  "created",
+  "revision",
+  "default_expiration",
+  "default_ttl_milliseconds",
+  "expiration_override",
+  "default_eviction",
+  "eviction_override",
+]
+
+function operation_field_role(
+  member_traits: Json_Object | undefined,
+  location: string,
+): Operation_Field_Role | undefined {
+  const value = member_traits?.[OPERATION_FIELD_TRAIT_ID]
+  if (value === undefined) return undefined
+  const trait = object_value(value, `${location}.${OPERATION_FIELD_TRAIT_ID}`)
+  const role = string_member(
+    trait,
+    "role",
+    `${location}.${OPERATION_FIELD_TRAIT_ID}`,
+  )
+  if (!OPERATION_FIELD_ROLES.includes(role as Operation_Field_Role)) {
+    throw new Error(
+      `${location}.${OPERATION_FIELD_TRAIT_ID}.role must be one of ${OPERATION_FIELD_ROLES.join(", ")}`,
+    )
+  }
+  return role as Operation_Field_Role
+}
+
 function api_structure(shapes: Json_Object, target: string): Api_Structure {
   const shape = object_member(shapes, target, "Smithy AST.shapes")
   if (shape_type(shape, `Smithy AST.shapes.${target}`) !== "structure") {
@@ -562,8 +635,12 @@ function api_structure(shapes: Json_Object, target: string): Api_Structure {
     members: Object.entries(members).map(([name, value]): Api_Member => {
       const member = object_value(value, `${target}.${name}`)
       const traits = optional_object_member(member, "traits", `${target}.${name}`)
+      const field_role = operation_field_role(traits, `${target}.${name}`)
       return {
         name,
+        ...(field_role === undefined
+          ? {}
+          : { operation_field_role: field_role }),
         required: traits?.["smithy.api#required"] !== undefined,
         type: api_type(
           shapes,
@@ -4055,8 +4132,8 @@ abstract interface class SmithyOpenKacheApi implements ${interfaces} {}
 }
 
 interface Operation_Field_Binding {
-  readonly input_payload?: Api_Member
-  readonly output_payload?: Api_Member
+  readonly input: Readonly<Partial<Record<Operation_Field_Role, Api_Member>>>
+  readonly output: Readonly<Partial<Record<Operation_Field_Role, Api_Member>>>
 }
 
 interface Managed_Api_Operation extends Api_Operation {
@@ -4101,11 +4178,33 @@ function operation_field_binding(
   contract: Client_Contract,
   operation: Api_Operation & { readonly contract: Api_Operation_Contract },
 ): Operation_Field_Binding {
-  if (operation.contract.response_kind !== "application_value") return {}
-  return {
-    input_payload: required_string_member(contract, operation, "input"),
-    output_payload: required_string_member(contract, operation, "output"),
+  const fields = (
+    direction: "input" | "output",
+  ): Partial<Record<Operation_Field_Role, Api_Member>> => {
+    const bound: Partial<Record<Operation_Field_Role, Api_Member>> = {}
+    for (const member of operation_structure(contract, operation, direction).members) {
+      const role = member.operation_field_role
+      if (role === undefined) continue
+      if (bound[role] !== undefined) {
+        throw new Error(
+          `operation ${operation.name} ${direction} binds more than one member to ${role}`,
+        )
+      }
+      bound[role] = member
+    }
+    return bound
   }
+  const input = fields("input")
+  const output = fields("output")
+  if (operation.contract.response_kind === "application_value") {
+    if (input.payload === undefined) {
+      input.payload = required_string_member(contract, operation, "input")
+    }
+    if (output.payload === undefined) {
+      output.payload = required_string_member(contract, operation, "output")
+    }
+  }
+  return { input, output }
 }
 
 function managed_operation_entries(
@@ -4134,11 +4233,9 @@ function managed_operation_entries(
 function operation_field(
   operation: Managed_Api_Operation,
   direction: "input" | "output",
-  field: "payload",
+  field: Operation_Field_Role,
 ): Api_Member {
-  const member = direction === "input"
-    ? operation.binding.input_payload
-    : operation.binding.output_payload
+  const member = operation.binding[direction][field]
   if (member === undefined) {
     throw new Error(
       `operation ${operation.name} has no generated ${direction} ${field} member`,
@@ -4153,7 +4250,7 @@ function operation_field_name(
 ): string {
   switch (language) {
     case "csharp":
-      return pascal_case(member.name)
+      return pascal_case(snake_case(member.name))
     case "dart":
     case "java":
     case "kotlin":
@@ -4167,6 +4264,84 @@ function operation_field_name(
     case "swift":
       return swift_property_name(member.name)
   }
+}
+
+const OPERATION_FIELD_DEFAULT_NAMES: Record<Operation_Field_Role, string> = {
+  payload: "message",
+  namespace_id: "namespaceId",
+  item_id: "itemId",
+  value: "value",
+  condition: "condition",
+  expiration_mode: "expirationMode",
+  ttl_milliseconds: "ttlMilliseconds",
+  eviction_mode: "evictionMode",
+  expected_revision: "expectedRevision",
+  name: "name",
+  create_if_missing: "createIfMissing",
+  policy: "policy",
+  outcome: "outcome",
+  deleted: "deleted",
+  json: "json",
+  descriptor: "descriptor",
+  created: "created",
+  revision: "revision",
+  default_expiration: "defaultExpiration",
+  default_ttl_milliseconds: "defaultTtlMilliseconds",
+  expiration_override: "expirationOverride",
+  default_eviction: "defaultEviction",
+  eviction_override: "evictionOverride",
+}
+
+function operation_field_name_for(
+  operation: Managed_Api_Operation,
+  direction: "input" | "output",
+  field: Exclude<Operation_Field_Role, "payload">,
+  language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
+): string {
+  const member = operation.binding[direction][field]
+  if (member !== undefined) return operation_field_name(member, language)
+  const fallback: Api_Member = {
+    name: OPERATION_FIELD_DEFAULT_NAMES[field],
+    required: false,
+    type: { kind: "string" },
+  }
+  return operation_field_name(fallback, language)
+}
+
+function structure_field_name_for(
+  contract: Client_Contract,
+  structure_name: string,
+  field: Operation_Field_Role,
+  language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
+): string {
+  const structure = contract.api.structures.find(
+    (candidate) => candidate.name === structure_name,
+  )
+  const member = structure?.members.find(
+    (candidate) => candidate.operation_field_role === field,
+  )
+  if (member !== undefined) return operation_field_name(member, language)
+  const fallback: Api_Member = {
+    name: OPERATION_FIELD_DEFAULT_NAMES[field],
+    required: false,
+    type: { kind: "string" },
+  }
+  return operation_field_name(fallback, language)
+}
+
+function operation_structure_field_name_for(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+  direction: "input" | "output",
+  parent: Exclude<Operation_Field_Role, "payload">,
+  field: Exclude<Operation_Field_Role, "payload">,
+  language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
+): string {
+  const member = operation.binding[direction][parent]
+  if (member?.type.kind === "structure" && member.type.name !== undefined) {
+    return structure_field_name_for(contract, member.type.name, field, language)
+  }
+  return operation_field_name_for(operation, direction, field, language)
 }
 
 function managed_operation_constant(
@@ -4188,6 +4363,57 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
   const operation_constant = managed_operation_constant(operation, "java")
   const operation_label = managed_operation_label(operation)
   const method_name = lower_camel_case(operation.name)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "java",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "java",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "java")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "java",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "java",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "java",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "java",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "java",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "java")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "java",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "java")
   switch (operation.contract.response_kind) {
     case "pong":
       return `    @Override
@@ -4234,8 +4460,8 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         return smithySubmit(() -> {
             NativeResult result = smithyExecuteScoped(
                 ${operation_constant},
-                input.namespaceId(),
-                input.itemId(),
+                input.${input_namespace_id}(),
+                input.${input_item_id}(),
                 new byte[0],
                 0,
                 0);
@@ -4254,9 +4480,9 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             SmithySetFlags flags = smithySetFlags(input);
             NativeResult result = smithyExecuteScoped(
                 ${operation_constant},
-                input.namespaceId(),
-                input.itemId(),
-                input.value(),
+                input.${input_namespace_id}(),
+                input.${input_item_id}(),
+                input.${input_value}(),
                 flags.flags(),
                 flags.ttlMilliseconds());
             SetOutcome outcome = switch (result.kind()) {
@@ -4275,8 +4501,8 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         return smithySubmit(() -> {
             NativeResult result = smithyExecuteScoped(
                 ${operation_constant},
-                input.namespaceId(),
-                input.itemId(),
+                input.${input_namespace_id}(),
+                input.${input_item_id}(),
                 new byte[0],
                 0,
                 0);
@@ -4296,7 +4522,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         return smithySubmit(() -> {
             NativeResult result = smithyExecuteScoped(
                 ${operation_constant},
-                input.namespaceId(),
+                input.${input_namespace_id}(),
                 new byte[0],
                 new byte[0],
                 0,
@@ -4314,7 +4540,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         return smithySubmit(() -> {
             NativeResult result = smithyExecuteScoped(
                 ${operation_constant},
-                input.namespaceId(),
+                input.${input_namespace_id}(),
                 new byte[0],
                 new byte[0],
                 0,
@@ -4330,8 +4556,8 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         Objects.requireNonNull(input, "input");
         return smithySubmit(() -> {
             NativeResult result = smithyNamespaceDelete(
-                input.namespaceId(),
-                input.expectedRevision());
+                input.${input_namespace_id}(),
+                input.${input_expected_revision}());
             smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
             return new ${operation.output}();
         });
@@ -4344,14 +4570,16 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
         return smithySubmit(() -> {
-            byte[] name = input.name().getBytes(StandardCharsets.UTF_8);
+            byte[] name = input.${input_name}().getBytes(StandardCharsets.UTF_8);
             if (name.length > SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
                 throw new OpenKacheClientException("namespace name exceeds protocol limit");
             }
-            SmithyPolicyFlags policy = smithyPolicyFlags(input.policy(), input.createIfMissing());
+            SmithyPolicyFlags policy = smithyPolicyFlags(
+                input.${input_policy}(),
+                input.${input_create_if_missing}());
             NativeResult result = smithyNamespaceOpen(
                 name,
-                input.createIfMissing(),
+                input.${input_create_if_missing}(),
                 policy.flags(),
                 policy.ttlMilliseconds());
             boolean created = result.kind() == SmithyContract.RESULT_CREATED;
@@ -4369,10 +4597,10 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
         return smithySubmit(() -> {
-            SmithyPolicyFlags policy = smithyPolicyFlags(input.policy(), true);
+            SmithyPolicyFlags policy = smithyPolicyFlags(input.${input_policy}(), true);
             NativeResult result = smithyNamespaceUpdatePolicy(
-                input.namespaceId(),
-                input.expectedRevision(),
+                input.${input_namespace_id}(),
+                input.${input_expected_revision}(),
                 policy.flags(),
                 policy.ttlMilliseconds());
             smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
@@ -4392,6 +4620,61 @@ export function render_java_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
     .map(render_java_operation_method)
     .join("\n\n")
+  const set_condition = structure_field_name_for(
+    contract,
+    "SetInput",
+    "condition",
+    "java",
+  )
+  const set_expiration_mode = structure_field_name_for(
+    contract,
+    "SetInput",
+    "expiration_mode",
+    "java",
+  )
+  const set_ttl_milliseconds = structure_field_name_for(
+    contract,
+    "SetInput",
+    "ttl_milliseconds",
+    "java",
+  )
+  const set_eviction_mode = structure_field_name_for(
+    contract,
+    "SetInput",
+    "eviction_mode",
+    "java",
+  )
+  const set_value = structure_field_name_for(contract, "SetInput", "value", "java")
+  const policy_default_expiration = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_expiration",
+    "java",
+  )
+  const policy_default_ttl_milliseconds = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_ttl_milliseconds",
+    "java",
+  )
+  const policy_expiration_override = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "expiration_override",
+    "java",
+  )
+  const policy_default_eviction = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_eviction",
+    "java",
+  )
+  const policy_eviction_override = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "eviction_override",
+    "java",
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 package io.openkache.client;
 
@@ -4446,50 +4729,50 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
     ${methods}
 
     private static SmithySetFlags smithySetFlags(SetInput input) {
-        int flags = switch (input.condition() == null ? SetCondition.ANY : input.condition()) {
+        int flags = switch (input.${set_condition}() == null ? SetCondition.ANY : input.${set_condition}()) {
             case ANY -> SmithyContract.SET_CONDITION_ANY;
             case IF_ABSENT -> SmithyContract.SET_CONDITION_IF_ABSENT;
             case IF_PRESENT -> SmithyContract.SET_CONDITION_IF_PRESENT;
         };
-        ExpirationMode expiration = input.expirationMode()
+        ExpirationMode expiration = input.${set_expiration_mode}()
             == null
-            ? (input.ttlMilliseconds() == null
+            ? (input.${set_ttl_milliseconds}() == null
                 ? ExpirationMode.INHERIT
                 : ExpirationMode.EXPLICIT_TTL)
-            : input.expirationMode();
+            : input.${set_expiration_mode}();
         switch (expiration) {
             case INHERIT -> {
-                if (input.ttlMilliseconds() != null) {
+                if (input.${set_ttl_milliseconds}() != null) {
                     throw new IllegalArgumentException("INHERIT cannot carry a TTL");
                 }
                 flags |= SmithyContract.SET_INHERIT_EXPIRATION_BITS;
             }
             case NO_EXPIRY -> {
-                if (input.ttlMilliseconds() != null) {
+                if (input.${set_ttl_milliseconds}() != null) {
                     throw new IllegalArgumentException("NO_EXPIRY cannot carry a TTL");
                 }
                 flags |= SmithyContract.SET_NO_EXPIRY_BITS;
             }
             case EXPLICIT_TTL -> {
-                if (input.ttlMilliseconds() == null || input.ttlMilliseconds() <= 0) {
+                if (input.${set_ttl_milliseconds}() == null || input.${set_ttl_milliseconds}() <= 0) {
                     throw new IllegalArgumentException("EXPLICIT_TTL requires a positive TTL");
                 }
                 flags |= SmithyContract.SET_EXPLICIT_TTL_BITS;
             }
         }
-        flags |= switch (input.evictionMode() == null
+        flags |= switch (input.${set_eviction_mode}() == null
             ? EvictionMode.INHERIT
-            : input.evictionMode()) {
+            : input.${set_eviction_mode}()) {
             case INHERIT -> SmithyContract.SET_INHERIT_EVICTION_BITS;
             case EVICTABLE -> SmithyContract.SET_EVICTABLE_BITS;
             case EVICTION_PROTECTED -> SmithyContract.SET_EVICTION_PROTECTED_BITS;
         };
-        if (input.value().length > SmithyContract.MAX_VALUE_BYTES) {
+        if (input.${set_value}().length > SmithyContract.MAX_VALUE_BYTES) {
             throw new IllegalArgumentException("value exceeds protocol limit");
         }
         return new SmithySetFlags(
             flags,
-            input.ttlMilliseconds() == null ? 0 : input.ttlMilliseconds());
+            input.${set_ttl_milliseconds}() == null ? 0 : input.${set_ttl_milliseconds}());
     }
 
     private static SmithyPolicyFlags smithyPolicyFlags(
@@ -4504,26 +4787,26 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
         if (policy == null) {
             return new SmithyPolicyFlags(0, 0);
         }
-        int flags = switch (policy.defaultExpiration()) {
+        int flags = switch (policy.${policy_default_expiration}()) {
             case NO_EXPIRY -> SmithyContract.POLICY_NO_EXPIRY_BITS;
             case FIXED_TTL -> SmithyContract.POLICY_FIXED_TTL_BITS;
         };
-        long ttl = policy.defaultTtlMilliseconds() == null
+        long ttl = policy.${policy_default_ttl_milliseconds}() == null
             ? 0
-            : policy.defaultTtlMilliseconds();
-        if (policy.defaultExpiration() == ExpirationDefault.FIXED_TTL && ttl <= 0) {
+            : policy.${policy_default_ttl_milliseconds}();
+        if (policy.${policy_default_expiration}() == ExpirationDefault.FIXED_TTL && ttl <= 0) {
             throw new IllegalArgumentException("FIXED_TTL requires a positive TTL");
         }
-        if (policy.defaultExpiration() == ExpirationDefault.NO_EXPIRY && ttl != 0) {
+        if (policy.${policy_default_expiration}() == ExpirationDefault.NO_EXPIRY && ttl != 0) {
             throw new IllegalArgumentException("NO_EXPIRY cannot carry a TTL");
         }
-        if (policy.expirationOverride() == OverridePolicy.ALLOWED) {
+        if (policy.${policy_expiration_override}() == OverridePolicy.ALLOWED) {
             flags |= SmithyContract.POLICY_EXPIRATION_OVERRIDE_FLAG;
         }
-        if (policy.defaultEviction() == EvictionDefault.EVICTION_PROTECTED) {
+        if (policy.${policy_default_eviction}() == EvictionDefault.EVICTION_PROTECTED) {
             flags |= SmithyContract.POLICY_EVICTION_PROTECTED_FLAG;
         }
-        if (policy.evictionOverride() == OverridePolicy.ALLOWED) {
+        if (policy.${policy_eviction_override}() == OverridePolicy.ALLOWED) {
             flags |= SmithyContract.POLICY_EVICTION_OVERRIDE_FLAG;
         }
         return new SmithyPolicyFlags(flags, ttl);
@@ -4550,6 +4833,59 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
   const operation_constant = managed_operation_constant(operation, "kotlin")
   const operation_label = managed_operation_label(operation)
   const method_name = lower_camel_case(operation.name)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "kotlin",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "kotlin",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "kotlin")
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "kotlin",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "kotlin")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "kotlin",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "kotlin")
+  const output_value = operation_field_name_for(operation, "output", "value", "kotlin")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "kotlin",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "kotlin",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "kotlin")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "kotlin",
+  )
+  const output_created = operation_field_name_for(
+    operation,
+    "output",
+    "created",
+    "kotlin",
+  )
   const prefix = `    override suspend fun ${method_name}(input: ${operation.input}): ${operation.output} =
         withContext(Dispatchers.IO) {
             requireNotNull(input)
@@ -4588,13 +4924,13 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
     case "value":
       return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
-                input.namespaceId,
-                input.itemId,
+                input.${input_namespace_id},
+                input.${input_item_id},
                 byteArrayOf(),
             )
             when (result.kind) {
-                SmithyContract.RESULT_VALUE -> ${operation.output}(value = result.payload)
-                SmithyContract.RESULT_NOT_FOUND -> ${operation.output}(value = null)
+                SmithyContract.RESULT_VALUE -> ${operation.output}(${output_value} = result.payload)
+                SmithyContract.RESULT_NOT_FOUND -> ${operation.output}(${output_value} = null)
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
         }`
@@ -4602,9 +4938,9 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
       return `${prefix}            val flags = smithySetFlags(input)
             val result = smithyInvokeScoped(
                 ${operation_constant},
-                input.namespaceId,
-                input.itemId,
-                input.value,
+                input.${input_namespace_id},
+                input.${input_item_id},
+                input.${input_value},
                 flags.first,
                 flags.second,
             )
@@ -4614,38 +4950,38 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 SmithyContract.RESULT_NOT_STORED -> SetOutcome.NotStored
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
-            ${operation.output}(outcome = outcome)
+            ${operation.output}(${output_outcome} = outcome)
         }`
     case "delete_outcome":
       return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
-                input.namespaceId,
-                input.itemId,
+                input.${input_namespace_id},
+                input.${input_item_id},
                 byteArrayOf(),
             )
             when (result.kind) {
-                SmithyContract.RESULT_DELETED -> ${operation.output}(deleted = true)
-                SmithyContract.RESULT_NOT_DELETED -> ${operation.output}(deleted = false)
+                SmithyContract.RESULT_DELETED -> ${operation.output}(${output_deleted} = true)
+                SmithyContract.RESULT_NOT_DELETED -> ${operation.output}(${output_deleted} = false)
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
         }`
     case "stats_json":
       return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
-                input.namespaceId,
+                input.${input_namespace_id},
                 byteArrayOf(),
                 byteArrayOf(),
             )
             smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
             ${operation.output}(
-                json = smithyDecodeUtf8(result.payload, "${operation_label}"),
+                ${output_json} = smithyDecodeUtf8(result.payload, "${operation_label}"),
             )
         }`
     case "empty":
       if (operation.contract.request_kind === "scoped_namespace") {
         return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
-                input.namespaceId,
+                input.${input_namespace_id},
                 byteArrayOf(),
                 byteArrayOf(),
             )
@@ -4655,8 +4991,8 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
       }
       if (operation.contract.request_kind === "namespace_delete") {
         return `${prefix}            val result = smithyNamespaceDelete(
-                input.namespaceId,
-                input.expectedRevision,
+                input.${input_namespace_id},
+                input.${input_expected_revision},
             )
             smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
             ${operation.output}()
@@ -4665,14 +5001,17 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
       throw new Error(`unsupported generated Kotlin empty operation ${operation.name}`)
     case "namespace_descriptor":
       if (operation.contract.request_kind === "namespace_open") {
-        return `${prefix}            val name = input.name.toByteArray(StandardCharsets.UTF_8)
+        return `${prefix}            val name = input.${input_name}.toByteArray(StandardCharsets.UTF_8)
             require(name.size <= SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
                 "namespace name exceeds protocol limit"
             }
-            val policy = smithyPolicyFlags(input.policy, input.createIfMissing)
+            val policy = smithyPolicyFlags(
+                input.${input_policy},
+                input.${input_create_if_missing},
+            )
             val result = smithyNamespaceOpen(
                 name,
-                input.createIfMissing,
+                input.${input_create_if_missing},
                 policy.first,
                 policy.second,
             )
@@ -4681,21 +5020,21 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
             ${operation.output}(
-                descriptor = smithyDecodeDescriptor(result.payload),
-                created = created,
+                ${output_descriptor} = smithyDecodeDescriptor(result.payload),
+                ${output_created} = created,
             )
         }`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
-        return `${prefix}            val policy = smithyPolicyFlags(input.policy, true)
+        return `${prefix}            val policy = smithyPolicyFlags(input.${input_policy}, true)
             val result = smithyNamespaceUpdatePolicy(
-                input.namespaceId,
-                input.expectedRevision,
+                input.${input_namespace_id},
+                input.${input_expected_revision},
                 policy.first,
                 policy.second,
             )
             smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
-            ${operation.output}(descriptor = smithyDecodeDescriptor(result.payload))
+            ${operation.output}(${output_descriptor} = smithyDecodeDescriptor(result.payload))
         }`
       }
       throw new Error(`unsupported generated Kotlin namespace operation ${operation.name}`)
@@ -4710,6 +5049,61 @@ export function render_kotlin_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
     .map(render_kotlin_operation_method)
     .join("\n\n")
+  const set_condition = structure_field_name_for(
+    contract,
+    "SetInput",
+    "condition",
+    "kotlin",
+  )
+  const set_expiration_mode = structure_field_name_for(
+    contract,
+    "SetInput",
+    "expiration_mode",
+    "kotlin",
+  )
+  const set_ttl_milliseconds = structure_field_name_for(
+    contract,
+    "SetInput",
+    "ttl_milliseconds",
+    "kotlin",
+  )
+  const set_eviction_mode = structure_field_name_for(
+    contract,
+    "SetInput",
+    "eviction_mode",
+    "kotlin",
+  )
+  const set_value = structure_field_name_for(contract, "SetInput", "value", "kotlin")
+  const policy_default_expiration = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_expiration",
+    "kotlin",
+  )
+  const policy_default_ttl_milliseconds = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_ttl_milliseconds",
+    "kotlin",
+  )
+  const policy_expiration_override = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "expiration_override",
+    "kotlin",
+  )
+  const policy_default_eviction = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_eviction",
+    "kotlin",
+  )
+  const policy_eviction_override = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "eviction_override",
+    "kotlin",
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 package io.openkache.client
 
@@ -4763,38 +5157,38 @@ public interface SmithyGeneratedOperations : SmithyOpenKacheApi {
 ${methods}
 
     private fun smithySetFlags(input: SetInput): Pair<Int, Long> {
-        var flags = when (input.condition ?: SetCondition.Any) {
+        var flags = when (input.${set_condition} ?: SetCondition.Any) {
             SetCondition.Any -> SmithyContract.SET_CONDITION_ANY
             SetCondition.IfAbsent -> SmithyContract.SET_CONDITION_IF_ABSENT
             SetCondition.IfPresent -> SmithyContract.SET_CONDITION_IF_PRESENT
         }
-        val expiration = input.expirationMode
-            ?: if (input.ttlMilliseconds == null) ExpirationMode.Inherit else ExpirationMode.ExplicitTtl
+        val expiration = input.${set_expiration_mode}
+            ?: if (input.${set_ttl_milliseconds} == null) ExpirationMode.Inherit else ExpirationMode.ExplicitTtl
         when (expiration) {
             ExpirationMode.Inherit -> {
-                require(input.ttlMilliseconds == null) { "INHERIT cannot carry a TTL" }
+                require(input.${set_ttl_milliseconds} == null) { "INHERIT cannot carry a TTL" }
                 flags = flags or SmithyContract.SET_INHERIT_EXPIRATION_BITS
             }
             ExpirationMode.NoExpiry -> {
-                require(input.ttlMilliseconds == null) { "NO_EXPIRY cannot carry a TTL" }
+                require(input.${set_ttl_milliseconds} == null) { "NO_EXPIRY cannot carry a TTL" }
                 flags = flags or SmithyContract.SET_NO_EXPIRY_BITS
             }
             ExpirationMode.ExplicitTtl -> {
-                require(input.ttlMilliseconds != null && input.ttlMilliseconds > 0) {
+                require(input.${set_ttl_milliseconds} != null && input.${set_ttl_milliseconds} > 0) {
                     "EXPLICIT_TTL requires a positive TTL"
                 }
                 flags = flags or SmithyContract.SET_EXPLICIT_TTL_BITS
             }
         }
-        flags = flags or when (input.evictionMode ?: EvictionMode.Inherit) {
+        flags = flags or when (input.${set_eviction_mode} ?: EvictionMode.Inherit) {
             EvictionMode.Inherit -> SmithyContract.SET_INHERIT_EVICTION_BITS
             EvictionMode.Evictable -> SmithyContract.SET_EVICTABLE_BITS
             EvictionMode.EvictionProtected -> SmithyContract.SET_EVICTION_PROTECTED_BITS
         }
-        require(input.value.size <= SmithyContract.MAX_VALUE_BYTES) {
+        require(input.${set_value}.size <= SmithyContract.MAX_VALUE_BYTES) {
             "value exceeds protocol limit"
         }
-        return flags to (input.ttlMilliseconds ?: 0)
+        return flags to (input.${set_ttl_milliseconds} ?: 0)
     }
 
     private fun smithyPolicyFlags(
@@ -4804,23 +5198,23 @@ ${methods}
         if (required) requireNotNull(policy) { "namespace policy is required" }
         if (!required) require(policy == null) { "namespace policy requires createIfMissing" }
         if (policy == null) return 0 to 0
-        var flags = when (policy.defaultExpiration) {
+        var flags = when (policy.${policy_default_expiration}) {
             ExpirationDefault.NoExpiry -> SmithyContract.POLICY_NO_EXPIRY_BITS
             ExpirationDefault.FixedTtl -> SmithyContract.POLICY_FIXED_TTL_BITS
         }
-        val ttl = policy.defaultTtlMilliseconds ?: 0
-        if (policy.defaultExpiration == ExpirationDefault.FixedTtl) {
+        val ttl = policy.${policy_default_ttl_milliseconds} ?: 0
+        if (policy.${policy_default_expiration} == ExpirationDefault.FixedTtl) {
             require(ttl > 0) { "FIXED_TTL requires a positive TTL" }
         } else {
             require(ttl == 0L) { "NO_EXPIRY cannot carry a TTL" }
         }
-        if (policy.expirationOverride == OverridePolicy.Allowed) {
+        if (policy.${policy_expiration_override} == OverridePolicy.Allowed) {
             flags = flags or SmithyContract.POLICY_EXPIRATION_OVERRIDE_FLAG
         }
-        if (policy.defaultEviction == EvictionDefault.EvictionProtected) {
+        if (policy.${policy_default_eviction} == EvictionDefault.EvictionProtected) {
             flags = flags or SmithyContract.POLICY_EVICTION_PROTECTED_FLAG
         }
-        if (policy.evictionOverride == OverridePolicy.Allowed) {
+        if (policy.${policy_eviction_override} == OverridePolicy.Allowed) {
             flags = flags or SmithyContract.POLICY_EVICTION_OVERRIDE_FLAG
         }
         return flags to ttl
@@ -4846,6 +5240,59 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
   const operation_constant = managed_operation_constant(operation, "dart")
   const operation_label = managed_operation_label(operation)
   const method_name = lower_camel_case(operation.name)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "dart",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "dart",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "dart")
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "dart",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "dart")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "dart",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "dart")
+  const output_value = operation_field_name_for(operation, "output", "value", "dart")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "dart",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "dart",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "dart")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "dart",
+  )
+  const output_created = operation_field_name_for(
+    operation,
+    "output",
+    "created",
+    "dart",
+  )
   const prefix = `  @override
   Future<${operation.output}> ${method_name}(${operation.input} input) => _run(() {
 `
@@ -4883,23 +5330,23 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     case "value":
       return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
-      input.namespaceId,
-      input.itemId,
+      input.${input_namespace_id},
+      input.${input_item_id},
       const <int>[],
     );
     if (result.kind == smithyResultNotFound) {
       return const ${operation.output}();
     }
     _smithyRequireKind(result, smithyResultValue, '${operation_label}');
-    return ${operation.output}(value: result.payload);
+      return ${operation.output}(${output_value}: result.payload);
   });`
     case "set_outcome":
       return `${prefix}    final flags = _smithySetFlags(input);
     final result = _invokeScoped(
       ${operation_constant},
-      input.namespaceId,
-      input.itemId,
-      input.value,
+      input.${input_namespace_id},
+      input.${input_item_id},
+      input.${input_value},
       flags: flags.flags,
       ttlMilliseconds: flags.ttlMilliseconds,
     );
@@ -4909,38 +5356,38 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       smithyResultNotStored => SetOutcome.notStored,
       _ => throw _smithyUnexpectedKind('${operation_label}', result.kind),
     };
-    return ${operation.output}(outcome: outcome);
+    return ${operation.output}(${output_outcome}: outcome);
   });`
     case "delete_outcome":
       return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
-      input.namespaceId,
-      input.itemId,
+      input.${input_namespace_id},
+      input.${input_item_id},
       const <int>[],
     );
     return switch (result.kind) {
-      smithyResultDeleted => const ${operation.output}(deleted: true),
-      smithyResultNotDeleted => const ${operation.output}(deleted: false),
+      smithyResultDeleted => const ${operation.output}(${output_deleted}: true),
+      smithyResultNotDeleted => const ${operation.output}(${output_deleted}: false),
       _ => throw _smithyUnexpectedKind('${operation_label}', result.kind),
     };
   });`
     case "stats_json":
       return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
-      input.namespaceId,
+      input.${input_namespace_id},
       const <int>[],
       const <int>[],
     );
     _smithyRequireKind(result, smithyResultValue, '${operation_label}');
     return ${operation.output}(
-      json: _smithyDecodeUtf8(result.payload, '${operation_label}'),
+      ${output_json}: _smithyDecodeUtf8(result.payload, '${operation_label}'),
     );
   });`
     case "empty":
       if (operation.contract.request_kind === "scoped_namespace") {
         return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
-      input.namespaceId,
+      input.${input_namespace_id},
       const <int>[],
       const <int>[],
     );
@@ -4953,8 +5400,8 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       _api,
       _api.namespaceDelete(
         _requireOpenHandle(),
-        input.namespaceId,
-        input.expectedRevision,
+        input.${input_namespace_id},
+        input.${input_expected_revision},
       ),
     );
     _smithyRequireKind(result, smithyResultOk, '${operation_label}');
@@ -4964,11 +5411,14 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       throw new Error(`unsupported generated Dart empty operation ${operation.name}`)
     case "namespace_descriptor":
       if (operation.contract.request_kind === "namespace_open") {
-        return `${prefix}    final name = utf8.encode(input.name);
+        return `${prefix}    final name = utf8.encode(input.${input_name});
     if (name.length > smithyNamespaceNameMaxBytes) {
       throw const OpenKacheClientException('namespace name exceeds protocol limit');
     }
-    final policy = _smithyPolicyFlags(input.policy, input.createIfMissing);
+    final policy = _smithyPolicyFlags(
+      input.${input_policy},
+      input.${input_create_if_missing},
+    );
     final nameBuffer = _Buffer(name);
     try {
       final result = _readResult(
@@ -4977,7 +5427,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
           _requireOpenHandle(),
           nameBuffer.pointer,
           nameBuffer.length,
-          input.createIfMissing ? 1 : 0,
+          input.${input_create_if_missing} ? 1 : 0,
           policy.flags,
           policy.ttlMilliseconds,
         ),
@@ -4987,8 +5437,8 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         throw _smithyUnexpectedKind('${operation_label}', result.kind);
       }
       return ${operation.output}(
-        descriptor: _decodeDescriptor(result.payload),
-        created: created,
+        ${output_descriptor}: _decodeDescriptor(result.payload),
+        ${output_created}: created,
       );
     } finally {
       nameBuffer.close();
@@ -4996,20 +5446,20 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
   });`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
-        return `${prefix}    final policy = _smithyPolicyFlags(input.policy, true);
+        return `${prefix}    final policy = _smithyPolicyFlags(input.${input_policy}, true);
     final result = _readResult(
       _api,
       _api.namespaceUpdatePolicy(
         _requireOpenHandle(),
-        input.namespaceId,
-        input.expectedRevision,
+        input.${input_namespace_id},
+        input.${input_expected_revision},
         policy.flags,
         policy.ttlMilliseconds,
       ),
     );
     _smithyRequireKind(result, smithyResultValue, '${operation_label}');
     return ${operation.output}(
-      descriptor: _decodeDescriptor(result.payload),
+      ${output_descriptor}: _decodeDescriptor(result.payload),
     );
   });`
       }
@@ -5025,6 +5475,61 @@ export function render_dart_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
     .map(render_dart_operation_method)
     .join("\n\n")
+  const set_condition = structure_field_name_for(
+    contract,
+    "SetInput",
+    "condition",
+    "dart",
+  )
+  const set_expiration_mode = structure_field_name_for(
+    contract,
+    "SetInput",
+    "expiration_mode",
+    "dart",
+  )
+  const set_ttl_milliseconds = structure_field_name_for(
+    contract,
+    "SetInput",
+    "ttl_milliseconds",
+    "dart",
+  )
+  const set_eviction_mode = structure_field_name_for(
+    contract,
+    "SetInput",
+    "eviction_mode",
+    "dart",
+  )
+  const set_value = structure_field_name_for(contract, "SetInput", "value", "dart")
+  const policy_default_expiration = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_expiration",
+    "dart",
+  )
+  const policy_default_ttl_milliseconds = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_ttl_milliseconds",
+    "dart",
+  )
+  const policy_expiration_override = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "expiration_override",
+    "dart",
+  )
+  const policy_default_eviction = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "default_eviction",
+    "dart",
+  )
+  const policy_eviction_override = structure_field_name_for(
+    contract,
+    "NamespacePolicy",
+    "eviction_override",
+    "dart",
+  )
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 part of '../openkache.dart';
 // The generated hook keeps optional arguments aligned with the native ABI.
@@ -5061,42 +5566,42 @@ ${methods}
 }
 
 _SmithySetFlags _smithySetFlags(SetInput input) {
-  var flags = switch (input.condition ?? SetCondition.any) {
+  var flags = switch (input.${set_condition} ?? SetCondition.any) {
     SetCondition.any => smithySetConditionAny,
     SetCondition.ifAbsent => smithySetConditionIfAbsent,
     SetCondition.ifPresent => smithySetConditionIfPresent,
   };
   final expiration =
-      input.expirationMode ??
-      (input.ttlMilliseconds == null
+      input.${set_expiration_mode} ??
+      (input.${set_ttl_milliseconds} == null
           ? ExpirationMode.inherit
           : ExpirationMode.explicitTtl);
   switch (expiration) {
     case ExpirationMode.inherit:
-      if (input.ttlMilliseconds != null) {
+      if (input.${set_ttl_milliseconds} != null) {
         throw ArgumentError('INHERIT cannot carry a TTL');
       }
       flags |= smithySetInheritExpirationBits;
     case ExpirationMode.noExpiry:
-      if (input.ttlMilliseconds != null) {
+      if (input.${set_ttl_milliseconds} != null) {
         throw ArgumentError('NO_EXPIRY cannot carry a TTL');
       }
       flags |= smithySetNoExpiryBits;
     case ExpirationMode.explicitTtl:
-      if (input.ttlMilliseconds == null || input.ttlMilliseconds! <= 0) {
+      if (input.${set_ttl_milliseconds} == null || input.${set_ttl_milliseconds}! <= 0) {
         throw ArgumentError('EXPLICIT_TTL requires a positive TTL');
       }
       flags |= smithySetExplicitTtlBits;
   }
-  flags |= switch (input.evictionMode ?? EvictionMode.inherit) {
+  flags |= switch (input.${set_eviction_mode} ?? EvictionMode.inherit) {
     EvictionMode.inherit => smithySetInheritEvictionBits,
     EvictionMode.evictable => smithySetEvictableBits,
     EvictionMode.evictionProtected => smithySetEvictionProtectedBits,
   };
-  if (input.value.length > smithyMaxValueBytes) {
+  if (input.${set_value}.length > smithyMaxValueBytes) {
     throw ArgumentError('value exceeds protocol limit');
   }
-  return _SmithySetFlags(flags, input.ttlMilliseconds ?? 0);
+  return _SmithySetFlags(flags, input.${set_ttl_milliseconds} ?? 0);
 }
 
 _SmithyPolicyFlags _smithyPolicyFlags(
@@ -5110,23 +5615,23 @@ _SmithyPolicyFlags _smithyPolicyFlags(
     throw ArgumentError('namespace policy requires createIfMissing');
   }
   if (policy == null) return const _SmithyPolicyFlags(0, 0);
-  var flags = switch (policy.defaultExpiration) {
+  var flags = switch (policy.${policy_default_expiration}) {
     ExpirationDefault.noExpiry => smithyPolicyNoExpiryBits,
     ExpirationDefault.fixedTtl => smithyPolicyFixedTtlBits,
   };
-  final ttl = policy.defaultTtlMilliseconds ?? 0;
-  if (policy.defaultExpiration == ExpirationDefault.fixedTtl) {
+  final ttl = policy.${policy_default_ttl_milliseconds} ?? 0;
+  if (policy.${policy_default_expiration} == ExpirationDefault.fixedTtl) {
     if (ttl <= 0) throw ArgumentError('FIXED_TTL requires a positive TTL');
   } else if (ttl != 0) {
     throw ArgumentError('NO_EXPIRY cannot carry a TTL');
   }
-  if (policy.expirationOverride == OverridePolicy.allowed) {
+  if (policy.${policy_expiration_override} == OverridePolicy.allowed) {
     flags |= smithyPolicyExpirationOverrideFlag;
   }
-  if (policy.defaultEviction == EvictionDefault.evictionProtected) {
+  if (policy.${policy_default_eviction} == EvictionDefault.evictionProtected) {
     flags |= smithyPolicyEvictionProtectedFlag;
   }
-  if (policy.evictionOverride == OverridePolicy.allowed) {
+  if (policy.${policy_eviction_override} == OverridePolicy.allowed) {
     flags |= smithyPolicyEvictionOverrideFlag;
   }
   return _SmithyPolicyFlags(flags, ttl);
@@ -5769,10 +6274,124 @@ function typescript_operation_result_kinds(
   }
 }
 
-function render_typescript_operation_method(operation: Managed_Api_Operation): string {
+function render_typescript_operation_method(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   const method_name = snake_case(operation.name)
   const operation_value = operation.opcode.value
   const result_kinds = typescript_operation_result_kinds(operation)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "typescript",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "typescript",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "typescript")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "typescript",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "typescript",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "typescript",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "typescript",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "typescript",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "typescript")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "typescript",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "typescript")
+  const policy_default_expiration = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_expiration",
+    "typescript",
+  )
+  const policy_default_ttl_milliseconds = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_ttl_milliseconds",
+    "typescript",
+  )
+  const policy_expiration_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "expiration_override",
+    "typescript",
+  )
+  const policy_default_eviction = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_eviction",
+    "typescript",
+  )
+  const policy_eviction_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "eviction_override",
+    "typescript",
+  )
+  const output_value = operation_field_name_for(operation, "output", "value", "typescript")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "typescript",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "typescript",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "typescript")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "typescript",
+  )
   switch (operation.contract.response_kind) {
     case "pong":
       return `  async ${method_name}(
@@ -5815,15 +6434,15 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     this.#transport.assert_open();
     const result = await this.#transport.invoke_scoped(
       ${operation_value},
-      input.namespace_id,
+      input.${input_namespace_id},
       {
-        item_id: input.item_id,
+        item_id: input.${input_item_id},
         expected_kinds: [${result_kinds}],
       },
     );
     return result.kind === SMITHY_FFI_RESULT_NOT_FOUND
       ? {}
-      : { value: result.payload };
+      : { ${output_value}: result.payload };
   }`
     case "set_outcome":
       return `  async ${method_name}(
@@ -5832,24 +6451,24 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     this.#transport.assert_open();
     const result = await this.#transport.invoke_scoped(
       ${operation_value},
-      input.namespace_id,
+      input.${input_namespace_id},
       {
-        item_id: input.item_id,
-        value: input.value,
-        condition: input.condition,
-        expiration_mode: input.expiration_mode,
-        eviction_mode: input.eviction_mode,
-        ttl_milliseconds: input.ttl_milliseconds,
+        item_id: input.${input_item_id},
+        value: input.${input_value},
+        condition: input.${input_condition},
+        expiration_mode: input.${input_expiration_mode},
+        eviction_mode: input.${input_eviction_mode},
+        ttl_milliseconds: input.${input_ttl_milliseconds},
         expected_kinds: [${result_kinds}],
       },
     );
     switch (result.kind) {
       case SMITHY_FFI_RESULT_CREATED:
-        return { outcome: "created" };
+        return { ${output_outcome}: "created" };
       case SMITHY_FFI_RESULT_REPLACED:
-        return { outcome: "replaced" };
+        return { ${output_outcome}: "replaced" };
       case SMITHY_FFI_RESULT_NOT_STORED:
-        return { outcome: "not_stored" };
+        return { ${output_outcome}: "not_stored" };
       default:
         throw new Error("SET returned an unexpected native result");
     }
@@ -5861,13 +6480,13 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     this.#transport.assert_open();
     const result = await this.#transport.invoke_scoped(
       ${operation_value},
-      input.namespace_id,
+      input.${input_namespace_id},
       {
-        item_id: input.item_id,
+        item_id: input.${input_item_id},
         expected_kinds: [${result_kinds}],
       },
     );
-    return { deleted: result.kind === SMITHY_FFI_RESULT_DELETED };
+    return { ${output_deleted}: result.kind === SMITHY_FFI_RESULT_DELETED };
   }`
     case "stats_json":
       return `  async ${method_name}(
@@ -5876,13 +6495,13 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     this.#transport.assert_open();
     const result = await this.#transport.invoke_scoped(
       ${operation_value},
-      input.namespace_id,
+      input.${input_namespace_id},
       {
         expected_kinds: [${result_kinds}],
       },
     );
     return {
-      json: this.#transport.decode_utf8(result.payload, ${operation_value}),
+      ${output_json}: this.#transport.decode_utf8(result.payload, ${operation_value}),
     };
   }`
     case "empty":
@@ -5891,7 +6510,10 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    await this.#transport.namespace_delete(input);
+    await this.#transport.namespace_delete(
+      input.${input_namespace_id},
+      input.${input_expected_revision},
+    );
     return {};
   }`
       }
@@ -5904,7 +6526,7 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     this.#transport.assert_open();
     await this.#transport.invoke_scoped(
       ${operation_value},
-      input.namespace_id,
+        input.${input_namespace_id},
       {
         expected_kinds: [${result_kinds}],
       },
@@ -5917,7 +6539,16 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return await this.#transport.namespace_open(input);
+    const policy = input.${input_policy};
+    return await this.#transport.namespace_open(
+      input.${input_name},
+      input.${input_create_if_missing},
+      policy?.${policy_default_expiration},
+      policy?.${policy_expiration_override},
+      policy?.${policy_default_eviction},
+      policy?.${policy_eviction_override},
+      policy?.${policy_default_ttl_milliseconds},
+    );
   }`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
@@ -5925,7 +6556,16 @@ function render_typescript_operation_method(operation: Managed_Api_Operation): s
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
-    return { descriptor: await this.#transport.namespace_update_policy(input) };
+    const policy = input.${input_policy};
+    return { ${output_descriptor}: await this.#transport.namespace_update_policy(
+      input.${input_namespace_id},
+      input.${input_expected_revision},
+      policy.${policy_default_expiration},
+      policy.${policy_expiration_override},
+      policy.${policy_default_eviction},
+      policy.${policy_eviction_override},
+      policy.${policy_default_ttl_milliseconds},
+    ) };
   }`
       }
       throw new Error(`unsupported generated TypeScript namespace operation ${operation.name}`)
@@ -5947,11 +6587,14 @@ export function render_typescript_operations(contract: Client_Contract): string 
   imported_types.add("Smithy_Namespace_Descriptor")
   imported_types.add("Smithy_Namespace_Open_Output")
   imported_types.add("Smithy_Set_Condition")
+  imported_types.add("Smithy_Expiration_Default")
   imported_types.add("Smithy_Expiration_Mode")
   imported_types.add("Smithy_Eviction_Mode")
+  imported_types.add("Smithy_Eviction_Default")
+  imported_types.add("Smithy_Override_Policy")
   const imports = [...imported_types].sort().join(",\n  ")
   const methods = managed_operations
-    .map(render_typescript_operation_method)
+    .map((operation) => render_typescript_operation_method(contract, operation))
     .join("\n\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
@@ -5998,12 +6641,24 @@ export interface Smithy_Operation_Transport {
   ): Promise<Smithy_Operation_Result>
   decode_utf8(payload: Uint8Array, operation: number): string
   namespace_open(
-    input: Smithy_Namespace_Open_Input,
+    name: string,
+    create_if_missing: boolean,
+    policy_default_expiration?: Smithy_Expiration_Default,
+    policy_expiration_override?: Smithy_Override_Policy,
+    policy_default_eviction?: Smithy_Eviction_Default,
+    policy_eviction_override?: Smithy_Override_Policy,
+    policy_default_ttl_milliseconds?: bigint,
   ): Promise<Smithy_Namespace_Open_Output>
   namespace_update_policy(
-    input: Smithy_Namespace_Update_Policy_Input,
+    namespace_id: bigint,
+    expected_revision: bigint,
+    default_expiration: Smithy_Expiration_Default,
+    expiration_override: Smithy_Override_Policy,
+    default_eviction: Smithy_Eviction_Default,
+    eviction_override: Smithy_Override_Policy,
+    default_ttl_milliseconds?: bigint,
   ): Promise<Smithy_Namespace_Descriptor>
-  namespace_delete(input: Smithy_Namespace_Delete_Input): Promise<void>
+  namespace_delete(namespace_id: bigint, expected_revision: bigint): Promise<void>
 }
 
 /** Generated Smithy operations backed by the language adapter's native hooks. */
@@ -6345,12 +7000,117 @@ function go_operation_label(operation: Api_Operation): string {
   return snake_case(operation.name).replaceAll("_", " ")
 }
 
-function render_go_operation_method(operation: Managed_Api_Operation): string {
+function render_go_operation_method(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   const input = go_api_name(operation.input)
   const output = go_api_name(operation.output)
   const method = operation.name
   const opcode = `SmithyOpcode${operation.name}`
   const label = go_operation_label(operation)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "go",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "go",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "go")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "go",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "go",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "go",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "go",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "go",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "go")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "go",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "go")
+  const output_value = operation_field_name_for(operation, "output", "value", "go")
+  const output_outcome = operation_field_name_for(operation, "output", "outcome", "go")
+  const output_deleted = operation_field_name_for(operation, "output", "deleted", "go")
+  const output_json = operation_field_name_for(operation, "output", "json", "go")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "go",
+  )
+  const output_created = operation_field_name_for(operation, "output", "created", "go")
+  const policy_default_expiration = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_expiration",
+    "go",
+  )
+  const policy_default_ttl_milliseconds = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_ttl_milliseconds",
+    "go",
+  )
+  const policy_expiration_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "expiration_override",
+    "go",
+  )
+  const policy_default_eviction = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_eviction",
+    "go",
+  )
+  const policy_eviction_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "eviction_override",
+    "go",
+  )
   switch (operation.contract.response_kind) {
     case "pong":
       return `func (s smithyClient) ${method}(
@@ -6401,14 +7161,14 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
-	itemID, err := NewItemID(input.ItemID)
+	itemID, err := NewItemID(input.${input_item_id})
 	if err != nil {
 		return ${output}{}, err
 	}
 	result, err := s.client.invokeScoped(
 		ctx,
 		${opcode},
-		input.NamespaceID,
+		input.${input_namespace_id},
 		itemID,
 		nil,
 		SetOptions{},
@@ -6420,48 +7180,53 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	if err != nil || !found {
 		return ${output}{}, err
 	}
-	return ${output}{Value: &value}, nil
+	return ${output}{${output_value}: &value}, nil
 }`
     case "set_outcome":
       return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
-	itemID, err := NewItemID(input.ItemID)
+	itemID, err := NewItemID(input.${input_item_id})
 	if err != nil {
 		return ${output}{}, err
 	}
-	options, err := smithySetOptions(input)
+	options, err := smithySetOptions(
+		input.${input_condition},
+		input.${input_expiration_mode},
+		input.${input_ttl_milliseconds},
+		input.${input_eviction_mode},
+	)
 	if err != nil {
 		return ${output}{}, err
 	}
 	result, err := s.client.invokeScoped(
 		ctx,
 		${opcode},
-		input.NamespaceID,
+		input.${input_namespace_id},
 		itemID,
-		input.Value,
+		input.${input_value},
 		options,
 	)
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
 	outcome, err := setResult("${label}", result)
-	return ${output}{Outcome: SmithySetOutcome(outcome)}, err
+	return ${output}{${output_outcome}: SmithySetOutcome(outcome)}, err
 }`
     case "delete_outcome":
       return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
-	itemID, err := NewItemID(input.ItemID)
+	itemID, err := NewItemID(input.${input_item_id})
 	if err != nil {
 		return ${output}{}, err
 	}
 	result, err := s.client.invokeScoped(
 		ctx,
 		${opcode},
-		input.NamespaceID,
+		input.${input_namespace_id},
 		itemID,
 		nil,
 		SetOptions{},
@@ -6470,7 +7235,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 		return ${output}{}, operationError("${label}", err)
 	}
 	deleted, err := deleteResult("${label}", result)
-	return ${output}{Deleted: deleted}, err
+	return ${output}{${output_deleted}: deleted}, err
 }`
     case "stats_json":
       return `func (s smithyClient) ${method}(
@@ -6480,7 +7245,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	result, err := s.client.invokeScoped(
 		ctx,
 		${opcode},
-		input.NamespaceID,
+		input.${input_namespace_id},
 		ItemID{},
 		nil,
 		SetOptions{},
@@ -6491,7 +7256,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	if result.kind != SmithyFFIResultValue {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
-	return ${output}{JSON: string(result.data)}, nil
+	return ${output}{${output_json}: string(result.data)}, nil
 }`
     case "empty":
       if (operation.contract.request_kind === "scoped_namespace") {
@@ -6502,7 +7267,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	result, err := s.client.invokeScoped(
 		ctx,
 		${opcode},
-		input.NamespaceID,
+		input.${input_namespace_id},
 		ItemID{},
 		nil,
 		SetOptions{},
@@ -6523,8 +7288,8 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 ) (${output}, error) {
 	result, err := s.client.invokeNamespaceDelete(
 		ctx,
-		input.NamespaceID,
-		input.ExpectedRevision,
+		input.${input_namespace_id},
+		input.${input_expected_revision},
 	)
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
@@ -6542,26 +7307,37 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
-	if input.CreateIfMissing && input.Policy == nil {
+	if input.${input_create_if_missing} && input.${input_policy} == nil {
 		return ${output}{}, validationError(
 			"namespace.policy",
 			"is required when create_if_missing is true",
 		)
 	}
-	if !input.CreateIfMissing && input.Policy != nil {
+	if !input.${input_create_if_missing} && input.${input_policy} != nil {
 		return ${output}{}, validationError(
 			"namespace.policy",
 			"is only valid when create_if_missing is true",
 		)
 	}
-	policyFlags, ttl, err := smithyNamespacePolicyWire(input.Policy)
+	var policyFlags uint8
+	var ttl uint64
+	var err error
+	if input.${input_policy} != nil {
+		policyFlags, ttl, err = smithyNamespacePolicyWire(
+			input.${input_policy}.${policy_default_expiration},
+			input.${input_policy}.${policy_default_ttl_milliseconds},
+			input.${input_policy}.${policy_expiration_override},
+			input.${input_policy}.${policy_default_eviction},
+			input.${input_policy}.${policy_eviction_override},
+		)
+	}
 	if err != nil {
 		return ${output}{}, err
 	}
 	result, err := s.client.invokeNamespaceOpen(
 		ctx,
-		[]byte(input.Name),
-		input.CreateIfMissing,
+		[]byte(input.${input_name}),
+		input.${input_create_if_missing},
 		policyFlags,
 		ttl,
 	)
@@ -6576,8 +7352,8 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 		return ${output}{}, err
 	}
 	return ${output}{
-		Descriptor: smithyNamespaceDescriptor(decoded),
-		Created:    result.kind == SmithyFFIResultCreated,
+		${output_descriptor}: smithyNamespaceDescriptor(decoded),
+		${output_created}:    result.kind == SmithyFFIResultCreated,
 	}, nil
 }`
       }
@@ -6586,14 +7362,20 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
-	policyFlags, ttl, err := smithyNamespacePolicyWire(&input.Policy)
+	policyFlags, ttl, err := smithyNamespacePolicyWire(
+		input.${input_policy}.${policy_default_expiration},
+		input.${input_policy}.${policy_default_ttl_milliseconds},
+		input.${input_policy}.${policy_expiration_override},
+		input.${input_policy}.${policy_default_eviction},
+		input.${input_policy}.${policy_eviction_override},
+	)
 	if err != nil {
 		return ${output}{}, err
 	}
 	result, err := s.client.invokeNamespaceUpdatePolicy(
 		ctx,
-		input.NamespaceID,
-		input.ExpectedRevision,
+		input.${input_namespace_id},
+		input.${input_expected_revision},
 		policyFlags,
 		ttl,
 	)
@@ -6607,7 +7389,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 	if err != nil {
 		return ${output}{}, err
 	}
-	return ${output}{Descriptor: smithyNamespaceDescriptor(decoded)}, nil
+	return ${output}{${output_descriptor}: smithyNamespaceDescriptor(decoded)}, nil
 }`
       }
       throw new Error(`unsupported generated Go descriptor operation ${operation.name}`)
@@ -6621,7 +7403,7 @@ function render_go_operation_method(operation: Managed_Api_Operation): string {
 /** Renders generated Go operation implementations backed by the shared client core. */
 export function render_go_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
-    .map(render_go_operation_method)
+    .map((operation) => render_go_operation_method(contract, operation))
     .join("\n\n")
   return `// Code generated from the OpenKache Smithy client contract. DO NOT EDIT.
 
@@ -6833,12 +7615,126 @@ function python_operation_result_kinds(
   }
 }
 
-function render_python_operation_method(operation: Managed_Api_Operation): string {
+function render_python_operation_method(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   const method_name = snake_case(operation.name)
   const input = python_api_name(operation.input)
   const output = python_api_name(operation.output)
   const operation_value = operation.opcode.value
   const result_kinds = python_operation_result_kinds(operation)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "python",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "python",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "python")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "python",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "python",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "python",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "python",
+  )
+  const output_value = operation_field_name_for(operation, "output", "value", "python")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "python",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "python",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "python")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "python",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "python",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "python")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "python",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "python")
+  const policy_default_expiration = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_expiration",
+    "python",
+  )
+  const policy_default_ttl_milliseconds = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_ttl_milliseconds",
+    "python",
+  )
+  const policy_expiration_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "expiration_override",
+    "python",
+  )
+  const policy_default_eviction = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_eviction",
+    "python",
+  )
+  const policy_eviction_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "eviction_override",
+    "python",
+  )
   switch (operation.contract.response_kind) {
     case "pong":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
@@ -6876,12 +7772,12 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
         self._smithy_transport.assert_open()
         kind, payload = await self._smithy_transport.invoke_scoped(
             ${operation_value},
-            namespace_id=input.namespace_id,
-            item_id=input.item_id,
+            namespace_id=input.${input_namespace_id},
+            item_id=input.${input_item_id},
             expected_kinds=(${result_kinds},),
         )
         return ${output}(
-            value=None
+            ${output_value}=None
             if kind == SMITHY_FFI_RESULT_NOT_FOUND
             else payload
         )`
@@ -6890,13 +7786,13 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
         self._smithy_transport.assert_open()
         kind, _ = await self._smithy_transport.invoke_scoped(
             ${operation_value},
-            namespace_id=input.namespace_id,
-            item_id=input.item_id,
-            value=input.value,
-            condition=input.condition,
-            expiration_mode=input.expiration_mode,
-            eviction_mode=input.eviction_mode,
-            ttl_milliseconds=input.ttl_milliseconds,
+            namespace_id=input.${input_namespace_id},
+            item_id=input.${input_item_id},
+            value=input.${input_value},
+            condition=input.${input_condition},
+            expiration_mode=input.${input_expiration_mode},
+            eviction_mode=input.${input_eviction_mode},
+            ttl_milliseconds=input.${input_ttl_milliseconds},
             expected_kinds=(${result_kinds},),
         )
         outcome = {
@@ -6904,35 +7800,38 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
             SMITHY_FFI_RESULT_REPLACED: SmithySetOutcome.REPLACED,
             SMITHY_FFI_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
         }[kind]
-        return ${output}(outcome=outcome)`
+        return ${output}(${output_outcome}=outcome)`
     case "delete_outcome":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         kind, _ = await self._smithy_transport.invoke_scoped(
             ${operation_value},
-            namespace_id=input.namespace_id,
-            item_id=input.item_id,
+            namespace_id=input.${input_namespace_id},
+            item_id=input.${input_item_id},
             expected_kinds=(${result_kinds},),
         )
         return ${output}(
-            deleted=kind == SMITHY_FFI_RESULT_DELETED
+            ${output_deleted}=kind == SMITHY_FFI_RESULT_DELETED
         )`
     case "stats_json":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         _, payload = await self._smithy_transport.invoke_scoped(
             ${operation_value},
-            namespace_id=input.namespace_id,
+            namespace_id=input.${input_namespace_id},
             expected_kinds=(${result_kinds},),
         )
         return ${output}(
-            json=self._smithy_transport.decode_utf8(payload, ${operation_value})
+            ${output_json}=self._smithy_transport.decode_utf8(payload, ${operation_value})
         )`
     case "empty":
       if (operation.contract.request_kind === "namespace_delete") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        await self._smithy_transport.namespace_delete(input)
+        await self._smithy_transport.namespace_delete(
+            namespace_id=input.${input_namespace_id},
+            expected_revision=input.${input_expected_revision},
+        )
         return ${output}()`
       }
       if (operation.contract.request_kind !== "scoped_namespace") {
@@ -6942,7 +7841,7 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
         self._smithy_transport.assert_open()
         await self._smithy_transport.invoke_scoped(
             ${operation_value},
-            namespace_id=input.namespace_id,
+            namespace_id=input.${input_namespace_id},
             expected_kinds=(${result_kinds},),
         )
         return ${output}()`
@@ -6950,13 +7849,49 @@ function render_python_operation_method(operation: Managed_Api_Operation): strin
       if (operation.contract.request_kind === "namespace_open") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
-        return await self._smithy_transport.namespace_open(input)`
+        return await self._smithy_transport.namespace_open(
+            name=input.${input_name},
+            create_if_missing=input.${input_create_if_missing},
+            policy_default_expiration=(
+                None
+                if input.${input_policy} is None
+                else input.${input_policy}.${policy_default_expiration}
+            ),
+            policy_default_ttl_milliseconds=(
+                None
+                if input.${input_policy} is None
+                else input.${input_policy}.${policy_default_ttl_milliseconds}
+            ),
+            policy_expiration_override=(
+                None
+                if input.${input_policy} is None
+                else input.${input_policy}.${policy_expiration_override}
+            ),
+            policy_default_eviction=(
+                None
+                if input.${input_policy} is None
+                else input.${input_policy}.${policy_default_eviction}
+            ),
+            policy_eviction_override=(
+                None
+                if input.${input_policy} is None
+                else input.${input_policy}.${policy_eviction_override}
+            ),
+        )`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         return ${output}(
-            descriptor=await self._smithy_transport.namespace_update_policy(input)
+            ${output_descriptor}=await self._smithy_transport.namespace_update_policy(
+                namespace_id=input.${input_namespace_id},
+                expected_revision=input.${input_expected_revision},
+                default_expiration=input.${input_policy}.${policy_default_expiration},
+                default_ttl_milliseconds=input.${input_policy}.${policy_default_ttl_milliseconds},
+                expiration_override=input.${input_policy}.${policy_expiration_override},
+                default_eviction=input.${input_policy}.${policy_default_eviction},
+                eviction_override=input.${input_policy}.${policy_eviction_override},
+            )
         )`
       }
       throw new Error(`unsupported generated Python namespace operation ${operation.name}`)
@@ -6981,9 +7916,12 @@ export function render_python_operations(contract: Client_Contract): string {
   imported_types.add("SmithySetCondition")
   imported_types.add("SmithyExpirationMode")
   imported_types.add("SmithyEvictionMode")
+  imported_types.add("SmithyExpirationDefault")
+  imported_types.add("SmithyOverridePolicy")
+  imported_types.add("SmithyEvictionDefault")
   const imports = [...imported_types].sort().join(",\n    ")
   const methods = managed_operations
-    .map(render_python_operation_method)
+    .map((operation) => render_python_operation_method(contract, operation))
     .join("\n\n")
   return `# Generated from the OpenKache Smithy contract. Do not edit.
 
@@ -7041,15 +7979,31 @@ class SmithyOperationTransport(Protocol):
     def decode_utf8(self, payload: bytes, operation: int) -> str: ...
 
     async def namespace_open(
-        self, input: SmithyNamespaceOpenInput
+        self,
+        *,
+        name: str,
+        create_if_missing: bool,
+        policy_default_expiration: SmithyExpirationDefault | None,
+        policy_default_ttl_milliseconds: int | None,
+        policy_expiration_override: SmithyOverridePolicy | None,
+        policy_default_eviction: SmithyEvictionDefault | None,
+        policy_eviction_override: SmithyOverridePolicy | None,
     ) -> SmithyNamespaceOpenOutput: ...
 
     async def namespace_update_policy(
-        self, input: SmithyNamespaceUpdatePolicyInput
+        self,
+        *,
+        namespace_id: int,
+        expected_revision: int,
+        default_expiration: SmithyExpirationDefault,
+        default_ttl_milliseconds: int | None,
+        expiration_override: SmithyOverridePolicy,
+        default_eviction: SmithyEvictionDefault,
+        eviction_override: SmithyOverridePolicy,
     ) -> SmithyNamespaceDescriptor: ...
 
     async def namespace_delete(
-        self, input: SmithyNamespaceDeleteInput
+        self, *, namespace_id: int, expected_revision: int
     ) -> None: ...
 
 
@@ -7663,12 +8617,127 @@ ${swift_descriptor_offsets}
 `
 }
 
-function render_swift_operation_method(operation: Managed_Api_Operation): string {
+function render_swift_operation_method(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   const method_name = swift_property_name(operation.name)
   const operation_constant = `UInt32(Smithy_Opcode.${method_name}.rawValue)`
   const input = `Smithy_${typescript_name(operation.input)}`
   const output = `Smithy_${typescript_name(operation.output)}`
   const operation_label = managed_operation_label(operation)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "swift",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "swift",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "swift")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "swift",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "swift",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "swift",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "swift",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "swift",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "swift")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "swift",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "swift")
+  const output_value = operation_field_name_for(operation, "output", "value", "swift")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "swift",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "swift",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "swift")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "swift",
+  )
+  const output_created = operation_field_name_for(operation, "output", "created", "swift")
+  const policy_default_expiration = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_expiration",
+    "swift",
+  )
+  const policy_default_ttl_milliseconds = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_ttl_milliseconds",
+    "swift",
+  )
+  const policy_expiration_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "expiration_override",
+    "swift",
+  )
+  const policy_default_eviction = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_eviction",
+    "swift",
+  )
+  const policy_eviction_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "eviction_override",
+    "swift",
+  )
   switch (operation.contract.response_kind) {
     case "pong":
       return `  public func ${method_name}(
@@ -7713,14 +8782,14 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
   ) async throws -> ${output} {
     let result = try await smithyInvokeScoped(
       ${operation_constant},
-      namespaceID: input.namespaceId,
-      itemID: input.itemId
+      namespaceID: input.${input_namespace_id},
+      itemID: input.${input_item_id}
     )
     switch result.kind {
     case Smithy_Native_Contract.resultValue:
-      return ${output}(value: result.payload)
+      return ${output}(${output_value}: result.payload)
     case Smithy_Native_Contract.resultNotFound:
-      return ${output}(value: nil)
+      return ${output}(${output_value}: nil)
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
@@ -7731,13 +8800,13 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
   ) async throws -> ${output} {
     let result = try await smithyInvokeScoped(
       ${operation_constant},
-      namespaceID: input.namespaceId,
-      itemID: input.itemId,
-      value: input.value,
-      condition: input.condition,
-      expirationMode: input.expirationMode,
-      evictionMode: input.evictionMode,
-      ttlMilliseconds: input.ttlMilliseconds
+      namespaceID: input.${input_namespace_id},
+      itemID: input.${input_item_id},
+      value: input.${input_value},
+      condition: input.${input_condition},
+      expirationMode: input.${input_expiration_mode},
+      evictionMode: input.${input_eviction_mode},
+      ttlMilliseconds: input.${input_ttl_milliseconds}
     )
     let outcome: Smithy_Set_Outcome
     switch result.kind {
@@ -7750,7 +8819,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
-    return ${output}(outcome: outcome)
+    return ${output}(${output_outcome}: outcome)
   }`
     case "delete_outcome":
       return `  public func ${method_name}(
@@ -7758,14 +8827,14 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
   ) async throws -> ${output} {
     let result = try await smithyInvokeScoped(
       ${operation_constant},
-      namespaceID: input.namespaceId,
-      itemID: input.itemId
+      namespaceID: input.${input_namespace_id},
+      itemID: input.${input_item_id}
     )
     switch result.kind {
     case Smithy_Native_Contract.resultDeleted:
-      return ${output}(deleted: true)
+      return ${output}(${output_deleted}: true)
     case Smithy_Native_Contract.resultNotDeleted:
-      return ${output}(deleted: false)
+      return ${output}(${output_deleted}: false)
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
@@ -7776,7 +8845,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
   ) async throws -> ${output} {
     let result = try await smithyInvokeScoped(
       ${operation_constant},
-      namespaceID: input.namespaceId
+      namespaceID: input.${input_namespace_id}
     )
     guard result.kind == Smithy_Native_Contract.resultValue else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
@@ -7784,7 +8853,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
     guard let json = String(data: result.payload, encoding: .utf8) else {
       throw OpenKacheError("${operation_label} response is not valid UTF-8")
     }
-    return ${output}(json: json)
+    return ${output}(${output_json}: json)
   }`
     case "empty":
       if (operation.contract.request_kind === "scoped_namespace") {
@@ -7793,7 +8862,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
   ) async throws -> ${output} {
     let result = try await smithyInvokeScoped(
       ${operation_constant},
-      namespaceID: input.namespaceId
+      namespaceID: input.${input_namespace_id}
     )
     guard result.kind == Smithy_Native_Contract.resultOk else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
@@ -7806,8 +8875,8 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
     _ input: ${input}
   ) async throws -> ${output} {
     try await smithyNamespaceDelete(
-      input.namespaceId,
-      expectedRevision: input.expectedRevision
+      input.${input_namespace_id},
+      expectedRevision: input.${input_expected_revision}
     )
     return ${output}()
   }`
@@ -7818,15 +8887,44 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    let result = try await smithyNamespaceOpen(input)
-    return ${output}(descriptor: result.descriptor, created: result.created)
+    let policy = try input.${input_policy}.map { policy in
+      try smithyPolicyFlags(
+        defaultExpiration: policy.${policy_default_expiration},
+        defaultTtlMilliseconds: policy.${policy_default_ttl_milliseconds},
+        expirationOverride: policy.${policy_expiration_override},
+        defaultEviction: policy.${policy_default_eviction},
+        evictionOverride: policy.${policy_eviction_override}
+      )
+    } ?? (flags: UInt8(0), ttl: UInt64(0))
+    let result = try await smithyNamespaceOpen(
+      name: input.${input_name},
+      createIfMissing: input.${input_create_if_missing},
+      policyFlags: policy.flags,
+      ttl: policy.ttl
+    )
+    return ${output}(
+      ${output_descriptor}: result.${output_descriptor},
+      ${output_created}: result.${output_created}
+    )
   }`
       }
       if (operation.contract.request_kind === "namespace_update_policy") {
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
-    ${output}(descriptor: try await smithyNamespaceUpdatePolicy(input))
+    let policy = try smithyPolicyFlags(
+      defaultExpiration: input.${input_policy}.${policy_default_expiration},
+      defaultTtlMilliseconds: input.${input_policy}.${policy_default_ttl_milliseconds},
+      expirationOverride: input.${input_policy}.${policy_expiration_override},
+      defaultEviction: input.${input_policy}.${policy_default_eviction},
+      evictionOverride: input.${input_policy}.${policy_eviction_override}
+    )
+    return ${output}(${output_descriptor}: try await smithyNamespaceUpdatePolicy(
+      namespaceID: input.${input_namespace_id},
+      expectedRevision: input.${input_expected_revision},
+      policyFlags: policy.flags,
+      ttl: policy.ttl
+    ))
   }`
       }
       throw new Error(`unsupported generated Swift namespace operation ${operation.name}`)
@@ -7840,7 +8938,7 @@ function render_swift_operation_method(operation: Managed_Api_Operation): string
 /** Renders generated Swift Smithy operation implementations. */
 export function render_swift_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
-    .map(render_swift_operation_method)
+    .map((operation) => render_swift_operation_method(contract, operation))
     .join("\n\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
@@ -8157,9 +9255,124 @@ ${operations.join("\n")}
 `
 }
 
-function render_csharp_operation_method_body(operation: Managed_Api_Operation): string {
+function render_csharp_operation_method_body(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   const method_name = `${operation.name}Async`
   const label = managed_operation_label(operation)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "csharp",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "csharp",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "csharp")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "csharp",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "csharp",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "csharp",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "csharp",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "csharp",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "csharp")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "csharp",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "csharp")
+  const output_value = operation_field_name_for(operation, "output", "value", "csharp")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "csharp",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "csharp",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "csharp")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "csharp",
+  )
+  const output_created = operation_field_name_for(operation, "output", "created", "csharp")
+  const policy_default_expiration = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_expiration",
+    "csharp",
+  )
+  const policy_default_ttl_milliseconds = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_ttl_milliseconds",
+    "csharp",
+  )
+  const policy_expiration_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "expiration_override",
+    "csharp",
+  )
+  const policy_default_eviction = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_eviction",
+    "csharp",
+  )
+  const policy_eviction_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "eviction_override",
+    "csharp",
+  )
   switch (operation.contract.response_kind) {
     case "pong":
       return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
@@ -8210,13 +9423,13 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         ArgumentNullException.ThrowIfNull(input);
         var result = await RequestScopedAsync(
             Protocol.Opcode.${operation.name},
-            input.NamespaceId,
-            ValidateItemId(input.ItemId),
+            input.${input_namespace_id},
+            ValidateItemId(input.${input_item_id}),
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         return new Smithy.${operation.output}
         {
-            Value = result.Kind switch
+            ${output_value} = result.Kind switch
             {
                 var kind when kind == Protocol.FfiResultValue => result.Payload,
                 var kind when kind == Protocol.FfiResultNotFound => null,
@@ -8230,18 +9443,22 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var (setFlags, ttlMilliseconds) = NativeSetOptions(input);
+        var (setFlags, ttlMilliseconds) = NativeSetOptions(
+            input.${input_condition},
+            input.${input_expiration_mode},
+            input.${input_ttl_milliseconds},
+            input.${input_eviction_mode});
         var result = await RequestScopedAsync(
             Protocol.Opcode.${operation.name},
-            input.NamespaceId,
-            ValidateItemId(input.ItemId),
-            ValidateValue(input.Value),
+            input.${input_namespace_id},
+            ValidateItemId(input.${input_item_id}),
+            ValidateValue(input.${input_value}),
             setFlags,
             ttlMilliseconds,
             cancellationToken).ConfigureAwait(false);
         return new Smithy.${operation.output}
         {
-            Outcome = result.Kind switch
+            ${output_outcome} = result.Kind switch
             {
                 var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
                 var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
@@ -8258,13 +9475,13 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         ArgumentNullException.ThrowIfNull(input);
         var result = await RequestScopedAsync(
             Protocol.Opcode.${operation.name},
-            input.NamespaceId,
-            ValidateItemId(input.ItemId),
+            input.${input_namespace_id},
+            ValidateItemId(input.${input_item_id}),
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         return new Smithy.${operation.output}
         {
-            Deleted = result.Kind switch
+            ${output_deleted} = result.Kind switch
             {
                 var kind when kind == Protocol.FfiResultDeleted => true,
                 var kind when kind == Protocol.FfiResultNotDeleted => false,
@@ -8280,14 +9497,14 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         ArgumentNullException.ThrowIfNull(input);
         var result = await RequestScopedAsync(
             Protocol.Opcode.${operation.name},
-            input.NamespaceId,
+            input.${input_namespace_id},
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ExpectKind("${label}", result, Protocol.FfiResultValue);
         return new Smithy.${operation.output}
         {
-            Json = new UTF8Encoding(false, true).GetString(result.Payload),
+            ${output_json} = new UTF8Encoding(false, true).GetString(result.Payload),
         };
     }`
     case "empty":
@@ -8299,7 +9516,7 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         ArgumentNullException.ThrowIfNull(input);
         var result = await RequestScopedAsync(
             Protocol.Opcode.${operation.name},
-            input.NamespaceId,
+            input.${input_namespace_id},
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -8316,8 +9533,8 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         try
         {
             var result = await _nativeClient.NamespaceDeleteAsync(
-                input.NamespaceId,
-                input.ExpectedRevision,
+                input.${input_namespace_id},
+                input.${input_expected_revision},
                 cancellationToken).ConfigureAwait(false);
             ExpectKind("${label}", result, Protocol.FfiResultOk);
             return new Smithy.${operation.output}();
@@ -8340,31 +9557,38 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var name = Encoding.UTF8.GetBytes(input.Name);
+        var name = Encoding.UTF8.GetBytes(input.${input_name});
         if (name.Length > Protocol.NamespaceNameMaxBytes)
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
                 $"namespace name exceeds {Protocol.NamespaceNameMaxBytes} UTF-8 octets.");
         }
-        if (input.CreateIfMissing && input.Policy is null)
+        if (input.${input_create_if_missing} && input.${input_policy} is null)
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
                 "namespace policy is required when CreateIfMissing is true.");
         }
-        if (!input.CreateIfMissing && input.Policy is not null)
+        if (!input.${input_create_if_missing} && input.${input_policy} is not null)
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
                 "namespace policy is only valid when CreateIfMissing is true.");
         }
-        var (policyFlags, ttlMilliseconds) = NativePolicy(input.Policy);
+        var (policyFlags, ttlMilliseconds) = input.${input_policy} is null
+            ? ((byte)0, 0UL)
+            : NativePolicy(
+                input.${input_policy}.${policy_default_expiration},
+                input.${input_policy}.${policy_default_ttl_milliseconds},
+                input.${input_policy}.${policy_expiration_override},
+                input.${input_policy}.${policy_default_eviction},
+                input.${input_policy}.${policy_eviction_override});
         try
         {
             var result = await _nativeClient.NamespaceOpenAsync(
                 name,
-                input.CreateIfMissing,
+                input.${input_create_if_missing},
                 policyFlags,
                 ttlMilliseconds,
                 cancellationToken).ConfigureAwait(false);
@@ -8375,8 +9599,8 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
             }
             return new Smithy.${operation.output}
             {
-                Descriptor = DecodeNamespaceDescriptor(result.Payload),
-                Created = result.Kind == Protocol.FfiResultCreated,
+                ${output_descriptor} = DecodeNamespaceDescriptor(result.Payload),
+                ${output_created} = result.Kind == Protocol.FfiResultCreated,
             };
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -8395,19 +9619,24 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var (policyFlags, ttlMilliseconds) = NativePolicy(input.Policy);
+        var (policyFlags, ttlMilliseconds) = NativePolicy(
+            input.${input_policy}.${policy_default_expiration},
+            input.${input_policy}.${policy_default_ttl_milliseconds},
+            input.${input_policy}.${policy_expiration_override},
+            input.${input_policy}.${policy_default_eviction},
+            input.${input_policy}.${policy_eviction_override});
         try
         {
             var result = await _nativeClient.NamespaceUpdatePolicyAsync(
-                input.NamespaceId,
-                input.ExpectedRevision,
+                input.${input_namespace_id},
+                input.${input_expected_revision},
                 policyFlags,
                 ttlMilliseconds,
                 cancellationToken).ConfigureAwait(false);
             ExpectKind("${label}", result, Protocol.FfiResultValue);
             return new Smithy.${operation.output}
             {
-                Descriptor = DecodeNamespaceDescriptor(result.Payload),
+                ${output_descriptor} = DecodeNamespaceDescriptor(result.Payload),
             };
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -8428,15 +9657,18 @@ function render_csharp_operation_method_body(operation: Managed_Api_Operation): 
   }
 }
 
-function render_csharp_operation_method(operation: Managed_Api_Operation): string {
+function render_csharp_operation_method(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   return `    /// <summary>Invokes the generated Smithy ${operation.name} operation.</summary>
-${render_csharp_operation_method_body(operation)}`
+${render_csharp_operation_method_body(contract, operation)}`
 }
 
 /** Renders generated C# Smithy operation implementations. */
 export function render_csharp_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
-    .map(render_csharp_operation_method)
+    .map((operation) => render_csharp_operation_method(contract, operation))
     .join("\n\n")
   return `// SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
@@ -8648,9 +9880,124 @@ ${operations.join("\n\n")}
 `
 }
 
-function render_rust_operation_method(operation: Managed_Api_Operation): string {
+function render_rust_operation_method(
+  contract: Client_Contract,
+  operation: Managed_Api_Operation,
+): string {
   const method_name = snake_case(operation.name)
   const operation_label = managed_operation_label(operation)
+  const input_namespace_id = operation_field_name_for(
+    operation,
+    "input",
+    "namespace_id",
+    "rust",
+  )
+  const input_item_id = operation_field_name_for(
+    operation,
+    "input",
+    "item_id",
+    "rust",
+  )
+  const input_value = operation_field_name_for(operation, "input", "value", "rust")
+  const input_condition = operation_field_name_for(
+    operation,
+    "input",
+    "condition",
+    "rust",
+  )
+  const input_expiration_mode = operation_field_name_for(
+    operation,
+    "input",
+    "expiration_mode",
+    "rust",
+  )
+  const input_eviction_mode = operation_field_name_for(
+    operation,
+    "input",
+    "eviction_mode",
+    "rust",
+  )
+  const input_ttl_milliseconds = operation_field_name_for(
+    operation,
+    "input",
+    "ttl_milliseconds",
+    "rust",
+  )
+  const input_expected_revision = operation_field_name_for(
+    operation,
+    "input",
+    "expected_revision",
+    "rust",
+  )
+  const input_name = operation_field_name_for(operation, "input", "name", "rust")
+  const input_create_if_missing = operation_field_name_for(
+    operation,
+    "input",
+    "create_if_missing",
+    "rust",
+  )
+  const input_policy = operation_field_name_for(operation, "input", "policy", "rust")
+  const output_value = operation_field_name_for(operation, "output", "value", "rust")
+  const output_outcome = operation_field_name_for(
+    operation,
+    "output",
+    "outcome",
+    "rust",
+  )
+  const output_deleted = operation_field_name_for(
+    operation,
+    "output",
+    "deleted",
+    "rust",
+  )
+  const output_json = operation_field_name_for(operation, "output", "json", "rust")
+  const output_descriptor = operation_field_name_for(
+    operation,
+    "output",
+    "descriptor",
+    "rust",
+  )
+  const output_created = operation_field_name_for(operation, "output", "created", "rust")
+  const policy_default_expiration = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_expiration",
+    "rust",
+  )
+  const policy_default_ttl_milliseconds = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_ttl_milliseconds",
+    "rust",
+  )
+  const policy_expiration_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "expiration_override",
+    "rust",
+  )
+  const policy_default_eviction = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "default_eviction",
+    "rust",
+  )
+  const policy_eviction_override = operation_structure_field_name_for(
+    contract,
+    operation,
+    "input",
+    "policy",
+    "eviction_override",
+    "rust",
+  )
   switch (operation.contract.response_kind) {
     case "pong":
       return `            async fn ${method_name}(
@@ -8713,8 +10060,8 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 let result = $client::execute_scoped(
                     self,
                     openkache_client_core::Opcode::${operation.name},
-                    input.namespace_id,
-                    input.item_id,
+                    input.${input_namespace_id},
+                    input.${input_item_id},
                     [],
                     SetOptions::new(),
                 )
@@ -8734,7 +10081,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 } else {
                     Some(result.payload)
                 };
-                Ok(smithy::${operation.output} { value })
+                Ok(smithy::${operation.output} { ${output_value}: value })
             }`
     case "set_outcome":
       return `            async fn ${method_name}(
@@ -8742,17 +10089,17 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
                 let options = smithy_set_options(
-                    input.condition,
-                    input.expiration_mode,
-                    input.ttl_milliseconds,
-                    input.eviction_mode,
+                    input.${input_condition},
+                    input.${input_expiration_mode},
+                    input.${input_ttl_milliseconds},
+                    input.${input_eviction_mode},
                 )?;
                 let result = $client::execute_scoped(
                     self,
                     openkache_client_core::Opcode::${operation.name},
-                    input.namespace_id,
-                    input.item_id,
-                    input.value,
+                    input.${input_namespace_id},
+                    input.${input_item_id},
+                    input.${input_value},
                     options,
                 )
                     .await?;
@@ -8777,7 +10124,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                     }
                     _ => unreachable!("smithy_require_kind validated SET result"),
                 };
-                Ok(smithy::${operation.output} { outcome })
+                Ok(smithy::${operation.output} { ${output_outcome}: outcome })
             }`
     case "delete_outcome":
       return `            async fn ${method_name}(
@@ -8787,8 +10134,8 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 let result = $client::execute_scoped(
                     self,
                     openkache_client_core::Opcode::${operation.name},
-                    input.namespace_id,
-                    input.item_id,
+                    input.${input_namespace_id},
+                    input.${input_item_id},
                     [],
                     SetOptions::new(),
                 )
@@ -8803,7 +10150,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 )?;
                 let deleted =
                     result.kind == openkache_client_core::contract::FFI_RESULT_DELETED;
-                Ok(smithy::${operation.output} { deleted })
+                Ok(smithy::${operation.output} { ${output_deleted}: deleted })
             }`
     case "stats_json":
       return `            async fn ${method_name}(
@@ -8813,7 +10160,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 let result = $client::execute_scoped(
                     self,
                     openkache_client_core::Opcode::${operation.name},
-                    input.namespace_id,
+                    input.${input_namespace_id},
                     [],
                     [],
                     SetOptions::new(),
@@ -8827,7 +10174,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 let json = String::from_utf8(result.payload).map_err(|error| {
                     Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
                 })?;
-                Ok(smithy::${operation.output} { json })
+                Ok(smithy::${operation.output} { ${output_json}: json })
             }`
     case "empty":
       if (operation.contract.request_kind === "scoped_namespace") {
@@ -8838,7 +10185,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 let result = $client::execute_scoped(
                     self,
                     openkache_client_core::Opcode::${operation.name},
-                    input.namespace_id,
+                    input.${input_namespace_id},
                     [],
                     [],
                     SetOptions::new(),
@@ -8857,7 +10204,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                $client::namespace_delete(self, input.namespace_id, input.expected_revision)
+                $client::namespace_delete(self, input.${input_namespace_id}, input.${input_expected_revision})
                     .await?;
                 Ok(smithy::${operation.output})
             }`
@@ -8870,19 +10217,25 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
                 let policy = input
-                    .policy
-                    .map(smithy_namespace_policy)
+                    .${input_policy}
+                    .map(|policy| smithy_namespace_policy(
+                        policy.${policy_default_expiration},
+                        policy.${policy_default_ttl_milliseconds},
+                        policy.${policy_expiration_override},
+                        policy.${policy_default_eviction},
+                        policy.${policy_eviction_override},
+                    ))
                     .transpose()?;
                 let (descriptor, created) = $client::namespace_open_with_outcome(
                     self,
-                    input.name.into_bytes(),
-                    input.create_if_missing,
+                    input.${input_name}.into_bytes(),
+                    input.${input_create_if_missing},
                     policy,
                 )
                 .await?;
                 Ok(smithy::${operation.output} {
-                    descriptor: smithy_namespace_descriptor(descriptor),
-                    created,
+                    ${output_descriptor}: smithy_namespace_descriptor(descriptor),
+                    ${output_created}: created,
                 })
             }`
       }
@@ -8891,16 +10244,22 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
                 &self,
                 input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let policy = smithy_namespace_policy(input.policy)?;
+                let policy = smithy_namespace_policy(
+                    input.${input_policy}.${policy_default_expiration},
+                    input.${input_policy}.${policy_default_ttl_milliseconds},
+                    input.${input_policy}.${policy_expiration_override},
+                    input.${input_policy}.${policy_default_eviction},
+                    input.${input_policy}.${policy_eviction_override},
+                )?;
                 let descriptor = $client::namespace_update_policy(
                     self,
-                    input.namespace_id,
-                    input.expected_revision,
+                    input.${input_namespace_id},
+                    input.${input_expected_revision},
                     policy,
                 )
                 .await?;
                 Ok(smithy::${operation.output} {
-                    descriptor: smithy_namespace_descriptor(descriptor),
+                    ${output_descriptor}: smithy_namespace_descriptor(descriptor),
                 })
             }`
       }
@@ -8915,7 +10274,7 @@ function render_rust_operation_method(operation: Managed_Api_Operation): string 
 /** Renders generated Rust operation implementations backed by the shared client core. */
 export function render_rust_operations(contract: Client_Contract): string {
   const methods = managed_operation_entries(contract)
-    .map(render_rust_operation_method)
+    .map((operation) => render_rust_operation_method(contract, operation))
     .join("\n\n")
   return `// Generated from the OpenKache Smithy client contract. Do not edit.
 
