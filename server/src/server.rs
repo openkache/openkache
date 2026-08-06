@@ -2030,8 +2030,11 @@ async fn execute_request(
                 Err(error) => return Some(cache_error_response(error)),
             }
         }
-        if operation_contract.response_value_count == 1 && values[0].is_none() {
-            return Some(response(Status::NotFound, Vec::new()));
+        if operation_contract.response_value_count == 1 {
+            return Some(match values.into_iter().next().expect("GET has one value") {
+                Some(value) => response(Status::Ok, value.into_bytes()),
+                None => response(Status::NotFound, Vec::new()),
+            });
         }
         let references = values
             .iter()
