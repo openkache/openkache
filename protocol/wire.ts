@@ -1474,7 +1474,7 @@ function rust_request_layout(contract: Wire_Contract): string {
         return `[${fixed("OPCODE_BYTES + NAMESPACE_ID_BYTES")}]`
       case "NamespaceOpen":
         return `[
-            ${fixed("OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES")},
+            ${fixed("OPCODE_BYTES + OPEN_FLAGS_BYTES")},
             WireRequestStep::ByteLength,
             WireRequestStep::ConditionalPolicy {
                 selector_offset: OPCODE_BYTES,

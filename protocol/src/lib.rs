@@ -629,10 +629,9 @@ fn decode_wire_request_header(prefix: &[u8]) -> Result<Option<RequestFrameHeader
                 mask,
                 expected,
             } => {
-                let selector = *prefix.get(selector_offset).ok_or(ProtocolError::FrameTooShort {
-                    expected: selector_offset + 1,
-                    actual: prefix.len(),
-                })?;
+                let Some(&selector) = prefix.get(selector_offset) else {
+                    return Ok(None);
+                };
                 if selector & mask == expected {
                     let Some((_, encoded_len)) =
                         decode_varuint(&prefix[cursor..], "request conditional integer")?
@@ -645,10 +644,10 @@ fn decode_wire_request_header(prefix: &[u8]) -> Result<Option<RequestFrameHeader
                 }
             }
             WireRequestStep::ByteLength => {
-                let length = usize::from(*prefix.get(cursor).ok_or(ProtocolError::FrameTooShort {
-                    expected: cursor + 1,
-                    actual: prefix.len(),
-                })?);
+                let Some(&length) = prefix.get(cursor) else {
+                    return Ok(None);
+                };
+                let length = usize::from(length);
                 let end = cursor
                     .checked_add(NAMESPACE_NAME_LENGTH_BYTES)
                     .and_then(|end| end.checked_add(length))
@@ -671,10 +670,9 @@ fn decode_wire_request_header(prefix: &[u8]) -> Result<Option<RequestFrameHeader
                 mask,
                 expected,
             } => {
-                let selector = *prefix.get(selector_offset).ok_or(ProtocolError::FrameTooShort {
-                    expected: selector_offset + 1,
-                    actual: prefix.len(),
-                })?;
+                let Some(&selector) = prefix.get(selector_offset) else {
+                    return Ok(None);
+                };
                 if selector & mask == expected {
                     let Some(encoded_len) = decode_wire_policy_len(&prefix[cursor..])? else {
                         return Ok(None);
