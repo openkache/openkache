@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use openkache_protocol::Request;
+use openkache_protocol::RequestFrame as ProtocolRequestFrame;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
@@ -392,7 +392,7 @@ async fn read_buffered_request<S: RequestByteStream>(
     let (frame, header) = network_runtime::timeout(timeout, async {
         let mut frame = first;
         loop {
-            if let Some(header) = Request::decode_header(&frame)? {
+            if let Some(header) = ProtocolRequestFrame::decode_header(&frame)? {
                 break Ok::<_, StreamReadError>((frame, header));
             }
             if frame.len() >= maximum {
@@ -418,27 +418,9 @@ async fn read_buffered_request<S: RequestByteStream>(
         return Err(StreamReadError::TooLarge);
     }
     let (mut frame, frame_len) = network_runtime::timeout(timeout, async {
-        let mut frame = frame;
-        loop {
-            if let Some(frame_len) = header.frame_len(&frame)? {
-                break Ok::<_, StreamReadError>((frame, frame_len));
-            }
-            if frame.len() >= maximum {
-                return Err(StreamReadError::TooLarge);
-            }
-            let next = stream
-                .read_chunk(1, backend)
-                .await
-                .map_err(StreamReadError::Transport)?;
-            if next.is_empty() {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream metadata read",
-                    "stream ended before request metadata completed",
-                )));
-            }
-            frame.extend_from_slice(&next);
-        }
+        let frame = frame;
+        let frame_len = header.frame_len()?;
+        Ok::<_, StreamReadError>((frame, frame_len))
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
@@ -1041,7 +1023,7 @@ mod quiche_backend {
             .map_err(StreamReadError::Transport)?;
             let header = network_runtime::timeout(timeout, async {
                 loop {
-                    if let Some(header) = Request::decode_header(&self.buffered)? {
+                    if let Some(header) = ProtocolRequestFrame::decode_header(&self.buffered)? {
                         break Ok::<_, StreamReadError>(header);
                     }
                     if self.buffered.len() >= maximum {
@@ -1057,16 +1039,8 @@ mod quiche_backend {
                 return Err(StreamReadError::TooLarge);
             }
             let frame_len = network_runtime::timeout(timeout, async {
-                loop {
-                    if let Some(frame_len) = header.frame_len(&self.buffered)? {
-                        break Ok::<_, StreamReadError>(frame_len);
-                    }
-                    if self.buffered.len() >= maximum {
-                        return Err(StreamReadError::TooLarge);
-                    }
-                    let chunk = self.next_chunk("stream metadata read").await?;
-                    self.buffered.extend_from_slice(&chunk);
-                }
+                let frame_len = header.frame_len()?;
+                Ok::<_, StreamReadError>(frame_len)
             })
             .await
             .map_err(|_| StreamReadError::Timeout)??;

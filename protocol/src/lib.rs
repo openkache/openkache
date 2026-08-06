@@ -544,6 +544,220 @@ impl RequestHeader {
     }
 }
 
+/// Header metadata required to delimit one v1 request without decoding its
+/// operation semantics.
+///
+/// The request body remains opaque. In particular, this type does not expose
+/// namespace IDs, item IDs, SET policy, or an operation response contract.
+/// Server-owned handlers and generated client codecs decide what those bytes
+/// mean after the frame has been delimited.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RequestFrameHeader {
+    opcode: Opcode,
+    encoded_len: usize,
+    value_len: usize,
+}
+
+impl RequestFrameHeader {
+    /// Returns the operation discriminator.
+    pub const fn opcode(self) -> Opcode {
+        self.opcode
+    }
+
+    /// Returns the number of bytes before an application value body.
+    pub const fn encoded_len(self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns the value length carried by a value-bearing layout.
+    ///
+    /// This is framing metadata only. A server may apply a smaller
+    /// operation-specific limit after it decodes the opaque body.
+    pub const fn value_len(self) -> usize {
+        self.value_len
+    }
+
+    /// Returns the complete frame length once the header is available.
+    pub fn frame_len(self) -> Result<usize> {
+        self.encoded_len
+            .checked_add(self.value_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    }
+}
+
+/// Reads one request header using only generated wire layout metadata.
+///
+/// This parser deliberately accepts operation-specific flag and field values
+/// that are semantically invalid. It only performs checks needed to find the
+/// next frame boundary (canonical varuints, representable lengths, and
+/// complete fixed-width fields). The semantic `Request` decoder remains
+/// available for the legacy built-in server/client adapters.
+fn decode_wire_request_header(prefix: &[u8]) -> Result<Option<RequestFrameHeader>> {
+    let Some(&opcode_byte) = prefix.first() else {
+        return Ok(None);
+    };
+    let opcode = Opcode::try_from(opcode_byte)?;
+    let layout = wire_request_layout(opcode);
+    let fixed = |length: usize| {
+        if prefix.len() < length {
+            None
+        } else {
+            Some(RequestFrameHeader {
+                opcode,
+                encoded_len: length,
+                value_len: 0,
+            })
+        }
+    };
+    match layout.kind {
+        WireRequestLayoutKind::Empty => Ok(fixed(OPCODE_BYTES)),
+        WireRequestLayoutKind::ApplicationValue => {
+            let Some((value_len, value_len_bytes)) =
+                decode_varuint(prefix.get(OPCODE_BYTES..).unwrap_or_default(), "application value length")?
+            else {
+                return Ok(None);
+            };
+            let value_len =
+                usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+            validate_value_length(value_len)?;
+            Ok(Some(RequestFrameHeader {
+                opcode,
+                encoded_len: OPCODE_BYTES + value_len_bytes,
+                value_len,
+            }))
+        }
+        WireRequestLayoutKind::Item => {
+            let item_bytes = ITEM_ID_BYTES
+                .checked_mul(layout.item_id_count)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            Ok(fixed(
+                OPCODE_BYTES
+                    .checked_add(NAMESPACE_ID_BYTES)
+                    .and_then(|length| length.checked_add(item_bytes))
+                    .ok_or(ProtocolError::FrameLengthOverflow)?,
+            ))
+        }
+        WireRequestLayoutKind::Namespace => Ok(fixed(
+            OPCODE_BYTES
+                .checked_add(NAMESPACE_ID_BYTES)
+                .ok_or(ProtocolError::FrameLengthOverflow)?,
+        )),
+        WireRequestLayoutKind::Set => {
+            let fixed_len = OPCODE_BYTES
+                .checked_add(NAMESPACE_ID_BYTES)
+                .and_then(|length| length.checked_add(SET_FLAGS_BYTES))
+                .and_then(|length| length.checked_add(ITEM_ID_BYTES))
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            if prefix.len() < fixed_len {
+                return Ok(None);
+            }
+            let flags = prefix[OPCODE_BYTES + NAMESPACE_ID_BYTES];
+            let mut cursor = fixed_len;
+            if flags & SET_EXPIRATION_MASK == SET_EXPLICIT_TTL_BITS {
+                let Some((_, length)) = decode_varuint(&prefix[cursor..], "SET TTL")? else {
+                    return Ok(None);
+                };
+                cursor = cursor
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            let Some((value_len, value_len_bytes)) =
+                decode_varuint(&prefix[cursor..], "SET value length")?
+            else {
+                return Ok(None);
+            };
+            let value_len =
+                usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+            validate_value_length(value_len)?;
+            Ok(Some(RequestFrameHeader {
+                opcode,
+                encoded_len: cursor
+                    .checked_add(value_len_bytes)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?,
+                value_len,
+            }))
+        }
+        WireRequestLayoutKind::NamespaceOpen => {
+            let fixed_len = OPCODE_BYTES
+                .checked_add(OPEN_FLAGS_BYTES)
+                .and_then(|length| length.checked_add(NAMESPACE_NAME_LENGTH_BYTES))
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            if prefix.len() < fixed_len {
+                return Ok(None);
+            }
+            let name_len = usize::from(prefix[OPCODE_BYTES + OPEN_FLAGS_BYTES]);
+            let name_end = fixed_len
+                .checked_add(name_len)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            if prefix.len() < name_end {
+                return Ok(None);
+            }
+            let create = prefix[OPCODE_BYTES] & OPEN_CREATE_IF_MISSING != 0;
+            let encoded_len = if create {
+                let Some(policy_len) = decode_wire_policy_len(&prefix[name_end..])? else {
+                    return Ok(None);
+                };
+                name_end
+                    .checked_add(policy_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?
+            } else {
+                name_end
+            };
+            Ok(Some(RequestFrameHeader {
+                opcode,
+                encoded_len,
+                value_len: 0,
+            }))
+        }
+        WireRequestLayoutKind::NamespaceUpdatePolicy => {
+            let fixed_len = OPCODE_BYTES
+                .checked_add(NAMESPACE_ID_BYTES)
+                .and_then(|length| length.checked_add(NAMESPACE_REVISION_BYTES))
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            if prefix.len() < fixed_len {
+                return Ok(None);
+            }
+            let Some(policy_len) = decode_wire_policy_len(&prefix[fixed_len..])? else {
+                return Ok(None);
+            };
+            Ok(Some(RequestFrameHeader {
+                opcode,
+                encoded_len: fixed_len
+                    .checked_add(policy_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?,
+                value_len: 0,
+            }))
+        }
+        WireRequestLayoutKind::NamespaceDelete => Ok(fixed(
+            OPCODE_BYTES
+                .checked_add(DELETE_FLAGS_BYTES)
+                .and_then(|length| length.checked_add(NAMESPACE_ID_BYTES))
+                .and_then(|length| length.checked_add(NAMESPACE_REVISION_BYTES))
+                .ok_or(ProtocolError::FrameLengthOverflow)?,
+        )),
+    }
+}
+
+/// Finds the length of one policy field without validating its meaning.
+fn decode_wire_policy_len(input: &[u8]) -> Result<Option<usize>> {
+    let Some(&flags) = input.first() else {
+        return Ok(None);
+    };
+    if flags & POLICY_DEFAULT_EXPIRATION_MASK != POLICY_FIXED_TTL {
+        return Ok(Some(POLICY_FLAGS_BYTES));
+    }
+    let Some((_, ttl_len)) =
+        decode_varuint(input.get(POLICY_FLAGS_BYTES..).unwrap_or_default(), "namespace default TTL")?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        POLICY_FLAGS_BYTES
+            .checked_add(ttl_len)
+            .ok_or(ProtocolError::FrameLengthOverflow)?,
+    ))
+}
+
 /// A complete v1 request viewed as an opaque operation call.
 ///
 /// The protocol runtime owns only frame delimiting here. It deliberately does
@@ -558,6 +772,18 @@ pub struct RequestFrame<'a> {
 }
 
 impl<'a> RequestFrame<'a> {
+    /// Decodes only the frame metadata needed to delimit one request.
+    pub fn decode_header(prefix: &[u8]) -> Result<Option<RequestFrameHeader>> {
+        decode_wire_request_header(prefix)
+    }
+
+    /// Reports the complete frame length once enough metadata is available.
+    pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
+        Self::decode_header(prefix)?
+            .map(RequestFrameHeader::frame_len)
+            .transpose()
+    }
+
     /// Decodes one complete request without interpreting its operation body.
     ///
     /// # Errors
@@ -565,16 +791,11 @@ impl<'a> RequestFrame<'a> {
     /// Returns a protocol error when the opcode, generated wire layout, or
     /// complete frame length is invalid.
     pub fn decode(frame: &'a [u8]) -> Result<Self> {
-        let header = Request::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
+        let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
             expected: REQUEST_FIXED_BYTES,
             actual: frame.len(),
         })?;
-        let expected = header
-            .frame_len(frame)?
-            .ok_or(ProtocolError::FrameTooShort {
-                expected: header.encoded_len,
-                actual: frame.len(),
-            })?;
+        let expected = header.frame_len()?;
         if frame.len() != expected {
             return Err(ProtocolError::FrameLength {
                 expected,
