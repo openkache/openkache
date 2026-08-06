@@ -46,6 +46,8 @@ use crate::{
 #[allow(unused_imports)]
 pub(crate) use crate::{contract, protocol};
 
+#[path = "experimental_api.rs"]
+mod experimental_api;
 #[path = "operation_handlers.rs"]
 mod operation_handlers;
 
@@ -1876,7 +1878,12 @@ fn response_budget_bytes(
 ) -> Option<usize> {
     match crate::contract::operation_contract(opcode).response_kind {
         OperationResponseKind::ApplicationValue => Some(request_value_bytes),
-        OperationResponseKind::Value => Some(max_item_bytes),
+        OperationResponseKind::Value => {
+            let value_count = crate::contract::operation_contract(opcode).response_value_count;
+            max_item_bytes
+                .checked_mul(value_count)
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>() * value_count))
+        }
         _ => None,
     }
 }

@@ -57,7 +57,9 @@ pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
     let contract = crate::contract::operation_contract(opcode);
     match contract.response_kind {
         OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
-        OperationResponseKind::ApplicationValue => response(Status::Ok, value),
+        OperationResponseKind::ApplicationValue => {
+            super::experimental_api::application_value_response(contract.value_transform, value)
+        }
         _ => response_bytes(
             Status::InternalError,
             b"invalid immediate operation contract",
@@ -67,6 +69,10 @@ pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
 
 /// Dispatches a decoded, non-immediate request to server-owned behavior.
 pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Response> {
+    if let Some(response) = super::experimental_api::execute(&context).await {
+        return Some(response);
+    }
+
     let OperationContext {
         cache,
         opcode,

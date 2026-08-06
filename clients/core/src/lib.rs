@@ -362,16 +362,19 @@ fn parse_item_ids(bytes: &[u8], item_count: usize) -> Result<Vec<ItemId>> {
         .collect()
 }
 
-fn operation_values_result(operation: Opcode, response: Response) -> Result<OperationResult> {
+fn operation_values_result(
+    operation: Opcode,
+    response: Response,
+    value_count: usize,
+) -> Result<OperationResult> {
     match response.status {
         Status::Ok => Ok(operation_result(
             contract::FfiResultKind::Value,
             response.payload,
         )),
-        Status::NotFound if response.payload.is_empty() => Ok(operation_result(
-            contract::FfiResultKind::NotFound,
-            Vec::new(),
-        )),
+        Status::NotFound if value_count == 1 && response.payload.is_empty() => Ok(
+            operation_result(contract::FfiResultKind::NotFound, Vec::new()),
+        ),
         status => Err(unexpected_status(Operation::from_opcode(operation), status)),
     }
 }
@@ -1373,7 +1376,11 @@ macro_rules! raw_client_methods {
                             .0
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
-                        operation_values_result(operation, response)
+                        operation_values_result(
+                            operation,
+                            response,
+                            contract.response_value_count,
+                        )
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1455,7 +1462,11 @@ macro_rules! raw_client_methods {
                             .0
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
-                        operation_values_result(operation, response)
+                        operation_values_result(
+                            operation,
+                            response,
+                            contract.response_value_count,
+                        )
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -2008,7 +2019,21 @@ fn validate_response_contract(
         }
         contract::OperationResponseKind::ApplicationValue => Ok(()),
         contract::OperationResponseKind::Value => {
-            if response.status == Status::NotFound && !response.payload.is_empty() {
+            if operation_contract.response_value_count > 1 {
+                if response.status != Status::Ok {
+                    invalid_payload("multi-value GET responses must have an OK status")
+                } else {
+                    crate::protocol::decode_optional_values(
+                        &response.payload,
+                        operation_contract.response_value_count,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| Error::UnexpectedResponse {
+                        operation,
+                        message: format!("optional-values payload is invalid: {error}"),
+                    })
+                }
+            } else if response.status == Status::NotFound && !response.payload.is_empty() {
                 invalid_payload("GET NotFound responses must have an empty payload")
             } else {
                 Ok(())

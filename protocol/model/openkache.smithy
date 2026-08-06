@@ -79,6 +79,13 @@ enum OperationResponseKind {
     NAMESPACE_DESCRIPTOR = "namespace_descriptor"
 }
 
+/// Application-value transformation performed by the server before responding.
+enum OperationValueTransform {
+    IDENTITY = "identity"
+    REVERSE_UTF8 = "reverse_utf8"
+    SQUARE_ARRAY = "square_array"
+}
+
 /// Retry policy used by a generated operation contract.
 enum OperationRetryMode {
     ALWAYS = "always"
@@ -110,6 +117,10 @@ structure operationContract {
 
     @required
     errorStatuses: OperationStatuses
+
+    /// Optional application-value transform; omitted operations preserve their
+    /// request payload unchanged.
+    valueTransform: OperationValueTransform
 }
 
 /// Values that are visible on the client/server wire.
@@ -359,6 +370,18 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
+    @wireOpcode(value: 10)
+    EXPERIMENTAL_ECHO = "experimental_echo"
+
+    @wireOpcode(value: 11)
+    EXPERIMENTAL_REVERSE = "experimental_reverse"
+
+    @wireOpcode(value: 12)
+    SQUARE_ARRAY = "square_array"
+
+    @wireOpcode(value: 13)
+    GET2 = "get2"
+
 }
 
 @operationContract(
@@ -375,6 +398,48 @@ operation Ping {
 }
 
 @operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "application_value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
+    valueTransform: "identity"
+)
+operation ExperimentalEcho {
+    input: ExperimentalEchoInput
+    output: ExperimentalEchoOutput
+}
+
+@operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "application_value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
+    valueTransform: "reverse_utf8"
+)
+operation ExperimentalReverse {
+    input: ExperimentalReverseInput
+    output: ExperimentalReverseOutput
+}
+
+@operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "application_value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
+    valueTransform: "square_array"
+)
+operation SquareArray {
+    input: SquareArrayInput
+    output: SquareArrayOutput
+}
+
+@operationContract(
     scope: "item",
     requestKind: "scoped_item",
     responseKind: "value",
@@ -385,6 +450,19 @@ operation Ping {
 operation Get {
     input: GetInput
     output: GetOutput
+}
+
+@operationContract(
+    scope: "item",
+    requestKind: "scoped_item",
+    responseKind: "value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
+operation Get2 {
+    input: Get2Input
+    output: Get2Output
 }
 
 @operationContract(
@@ -481,6 +559,12 @@ operation NamespaceDelete {
 blob ItemId
 blob Value
 
+/// Dense finite IEEE-754 binary64 values. Application-value operations encode
+/// each value as one big-endian eight-octet payload with no count prefix.
+list FloatingPointArray {
+    member: Double
+}
+
 structure PingInput {}
 structure PingOutput {}
 
@@ -498,6 +582,29 @@ structure GetInput {
 structure GetOutput {
     @operationField(role: "value")
     value: Value
+}
+
+structure Get2Input {
+    @required
+    @unsignedLong
+    @operationField(role: "namespace_id")
+    namespaceId: Long
+
+    @required
+    @operationField(role: "item_id")
+    itemIdA: ItemId
+
+    @required
+    @operationField(role: "item_id")
+    itemIdB: ItemId
+}
+
+structure Get2Output {
+    @operationField(role: "value")
+    valueA: Value
+
+    @operationField(role: "value")
+    valueB: Value
 }
 
 structure SetInput {
@@ -572,6 +679,42 @@ structure SyncInput {
 }
 
 structure SyncOutput {}
+
+structure ExperimentalEchoInput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure ExperimentalEchoOutput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure ExperimentalReverseInput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure ExperimentalReverseOutput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure SquareArrayInput {
+    @required
+    @operationField(role: "payload")
+    values: FloatingPointArray
+}
+
+structure SquareArrayOutput {
+    @required
+    @operationField(role: "payload")
+    values: FloatingPointArray
+}
 
 structure NamespaceOpenInput {
     @required

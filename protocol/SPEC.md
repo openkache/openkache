@@ -305,6 +305,10 @@ possible next frame; it MUST terminate the lane after the error response.
 | `07` | `NAMESPACE_OPEN` | opcode + flags + name length + name + optional policy | namespace descriptor |
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + expected revision + policy | namespace descriptor |
 | `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + expected revision | no value |
+| `0A` | `EXPERIMENTAL_ECHO` | opcode + value length + value | UTF-8 application value |
+| `0B` | `EXPERIMENTAL_REVERSE` | opcode + value length + value | reversed UTF-8 application value |
+| `0C` | `SQUARE_ARRAY` | opcode + value length + value | squared binary64 array |
+| `0D` | `GET2` | opcode + namespace ID + Item ID + Item ID | ordered optional values |
 
 ### `SET` flags
 
@@ -626,6 +630,62 @@ its TTL is not applied.
 
 The success response is `Ok` with exactly the four ASCII octets `PONG`.
 
+### Experimental application-value operations
+
+`EXPERIMENTAL_ECHO` (`0A`) and `EXPERIMENTAL_REVERSE` (`0B`) use the
+application-value request layout:
+
+```text
+opcode | value_len:vu128 | value:value_len
+```
+
+The value length is bounded by the protocol's 64 MiB value ceiling. Both
+operations require the value to be valid UTF-8. `EXPERIMENTAL_ECHO` returns the
+same UTF-8 octets. `EXPERIMENTAL_REVERSE` reverses Unicode scalar values
+(equivalently, Rust `char`s) and returns the resulting UTF-8 encoding. A
+malformed UTF-8 input returns `InvalidRequest`.
+
+### `SQUARE_ARRAY`
+
+`SQUARE_ARRAY` (`0C`) uses the same application-value frame layout:
+
+```text
+0C | value_len:vu128 | value:value_len
+```
+
+The payload is a dense array of IEEE-754 binary64 values. Each element occupies
+exactly eight octets in big-endian (network) byte order. There is no count
+prefix; the element count is `value_len / 8`, so an empty array is valid. A
+receiver MUST reject a length that is not a multiple of eight, a non-finite
+input (`NaN` or either infinity), or a squared result that is not finite, with
+`InvalidRequest`. On success the server returns one big-endian binary64 value
+for each input element, equal to `input * input`.
+
+### `GET2`
+
+`GET2` (`0D`) reads two items in one namespace-scoped request. It uses the
+same generic scoped-item/value contract as `GET`; the Smithy shape happens to
+bind two `item_id` members and two `value` members:
+
+```text
+0D | namespace_id:u64be | item_id_a:32 | item_id_b:32
+```
+
+The server may issue the two storage reads concurrently, but the response
+always preserves the request order. An `Ok` response carries the generic
+optional-values payload made of two independently encoded entries:
+
+```text
+value_0_len:u32be | value_0:value_0_len |
+value_1_len:u32be | value_1:value_1_len
+```
+
+`0xffff_ffff` denotes a missing, expired, deleted, or evicted item; `0` denotes
+a present empty value. Every other length denotes the exact opaque value bytes.
+The complete payload remains subject to the 64 MiB response limit. A missing
+namespace returns `NamespaceNotFound`; an existing namespace with either or
+both items missing still returns `Ok` with the corresponding missing sentinel.
+
 ### `GET`
 
 `GET` has the request layout `02 | namespace_id:u64be | item_id:32`.
@@ -829,6 +889,10 @@ For a valid request, the following are the domain success and result statuses:
 | `NAMESPACE_OPEN` | `Ok`, `Created` | Namespace descriptor |
 | `NAMESPACE_UPDATE_POLICY` | `Ok` | Updated namespace descriptor |
 | `NAMESPACE_DELETE` | `Deleted` | Always empty |
+| `EXPERIMENTAL_ECHO` | `Ok` | The input UTF-8 bytes unchanged |
+| `EXPERIMENTAL_REVERSE` | `Ok` | The input UTF-8 string reversed by Unicode scalar value |
+| `SQUARE_ARRAY` | `Ok` | Squared binary64 array |
+| `GET2` | `Ok` | Ordered pair of independently optional item values |
 
 Common error statuses MAY be returned when their stated condition applies. A
 client receiving a status that is neither an allowed domain status nor an
