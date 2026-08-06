@@ -308,6 +308,7 @@ possible next frame; it MUST terminate the lane after the error response.
 | `0A` | `EXPERIMENTAL_ECHO` | opcode + value length + value | UTF-8 application value |
 | `0B` | `EXPERIMENTAL_REVERSE` | opcode + value length + value | reversed UTF-8 application value |
 | `0C` | `SQUARE_ARRAY` | opcode + value length + value | squared binary64 array |
+| `0D` | `GET2` | opcode + namespace ID + Item ID + Item ID | ordered value pair |
 
 ### `SET` flags
 
@@ -660,6 +661,29 @@ input (`NaN` or either infinity), or a squared result that is not finite, with
 `InvalidRequest`. On success the server returns one big-endian binary64 value
 for each input element, equal to `input * input`.
 
+### `GET2`
+
+`GET2` (`0D`) reads two items in one namespace-scoped request:
+
+```text
+0D | namespace_id:u64be | item_id_a:32 | item_id_b:32
+```
+
+The server may issue the two storage reads concurrently, but the response
+always preserves the request order. An `Ok` response carries a `value_pair`
+payload made of two independently encoded entries:
+
+```text
+value_a_len:u32be | value_a:value_a_len |
+value_b_len:u32be | value_b:value_b_len
+```
+
+`0xffff_ffff` denotes a missing, expired, deleted, or evicted item; `0` denotes
+a present empty value. Every other length denotes the exact opaque value bytes.
+The complete payload remains subject to the 64 MiB response limit. A missing
+namespace returns `NamespaceNotFound`; an existing namespace with either or
+both items missing still returns `Ok` with the corresponding missing sentinel.
+
 ### `GET`
 
 `GET` has the request layout `02 | namespace_id:u64be | item_id:32`.
@@ -866,6 +890,7 @@ For a valid request, the following are the domain success and result statuses:
 | `EXPERIMENTAL_ECHO` | `Ok` | The input UTF-8 bytes unchanged |
 | `EXPERIMENTAL_REVERSE` | `Ok` | The input UTF-8 string reversed by Unicode scalar value |
 | `SQUARE_ARRAY` | `Ok` | Squared binary64 array |
+| `GET2` | `Ok` | Ordered pair of independently optional item values |
 
 Common error statuses MAY be returned when their stated condition applies. A
 client receiving a status that is neither an allowed domain status nor an
