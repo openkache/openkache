@@ -41,7 +41,7 @@ runs:
               reference=".#packages.${system}.nixpkgs-cache-check"
               if ! dry_run="$(nix --extra-experimental-features "nix-command flakes" \
                 build --dry-run --json --accept-flake-config --no-update-lock-file \
-                "${lock_file_arguments[@]}" "$reference")"; then
+                "${lock_file_arguments[@]}" "$reference" 2>&1)"; then
                 printf "Nix cache probe could not evaluate the %s container package set.\n" "$system" >&2
                 printf "Why: the workflow must prove that the container inputs can be substituted before a build or PR.\n" >&2
                 printf "Fix: repair server/flake.nix or server/flake.lock, then rerun the container cache probe.\n" >&2
@@ -90,8 +90,20 @@ runs:
                 exit 1
               fi
             }
-            check_cache x86_64-linux
-            check_cache aarch64-linux
+            check_cache x86_64-linux &
+            x86_pid=$!
+            check_cache aarch64-linux &
+            aarch64_pid=$!
+            cache_status=0
+            if ! wait "$x86_pid"; then
+              cache_status=1
+            fi
+            if ! wait "$aarch64_pid"; then
+              cache_status=1
+            fi
+            if [ "$cache_status" -ne 0 ]; then
+              exit "$cache_status"
+            fi
             if [ "${{ inputs.update }}" = "true" ]; then
               cp "$candidate_lock" flake.lock
             fi
