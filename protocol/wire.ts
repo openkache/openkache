@@ -251,6 +251,10 @@ function string_member(object: Json_Object, member: string, location: string): s
   return value
 }
 
+function shape_type(shape: Json_Object, location: string): string {
+  return string_member(shape, "type", location)
+}
+
 function integer_member(
   object: Json_Object,
   member: string,
