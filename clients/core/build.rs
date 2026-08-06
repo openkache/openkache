@@ -102,10 +102,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protocol_wire_generator = client_directory.join("../protocol/wire.ts");
     let client_model = client_directory.join("model");
     let protocol_model = client_directory.join("../protocol/model");
-    let output = std::path::PathBuf::from(
+    let output_directory = std::path::PathBuf::from(
         std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
-    )
-    .join("client_contract.rs");
+    );
+    let output = output_directory.join("client_contract.rs");
+    let operation_constants_output = output_directory.join("operation_constants.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
     println!(
@@ -122,6 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(&generator)
         .env("OPENKACHE_GENERATION_TARGET", "rust-client")
         .env("OPENKACHE_RUST_CLIENT_OUTPUT", &output)
+        .env(
+            "OPENKACHE_RUST_OPERATION_CONSTANTS_OUTPUT",
+            &operation_constants_output,
+        )
         .status()
         .map_err(|error| {
             format!(

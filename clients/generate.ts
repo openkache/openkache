@@ -361,6 +361,8 @@ const GENERATED_OUTPUTS = {
   ),
   rust_client: process.env.OPENKACHE_RUST_CLIENT_OUTPUT ??
     generated_path("clients/core/generated_local/client_contract.rs"),
+  rust_operation_constants: process.env.OPENKACHE_RUST_OPERATION_CONSTANTS_OUTPUT ??
+    generated_path("clients/core/generated_local/operation_constants.rs"),
   rust_api: process.env.OPENKACHE_RUST_API_OUTPUT ??
     generated_path("clients/rust/generated_local/smithy_api.rs"),
   rust_operations: process.env.OPENKACHE_RUST_OPERATIONS_OUTPUT ??
@@ -2564,6 +2566,22 @@ pub const fn protocol_opcode(
 ${protocol_opcode_arms}
         _ => None,
     }
+}
+`
+}
+
+/** Renders Rust associated operation constants for the shared client core. */
+export function render_rust_operation_constants(contract: Client_Contract): string {
+  const constants = contract.opcodes
+    .map(
+      (entry) =>
+        `/// \`${entry.text ?? snake_case(entry.name)}\` request.
+pub const ${entry.name}: Self = Self::Protocol(Opcode::${entry.name});`,
+    )
+    .join("\n")
+  return `#[allow(non_upper_case_globals)]
+impl Operation {
+${constants}
 }
 `
 }
@@ -10848,6 +10866,8 @@ function expected_outputs(
     case "rust-client":
       return {
         [GENERATED_OUTPUTS.rust_client]: render_rust_client(contract),
+        [GENERATED_OUTPUTS.rust_operation_constants]:
+          render_rust_operation_constants(contract),
       }
     case "rust-wire":
       return {

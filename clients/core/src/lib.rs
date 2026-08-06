@@ -106,27 +106,9 @@ pub enum Operation {
     StreamRead,
 }
 
-#[allow(non_upper_case_globals)]
-impl Operation {
-    /// `PING` request.
-    pub const Ping: Self = Self::Protocol(Opcode::Ping);
-    /// `GET` request.
-    pub const Get: Self = Self::Protocol(Opcode::Get);
-    /// `SET` request.
-    pub const Set: Self = Self::Protocol(Opcode::Set);
-    /// `DELETE` request.
-    pub const Delete: Self = Self::Protocol(Opcode::Delete);
-    /// `STATS` request.
-    pub const Stats: Self = Self::Protocol(Opcode::Stats);
-    /// `SYNC` request.
-    pub const Sync: Self = Self::Protocol(Opcode::Sync);
-    /// `NAMESPACE_OPEN` request.
-    pub const NamespaceOpen: Self = Self::Protocol(Opcode::NamespaceOpen);
-    /// `NAMESPACE_UPDATE_POLICY` request.
-    pub const NamespaceUpdatePolicy: Self = Self::Protocol(Opcode::NamespaceUpdatePolicy);
-    /// `NAMESPACE_DELETE` request.
-    pub const NamespaceDelete: Self = Self::Protocol(Opcode::NamespaceDelete);
+include!(concat!(env!("OUT_DIR"), "/operation_constants.rs"));
 
+impl Operation {
     /// Wraps any generated protocol opcode for structured error reporting.
     pub const fn from_opcode(opcode: Opcode) -> Self {
         Self::Protocol(opcode)
