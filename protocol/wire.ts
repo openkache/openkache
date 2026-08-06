@@ -49,6 +49,14 @@ export const OPERATION_RESPONSE_KINDS = [
 
 export type Wire_Operation_Response_Kind = (typeof OPERATION_RESPONSE_KINDS)[number]
 
+export const OPERATION_VALUE_TRANSFORMS = [
+  "identity",
+  "reverse_utf8",
+] as const
+
+export type Wire_Operation_Value_Transform =
+  (typeof OPERATION_VALUE_TRANSFORMS)[number]
+
 export const OPERATION_RETRY_MODES = [
   "always",
   "never",
@@ -89,6 +97,8 @@ export interface Wire_Operation_Contract {
   readonly retry_mode: Wire_Operation_Retry_Mode
   readonly scope: Wire_Operation_Scope
   readonly success_statuses: readonly string[]
+  /** Optional application-value transform; omitted means identity. */
+  readonly value_transform?: Wire_Operation_Value_Transform
 }
 
 /** One protocol opcode and its Smithy semantic operation contract. */
@@ -804,6 +814,28 @@ function operation_contract(
     )
   }
 
+  const value_transform_value = contract["valueTransform"]
+  const value_transform =
+    value_transform_value === undefined
+      ? undefined
+      : string_member(
+          contract,
+          "valueTransform",
+          `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+        )
+  if (
+    value_transform !== undefined &&
+    !OPERATION_VALUE_TRANSFORMS.includes(
+      value_transform as Wire_Operation_Value_Transform,
+    )
+  ) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be identity or reverse_utf8`,
+    )
+  }
+  const parsed_value_transform =
+    value_transform as Wire_Operation_Value_Transform | undefined
+
   const status_names = new Set(
     statuses.flatMap((status) => [
       status.name,
@@ -854,6 +886,9 @@ function operation_contract(
     retry_mode: retry_mode as Wire_Operation_Contract["retry_mode"],
     scope: scope as Wire_Operation_Contract["scope"],
     success_statuses,
+    ...(parsed_value_transform === undefined
+      ? {}
+      : { value_transform: parsed_value_transform }),
   }
 }
 
@@ -1130,6 +1165,7 @@ function rust_operation_contract(contract: Wire_Contract): string {
             request_kind: OperationRequestKind::${enum_variant(operation.contract.request_kind)},
             response_kind: OperationResponseKind::${enum_variant(operation.contract.response_kind)},
             retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
+            value_transform: OperationValueTransform::${enum_variant(operation.contract.value_transform ?? "identity")},
             success_statuses: ${status_slice(operation.contract.success_statuses)},
             error_statuses: ${status_slice(operation.contract.error_statuses)},
         },`,
@@ -1177,6 +1213,13 @@ pub enum OperationRetryMode {
     WhenNotCreating,
 }
 
+/// Application-value transformation declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationValueTransform {
+    Identity,
+    ReverseUtf8,
+}
+
 /// Generated semantic metadata for one protocol operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
@@ -1184,6 +1227,7 @@ pub struct OperationContract {
     pub request_kind: OperationRequestKind,
     pub response_kind: OperationResponseKind,
     pub retry_mode: OperationRetryMode,
+    pub value_transform: OperationValueTransform,
     pub success_statuses: &'static [Status],
     pub error_statuses: &'static [Status],
 }
