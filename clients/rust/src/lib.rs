@@ -291,14 +291,6 @@ macro_rules! client_methods {
                 self.inner.ping().await
             }
 
-            /// Sends an experimental UTF-8 message and returns the echoed message.
-            pub async fn echo(&self, message: impl AsRef<str>) -> Result<String> {
-                let value = self.inner.echo(message.as_ref().as_bytes()).await?;
-                String::from_utf8(value).map_err(|error| {
-                    Error::Protocol(format!("ECHO response is not UTF-8: {error}"))
-                })
-            }
-
             /// Returns the currently selected server-assigned namespace ID.
             pub fn namespace_id(&self) -> Option<u64> {
                 self.inner.namespace_id()

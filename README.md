@@ -98,8 +98,8 @@ cargo run --manifest-path server/Cargo.toml --bin openkache-server
 The server listens on `127.0.0.1:4433`, stores shard files under
 `target/kvkache-v1`, and writes an ephemeral
 self-signed certificate to
-`target/openkache-local/certificate.local.der`. It supports `PING`, experimental
-`ECHO`, `GET`, `SET`, `DELETE`, `STATS`, and `SYNC` over the versioned
+`target/openkache-local/certificate.local.der`. It supports `PING`, `GET`,
+`SET`, `DELETE`, `STATS`, and `SYNC` over the versioned
 `openkache/1` QUIC
 protocol. `SET` accepts an optional millisecond TTL and atomic `if_absent` or
 `if_present` existence condition. Expired values are treated as absent

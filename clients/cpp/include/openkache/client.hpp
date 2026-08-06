@@ -288,24 +288,6 @@ public:
         }
     }
 
-    /// Sends an experimental payload and returns the exact echoed bytes.
-    Bytes echo(std::span<const Byte> value) const {
-        const auto result = execute(
-            OPENKACHE_SMITHY_OPCODE_ECHO, {}, value, Set_Options{});
-        if (result.kind != OPENKACHE_SMITHY_FFI_RESULT_VALUE) {
-            throw Error("OpenKache returned an invalid ECHO outcome");
-        }
-        return result.payload;
-    }
-
-    /// Convenience overload for UTF-8 experimental messages.
-    std::string echo(std::string_view value) const {
-        const auto bytes = echo(as_bytes(value));
-        return std::string(
-            reinterpret_cast<const char*>(bytes.data()),
-            bytes.size());
-    }
-
     /// Executes a generated operation through the protected Smithy ABI boundary.
     ///
     /// `operation` must be a generated protocol opcode or native FFI operation identifier.

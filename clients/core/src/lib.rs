@@ -110,8 +110,6 @@ pub enum Operation {
 impl Operation {
     /// `PING` request.
     pub const Ping: Self = Self::Protocol(Opcode::Ping);
-    /// Experimental `ECHO` request.
-    pub const Echo: Self = Self::Protocol(Opcode::Echo);
     /// `GET` request.
     pub const Get: Self = Self::Protocol(Opcode::Get);
     /// `SET` request.
@@ -527,14 +525,6 @@ impl<C: ClientConnection> Core<C> {
             });
         }
         Ok(started.elapsed())
-    }
-
-    async fn echo(&self, value: Vec<u8>) -> Result<Vec<u8>> {
-        let response = self
-            .request(Request::new(Opcode::Echo, None, value).map_err(Error::protocol)?)
-            .await?;
-        expect_status(Operation::Echo, response.status, &[Status::Ok])?;
-        Ok(response.payload)
     }
 
     async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
@@ -1465,11 +1455,6 @@ macro_rules! raw_client_methods {
                         ),
                     )),
                 }
-            }
-
-            /// Sends an experimental UTF-8-independent payload and returns the echoed bytes.
-            pub async fn echo(&self, value: impl AsRef<[u8]>) -> Result<Vec<u8>> {
-                self.0.echo(value.as_ref().to_vec()).await
             }
 
             /// Sends an application payload through the generic Smithy operation boundary.

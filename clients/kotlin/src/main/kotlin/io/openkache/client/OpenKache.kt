@@ -348,15 +348,3 @@ public data class NativeResult(
 
 public class OpenKacheClientException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
-
-/** @deprecated Use [Client] and generated Smithy operation DTOs. */
-@Deprecated("Use Client")
-public typealias EchoClient = Client
-
-/** @deprecated Use [OpenKacheClientException]. */
-@Deprecated("Use OpenKacheClientException")
-public typealias EchoClientException = OpenKacheClientException
-
-/** Compatibility convenience for the experimental ECHO operation. */
-@Deprecated("Use echo(EchoInput) from the generated Smithy API")
-public suspend fun Client.echo(message: String): String = echo(EchoInput(message)).message

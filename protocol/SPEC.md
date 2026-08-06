@@ -255,7 +255,7 @@ The request layout is selected by `opcode`. There is no common request
 `flags`, `item_id_len`, or `value_len` field.
 
 ```text
-request = ping | get | set | delete | stats | sync | echo |
+request = ping | get | set | delete | stats | sync |
           namespace_open | namespace_update_policy | namespace_delete
 
 ping                     = opcode:01
@@ -272,7 +272,6 @@ namespace_update_policy  = opcode:08 | namespace_id:u64be |
                            expected_revision:u64be | namespace_policy
 namespace_delete         = opcode:09 | delete_flags:u8 | namespace_id:u64be |
                            expected_revision:u64be
-echo                     = opcode:0A | value_len:vu128 | value:value_len
 ```
 
 `value_len` appears only in `SET`, including when the value is empty. It is
@@ -306,7 +305,6 @@ possible next frame; it MUST terminate the lane after the error response.
 | `07` | `NAMESPACE_OPEN` | opcode + flags + name length + name + optional policy | namespace descriptor |
 | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + expected revision + policy | namespace descriptor |
 | `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + expected revision | no value |
-| `0A` | `ECHO` | opcode + value length + value | same value |
 
 ### `SET` flags
 

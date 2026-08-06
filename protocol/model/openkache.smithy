@@ -359,8 +359,6 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
-    @wireOpcode(value: 10)
-    ECHO = "echo"
 }
 
 @operationContract(
@@ -439,20 +437,6 @@ operation Stats {
 operation Sync {
     input: SyncInput
     output: SyncOutput
-}
-
-/// Experimental API used to verify cross-language contract propagation.
-@operationContract(
-    scope: "global",
-    requestKind: "application_value",
-    responseKind: "application_value",
-    retryMode: "always",
-    successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
-)
-operation Echo {
-    input: EchoInput
-    output: EchoOutput
 }
 
 @operationContract(
@@ -588,18 +572,6 @@ structure SyncInput {
 }
 
 structure SyncOutput {}
-
-structure EchoInput {
-    @required
-    @operationField(role: "payload")
-    message: String
-}
-
-structure EchoOutput {
-    @required
-    @operationField(role: "payload")
-    message: String
-}
 
 structure NamespaceOpenInput {
     @required
