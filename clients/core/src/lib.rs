@@ -542,6 +542,26 @@ impl<C: ClientConnection> Core<C> {
         }
     }
 
+    async fn get_pair_in_namespace(
+        &self,
+        operation: Opcode,
+        namespace_id: u64,
+        item_id_a: ItemId,
+        item_id_b: ItemId,
+    ) -> Result<Vec<u8>> {
+        validate_client_namespace_id(namespace_id)?;
+        let response = self
+            .request(
+                Request::new_scoped_pair(operation, namespace_id, item_id_a.into_protocol(), item_id_b.into_protocol())
+                    .map_err(Error::protocol)?,
+            )
+            .await?;
+        if response.status != Status::Ok {
+            return Err(unexpected_status(Operation::from_opcode(operation), response.status));
+        }
+        Ok(response.payload)
+    }
+
     async fn set(
         &self,
         item_id: ItemId,
@@ -1314,6 +1334,42 @@ macro_rules! raw_client_methods {
                         Ok(operation_get_result(self.get(item_id).await?))
                     }
                     (
+                        contract::OperationRequestKind::ScopedItemPair,
+                        contract::OperationResponseKind::ValuePair,
+                    ) => {
+                        let item_ids = item_id.as_ref();
+                        let item_id_a = ItemId::from_slice(
+                            item_ids.get(..ITEM_ID_BYTES).ok_or_else(|| {
+                                Error::configuration(
+                                    "item_id",
+                                    format!(
+                                        "pair must contain exactly {} bytes, got {}",
+                                        ITEM_ID_BYTES * 2,
+                                        item_ids.len()
+                                    ),
+                                )
+                            })?,
+                        )?;
+                        let item_id_b = ItemId::from_slice(
+                            item_ids.get(ITEM_ID_BYTES..).ok_or_else(|| {
+                                Error::configuration(
+                                    "item_id",
+                                    format!(
+                                        "pair must contain exactly {} bytes, got {}",
+                                        ITEM_ID_BYTES * 2,
+                                        item_ids.len()
+                                    ),
+                                )
+                            })?,
+                        )?;
+                        let namespace_id = self.0.ensure_namespace().await?;
+                        let payload = self
+                            .0
+                            .get_pair_in_namespace(operation, namespace_id, item_id_a, item_id_b)
+                            .await?;
+                        Ok(operation_result(contract::FfiResultKind::Value, payload))
+                    }
+                    (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::SetOutcome,
                     ) => {
@@ -1391,6 +1447,41 @@ macro_rules! raw_client_methods {
                         Ok(operation_get_result(
                             self.get_in_namespace(namespace_id, item_id).await?,
                         ))
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItemPair,
+                        contract::OperationResponseKind::ValuePair,
+                    ) => {
+                        let item_ids = item_id.as_ref();
+                        let item_id_a = ItemId::from_slice(
+                            item_ids.get(..ITEM_ID_BYTES).ok_or_else(|| {
+                                Error::configuration(
+                                    "item_id",
+                                    format!(
+                                        "pair must contain exactly {} bytes, got {}",
+                                        ITEM_ID_BYTES * 2,
+                                        item_ids.len()
+                                    ),
+                                )
+                            })?,
+                        )?;
+                        let item_id_b = ItemId::from_slice(
+                            item_ids.get(ITEM_ID_BYTES..).ok_or_else(|| {
+                                Error::configuration(
+                                    "item_id",
+                                    format!(
+                                        "pair must contain exactly {} bytes, got {}",
+                                        ITEM_ID_BYTES * 2,
+                                        item_ids.len()
+                                    ),
+                                )
+                            })?,
+                        )?;
+                        let payload = self
+                            .0
+                            .get_pair_in_namespace(operation, namespace_id, item_id_a, item_id_b)
+                            .await?;
+                        Ok(operation_result(contract::FfiResultKind::Value, payload))
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1954,6 +2045,14 @@ fn validate_response_contract(
             } else {
                 Ok(())
             }
+        }
+        contract::OperationResponseKind::ValuePair => {
+            openkache_protocol::decode_value_pair(&response.payload)
+                .map(|_| ())
+                .map_err(|error| Error::UnexpectedResponse {
+                    operation,
+                    message: format!("value-pair payload is invalid: {error}"),
+                })
         }
         contract::OperationResponseKind::SetOutcome => {
             if response.payload.is_empty() {

@@ -645,6 +645,17 @@ func (h *nativeHandle) executeScoped(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	return h.executeScopedBytes(ctx, operation, namespaceID, itemID[:], value, options)
+}
+
+func (h *nativeHandle) executeScopedBytes(
+	ctx context.Context,
+	operation uint32,
+	namespaceID uint64,
+	itemID []byte,
+	value []byte,
+	options SetOptions,
+) (nativeResult, error) {
 	if !h.scoped {
 		return nativeResult{}, &Error{
 			Operation: "execute scoped",
@@ -661,7 +672,7 @@ func (h *nativeHandle) executeScoped(
 	}
 	var itemBytes []byte
 	if smithyOperationUsesItemID(operation) {
-		itemBytes = itemID[:]
+		itemBytes = itemID
 	}
 	itemMemory := C.CBytes(itemBytes)
 	valueMemory := C.CBytes(value)

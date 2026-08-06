@@ -157,10 +157,10 @@ final class Client with SmithyGeneratedOperations implements OpenKacheClient {
     int flags = 0,
     int ttlMilliseconds = 0,
   }) {
-    if (smithyOperationRequiresItemId(operation) &&
-        itemId.length != smithyItemIdBytes) {
+    final requiredItemIdBytes = smithyOperationItemIdBytes(operation);
+    if (requiredItemIdBytes != 0 && itemId.length != requiredItemIdBytes) {
       throw ArgumentError(
-        'itemId must contain exactly $smithyItemIdBytes bytes',
+        'itemId must contain exactly $requiredItemIdBytes bytes',
       );
     }
     if (itemId.isNotEmpty && !smithyOperationSupportsScoped(operation)) {

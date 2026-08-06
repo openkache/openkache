@@ -1865,6 +1865,9 @@ fn response_budget_bytes(
     match openkache_protocol::operation_contract(opcode).response_kind {
         OperationResponseKind::ApplicationValue => Some(request_value_bytes),
         OperationResponseKind::Value => Some(max_item_bytes),
+        OperationResponseKind::ValuePair => max_item_bytes
+            .checked_mul(2)
+            .and_then(|bytes| bytes.checked_add(8)),
         _ => None,
     }
 }
@@ -1951,6 +1954,7 @@ async fn execute_request(
         opcode,
         namespace_id,
         item_id,
+        item_id_b: _item_id_b,
         set_options,
         value,
         namespace_name,
@@ -2004,6 +2008,7 @@ async fn execute_request(
     let namespace_lock = if matches!(
         openkache_protocol::operation_contract(opcode).request_kind,
         OperationRequestKind::ScopedItem
+            | OperationRequestKind::ScopedItemPair
             | OperationRequestKind::ScopedNamespace
             | OperationRequestKind::NamespaceUpdatePolicy
             | OperationRequestKind::NamespaceDelete
