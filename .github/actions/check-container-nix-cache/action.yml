@@ -43,6 +43,7 @@ runs:
                 build --dry-run --json --accept-flake-config --no-update-lock-file \
                 "${lock_file_arguments[@]}" "$reference" 2>&1)"; then
                 printf "Nix cache probe could not evaluate the %s container package set.\n" "$system" >&2
+                printf "%s\n" "$dry_run" >&2
                 printf "Why: the workflow must prove that the container inputs can be substituted before a build or PR.\n" >&2
                 printf "Fix: repair server/flake.nix or server/flake.lock, then rerun the container cache probe.\n" >&2
                 exit 1
