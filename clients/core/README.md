@@ -88,16 +88,19 @@ that migration is completed.
 `ValueCodec` stores its metadata inside the opaque value:
 
 ```text
-version:vu128 | format:u8 | body
+version:vu128 | flags:u8 | body
 
-format bits 0..3 = compression identifier
-format bits 4..7 = encryption identifier
+flags bits 0..1 = encryption identifier
+flags bits 2..3 = compression identifier
+flags bits 4..5 = codec identifier
+flags bits 6..7 = reserved (zero in v1)
 
+body = encrypt(compress(selected codec payload))
 Compact body = AES-256-SIV-CMAC synthetic_iv[16] | ciphertext
 Robust body  = nonce[12] | AES-256-GCM-SIV ciphertext | tag[16]
 ```
 
-The encrypted serialization identifier and body are authenticated with the
+For protected profiles, the packed flags and body are authenticated with the
 exact item ID and container header. Neither the wire protocol nor the server
 parses this format.
 

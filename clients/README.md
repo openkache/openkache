@@ -41,10 +41,10 @@ layouts only. They do not connect to OpenKache or expose cache operations yet.
 
 The [value format](VALUE_FORMAT.md) is the pre-freeze v1 design contract. It
 supersedes the currently implemented JSON/legacy-envelope details with Raw and
-deterministic CBOR. The core and adapters must be migrated before v1
-interoperability is claimed. TypeScript's legacy metadata envelope remains a
-package-level compatibility detail during that migration; it is not a v1
-codec.
+deterministic CBOR and a one-byte packed flags header. The core and adapters
+must be migrated before v1 interoperability is claimed. TypeScript's legacy
+metadata envelope remains a package-level compatibility detail during that
+migration; it is not a v1 codec.
 
 ## Binding architecture
 

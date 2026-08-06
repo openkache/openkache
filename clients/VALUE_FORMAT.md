@@ -28,11 +28,12 @@ The v1 design fixes the following choices:
 - Raw byte keys and structured keys have one exact binary input contract.
 - Values provide Raw bytes and deterministic CBOR. There is no separate
   client-only metadata envelope.
-- Compression and encryption are independent options. The wire format supports
-  no compression, Zstandard, no protection, Compact protection, and Robust
-  protection.
-- Protocol and value-format integers use the same canonical unsigned 64-bit
-  `vu128` encoding. The value format does not define a second 128-bit variant.
+- Compression, encryption, and value codec selection are independent options.
+  The wire format supports no compression, Zstandard, no protection, Compact
+  protection, Raw bytes, and deterministic CBOR.
+- Standalone variable-width integers use the protocol's canonical unsigned
+  64-bit `vu128` encoding. Value-format transform and codec identifiers are
+  fixed-width bit fields in the packed flags byte.
 - Replay/freshness protection is intentionally not frozen in v1.
 
 ## Processing model
@@ -40,8 +41,8 @@ The v1 design fixes the following choices:
 A formatted write performs these stages:
 
 ```text
-native value
-  -> core logical value
+native value or exact Raw bytes
+  -> core logical value when structured
   -> selected value codec
   -> optional Zstandard compression
   -> optional authenticated encryption
@@ -50,8 +51,9 @@ native value
 ```
 
 A read reverses the stages. Compression always precedes encryption. The
-serialization discriminator and serialized payload are inside the transformed
-body, so encryption hides the value codec choice.
+one-byte flags field identifies the selected codec and transforms before the
+body is decoded. The flags are visible to the server but are authenticated as
+associated data by protected profiles.
 
 The format has no magic bytes and no body-length field. The surrounding
 protocol frame supplies the exact value boundary. `value_len` in the `SET`
@@ -71,28 +73,40 @@ All variable-width integers in this document:
 - MUST reject truncation, overflow, reserved prefixes, and overlong encodings;
 - are limited to the unsigned 64-bit range in v1.
 
-The maximum encoded width is therefore 9 bytes. Version and codec identifiers
-currently encode in one byte, but using the shared integer contract keeps
-future assignments unambiguous.
+The maximum encoded width is therefore 9 bytes. The version and standalone key
+codec identifier use this contract. Value codec, compression, and encryption
+identifiers are fixed-width subfields of the packed flags byte and do not have
+separate `vu128` encodings.
 
 ## Container layout
 
 ```text
-container = version:vu128 | format:u8 | body
+container = version:vu128 | flags:u8 | body
 ```
 
 | Field | Size | Meaning |
 |---|---:|---|
 | `version` | 1–9 bytes | Canonical value-format version; v1 is `01`. |
-| `format` | 1 byte | Compression and encryption identifiers. |
-| `body` | remaining bytes | Serialized value, optionally compressed and encrypted. |
+| `flags` | 1 byte | Packed encryption, compression, and codec identifiers. |
+| `body` | remaining bytes | Codec payload, optionally compressed and encrypted. |
 
-The format byte is split into two nibbles:
+The wire has one packed flags byte rather than a separate header byte for each
+transformation. Each layer owns its fixed-width identifier field, while the
+body still applies the transformations in codec, compression, then encryption
+order.
+
+The flags byte is packed from three fixed-width two-bit identifiers:
 
 ```text
-bits 0..3 = compression_id
-bits 4..7 = encryption_id
-format = compression_id | (encryption_id << 4)
+bits 0..1 = encryption_id
+bits 2..3 = compression_id
+bits 4..5 = codec_id
+bits 6..7 = reserved; MUST be zero in v1
+
+flags =
+  encryption_id
+  | (compression_id << 2)
+  | (codec_id << 4)
 ```
 
 ### Compression identifiers
@@ -101,7 +115,7 @@ format = compression_id | (encryption_id << 4)
 |---:|---|
 | `0` | None |
 | `1` | Zstandard |
-| `2..15` | Reserved |
+| `2..3` | Reserved |
 
 ### Encryption identifiers
 
@@ -110,64 +124,69 @@ format = compression_id | (encryption_id << 4)
 | `0` | None | Unprotected |
 | `1` | AES-256-SIV-CMAC | Compact |
 | `2` | AES-256-GCM-SIV | Robust |
-| `3..15` | Reserved |
+| `3` | Reserved |
 
-A decoder MUST reject every unassigned identifier. It MUST NOT guess an
-algorithm or try several interpretations.
+A decoder MUST reject nonzero reserved bits and every unassigned identifier.
+It MUST NOT guess an algorithm or try several interpretations.
 
-Common format bytes are:
+Common flags bytes are:
 
-| Byte | Meaning |
+| Byte | Encryption | Compression | Codec |
+|---:|---|---|---|
+| `00` | Unprotected | None | Raw |
+| `04` | Unprotected | Zstandard | Raw |
+| `10` | Unprotected | None | Deterministic CBOR |
+| `14` | Unprotected | Zstandard | Deterministic CBOR |
+| `01` | Compact | None | Raw |
+| `05` | Compact | Zstandard | Raw |
+| `11` | Compact | None | Deterministic CBOR |
+| `15` | Compact | Zstandard | Deterministic CBOR |
+| `02` | Robust | None | Raw |
+| `06` | Robust | Zstandard | Raw |
+| `12` | Robust | None | Deterministic CBOR |
+| `16` | Robust | Zstandard | Deterministic CBOR |
+
+### Codec identifiers
+
+| ID | Name |
 |---:|---|
-| `00` | Raw or CBOR value, uncompressed and unprotected |
-| `01` | Raw or CBOR value, Zstandard-compressed and unprotected |
-| `10` | Raw or CBOR value, Compact-protected |
-| `11` | Raw or CBOR value, Zstandard-compressed and Compact-protected |
-| `20` | Raw or CBOR value, Robust-protected |
-| `21` | Raw or CBOR value, Zstandard-compressed and Robust-protected |
+| `0` | Raw bytes |
+| `1` | Deterministic CBOR |
+| `2..3` | Reserved |
 
-The serialization identifier is in the transformed body and is not encoded in
-the format byte. This keeps compression and encryption assignments independent
-of the codec registry.
-
-## Serialized value
-
-Before compression or encryption, the body is:
-
-```text
-serialized_value = serialization_id:vu128 | serialization_payload
-```
-
-Serialization identifiers:
-
-| ID | Name | Payload |
-|---:|---|---|
-| `0` | Raw bytes | Exact remaining application bytes. |
-| `1` | Deterministic CBOR | Core logical value encoded by the v1 CBOR contract. |
-| `2..2^64-1` | Reserved | Invalid until specified and assigned. |
-
-An unknown identifier is an unsupported-serialization error. Language adapters
+An unknown codec identifier is an unsupported-codec error. Language adapters
 MUST NOT assign identifiers or write a serializer that is not part of the core
 contract.
+
+The body before compression or encryption is exactly the selected codec
+payload:
+
+```text
+codec_payload =
+  exact_application_bytes                  // Raw
+  deterministic_cbor(core_logical_value)  // deterministic CBOR
+transformed_body = encrypt(compress(codec_payload))
+```
+
+The `codec_id` is in `flags`, not in `codec_payload` or `transformed_body`.
 
 ### Raw bytes
 
 ```text
-raw_serialized_value = 00 | exact_application_bytes
+raw_codec_payload = exact_application_bytes
 ```
 
-An empty application byte string is valid and is encoded as the single byte
-`00` before the outer container is added. Embedded `00` octets are ordinary
-payload bytes. There is no NUL terminator, text sentinel, or implicit
-application-value length inside Raw.
+An empty application byte string is valid and has a zero-byte codec payload.
+Embedded `00` octets are ordinary payload bytes. There is no NUL terminator,
+text sentinel, codec marker, or implicit application-value length inside Raw.
 
-Consequently, an empty raw value occupies 3 bytes in the uncompressed,
-unprotected profile (`version=01 | format=00 | serialization_id=00`).
+Consequently, an empty Raw value occupies 2 bytes in the uncompressed,
+unprotected profile (`version=01 | flags=00`).
 
 Raw is also the escape hatch for application-defined binary data. If an
 application wants to put client-only metadata next to its value, it can define
-that metadata inside its own Raw payload. v1 does not add a second envelope,
-flag, or length field for such data.
+that metadata inside its own Raw payload. v1 does not add a second envelope or
+length field for such data.
 
 ### Deterministic CBOR
 
@@ -325,12 +344,12 @@ aad =
   | namespace_id_bytes
   | item_id[32]
   | encoded_version
-  | format
+  | flags
 ```
 
 `encoded_version` is the exact canonical `vu128` byte sequence stored in the
-container. For v1 it is `01`. `format` is the exact byte stored after the
-version.
+container. For v1 it is `01`. `flags` is the exact packed byte stored after the
+version, including its reserved bits.
 
 The namespace is included separately in both `item_id_input` and `aad`.
 The complete AAD is not fed into item-ID derivation; doing that would create a
@@ -338,17 +357,17 @@ circular dependency because AAD contains the item ID.
 
 Authenticating the namespace and Item ID prevents moving a valid ciphertext to
 another `(namespace_id, item_id)` pair. Authenticating the header prevents
-changing the version or transform algorithms. AAD does not provide freshness:
-an older valid container can still be replayed to the same item.
+changing the version, codec, or transform algorithms. AAD does not provide
+freshness: an older valid container can still be replayed to the same item.
 
 ## Encryption profiles
 
 ### Unprotected (ID 0)
 
-The transformed serialized body is stored directly:
+The transformed codec payload is stored directly:
 
 ```text
-container = version:vu128 | format:u8 | transformed_body
+container = version:vu128 | flags:u8 | transformed_body
 ```
 
 This is the minimum-size option. It provides no confidentiality or value
@@ -417,13 +436,13 @@ do not expose Compact's deterministic repetition. A nonce remains public.
 
 ### Profile size comparison
 
-For v1, the fixed overhead before the serialized payload is:
+For v1, the fixed overhead before the codec payload is:
 
 | Profile | Container/crypto overhead | Empty Raw value |
 |---|---:|---:|
-| Unprotected | 2 bytes | 3 bytes |
-| Compact | 18 bytes | 19 bytes |
-| Robust | 30 bytes | 31 bytes |
+| Unprotected | 2 bytes | 2 bytes |
+| Compact | 18 bytes | 18 bytes |
+| Robust | 30 bytes | 30 bytes |
 
 Robust is exactly 12 bytes larger than Compact. Compression, when selected,
 adds the Zstandard frame overhead and can make a small value larger.
@@ -439,12 +458,13 @@ Compression ID `1` is one complete Zstandard frame as specified by
 [RFC 8878](https://www.rfc-editor.org/rfc/rfc8878):
 
 ```text
-compressed_body = zstd(serialized_value)
+compressed_body = zstd(codec_payload)
 ```
 
 The encoder MUST:
 
-- compress the complete serialized value, including its codec identifier;
+- compress exactly the selected codec payload; the codec identifier is already
+  in `flags`;
 - emit exactly one standard frame with a declared content size;
 - use no external dictionary and no skippable frame;
 - append no trailing bytes;
@@ -458,7 +478,7 @@ or produced output above the decoded-value limit.
 Compression policy is not wire semantics. An encoder MAY compare compressed and
 uncompressed lengths and keep the uncompressed body when compression is not
 beneficial. The initial recommendation is Zstandard level 1, no compression
-below 1,024 serialized bytes, and a minimum saving of 64 bytes.
+below 1,024 codec-payload bytes, and a minimum saving of 64 bytes.
 
 ### Compression and sensitive values
 
@@ -480,19 +500,20 @@ Encryption does not hide the final stored length in any profile.
 
 An encoder MUST:
 
-1. Convert a native value to the core logical model.
-2. Prefix the selected canonical codec ID to produce `serialized_value`.
-3. Reject a serialized value above the decoded-value limit.
+1. Convert a structured native value to the core logical model. A Raw value
+   instead supplies its exact application bytes.
+2. Encode the value with the selected codec to produce `codec_payload`.
+3. Reject a codec payload above the decoded-value limit.
 4. Apply Zstandard only when configured and beneficial.
-5. Encode version `1` canonically and construct the format byte.
+5. Encode version `1` canonically and construct the packed flags byte.
 6. Construct AAD from the namespace ID, exact Item ID, and exact header bytes.
 7. Apply the selected encryption profile.
 8. Reject a complete container above the protocol value limit.
 9. Send the complete container as the opaque protocol value.
 
 The encoder MUST NOT emit a magic prefix, body-length field, reserved
-identifier, non-canonical `vu128`, or an encryption profile inconsistent with
-the format byte.
+identifier, non-canonical `vu128`, nonzero reserved flag bits, or an encryption
+profile, compression algorithm, or codec inconsistent with the flags byte.
 
 ## Decoding procedure
 
@@ -500,14 +521,16 @@ A decoder MUST:
 
 1. Parse one canonical `version:vu128` from the exact container slice.
 2. Require version `1`.
-3. Read one format byte and reject reserved compression/encryption IDs.
+3. Read one flags byte and reject nonzero reserved bits or reserved
+   encryption, compression, and codec IDs.
 4. Enforce the configured encryption policy.
 5. Construct AAD from the supplied namespace ID, exact Item ID, and exact header.
 6. Check profile-specific minimum body sizes before slicing.
 7. Derive the selected per-item key(s).
 8. Authenticate and decrypt before decompression or codec parsing.
 9. If compressed, validate and decompress one bounded Zstandard frame.
-10. Parse one canonical serialization ID and dispatch the core codec.
+10. Dispatch the selected codec from `flags` over the complete decompressed
+    body.
 11. Reject unsupported, non-deterministic, truncated, trailing, or oversized
     payloads.
 
@@ -521,8 +544,8 @@ Two independent v1 limits apply:
 
 1. The complete stored container MUST be at most 64 MiB, including headers,
    compression framing, nonce, and authentication tag.
-2. The decoded `serialized_value` MUST be at most 64 MiB, including its codec
-   identifier.
+2. The decoded codec payload MUST be at most 64 MiB. The codec identifier is
+   already in the one-byte flags field and is not counted in this limit.
 
 Implementations MAY configure lower limits, but MUST apply them consistently
 to encoding and decoding. Declared Zstandard content size, requested window
@@ -531,8 +554,9 @@ allocation.
 
 ## Replay and freshness (P1, intentionally open)
 
-V1 encryption authenticates identity and format, not time or write order. A
-server can replay an older valid value to the same namespace and Item ID.
+V1 encryption authenticates identity and transform selection, not time or write
+order. A server can replay an older valid value to the same namespace and Item
+ID.
 Robust's random nonce changes the bytes; it does not stop rollback.
 
 The current recommendation is to leave replay/freshness out of the frozen
