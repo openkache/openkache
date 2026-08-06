@@ -710,7 +710,7 @@ class _RawOperationTransport(SmithyOperationTransport):
         kind, payload = await self._owner._execute_scoped(
             operation,
             namespace_id=namespace_id,
-            item_id=_item_id_or_pair(item_id) if item_id else b"",
+            item_id=_item_id(item_id) if item_id else b"",
             value=value,
             options=options,
         )
@@ -1004,16 +1004,6 @@ def _item_id(value: bytes | bytearray | memoryview) -> bytes:
     if len(item_id) != SMITHY_ITEM_ID_BYTES:
         raise OpenKacheValueError(
             f"item_id must contain exactly {SMITHY_ITEM_ID_BYTES} bytes"
-        )
-    return item_id
-
-
-def _item_id_or_pair(value: bytes | bytearray | memoryview) -> bytes:
-    item_id = _as_bytes(value, "item_id")
-    if len(item_id) not in (SMITHY_ITEM_ID_BYTES, SMITHY_ITEM_ID_BYTES * 2):
-        raise OpenKacheValueError(
-            f"item_id must contain exactly {SMITHY_ITEM_ID_BYTES} or "
-            f"{SMITHY_ITEM_ID_BYTES * 2} bytes"
         )
     return item_id
 

@@ -781,16 +781,6 @@ fn validate_ffi_operation(
                 input.len()
             ));
         }
-        (FfiInvocation::Raw, FfiInputKind::ItemIdPair)
-        | (FfiInvocation::Scoped, FfiInputKind::ItemIdPair)
-            if input.len() != crate::ITEM_ID_BYTES * 2 =>
-        {
-            return Err(format!(
-                "item_id pair must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES * 2,
-                input.len()
-            ));
-        }
         (FfiInvocation::Scoped, FfiInputKind::None) if !input.is_empty() => {
             return Err("operation does not accept an item_id".to_owned());
         }

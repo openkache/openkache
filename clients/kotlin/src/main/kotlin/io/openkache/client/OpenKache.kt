@@ -72,9 +72,10 @@ public class Client private constructor(
         flags: Int,
         ttlMilliseconds: Long,
     ): NativeResult {
-        val requiredItemIdBytes = SmithyContract.operationItemIdBytes(operation)
-        if (requiredItemIdBytes != 0 && itemId.size != requiredItemIdBytes) {
-            throw IllegalArgumentException("itemId must contain exactly ${requiredItemIdBytes} bytes")
+        if (SmithyContract.operationRequiresItemId(operation)
+            && itemId.size != SmithyContract.ITEM_ID_BYTES
+        ) {
+            throw IllegalArgumentException("itemId must contain exactly ${SmithyContract.ITEM_ID_BYTES} bytes")
         }
         if (itemId.isNotEmpty() && !SmithyContract.operationSupportsScoped(operation)) {
             throw IllegalArgumentException("operation does not accept an itemId")

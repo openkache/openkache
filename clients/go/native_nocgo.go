@@ -44,17 +44,6 @@ func (unavailableNativeClient) executeScoped(
 	return nativeResult{}, &Error{Operation: "execute scoped", Message: "native client unavailable"}
 }
 
-func (unavailableNativeClient) executeScopedBytes(
-	context.Context,
-	uint32,
-	uint64,
-	[]byte,
-	[]byte,
-	SetOptions,
-) (nativeResult, error) {
-	return nativeResult{}, &Error{Operation: "execute scoped", Message: "native client unavailable"}
-}
-
 func (unavailableNativeClient) namespaceOpen(
 	context.Context,
 	[]byte,

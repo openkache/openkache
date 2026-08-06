@@ -400,14 +400,6 @@ type nativeClient interface {
 		[]byte,
 		SetOptions,
 	) (nativeResult, error)
-	executeScopedBytes(
-		context.Context,
-		uint32,
-		uint64,
-		[]byte,
-		[]byte,
-		SetOptions,
-	) (nativeResult, error)
 	namespaceOpen(
 		context.Context,
 		[]byte,
@@ -495,19 +487,6 @@ func (c *Client) invokeScoped(
 ) (nativeResult, error) {
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.executeScoped(ctx, operation, namespaceID, itemID, value, options)
-	})
-}
-
-func (c *Client) invokeScopedBytes(
-	ctx context.Context,
-	operation uint32,
-	namespaceID uint64,
-	itemID []byte,
-	value []byte,
-	options SetOptions,
-) (nativeResult, error) {
-	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
-		return native.executeScopedBytes(ctx, operation, namespaceID, itemID, value, options)
 	})
 }
 

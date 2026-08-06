@@ -1222,14 +1222,9 @@ public actor OpenKacheRawClient {
     }
 
     private func validateItemID(_ itemID: Data) throws {
-        guard !itemID.isEmpty else {
-            return
-        }
-        guard itemID.count == Smithy_Value_Format.itemIdBytes
-            || itemID.count == Smithy_Value_Format.itemIdBytes * 2 else {
+        guard itemID.count == Smithy_Value_Format.itemIdBytes else {
             throw OpenKacheError(
-                "itemID must contain exactly \(Smithy_Value_Format.itemIdBytes) or "
-                    + "\(Smithy_Value_Format.itemIdBytes * 2) bytes"
+                "itemID must contain exactly \(Smithy_Value_Format.itemIdBytes) bytes"
             )
         }
     }
