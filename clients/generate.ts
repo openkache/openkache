@@ -15,7 +15,12 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
+  OPERATION_REQUEST_KINDS,
+  OPERATION_REQUEST_SCOPES,
+  OPERATION_RETRY_MODES,
   OPERATION_RESPONSE_KINDS_BY_REQUEST,
+  OPERATION_RESPONSE_KINDS,
+  OPERATION_SCOPES,
   extract_wire_contract as extract_protocol_wire_contract,
   render_rust_wire as render_protocol_rust_wire,
   type Wire_Contract,
@@ -578,34 +583,43 @@ function api_type(
   }
 }
 
-const OPERATION_FIELD_ROLES: readonly Operation_Field_Role[] = [
-  "payload",
-  "namespace_id",
-  "item_id",
-  "value",
-  "condition",
-  "expiration_mode",
-  "ttl_milliseconds",
-  "eviction_mode",
-  "expected_revision",
-  "name",
-  "create_if_missing",
-  "policy",
-  "outcome",
-  "deleted",
-  "json",
-  "descriptor",
-  "created",
-  "revision",
-  "default_expiration",
-  "default_ttl_milliseconds",
-  "expiration_override",
-  "default_eviction",
-  "eviction_override",
-]
+const OPERATION_FIELD_ROLE_SHAPE_ID = "openkache.protocol#OperationFieldRole"
+
+function smithy_operation_field_roles(shapes: Json_Object): readonly string[] {
+  const shape = object_member(
+    shapes,
+    OPERATION_FIELD_ROLE_SHAPE_ID,
+    "Smithy AST.shapes",
+  )
+  if (shape_type(shape, `Smithy AST.shapes.${OPERATION_FIELD_ROLE_SHAPE_ID}`) !== "enum") {
+    throw new Error(`${OPERATION_FIELD_ROLE_SHAPE_ID} must be an enum`)
+  }
+  const members = object_member(shape, "members", OPERATION_FIELD_ROLE_SHAPE_ID)
+  const roles = Object.entries(members).map(([name, value]) => {
+    const member = object_value(value, `${OPERATION_FIELD_ROLE_SHAPE_ID}.${name}`)
+    const traits = object_member(
+      member,
+      "traits",
+      `${OPERATION_FIELD_ROLE_SHAPE_ID}.${name}`,
+    )
+    return string_member(
+      traits,
+      "smithy.api#enumValue",
+      `${OPERATION_FIELD_ROLE_SHAPE_ID}.${name}.traits`,
+    )
+  })
+  if (roles.length === 0) {
+    throw new Error(`${OPERATION_FIELD_ROLE_SHAPE_ID} must define at least one role`)
+  }
+  if (new Set(roles).size !== roles.length) {
+    throw new Error(`${OPERATION_FIELD_ROLE_SHAPE_ID} must not define duplicate roles`)
+  }
+  return roles
+}
 
 function operation_field_role(
   member_traits: Json_Object | undefined,
+  operation_field_roles: readonly string[],
   location: string,
 ): Operation_Field_Role | undefined {
   const value = member_traits?.[OPERATION_FIELD_TRAIT_ID]
@@ -616,15 +630,19 @@ function operation_field_role(
     "role",
     `${location}.${OPERATION_FIELD_TRAIT_ID}`,
   )
-  if (!OPERATION_FIELD_ROLES.includes(role as Operation_Field_Role)) {
+  if (!operation_field_roles.includes(role)) {
     throw new Error(
-      `${location}.${OPERATION_FIELD_TRAIT_ID}.role must be one of ${OPERATION_FIELD_ROLES.join(", ")}`,
+      `${location}.${OPERATION_FIELD_TRAIT_ID}.role must be one of ${operation_field_roles.join(", ")}`,
     )
   }
   return role as Operation_Field_Role
 }
 
-function api_structure(shapes: Json_Object, target: string): Api_Structure {
+function api_structure(
+  shapes: Json_Object,
+  target: string,
+  operation_field_roles: readonly string[],
+): Api_Structure {
   const shape = object_member(shapes, target, "Smithy AST.shapes")
   if (shape_type(shape, `Smithy AST.shapes.${target}`) !== "structure") {
     throw new Error(`${target} must be a structure`)
@@ -635,7 +653,11 @@ function api_structure(shapes: Json_Object, target: string): Api_Structure {
     members: Object.entries(members).map(([name, value]): Api_Member => {
       const member = object_value(value, `${target}.${name}`)
       const traits = optional_object_member(member, "traits", `${target}.${name}`)
-      const field_role = operation_field_role(traits, `${target}.${name}`)
+      const field_role = operation_field_role(
+        traits,
+        operation_field_roles,
+        `${target}.${name}`,
+      )
       return {
         name,
         ...(field_role === undefined
@@ -662,7 +684,7 @@ function operation_contract(
   if (value === undefined) return undefined
   const contract = object_value(value, `${target}.traits.${OPERATION_CONTRACT_TRAIT_ID}`)
   const scope = string_member(contract, "scope", `${target}.${OPERATION_CONTRACT_TRAIT_ID}`)
-  if (!["global", "item", "namespace", "namespace_management"].includes(scope)) {
+  if (!OPERATION_SCOPES.includes(scope as Api_Operation_Scope)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
     )
@@ -672,33 +694,12 @@ function operation_contract(
     "requestKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  const request_kinds = [
-    "empty",
-    "application_value",
-    "scoped_item",
-    "scoped_namespace",
-    "namespace_open",
-    "namespace_update_policy",
-    "namespace_delete",
-  ] as const
-  if (!request_kinds.includes(request_kind as Api_Operation_Request_Kind)) {
+  if (!OPERATION_REQUEST_KINDS.includes(request_kind as Api_Operation_Request_Kind)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind is not a supported request kind`,
     )
   }
-  const request_scope: Record<
-    Api_Operation_Request_Kind,
-    Api_Operation_Scope
-  > = {
-    empty: "global",
-    application_value: "global",
-    scoped_item: "item",
-    scoped_namespace: "namespace",
-    namespace_open: "namespace_management",
-    namespace_update_policy: "namespace_management",
-    namespace_delete: "namespace_management",
-  }
-  if (request_scope[request_kind as Api_Operation_Request_Kind] !== scope) {
+  if (OPERATION_REQUEST_SCOPES[request_kind as Api_Operation_Request_Kind] !== scope) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind ${request_kind} is incompatible with scope ${scope}`,
     )
@@ -708,18 +709,7 @@ function operation_contract(
     "responseKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (
-    ![
-      "empty",
-      "pong",
-      "application_value",
-      "value",
-      "set_outcome",
-      "delete_outcome",
-      "stats_json",
-      "namespace_descriptor",
-    ].includes(response_kind)
-  ) {
+  if (!OPERATION_RESPONSE_KINDS.includes(response_kind as Api_Operation_Response_Kind)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
     )
@@ -738,7 +728,7 @@ function operation_contract(
     "retryMode",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (!["always", "never", "when_not_creating"].includes(retry_mode)) {
+  if (!OPERATION_RETRY_MODES.includes(retry_mode as Api_Operation_Retry_Mode)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
     )
@@ -824,6 +814,7 @@ function api_contract(
   shapes: Json_Object,
   service_shape_id: string,
   namespace: string,
+  operation_field_roles: readonly string[],
   fallback_operation_names?: readonly string[],
   protocol_operations?: readonly {
     readonly contract: Api_Operation_Contract
@@ -887,7 +878,11 @@ function api_contract(
   while (pending_structure_names.length > 0) {
     const name = pending_structure_names.pop()
     if (name === undefined || structures_by_name.has(name)) continue
-    const structure = api_structure(shapes, `${namespace}#${name}`)
+    const structure = api_structure(
+      shapes,
+      `${namespace}#${name}`,
+      operation_field_roles,
+    )
     structures_by_name.set(name, structure)
     for (const member of structure.members) {
       if (member.type.name === undefined) continue
@@ -1085,7 +1080,11 @@ function namespace_descriptor_contract(
   shapes: Json_Object,
   namespace: string,
 ): Namespace_Descriptor_Contract {
-  const descriptor = api_structure(shapes, `${namespace}#FfiNamespaceDescriptor`)
+  const descriptor = api_structure(
+    shapes,
+    `${namespace}#FfiNamespaceDescriptor`,
+    [],
+  )
   if (descriptor.members.length === 0) {
     throw new Error("Smithy FfiNamespaceDescriptor must define at least one member")
   }
@@ -1726,6 +1725,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
   const client_namespace = client_service_id.slice(0, client_service_id.lastIndexOf("#"))
   const service = object_member(shapes, client_service_id, "Smithy AST.shapes")
   const location = `Smithy AST.shapes.${client_service_id}`
+  const operation_field_roles = smithy_operation_field_roles(shapes)
   const trait_ids = (trait_id: string): readonly string[] =>
     client_service_id === SERVICE_SHAPE_ID
       ? [trait_id, trait_id.replace("openkache.client#", "openkache.protocol#")]
@@ -1738,6 +1738,7 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     shapes,
     client_service_id,
     API_NAMESPACE,
+    operation_field_roles,
     wire.opcodes.map((entry) => entry.name),
     wire.operations,
   )

@@ -15,30 +15,59 @@ export interface Wire_Entry {
 }
 
 /** Semantic contract declared by one Smithy protocol operation. */
-export type Wire_Operation_Scope =
-  | "global"
-  | "item"
-  | "namespace"
-  | "namespace_management"
+export const OPERATION_SCOPES = [
+  "global",
+  "item",
+  "namespace",
+  "namespace_management",
+] as const
 
-export type Wire_Operation_Request_Kind =
-  | "empty"
-  | "application_value"
-  | "scoped_item"
-  | "scoped_namespace"
-  | "namespace_open"
-  | "namespace_update_policy"
-  | "namespace_delete"
+export type Wire_Operation_Scope = (typeof OPERATION_SCOPES)[number]
 
-export type Wire_Operation_Response_Kind =
-  | "empty"
-  | "pong"
-  | "application_value"
-  | "value"
-  | "set_outcome"
-  | "delete_outcome"
-  | "stats_json"
-  | "namespace_descriptor"
+export const OPERATION_REQUEST_KINDS = [
+  "empty",
+  "application_value",
+  "scoped_item",
+  "scoped_namespace",
+  "namespace_open",
+  "namespace_update_policy",
+  "namespace_delete",
+] as const
+
+export type Wire_Operation_Request_Kind = (typeof OPERATION_REQUEST_KINDS)[number]
+
+export const OPERATION_RESPONSE_KINDS = [
+  "empty",
+  "pong",
+  "application_value",
+  "value",
+  "set_outcome",
+  "delete_outcome",
+  "stats_json",
+  "namespace_descriptor",
+] as const
+
+export type Wire_Operation_Response_Kind = (typeof OPERATION_RESPONSE_KINDS)[number]
+
+export const OPERATION_RETRY_MODES = [
+  "always",
+  "never",
+  "when_not_creating",
+] as const
+
+export type Wire_Operation_Retry_Mode = (typeof OPERATION_RETRY_MODES)[number]
+
+export const OPERATION_REQUEST_SCOPES: Readonly<
+  Record<Wire_Operation_Request_Kind, Wire_Operation_Scope>
+> = {
+  empty: "global",
+  application_value: "global",
+  scoped_item: "item",
+  scoped_namespace: "namespace",
+  namespace_open: "namespace_management",
+  namespace_update_policy: "namespace_management",
+  namespace_delete: "namespace_management",
+}
 
 /** Response shapes permitted for each protocol-owned request shape. */
 export const OPERATION_RESPONSE_KINDS_BY_REQUEST: Readonly<
@@ -57,7 +86,7 @@ export interface Wire_Operation_Contract {
   readonly error_statuses: readonly string[]
   readonly request_kind: Wire_Operation_Request_Kind
   readonly response_kind: Wire_Operation_Response_Kind
-  readonly retry_mode: "always" | "never" | "when_not_creating"
+  readonly retry_mode: Wire_Operation_Retry_Mode
   readonly scope: Wire_Operation_Scope
   readonly success_statuses: readonly string[]
 }
@@ -723,8 +752,7 @@ function operation_contract(
   if (value === undefined) return undefined
   const contract = object_value(value, `${target}.traits.${OPERATION_CONTRACT_TRAIT_ID}`)
   const scope = string_member(contract, "scope", `${target}.${OPERATION_CONTRACT_TRAIT_ID}`)
-  const scopes = ["global", "item", "namespace", "namespace_management"] as const
-  if (!scopes.includes(scope as (typeof scopes)[number])) {
+  if (!OPERATION_SCOPES.includes(scope as Wire_Operation_Scope)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
     )
@@ -734,30 +762,12 @@ function operation_contract(
     "requestKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  const request_kinds = [
-    "empty",
-    "application_value",
-    "scoped_item",
-    "scoped_namespace",
-    "namespace_open",
-    "namespace_update_policy",
-    "namespace_delete",
-  ] as const
-  if (!request_kinds.includes(request_kind as (typeof request_kinds)[number])) {
+  if (!OPERATION_REQUEST_KINDS.includes(request_kind as Wire_Operation_Request_Kind)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind is not a supported request kind`,
     )
   }
-  const request_scopes: Readonly<Record<(typeof request_kinds)[number], (typeof scopes)[number]>> = {
-    empty: "global",
-    application_value: "global",
-    scoped_item: "item",
-    scoped_namespace: "namespace",
-    namespace_open: "namespace_management",
-    namespace_update_policy: "namespace_management",
-    namespace_delete: "namespace_management",
-  }
-  if (request_scopes[request_kind as (typeof request_kinds)[number]] !== scope) {
+  if (OPERATION_REQUEST_SCOPES[request_kind as Wire_Operation_Request_Kind] !== scope) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind ${request_kind} is incompatible with scope ${scope}`,
     )
@@ -768,17 +778,7 @@ function operation_contract(
     "responseKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  const response_kinds = [
-    "empty",
-    "pong",
-    "application_value",
-    "value",
-    "set_outcome",
-    "delete_outcome",
-    "stats_json",
-    "namespace_descriptor",
-  ] as const
-  if (!response_kinds.includes(response_kind as (typeof response_kinds)[number])) {
+  if (!OPERATION_RESPONSE_KINDS.includes(response_kind as Wire_Operation_Response_Kind)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
     )
@@ -798,8 +798,7 @@ function operation_contract(
     "retryMode",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  const retry_modes = ["always", "never", "when_not_creating"] as const
-  if (!retry_modes.includes(retry_mode as (typeof retry_modes)[number])) {
+  if (!OPERATION_RETRY_MODES.includes(retry_mode as Wire_Operation_Retry_Mode)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
     )
