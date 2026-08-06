@@ -11,9 +11,16 @@ quic-compio = ["dep:compio", "openkache-client/quic-compio"]
 quic-quinn = ["dep:tokio", "openkache-client/quic-quinn"]
 
 [dependencies]
+anstream = "*"
 base64 = "*"
 clap = { version = "*", features = ["derive", "env"] }
+comfy-table = "*"
 compio = { version = "*", default-features = false, features = ["io-uring", "runtime", "time"], optional = true }
+indicatif = "*"
+miette = { version = "*", features = ["fancy"] }
 openkache-client = { path = "../rust", default-features = false }
+owo-colors = "*"
+reedline = "*"
+serde_json = "*"
 thiserror = "*"
 tokio = { version = "*", features = ["macros", "rt-multi-thread"], optional = true }

@@ -2,6 +2,7 @@
 
 use std::{io, net::SocketAddr, path::PathBuf};
 
+use anstream::eprintln;
 use clap::Parser;
 use openkache::{AppConfig, QuicBackend};
 
@@ -52,7 +53,22 @@ struct Arguments {
     sizing: sizing::SizingArguments,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    install_diagnostics();
+    if let Err(error) = try_main() {
+        let report = miette::miette!(
+            severity = miette::Severity::Error,
+            code = "openkache::server",
+            help = "check `openkache-server --help` and the selected configuration",
+            "{}",
+            error
+        );
+        eprintln!("{report:?}");
+        std::process::exit(1);
+    }
+}
+
+fn try_main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = Arguments::parse();
     if let Some(command) = &arguments.command {
         return Ok(command.run()?);
@@ -78,6 +94,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sizing::print_plan(plan);
     }
     openkache::block_on(serve::run(arguments, config)).map_err(runtime_initialization_error)?
+}
+
+fn install_diagnostics() {
+    let _ = miette::set_hook(Box::new(|_| {
+        Box::new(
+            miette::MietteHandlerOpts::new()
+                .terminal_links(true)
+                .build(),
+        )
+    }));
 }
 
 #[cfg(target_os = "linux")]

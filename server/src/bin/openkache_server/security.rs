@@ -2,9 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use anstream::println;
 use clap::Args;
 use openkache::AppConfig;
 use openkache::server::{KacheServer, Result};
+use owo_colors::OwoColorize;
 
 /// TLS identity, client authentication, and explicit development override arguments.
 #[derive(Args)]
@@ -113,13 +115,15 @@ impl SecurityArguments {
 
     pub(super) fn report(&self, mode: SecurityMode) {
         match mode {
-            SecurityMode::MutualTls => println!("Security: mutual TLS"),
+            SecurityMode::MutualTls => println!("{} {}", "Security:".green().bold(), "mutual TLS"),
             SecurityMode::LocalDevelopment => println!(
-                "Security: local development on loopback only (certificate: {})",
+                "{} local development on loopback only (certificate: {})",
+                "Security:".green().bold(),
                 self.certificate_out.display()
             ),
             SecurityMode::ExplicitInsecureDevelopment => println!(
-                "Security: INSECURE DEVELOPMENT (certificate: {})",
+                "{} INSECURE DEVELOPMENT (certificate: {})",
+                "Security:".red().bold(),
                 self.certificate_out.display()
             ),
         }

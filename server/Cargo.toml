@@ -44,6 +44,7 @@ path = "src/bin/openkache_server.rs"
 
 [dependencies]
 aes = "*"
+anstream = "*"
 # Both crates must resolve to one BoringSSL binding version.
 boring = { version = "*", optional = true }
 clap = { version = "*", features = ["derive"] }
@@ -61,10 +62,12 @@ libc = "*"
 glommio = { version = "*", optional = true }
 mimalloc = { version = "*", optional = true }
 monoio = { version = "*", default-features = false, features = ["async-cancel", "iouring", "sync"], optional = true }
+miette = { version = "*", features = ["fancy"] }
 openkache-protocol = { path = "../protocol" }
 opentelemetry = { version = "*", optional = true, default-features = false, features = ["metrics"] }
 opentelemetry-otlp = { version = "*", optional = true, default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client"] }
 opentelemetry_sdk = { version = "*", optional = true, default-features = false, features = ["metrics"] }
+owo-colors = "*"
 quiche = { version = "*", default-features = false, features = ["boringssl-boring-crate"], optional = true }
 rand = "*"
 rcgen = { version = "*", features = ["x509-parser"] }
@@ -81,4 +84,4 @@ tikv-jemallocator = { version = "*", optional = true }
 time = "*"
 toml = "*"
 tracing = "*"
-tracing-subscriber = { version = "*", default-features = false, features = ["fmt", "json"] }
+tracing-subscriber = { version = "*", default-features = false, features = ["ansi", "env-filter", "fmt", "json"] }
