@@ -359,6 +359,9 @@ enum Opcode {
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
 
+    @wireOpcode(value: 10)
+    EXPERIMENTAL_ECHO = "experimental_echo"
+
 }
 
 @operationContract(
@@ -372,6 +375,19 @@ enum Opcode {
 operation Ping {
     input: PingInput
     output: PingOutput
+}
+
+@operationContract(
+    scope: "global",
+    requestKind: "application_value",
+    responseKind: "application_value",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
+)
+operation ExperimentalEcho {
+    input: ExperimentalEchoInput
+    output: ExperimentalEchoOutput
 }
 
 @operationContract(
@@ -572,6 +588,18 @@ structure SyncInput {
 }
 
 structure SyncOutput {}
+
+structure ExperimentalEchoInput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
+
+structure ExperimentalEchoOutput {
+    @required
+    @operationField(role: "payload")
+    message: String
+}
 
 structure NamespaceOpenInput {
     @required
