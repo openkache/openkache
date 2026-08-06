@@ -62,6 +62,14 @@ pub type Result<T> = std::result::Result<T, CliError>;
 ///
 /// Errors are written to stderr so command stdout remains safe for values and
 /// machine-readable responses.
+///
+/// # Arguments
+///
+/// * `error` - The client failure to render.
+///
+/// # Returns
+///
+/// Nothing. The formatted diagnostic is written to stderr.
 pub fn report_error(error: &CliError) {
     report_message(error, "run `openkache-cli --help` for usage");
 }
@@ -73,6 +81,10 @@ pub fn report_error(error: &CliError) {
 ///
 /// * `message` - Human-readable runtime initialization or configuration error.
 /// * `help` - Actionable follow-up guidance shown below the error.
+///
+/// # Returns
+///
+/// Nothing. The formatted diagnostic is written to stderr.
 pub fn report_message(message: impl Display, help: &str) {
     static DIAGNOSTIC_HANDLER: Once = Once::new();
     DIAGNOSTIC_HANDLER.call_once(|| {
@@ -474,7 +486,10 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
         Command::Stats => print_stats(&client.stats().await?)?,
         Command::Sync => {
             let syncing = progress_bar("waiting for durable mutations".to_owned());
-            client.sync().await?;
+            if let Err(error) = client.sync().await {
+                syncing.abandon();
+                return Err(error.into());
+            }
             syncing.finish_with_message("mutations are durable");
             print_status("OK");
         }

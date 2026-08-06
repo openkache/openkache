@@ -59,8 +59,9 @@ default and replaces invalid UTF-8 bytes lossily; `base64` is safe for
 binary values in shell pipelines.
 
 When attached to a terminal, `stats` renders a readable table and connection
-or durability waits show a spinner on stderr. Piped output remains plain JSON,
-so existing scripts do not receive terminal control sequences. `shell` uses
+or durability waits show a spinner on stderr. Piped `stats` output remains
+plain JSON, while the other commands keep their existing plain or raw stdout
+contracts, so scripts do not receive terminal control sequences. `shell` uses
 an editable prompt with history and Tab completion; set `NO_COLOR=1` to
 disable terminal styling.
 
