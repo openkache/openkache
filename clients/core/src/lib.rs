@@ -66,29 +66,14 @@ impl std::fmt::Display for Backend {
 }
 
 /// Stable client operation or operation phase used by structured errors.
+///
+/// Protocol operations intentionally wrap the generated [`Opcode`] instead of
+/// duplicating one enum variant per operation. The associated constants retain
+/// source-compatible labels for the long-lived convenience APIs, while a new
+/// Smithy opcode automatically receives the generated operation label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Operation {
-    /// `PING` request.
-    Ping,
-    /// Experimental `ECHO` request.
-    Echo,
-    /// `GET` request.
-    Get,
-    /// `SET` request.
-    Set,
-    /// `DELETE` request.
-    Delete,
-    /// `STATS` request.
-    Stats,
-    /// `SYNC` request.
-    Sync,
-    /// `NAMESPACE_OPEN` request.
-    NamespaceOpen,
-    /// `NAMESPACE_UPDATE_POLICY` request.
-    NamespaceUpdatePolicy,
-    /// `NAMESPACE_DELETE` request.
-    NamespaceDelete,
     /// A protocol request whose operation-specific client label is generated from Smithy.
     Protocol(Opcode),
     /// DNS lookup.
@@ -121,19 +106,38 @@ pub enum Operation {
     StreamRead,
 }
 
+#[allow(non_upper_case_globals)]
+impl Operation {
+    /// `PING` request.
+    pub const Ping: Self = Self::Protocol(Opcode::Ping);
+    /// Experimental `ECHO` request.
+    pub const Echo: Self = Self::Protocol(Opcode::Echo);
+    /// `GET` request.
+    pub const Get: Self = Self::Protocol(Opcode::Get);
+    /// `SET` request.
+    pub const Set: Self = Self::Protocol(Opcode::Set);
+    /// `DELETE` request.
+    pub const Delete: Self = Self::Protocol(Opcode::Delete);
+    /// `STATS` request.
+    pub const Stats: Self = Self::Protocol(Opcode::Stats);
+    /// `SYNC` request.
+    pub const Sync: Self = Self::Protocol(Opcode::Sync);
+    /// `NAMESPACE_OPEN` request.
+    pub const NamespaceOpen: Self = Self::Protocol(Opcode::NamespaceOpen);
+    /// `NAMESPACE_UPDATE_POLICY` request.
+    pub const NamespaceUpdatePolicy: Self = Self::Protocol(Opcode::NamespaceUpdatePolicy);
+    /// `NAMESPACE_DELETE` request.
+    pub const NamespaceDelete: Self = Self::Protocol(Opcode::NamespaceDelete);
+
+    /// Wraps any generated protocol opcode for structured error reporting.
+    pub const fn from_opcode(opcode: Opcode) -> Self {
+        Self::Protocol(opcode)
+    }
+}
+
 impl std::fmt::Display for Operation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Ping => "PING",
-            Self::Echo => "ECHO",
-            Self::Get => "GET",
-            Self::Set => "SET",
-            Self::Delete => "DELETE",
-            Self::Stats => "STATS",
-            Self::Sync => "SYNC",
-            Self::NamespaceOpen => "NAMESPACE_OPEN",
-            Self::NamespaceUpdatePolicy => "NAMESPACE_UPDATE_POLICY",
-            Self::NamespaceDelete => "NAMESPACE_DELETE",
             Self::Protocol(opcode) => return formatter.write_str(opcode.name()),
             Self::DnsResolution => "DNS resolution",
             Self::ConnectionSetup => "connection setup",
@@ -2035,19 +2039,6 @@ fn server_error_code(status: Status) -> ServerErrorCode {
     }
 }
 
-#[allow(unreachable_patterns)]
 fn operation(opcode: Opcode) -> Operation {
-    match opcode {
-        Opcode::Ping => Operation::Ping,
-        Opcode::Echo => Operation::Echo,
-        Opcode::Get => Operation::Get,
-        Opcode::Set => Operation::Set,
-        Opcode::Delete => Operation::Delete,
-        Opcode::Stats => Operation::Stats,
-        Opcode::Sync => Operation::Sync,
-        Opcode::NamespaceOpen => Operation::NamespaceOpen,
-        Opcode::NamespaceUpdatePolicy => Operation::NamespaceUpdatePolicy,
-        Opcode::NamespaceDelete => Operation::NamespaceDelete,
-        opcode => Operation::Protocol(opcode),
-    }
+    Operation::from_opcode(opcode)
 }
