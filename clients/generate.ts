@@ -90,7 +90,7 @@ type Api_Type_Kind =
   | "structure"
   | "unsigned_long"
 
-type Operation_Field_Role =
+type Known_Operation_Field_Role =
   | "payload"
   | "namespace_id"
   | "item_id"
@@ -114,6 +114,15 @@ type Operation_Field_Role =
   | "expiration_override"
   | "default_eviction"
   | "eviction_override"
+
+/**
+ * Roles are declared by the Smithy OperationFieldRole enum.
+ *
+ * Keep the well-known roles typed for renderer convenience, but retain the
+ * string boundary so adding a model-only role does not require a generator
+ * union edit before extraction can validate and preserve it.
+ */
+type Operation_Field_Role = string
 
 /** Semantic operation metadata consumed by the shared client core. */
 export type Api_Operation_Contract = Wire_Operation_Contract
@@ -234,6 +243,8 @@ export interface Client_Contract extends Wire_Contract {
   readonly api: Api_Contract
   readonly client_defaults: Client_Defaults_Contract
   readonly ffi: Ffi_Contract
+  /** Whether missing semantic operation fields must fail generation. */
+  readonly strict_operation_bindings: boolean
   readonly value_envelope: Value_Envelope_Contract
   readonly value_format: Value_Format_Contract
 }
@@ -903,6 +914,201 @@ function api_contract(
       .sort((left, right) => left.name.localeCompare(right.name)),
     operations: operation_shapes,
     structures,
+  }
+}
+
+interface Operation_Field_Requirement {
+  readonly direction: "input" | "output"
+  readonly parent?: Known_Operation_Field_Role
+  readonly role: Known_Operation_Field_Role
+}
+
+const NAMESPACE_POLICY_FIELD_ROLES: readonly Known_Operation_Field_Role[] = [
+  "default_expiration",
+  "default_ttl_milliseconds",
+  "expiration_override",
+  "default_eviction",
+  "eviction_override",
+]
+
+/**
+ * Derives the complete semantic field surface required by one operation
+ * shape. This is intentionally evaluated once at the model boundary so
+ * renderers never need to infer required members from operation names.
+ */
+function operation_field_requirements(
+  operation: Api_Operation & { readonly contract: Api_Operation_Contract },
+): readonly Operation_Field_Requirement[] {
+  const requirements: Operation_Field_Requirement[] = []
+  const input = (...roles: readonly Known_Operation_Field_Role[]): void => {
+    for (const role of roles) requirements.push({ direction: "input", role })
+  }
+  const output = (...roles: readonly Known_Operation_Field_Role[]): void => {
+    for (const role of roles) requirements.push({ direction: "output", role })
+  }
+  const policy = (): void => {
+    requirements.push({ direction: "input", role: "policy" })
+    for (const role of NAMESPACE_POLICY_FIELD_ROLES) {
+      requirements.push({ direction: "input", parent: "policy", role })
+    }
+  }
+
+  switch (operation.contract.request_kind) {
+    case "empty":
+      break
+    case "application_value":
+      input("payload")
+      break
+    case "scoped_item":
+      input("namespace_id", "item_id")
+      if (operation.contract.response_kind === "set_outcome") {
+        input(
+          "value",
+          "condition",
+          "expiration_mode",
+          "ttl_milliseconds",
+          "eviction_mode",
+        )
+      }
+      break
+    case "scoped_namespace":
+      input("namespace_id")
+      break
+    case "namespace_open":
+      input("name", "create_if_missing")
+      policy()
+      break
+    case "namespace_update_policy":
+      input("namespace_id", "expected_revision")
+      policy()
+      break
+    case "namespace_delete":
+      input("namespace_id", "expected_revision")
+      break
+  }
+
+  switch (operation.contract.response_kind) {
+    case "empty":
+    case "pong":
+      break
+    case "application_value":
+      output("payload")
+      break
+    case "value":
+      output("value")
+      break
+    case "set_outcome":
+      output("outcome")
+      break
+    case "delete_outcome":
+      output("deleted")
+      break
+    case "stats_json":
+      output("json")
+      break
+    case "namespace_descriptor":
+      output("descriptor")
+      if (operation.contract.request_kind === "namespace_open") {
+        output("created")
+      }
+      break
+  }
+  return requirements
+}
+
+function operation_structure_for(
+  api: Api_Contract,
+  operation: Api_Operation,
+  direction: "input" | "output",
+): Api_Structure {
+  const name = direction === "input" ? operation.input : operation.output
+  const structure = api.structures.find((candidate) => candidate.name === name)
+  if (structure === undefined) {
+    throw new Error(
+      `operation ${operation.name} ${direction} structure ${name} is missing from the Smithy contract`,
+    )
+  }
+  return structure
+}
+
+function validate_operation_structure_roles(
+  operation: Api_Operation,
+  direction: "input" | "output",
+  structure: Api_Structure,
+): void {
+  const seen = new Set<string>()
+  for (const member of structure.members) {
+    const role = member.operation_field_role
+    if (role === undefined) continue
+    if (seen.has(role)) {
+      throw new Error(
+        `operation ${operation.name} ${direction} binds more than one member to ${role}`,
+      )
+    }
+    seen.add(role)
+  }
+}
+
+/**
+ * Fails closed for the public client model when a renderer-consumed semantic
+ * role is absent. The protocol-only legacy fixture path remains permissive,
+ * but production clients cannot silently fall back to a historical member
+ * name after a Smithy rename.
+ */
+function validate_operation_field_bindings(api: Api_Contract): void {
+  for (const operation of api.operations) {
+    if (operation.contract === undefined) continue
+    const managed_operation = operation as Api_Operation & {
+      readonly contract: Api_Operation_Contract
+    }
+    const requirements = operation_field_requirements(managed_operation)
+    const structures = new Map<"input" | "output", Api_Structure>([
+      ["input", operation_structure_for(api, operation, "input")],
+      ["output", operation_structure_for(api, operation, "output")],
+    ])
+    validate_operation_structure_roles(operation, "input", structures.get("input")!)
+    validate_operation_structure_roles(operation, "output", structures.get("output")!)
+    for (const requirement of requirements) {
+      const parent_structure = structures.get(requirement.direction)!
+      let structure = parent_structure
+      if (requirement.parent !== undefined) {
+        const parent = parent_structure.members.find(
+          (member) => member.operation_field_role === requirement.parent,
+        )
+        if (parent === undefined) {
+          throw new Error(
+            `operation ${operation.name} ${requirement.direction} is missing operationField role ${requirement.parent}`,
+          )
+        }
+        if (parent.type.kind !== "structure" || parent.type.name === undefined) {
+          throw new Error(
+            `operation ${operation.name} ${requirement.direction} operationField role ${requirement.parent} must target a structure`,
+          )
+        }
+        const nested = api.structures.find(
+          (candidate) => candidate.name === parent.type.name,
+        )
+        if (nested === undefined) {
+          throw new Error(
+            `operation ${operation.name} ${requirement.direction} operationField role ${requirement.parent} targets missing structure ${parent.type.name}`,
+          )
+        }
+        structure = nested
+        validate_operation_structure_roles(operation, requirement.direction, structure)
+      }
+      if (
+        !structure.members.some(
+          (member) => member.operation_field_role === requirement.role,
+        )
+      ) {
+        const parent = requirement.parent === undefined
+          ? ""
+          : ` inside ${requirement.parent}`
+        throw new Error(
+          `operation ${operation.name} ${requirement.direction} is missing operationField role ${requirement.role}${parent}`,
+        )
+      }
+    }
   }
 }
 
@@ -1709,7 +1915,10 @@ function valid_encoding_identifier(encoding: string, maximum_bytes: number): boo
  * these models separate prevents server builds from depending on client defaults,
  * ABI discriminators, or application-level value-format details.
  */
-export function extract_client_contract(ast: unknown): Client_Contract {
+export function extract_client_contract(
+  ast: unknown,
+  strict_operation_bindings = false,
+): Client_Contract {
   const ast_object = object_value(ast, "Smithy AST")
   const shapes = object_member(ast_object, "shapes", "Smithy AST")
   const wire = extract_protocol_wire_contract(ast)
@@ -1805,6 +2014,9 @@ export function extract_client_contract(ast: unknown): Client_Contract {
       )
     }
   }
+  if (strict_operation_bindings || client_service_id === CLIENT_SERVICE_SHAPE_ID) {
+    validate_operation_field_bindings(api)
+  }
   const ffi = ffi_contract(ffi_trait, shapes, client_namespace)
   if (
     client_service_id === CLIENT_SERVICE_SHAPE_ID &&
@@ -1831,6 +2043,8 @@ export function extract_client_contract(ast: unknown): Client_Contract {
     api,
     client_defaults: client_defaults_contract(client_defaults_trait),
     ffi,
+    strict_operation_bindings:
+      strict_operation_bindings || client_service_id === CLIENT_SERVICE_SHAPE_ID,
     value_envelope: value_envelope_contract(value_envelope_trait),
     value_format: value_format_contract(value_format_trait),
   }
@@ -2123,27 +2337,6 @@ pub use openkache_protocol::{
     }
     return pascal_case(snake_case(value))
   }
-  const scope_variants = ["global", "item", "namespace", "namespace_management"] as const
-  const request_variants = [
-    "empty",
-    "application_value",
-    "scoped_item",
-    "scoped_namespace",
-    "namespace_open",
-    "namespace_update_policy",
-    "namespace_delete",
-  ] as const
-  const response_variants = [
-    "empty",
-    "pong",
-    "application_value",
-    "value",
-    "set_outcome",
-    "delete_outcome",
-    "stats_json",
-    "namespace_descriptor",
-  ] as const
-  const retry_variants = ["always", "never", "when_not_creating"] as const
   const status_slice = (statuses: readonly string[]): string =>
     `&[${statuses
       .map(
@@ -2159,10 +2352,10 @@ pub use openkache_protocol::{
         throw new Error(`operation metadata has no matching opcode ${operation.name}`)
       }
       return `        openkache_protocol::Opcode::${operation.name} => OperationContract {
-            scope: OperationScope::${enum_variant(operation_contract.scope, scope_variants, `${operation.name}.scope`)},
-            request_kind: OperationRequestKind::${enum_variant(operation_contract.request_kind, request_variants, `${operation.name}.requestKind`)},
-            response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind, response_variants, `${operation.name}.responseKind`)},
-            retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode, retry_variants, `${operation.name}.retryMode`)},
+            scope: OperationScope::${enum_variant(operation_contract.scope, OPERATION_SCOPES, `${operation.name}.scope`)},
+            request_kind: OperationRequestKind::${enum_variant(operation_contract.request_kind, OPERATION_REQUEST_KINDS, `${operation.name}.requestKind`)},
+            response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind, OPERATION_RESPONSE_KINDS, `${operation.name}.responseKind`)},
+            retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode, OPERATION_RETRY_MODES, `${operation.name}.retryMode`)},
             success_statuses: ${status_slice(operation_contract.success_statuses)},
             error_statuses: ${status_slice(operation_contract.error_statuses)},
         },`
@@ -4137,10 +4330,23 @@ interface Operation_Field_Binding {
   readonly output: Readonly<Partial<Record<Operation_Field_Role, Api_Member>>>
 }
 
+/** One language-neutral operation plan shared by every source renderer. */
+interface Managed_Operation_Plan {
+  readonly binding: Operation_Field_Binding
+  readonly contract: Api_Operation_Contract
+  readonly input: string
+  readonly name: string
+  readonly opcode: Wire_Entry
+  readonly output: string
+  readonly required_fields: readonly Operation_Field_Requirement[]
+  readonly strict_operation_bindings: boolean
+}
+
 interface Managed_Api_Operation extends Api_Operation {
   readonly binding: Operation_Field_Binding
   readonly contract: Api_Operation_Contract
   readonly opcode: Wire_Entry
+  readonly plan: Managed_Operation_Plan
 }
 
 function operation_structure(
@@ -4199,9 +4405,19 @@ function operation_field_binding(
   const output = fields("output")
   if (operation.contract.response_kind === "application_value") {
     if (input.payload === undefined) {
+      if (contract.strict_operation_bindings) {
+        throw new Error(
+          `operation ${operation.name} input is missing operationField role payload`,
+        )
+      }
       input.payload = required_string_member(contract, operation, "input")
     }
     if (output.payload === undefined) {
+      if (contract.strict_operation_bindings) {
+        throw new Error(
+          `operation ${operation.name} output is missing operationField role payload`,
+        )
+      }
       output.payload = required_string_member(contract, operation, "output")
     }
   }
@@ -4223,10 +4439,22 @@ function managed_operation_entries(
       ...operation,
       contract: operation.contract,
     }
+    const binding = operation_field_binding(contract, managed_operation)
+    const plan: Managed_Operation_Plan = {
+      binding,
+      contract: managed_operation.contract,
+      input: managed_operation.input,
+      name: managed_operation.name,
+      opcode,
+      output: managed_operation.output,
+      required_fields: operation_field_requirements(managed_operation),
+      strict_operation_bindings: contract.strict_operation_bindings,
+    }
     return [{
       ...managed_operation,
-      binding: operation_field_binding(contract, managed_operation),
+      binding,
       opcode,
+      plan,
     }]
   })
 }
@@ -4234,9 +4462,9 @@ function managed_operation_entries(
 function operation_field(
   operation: Managed_Api_Operation,
   direction: "input" | "output",
-  field: Operation_Field_Role,
+  field: Known_Operation_Field_Role,
 ): Api_Member {
-  const member = operation.binding[direction][field]
+  const member = operation.plan.binding[direction][field]
   if (member === undefined) {
     throw new Error(
       `operation ${operation.name} has no generated ${direction} ${field} member`,
@@ -4267,7 +4495,7 @@ function operation_field_name(
   }
 }
 
-const OPERATION_FIELD_DEFAULT_NAMES: Record<Operation_Field_Role, string> = {
+const OPERATION_FIELD_DEFAULT_NAMES: Record<Known_Operation_Field_Role, string> = {
   payload: "message",
   namespace_id: "namespaceId",
   item_id: "itemId",
@@ -4296,11 +4524,24 @@ const OPERATION_FIELD_DEFAULT_NAMES: Record<Operation_Field_Role, string> = {
 function operation_field_name_for(
   operation: Managed_Api_Operation,
   direction: "input" | "output",
-  field: Exclude<Operation_Field_Role, "payload">,
+  field: Exclude<Known_Operation_Field_Role, "payload">,
   language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
 ): string {
-  const member = operation.binding[direction][field]
+  const member = operation.plan.binding[direction][field]
   if (member !== undefined) return operation_field_name(member, language)
+  if (
+    operation.plan.strict_operation_bindings &&
+    operation.plan.required_fields.some(
+      (requirement) =>
+        requirement.direction === direction &&
+        requirement.parent === undefined &&
+        requirement.role === field,
+    )
+  ) {
+    throw new Error(
+      `operation ${operation.name} ${direction} is missing operationField role ${field}`,
+    )
+  }
   const fallback: Api_Member = {
     name: OPERATION_FIELD_DEFAULT_NAMES[field],
     required: false,
@@ -4312,7 +4553,7 @@ function operation_field_name_for(
 function structure_field_name_for(
   contract: Client_Contract,
   structure_name: string,
-  field: Operation_Field_Role,
+  field: Known_Operation_Field_Role,
   language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
 ): string {
   const structure = contract.api.structures.find(
@@ -4322,6 +4563,11 @@ function structure_field_name_for(
     (candidate) => candidate.operation_field_role === field,
   )
   if (member !== undefined) return operation_field_name(member, language)
+  if (contract.strict_operation_bindings) {
+    throw new Error(
+      `Smithy structure ${structure_name} is missing operationField role ${field}`,
+    )
+  }
   const fallback: Api_Member = {
     name: OPERATION_FIELD_DEFAULT_NAMES[field],
     required: false,
@@ -4334,11 +4580,11 @@ function operation_structure_field_name_for(
   contract: Client_Contract,
   operation: Managed_Api_Operation,
   direction: "input" | "output",
-  parent: Exclude<Operation_Field_Role, "payload">,
-  field: Exclude<Operation_Field_Role, "payload">,
+  parent: Exclude<Known_Operation_Field_Role, "payload">,
+  field: Exclude<Known_Operation_Field_Role, "payload">,
   language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
 ): string {
-  const member = operation.binding[direction][parent]
+  const member = operation.plan.binding[direction][parent]
   if (member?.type.kind === "structure" && member.type.name !== undefined) {
     return structure_field_name_for(contract, member.type.name, field, language)
   }
@@ -10659,7 +10905,7 @@ export function main(): number {
     const outputs =
       target === "rust-wire"
         ? expected_wire_outputs(extract_protocol_wire_contract(smithy_ast(false)), target)
-        : expected_outputs(extract_client_contract(smithy_ast(true)), target)
+        : expected_outputs(extract_client_contract(smithy_ast(true), true), target)
     write_outputs(
       outputs,
       process.env.OPENKACHE_GENERATION_CHECK === "1",
