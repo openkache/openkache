@@ -1954,7 +1954,7 @@ async fn execute_request(
         opcode,
         namespace_id,
         item_id,
-        item_id_b: _item_id_b,
+        item_id_b,
         set_options,
         value,
         namespace_name,
@@ -2160,6 +2160,54 @@ async fn execute_request(
                 }
                 Err(error) => cache_error_response(error),
             });
+        }
+        Opcode::Get2 => {
+            let namespace_id = namespace_id.expect("GET2 requests have a validated namespace ID");
+            if !namespace_exists(namespaces, namespace_id) {
+                return Some(response_bytes(
+                    Status::NamespaceNotFound,
+                    b"namespace does not exist",
+                ));
+            }
+            let item_id_a = item_id.expect("GET2 requests have a validated first item ID");
+            let item_id_b = item_id_b.expect("GET2 requests have a validated second item ID");
+            let (first, second) = futures_util::join!(
+                cache.get_in_namespace(namespace_id, item_id_a),
+                cache.get_in_namespace(namespace_id, item_id_b),
+            );
+            let first = match first {
+                Ok(value) => value,
+                Err(error) => return Some(cache_error_response(error)),
+            };
+            let second = match second {
+                Ok(value) => value,
+                Err(error) => return Some(cache_error_response(error)),
+            };
+            for (item_id, value) in [(item_id_a, &first), (item_id_b, &second)] {
+                if value.is_none() {
+                    if let Ok(mut registry) = namespaces.lock() {
+                        if registry.prune_item(namespace_id, item_id).is_err() {
+                            return Some(response_bytes(
+                                Status::InternalError,
+                                b"namespace metadata is unavailable",
+                            ));
+                        }
+                    } else {
+                        return Some(response_bytes(
+                            Status::InternalError,
+                            b"namespace metadata is unavailable",
+                        ));
+                    }
+                }
+            }
+            let payload = match openkache_protocol::encode_value_pair(
+                first.as_ref().map(|value| &**value),
+                second.as_ref().map(|value| &**value),
+            ) {
+                Ok(payload) => payload,
+                Err(error) => return Some(protocol_error_response(error)),
+            };
+            Some(response(Status::Ok, payload))
         }
         Opcode::Set => {
             let namespace_id = namespace_id.expect("SET requests have a validated namespace ID");

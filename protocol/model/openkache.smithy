@@ -385,6 +385,9 @@ enum Opcode {
     @wireOpcode(value: 12)
     SQUARE_ARRAY = "square_array"
 
+    @wireOpcode(value: 13)
+    GET2 = "get2"
+
 }
 
 @operationContract(
@@ -453,6 +456,19 @@ operation SquareArray {
 operation Get {
     input: GetInput
     output: GetOutput
+}
+
+@operationContract(
+    scope: "item",
+    requestKind: "scoped_item_pair",
+    responseKind: "value_pair",
+    retryMode: "always",
+    successStatuses: ["ok"],
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
+)
+operation Get2 {
+    input: Get2Input
+    output: Get2Output
 }
 
 @operationContract(
@@ -572,6 +588,29 @@ structure GetInput {
 structure GetOutput {
     @operationField(role: "value")
     value: Value
+}
+
+structure Get2Input {
+    @required
+    @unsignedLong
+    @operationField(role: "namespace_id")
+    namespaceId: Long
+
+    @required
+    @operationField(role: "item_id_a")
+    itemIdA: ItemId
+
+    @required
+    @operationField(role: "item_id_b")
+    itemIdB: ItemId
+}
+
+structure Get2Output {
+    @operationField(role: "value_a")
+    valueA: Value
+
+    @operationField(role: "value_b")
+    valueB: Value
 }
 
 structure SetInput {
