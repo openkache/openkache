@@ -414,8 +414,8 @@ fn compio_datagram(packet: compio::driver::op::RecvFromMultiResult) -> io::Resul
 
 #[cfg(not(feature = "network-runtime-compio"))]
 async fn portable_shutdown_signal() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let interrupted = Arc::new(AtomicBool::new(false));
     let terminated = Arc::new(AtomicBool::new(false));

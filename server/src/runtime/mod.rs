@@ -11,11 +11,12 @@ use aes::{
     Aes256,
     cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
-use openkache_protocol::{ItemId, NAMESPACE_ID_BYTES, SetOptions};
+use openkache_protocol::NAMESPACE_ID_BYTES;
 
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
+use crate::protocol::{ItemId, SetOptions};
 use crate::types::StoredItemValue;
 use crate::*;
 
@@ -143,11 +144,7 @@ impl<'a> NetworkWorkerCache<'a> {
         item_id: ItemId,
     ) -> Result<Option<StoredItemValue>> {
         self.cache
-            .get_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
-                Some(self.network_worker),
-            )
+            .get_async_in_namespace_with_requester(namespace_id, item_id, Some(self.network_worker))
             .await
     }
 
@@ -196,12 +193,7 @@ impl<'a> NetworkWorkerCache<'a> {
         options: SetOptions,
     ) -> Result<SetOutcome> {
         self.cache
-            .set_async_with_options_requester(
-                item_id,
-                value,
-                options,
-                Some(self.network_worker),
-            )
+            .set_async_with_options_requester(item_id, value, options, Some(self.network_worker))
             .await
     }
 
@@ -653,15 +645,12 @@ impl ThreadedKvkache {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(
-                worker,
-                Operation::Get,
-                requester,
-                |response| WorkerRequest::Get {
+            .request(worker, Operation::Get, requester, |response| {
+                WorkerRequest::Get {
                     storage_key,
                     response,
-                },
-            )
+                }
+            })
             .await?
         {
             WorkerResponse::Value(value) => Ok(value),
@@ -690,15 +679,12 @@ impl ThreadedKvkache {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(
-                worker,
-                Operation::Get,
-                requester,
-                |response| WorkerRequest::Get {
+            .request(worker, Operation::Get, requester, |response| {
+                WorkerRequest::Get {
                     storage_key,
                     response,
-                },
-            )
+                }
+            })
             .await?
         {
             WorkerResponse::Value(value) => Ok(value),
@@ -733,17 +719,14 @@ impl ThreadedKvkache {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(
-                worker,
-                Operation::Set,
-                requester,
-                |response| WorkerRequest::Set {
+            .request(worker, Operation::Set, requester, |response| {
+                WorkerRequest::Set {
                     storage_key,
                     value,
                     options,
                     response,
-                },
-            )
+                }
+            })
             .await?
         {
             WorkerResponse::Set(outcome) => Ok(outcome),
@@ -776,17 +759,14 @@ impl ThreadedKvkache {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(
-                worker,
-                Operation::Set,
-                requester,
-                |response| WorkerRequest::Set {
+            .request(worker, Operation::Set, requester, |response| {
+                WorkerRequest::Set {
                     storage_key,
                     value,
                     options,
                     response,
-                },
-            )
+                }
+            })
             .await?
         {
             WorkerResponse::Set(outcome) => Ok(outcome),
@@ -808,15 +788,12 @@ impl ThreadedKvkache {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(
-                worker,
-                Operation::Delete,
-                requester,
-                |response| WorkerRequest::Delete {
+            .request(worker, Operation::Delete, requester, |response| {
+                WorkerRequest::Delete {
                     storage_key,
                     response,
-                },
-            )
+                }
+            })
             .await?
         {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
@@ -845,15 +822,12 @@ impl ThreadedKvkache {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
         match self
-            .request(
-                worker,
-                Operation::Delete,
-                requester,
-                |response| WorkerRequest::Delete {
+            .request(worker, Operation::Delete, requester, |response| {
+                WorkerRequest::Delete {
                     storage_key,
                     response,
-                },
-            )
+                }
+            })
             .await?
         {
             WorkerResponse::Deleted(deleted) => Ok(deleted),
@@ -1237,12 +1211,9 @@ impl ThreadedKvkache {
         let mut stats = Vec::with_capacity(self.workers.len());
         for thread_id in 0..self.workers.len() {
             match self
-                .request(
-                    thread_id,
-                    Operation::Stats,
-                    requester,
-                    |response| WorkerRequest::Stats { response },
-                )
+                .request(thread_id, Operation::Stats, requester, |response| {
+                    WorkerRequest::Stats { response }
+                })
                 .await?
             {
                 WorkerResponse::Stats(worker_stats) => {
@@ -1265,12 +1236,9 @@ impl ThreadedKvkache {
     async fn sync_async_with_requester(&self, requester: Option<NetworkWorkerId>) -> Result<()> {
         for thread_id in 0..self.workers.len() {
             match self
-                .request(
-                    thread_id,
-                    Operation::Sync,
-                    requester,
-                    |response| WorkerRequest::Sync { response },
-                )
+                .request(thread_id, Operation::Sync, requester, |response| {
+                    WorkerRequest::Sync { response }
+                })
                 .await?
             {
                 WorkerResponse::Synced => {}
@@ -1301,12 +1269,9 @@ impl ThreadedKvkache {
                 )));
             }
             match self
-                .request(
-                    worker,
-                    Operation::Sync,
-                    requester,
-                    |response| WorkerRequest::Sync { response },
-                )
+                .request(worker, Operation::Sync, requester, |response| {
+                    WorkerRequest::Sync { response }
+                })
                 .await?
             {
                 WorkerResponse::Synced => {}

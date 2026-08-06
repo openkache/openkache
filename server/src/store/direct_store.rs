@@ -9,13 +9,12 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use futures_util::future::FutureExt;
-use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{EvictionMode, SetCondition, SetOptions};
-
 use super::*;
+use crate::protocol::{EvictionMode, SetCondition, SetOptions};
 use crate::storage_backend;
 use crate::types::StoredItemValue;
+use futures_util::future::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 
@@ -805,52 +804,56 @@ impl Kvkache {
         };
         let (outcome, visible_state, flush_required, pending) =
             match (completed.operation, observation) {
-            (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
-                let visible_state = include_visible_state.then(|| match &mut value {
-                    Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
-                    None => KeyedVisibleState::Missing,
-                });
-                (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
-            }
-            (PreparedKeyedOperation::Set { value, options }, KeyedObservation::State(previous)) => {
-                let evaluated_at_ms = unix_time_ms();
-                match self.finish_keyed_set(
-                    completed.storage_key,
-                    value,
-                    options,
-                    evaluated_at_ms,
-                    previous,
-                    include_visible_state,
-                ) {
-                    Ok((outcome, visible_state, flush_required, pending)) => (
-                        Ok(KeyedOutcome::Set(outcome)),
-                        visible_state,
-                        flush_required,
-                        pending,
-                    ),
-                    Err(error) => (Err(error), None, false, false),
+                (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
+                    let visible_state = include_visible_state.then(|| match &mut value {
+                        Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
+                        None => KeyedVisibleState::Missing,
+                    });
+                    (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
                 }
-            }
-            (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
-                match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous) {
-                    Ok((deleted, flush_required)) => (
-                        Ok(KeyedOutcome::Deleted(deleted)),
-                        Some(KeyedVisibleState::Missing),
-                        flush_required,
-                        false,
-                    ),
-                    Err(error) => (Err(error), None, false, false),
+                (
+                    PreparedKeyedOperation::Set { value, options },
+                    KeyedObservation::State(previous),
+                ) => {
+                    let evaluated_at_ms = unix_time_ms();
+                    match self.finish_keyed_set(
+                        completed.storage_key,
+                        value,
+                        options,
+                        evaluated_at_ms,
+                        previous,
+                        include_visible_state,
+                    ) {
+                        Ok((outcome, visible_state, flush_required, pending)) => (
+                            Ok(KeyedOutcome::Set(outcome)),
+                            visible_state,
+                            flush_required,
+                            pending,
+                        ),
+                        Err(error) => (Err(error), None, false, false),
+                    }
                 }
-            }
-            _ => (
-                Err(KvError::Worker(
-                    "keyed operation completed with an incompatible observation".into(),
-                )),
-                None,
-                false,
-                false,
-            ),
-        };
+                (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
+                    match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous)
+                    {
+                        Ok((deleted, flush_required)) => (
+                            Ok(KeyedOutcome::Deleted(deleted)),
+                            Some(KeyedVisibleState::Missing),
+                            flush_required,
+                            false,
+                        ),
+                        Err(error) => (Err(error), None, false, false),
+                    }
+                }
+                _ => (
+                    Err(KvError::Worker(
+                        "keyed operation completed with an incompatible observation".into(),
+                    )),
+                    None,
+                    false,
+                    false,
+                ),
+            };
         KeyedFinish {
             outcome,
             visible_state,

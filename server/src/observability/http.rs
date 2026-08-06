@@ -48,7 +48,9 @@ fn handle_http_connection(
             return;
         }
         bytes += read;
-        if request[..bytes].windows(4).any(|window| window == b"\r\n\r\n")
+        if request[..bytes]
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n")
             || bytes == request.len()
         {
             break;

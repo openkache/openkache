@@ -9,16 +9,15 @@
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use openkache_protocol::{
-    ItemId, NamespacePolicy, Opcode, OperationRequestKind, OperationResponseKind, Response,
-    SetOptions, Status,
-};
+use openkache_protocol::{Opcode, Status};
 
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState, SetOutcome, cache_error_response,
-    descriptor_payload, mutation_cache_error_response, namespace_exists, protocol_error_response,
-    resolve_set_options, response, response_bytes,
+    descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
+    response, response_bytes,
 };
+use crate::contract::{OperationRequestKind, OperationResponseKind};
+use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions};
 
 /// Borrowed context passed from the protocol server to one concrete handler.
 ///
@@ -42,7 +41,7 @@ pub(super) struct OperationContext<'a, 'cache> {
 
 /// Returns whether an operation can be answered without touching storage.
 pub(super) const fn is_immediate(opcode: Opcode) -> bool {
-    let contract = openkache_protocol::operation_contract(opcode);
+    let contract = crate::contract::operation_contract(opcode);
     matches!(
         (contract.request_kind, contract.response_kind),
         (OperationRequestKind::Empty, OperationResponseKind::Pong)
@@ -55,7 +54,7 @@ pub(super) const fn is_immediate(opcode: Opcode) -> bool {
 
 /// Executes an already-classified immediate operation.
 pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
-    match openkache_protocol::operation_contract(opcode).response_kind {
+    match crate::contract::operation_contract(opcode).response_kind {
         OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
         OperationResponseKind::ApplicationValue => response(Status::Ok, value),
         _ => response_bytes(
@@ -84,7 +83,13 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
     } = context;
 
     match opcode {
-        Opcode::Get => execute_read_many(cache, opcode, namespace_id, item_ids, namespaces).await,
+        Opcode::Get => {
+            let item_id = item_ids
+                .first()
+                .copied()
+                .expect("GET requests have a validated item ID");
+            execute_get(cache, namespace_id, item_id, namespaces).await
+        }
         Opcode::NamespaceOpen => {
             let name = namespace_name.expect("namespace-open requests have a validated name");
             let result = namespaces
@@ -409,15 +414,14 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
     }
 }
 
-/// Executes the server-owned ordered optional-value read behavior.
+/// Executes the built-in single-item GET behavior.
 ///
-/// The request and response cardinalities come from the generated contract;
-/// this function never branches on an API name or assumes a fixed item count.
-async fn execute_read_many(
+/// The wire/runtime layers only deliver the decoded operation context. The
+/// storage lookup and its domain response remain a server-owned decision.
+async fn execute_get(
     cache: &NetworkWorkerCache<'_>,
-    opcode: Opcode,
     namespace_id: Option<u64>,
-    item_ids: &[ItemId],
+    item_id: ItemId,
     namespaces: &Mutex<NamespaceRegistry>,
 ) -> Option<Response> {
     let namespace_id = namespace_id.expect("scoped value requests have a validated ID");
@@ -427,47 +431,24 @@ async fn execute_read_many(
             b"namespace does not exist",
         ));
     }
-    let mut values = Vec::with_capacity(item_ids.len());
-    for item_id in item_ids {
-        match cache.get_in_namespace(namespace_id, *item_id).await {
-            Ok(value) => {
-                if value.is_none() {
-                    if let Ok(mut registry) = namespaces.lock() {
-                        if registry.prune_item(namespace_id, *item_id).is_err() {
-                            return Some(response_bytes(
-                                Status::InternalError,
-                                b"namespace metadata is unavailable",
-                            ));
-                        }
-                    } else {
-                        return Some(response_bytes(
-                            Status::InternalError,
-                            b"namespace metadata is unavailable",
-                        ));
-                    }
+    match cache.get_in_namespace(namespace_id, item_id).await {
+        Ok(Some(value)) => Some(response(Status::Ok, value.into_bytes())),
+        Ok(None) => {
+            if let Ok(mut registry) = namespaces.lock() {
+                if registry.prune_item(namespace_id, item_id).is_err() {
+                    return Some(response_bytes(
+                        Status::InternalError,
+                        b"namespace metadata is unavailable",
+                    ));
                 }
-                values.push(value);
+            } else {
+                return Some(response_bytes(
+                    Status::InternalError,
+                    b"namespace metadata is unavailable",
+                ));
             }
-            Err(error) => return Some(cache_error_response(error)),
+            Some(response(Status::NotFound, Vec::new()))
         }
+        Err(error) => Some(cache_error_response(error)),
     }
-    let response_value_count = openkache_protocol::operation_contract(opcode).response_value_count;
-    if response_value_count == 1 {
-        return Some(
-            match values.into_iter().next().expect("one value response") {
-                Some(value) => response(Status::Ok, value.into_bytes()),
-                None => response(Status::NotFound, Vec::new()),
-            },
-        );
-    }
-    let references = values
-        .iter()
-        .map(|value| value.as_deref())
-        .collect::<Vec<_>>();
-    Some(
-        match openkache_protocol::encode_optional_values(&references) {
-            Ok(payload) => response(Status::Ok, payload),
-            Err(error) => protocol_error_response(error),
-        },
-    )
 }

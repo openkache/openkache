@@ -15,11 +15,18 @@ import { fileURLToPath } from "node:url"
 import {
   extract_wire_contract,
   render_rust_wire,
+  render_rust_semantic_constants,
+  render_rust_server_contract,
   smithy_wire_ast,
   type Wire_Contract,
 } from "./wire"
 
-export { extract_wire_contract, render_rust_wire } from "./wire"
+export {
+  extract_wire_contract,
+  render_rust_semantic_constants,
+  render_rust_server_contract,
+  render_rust_wire,
+} from "./wire"
 export type { Wire_Contract, Wire_Entry, Wire_V1_Contract } from "./wire"
 
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
@@ -29,6 +36,8 @@ const GENERATED_OUTPUT_ROOT = resolve(
 )
 const GENERATED_WIRE_OUTPUT = process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
   join(GENERATED_OUTPUT_ROOT, "protocol/generated_local/wire_values.rs")
+const GENERATED_SERVER_OUTPUT = process.env.OPENKACHE_RUST_SERVER_OUTPUT ??
+  join(GENERATED_OUTPUT_ROOT, "server/generated_local/server_contract.rs")
 
 /** Returns generated outputs that are missing or differ from the wire contract. */
 export function generated_output_issues(
@@ -81,18 +90,19 @@ function write_output(output_path: string, content: string, check_only: boolean)
 export function main(): number {
   try {
     const target = process.env.OPENKACHE_GENERATION_TARGET
-    if (target !== undefined && target !== "rust-wire") {
+    if (target !== undefined && target !== "rust-wire" && target !== "rust-server") {
       throw new Error(
-        "the protocol entry point emits only the server-visible Rust wire contract; " +
+        "the protocol entry point emits only Rust wire or server contracts; " +
           "run `../clients/generate.ts` for client language or ABI outputs",
       )
     }
     const contract: Wire_Contract = extract_wire_contract(smithy_wire_ast(), true)
-    write_output(
-      GENERATED_WIRE_OUTPUT,
-      render_rust_wire(contract),
-      process.env.OPENKACHE_GENERATION_CHECK === "1",
-    )
+    const check_only = process.env.OPENKACHE_GENERATION_CHECK === "1"
+    if (target === "rust-server") {
+      write_output(GENERATED_SERVER_OUTPUT, render_rust_server_contract(contract), check_only)
+    } else {
+      write_output(GENERATED_WIRE_OUTPUT, render_rust_wire(contract), check_only)
+    }
     return 0
   } catch (error) {
     console.error(

@@ -51,7 +51,6 @@ export type Wire_Operation_Response_Kind = (typeof OPERATION_RESPONSE_KINDS)[num
 
 export const OPERATION_VALUE_TRANSFORMS = [
   "identity",
-  "reverse_utf8",
 ] as const
 
 /**
@@ -1329,6 +1328,7 @@ function rust_operation_contract(contract: Wire_Contract): string {
       (operation) => `        Opcode::${operation.name} => OperationContract {
             scope: OperationScope::${enum_variant(operation.contract.scope)},
             request_kind: OperationRequestKind::${enum_variant(operation.contract.request_kind)},
+            request_value_count: ${operation.contract.request_value_count ?? 0},
             request_item_count: ${operation.contract.request_item_count},
             response_kind: OperationResponseKind::${enum_variant(operation.contract.response_kind)},
             response_value_count: ${operation.contract.response_value_count},
@@ -1397,6 +1397,7 @@ ${value_transforms.map((value) => `    ${enum_variant(value)},`).join("\n")}
 pub struct OperationContract {
     pub scope: OperationScope,
     pub request_kind: OperationRequestKind,
+    pub request_value_count: usize,
     pub request_item_count: usize,
     pub response_kind: OperationResponseKind,
     pub response_value_count: usize,
@@ -1419,10 +1420,10 @@ ${metadata}
  * Renders only the request metadata needed to find a v1 frame boundary.
  *
  * This is intentionally separate from the semantic operation contract below.
- * The protocol runtime must not inspect response meanings, retry policy, or
+ * The server runtime must not inspect response meanings, retry policy, or
  * server behavior just to read a request from a stream. Those fields remain
- * available to generated client/server adapters, while the wire crate gets a
- * small, request-only descriptor.
+ * available to the generated server adapter, which owns this request-only
+ * descriptor.
  */
 function rust_request_layout(contract: Wire_Contract): string {
   const operations = contract.operations
@@ -1476,16 +1477,23 @@ function rust_request_layout(contract: Wire_Contract): string {
         return `[
             ${fixed("OPCODE_BYTES + OPEN_FLAGS_BYTES")},
             WireRequestStep::ByteLength,
-            WireRequestStep::ConditionalPolicy {
+            WireRequestStep::ConditionalByteThenVarUInt {
                 selector_offset: OPCODE_BYTES,
                 mask: OPEN_CREATE_IF_MISSING,
                 expected: OPEN_CREATE_IF_MISSING,
+                prefix_bytes: POLICY_FLAGS_BYTES,
+                value_mask: POLICY_DEFAULT_EXPIRATION_MASK,
+                value_expected: POLICY_FIXED_TTL,
             },
         ]`
       case "NamespaceUpdatePolicy":
         return `[
             ${fixed("OPCODE_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES")},
-            WireRequestStep::Policy,
+            WireRequestStep::ByteThenVarUInt {
+                prefix_bytes: POLICY_FLAGS_BYTES,
+                mask: POLICY_DEFAULT_EXPIRATION_MASK,
+                expected: POLICY_FIXED_TTL,
+            },
         ]`
       case "NamespaceDelete":
         return `[
@@ -1500,26 +1508,11 @@ function rust_request_layout(contract: Wire_Contract): string {
   const metadata = operations
     .map(
       (operation) => `        Opcode::${operation.name} => WireRequestLayout {
-            kind: WireRequestLayoutKind::${request_kind(operation)},
-            item_id_count: ${operation.contract.request_item_count},
             steps: &${step_expression(operation)},
         },`,
     )
     .join("\n")
-  return `/// Wire-only request layouts used to delimit protocol v1 frames.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WireRequestLayoutKind {
-    Empty,
-    ApplicationValue,
-    Item,
-    Set,
-    Namespace,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
-}
-
-/// Primitive request parsing steps generated from the wire layout.
+  return `/// Primitive request parsing steps generated from the wire layout.
 ///
 /// These steps describe only byte consumption. They do not assign a meaning
 /// to namespace IDs, item IDs, flags, policies, or response behavior.
@@ -1533,19 +1526,24 @@ pub enum WireRequestStep {
         expected: u8,
     },
     ByteLength,
-    Policy,
-    ConditionalPolicy {
+        ByteThenVarUInt {
+            prefix_bytes: usize,
+            mask: u8,
+            expected: u8,
+        },
+    ConditionalByteThenVarUInt {
         selector_offset: usize,
         mask: u8,
         expected: u8,
+        prefix_bytes: usize,
+        value_mask: u8,
+        value_expected: u8,
     },
 }
 
 /// Generated request metadata used only to delimit protocol v1 frames.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WireRequestLayout {
-    pub kind: WireRequestLayoutKind,
-    pub item_id_count: usize,
     pub steps: &'static [WireRequestStep],
 }
 
@@ -1558,35 +1556,78 @@ ${metadata}
 `
 }
 
-/** Renders protocol v1 Rust definitions without client-only declarations. */
-export function render_rust_wire(contract: Wire_Contract): string {
+/** Computes the bounded receive size from modeled wire layouts. */
+function max_request_frame_bytes_for_contract(contract: Wire_Contract): number {
   const v1 = contract.v1
-  return `// Generated from the OpenKache Smithy wire contract. Do not edit.
+  const policy_bytes = v1.policy_flags_bytes + v1.max_varuint_bytes
+  const operations = contract.operations
+  if (operations === undefined || operations.length === 0) {
+    // Legacy AST fixtures may omit operations. Keep the historical bound for
+    // those fixtures; production extraction always takes the modeled path.
+    const set_prefix =
+      v1.request_fixed_bytes +
+      v1.namespace_id_bytes +
+      v1.set_flags_bytes +
+      contract.item_id_bytes +
+      v1.max_varuint_bytes +
+      v1.max_varuint_bytes
+    const namespace_open_prefix =
+      v1.opcode_bytes +
+      v1.open_flags_bytes +
+      v1.namespace_name_length_bytes +
+      v1.namespace_name_max_bytes +
+      policy_bytes
+    return Math.max(
+      set_prefix + contract.max_value_bytes,
+      namespace_open_prefix,
+    )
+  }
 
-/// QUIC application protocol identifier for wire protocol version 1.
-pub const ALPN: &[u8] = ${rust_byte_string_literal(v1.alpn)};
-/// Bytes occupied by the request opcode.
-pub const OPCODE_BYTES: usize = ${formatted_decimal(v1.opcode_bytes)};
-/// Bytes occupied by the response status.
-pub const STATUS_BYTES: usize = ${formatted_decimal(v1.status_bytes)};
-/// Bytes before the variable-length request lengths.
-pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(v1.request_fixed_bytes)};
-/// Bytes before the variable-length response payload length.
-pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(v1.response_fixed_bytes)};
-/// Minimum bytes in one canonical unsigned \`vu128\`.
-pub const MIN_VARUINT_BYTES: usize = ${formatted_decimal(v1.min_varuint_bytes)};
-/// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
-pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(v1.max_varuint_bytes)};
-/// Bytes in every canonical item ID carried by the protocol.
-pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
-/// Absolute value or response payload ceiling representable by protocol v1.
-pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
-/// Bytes in every namespace ID and namespace revision.
-pub const NAMESPACE_ID_BYTES: usize = ${formatted_decimal(v1.namespace_id_bytes)};
-pub const NAMESPACE_REVISION_BYTES: usize = ${formatted_decimal(v1.namespace_revision_bytes)};
-/// Bytes in the fixed namespace name length field.
-pub const NAMESPACE_NAME_LENGTH_BYTES: usize = ${formatted_decimal(v1.namespace_name_length_bytes)};
-/// Maximum UTF-8 octets in a namespace name.
+  const sizes = operations.map((operation) => {
+    const { request_kind, request_item_count, request_value_count, response_kind } =
+      operation.contract
+    switch (request_kind) {
+      case "empty":
+        return v1.opcode_bytes
+      case "application_value":
+        return v1.opcode_bytes + v1.max_varuint_bytes + contract.max_value_bytes
+      case "scoped_item": {
+        const item_count = request_item_count * contract.item_id_bytes
+        const is_value_request =
+          (request_value_count ?? (response_kind === "set_outcome" ? 1 : 0)) > 0
+        const prefix =
+          v1.opcode_bytes +
+          v1.namespace_id_bytes +
+          item_count +
+          (is_value_request ? v1.set_flags_bytes : 0) +
+          (is_value_request ? v1.max_varuint_bytes : 0) +
+          (is_value_request ? v1.max_varuint_bytes : 0)
+        return prefix + (is_value_request ? contract.max_value_bytes : 0)
+      }
+      case "scoped_namespace":
+        return v1.opcode_bytes + v1.namespace_id_bytes
+      case "namespace_open":
+        return (
+          v1.opcode_bytes +
+          v1.open_flags_bytes +
+          v1.namespace_name_length_bytes +
+          v1.namespace_name_max_bytes +
+          policy_bytes
+        )
+      case "namespace_update_policy":
+        return v1.opcode_bytes + v1.namespace_id_bytes + v1.namespace_revision_bytes + policy_bytes
+      case "namespace_delete":
+        return v1.opcode_bytes + v1.delete_flags_bytes + v1.namespace_id_bytes +
+          v1.namespace_revision_bytes
+    }
+  })
+  return Math.max(...sizes)
+}
+
+/** Renders operation-specific protocol constants for semantic adapters. */
+export function render_rust_semantic_constants(contract: Wire_Contract): string {
+  const v1 = contract.v1
+  return `/// Maximum UTF-8 octets accepted in a namespace name.
 pub const NAMESPACE_NAME_MAX_BYTES: usize = ${formatted_decimal(v1.namespace_name_max_bytes)};
 
 /// Width of the SET flags field.
@@ -1612,6 +1653,7 @@ pub const SET_RESERVED_MASK: u8 = ${formatted_byte(v1.set_reserved_mask)};
 pub const OPEN_FLAGS_BYTES: usize = ${formatted_decimal(v1.open_flags_bytes)};
 pub const OPEN_CREATE_IF_MISSING: u8 = ${formatted_byte(v1.open_create_if_missing_flag)};
 pub const OPEN_RESERVED_MASK: u8 = ${formatted_byte(v1.open_reserved_mask)};
+
 /// Namespace-delete flag fields.
 pub const DELETE_FLAGS_BYTES: usize = ${formatted_decimal(v1.delete_flags_bytes)};
 pub const DELETE_IF_EMPTY: u8 = ${formatted_byte(v1.delete_if_empty_bits)};
@@ -1628,6 +1670,40 @@ pub const POLICY_EXPIRATION_OVERRIDE: u8 = ${formatted_byte(v1.policy_expiration
 pub const POLICY_EVICTION_PROTECTED: u8 = ${formatted_byte(v1.policy_eviction_protected_flag)};
 pub const POLICY_EVICTION_OVERRIDE: u8 = ${formatted_byte(v1.policy_eviction_override_flag)};
 pub const POLICY_RESERVED_MASK: u8 = ${formatted_byte(v1.policy_reserved_mask)};
+`
+}
+
+/** Renders protocol v1 identifiers and common wire primitives. */
+export function render_rust_wire(contract: Wire_Contract): string {
+  const v1 = contract.v1
+  return `// Generated from the OpenKache Smithy wire contract. Do not edit.
+
+/// QUIC application protocol identifier for wire protocol version 1.
+pub const ALPN: &[u8] = ${rust_byte_string_literal(v1.alpn)};
+/// Bytes occupied by the request opcode.
+pub const OPCODE_BYTES: usize = ${formatted_decimal(v1.opcode_bytes)};
+/// Bytes occupied by the response status.
+pub const STATUS_BYTES: usize = ${formatted_decimal(v1.status_bytes)};
+/// Bytes before the variable-length request lengths.
+pub const REQUEST_FIXED_BYTES: usize = ${formatted_decimal(v1.request_fixed_bytes)};
+/// Bytes before the variable-length response payload length.
+pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(v1.response_fixed_bytes)};
+/// Minimum bytes in one canonical unsigned \`vu128\`.
+pub const MIN_VARUINT_BYTES: usize = ${formatted_decimal(v1.min_varuint_bytes)};
+/// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
+pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(v1.max_varuint_bytes)};
+/// Bytes in every canonical item ID carried by the protocol.
+pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
+/// Absolute value or response payload ceiling representable by protocol v1.
+pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
+/// Conservative maximum complete response frame size for protocol v1.
+pub const MAX_RESPONSE_FRAME_BYTES: usize =
+    STATUS_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
+/// Bytes in every namespace ID and namespace revision.
+pub const NAMESPACE_ID_BYTES: usize = ${formatted_decimal(v1.namespace_id_bytes)};
+pub const NAMESPACE_REVISION_BYTES: usize = ${formatted_decimal(v1.namespace_revision_bytes)};
+/// Bytes in the fixed namespace name length field.
+pub const NAMESPACE_NAME_LENGTH_BYTES: usize = ${formatted_decimal(v1.namespace_name_length_bytes)};
 
 /// First assigned status value reserved for errors.
 pub const ERROR_STATUS_MINIMUM: u8 = ${formatted_byte(v1.error_status_minimum)};
@@ -1635,8 +1711,25 @@ pub const ERROR_STATUS_MINIMUM: u8 = ${formatted_byte(v1.error_status_minimum)};
 ${rust_wire_enum("Opcode", "Operations supported by protocol v1.", contract.opcodes, "UnknownOpcode")}
 
 ${rust_wire_enum("Status", "Status returned in every protocol response.", contract.statuses, "UnknownStatus")}
+`
+}
+
+/** Renders semantic operation metadata for the server-owned adapter. */
+export function render_rust_server_contract(contract: Wire_Contract): string {
+  const max_request_frame_bytes = max_request_frame_bytes_for_contract(contract)
+  return `// Generated from the OpenKache Smithy operation contract. Do not edit.
+
+use openkache_protocol::{
+    ITEM_ID_BYTES, NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES, OPCODE_BYTES, Status, Opcode,
+};
+
+/// Conservative maximum complete request frame size for protocol v1.
+pub const MAX_REQUEST_FRAME_BYTES: usize = ${formatted_decimal(max_request_frame_bytes)};
+
+${render_rust_semantic_constants(contract)}
+
+${rust_operation_contract(contract)}
 
 ${rust_request_layout(contract)}
-${rust_operation_contract(contract)}
 `
 }

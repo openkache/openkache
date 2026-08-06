@@ -53,10 +53,7 @@ pub(super) async fn connect(
         .map_err(|error| TransportError::backend(BACKEND, Operation::Handshake, error))?;
     let negotiated_alpn = inner
         .handshake_data()
-        .and_then(|data| {
-            data.downcast::<quinn::crypto::rustls::HandshakeData>()
-                .ok()
-        })
+        .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
         .and_then(|data| data.protocol)
         .ok_or_else(|| {
             TransportError::backend(

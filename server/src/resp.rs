@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{ItemId, SetOptions};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -19,6 +18,7 @@ use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
 };
 use crate::platform::StorageDeviceKind;
+use crate::protocol::{ItemId, SetOptions};
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,

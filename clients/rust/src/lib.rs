@@ -130,12 +130,12 @@ fn smithy_namespace_policy(
         }
         smithy::ExpirationDefault::FixedTtl => {
             let ttl_ms = default_ttl_milliseconds.ok_or_else(|| Error::Configuration {
-                    field: "namespace.policy.default_ttl_milliseconds",
-                    message: format!(
-                        "is required with {} expiration",
-                        contract::SMITHY_EXPIRATION_DEFAULT_FIXED_TTL
-                    ),
-                })?;
+                field: "namespace.policy.default_ttl_milliseconds",
+                message: format!(
+                    "is required with {} expiration",
+                    contract::SMITHY_EXPIRATION_DEFAULT_FIXED_TTL
+                ),
+            })?;
             if ttl_ms == 0 {
                 return Err(Error::Configuration {
                     field: "namespace.policy.default_ttl_milliseconds",
@@ -182,9 +182,7 @@ fn smithy_namespace_descriptor(descriptor: NamespaceDescriptor) -> smithy::Names
             },
             default_eviction: match descriptor.policy.default_eviction {
                 EvictionDefault::Evictable => smithy::EvictionDefault::Evictable,
-                EvictionDefault::EvictionProtected => {
-                    smithy::EvictionDefault::EvictionProtected
-                }
+                EvictionDefault::EvictionProtected => smithy::EvictionDefault::EvictionProtected,
             },
             eviction_override: match descriptor.policy.eviction_override {
                 OverridePolicy::Allowed => smithy::OverridePolicy::Allowed,

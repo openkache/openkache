@@ -11,10 +11,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let protocol_model = client_directory.join("../../protocol/model");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
         .join("smithy_api.rs");
-    let operations_output = PathBuf::from(
-        std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?,
-    )
-    .join("smithy_operations.rs");
+    let operations_output =
+        PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
+            .join("smithy_operations.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
     println!(

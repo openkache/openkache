@@ -16,30 +16,35 @@ use std::os::unix::fs::OpenOptionsExt;
 use futures_util::lock::Mutex as AsyncMutex;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId,
-    MAX_REQUEST_FRAME_BYTES, NamespaceDescriptor, NamespacePolicy, Opcode, OperationRequestKind,
-    OperationResponseKind, OverridePolicy, ProtocolError, Request, Response, SetOptions, Status,
-};
+use openkache_protocol::{Opcode, Status};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
+use crate::contract::{
+    MAX_REQUEST_FRAME_BYTES, NAMESPACE_NAME_MAX_BYTES, OperationRequestKind, OperationResponseKind,
+};
 use crate::network_runtime;
 use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
 };
 use crate::platform::StorageDeviceKind;
+use crate::protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId, NamespaceDescriptor,
+    NamespacePolicy, OverridePolicy, Request, Response, SetOptions,
+};
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
     Incoming as TransportIncoming, ReceiveStream, RequestBudget, SendStream, ServerEndpoint,
     ServerTlsConfig, StreamReadError, TransportError,
 };
 use crate::{
-    AppConfig, KvError, NetworkConfig, NetworkWorkerCache, QuicBackend, ThreadedKvkache,
-    SetOutcome, TlsConfig,
+    AppConfig, KvError, NetworkConfig, NetworkWorkerCache, QuicBackend, SetOutcome,
+    ThreadedKvkache, TlsConfig,
 };
+#[allow(unused_imports)]
+pub(crate) use crate::{contract, protocol};
 
 #[path = "operation_handlers.rs"]
 mod operation_handlers;
@@ -475,11 +480,9 @@ impl NamespaceRegistry {
             .by_id
             .get_mut(&namespace_id)
             .ok_or(Status::NamespaceNotFound)
-            .map(|entry| {
-                SetReservation {
-                    inserted_item: entry.items.insert(item_id),
-                    inserted_worker: entry.dirty_workers.insert(worker),
-                }
+            .map(|entry| SetReservation {
+                inserted_item: entry.items.insert(item_id),
+                inserted_worker: entry.dirty_workers.insert(worker),
             })?;
         if !reservation.inserted_item && !reservation.inserted_worker {
             return Ok(reservation);
@@ -628,7 +631,11 @@ impl NamespaceRegistry {
         Ok(())
     }
 
-    fn prune_item(&mut self, namespace_id: u64, item_id: ItemId) -> std::result::Result<(), Status> {
+    fn prune_item(
+        &mut self,
+        namespace_id: u64,
+        item_id: ItemId,
+    ) -> std::result::Result<(), Status> {
         let Some(entry) = self.by_id.get_mut(&namespace_id) else {
             return Err(Status::NamespaceNotFound);
         };
@@ -746,7 +753,7 @@ impl NamespaceRegistry {
                 return Err(cursor.invalid("namespace metadata contains zero identity"));
             }
             let name_len = usize::from(cursor.u16()?);
-            if name_len > openkache_protocol::NAMESPACE_NAME_MAX_BYTES {
+            if name_len > NAMESPACE_NAME_MAX_BYTES {
                 return Err(cursor.invalid("namespace metadata name is too long"));
             }
             let name = cursor.take(name_len)?.to_vec();
@@ -782,9 +789,9 @@ impl NamespaceRegistry {
                     let worker = usize::try_from(cursor.u64()?)
                         .map_err(|_| cursor.invalid("namespace metadata worker ID is invalid"))?;
                     if !dirty_workers.insert(worker) {
-                        return Err(cursor.invalid(
-                            "namespace metadata contains duplicate dirty workers",
-                        ));
+                        return Err(
+                            cursor.invalid("namespace metadata contains duplicate dirty workers")
+                        );
                     }
                 }
             }
@@ -1657,9 +1664,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
     max_item_bytes: usize,
     namespaces: Arc<Mutex<NamespaceRegistry>>,
 ) {
-    let _stream_guard = ActiveStream {
-        network_shard,
-    };
+    let _stream_guard = ActiveStream { network_shard };
     loop {
         let mut frame = match receive
             .read_request(
@@ -1699,7 +1704,12 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::Protocol(error)) => {
                 network_shard.protocol_error();
-                if !write_response(&mut send, protocol_error_response(error), request_timeout).await
+                if !write_response(
+                    &mut send,
+                    wire_protocol_error_response(error),
+                    request_timeout,
+                )
+                .await
                 {
                     network_shard.response_write_failure();
                 }
@@ -1844,7 +1854,7 @@ async fn write_response<S: SendStream>(
 }
 
 fn request_may_mutate(request: &Request) -> bool {
-    let contract = openkache_protocol::operation_contract(request.opcode);
+    let contract = crate::contract::operation_contract(request.opcode);
     match contract.request_kind {
         OperationRequestKind::ScopedItem => matches!(
             contract.response_kind,
@@ -1864,14 +1874,9 @@ fn response_budget_bytes(
     request_value_bytes: usize,
     max_item_bytes: usize,
 ) -> Option<usize> {
-    match openkache_protocol::operation_contract(opcode).response_kind {
+    match crate::contract::operation_contract(opcode).response_kind {
         OperationResponseKind::ApplicationValue => Some(request_value_bytes),
-        OperationResponseKind::Value => {
-            let value_count = openkache_protocol::operation_contract(opcode).response_value_count;
-            max_item_bytes
-                .checked_mul(value_count)
-                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>() * value_count))
-        }
+        OperationResponseKind::Value => Some(max_item_bytes),
         _ => None,
     }
 }
@@ -1902,7 +1907,7 @@ async fn execute_request(
     // one lifecycle lock so an open cannot observe a descriptor while delete
     // is concurrently removing it (or vice versa).
     let lifecycle_lock = if matches!(
-        openkache_protocol::operation_contract(opcode).request_kind,
+        crate::contract::operation_contract(opcode).request_kind,
         OperationRequestKind::NamespaceOpen | OperationRequestKind::NamespaceDelete
     ) {
         match namespaces.lock() {
@@ -1927,7 +1932,7 @@ async fn execute_request(
     // mutex only protects map metadata; this async lock covers the cache
     // operation and its corresponding item-tracking update.
     let namespace_lock = if matches!(
-        openkache_protocol::operation_contract(opcode).request_kind,
+        crate::contract::operation_contract(opcode).request_kind,
         OperationRequestKind::ScopedItem
             | OperationRequestKind::ScopedNamespace
             | OperationRequestKind::NamespaceUpdatePolicy
@@ -2075,18 +2080,29 @@ fn mutation_cache_error_response(opcode: Opcode, error: KvError) -> Option<Respo
     // items. DELETE can encounter the same storage condition while driving
     // background work, but the v1 response contract reserves `NoCapacity` for
     // SET; use the applicable generic overload status for other mutations.
-    Some(if matches!(error, KvError::NoCapacity) && opcode != Opcode::Set {
-        response_display(Status::Overloaded, error)
-    } else {
-        cache_error_response(error)
-    })
+    Some(
+        if matches!(error, KvError::NoCapacity) && opcode != Opcode::Set {
+            response_display(Status::Overloaded, error)
+        } else {
+            cache_error_response(error)
+        },
+    )
 }
 
 /// Maps framing and validation failures to stable protocol statuses.
-fn protocol_error_response(error: ProtocolError) -> Response {
+fn protocol_error_response(error: crate::protocol::ProtocolError) -> Response {
     let status = match error {
-        ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        crate::protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
+        crate::protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        _ => Status::InvalidRequest,
+    };
+    response_display(status, error)
+}
+
+fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Response {
+    let status = match error {
+        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
+        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
         _ => Status::InvalidRequest,
     };
     response_display(status, error)

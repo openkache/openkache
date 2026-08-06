@@ -12,6 +12,7 @@ pub mod ffi;
 mod key;
 mod protected;
 mod protection;
+mod protocol;
 mod transport;
 pub mod value;
 pub mod value_envelope;
@@ -23,7 +24,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Request, Response, Status};
+use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status};
+use protocol::Request;
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -32,15 +34,16 @@ pub use config::{
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
-pub use openkache_protocol::{
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, Opcode, ITEM_ID_BYTES,
-    NamespaceDescriptor, NamespacePolicy, OverridePolicy, SetCondition,
-};
+pub use openkache_protocol::{ITEM_ID_BYTES, Opcode};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
 pub use protected::{ProtectedClient, ProtectedClientBuilder};
 pub use protection::DataProtection;
+pub use protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
+    NamespacePolicy, OverridePolicy, ProtocolError, SetCondition,
+};
 pub use value::ItemValue;
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
@@ -280,7 +283,7 @@ impl Error {
         Self::Tls(error.to_string())
     }
 
-    fn protocol(error: openkache_protocol::ProtocolError) -> Self {
+    fn protocol(error: impl std::fmt::Display) -> Self {
         Self::Protocol(error.to_string())
     }
 
@@ -311,9 +314,7 @@ pub(crate) fn operation_result(kind: contract::FfiResultKind, payload: Vec<u8>) 
     }
 }
 
-pub(crate) fn operation_get_result<T: Into<Vec<u8>>>(
-    outcome: GetOutcome<T>,
-) -> OperationResult {
+pub(crate) fn operation_get_result<T: Into<Vec<u8>>>(outcome: GetOutcome<T>) -> OperationResult {
     match outcome {
         GetOutcome::Found(value) => operation_result(contract::FfiResultKind::Value, value.into()),
         GetOutcome::NotFound => operation_result(contract::FfiResultKind::NotFound, Vec::new()),
@@ -361,19 +362,16 @@ fn parse_item_ids(bytes: &[u8], item_count: usize) -> Result<Vec<ItemId>> {
         .collect()
 }
 
-fn operation_values_result(
-    operation: Opcode,
-    response: Response,
-    value_count: usize,
-) -> Result<OperationResult> {
+fn operation_values_result(operation: Opcode, response: Response) -> Result<OperationResult> {
     match response.status {
         Status::Ok => Ok(operation_result(
             contract::FfiResultKind::Value,
             response.payload,
         )),
-        Status::NotFound if value_count == 1 && response.payload.is_empty() => {
-            Ok(operation_result(contract::FfiResultKind::NotFound, Vec::new()))
-        }
+        Status::NotFound if response.payload.is_empty() => Ok(operation_result(
+            contract::FfiResultKind::NotFound,
+            Vec::new(),
+        )),
         status => Err(unexpected_status(Operation::from_opcode(operation), status)),
     }
 }
@@ -594,10 +592,7 @@ impl<C: ClientConnection> Core<C> {
             Request::new_scoped_items(
                 operation,
                 namespace_id,
-                item_ids
-                    .into_iter()
-                    .map(ItemId::into_protocol)
-                    .collect(),
+                item_ids.into_iter().map(ItemId::into_protocol).collect(),
             )
             .map_err(Error::protocol)?,
         )
@@ -885,12 +880,13 @@ impl<C: ClientConnection> Core<C> {
                 ),
             });
         }
-        let expected_next_revision = expected_revision.checked_add(1).ok_or_else(|| {
-            Error::UnexpectedResponse {
-                operation: Operation::NamespaceUpdatePolicy,
-                message: "successful policy update cannot follow the maximum revision".into(),
-            }
-        })?;
+        let expected_next_revision =
+            expected_revision
+                .checked_add(1)
+                .ok_or_else(|| Error::UnexpectedResponse {
+                    operation: Operation::NamespaceUpdatePolicy,
+                    message: "successful policy update cannot follow the maximum revision".into(),
+                })?;
         if descriptor.revision != expected_next_revision {
             return Err(Error::UnexpectedResponse {
                 operation: Operation::NamespaceUpdatePolicy,
@@ -969,9 +965,7 @@ impl<C: ClientConnection> Core<C> {
         // violation; the lane must be discarded even when the QUIC connection remains
         // usable. This also prevents a malformed success from being mistaken for a
         // definitive mutation result.
-        if let Err(error) =
-            validate_response_contract(opcode, create_if_missing, &response)
-        {
+        if let Err(error) = validate_response_contract(opcode, create_if_missing, &response) {
             return Err(RequestFailure::after_response(error));
         }
         // Error responses may be emitted while the server is still parsing a request,
@@ -1379,7 +1373,7 @@ macro_rules! raw_client_methods {
                             .0
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
-                        operation_values_result(operation, response, contract.response_value_count)
+                        operation_values_result(operation, response)
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1461,7 +1455,7 @@ macro_rules! raw_client_methods {
                             .0
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
-                        operation_values_result(operation, response, contract.response_value_count)
+                        operation_values_result(operation, response)
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1969,10 +1963,7 @@ fn validate_response_contract(
     let operation = operation(opcode);
     let operation_contract = contract::operation_contract(opcode);
     if response.status.is_error() {
-        if !operation_contract
-            .error_statuses
-            .contains(&response.status)
-        {
+        if !operation_contract.error_statuses.contains(&response.status) {
             return Err(Error::UnexpectedResponse {
                 operation,
                 message: format!(
@@ -1990,10 +1981,7 @@ fn validate_response_contract(
     {
         return Err(unexpected_status(operation, response.status));
     }
-    if opcode == Opcode::NamespaceOpen
-        && response.status == Status::Created
-        && !create_if_missing
-    {
+    if opcode == Opcode::NamespaceOpen && response.status == Status::Created && !create_if_missing {
         return Err(unexpected_status(operation, response.status));
     }
     let invalid_payload = |message: &'static str| {
@@ -2003,12 +1991,12 @@ fn validate_response_contract(
         })
     };
     let descriptor_payload = || {
-        NamespaceDescriptor::decode(&response.payload).map(|_| ()).map_err(|error| {
-            Error::UnexpectedResponse {
+        NamespaceDescriptor::decode(&response.payload)
+            .map(|_| ())
+            .map_err(|error| Error::UnexpectedResponse {
                 operation,
                 message: format!("namespace descriptor is invalid: {error}"),
-            }
-        })
+            })
     };
     match operation_contract.response_kind {
         contract::OperationResponseKind::Pong => {
@@ -2020,21 +2008,7 @@ fn validate_response_contract(
         }
         contract::OperationResponseKind::ApplicationValue => Ok(()),
         contract::OperationResponseKind::Value => {
-            if operation_contract.response_value_count > 1 {
-                if response.status != Status::Ok {
-                    invalid_payload("multi-value GET responses must have an OK status")
-                } else {
-                    openkache_protocol::decode_optional_values(
-                        &response.payload,
-                        operation_contract.response_value_count,
-                    )
-                    .map(|_| ())
-                    .map_err(|error| Error::UnexpectedResponse {
-                        operation,
-                        message: format!("optional-values payload is invalid: {error}"),
-                    })
-                }
-            } else if response.status == Status::NotFound && !response.payload.is_empty() {
+            if response.status == Status::NotFound && !response.payload.is_empty() {
                 invalid_payload("GET NotFound responses must have an empty payload")
             } else {
                 Ok(())

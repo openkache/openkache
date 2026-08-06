@@ -7,13 +7,12 @@ use std::future::{Future, poll_fn};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{ItemId, SetOptions};
-
 use crate::channel::{AsyncReceiver, TryRecvError};
 use crate::observability::{ObservabilityState, Operation, StorageWorkerId};
+use crate::protocol::{ItemId, SetOptions};
 use crate::types::StoredItemValue;
 use crate::*;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 
 use super::CoreTask;
 use super::completion::CompletionSender;
@@ -917,10 +916,8 @@ pub(super) async fn worker_loop(
             },
             WorkerEvent::Completed(completed) => {
                 if let Some(storage_shard) = storage_shard {
-                    storage_shard.record_operation(
-                        completed.operation,
-                        completed.started_at.elapsed(),
-                    );
+                    storage_shard
+                        .record_operation(completed.operation, completed.started_at.elapsed());
                 }
                 let include_visible_state = scheduler.has_waiting(&completed.storage_key);
                 let KeyedFinish {

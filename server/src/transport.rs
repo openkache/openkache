@@ -10,11 +10,11 @@ use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use openkache_protocol::RequestFrame as ProtocolRequestFrame;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
 use crate::network_runtime;
+use crate::protocol::RequestFrame as ProtocolRequestFrame;
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
@@ -454,9 +454,7 @@ async fn read_buffered_request<S: RequestByteStream>(
     let has_trailing_bytes =
         match network_runtime::timeout(Duration::ZERO, stream.read_chunk(1, backend)).await {
             Err(_) => false,
-            Ok(result) => !result
-                .map_err(StreamReadError::Transport)?
-                .is_empty(),
+            Ok(result) => !result.map_err(StreamReadError::Transport)?.is_empty(),
         };
     Ok(RequestFrame::with_trailing_bytes(
         body,
@@ -844,7 +842,7 @@ mod quiche_backend {
 
     const NAME: &str = "quiche";
     const MAX_DATAGRAM_BYTES: usize = 65_535;
-    const MAX_BUFFERED_REQUEST_BYTES: usize = openkache_protocol::MAX_REQUEST_FRAME_BYTES + 1;
+    const MAX_BUFFERED_REQUEST_BYTES: usize = crate::contract::MAX_REQUEST_FRAME_BYTES + 1;
     const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
     const STREAM_CHUNK_BYTES: usize = 16 * 1024;
     const STREAM_CHUNK_BACKLOG: usize = 1;

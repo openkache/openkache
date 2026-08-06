@@ -151,8 +151,12 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+pub(crate) mod contract {
+    include!(concat!(env!("OUT_DIR"), "/server_contract.rs"));
+}
 pub(crate) mod network_runtime;
 pub mod platform;
+pub mod protocol;
 pub mod resp;
 pub mod server;
 mod transport;
@@ -163,6 +167,10 @@ pub(crate) mod observability;
 pub(crate) mod storage_backend;
 pub(crate) mod storage_runtime;
 
+pub use protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId, NamespaceDescriptor,
+    NamespacePolicy, OverridePolicy, SetCondition, SetOptions,
+};
 pub use types::{ItemValue, StorageKey};
 
 mod error;
