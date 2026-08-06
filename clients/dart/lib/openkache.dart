@@ -9,6 +9,8 @@ import 'generated_local/smithy_api.dart';
 import 'generated_local/smithy_contract.dart';
 import 'generated_local/smithy_native_api.dart';
 
+export 'generated_local/smithy_api.dart';
+
 part 'generated_local/smithy_operations.dart';
 
 /// Failure reported by the shared Rust client-core ABI.
