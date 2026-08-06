@@ -54,7 +54,8 @@ pub(super) const fn is_immediate(opcode: Opcode) -> bool {
 
 /// Executes an already-classified immediate operation.
 pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
-    match crate::contract::operation_contract(opcode).response_kind {
+    let contract = crate::contract::operation_contract(opcode);
+    match contract.response_kind {
         OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
         OperationResponseKind::ApplicationValue => response(Status::Ok, value),
         _ => response_bytes(
