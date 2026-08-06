@@ -12182,18 +12182,21 @@ fn smithy_decode_value_pair(
     operation: &str,
 ) -> std::result::Result<(Option<Vec<u8>>, Option<Vec<u8>>), Error> {
     let mut values = [None, None];
-    let mut offset = 0;
+    let mut offset: usize = 0;
     for value in &mut values {
         let end = offset.checked_add(4).ok_or_else(|| {
             Error::Protocol(format!("{operation} response has an invalid value-pair length"))
         })?;
-        let length = u32::from_be_bytes(payload.get(offset..end).ok_or_else(|| {
-            Error::Protocol(format!(
-                "{operation} response is missing a value-pair length",
-            ))
-        })?.try_into().map_err(|_| {
-            Error::Protocol(format!("{operation} response has an invalid value-pair length"))
-        })?);
+        let length_bytes: [u8; 4] = payload
+            .get(offset..end)
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "{operation} response is missing a value-pair length",
+                ))
+            })?
+            .try_into()
+            .expect("value-pair length has a fixed width");
+        let length = u32::from_be_bytes(length_bytes);
         offset = end;
         if length == u32::MAX {
             continue;
