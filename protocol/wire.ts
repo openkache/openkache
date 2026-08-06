@@ -964,12 +964,6 @@ function wire_operations(
       }
       return undefined
     }
-    if (strict && contract.request_kind === "application_value" &&
-        contract.value_transform === undefined) {
-      throw new Error(
-        `operation ${opcode.name} application-value operations require valueTransform`,
-      )
-    }
     operations.push({ contract, name: opcode.name })
   }
   return operations
