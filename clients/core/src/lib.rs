@@ -337,6 +337,47 @@ pub(crate) fn operation_delete_result(outcome: DeleteOutcome) -> OperationResult
     operation_result(kind, Vec::new())
 }
 
+fn parse_item_ids(bytes: &[u8], item_count: usize) -> Result<Vec<ItemId>> {
+    let expected = item_count
+        .checked_mul(ITEM_ID_BYTES)
+        .ok_or_else(|| Error::configuration("item_id", "item ID count overflows the ABI"))?;
+    if bytes.len() != expected {
+        return Err(Error::configuration(
+            "item_id",
+            format!(
+                "expected {expected} bytes for {item_count} item IDs, got {}",
+                bytes.len()
+            ),
+        ));
+    }
+    (0..item_count)
+        .map(|index| {
+            ItemId::from_slice(
+                bytes
+                    .get(index * ITEM_ID_BYTES..(index + 1) * ITEM_ID_BYTES)
+                    .expect("item ID range was validated"),
+            )
+        })
+        .collect()
+}
+
+fn operation_values_result(
+    operation: Opcode,
+    response: Response,
+    value_count: usize,
+) -> Result<OperationResult> {
+    match response.status {
+        Status::Ok => Ok(operation_result(
+            contract::FfiResultKind::Value,
+            response.payload,
+        )),
+        Status::NotFound if value_count == 1 && response.payload.is_empty() => {
+            Ok(operation_result(contract::FfiResultKind::NotFound, Vec::new()))
+        }
+        status => Err(unexpected_status(Operation::from_opcode(operation), status)),
+    }
+}
+
 /// Successful lookup result, separate from transport or protocol failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GetOutcome<T> {
@@ -540,6 +581,27 @@ impl<C: ClientConnection> Core<C> {
             }),
             status => Err(unexpected_status(Operation::Get, status)),
         }
+    }
+
+    async fn get_values_in_namespace(
+        &self,
+        operation: Opcode,
+        namespace_id: u64,
+        item_ids: Vec<ItemId>,
+    ) -> Result<Response> {
+        validate_client_namespace_id(namespace_id)?;
+        self.request(
+            Request::new_scoped_items(
+                operation,
+                namespace_id,
+                item_ids
+                    .into_iter()
+                    .map(ItemId::into_protocol)
+                    .collect(),
+            )
+            .map_err(Error::protocol)?,
+        )
+        .await
     }
 
     async fn set(
@@ -1310,8 +1372,14 @@ macro_rules! raw_client_methods {
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::Value,
                     ) => {
-                        let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        Ok(operation_get_result(self.get(item_id).await?))
+                        let item_ids =
+                            parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
+                        let namespace_id = self.0.ensure_namespace().await?;
+                        let response = self
+                            .0
+                            .get_values_in_namespace(operation, namespace_id, item_ids)
+                            .await?;
+                        operation_values_result(operation, response, contract.response_value_count)
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1387,10 +1455,13 @@ macro_rules! raw_client_methods {
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::Value,
                     ) => {
-                        let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        Ok(operation_get_result(
-                            self.get_in_namespace(namespace_id, item_id).await?,
-                        ))
+                        let item_ids =
+                            parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
+                        let response = self
+                            .0
+                            .get_values_in_namespace(operation, namespace_id, item_ids)
+                            .await?;
+                        operation_values_result(operation, response, contract.response_value_count)
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1949,7 +2020,21 @@ fn validate_response_contract(
         }
         contract::OperationResponseKind::ApplicationValue => Ok(()),
         contract::OperationResponseKind::Value => {
-            if response.status == Status::NotFound && !response.payload.is_empty() {
+            if operation_contract.response_value_count > 1 {
+                if response.status != Status::Ok {
+                    invalid_payload("multi-value GET responses must have an OK status")
+                } else {
+                    openkache_protocol::decode_optional_values(
+                        &response.payload,
+                        operation_contract.response_value_count,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| Error::UnexpectedResponse {
+                        operation,
+                        message: format!("optional-values payload is invalid: {error}"),
+                    })
+                }
+            } else if response.status == Status::NotFound && !response.payload.is_empty() {
                 invalid_payload("GET NotFound responses must have an empty payload")
             } else {
                 Ok(())

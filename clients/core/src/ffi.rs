@@ -773,11 +773,13 @@ fn validate_ffi_operation(
         }
         (FfiInvocation::Raw, FfiInputKind::ItemId)
         | (FfiInvocation::Scoped, FfiInputKind::ItemId)
-            if input.len() != crate::ITEM_ID_BYTES =>
+            if input.len()
+                != crate::ITEM_ID_BYTES * operation_contract.request_item_count as usize =>
         {
             return Err(format!(
-                "item_id must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES,
+                "item_id must contain exactly {} bytes for {} item IDs, got {}",
+                crate::ITEM_ID_BYTES * operation_contract.request_item_count as usize,
+                operation_contract.request_item_count,
                 input.len()
             ));
         }

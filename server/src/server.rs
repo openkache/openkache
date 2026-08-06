@@ -1863,7 +1863,12 @@ fn response_budget_bytes(
 ) -> Option<usize> {
     match openkache_protocol::operation_contract(opcode).response_kind {
         OperationResponseKind::ApplicationValue => Some(request_value_bytes),
-        OperationResponseKind::Value => Some(max_item_bytes),
+        OperationResponseKind::Value => {
+            let value_count = openkache_protocol::operation_contract(opcode).response_value_count;
+            max_item_bytes
+                .checked_mul(value_count)
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>() * value_count))
+        }
         _ => None,
     }
 }
@@ -1899,7 +1904,7 @@ async fn execute_request(
     let Request {
         opcode,
         namespace_id,
-        item_id,
+        item_ids,
         set_options,
         value,
         namespace_name,
@@ -1989,6 +1994,53 @@ async fn execute_request(
             Status::NamespaceNotFound,
             b"namespace does not exist",
         ));
+    }
+    let operation_contract = openkache_protocol::operation_contract(opcode);
+    if operation_contract.request_kind == OperationRequestKind::ScopedItem
+        && operation_contract.response_kind == OperationResponseKind::Value
+    {
+        let namespace_id = namespace_id.expect("scoped value requests have a validated ID");
+        if !namespace_exists(namespaces, namespace_id) {
+            return Some(response_bytes(
+                Status::NamespaceNotFound,
+                b"namespace does not exist",
+            ));
+        }
+        let mut values = Vec::with_capacity(item_ids.len());
+        for item_id in item_ids {
+            match cache.get_in_namespace(namespace_id, item_id).await {
+                Ok(value) => {
+                    if value.is_none() {
+                        if let Ok(mut registry) = namespaces.lock() {
+                            if registry.prune_item(namespace_id, item_id).is_err() {
+                                return Some(response_bytes(
+                                    Status::InternalError,
+                                    b"namespace metadata is unavailable",
+                                ));
+                            }
+                        } else {
+                            return Some(response_bytes(
+                                Status::InternalError,
+                                b"namespace metadata is unavailable",
+                            ));
+                        }
+                    }
+                    values.push(value);
+                }
+                Err(error) => return Some(cache_error_response(error)),
+            }
+        }
+        if operation_contract.response_value_count == 1 && values[0].is_none() {
+            return Some(response(Status::NotFound, Vec::new()));
+        }
+        let references = values
+            .iter()
+            .map(|value| value.as_deref())
+            .collect::<Vec<_>>();
+        return Some(match openkache_protocol::encode_optional_values(&references) {
+            Ok(payload) => response(Status::Ok, payload),
+            Err(error) => protocol_error_response(error),
+        });
     }
     let result = match opcode {
         Opcode::NamespaceOpen => {
@@ -2080,31 +2132,6 @@ async fn execute_request(
                 Err(status) => response_bytes(status, b"namespace deletion rejected"),
             });
         }
-        Opcode::Get => {
-            let namespace_id = namespace_id.expect("GET requests have a validated namespace ID");
-            if !namespace_exists(namespaces, namespace_id) {
-                return Some(response_bytes(
-                    Status::NamespaceNotFound,
-                    b"namespace does not exist",
-                ));
-            }
-            let item_id = item_id.expect("GET requests have a validated item ID");
-            return Some(match cache.get_in_namespace(namespace_id, item_id).await {
-                Ok(Some(value)) => response(Status::Ok, value.into_bytes()),
-                Ok(None) => {
-                    if let Ok(mut registry) = namespaces.lock() {
-                        if registry.prune_item(namespace_id, item_id).is_err() {
-                            return Some(response_bytes(
-                                Status::InternalError,
-                                b"namespace metadata is unavailable",
-                            ));
-                        }
-                    }
-                    response(Status::NotFound, Vec::new())
-                }
-                Err(error) => cache_error_response(error),
-            });
-        }
         Opcode::Set => {
             let namespace_id = namespace_id.expect("SET requests have a validated namespace ID");
             let policy = match namespaces
@@ -2126,7 +2153,10 @@ async fn execute_request(
                     return Some(response_bytes(status, b"SET policy is disallowed"));
                 }
             };
-            let item_id = item_id.expect("SET requests have a validated item ID");
+            let item_id = item_ids
+                .first()
+                .copied()
+                .expect("SET requests have a validated item ID");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             let reservation = match namespaces
                 .lock()
@@ -2196,7 +2226,10 @@ async fn execute_request(
                     b"namespace does not exist",
                 ));
             }
-            let item_id = item_id.expect("DELETE requests have a validated item ID");
+            let item_id = item_ids
+                .first()
+                .copied()
+                .expect("DELETE requests have a validated item ID");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             if let Err(status) = namespaces
                 .lock()

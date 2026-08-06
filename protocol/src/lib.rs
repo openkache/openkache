@@ -31,10 +31,11 @@ macro_rules! wire_enum {
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
 const MAX_POLICY_BYTES: usize = POLICY_FLAGS_BYTES + MAX_VARUINT_BYTES;
+const MAX_OPERATION_ITEM_IDS: usize = 16;
 const MAX_REQUEST_PREFIX_BYTES: usize = REQUEST_FIXED_BYTES
     + NAMESPACE_ID_BYTES
     + SET_FLAGS_BYTES
-    + ITEM_ID_BYTES
+    + ITEM_ID_BYTES * MAX_OPERATION_ITEM_IDS
     + MAX_VARUINT_BYTES
     + MAX_VARUINT_BYTES;
 const MAX_NAMESPACE_OPEN_PREFIX_BYTES: usize = OPCODE_BYTES
@@ -509,6 +510,7 @@ pub struct RequestHeader {
     value_len: usize,
     namespace_id: Option<u64>,
     item_id_start: Option<usize>,
+    item_id_count: usize,
     set_options: SetOptions,
     has_ttl: bool,
 }
@@ -526,11 +528,12 @@ impl RequestHeader {
 
     /// Returns the fixed item ID length for operations carrying an item ID.
     pub const fn item_id_len(self) -> usize {
-        if self.item_id_start.is_some() {
-            ITEM_ID_BYTES
-        } else {
-            0
-        }
+        ITEM_ID_BYTES * self.item_id_count
+    }
+
+    /// Returns the number of item IDs carried by this request.
+    pub const fn item_id_count(self) -> usize {
+        self.item_id_count
     }
 
     /// Returns the opaque SET or application-value length, or zero for other operations.
@@ -562,7 +565,7 @@ impl RequestHeader {
 pub struct Request {
     pub opcode: Opcode,
     pub namespace_id: Option<u64>,
-    pub item_id: Option<ItemId>,
+    pub item_ids: Vec<ItemId>,
     pub set_options: SetOptions,
     pub value: Vec<u8>,
     pub namespace_name: Option<Vec<u8>>,
@@ -577,7 +580,7 @@ impl Request {
         let request = Self {
             opcode,
             namespace_id: None,
-            item_id,
+            item_ids: item_id.into_iter().collect(),
             set_options: SetOptions::NONE,
             value,
             namespace_name: None,
@@ -610,9 +613,30 @@ impl Request {
         let request = Self {
             opcode,
             namespace_id: Some(namespace_id),
-            item_id,
+            item_ids: item_id.into_iter().collect(),
             set_options,
             value,
+            namespace_name: None,
+            namespace_policy: None,
+            expected_revision: None,
+            create_if_missing: false,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Creates a data-plane request carrying one or more exact item IDs.
+    pub fn new_scoped_items(
+        opcode: Opcode,
+        namespace_id: u64,
+        item_ids: Vec<ItemId>,
+    ) -> Result<Self> {
+        let request = Self {
+            opcode,
+            namespace_id: Some(namespace_id),
+            item_ids,
+            set_options: SetOptions::NONE,
+            value: Vec::new(),
             namespace_name: None,
             namespace_policy: None,
             expected_revision: None,
@@ -641,7 +665,7 @@ impl Request {
         let request = Self {
             opcode: Opcode::NamespaceOpen,
             namespace_id: None,
-            item_id: None,
+            item_ids: Vec::new(),
             set_options: SetOptions::NONE,
             value: Vec::new(),
             namespace_name: Some(name.as_ref().to_vec()),
@@ -662,7 +686,7 @@ impl Request {
         let request = Self {
             opcode: Opcode::NamespaceUpdatePolicy,
             namespace_id: Some(namespace_id),
-            item_id: None,
+            item_ids: Vec::new(),
             set_options: SetOptions::NONE,
             value: Vec::new(),
             namespace_name: None,
@@ -679,7 +703,7 @@ impl Request {
         let request = Self {
             opcode: Opcode::NamespaceDelete,
             namespace_id: Some(namespace_id),
-            item_id: None,
+            item_ids: Vec::new(),
             set_options: SetOptions::NONE,
             value: Vec::new(),
             namespace_name: None,
@@ -723,22 +747,17 @@ impl Request {
             RequestLayout::Item | RequestLayout::Namespace => {
                 put_namespace_id(&mut output, self.namespace_id)?;
                 if layout == RequestLayout::Item {
-                    output.extend_from_slice(
-                        self.item_id
-                            .ok_or(ProtocolError::InvalidRequestShape {
-                                opcode: self.opcode,
-                                expected_item_id: ITEM_ID_BYTES,
-                                expected_value: "0",
-                            })?
-                            .as_bytes(),
-                    );
+                    for item_id in &self.item_ids {
+                        output.extend_from_slice(item_id.as_bytes());
+                    }
                 }
             }
             RequestLayout::Set => {
                 put_namespace_id(&mut output, self.namespace_id)?;
                 output.push(self.set_options.flags()?);
                 output.extend_from_slice(
-                    self.item_id
+                    self.item_ids
+                        .first()
                         .ok_or(ProtocolError::InvalidRequestShape {
                             opcode: self.opcode,
                             expected_item_id: ITEM_ID_BYTES,
@@ -815,13 +834,21 @@ impl Request {
                 actual: frame.len(),
             });
         }
-        let item_id = header.item_id_start.map(|start| {
-            ItemId::new(
-                frame[start..start + ITEM_ID_BYTES]
-                    .try_into()
-                    .expect("validated item ID range"),
-            )
-        });
+        let item_ids = header
+            .item_id_start
+            .map(|start| {
+                (0..header.item_id_count)
+                    .map(|index| {
+                        let item_start = start + index * ITEM_ID_BYTES;
+                        ItemId::new(
+                            frame[item_start..item_start + ITEM_ID_BYTES]
+                                .try_into()
+                                .expect("validated item ID range"),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let namespace_name = if request_layout(header.opcode) == RequestLayout::NamespaceOpen {
             let name_start = OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES;
             let name_len_offset = OPCODE_BYTES + OPEN_FLAGS_BYTES;
@@ -881,7 +908,7 @@ impl Request {
         let request = Self {
             opcode: header.opcode,
             namespace_id: header.namespace_id,
-            item_id,
+            item_ids,
             set_options: if request_layout(header.opcode) == RequestLayout::Set {
                 SetOptions::from_wire_parts(
                     frame[OPCODE_BYTES + NAMESPACE_ID_BYTES..]
@@ -946,12 +973,18 @@ impl Request {
                 value_len: 0,
                 namespace_id: None,
                 item_id_start: None,
+                item_id_count: 0,
                 set_options: SetOptions::NONE,
                 has_ttl: false,
             })),
             RequestLayout::ApplicationValue => decode_application_value_header(prefix, opcode),
             RequestLayout::Item => {
-                let required = OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
+                let item_id_count = operation_contract(opcode).request_item_count;
+                let required = OPCODE_BYTES
+                    + NAMESPACE_ID_BYTES
+                    + ITEM_ID_BYTES
+                        .checked_mul(item_id_count)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < required {
                     return Ok(None);
                 }
@@ -962,6 +995,7 @@ impl Request {
                     value_len: 0,
                     namespace_id: Some(namespace_id),
                     item_id_start: Some(OPCODE_BYTES + NAMESPACE_ID_BYTES),
+                    item_id_count,
                     set_options: SetOptions::NONE,
                     has_ttl: false,
                 }))
@@ -978,6 +1012,7 @@ impl Request {
                     value_len: 0,
                     namespace_id: Some(namespace_id),
                     item_id_start: None,
+                    item_id_count: 0,
                     set_options: SetOptions::NONE,
                     has_ttl: false,
                 }))
@@ -1002,7 +1037,7 @@ impl Request {
         match request_layout(self.opcode) {
             RequestLayout::Empty => {
                 if self.namespace_id.is_some()
-                    || self.item_id.is_some()
+                    || !self.item_ids.is_empty()
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
@@ -1019,7 +1054,7 @@ impl Request {
             }
             RequestLayout::ApplicationValue => {
                 if self.namespace_id.is_some()
-                    || self.item_id.is_some()
+                    || !self.item_ids.is_empty()
                     || self.set_options != SetOptions::NONE
                     || self.namespace_name.is_some()
                     || self.namespace_policy.is_some()
@@ -1035,7 +1070,8 @@ impl Request {
             }
             RequestLayout::Item => {
                 validate_namespace_id(self.namespace_id)?;
-                if self.item_id.is_none()
+                let expected_item_count = operation_contract(self.opcode).request_item_count;
+                if self.item_ids.len() != expected_item_count
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
@@ -1045,14 +1081,14 @@ impl Request {
                 {
                     return Err(ProtocolError::InvalidRequestShape {
                         opcode: self.opcode,
-                        expected_item_id: ITEM_ID_BYTES,
+                        expected_item_id: ITEM_ID_BYTES * expected_item_count,
                         expected_value: "0",
                     });
                 }
             }
             RequestLayout::Namespace => {
                 validate_namespace_id(self.namespace_id)?;
-                if self.item_id.is_some()
+                if !self.item_ids.is_empty()
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
@@ -1069,7 +1105,7 @@ impl Request {
             }
             RequestLayout::Set => {
                 validate_namespace_id(self.namespace_id)?;
-                if self.item_id.is_none() {
+                if self.item_ids.len() != 1 {
                     return Err(ProtocolError::InvalidItemIdLength {
                         opcode: self.opcode,
                         expected: ITEM_ID_BYTES,
@@ -1104,7 +1140,7 @@ impl Request {
                 }
                 if self.expected_revision.is_some()
                     || self.namespace_id.is_some()
-                    || self.item_id.is_some()
+                    || !self.item_ids.is_empty()
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                 {
@@ -1124,7 +1160,7 @@ impl Request {
                 self.namespace_policy
                     .ok_or(ProtocolError::MissingNamespacePolicy)?
                     .encode()?;
-                if self.item_id.is_some()
+                if !self.item_ids.is_empty()
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
@@ -1140,7 +1176,7 @@ impl Request {
             RequestLayout::NamespaceDelete => {
                 validate_namespace_id(self.namespace_id)?;
                 validate_revision(self.expected_revision)?;
-                if self.item_id.is_some()
+                if !self.item_ids.is_empty()
                     || self.set_options != SetOptions::NONE
                     || !self.value.is_empty()
                     || self.namespace_name.is_some()
@@ -1219,6 +1255,7 @@ fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
         value_len,
         namespace_id: Some(namespace_id),
         item_id_start: Some(item_id_start),
+        item_id_count: 1,
         set_options,
         has_ttl,
     }))
@@ -1238,6 +1275,7 @@ fn decode_application_value_header(prefix: &[u8], opcode: Opcode) -> Result<Opti
         value_len,
         namespace_id: None,
         item_id_start: None,
+        item_id_count: 0,
         set_options: SetOptions::NONE,
         has_ttl: false,
     }))
@@ -1277,6 +1315,7 @@ fn decode_namespace_open_header(prefix: &[u8]) -> Result<Option<RequestHeader>> 
         value_len: 0,
         namespace_id: None,
         item_id_start: None,
+        item_id_count: 0,
         set_options: SetOptions::NONE,
         has_ttl: false,
     }))
@@ -1301,6 +1340,7 @@ fn decode_namespace_update_header(prefix: &[u8]) -> Result<Option<RequestHeader>
         value_len: 0,
         namespace_id: Some(namespace_id),
         item_id_start: None,
+        item_id_count: 0,
         set_options: SetOptions::NONE,
         has_ttl: false,
     }))
@@ -1332,6 +1372,7 @@ fn decode_namespace_delete_header(prefix: &[u8]) -> Result<Option<RequestHeader>
         value_len: 0,
         namespace_id: Some(namespace_id),
         item_id_start: None,
+        item_id_count: 0,
         set_options: SetOptions::NONE,
         has_ttl: false,
     }))
@@ -1537,6 +1578,8 @@ pub enum ProtocolError {
     },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("invalid optional-values payload: {0}")]
+    InvalidOptionalValues(&'static str),
     #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
     InvalidRequestShape {
         opcode: Opcode,
@@ -1609,6 +1652,85 @@ impl ResponseHeader {
 pub struct Response {
     pub status: Status,
     pub payload: Vec<u8>,
+}
+
+const OPTIONAL_VALUE_LENGTH_BYTES: usize = std::mem::size_of::<u32>();
+const OPTIONAL_VALUE_MISSING: u32 = u32::MAX;
+
+/// Encodes any number of independently optional values.
+///
+/// Each entry is prefixed by a big-endian `u32` length. `0xffff_ffff` denotes
+/// a missing value, while zero denotes a present empty value. The shape and
+/// field order come from Smithy; this helper only owns the shared wire codec.
+pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
+    let payload_len = values.iter().try_fold(0usize, |length, value| {
+        let value_len = value.map_or(0, <[u8]>::len);
+        if value_len >= usize::try_from(OPTIONAL_VALUE_MISSING).unwrap() {
+            return Err(ProtocolError::InvalidOptionalValues(
+                "optional-value entries cannot use the missing sentinel length",
+            ));
+        }
+        length
+            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
+            .and_then(|length| length.checked_add(value_len))
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    })?;
+    validate_value_length(payload_len)?;
+    let mut payload = Vec::with_capacity(payload_len);
+    for value in values {
+        let length = value.map_or(OPTIONAL_VALUE_MISSING, |value| value.len() as u32);
+        payload.extend_from_slice(&length.to_be_bytes());
+        if let Some(value) = value {
+            payload.extend_from_slice(value);
+        }
+    }
+    Ok(payload)
+}
+
+/// Decodes and validates any number of independently optional values.
+pub fn decode_optional_values(
+    payload: &[u8],
+    value_count: usize,
+) -> Result<Vec<Option<Vec<u8>>>> {
+    validate_value_length(payload.len())?;
+    let mut cursor: usize = 0;
+    let mut values = Vec::with_capacity(value_count);
+    for _ in 0..value_count {
+        let end = cursor
+            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let length_bytes: [u8; OPTIONAL_VALUE_LENGTH_BYTES] = payload
+            .get(cursor..end)
+            .ok_or(ProtocolError::InvalidOptionalValues(
+                "optional-value payload is missing an entry length",
+            ))?
+            .try_into()
+            .expect("optional-value length has a fixed width");
+        cursor = end;
+        let length = u32::from_be_bytes(length_bytes);
+        if length == OPTIONAL_VALUE_MISSING {
+            values.push(None);
+            continue;
+        }
+        let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+        validate_value_length(length)?;
+        let end = cursor
+            .checked_add(length)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let bytes = payload
+            .get(cursor..end)
+            .ok_or(ProtocolError::InvalidOptionalValues(
+                "optional-value payload entry is truncated",
+            ))?;
+        values.push(Some(bytes.to_vec()));
+        cursor = end;
+    }
+    if cursor != payload.len() {
+        return Err(ProtocolError::InvalidOptionalValues(
+            "optional-value payload contains trailing bytes",
+        ));
+    }
+    Ok(values)
 }
 
 impl Response {

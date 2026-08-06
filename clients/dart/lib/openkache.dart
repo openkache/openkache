@@ -2,6 +2,7 @@ library;
 
 import 'dart:convert';
 import 'dart:ffi' as ffi;
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
@@ -156,10 +157,10 @@ final class Client with SmithyGeneratedOperations implements OpenKacheClient {
     int flags = 0,
     int ttlMilliseconds = 0,
   }) {
-    if (smithyOperationRequiresItemId(operation) &&
-        itemId.length != smithyItemIdBytes) {
+    final requiredItemIdBytes = smithyOperationItemIdBytes(operation);
+    if (requiredItemIdBytes != 0 && itemId.length != requiredItemIdBytes) {
       throw ArgumentError(
-        'itemId must contain exactly $smithyItemIdBytes bytes',
+        'itemId must contain exactly $requiredItemIdBytes bytes',
       );
     }
     if (itemId.isNotEmpty && !smithyOperationSupportsScoped(operation)) {
@@ -249,7 +250,8 @@ final class _Buffer {
     : length = value.length,
       pointer = value.isEmpty ? ffi.nullptr : calloc<ffi.Uint8>(value.length) {
     if (value.isNotEmpty) {
-      pointer.asTypedList(value.length).setAll(0, value);
+      final Uint8List bytes = pointer.asTypedList(value.length);
+      bytes.setAll(0, value);
     }
   }
 
@@ -285,9 +287,10 @@ _NativeResult _readResult(
         'native client returned a null payload pointer',
       );
     }
-    final payload = length == 0
-        ? <int>[]
-        : data.asTypedList(length).toList(growable: false);
+    final Uint8List payloadBytes = length == 0
+        ? Uint8List(0)
+        : data.asTypedList(length);
+    final payload = payloadBytes.toList(growable: false);
     final client = takeClient ? api.resultTakeClient(result) : ffi.nullptr;
     if (kind == smithyResultError) {
       throw OpenKacheClientException(

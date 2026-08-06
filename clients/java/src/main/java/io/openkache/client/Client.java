@@ -261,10 +261,10 @@ public final class Client implements OpenKacheClient, AutoCloseable {
     }
 
     private void validateItemId(byte[] itemId, int operation) {
-        if (SmithyContract.operationRequiresItemId(operation)
-            && itemId.length != SmithyContract.ITEM_ID_BYTES) {
+        int requiredItemIdBytes = SmithyContract.operationItemIdBytes(operation);
+        if (requiredItemIdBytes != 0 && itemId.length != requiredItemIdBytes) {
             throw new IllegalArgumentException("itemId must contain exactly "
-                + SmithyContract.ITEM_ID_BYTES + " bytes");
+                + requiredItemIdBytes + " bytes");
         }
         if (itemId.length != 0 && !SmithyContract.operationSupportsScoped(operation)) {
             throw new IllegalArgumentException("operation does not accept an itemId");
