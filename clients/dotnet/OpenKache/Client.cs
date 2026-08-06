@@ -109,33 +109,6 @@ public sealed partial class Client : IAsyncDisposable, Smithy.IOpenKacheApi
     }
 
     /// <summary>
-    /// Sends an experimental UTF-8 message and returns the echoed message.
-    /// </summary>
-    public async ValueTask<string> EchoAsync(
-        string message,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(message);
-        var result = await RequestAsync(
-            Protocol.Opcode.Echo,
-            ReadOnlyMemory<byte>.Empty,
-            ValidateValue(Encoding.UTF8.GetBytes(message)),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("ECHO", result, Protocol.FfiResultValue);
-        try
-        {
-            return new UTF8Encoding(false, true).GetString(result.Payload);
-        }
-        catch (DecoderFallbackException error)
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                "ECHO returned invalid UTF-8.",
-                error);
-        }
-    }
-
-    /// <summary>
     /// Retrieves the bytes stored for an exact binary item ID.
     /// </summary>
     /// <returns>The stored bytes, or <see langword="null"/> when the item ID is absent.</returns>

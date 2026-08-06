@@ -132,11 +132,6 @@ macro_rules! protected_client_methods {
             self.raw.ping().await
         }
 
-        /// Sends an experimental UTF-8-independent payload and returns the echoed bytes.
-        pub async fn echo(&self, value: impl AsRef<[u8]>) -> Result<Vec<u8>> {
-            self.raw.echo(value).await
-        }
-
         /// Sends an application payload through the generic Smithy operation boundary.
         ///
         /// This compatibility helper is deprecated; generated adapters should use the generic

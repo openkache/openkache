@@ -301,26 +301,6 @@ export class OpenKache_Client {
   }
 
   /**
-   * Sends an experimental UTF-8 message and returns the echoed message.
-   *
-   * @param message - UTF-8 text carried by the experimental ECHO operation.
-   * @returns The server's UTF-8 response.
-   * @throws {OpenKache_Error} When the client is closed or the response is not UTF-8.
-   */
-  async echo(message: string): Promise<string> {
-    this.#assert_open()
-    if (typeof message !== "string") {
-      throw new OpenKache_Error("message must be a string")
-    }
-    try {
-      const value = await this.#native_client.echo(TEXT_ENCODER.encode(message))
-      return new TextDecoder("utf-8", { fatal: true }).decode(value)
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
    * Returns the raw Smithy operation client sharing this connection.
    *
    * The returned client accepts exact protocol item IDs and opaque bytes. It

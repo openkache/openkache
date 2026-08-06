@@ -131,11 +131,6 @@ pub struct Arguments {
 pub enum Command {
     /// Verify the connection with a round trip.
     Ping,
-    /// Return an experimental message through the server.
-    Echo {
-        /// UTF-8 message to send.
-        message: String,
-    },
     /// Retrieve a value by application key.
     Get {
         /// Application key to retrieve.
@@ -215,15 +210,6 @@ impl ConnectedClient {
             Self::Compio(client) => client.ping().await.map(|_| ()),
             #[cfg(feature = "quic-quinn")]
             Self::Quinn(client) => client.ping().await.map(|_| ()),
-        }
-    }
-
-    async fn echo(&self, message: &[u8]) -> openkache_client::Result<Vec<u8>> {
-        match self {
-            #[cfg(feature = "quic-compio")]
-            Self::Compio(client) => client.raw().echo(message).await,
-            #[cfg(feature = "quic-quinn")]
-            Self::Quinn(client) => client.raw().echo(message).await,
         }
     }
 
@@ -406,10 +392,6 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
         Command::Ping => {
             client.ping().await?;
             println!("PONG");
-        }
-        Command::Echo { message } => {
-            let echoed = client.echo(message.as_bytes()).await?;
-            write_value(&echoed, OutputFormat::Text)?;
         }
         Command::Get { key, output } => match client.get(key.as_bytes()).await? {
             GetOutcome::Found(value) => write_value(&value, output)?,
@@ -597,9 +579,6 @@ fn parse_shell_command(line: &str) -> std::result::Result<Option<ShellCommand>, 
             require_no_arguments(arguments, "ping")?;
             Ok(Some(ShellCommand::Command(Command::Ping)))
         }
-        "echo" => Ok(Some(ShellCommand::Command(Command::Echo {
-            message: parse_message_argument(arguments, "echo <message>")?,
-        }))),
         "get" => Ok(Some(ShellCommand::Command(Command::Get {
             key: parse_single_argument(arguments, "get <key>")?,
             output: OutputFormat::Text,
@@ -654,14 +633,6 @@ fn parse_single_argument(arguments: &str, usage: &str) -> std::result::Result<St
     }
 }
 
-fn parse_message_argument(arguments: &str, usage: &str) -> std::result::Result<String, String> {
-    if arguments.is_empty() {
-        Err(format!("usage: {usage}"))
-    } else {
-        Ok(arguments.to_string())
-    }
-}
-
 fn parse_set_arguments(arguments: &str) -> std::result::Result<(String, String), String> {
     let Some(separator) = arguments.find(char::is_whitespace) else {
         return Err("usage: set <key> <value>".to_string());
@@ -676,7 +647,6 @@ fn parse_set_arguments(arguments: &str) -> std::result::Result<(String, String),
 
 fn print_shell_help() {
     println!("ping");
-    println!("echo <message>");
     println!("get <key>");
     println!("set <key> <value>");
     println!("delete <key>  (alias: del)");

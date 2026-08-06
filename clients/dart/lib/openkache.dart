@@ -242,21 +242,6 @@ final class Client with SmithyGeneratedOperations implements OpenKacheClient {
 
 }
 
-/// @deprecated Use [Client] and the generated Smithy operation DTOs.
-@Deprecated('Use Client')
-typedef EchoClient = Client;
-
-/// @deprecated Use [OpenKacheClientException].
-@Deprecated('Use OpenKacheClientException')
-typedef EchoClientException = OpenKacheClientException;
-
-/// Compatibility convenience for the experimental ECHO operation.
-@Deprecated('Use echo(EchoInput) from the generated Smithy API')
-extension EchoClientConvenience on Client {
-  Future<String> echoMessage(String message) async =>
-      (await echo(EchoInput(message: message))).message;
-}
-
 final class _Buffer {
   _Buffer(List<int> value)
     : length = value.length,

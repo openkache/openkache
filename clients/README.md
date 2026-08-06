@@ -38,9 +38,7 @@ formats or protocol behavior.
 
 Go, Java, Kotlin, and Dart implement the generated Smithy operation surface,
 including namespace management and exact-item cache operations. Their adapters
-connect to the shared Rust client-core C ABI; the live managed-client smoke
-suite exercises ECHO, namespace open/delete, SET, GET, STATS, SYNC, and DELETE
-against one QUIC server. Their Smithy DTOs, enums, operation signatures,
+connect to the shared Rust client-core C ABI; their Smithy DTOs, enums, operation signatures,
 operation dispatch, and FFI metadata are generated alongside the native
 constants.
 
@@ -48,10 +46,6 @@ The [value format](VALUE_FORMAT.md) specifies the implemented shared-core
 format v1. The core owns Raw and canonical JSON serialization. TypeScript's
 legacy metadata envelope remains a package-level compatibility detail; new
 cross-language values should use its `set_json`/`get_json` API.
-
-The experimental `ECHO` operation is available through every adapter as a
-UTF-8 message round trip. Java, Kotlin, and Dart use the same native ABI as the
-other bindings; no language package implements a second wire protocol.
 
 ## Binding architecture
 

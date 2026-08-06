@@ -30,7 +30,6 @@ export OPENKACHE_CLIENT_NATIVE="$PWD/target/debug/libopenkache_client_core.so"
 
 ```java
 import io.openkache.client.Client;
-import io.openkache.client.EchoInput;
 import io.openkache.client.GetInput;
 
 try (var client = Client.connect(
@@ -38,23 +37,16 @@ try (var client = Client.connect(
         "cache.example.com",
         certificateDerOrPem,
         dataProtectionKey)) {
-    var echoed = client.echo(new EchoInput("single-source-of-truth"))
-        .toCompletableFuture()
-        .join()
-        .message();
     long namespaceId = 1L;
     byte[] itemId = new byte[32]; // exact protocol item ID
     var value = client.get(new GetInput(namespaceId, itemId))
         .toCompletableFuture()
         .join()
         .value();
-    System.out.println(echoed);
 }
 ```
 
-`dataProtectionKey` must contain 32 bytes. The `ECHO` operation itself does
-not protect the message, but the shared core requires a valid client key when
-opening a protected connection. `Client` implements every generated
+`dataProtectionKey` must contain 32 bytes. The shared core requires a valid
+client key when opening a protected connection. `Client` implements every generated
 `SmithyOpenKacheApi` method, including exact-item data operations and namespace
-management. The deprecated `EchoClient` facade remains only as a convenience
-compatibility wrapper for the experimental string helper.
+management.

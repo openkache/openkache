@@ -35,7 +35,7 @@ val client = Client.connect(
     dataProtectionKey = dataProtectionKey,
 )
 try {
-    val echoed = client.echo(EchoInput("single-source-of-truth")).message
+    // Invoke generated Smithy operations here.
 } finally {
     client.close()
 }
@@ -44,5 +44,4 @@ try {
 `dataProtectionKey` must contain 32 bytes. All cache operations use the same
 generated DTOs and ABI boundary. `Client` implements every generated
 `SmithyOpenKacheApi` method, including exact-item data operations and namespace
-management. The deprecated `EchoClient` type alias retains the experimental
-string convenience helper for compatibility.
+management.
