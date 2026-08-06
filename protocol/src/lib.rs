@@ -598,144 +598,99 @@ fn decode_wire_request_header(prefix: &[u8]) -> Result<Option<RequestFrameHeader
     };
     let opcode = Opcode::try_from(opcode_byte)?;
     let layout = wire_request_layout(opcode);
-    let fixed = |length: usize| {
-        if prefix.len() < length {
-            None
-        } else {
-            Some(RequestFrameHeader {
-                opcode,
-                encoded_len: length,
-                value_len: 0,
-            })
-        }
-    };
-    match layout.kind {
-        WireRequestLayoutKind::Empty => Ok(fixed(OPCODE_BYTES)),
-        WireRequestLayoutKind::ApplicationValue => {
-            let Some((value_len, value_len_bytes)) =
-                decode_varuint(prefix.get(OPCODE_BYTES..).unwrap_or_default(), "application value length")?
-            else {
-                return Ok(None);
-            };
-            let value_len =
-                usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-            validate_value_length(value_len)?;
-            Ok(Some(RequestFrameHeader {
-                opcode,
-                encoded_len: OPCODE_BYTES + value_len_bytes,
-                value_len,
-            }))
-        }
-        WireRequestLayoutKind::Item => {
-            let item_bytes = ITEM_ID_BYTES
-                .checked_mul(layout.item_id_count)
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            Ok(fixed(
-                OPCODE_BYTES
-                    .checked_add(NAMESPACE_ID_BYTES)
-                    .and_then(|length| length.checked_add(item_bytes))
-                    .ok_or(ProtocolError::FrameLengthOverflow)?,
-            ))
-        }
-        WireRequestLayoutKind::Namespace => Ok(fixed(
-            OPCODE_BYTES
-                .checked_add(NAMESPACE_ID_BYTES)
-                .ok_or(ProtocolError::FrameLengthOverflow)?,
-        )),
-        WireRequestLayoutKind::Set => {
-            let fixed_len = OPCODE_BYTES
-                .checked_add(NAMESPACE_ID_BYTES)
-                .and_then(|length| length.checked_add(SET_FLAGS_BYTES))
-                .and_then(|length| length.checked_add(ITEM_ID_BYTES))
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            if prefix.len() < fixed_len {
-                return Ok(None);
+    let mut cursor: usize = 0;
+    let mut value_len = 0;
+    for step in layout.steps {
+        match *step {
+            WireRequestStep::Fixed { bytes } => {
+                let end = cursor
+                    .checked_add(bytes)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(None);
+                }
+                cursor = end;
             }
-            let flags = prefix[OPCODE_BYTES + NAMESPACE_ID_BYTES];
-            let mut cursor = fixed_len;
-            if flags & SET_EXPIRATION_MASK == SET_EXPLICIT_TTL_BITS {
-                let Some((_, length)) = decode_varuint(&prefix[cursor..], "SET TTL")? else {
+            WireRequestStep::ValueLength => {
+                let Some((length, encoded_len)) =
+                    decode_varuint(&prefix[cursor..], "request value length")?
+                else {
+                    return Ok(None);
+                };
+                value_len =
+                    usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                validate_value_length(value_len)?;
+                cursor = cursor
+                    .checked_add(encoded_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            WireRequestStep::ConditionalVarUInt {
+                selector_offset,
+                mask,
+                expected,
+            } => {
+                let selector = *prefix.get(selector_offset).ok_or(ProtocolError::FrameTooShort {
+                    expected: selector_offset + 1,
+                    actual: prefix.len(),
+                })?;
+                if selector & mask == expected {
+                    let Some((_, encoded_len)) =
+                        decode_varuint(&prefix[cursor..], "request conditional integer")?
+                    else {
+                        return Ok(None);
+                    };
+                    cursor = cursor
+                        .checked_add(encoded_len)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
+                }
+            }
+            WireRequestStep::ByteLength => {
+                let length = usize::from(*prefix.get(cursor).ok_or(ProtocolError::FrameTooShort {
+                    expected: cursor + 1,
+                    actual: prefix.len(),
+                })?);
+                let end = cursor
+                    .checked_add(NAMESPACE_NAME_LENGTH_BYTES)
+                    .and_then(|end| end.checked_add(length))
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(None);
+                }
+                cursor = end;
+            }
+            WireRequestStep::Policy => {
+                let Some(encoded_len) = decode_wire_policy_len(&prefix[cursor..])? else {
                     return Ok(None);
                 };
                 cursor = cursor
-                    .checked_add(length)
+                    .checked_add(encoded_len)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
             }
-            let Some((value_len, value_len_bytes)) =
-                decode_varuint(&prefix[cursor..], "SET value length")?
-            else {
-                return Ok(None);
-            };
-            let value_len =
-                usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-            validate_value_length(value_len)?;
-            Ok(Some(RequestFrameHeader {
-                opcode,
-                encoded_len: cursor
-                    .checked_add(value_len_bytes)
-                    .ok_or(ProtocolError::FrameLengthOverflow)?,
-                value_len,
-            }))
-        }
-        WireRequestLayoutKind::NamespaceOpen => {
-            let fixed_len = OPCODE_BYTES
-                .checked_add(OPEN_FLAGS_BYTES)
-                .and_then(|length| length.checked_add(NAMESPACE_NAME_LENGTH_BYTES))
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            if prefix.len() < fixed_len {
-                return Ok(None);
+            WireRequestStep::ConditionalPolicy {
+                selector_offset,
+                mask,
+                expected,
+            } => {
+                let selector = *prefix.get(selector_offset).ok_or(ProtocolError::FrameTooShort {
+                    expected: selector_offset + 1,
+                    actual: prefix.len(),
+                })?;
+                if selector & mask == expected {
+                    let Some(encoded_len) = decode_wire_policy_len(&prefix[cursor..])? else {
+                        return Ok(None);
+                    };
+                    cursor = cursor
+                        .checked_add(encoded_len)
+                        .ok_or(ProtocolError::FrameLengthOverflow)?;
+                }
             }
-            let name_len = usize::from(prefix[OPCODE_BYTES + OPEN_FLAGS_BYTES]);
-            let name_end = fixed_len
-                .checked_add(name_len)
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            if prefix.len() < name_end {
-                return Ok(None);
-            }
-            let create = prefix[OPCODE_BYTES] & OPEN_CREATE_IF_MISSING != 0;
-            let encoded_len = if create {
-                let Some(policy_len) = decode_wire_policy_len(&prefix[name_end..])? else {
-                    return Ok(None);
-                };
-                name_end
-                    .checked_add(policy_len)
-                    .ok_or(ProtocolError::FrameLengthOverflow)?
-            } else {
-                name_end
-            };
-            Ok(Some(RequestFrameHeader {
-                opcode,
-                encoded_len,
-                value_len: 0,
-            }))
         }
-        WireRequestLayoutKind::NamespaceUpdatePolicy => {
-            let fixed_len = OPCODE_BYTES
-                .checked_add(NAMESPACE_ID_BYTES)
-                .and_then(|length| length.checked_add(NAMESPACE_REVISION_BYTES))
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            if prefix.len() < fixed_len {
-                return Ok(None);
-            }
-            let Some(policy_len) = decode_wire_policy_len(&prefix[fixed_len..])? else {
-                return Ok(None);
-            };
-            Ok(Some(RequestFrameHeader {
-                opcode,
-                encoded_len: fixed_len
-                    .checked_add(policy_len)
-                    .ok_or(ProtocolError::FrameLengthOverflow)?,
-                value_len: 0,
-            }))
-        }
-        WireRequestLayoutKind::NamespaceDelete => Ok(fixed(
-            OPCODE_BYTES
-                .checked_add(DELETE_FLAGS_BYTES)
-                .and_then(|length| length.checked_add(NAMESPACE_ID_BYTES))
-                .and_then(|length| length.checked_add(NAMESPACE_REVISION_BYTES))
-                .ok_or(ProtocolError::FrameLengthOverflow)?,
-        )),
     }
+    Ok(Some(RequestFrameHeader {
+        opcode,
+        encoded_len: cursor,
+        value_len,
+    }))
 }
 
 /// Finds the length of one policy field without validating its meaning.

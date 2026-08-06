@@ -1442,11 +1442,67 @@ function rust_request_layout(contract: Wire_Contract): string {
     if (request_kind === "scoped_namespace") return "Namespace"
     return pascal_case(request_kind)
   }
+  const step_expression = (operation: Wire_Operation): string => {
+    const kind = request_kind(operation)
+    const fixed = (bytes: string): string =>
+      `WireRequestStep::Fixed { bytes: ${bytes} }`
+    switch (kind) {
+      case "Empty":
+        return `[${fixed("OPCODE_BYTES")}]`
+      case "ApplicationValue":
+        return `[${fixed("OPCODE_BYTES")}, WireRequestStep::ValueLength]`
+      case "Item":
+        return `[
+            ${fixed(
+              "OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES * " +
+                operation.contract.request_item_count,
+            )},
+        ]`
+      case "Set":
+        return `[
+            ${fixed(
+              "OPCODE_BYTES + NAMESPACE_ID_BYTES + SET_FLAGS_BYTES + ITEM_ID_BYTES",
+            )},
+            WireRequestStep::ConditionalVarUInt {
+                selector_offset: OPCODE_BYTES + NAMESPACE_ID_BYTES,
+                mask: SET_EXPIRATION_MASK,
+                expected: SET_EXPLICIT_TTL_BITS,
+            },
+            WireRequestStep::ValueLength,
+        ]`
+      case "Namespace":
+        return `[${fixed("OPCODE_BYTES + NAMESPACE_ID_BYTES")}]`
+      case "NamespaceOpen":
+        return `[
+            ${fixed("OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES")},
+            WireRequestStep::ByteLength,
+            WireRequestStep::ConditionalPolicy {
+                selector_offset: OPCODE_BYTES,
+                mask: OPEN_CREATE_IF_MISSING,
+                expected: OPEN_CREATE_IF_MISSING,
+            },
+        ]`
+      case "NamespaceUpdatePolicy":
+        return `[
+            ${fixed("OPCODE_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES")},
+            WireRequestStep::Policy,
+        ]`
+      case "NamespaceDelete":
+        return `[
+            ${fixed(
+              "OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES",
+            )},
+        ]`
+      default:
+        return `[]`
+    }
+  }
   const metadata = operations
     .map(
       (operation) => `        Opcode::${operation.name} => WireRequestLayout {
             kind: WireRequestLayoutKind::${request_kind(operation)},
             item_id_count: ${operation.contract.request_item_count},
+            steps: &${step_expression(operation)},
         },`,
     )
     .join("\n")
@@ -1463,11 +1519,34 @@ pub enum WireRequestLayoutKind {
     NamespaceDelete,
 }
 
+/// Primitive request parsing steps generated from the wire layout.
+///
+/// These steps describe only byte consumption. They do not assign a meaning
+/// to namespace IDs, item IDs, flags, policies, or response behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WireRequestStep {
+    Fixed { bytes: usize },
+    ValueLength,
+    ConditionalVarUInt {
+        selector_offset: usize,
+        mask: u8,
+        expected: u8,
+    },
+    ByteLength,
+    Policy,
+    ConditionalPolicy {
+        selector_offset: usize,
+        mask: u8,
+        expected: u8,
+    },
+}
+
 /// Generated request metadata used only to delimit protocol v1 frames.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WireRequestLayout {
     pub kind: WireRequestLayoutKind,
     pub item_id_count: usize,
+    pub steps: &'static [WireRequestStep],
 }
 
 /// Returns the wire-level request layout for one assigned opcode.
