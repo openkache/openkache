@@ -4330,6 +4330,90 @@ interface Operation_Field_Binding {
   readonly output: Readonly<Partial<Record<Operation_Field_Role, Api_Member>>>
 }
 
+type Operation_Request_Route =
+  | "global_empty"
+  | "global_application_value"
+  | "scoped_item"
+  | "scoped_namespace"
+  | "namespace_open"
+  | "namespace_update_policy"
+  | "namespace_delete"
+
+type Operation_Result_Kind =
+  | "ok"
+  | "value"
+  | "not_found"
+  | "created"
+  | "replaced"
+  | "not_stored"
+  | "deleted"
+  | "not_deleted"
+
+interface Operation_Result_Plan {
+  /** Response kind selected by the protocol operation contract. */
+  readonly response_kind: Api_Operation_Response_Kind
+  /** Native result discriminators accepted by the operation route. */
+  readonly result_kinds: readonly Operation_Result_Kind[]
+}
+
+const OPERATION_REQUEST_ROUTES: Readonly<
+  Record<Api_Operation_Request_Kind, Operation_Request_Route>
+> = {
+  empty: "global_empty",
+  application_value: "global_application_value",
+  scoped_item: "scoped_item",
+  scoped_namespace: "scoped_namespace",
+  namespace_open: "namespace_open",
+  namespace_update_policy: "namespace_update_policy",
+  namespace_delete: "namespace_delete",
+}
+
+/**
+ * Maps protocol-owned response semantics to native result discriminators once.
+ *
+ * Every language renderer consumes this plan. A new operation that reuses an
+ * existing response contract therefore cannot accidentally acquire a different
+ * set of accepted result kinds in one language adapter.
+ */
+const OPERATION_RESULT_KINDS: Readonly<
+  Record<Api_Operation_Response_Kind, readonly Operation_Result_Kind[]>
+> = {
+  empty: ["ok"],
+  pong: ["ok"],
+  application_value: ["value"],
+  value: ["value", "not_found"],
+  set_outcome: ["created", "replaced", "not_stored"],
+  delete_outcome: ["deleted", "not_deleted"],
+  stats_json: ["value"],
+  // Namespace operations use dedicated native ABI functions. Their result
+  // discriminators depend on the request route and are resolved below.
+  namespace_descriptor: [],
+}
+
+function operation_result_plan(
+  contract: Api_Operation_Contract,
+): Operation_Result_Plan {
+  let result_kinds = OPERATION_RESULT_KINDS[contract.response_kind]
+  if (contract.response_kind === "namespace_descriptor") {
+    result_kinds = contract.request_kind === "namespace_open"
+      ? ["ok", "created"]
+      : ["value"]
+  }
+  return {
+    response_kind: contract.response_kind,
+    result_kinds,
+  }
+}
+
+function operation_result_kind_constants(
+  operation: Managed_Api_Operation,
+  prefix = "SMITHY_FFI_RESULT_",
+): string {
+  return operation.plan.result_plan.result_kinds
+    .map((kind) => `${prefix}${kind.toUpperCase()}`)
+    .join(", ")
+}
+
 /** One language-neutral operation plan shared by every source renderer. */
 interface Managed_Operation_Plan {
   readonly binding: Operation_Field_Binding
@@ -4338,6 +4422,8 @@ interface Managed_Operation_Plan {
   readonly name: string
   readonly opcode: Wire_Entry
   readonly output: string
+  readonly request_route: Operation_Request_Route
+  readonly result_plan: Operation_Result_Plan
   readonly required_fields: readonly Operation_Field_Requirement[]
   readonly strict_operation_bindings: boolean
 }
@@ -4447,6 +4533,8 @@ function managed_operation_entries(
       name: managed_operation.name,
       opcode,
       output: managed_operation.output,
+      request_route: OPERATION_REQUEST_ROUTES[managed_operation.contract.request_kind],
+      result_plan: operation_result_plan(managed_operation.contract),
       required_fields: operation_field_requirements(managed_operation),
       strict_operation_bindings: contract.strict_operation_bindings,
     }
@@ -4606,9 +4694,60 @@ function managed_operation_label(operation: Api_Operation): string {
   return snake_case(operation.name).toUpperCase()
 }
 
+type Operation_Render_Language =
+  | "csharp"
+  | "dart"
+  | "go"
+  | "java"
+  | "kotlin"
+  | "python"
+  | "rust"
+  | "swift"
+  | "typescript"
+
+/**
+ * Renders one native result discriminator for the target language.
+ *
+ * The semantic name is validated against the shared operation result plan
+ * before it is converted to language syntax. This keeps result acceptance in
+ * one model table while leaving only identifier spelling to each renderer.
+ */
+function operation_result_constant(
+  operation: Managed_Api_Operation,
+  kind: Operation_Result_Kind,
+  language: Operation_Render_Language,
+): string {
+  if (!operation.plan.result_plan.result_kinds.includes(kind)) {
+    throw new Error(
+      `operation ${operation.name} result plan does not accept native result kind ${kind}`,
+    )
+  }
+  const suffix = pascal_case(kind)
+  switch (language) {
+    case "csharp":
+      return `Protocol.FfiResult${suffix}`
+    case "dart":
+      return `smithyResult${suffix}`
+    case "go":
+      return `SmithyFFIResult${kind === "ok" ? "OK" : suffix}`
+    case "java":
+    case "kotlin":
+      return `SmithyContract.RESULT_${kind.toUpperCase()}`
+    case "python":
+    case "typescript":
+      return `SMITHY_FFI_RESULT_${kind.toUpperCase()}`
+    case "rust":
+      return `openkache_client_core::contract::FFI_RESULT_${kind.toUpperCase()}`
+    case "swift":
+      return `Smithy_Native_Contract.result${suffix}`
+  }
+}
+
 function render_java_operation_method(operation: Managed_Api_Operation): string {
   const operation_constant = managed_operation_constant(operation, "java")
   const operation_label = managed_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "java")
   const method_name = lower_camel_case(operation.name)
   const input_namespace_id = operation_field_name_for(
     operation,
@@ -4661,7 +4800,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     "java",
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "java")
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
@@ -4673,7 +4812,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 new byte[0],
                 0,
                 0);
-            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
@@ -4694,7 +4833,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 input.${input_payload}().getBytes(StandardCharsets.UTF_8),
                 0,
                 0);
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             return new ${operation.output}(
                 smithyDecodeUtf8(result.payload(), "${operation_label}"));
         });
@@ -4712,10 +4851,10 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 new byte[0],
                 0,
                 0);
-            if (result.kind() == SmithyContract.RESULT_NOT_FOUND) {
+            if (result.kind() == ${result_constant("not_found")}) {
                 return new ${operation.output}(null);
             }
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             return new ${operation.output}(result.payload());
         });
     }`
@@ -4733,9 +4872,9 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 flags.flags(),
                 flags.ttlMilliseconds());
             SetOutcome outcome = switch (result.kind()) {
-                case SmithyContract.RESULT_CREATED -> SetOutcome.CREATED;
-                case SmithyContract.RESULT_REPLACED -> SetOutcome.REPLACED;
-                case SmithyContract.RESULT_NOT_STORED -> SetOutcome.NOT_STORED;
+                case ${result_constant("created")} -> SetOutcome.CREATED;
+                case ${result_constant("replaced")} -> SetOutcome.REPLACED;
+                case ${result_constant("not_stored")} -> SetOutcome.NOT_STORED;
                 default -> throw smithyUnexpectedKind("${operation_label}", result.kind());
             };
             return new ${operation.output}(outcome);
@@ -4753,10 +4892,10 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 new byte[0],
                 0,
                 0);
-            if (result.kind() == SmithyContract.RESULT_DELETED) {
+            if (result.kind() == ${result_constant("deleted")}) {
                 return new ${operation.output}(true);
             }
-            if (result.kind() == SmithyContract.RESULT_NOT_DELETED) {
+            if (result.kind() == ${result_constant("not_deleted")}) {
                 return new ${operation.output}(false);
             }
             throw smithyUnexpectedKind("${operation_label}", result.kind());
@@ -4774,13 +4913,13 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 new byte[0],
                 0,
                 0);
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             return new ${operation.output}(
                 smithyDecodeUtf8(result.payload(), "${operation_label}"));
         });
     }`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4792,12 +4931,12 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 new byte[0],
                 0,
                 0);
-            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4805,14 +4944,14 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             NativeResult result = smithyNamespaceDelete(
                 input.${input_namespace_id}(),
                 input.${input_expected_revision}());
-            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}");
             return new ${operation.output}();
         });
     }`
       }
       throw new Error(`unsupported generated Java empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4829,8 +4968,8 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 input.${input_create_if_missing}(),
                 policy.flags(),
                 policy.ttlMilliseconds());
-            boolean created = result.kind() == SmithyContract.RESULT_CREATED;
-            if (!created && result.kind() != SmithyContract.RESULT_OK) {
+            boolean created = result.kind() == ${result_constant("created")};
+            if (!created && result.kind() != ${result_constant("ok")}) {
                 throw smithyUnexpectedKind("${operation_label}", result.kind());
             }
             return new ${operation.output}(
@@ -4839,7 +4978,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -4850,7 +4989,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 input.${input_expected_revision}(),
                 policy.flags(),
                 policy.ttlMilliseconds());
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}");
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             return new ${operation.output}(smithyDecodeDescriptor(result.payload()));
         });
     }`
@@ -4858,7 +4997,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
       throw new Error(`unsupported generated Java namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Java response kind ${operation.contract.response_kind}`,
+        `unsupported generated Java response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -5079,6 +5218,8 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
 function render_kotlin_operation_method(operation: Managed_Api_Operation): string {
   const operation_constant = managed_operation_constant(operation, "kotlin")
   const operation_label = managed_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "kotlin")
   const method_name = lower_camel_case(operation.name)
   const input_namespace_id = operation_field_name_for(
     operation,
@@ -5137,14 +5278,14 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
         withContext(Dispatchers.IO) {
             requireNotNull(input)
 `
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `${prefix}            val result = smithyInvoke(
                 ${operation_constant},
                 byteArrayOf(),
                 byteArrayOf(),
             )
-            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
+            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
             ${operation.output}()
         }`
     case "application_value":
@@ -5162,7 +5303,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 byteArrayOf(),
                 input.${input_payload}.toByteArray(),
             )
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             ${operation.output}(
                 ${output_payload} = smithyDecodeUtf8(result.payload, "${operation_label}"),
             )
@@ -5176,8 +5317,8 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 byteArrayOf(),
             )
             when (result.kind) {
-                SmithyContract.RESULT_VALUE -> ${operation.output}(${output_value} = result.payload)
-                SmithyContract.RESULT_NOT_FOUND -> ${operation.output}(${output_value} = null)
+                ${result_constant("value")} -> ${operation.output}(${output_value} = result.payload)
+                ${result_constant("not_found")} -> ${operation.output}(${output_value} = null)
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
         }`
@@ -5192,9 +5333,9 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 flags.second,
             )
             val outcome = when (result.kind) {
-                SmithyContract.RESULT_CREATED -> SetOutcome.Created
-                SmithyContract.RESULT_REPLACED -> SetOutcome.Replaced
-                SmithyContract.RESULT_NOT_STORED -> SetOutcome.NotStored
+                ${result_constant("created")} -> SetOutcome.Created
+                ${result_constant("replaced")} -> SetOutcome.Replaced
+                ${result_constant("not_stored")} -> SetOutcome.NotStored
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
             ${operation.output}(${output_outcome} = outcome)
@@ -5207,8 +5348,8 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 byteArrayOf(),
             )
             when (result.kind) {
-                SmithyContract.RESULT_DELETED -> ${operation.output}(${output_deleted} = true)
-                SmithyContract.RESULT_NOT_DELETED -> ${operation.output}(${output_deleted} = false)
+                ${result_constant("deleted")} -> ${operation.output}(${output_deleted} = true)
+                ${result_constant("not_deleted")} -> ${operation.output}(${output_deleted} = false)
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
         }`
@@ -5219,35 +5360,35 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 byteArrayOf(),
                 byteArrayOf(),
             )
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             ${operation.output}(
                 ${output_json} = smithyDecodeUtf8(result.payload, "${operation_label}"),
             )
         }`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `${prefix}            val result = smithyInvokeScoped(
                 ${operation_constant},
                 input.${input_namespace_id},
                 byteArrayOf(),
                 byteArrayOf(),
             )
-            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
+            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
             ${operation.output}()
         }`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `${prefix}            val result = smithyNamespaceDelete(
                 input.${input_namespace_id},
                 input.${input_expected_revision},
             )
-            smithyRequireKind(result, SmithyContract.RESULT_OK, "${operation_label}")
+            smithyRequireKind(result, ${result_constant("ok")}, "${operation_label}")
             ${operation.output}()
         }`
       }
       throw new Error(`unsupported generated Kotlin empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `${prefix}            val name = input.${input_name}.toByteArray(StandardCharsets.UTF_8)
             require(name.size <= SmithyContract.NAMESPACE_NAME_MAX_BYTES) {
                 "namespace name exceeds protocol limit"
@@ -5262,8 +5403,8 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 policy.first,
                 policy.second,
             )
-            val created = result.kind == SmithyContract.RESULT_CREATED
-            if (!created && result.kind != SmithyContract.RESULT_OK) {
+            val created = result.kind == ${result_constant("created")}
+            if (!created && result.kind != ${result_constant("ok")}) {
                 throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
             ${operation.output}(
@@ -5272,7 +5413,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
         }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `${prefix}            val policy = smithyPolicyFlags(input.${input_policy}, true)
             val result = smithyNamespaceUpdatePolicy(
                 input.${input_namespace_id},
@@ -5280,14 +5421,14 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 policy.first,
                 policy.second,
             )
-            smithyRequireKind(result, SmithyContract.RESULT_VALUE, "${operation_label}")
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             ${operation.output}(${output_descriptor} = smithyDecodeDescriptor(result.payload))
         }`
       }
       throw new Error(`unsupported generated Kotlin namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Kotlin response kind ${operation.contract.response_kind}`,
+        `unsupported generated Kotlin response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -5486,6 +5627,8 @@ ${methods}
 function render_dart_operation_method(operation: Managed_Api_Operation): string {
   const operation_constant = managed_operation_constant(operation, "dart")
   const operation_label = managed_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "dart")
   const method_name = lower_camel_case(operation.name)
   const input_namespace_id = operation_field_name_for(
     operation,
@@ -5543,14 +5686,14 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
   const prefix = `  @override
   Future<${operation.output}> ${method_name}(${operation.input} input) => _run(() {
 `
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `${prefix}    final result = _invoke(
       ${operation_constant},
       const <int>[],
       const <int>[],
     );
-    _smithyRequireKind(result, smithyResultOk, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
     return const ${operation.output}();
   });`
     case "application_value":
@@ -5568,7 +5711,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       const <int>[],
       utf8.encode(input.${input_payload}),
     );
-    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     return ${operation.output}(
       ${output_payload}: _smithyDecodeUtf8(result.payload, '${operation_label}'),
     );
@@ -5581,10 +5724,10 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       input.${input_item_id},
       const <int>[],
     );
-    if (result.kind == smithyResultNotFound) {
+    if (result.kind == ${result_constant("not_found")}) {
       return const ${operation.output}();
     }
-    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
       return ${operation.output}(${output_value}: result.payload);
   });`
     case "set_outcome":
@@ -5598,9 +5741,9 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       ttlMilliseconds: flags.ttlMilliseconds,
     );
     final outcome = switch (result.kind) {
-      smithyResultCreated => SetOutcome.created,
-      smithyResultReplaced => SetOutcome.replaced,
-      smithyResultNotStored => SetOutcome.notStored,
+      ${result_constant("created")} => SetOutcome.created,
+      ${result_constant("replaced")} => SetOutcome.replaced,
+      ${result_constant("not_stored")} => SetOutcome.notStored,
       _ => throw _smithyUnexpectedKind('${operation_label}', result.kind),
     };
     return ${operation.output}(${output_outcome}: outcome);
@@ -5613,8 +5756,8 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       const <int>[],
     );
     return switch (result.kind) {
-      smithyResultDeleted => const ${operation.output}(${output_deleted}: true),
-      smithyResultNotDeleted => const ${operation.output}(${output_deleted}: false),
+      ${result_constant("deleted")} => const ${operation.output}(${output_deleted}: true),
+      ${result_constant("not_deleted")} => const ${operation.output}(${output_deleted}: false),
       _ => throw _smithyUnexpectedKind('${operation_label}', result.kind),
     };
   });`
@@ -5625,24 +5768,24 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       const <int>[],
       const <int>[],
     );
-    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     return ${operation.output}(
       ${output_json}: _smithyDecodeUtf8(result.payload, '${operation_label}'),
     );
   });`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `${prefix}    final result = _invokeScoped(
       ${operation_constant},
       input.${input_namespace_id},
       const <int>[],
       const <int>[],
     );
-    _smithyRequireKind(result, smithyResultOk, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
     return const ${operation.output}();
   });`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `${prefix}    final result = _readResult(
       _api,
       _api.namespaceDelete(
@@ -5651,13 +5794,13 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         input.${input_expected_revision},
       ),
     );
-    _smithyRequireKind(result, smithyResultOk, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("ok")}, '${operation_label}');
     return const ${operation.output}();
   });`
       }
       throw new Error(`unsupported generated Dart empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `${prefix}    final name = utf8.encode(input.${input_name});
     if (name.length > smithyNamespaceNameMaxBytes) {
       throw const OpenKacheClientException('namespace name exceeds protocol limit');
@@ -5679,8 +5822,8 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
           policy.ttlMilliseconds,
         ),
       );
-      final created = result.kind == smithyResultCreated;
-      if (!created && result.kind != smithyResultOk) {
+      final created = result.kind == ${result_constant("created")};
+      if (!created && result.kind != ${result_constant("ok")}) {
         throw _smithyUnexpectedKind('${operation_label}', result.kind);
       }
       return ${operation.output}(
@@ -5692,7 +5835,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     }
   });`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `${prefix}    final policy = _smithyPolicyFlags(input.${input_policy}, true);
     final result = _readResult(
       _api,
@@ -5704,7 +5847,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         policy.ttlMilliseconds,
       ),
     );
-    _smithyRequireKind(result, smithyResultValue, '${operation_label}');
+    _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     return ${operation.output}(
       ${output_descriptor}: _decodeDescriptor(result.payload),
     );
@@ -5713,7 +5856,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       throw new Error(`unsupported generated Dart namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Dart response kind ${operation.contract.response_kind}`,
+        `unsupported generated Dart response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -6493,41 +6636,15 @@ ${operations.join("\n")}
 `
 }
 
-function typescript_operation_result_kinds(
-  operation: Managed_Api_Operation,
-): string {
-  switch (operation.contract.response_kind) {
-    case "pong":
-    case "empty":
-      return "SMITHY_FFI_RESULT_OK"
-    case "application_value":
-    case "stats_json":
-      return "SMITHY_FFI_RESULT_VALUE"
-    case "value":
-      return "SMITHY_FFI_RESULT_VALUE, SMITHY_FFI_RESULT_NOT_FOUND"
-    case "set_outcome":
-      return (
-        "SMITHY_FFI_RESULT_CREATED, SMITHY_FFI_RESULT_REPLACED, "
-        + "SMITHY_FFI_RESULT_NOT_STORED"
-      )
-    case "delete_outcome":
-      return "SMITHY_FFI_RESULT_DELETED, SMITHY_FFI_RESULT_NOT_DELETED"
-    case "namespace_descriptor":
-      return ""
-    default:
-      throw new Error(
-        `unsupported generated TypeScript response kind ${operation.contract.response_kind}`,
-      )
-  }
-}
-
 function render_typescript_operation_method(
   contract: Client_Contract,
   operation: Managed_Api_Operation,
 ): string {
   const method_name = snake_case(operation.name)
   const operation_value = operation.opcode.value
-  const result_kinds = typescript_operation_result_kinds(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "typescript")
+  const result_kinds = operation_result_kind_constants(operation)
   const input_namespace_id = operation_field_name_for(
     operation,
     "input",
@@ -6639,7 +6756,7 @@ function render_typescript_operation_method(
     "descriptor",
     "typescript",
   )
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
@@ -6687,7 +6804,7 @@ function render_typescript_operation_method(
         expected_kinds: [${result_kinds}],
       },
     );
-    return result.kind === SMITHY_FFI_RESULT_NOT_FOUND
+    return result.kind === ${result_constant("not_found")}
       ? {}
       : { ${output_value}: result.payload };
   }`
@@ -6710,11 +6827,11 @@ function render_typescript_operation_method(
       },
     );
     switch (result.kind) {
-      case SMITHY_FFI_RESULT_CREATED:
+      case ${result_constant("created")}:
         return { ${output_outcome}: "created" };
-      case SMITHY_FFI_RESULT_REPLACED:
+      case ${result_constant("replaced")}:
         return { ${output_outcome}: "replaced" };
-      case SMITHY_FFI_RESULT_NOT_STORED:
+      case ${result_constant("not_stored")}:
         return { ${output_outcome}: "not_stored" };
       default:
         throw new Error("SET returned an unexpected native result");
@@ -6733,7 +6850,7 @@ function render_typescript_operation_method(
         expected_kinds: [${result_kinds}],
       },
     );
-    return { ${output_deleted}: result.kind === SMITHY_FFI_RESULT_DELETED };
+    return { ${output_deleted}: result.kind === ${result_constant("deleted")} };
   }`
     case "stats_json":
       return `  async ${method_name}(
@@ -6752,7 +6869,7 @@ function render_typescript_operation_method(
     };
   }`
     case "empty":
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
@@ -6764,7 +6881,7 @@ function render_typescript_operation_method(
     return {};
   }`
       }
-      if (operation.contract.request_kind !== "scoped_namespace") {
+      if (operation.plan.request_route !== "scoped_namespace") {
         throw new Error(`unsupported generated TypeScript empty operation ${operation.name}`)
       }
       return `  async ${method_name}(
@@ -6781,7 +6898,7 @@ function render_typescript_operation_method(
     return {};
   }`
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
@@ -6798,7 +6915,7 @@ function render_typescript_operation_method(
     );
   }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
@@ -6818,7 +6935,7 @@ function render_typescript_operation_method(
       throw new Error(`unsupported generated TypeScript namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated TypeScript response kind ${operation.contract.response_kind}`,
+        `unsupported generated TypeScript response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -7256,6 +7373,8 @@ function render_go_operation_method(
   const method = operation.name
   const opcode = `SmithyOpcode${operation.name}`
   const label = go_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "go")
   const input_namespace_id = operation_field_name_for(
     operation,
     "input",
@@ -7358,7 +7477,7 @@ function render_go_operation_method(
     "eviction_override",
     "go",
   )
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `func (s smithyClient) ${method}(
 	ctx context.Context,
@@ -7368,7 +7487,7 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultOK {
+	if result.kind != ${result_constant("ok")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
@@ -7397,7 +7516,7 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultValue {
+	if result.kind != ${result_constant("value")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{${output_payload}: string(result.data)}, nil
@@ -7500,13 +7619,13 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultValue {
+	if result.kind != ${result_constant("value")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{${output_json}: string(result.data)}, nil
 }`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
@@ -7522,13 +7641,13 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultOK {
+	if result.kind != ${result_constant("ok")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
 }`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
@@ -7541,7 +7660,7 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultOK {
+	if result.kind != ${result_constant("ok")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	return ${output}{}, nil
@@ -7549,7 +7668,7 @@ function render_go_operation_method(
       }
       throw new Error(`unsupported generated Go empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
@@ -7591,7 +7710,7 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultOK && result.kind != SmithyFFIResultCreated {
+	if result.kind != ${result_constant("ok")} && result.kind != ${result_constant("created")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	decoded, err := s.client.decodeNamespaceDescriptor(ctx, result.data)
@@ -7600,11 +7719,11 @@ function render_go_operation_method(
 	}
 	return ${output}{
 		${output_descriptor}: smithyNamespaceDescriptor(decoded),
-		${output_created}:    result.kind == SmithyFFIResultCreated,
+		${output_created}:    result.kind == ${result_constant("created")},
 	}, nil
 }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
@@ -7629,7 +7748,7 @@ function render_go_operation_method(
 	if err != nil {
 		return ${output}{}, operationError("${label}", err)
 	}
-	if result.kind != SmithyFFIResultValue {
+	if result.kind != ${result_constant("value")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
 	decoded, err := s.client.decodeNamespaceDescriptor(ctx, result.data)
@@ -7642,7 +7761,7 @@ function render_go_operation_method(
       throw new Error(`unsupported generated Go descriptor operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Go response kind ${operation.contract.response_kind}`,
+        `unsupported generated Go response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -7834,34 +7953,6 @@ ${operations}
 `
 }
 
-function python_operation_result_kinds(
-  operation: Managed_Api_Operation,
-): string {
-  switch (operation.contract.response_kind) {
-    case "pong":
-    case "empty":
-      return "SMITHY_FFI_RESULT_OK"
-    case "application_value":
-    case "stats_json":
-      return "SMITHY_FFI_RESULT_VALUE"
-    case "value":
-      return "SMITHY_FFI_RESULT_VALUE, SMITHY_FFI_RESULT_NOT_FOUND"
-    case "set_outcome":
-      return (
-        "SMITHY_FFI_RESULT_CREATED, SMITHY_FFI_RESULT_REPLACED, "
-        + "SMITHY_FFI_RESULT_NOT_STORED"
-      )
-    case "delete_outcome":
-      return "SMITHY_FFI_RESULT_DELETED, SMITHY_FFI_RESULT_NOT_DELETED"
-    case "namespace_descriptor":
-      return ""
-    default:
-      throw new Error(
-        `unsupported generated Python response kind ${operation.contract.response_kind}`,
-      )
-  }
-}
-
 function render_python_operation_method(
   contract: Client_Contract,
   operation: Managed_Api_Operation,
@@ -7870,7 +7961,9 @@ function render_python_operation_method(
   const input = python_api_name(operation.input)
   const output = python_api_name(operation.output)
   const operation_value = operation.opcode.value
-  const result_kinds = python_operation_result_kinds(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "python")
+  const result_kinds = operation_result_kind_constants(operation)
   const input_namespace_id = operation_field_name_for(
     operation,
     "input",
@@ -7982,7 +8075,7 @@ function render_python_operation_method(
     "eviction_override",
     "python",
   )
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
@@ -8025,7 +8118,7 @@ function render_python_operation_method(
         )
         return ${output}(
             ${output_value}=None
-            if kind == SMITHY_FFI_RESULT_NOT_FOUND
+            if kind == ${result_constant("not_found")}
             else payload
         )`
     case "set_outcome":
@@ -8043,9 +8136,9 @@ function render_python_operation_method(
             expected_kinds=(${result_kinds},),
         )
         outcome = {
-            SMITHY_FFI_RESULT_CREATED: SmithySetOutcome.CREATED,
-            SMITHY_FFI_RESULT_REPLACED: SmithySetOutcome.REPLACED,
-            SMITHY_FFI_RESULT_NOT_STORED: SmithySetOutcome.NOT_STORED,
+            ${result_constant("created")}: SmithySetOutcome.CREATED,
+            ${result_constant("replaced")}: SmithySetOutcome.REPLACED,
+            ${result_constant("not_stored")}: SmithySetOutcome.NOT_STORED,
         }[kind]
         return ${output}(${output_outcome}=outcome)`
     case "delete_outcome":
@@ -8058,7 +8151,7 @@ function render_python_operation_method(
             expected_kinds=(${result_kinds},),
         )
         return ${output}(
-            ${output_deleted}=kind == SMITHY_FFI_RESULT_DELETED
+            ${output_deleted}=kind == ${result_constant("deleted")}
         )`
     case "stats_json":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
@@ -8072,7 +8165,7 @@ function render_python_operation_method(
             ${output_json}=self._smithy_transport.decode_utf8(payload, ${operation_value})
         )`
     case "empty":
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         await self._smithy_transport.namespace_delete(
@@ -8081,7 +8174,7 @@ function render_python_operation_method(
         )
         return ${output}()`
       }
-      if (operation.contract.request_kind !== "scoped_namespace") {
+      if (operation.plan.request_route !== "scoped_namespace") {
         throw new Error(`unsupported generated Python empty operation ${operation.name}`)
       }
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
@@ -8093,7 +8186,7 @@ function render_python_operation_method(
         )
         return ${output}()`
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         return await self._smithy_transport.namespace_open(
@@ -8126,7 +8219,7 @@ function render_python_operation_method(
             ),
         )`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         return ${output}(
@@ -8144,7 +8237,7 @@ function render_python_operation_method(
       throw new Error(`unsupported generated Python namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Python response kind ${operation.contract.response_kind}`,
+        `unsupported generated Python response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -8873,6 +8966,8 @@ function render_swift_operation_method(
   const input = `Smithy_${typescript_name(operation.input)}`
   const output = `Smithy_${typescript_name(operation.output)}`
   const operation_label = managed_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "swift")
   const input_namespace_id = operation_field_name_for(
     operation,
     "input",
@@ -8985,14 +9080,14 @@ function render_swift_operation_method(
     "eviction_override",
     "swift",
   )
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
     _ = input
     let result = try await smithyInvoke(${operation_constant})
-    guard result.kind == Smithy_Native_Contract.resultOk else {
+    guard result.kind == ${result_constant("ok")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()
@@ -9014,7 +9109,7 @@ function render_swift_operation_method(
       ${operation_constant},
       value: Data(input.${input_payload}.utf8)
     )
-    guard result.kind == Smithy_Native_Contract.resultValue else {
+    guard result.kind == ${result_constant("value")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     guard let value = String(data: result.payload, encoding: .utf8) else {
@@ -9033,9 +9128,9 @@ function render_swift_operation_method(
       itemID: input.${input_item_id}
     )
     switch result.kind {
-    case Smithy_Native_Contract.resultValue:
+    case ${result_constant("value")}:
       return ${output}(${output_value}: result.payload)
-    case Smithy_Native_Contract.resultNotFound:
+    case ${result_constant("not_found")}:
       return ${output}(${output_value}: nil)
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
@@ -9057,11 +9152,11 @@ function render_swift_operation_method(
     )
     let outcome: Smithy_Set_Outcome
     switch result.kind {
-    case Smithy_Native_Contract.resultCreated:
+    case ${result_constant("created")}:
       outcome = .created
-    case Smithy_Native_Contract.resultReplaced:
+    case ${result_constant("replaced")}:
       outcome = .replaced
-    case Smithy_Native_Contract.resultNotStored:
+    case ${result_constant("not_stored")}:
       outcome = .notStored
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
@@ -9078,9 +9173,9 @@ function render_swift_operation_method(
       itemID: input.${input_item_id}
     )
     switch result.kind {
-    case Smithy_Native_Contract.resultDeleted:
+    case ${result_constant("deleted")}:
       return ${output}(${output_deleted}: true)
-    case Smithy_Native_Contract.resultNotDeleted:
+    case ${result_constant("not_deleted")}:
       return ${output}(${output_deleted}: false)
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
@@ -9094,7 +9189,7 @@ function render_swift_operation_method(
       ${operation_constant},
       namespaceID: input.${input_namespace_id}
     )
-    guard result.kind == Smithy_Native_Contract.resultValue else {
+    guard result.kind == ${result_constant("value")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     guard let json = String(data: result.payload, encoding: .utf8) else {
@@ -9103,7 +9198,7 @@ function render_swift_operation_method(
     return ${output}(${output_json}: json)
   }`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
@@ -9111,13 +9206,13 @@ function render_swift_operation_method(
       ${operation_constant},
       namespaceID: input.${input_namespace_id}
     )
-    guard result.kind == Smithy_Native_Contract.resultOk else {
+    guard result.kind == ${result_constant("ok")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
     return ${output}()
   }`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
@@ -9130,7 +9225,7 @@ function render_swift_operation_method(
       }
       throw new Error(`unsupported generated Swift empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
@@ -9155,7 +9250,7 @@ function render_swift_operation_method(
     )
   }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
@@ -9177,7 +9272,7 @@ function render_swift_operation_method(
       throw new Error(`unsupported generated Swift namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Swift response kind ${operation.contract.response_kind}`,
+        `unsupported generated Swift response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -9508,6 +9603,8 @@ function render_csharp_operation_method_body(
 ): string {
   const method_name = `${operation.name}Async`
   const label = managed_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "csharp")
   const input_namespace_id = operation_field_name_for(
     operation,
     "input",
@@ -9620,7 +9717,7 @@ function render_csharp_operation_method_body(
     "eviction_override",
     "csharp",
   )
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
@@ -9632,7 +9729,7 @@ function render_csharp_operation_method_body(
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, Protocol.FfiResultOk);
+        ExpectKind("${label}", result, ${result_constant("ok")});
         return new Smithy.${operation.output}();
     }`
     case "application_value":
@@ -9655,7 +9752,7 @@ function render_csharp_operation_method_body(
             ReadOnlyMemory<byte>.Empty,
             ValidateValue(Encoding.UTF8.GetBytes(input.${input_payload})),
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, Protocol.FfiResultValue);
+        ExpectKind("${label}", result, ${result_constant("value")});
         return new Smithy.${operation.output}
         {
             ${output_payload} = new UTF8Encoding(false, true).GetString(result.Payload),
@@ -9678,8 +9775,8 @@ function render_csharp_operation_method_body(
         {
             ${output_value} = result.Kind switch
             {
-                var kind when kind == Protocol.FfiResultValue => result.Payload,
-                var kind when kind == Protocol.FfiResultNotFound => null,
+                var kind when kind == ${result_constant("value")} => result.Payload,
+                var kind when kind == ${result_constant("not_found")} => null,
                 _ => throw UnexpectedKind("${label}", result.Kind),
             },
         };
@@ -9707,9 +9804,9 @@ function render_csharp_operation_method_body(
         {
             ${output_outcome} = result.Kind switch
             {
-                var kind when kind == Protocol.FfiResultCreated => Smithy.SetOutcome.Created,
-                var kind when kind == Protocol.FfiResultReplaced => Smithy.SetOutcome.Replaced,
-                var kind when kind == Protocol.FfiResultNotStored => Smithy.SetOutcome.NotStored,
+                var kind when kind == ${result_constant("created")} => Smithy.SetOutcome.Created,
+                var kind when kind == ${result_constant("replaced")} => Smithy.SetOutcome.Replaced,
+                var kind when kind == ${result_constant("not_stored")} => Smithy.SetOutcome.NotStored,
                 _ => throw UnexpectedKind("${label}", result.Kind),
             },
         };
@@ -9730,8 +9827,8 @@ function render_csharp_operation_method_body(
         {
             ${output_deleted} = result.Kind switch
             {
-                var kind when kind == Protocol.FfiResultDeleted => true,
-                var kind when kind == Protocol.FfiResultNotDeleted => false,
+                var kind when kind == ${result_constant("deleted")} => true,
+                var kind when kind == ${result_constant("not_deleted")} => false,
                 _ => throw UnexpectedKind("${label}", result.Kind),
             },
         };
@@ -9748,14 +9845,14 @@ function render_csharp_operation_method_body(
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, Protocol.FfiResultValue);
+        ExpectKind("${label}", result, ${result_constant("value")});
         return new Smithy.${operation.output}
         {
             ${output_json} = new UTF8Encoding(false, true).GetString(result.Payload),
         };
     }`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
@@ -9767,11 +9864,11 @@ function render_csharp_operation_method_body(
             ReadOnlyMemory<byte>.Empty,
             ReadOnlyMemory<byte>.Empty,
             cancellationToken: cancellationToken).ConfigureAwait(false);
-        ExpectKind("${label}", result, Protocol.FfiResultOk);
+        ExpectKind("${label}", result, ${result_constant("ok")});
         return new Smithy.${operation.output}();
     }`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
@@ -9783,7 +9880,7 @@ function render_csharp_operation_method_body(
                 input.${input_namespace_id},
                 input.${input_expected_revision},
                 cancellationToken).ConfigureAwait(false);
-            ExpectKind("${label}", result, Protocol.FfiResultOk);
+            ExpectKind("${label}", result, ${result_constant("ok")});
             return new Smithy.${operation.output}();
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -9798,7 +9895,7 @@ function render_csharp_operation_method_body(
       }
       throw new Error(`unsupported generated C# empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
@@ -9839,15 +9936,15 @@ function render_csharp_operation_method_body(
                 policyFlags,
                 ttlMilliseconds,
                 cancellationToken).ConfigureAwait(false);
-            if (result.Kind != Protocol.FfiResultOk
-                && result.Kind != Protocol.FfiResultCreated)
+            if (result.Kind != ${result_constant("ok")}
+                && result.Kind != ${result_constant("created")})
             {
                 throw UnexpectedKind("${label}", result.Kind);
             }
             return new Smithy.${operation.output}
             {
                 ${output_descriptor} = DecodeNamespaceDescriptor(result.Payload),
-                ${output_created} = result.Kind == Protocol.FfiResultCreated,
+                ${output_created} = result.Kind == ${result_constant("created")},
             };
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -9860,7 +9957,7 @@ function render_csharp_operation_method_body(
         }
     }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
@@ -9880,7 +9977,7 @@ function render_csharp_operation_method_body(
                 policyFlags,
                 ttlMilliseconds,
                 cancellationToken).ConfigureAwait(false);
-            ExpectKind("${label}", result, Protocol.FfiResultValue);
+            ExpectKind("${label}", result, ${result_constant("value")});
             return new Smithy.${operation.output}
             {
                 ${output_descriptor} = DecodeNamespaceDescriptor(result.Payload),
@@ -9899,7 +9996,7 @@ function render_csharp_operation_method_body(
       throw new Error(`unsupported generated C# namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated C# response kind ${operation.contract.response_kind}`,
+        `unsupported generated C# response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
@@ -10133,6 +10230,8 @@ function render_rust_operation_method(
 ): string {
   const method_name = snake_case(operation.name)
   const operation_label = managed_operation_label(operation)
+  const result_constant = (kind: Operation_Result_Kind): string =>
+    operation_result_constant(operation, kind, "rust")
   const input_namespace_id = operation_field_name_for(
     operation,
     "input",
@@ -10245,7 +10344,7 @@ function render_rust_operation_method(
     "eviction_override",
     "rust",
   )
-  switch (operation.contract.response_kind) {
+  switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `            async fn ${method_name}(
                 &self,
@@ -10261,7 +10360,7 @@ function render_rust_operation_method(
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[openkache_client_core::contract::FFI_RESULT_OK],
+                    &[${result_constant("ok")}],
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output})
@@ -10290,7 +10389,7 @@ function render_rust_operation_method(
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[openkache_client_core::contract::FFI_RESULT_VALUE],
+                    &[${result_constant("value")}],
                     "${operation_label}",
                 )?;
                 let payload = String::from_utf8(result.payload).map_err(|error| {
@@ -10316,13 +10415,13 @@ function render_rust_operation_method(
                 smithy_require_kind(
                     &result,
                     &[
-                        openkache_client_core::contract::FFI_RESULT_VALUE,
-                        openkache_client_core::contract::FFI_RESULT_NOT_FOUND,
+                        ${result_constant("value")},
+                        ${result_constant("not_found")},
                     ],
                     "${operation_label}",
                 )?;
                 let value = if result.kind
-                    == openkache_client_core::contract::FFI_RESULT_NOT_FOUND
+                    == ${result_constant("not_found")}
                 {
                     None
                 } else {
@@ -10353,20 +10452,20 @@ function render_rust_operation_method(
                 smithy_require_kind(
                     &result,
                     &[
-                        openkache_client_core::contract::FFI_RESULT_CREATED,
-                        openkache_client_core::contract::FFI_RESULT_REPLACED,
-                        openkache_client_core::contract::FFI_RESULT_NOT_STORED,
+                        ${result_constant("created")},
+                        ${result_constant("replaced")},
+                        ${result_constant("not_stored")},
                     ],
                     "${operation_label}",
                 )?;
                 let outcome = match result.kind {
-                    openkache_client_core::contract::FFI_RESULT_CREATED => {
+                    ${result_constant("created")} => {
                         smithy::SetOutcome::Created
                     }
-                    openkache_client_core::contract::FFI_RESULT_REPLACED => {
+                    ${result_constant("replaced")} => {
                         smithy::SetOutcome::Replaced
                     }
-                    openkache_client_core::contract::FFI_RESULT_NOT_STORED => {
+                    ${result_constant("not_stored")} => {
                         smithy::SetOutcome::NotStored
                     }
                     _ => unreachable!("smithy_require_kind validated SET result"),
@@ -10390,13 +10489,13 @@ function render_rust_operation_method(
                 smithy_require_kind(
                     &result,
                     &[
-                        openkache_client_core::contract::FFI_RESULT_DELETED,
-                        openkache_client_core::contract::FFI_RESULT_NOT_DELETED,
+                        ${result_constant("deleted")},
+                        ${result_constant("not_deleted")},
                     ],
                     "${operation_label}",
                 )?;
                 let deleted =
-                    result.kind == openkache_client_core::contract::FFI_RESULT_DELETED;
+                    result.kind == ${result_constant("deleted")};
                 Ok(smithy::${operation.output} { ${output_deleted}: deleted })
             }`
     case "stats_json":
@@ -10415,7 +10514,7 @@ function render_rust_operation_method(
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[openkache_client_core::contract::FFI_RESULT_VALUE],
+                    &[${result_constant("value")}],
                     "${operation_label}",
                 )?;
                 let json = String::from_utf8(result.payload).map_err(|error| {
@@ -10424,7 +10523,7 @@ function render_rust_operation_method(
                 Ok(smithy::${operation.output} { ${output_json}: json })
             }`
     case "empty":
-      if (operation.contract.request_kind === "scoped_namespace") {
+      if (operation.plan.request_route === "scoped_namespace") {
         return `            async fn ${method_name}(
                 &self,
                 input: smithy::${operation.input},
@@ -10440,13 +10539,13 @@ function render_rust_operation_method(
                     .await?;
                 smithy_require_kind(
                     &result,
-                    &[openkache_client_core::contract::FFI_RESULT_OK],
+                    &[${result_constant("ok")}],
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output})
             }`
       }
-      if (operation.contract.request_kind === "namespace_delete") {
+      if (operation.plan.request_route === "namespace_delete") {
         return `            async fn ${method_name}(
                 &self,
                 input: smithy::${operation.input},
@@ -10458,7 +10557,7 @@ function render_rust_operation_method(
       }
       throw new Error(`unsupported generated Rust empty operation ${operation.name}`)
     case "namespace_descriptor":
-      if (operation.contract.request_kind === "namespace_open") {
+      if (operation.plan.request_route === "namespace_open") {
         return `            async fn ${method_name}(
                 &self,
                 input: smithy::${operation.input},
@@ -10486,7 +10585,7 @@ function render_rust_operation_method(
                 })
             }`
       }
-      if (operation.contract.request_kind === "namespace_update_policy") {
+      if (operation.plan.request_route === "namespace_update_policy") {
         return `            async fn ${method_name}(
                 &self,
                 input: smithy::${operation.input},
@@ -10513,7 +10612,7 @@ function render_rust_operation_method(
       throw new Error(`unsupported generated Rust namespace operation ${operation.name}`)
     default:
       throw new Error(
-        `unsupported generated Rust response kind ${operation.contract.response_kind}`,
+        `unsupported generated Rust response kind ${operation.plan.result_plan.response_kind}`,
       )
   }
 }
