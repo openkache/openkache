@@ -1,10 +1,13 @@
 //! Protocol-specific server startup and reporting.
 
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 
+use anstream::{eprintln, println};
 use clap::ValueEnum;
 use openkache::resp::RespServer;
 use openkache::{AppConfig, platform::StorageDeviceKind};
+use owo_colors::OwoColorize;
 
 use super::{Arguments, DEFAULT_PORT, allocator};
 
@@ -21,11 +24,7 @@ pub(super) async fn run(
     arguments: Arguments,
     config: AppConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = tracing_subscriber::fmt()
-        .json()
-        .with_target(true)
-        .with_ansi(false)
-        .try_init();
+    init_tracing();
     let storage_directory = config.storage.directory.clone();
     let listen = arguments.listen.unwrap_or_else(|| {
         SocketAddr::from(([127, 0, 0, 1], arguments.port.unwrap_or(DEFAULT_PORT)))
@@ -42,7 +41,12 @@ pub(super) async fn run(
                 .write_development_certificate(&server, security_mode)?;
             report_common(address, &storage_directory, storage_device);
             arguments.security.report(security_mode);
-            println!("Protocol: QUIC ({})", quic_backend.as_str());
+            println!(
+                "{} {}",
+                "Protocol:".cyan().bold(),
+                format!("QUIC ({})", quic_backend.as_str())
+            );
+            tracing::info!(%address, protocol = "quic", backend = %quic_backend.as_str(), "server ready");
             server.serve(shutdown_signal()).await?;
         }
         Protocol::Resp => {
@@ -55,8 +59,17 @@ pub(super) async fn run(
             let server = RespServer::bind_plaintext_for_development(listen, config).await?;
             let storage_device = server.storage_device_kind();
             report_common(server.local_addr()?, &storage_directory, storage_device);
-            println!("Security: loopback-only plaintext development mode");
-            println!("Protocol: RESP2 (native direct dispatch)");
+            println!(
+                "{} {}",
+                "Security:".yellow().bold(),
+                "loopback-only plaintext development mode"
+            );
+            println!(
+                "{} {}",
+                "Protocol:".cyan().bold(),
+                "RESP2 (native direct dispatch)"
+            );
+            tracing::info!(protocol = "resp2", "server ready");
             server.serve(shutdown_signal()).await?;
         }
     }
@@ -68,45 +81,93 @@ fn report_common(
     storage_directory: &std::path::Path,
     storage_device: StorageDeviceKind,
 ) {
-    println!("OpenKache listening on {address}");
+    println!(
+        "{}",
+        format!("OpenKache listening on {address}").green().bold()
+    );
     if storage_device == StorageDeviceKind::NotApplicable {
         println!(
-            "Storage directory: {} (not used by simulated storage)",
+            "{} {} (not used by simulated storage)",
+            "Storage directory:".cyan().bold(),
             storage_directory.display()
         );
     } else {
-        println!("Storage directory: {}", storage_directory.display());
+        println!(
+            "{} {}",
+            "Storage directory:".cyan().bold(),
+            storage_directory.display()
+        );
     }
-    println!("Storage runtime: {}", openkache::storage_runtime_name());
-    println!("Network runtime: {}", openkache::network_runtime_name());
+    println!(
+        "{} {}",
+        "Storage runtime:".cyan().bold(),
+        openkache::storage_runtime_name()
+    );
+    println!(
+        "{} {}",
+        "Network runtime:".cyan().bold(),
+        openkache::network_runtime_name()
+    );
     report_storage_device(storage_device);
-    println!("Allocator: {}", allocator::NAME);
-    println!("Press Ctrl-C or send SIGTERM to stop");
+    println!("{} {}", "Allocator:".cyan().bold(), allocator::NAME);
+    println!("{}", "Press Ctrl-C or send SIGTERM to stop".dimmed());
 }
 
 fn report_storage_device(kind: StorageDeviceKind) {
     match kind {
         StorageDeviceKind::Nvme => {
-            println!("Storage device: NVMe (detected from opened storage files)");
+            println!(
+                "{} {}",
+                "Storage device:".green().bold(),
+                "NVMe (detected from opened storage files)"
+            );
         }
         StorageDeviceKind::NonNvme => {
             eprintln!(
-                "WARNING: at least one opened storage file is on a non-NVMe block \
+                "{} at least one opened storage file is on a non-NVMe block \
                  device. OpenKache will continue, but NVMe SSD is the intended \
-                 production medium for predictable latency."
+                 production medium for predictable latency.",
+                "WARNING:".yellow().bold()
             );
         }
         StorageDeviceKind::Unknown => {
             eprintln!(
-                "WARNING: could not verify the devices used by the opened storage \
+                "{} could not verify the devices used by the opened storage \
                  files. OpenKache will continue, but NVMe SSD is the intended \
-                 production medium for predictable latency."
+                 production medium for predictable latency.",
+                "WARNING:".yellow().bold()
             );
         }
         StorageDeviceKind::NotApplicable => {
-            println!("Storage device: not applicable (simulated storage uses no physical files)");
+            println!(
+                "{} not applicable (simulated storage uses no physical files)",
+                "Storage device:".dimmed()
+            );
         }
     }
+}
+
+fn init_tracing() {
+    if std::io::stderr().is_terminal() {
+        let _ = tracing_subscriber::fmt()
+            .compact()
+            .with_target(false)
+            .with_ansi(std::env::var_os("NO_COLOR").is_none())
+            .with_env_filter(log_filter())
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_target(true)
+            .with_ansi(false)
+            .with_env_filter(log_filter())
+            .try_init();
+    }
+}
+
+fn log_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
 async fn shutdown_signal() {

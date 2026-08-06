@@ -2,8 +2,10 @@
 
 use std::path::PathBuf;
 
+use anstream::println;
 use clap::{Args, ValueEnum};
 use openkache::{SizingPlan, SizingProfile, SizingRequest};
+use owo_colors::OwoColorize;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const GB: u64 = 1_000_000_000;
@@ -85,6 +87,7 @@ impl SizingArguments {
 }
 
 pub(super) fn print_plan(plan: &SizingPlan) {
+    println!("{}", "OpenKache sizing plan".bold());
     println!(
         "Sizing: profile={} value_bytes={} workers={}",
         plan.profile.as_str(),
