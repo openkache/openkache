@@ -21,7 +21,6 @@ import {
   OPERATION_RESPONSE_KINDS_BY_REQUEST,
   OPERATION_RESPONSE_KINDS,
   OPERATION_SCOPES,
-  OPERATION_VALUE_TRANSFORMS,
   extract_wire_contract as extract_protocol_wire_contract,
   render_rust_wire as render_protocol_rust_wire,
   type Wire_Contract,
@@ -84,10 +83,8 @@ export interface Client_Defaults_Contract {
 type Api_Type_Kind =
   | "blob"
   | "boolean"
-  | "double"
   | "enum"
   | "integer"
-  | "list"
   | "long"
   | "string"
   | "structure"
@@ -133,13 +130,10 @@ type Api_Operation_Scope = Api_Operation_Contract["scope"]
 type Api_Operation_Request_Kind = Api_Operation_Contract["request_kind"]
 type Api_Operation_Response_Kind = Api_Operation_Contract["response_kind"]
 type Api_Operation_Retry_Mode = Api_Operation_Contract["retry_mode"]
-type Api_Operation_Value_Transform =
-  NonNullable<Api_Operation_Contract["value_transform"]>
 
 /** One resolved Smithy API field type. */
 export interface Api_Type {
   readonly kind: Api_Type_Kind
-  readonly member?: Api_Type
   readonly name?: string
 }
 
@@ -574,7 +568,6 @@ function api_type(
 ): Api_Type {
   const prelude_types: Readonly<Record<string, Api_Type_Kind>> = {
     "smithy.api#Boolean": "boolean",
-    "smithy.api#Double": "double",
     "smithy.api#Integer": "integer",
     "smithy.api#Long": "long",
     "smithy.api#String": "string",
@@ -594,11 +587,6 @@ function api_type(
   switch (kind) {
     case "blob":
       return { kind: "blob" }
-    case "list": {
-      const member = object_member(shape, "member", target)
-      const member_target = string_member(member, "target", `${target}.member`)
-      return { kind: "list", member: api_type(shapes, member_target) }
-    }
     case "enum":
       return { kind: "enum", name: shape_name(target) }
     case "structure":
@@ -702,7 +690,6 @@ function api_structure(
 function operation_contract(
   shape: Json_Object,
   target: string,
-  value_transforms: readonly string[] = OPERATION_VALUE_TRANSFORMS,
 ): Api_Operation_Contract | undefined {
   const traits = optional_object_member(shape, "traits", target)
   const value = traits?.[OPERATION_CONTRACT_TRAIT_ID] ??
@@ -759,25 +746,6 @@ function operation_contract(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
     )
   }
-  const value_transform_value = contract["valueTransform"]
-  const value_transform =
-    value_transform_value === undefined
-      ? undefined
-      : string_member(
-          contract,
-          "valueTransform",
-          `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-        )
-  if (
-    value_transform !== undefined &&
-    !value_transforms.includes(value_transform)
-  ) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be one of ${value_transforms.join(", ")}`,
-    )
-  }
-  const parsed_value_transform =
-    value_transform as Api_Operation_Value_Transform | undefined
   const statuses = (member: string): readonly string[] => {
     const values = array_member(
       contract,
@@ -813,9 +781,6 @@ function operation_contract(
     retry_mode: retry_mode as Api_Operation_Retry_Mode,
     scope: scope as Api_Operation_Scope,
     success_statuses,
-    ...(parsed_value_transform === undefined
-      ? {}
-      : { value_transform: parsed_value_transform }),
   }
 }
 
@@ -868,7 +833,6 @@ function api_contract(
     readonly contract: Api_Operation_Contract
     readonly name: string
   }[],
-  value_transforms?: readonly string[],
 ): Api_Contract {
   const service = object_member(shapes, service_shape_id, "Smithy AST.shapes")
   // The protocol Opcode enum is the canonical operation-name source. A
@@ -907,7 +871,7 @@ function api_contract(
       )
       const semantic_contract = protocol_operations?.find(
         (operation) => operation.name === shape_name(target),
-      )?.contract ?? operation_contract(shape, target, value_transforms)
+      )?.contract ?? operation_contract(shape, target)
       return {
         ...(semantic_contract === undefined ? {} : { contract: semantic_contract }),
         input: shape_name(input),
@@ -934,13 +898,11 @@ function api_contract(
     )
     structures_by_name.set(name, structure)
     for (const member of structure.members) {
-      const member_type =
-        member.type.kind === "list" ? member.type.member : member.type
-      if (member_type?.name === undefined) continue
-      if (member_type.kind === "enum") {
-        enum_names.add(member_type.name)
-      } else if (member_type.kind === "structure") {
-        pending_structure_names.push(member_type.name)
+      if (member.type.name === undefined) continue
+      if (member.type.kind === "enum") {
+        enum_names.add(member.type.name)
+      } else if (member.type.kind === "structure") {
+        pending_structure_names.push(member.type.name)
       }
     }
   }
@@ -1990,7 +1952,6 @@ export function extract_client_contract(
     operation_field_roles,
     wire.opcodes.map((entry) => entry.name),
     wire.operations,
-    wire.operation_vocabularies?.value_transforms,
   )
   const api = {
     ...parsed_api,
@@ -2355,14 +2316,10 @@ function rust_status_variant(contract: Client_Contract, status: string): string 
 
 function render_rust_operation_contract(contract: Client_Contract): string {
   if (contract.operations !== undefined) {
-    const has_value_transforms = contract.operation_vocabularies !== undefined ||
-      contract.operations.some(
-        (operation) => operation.contract.value_transform !== undefined,
-      )
     return `/// Semantic operation metadata generated by the protocol Smithy contract.
 pub use openkache_protocol::{
     operation_contract, OperationContract, OperationRequestKind, OperationResponseKind,
-    OperationRetryMode, OperationScope,${has_value_transforms ? " OperationValueTransform," : ""}
+    OperationRetryMode, OperationScope,
 };`
   }
   const operations = contract.api.operations
@@ -2372,16 +2329,6 @@ pub use openkache_protocol::{
   ) {
     return ""
   }
-  const modeled_value_transforms = operations.flatMap((operation) =>
-    operation.contract?.value_transform === undefined
-      ? []
-      : [operation.contract.value_transform])
-  const value_transforms =
-    contract.operation_vocabularies?.value_transforms ??
-    (modeled_value_transforms.length === 0
-      ? []
-      : [...new Set(["identity", ...modeled_value_transforms])])
-  const has_value_transforms = value_transforms.length > 0
   const enum_variant = (
     value: string,
     allowed: readonly string[],
@@ -2411,9 +2358,6 @@ pub use openkache_protocol::{
             request_kind: OperationRequestKind::${enum_variant(operation_contract.request_kind, OPERATION_REQUEST_KINDS, `${operation.name}.requestKind`)},
             response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind, OPERATION_RESPONSE_KINDS, `${operation.name}.responseKind`)},
             retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode, OPERATION_RETRY_MODES, `${operation.name}.retryMode`)},
-${has_value_transforms
-  ? `            value_transform: OperationValueTransform::${enum_variant(operation_contract.value_transform ?? "identity", value_transforms, `${operation.name}.valueTransform`)},`
-  : ""}
             success_statuses: ${status_slice(operation_contract.success_statuses)},
             error_statuses: ${status_slice(operation_contract.error_statuses)},
         },`
@@ -2461,15 +2405,6 @@ pub enum OperationRetryMode {
     WhenNotCreating,
 }
 
-${has_value_transforms
-  ? `/// Application-value transformation declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationValueTransform {
-${value_transforms.map((value) => `    ${pascal_case(snake_case(value))},`).join("\n")}
-}
-`
-  : ""}
-
 /// Generated semantic metadata for one protocol operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
@@ -2477,7 +2412,6 @@ pub struct OperationContract {
     pub request_kind: OperationRequestKind,
     pub response_kind: OperationResponseKind,
     pub retry_mode: OperationRetryMode,
-${has_value_transforms ? "    pub value_transform: OperationValueTransform,\n" : ""}
     pub success_statuses: &'static [openkache_protocol::Status],
     pub error_statuses: &'static [openkache_protocol::Status],
 }
@@ -3545,9 +3479,6 @@ function java_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "boolean"
       break
-    case "double":
-      rendered = "double"
-      break
     case "enum":
     case "structure":
       if (type.name === undefined) throw new Error(`Java API ${type.kind} has no name`)
@@ -3555,12 +3486,6 @@ function java_api_type(type: Api_Type, required: boolean): string {
       break
     case "integer":
       rendered = "int"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Java API only supports lists of Double values")
-      }
-      rendered = "double[]"
       break
     case "long":
     case "unsigned_long":
@@ -3627,7 +3552,7 @@ public record ${structure.name}() {}
     .filter(
       (member) =>
         member.required &&
-        ["blob", "enum", "list", "string", "structure"].includes(member.type.kind),
+        ["blob", "enum", "string", "structure"].includes(member.type.kind),
     )
     .map((member) => `        Objects.requireNonNull(${member.name}, "${member.name}");`)
     .join("\n")
@@ -4239,9 +4164,6 @@ function kotlin_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "Boolean"
       break
-    case "double":
-      rendered = "Double"
-      break
     case "enum":
     case "structure":
       if (type.name === undefined) throw new Error(`Kotlin API ${type.kind} has no name`)
@@ -4249,12 +4171,6 @@ function kotlin_api_type(type: Api_Type, required: boolean): string {
       break
     case "integer":
       rendered = "Int"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Kotlin API only supports lists of Double values")
-      }
-      rendered = "DoubleArray"
       break
     case "long":
     case "unsigned_long":
@@ -4336,9 +4252,6 @@ function dart_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "bool"
       break
-    case "double":
-      rendered = "double"
-      break
     case "enum":
     case "structure":
       if (type.name === undefined) throw new Error(`Dart API ${type.kind} has no name`)
@@ -4348,12 +4261,6 @@ function dart_api_type(type: Api_Type, required: boolean): string {
     case "long":
     case "unsigned_long":
       rendered = "int"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Dart API only supports lists of double values")
-      }
-      rendered = "List<double>"
       break
     case "string":
       rendered = "String"
@@ -4528,7 +4435,6 @@ function operation_result_kind_constants(
 /** One language-neutral operation plan shared by every source renderer. */
 interface Managed_Operation_Plan {
   readonly binding: Operation_Field_Binding
-  readonly application_value_codec?: Application_Value_Codec
   readonly contract: Api_Operation_Contract
   readonly input: string
   readonly name: string
@@ -4547,8 +4453,6 @@ interface Managed_Api_Operation extends Api_Operation {
   readonly plan: Managed_Operation_Plan
 }
 
-type Application_Value_Codec = "f64_array" | "utf8"
-
 function operation_structure(
   contract: Client_Contract,
   operation: Api_Operation,
@@ -4564,16 +4468,18 @@ function operation_structure(
   return structure
 }
 
-function required_payload_member(
+function required_string_member(
   contract: Client_Contract,
   operation: Api_Operation,
   direction: "input" | "output",
 ): Api_Member {
   const structure = operation_structure(contract, operation, direction)
-  const members = structure.members.filter((member) => member.required)
+  const members = structure.members.filter(
+    (member) => member.required && member.type.kind === "string",
+  )
   if (structure.members.length !== 1 || members.length !== 1) {
     throw new Error(
-      `operation ${operation.name} ${direction} shape ${structure.name} must define exactly one required payload member and no other members for responseKind application_value`,
+      `operation ${operation.name} ${direction} shape ${structure.name} must define exactly one required String member and no other members for responseKind application_value`,
     )
   }
   return members[0]!
@@ -4608,7 +4514,7 @@ function operation_field_binding(
           `operation ${operation.name} input is missing operationField role payload`,
         )
       }
-      input.payload = required_payload_member(contract, operation, "input")
+      input.payload = required_string_member(contract, operation, "input")
     }
     if (output.payload === undefined) {
       if (contract.strict_operation_bindings) {
@@ -4616,57 +4522,10 @@ function operation_field_binding(
           `operation ${operation.name} output is missing operationField role payload`,
         )
       }
-      output.payload = required_payload_member(contract, operation, "output")
+      output.payload = required_string_member(contract, operation, "output")
     }
   }
   return { input, output }
-}
-
-/**
- * Resolves the wire codec for an application-value operation from its Smithy
- * payload shapes. The server transform is deliberately independent from this
- * decision: multiple transforms may share one payload codec.
- *
- * Adding another transform therefore does not require a generator edit as long
- * as it reuses a supported payload shape.
- */
-function application_value_codec_for_type(type: Api_Type): Application_Value_Codec {
-  switch (type.kind) {
-    case "string":
-      return "utf8"
-    case "list":
-      if (type.member?.kind === "double") return "f64_array"
-      throw new Error(
-        "application-value list payloads currently require a Double member",
-      )
-    default:
-      throw new Error(
-        `unsupported application-value payload type ${type.kind}; add a codec mapping`,
-      )
-  }
-}
-
-function application_value_codec(
-  contract: Client_Contract,
-  operation: Api_Operation & { readonly contract: Api_Operation_Contract },
-  binding: Operation_Field_Binding,
-): Application_Value_Codec | undefined {
-  if (operation.contract.response_kind !== "application_value") return undefined
-  const input_payload = binding.input.payload
-  const output_payload = binding.output.payload
-  if (input_payload === undefined || output_payload === undefined) {
-    throw new Error(
-      `operation ${operation.name} application-value payload bindings are incomplete`,
-    )
-  }
-  const input_codec = application_value_codec_for_type(input_payload.type)
-  const output_codec = application_value_codec_for_type(output_payload.type)
-  if (input_codec !== output_codec) {
-    throw new Error(
-      `operation ${operation.name} input and output payload codecs differ: ${input_codec} vs ${output_codec}`,
-    )
-  }
-  return input_codec
 }
 
 function managed_operation_entries(
@@ -4686,11 +4545,6 @@ function managed_operation_entries(
     }
     const binding = operation_field_binding(contract, managed_operation)
     const plan: Managed_Operation_Plan = {
-      application_value_codec: application_value_codec(
-        contract,
-        managed_operation,
-        binding,
-      ),
       binding,
       contract: managed_operation.contract,
       input: managed_operation.input,
@@ -4709,15 +4563,6 @@ function managed_operation_entries(
       plan,
     }]
   })
-}
-
-function has_application_value_codec(
-  operations: readonly Managed_Api_Operation[],
-  codec: Application_Value_Codec,
-): boolean {
-  return operations.some(
-    (operation) => operation.plan.application_value_codec === codec,
-  )
 }
 
 function operation_field(
@@ -4973,7 +4818,6 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     "java",
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "java")
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    @Override
@@ -4996,16 +4840,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
           operation_field(operation, "input", "payload"),
           "java",
         )
-        const output_payload = operation_field_name(
-          operation_field(operation, "output", "payload"),
-          "java",
-        )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `smithyEncodeF64Array(input.${input_payload}())`
-          : `input.${input_payload}().getBytes(StandardCharsets.UTF_8)`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `smithyDecodeF64Array(result.payload(), "${operation_label}")`
-          : `smithyDecodeUtf8(result.payload(), "${operation_label}")`
+        operation_field(operation, "output", "payload")
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
         Objects.requireNonNull(input, "input");
@@ -5013,12 +4848,12 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             NativeResult result = smithyExecute(
                 ${operation_constant},
                 new byte[0],
-                ${encoded_payload},
+                input.${input_payload}().getBytes(StandardCharsets.UTF_8),
                 0,
                 0);
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             return new ${operation.output}(
-                ${decoded_payload});
+                smithyDecodeUtf8(result.payload(), "${operation_label}"));
         });
     }`
       }
@@ -5186,44 +5021,9 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
 }
 
 export function render_java_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map(render_java_operation_method)
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `    private static byte[] smithyEncodeF64Array(double[] values) {
-        ByteBuffer buffer = ByteBuffer.allocate(values.length * Double.BYTES)
-            .order(ByteOrder.BIG_ENDIAN);
-        for (double value : values) {
-            if (!Double.isFinite(value)) {
-                throw new IllegalArgumentException("binary64 array input must contain finite values");
-            }
-            buffer.putDouble(value);
-        }
-        return buffer.array();
-    }
-
-    private static double[] smithyDecodeF64Array(byte[] payload, String operation) {
-        if ((payload.length % Double.BYTES) != 0) {
-            throw new OpenKacheClientException(
-                operation + " response has a malformed binary64 array length");
-        }
-        ByteBuffer buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
-        double[] values = new double[payload.length / Double.BYTES];
-        for (int index = 0; index < values.length; index++) {
-            values[index] = buffer.getDouble();
-            if (!Double.isFinite(values[index])) {
-                throw new OpenKacheClientException(
-                    operation + " response contains a non-finite binary64 value");
-            }
-        }
-        return values;
-    }
-`
-    : ""
   const set_condition = structure_field_name_for(
     contract,
     "SetInput",
@@ -5284,8 +5084,6 @@ package io.openkache.client;
 
 import io.openkache.client.generated_local.SmithyContract;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.concurrent.CompletionStage;
@@ -5331,8 +5129,6 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
     NamespaceDescriptor smithyDecodeDescriptor(byte[] payload);
 
     String smithyDecodeUtf8(byte[] payload, String operation);
-
-${f64_array_helpers}
 
     ${methods}
 
@@ -5496,7 +5292,6 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
     "created",
     "kotlin",
   )
-  const application_value_codec = operation.plan.application_value_codec
   const prefix = `    override suspend fun ${method_name}(input: ${operation.input}): ${operation.output} =
         withContext(Dispatchers.IO) {
             requireNotNull(input)
@@ -5521,20 +5316,14 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
           operation_field(operation, "output", "payload"),
           "kotlin",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `smithyEncodeF64Array(input.${input_payload})`
-          : `input.${input_payload}.toByteArray()`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `smithyDecodeF64Array(result.payload, "${operation_label}")`
-          : `smithyDecodeUtf8(result.payload, "${operation_label}")`
         return `${prefix}            val result = smithyInvoke(
                 ${operation_constant},
                 byteArrayOf(),
-                ${encoded_payload},
+                input.${input_payload}.toByteArray(),
             )
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             ${operation.output}(
-                ${output_payload} = ${decoded_payload},
+                ${output_payload} = smithyDecodeUtf8(result.payload, "${operation_label}"),
             )
         }`
       }
@@ -5663,41 +5452,9 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
 }
 
 export function render_kotlin_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map(render_kotlin_operation_method)
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `    private fun smithyEncodeF64Array(values: DoubleArray): ByteArray {
-        val buffer = ByteBuffer.allocate(values.size * java.lang.Double.BYTES)
-            .order(ByteOrder.BIG_ENDIAN)
-        values.forEach { value ->
-            require(value.isFinite()) {
-                "binary64 array input must contain finite values"
-            }
-            buffer.putDouble(value)
-        }
-        return buffer.array()
-    }
-
-    private fun smithyDecodeF64Array(payload: ByteArray, operation: String): DoubleArray {
-        require(payload.size % java.lang.Double.BYTES == 0) {
-            "$operation response has a malformed binary64 array length"
-        }
-        val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
-        return DoubleArray(payload.size / java.lang.Double.BYTES) {
-            buffer.double.also { value ->
-                require(value.isFinite()) {
-                    "$operation response contains a non-finite binary64 value"
-                }
-            }
-        }
-    }
-`
-    : ""
   const set_condition = structure_field_name_for(
     contract,
     "SetInput",
@@ -5759,8 +5516,6 @@ package io.openkache.client
 import io.openkache.client.generated_local.SmithyContract
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 
 /** Generated operation implementations backed by the shared native contract. */
@@ -5804,8 +5559,6 @@ public interface SmithyGeneratedOperations : SmithyOpenKacheApi {
     public fun smithyDecodeDescriptor(payload: ByteArray): NamespaceDescriptor
 
     public fun smithyDecodeUtf8(payload: ByteArray, operation: String): String
-
-${f64_array_helpers}
 
 ${methods}
 
@@ -5948,7 +5701,6 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     "created",
     "dart",
   )
-  const application_value_codec = operation.plan.application_value_codec
   const prefix = `  @override
   Future<${operation.output}> ${method_name}(${operation.input} input) => _run(() {
 `
@@ -5972,20 +5724,14 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
           operation_field(operation, "output", "payload"),
           "dart",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `_smithyEncodeF64Array(input.${input_payload})`
-          : `utf8.encode(input.${input_payload})`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `_smithyDecodeF64Array(result.payload, '${operation_label}')`
-          : `_smithyDecodeUtf8(result.payload, '${operation_label}')`
         return `${prefix}    final result = _invoke(
       ${operation_constant},
       const <int>[],
-      ${encoded_payload},
+      utf8.encode(input.${input_payload}),
     );
     _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     return ${operation.output}(
-      ${output_payload}: ${decoded_payload},
+      ${output_payload}: _smithyDecodeUtf8(result.payload, '${operation_label}'),
     );
   });`
       }
@@ -6134,49 +5880,9 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
 }
 
 export function render_dart_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map(render_dart_operation_method)
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `List<int> _smithyEncodeF64Array(List<double> values) {
-  final data = ByteData(values.length * 8);
-  for (var index = 0; index < values.length; index++) {
-    final value = values[index];
-    if (!value.isFinite) {
-      throw const OpenKacheClientException(
-        'binary64 array input must contain finite values',
-      );
-    }
-    data.setFloat64(index * 8, value, Endian.big);
-  }
-  return data.buffer.asUint8List();
-}
-
-List<double> _smithyDecodeF64Array(List<int> payload, String operation) {
-  if (payload.length % 8 != 0) {
-    throw OpenKacheClientException(
-      '$operation response has a malformed binary64 array length',
-    );
-  }
-  final data = ByteData.sublistView(Uint8List.fromList(payload));
-  final values = <double>[];
-  for (var offset = 0; offset < payload.length; offset += 8) {
-    final value = data.getFloat64(offset, Endian.big);
-    if (!value.isFinite) {
-      throw OpenKacheClientException(
-        '$operation response contains a non-finite binary64 value',
-      );
-    }
-    values.add(value);
-  }
-  return values;
-}
-`
-    : ""
   const set_condition = structure_field_name_for(
     contract,
     "SetInput",
@@ -6346,8 +6052,6 @@ String _smithyDecodeUtf8(List<int> payload, String operation) {
     throw OpenKacheClientException('$operation response is not valid UTF-8', error);
   }
 }
-
-${f64_array_helpers}
 
 void _smithyRequireKind(_NativeResult result, int expected, String operation) {
   if (result.kind != expected) {
@@ -6739,21 +6443,12 @@ function typescript_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "boolean"
       break
-    case "double":
-      rendered = "number"
-      break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = typescript_api_name(type.name)
       break
     case "integer":
       rendered = "number"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("TypeScript API only supports lists of number values")
-      }
-      rendered = "readonly number[]"
       break
     case "long":
       rendered = "number"
@@ -7079,7 +6774,6 @@ function render_typescript_operation_method(
     "descriptor",
     "typescript",
   )
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `  async ${method_name}(
@@ -7102,22 +6796,16 @@ function render_typescript_operation_method(
           operation_field(operation, "output", "payload"),
           "typescript",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `smithy_encode_f64_array(input.${input_payload})`
-          : `new TextEncoder().encode(input.${input_payload})`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `smithy_decode_f64_array(result.payload, ${operation_value})`
-          : `this.#transport.decode_utf8(result.payload, ${operation_value})`
         return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
   ): Promise<${typescript_api_name(operation.output)}> {
     this.#transport.assert_open();
     const result = await this.#transport.invoke(${operation_value}, {
-      value: ${encoded_payload},
+      value: new TextEncoder().encode(input.${input_payload}),
       expected_kinds: [${result_kinds}],
     });
     return {
-      ${output_payload}: ${decoded_payload},
+      ${output_payload}: this.#transport.decode_utf8(result.payload, ${operation_value}),
     };
   }`
       }
@@ -7290,39 +6978,6 @@ export function render_typescript_operations(contract: Client_Contract): string 
   const methods = managed_operations
     .map((operation) => render_typescript_operation_method(contract, operation))
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `function smithy_encode_f64_array(values: readonly number[]): Uint8Array {
-  const payload = new Uint8Array(values.length * 8);
-  const view = new DataView(payload.buffer);
-  values.forEach((value, index) => {
-    if (!Number.isFinite(value)) {
-      throw new Error("binary64 array input must contain finite values");
-    }
-    view.setFloat64(index * 8, value, false);
-  });
-  return payload;
-}
-
-function smithy_decode_f64_array(payload: Uint8Array, operation: number): readonly number[] {
-  if (payload.byteLength % 8 !== 0) {
-    throw new Error(\`operation \${operation} response has a malformed binary64 array length\`);
-  }
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-  const values: number[] = [];
-  for (let offset = 0; offset < payload.byteLength; offset += 8) {
-    const value = view.getFloat64(offset, false);
-    if (!Number.isFinite(value)) {
-      throw new Error(\`operation \${operation} response contains a non-finite binary64 value\`);
-    }
-    values.push(value);
-  }
-  return values;
-}
-`
-    : ""
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 import type {
@@ -7353,8 +7008,6 @@ export interface Smithy_Operation_Result {
   readonly kind: number
   readonly payload: Uint8Array
 }
-
-${f64_array_helpers}
 
 /** Native-facing hooks used by generated Smithy operations. */
 export interface Smithy_Operation_Transport {
@@ -7432,21 +7085,12 @@ function go_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "bool"
       break
-    case "double":
-      rendered = "float64"
-      break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = go_api_name(type.name)
       break
     case "integer":
       rendered = "int32"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Go API only supports lists of float64 values")
-      }
-      rendered = "[]float64"
       break
     case "long":
       rendered = "int64"
@@ -7851,7 +7495,6 @@ function render_go_operation_method(
     "eviction_override",
     "go",
   )
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `func (s smithyClient) ${method}(
@@ -7877,29 +7520,15 @@ function render_go_operation_method(
           operation_field(operation, "output", "payload"),
           "go",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `wireValue, err := smithyEncodeF64Array(input.${input_payload})
-\tif err != nil {
-\t\treturn ${output}{}, err
-\t}`
-          : `wireValue := []byte(input.${input_payload})`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `values, err := smithyDecodeF64Array(result.data)
-\tif err != nil {
-\t\treturn ${output}{}, operationError("${label}", err)
-\t}
-\treturn ${output}{${output_payload}: values}, nil`
-          : `return ${output}{${output_payload}: string(result.data)}, nil`
         return `func (s smithyClient) ${method}(
 	ctx context.Context,
 	input ${input},
 ) (${output}, error) {
-	${encoded_payload}
 	result, err := s.client.invoke(
 		ctx,
 		${opcode},
 		nil,
-		wireValue,
+		[]byte(input.${input_payload}),
 		SetOptions{},
 	)
 	if err != nil {
@@ -7908,7 +7537,7 @@ function render_go_operation_method(
 	if result.kind != ${result_constant("value")} {
 		return ${output}{}, unexpectedResult("${label}", result.kind)
 	}
-	${decoded_payload}
+	return ${output}{${output_payload}: string(result.data)}, nil
 }`
       }
     case "value":
@@ -8157,54 +7786,16 @@ function render_go_operation_method(
 
 /** Renders generated Go operation implementations backed by the shared client core. */
 export function render_go_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map((operation) => render_go_operation_method(contract, operation))
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `func smithyEncodeF64Array(values []float64) ([]byte, error) {
-	payload := make([]byte, len(values)*8)
-	for index, value := range values {
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, validationError("binary64 array", "must contain finite values")
-		}
-		binary.BigEndian.PutUint64(payload[index*8:], math.Float64bits(value))
-	}
-	return payload, nil
-}
-
-func smithyDecodeF64Array(payload []byte) ([]float64, error) {
-	if len(payload)%8 != 0 {
-		return nil, validationError("binary64 array", "has a malformed binary64 array length")
-	}
-	values := make([]float64, len(payload)/8)
-	for index := range values {
-		value := math.Float64frombits(binary.BigEndian.Uint64(payload[index*8:]))
-		if math.IsNaN(value) || math.IsInf(value, 0) {
-			return nil, validationError("binary64 array", "contains a non-finite binary64 value")
-		}
-		values[index] = value
-	}
-	return values, nil
-}
-`
-    : ""
   return `// Code generated from the OpenKache Smithy client contract. DO NOT EDIT.
 
 package openkache
 
-import (
-	"context"
-	"encoding/binary"
-	"math"
-)
+import "context"
 
 ${methods}
-
-${f64_array_helpers}
 `
 }
 
@@ -8294,21 +7885,12 @@ function python_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "bool"
       break
-    case "double":
-      rendered = "float"
-      break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = python_api_name(type.name)
       break
     case "integer":
       rendered = "int"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Python API only supports lists of float values")
-      }
-      rendered = "list[float]"
       break
     case "long":
       rendered = "int"
@@ -8511,7 +8093,6 @@ function render_python_operation_method(
     "eviction_override",
     "python",
   )
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
@@ -8531,21 +8112,17 @@ function render_python_operation_method(
           operation_field(operation, "output", "payload"),
           "python",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `_smithy_encode_f64_array(input.${input_payload})`
-          : `input.${input_payload}.encode("utf-8")`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `_smithy_decode_f64_array(payload, ${operation_value})`
-          : `self._smithy_transport.decode_utf8(payload, ${operation_value})`
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
         _, payload = await self._smithy_transport.invoke(
             ${operation_value},
-            value=${encoded_payload},
+            value=input.${input_payload}.encode("utf-8"),
             expected_kinds=(${result_kinds},),
         )
         return ${output}(
-            ${output_payload}=${decoded_payload}
+            ${output_payload}=self._smithy_transport.decode_utf8(
+                payload, ${operation_value}
+            )
         )`
       }
     case "value":
@@ -8704,41 +8281,10 @@ export function render_python_operations(contract: Client_Contract): string {
   const methods = managed_operations
     .map((operation) => render_python_operation_method(contract, operation))
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `def _smithy_encode_f64_array(values: list[float]) -> bytes:
-    payload = bytearray()
-    for value in values:
-        if not math.isfinite(value):
-            raise ValueError("binary64 array input must contain finite values")
-        payload.extend(struct.pack(">d", value))
-    return bytes(payload)
-
-
-def _smithy_decode_f64_array(payload: bytes, operation: int) -> list[float]:
-    if len(payload) % 8 != 0:
-        raise ValueError(
-            f"operation {operation} response has a malformed binary64 array length"
-        )
-    values = [
-        value
-        for (value,) in struct.iter_unpack(">d", payload)
-    ]
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError(
-            f"operation {operation} response contains a non-finite binary64 value"
-        )
-    return values
-`
-    : ""
   return `# Generated from the OpenKache Smithy contract. Do not edit.
 
 from __future__ import annotations
 
-import math
-import struct
 from typing import Protocol
 
 from .smithy_api import (
@@ -8755,7 +8301,7 @@ from .smithy_contract import (
     SMITHY_FFI_RESULT_VALUE,
 )
 
-${f64_array_helpers}
+
 class SmithyOperationTransport(Protocol):
     """Native-facing hooks used by generated Smithy operations."""
 
@@ -9141,9 +8687,6 @@ function swift_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "Bool"
       break
-    case "double":
-      rendered = "Double"
-      break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = `Smithy_${typescript_name(type.name)}`
@@ -9153,12 +8696,6 @@ function swift_api_type(type: Api_Type, required: boolean): string {
       break
     case "long":
       rendered = "Int64"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Swift API only supports lists of Double values")
-      }
-      rendered = "[Double]"
       break
     case "structure":
       if (type.name === undefined) throw new Error("structure API type has no name")
@@ -9561,7 +9098,6 @@ function render_swift_operation_method(
     "eviction_override",
     "swift",
   )
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `  public func ${method_name}(
@@ -9584,28 +9120,19 @@ function render_swift_operation_method(
           operation_field(operation, "output", "payload"),
           "swift",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `try smithyEncodeF64Array(input.${input_payload})`
-          : `Data(input.${input_payload}.utf8)`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `let value = try smithyDecodeF64Array(
-      result.payload,
-      operation: "${operation_label}"
-    )`
-          : `guard let value = String(data: result.payload, encoding: .utf8) else {
-      throw OpenKacheError("${operation_label} response is not valid UTF-8")
-    }`
         return `  public func ${method_name}(
     _ input: ${input}
   ) async throws -> ${output} {
     let result = try await smithyInvoke(
       ${operation_constant},
-      value: ${encoded_payload}
+      value: Data(input.${input_payload}.utf8)
     )
     guard result.kind == ${result_constant("value")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
-    ${decoded_payload}
+    guard let value = String(data: result.payload, encoding: .utf8) else {
+      throw OpenKacheError("${operation_label} response is not valid UTF-8")
+    }
     return ${output}(${output_payload}: value)
   }`
       }
@@ -9770,57 +9297,13 @@ function render_swift_operation_method(
 
 /** Renders generated Swift Smithy operation implementations. */
 export function render_swift_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map((operation) => render_swift_operation_method(contract, operation))
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `private func smithyEncodeF64Array(_ values: [Double]) throws -> Data {
-  var payload = Data(capacity: values.count * 8)
-  for value in values {
-    guard value.isFinite else {
-      throw OpenKacheError("binary64 array input must contain finite values")
-    }
-    let bits = value.bitPattern
-    for shift in stride(from: 56, through: 0, by: -8) {
-      payload.append(UInt8((bits >> UInt64(shift)) & 0xff))
-    }
-  }
-  return payload
-}
-
-private func smithyDecodeF64Array(
-  _ payload: Data,
-  operation: String
-) throws -> [Double] {
-  guard payload.count % 8 == 0 else {
-    throw OpenKacheError("\(operation) response has a malformed binary64 array length")
-  }
-  var values: [Double] = []
-  values.reserveCapacity(payload.count / 8)
-  for offset in stride(from: 0, to: payload.count, by: 8) {
-    var bits: UInt64 = 0
-    for index in 0..<8 {
-      bits = (bits << 8) | UInt64(payload[offset + index])
-    }
-    let value = Double(bitPattern: bits)
-    guard value.isFinite else {
-      throw OpenKacheError("\(operation) response contains a non-finite binary64 value")
-    }
-    values.append(value)
-  }
-  return values
-}
-`
-    : ""
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 import Foundation
 
-${f64_array_helpers}
 extension OpenKacheRawClient: Smithy_OpenKache_Api {
 ${methods}
 }
@@ -10051,21 +9534,12 @@ function csharp_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "bool"
       break
-    case "double":
-      rendered = "double"
-      break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = type.name
       break
     case "integer":
       rendered = "int"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("C# API only supports lists of double values")
-      }
-      rendered = "double[]"
       break
     case "long":
       rendered = "long"
@@ -10261,7 +9735,6 @@ function render_csharp_operation_method_body(
     "eviction_override",
     "csharp",
   )
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
@@ -10287,12 +9760,6 @@ function render_csharp_operation_method_body(
           operation_field(operation, "output", "payload"),
           "csharp",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `EncodeF64Array(input.${input_payload})`
-          : `ValidateValue(Encoding.UTF8.GetBytes(input.${input_payload}))`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `DecodeF64Array(result.Payload, "${label}")`
-          : `new UTF8Encoding(false, true).GetString(result.Payload)`
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
@@ -10301,12 +9768,12 @@ function render_csharp_operation_method_body(
         var result = await RequestAsync(
             Protocol.Opcode.${operation.name},
             ReadOnlyMemory<byte>.Empty,
-            ${encoded_payload},
+            ValidateValue(Encoding.UTF8.GetBytes(input.${input_payload})),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ExpectKind("${label}", result, ${result_constant("value")});
         return new Smithy.${operation.output}
         {
-            ${output_payload} = ${decoded_payload},
+            ${output_payload} = new UTF8Encoding(false, true).GetString(result.Payload),
         };
     }`
       }
@@ -10562,71 +10029,20 @@ ${render_csharp_operation_method_body(contract, operation)}`
 
 /** Renders generated C# Smithy operation implementations. */
 export function render_csharp_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map((operation) => render_csharp_operation_method(contract, operation))
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `    private static byte[] EncodeF64Array(double[] values)
-    {
-        var payload = new byte[checked(values.Length * 8)];
-        for (var index = 0; index < values.Length; index++)
-        {
-            var value = values[index];
-            if (!double.IsFinite(value))
-            {
-                throw new OpenKacheException(
-                    "PROTOCOL_ERROR",
-                    "binary64 array input must contain finite values.");
-            }
-            BinaryPrimitives.WriteInt64BigEndian(
-                payload.AsSpan(index * 8, 8),
-                BitConverter.DoubleToInt64Bits(value));
-        }
-        return payload;
-    }
-
-    private static double[] DecodeF64Array(byte[] payload, string operation)
-    {
-        if (payload.Length % 8 != 0)
-        {
-            throw new OpenKacheException(
-                "PROTOCOL_ERROR",
-                    $"{operation} response has a malformed binary64 array length.");
-        }
-        var values = new double[payload.Length / 8];
-        for (var index = 0; index < values.Length; index++)
-        {
-            var value = BitConverter.Int64BitsToDouble(
-                BinaryPrimitives.ReadInt64BigEndian(payload.AsSpan(index * 8, 8)));
-            if (!double.IsFinite(value))
-            {
-                throw new OpenKacheException(
-                    "PROTOCOL_ERROR",
-                    $"{operation} response contains a non-finite binary64 value.");
-            }
-            values[index] = value;
-        }
-        return values;
-    }
-`
-    : ""
   return `// SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // Generated from the OpenKache Smithy client contract. Do not edit.
 
 using System.Text;
-using System.Buffers.Binary;
 
 namespace OpenKache;
 
 public sealed partial class Client
 {
-${f64_array_helpers}
 ${methods}
 }
 `
@@ -10740,21 +10156,12 @@ function rust_api_type(type: Api_Type, required: boolean): string {
     case "boolean":
       rendered = "bool"
       break
-    case "double":
-      rendered = "f64"
-      break
     case "enum":
       if (type.name === undefined) throw new Error("enum API type has no name")
       rendered = type.name
       break
     case "integer":
       rendered = "i32"
-      break
-    case "list":
-      if (type.member?.kind !== "double") {
-        throw new Error("Rust API only supports lists of f64 values")
-      }
-      rendered = "Vec<f64>"
       break
     case "long":
       rendered = "i64"
@@ -10771,35 +10178,6 @@ function rust_api_type(type: Api_Type, required: boolean): string {
       break
   }
   return required ? rendered : `Option<${rendered}>`
-}
-
-function rust_api_type_supports_eq(
-  contract: Client_Contract,
-  type: Api_Type,
-  visited = new Set<string>(),
-): boolean {
-  switch (type.kind) {
-    case "double":
-      return false
-    case "list":
-      return type.member === undefined
-        ? true
-        : rust_api_type_supports_eq(contract, type.member, visited)
-    case "structure": {
-      if (type.name === undefined || visited.has(type.name)) return true
-      const structure = contract.api.structures.find(
-        (candidate) => candidate.name === type.name,
-      )
-      if (structure === undefined) return true
-      const next_visited = new Set(visited)
-      next_visited.add(type.name)
-      return structure.members.every((member) =>
-        rust_api_type_supports_eq(contract, member.type, next_visited)
-      )
-    }
-    default:
-      return true
-  }
 }
 
 /** Renders Smithy operation types and an API trait for Rust.
@@ -10825,18 +10203,13 @@ ${members}
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ${structure.name};`
     }
-    const equality_derives = structure.members.every((member) =>
-      rust_api_type_supports_eq(contract, member.type)
-    )
-      ? "Eq, PartialEq"
-      : "PartialEq"
     const members = structure.members.map(
       (member) =>
         `    /// Smithy ${member.name} member.
     pub ${snake_case(member.name)}: ${rust_api_type(member.type, member.required)},`,
     )
     return `/// Smithy ${structure.name} structure.
-#[derive(Clone, Debug, ${equality_derives})]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ${structure.name} {
 ${members.join("\n")}
 }`
@@ -10989,7 +10362,6 @@ function render_rust_operation_method(
     "eviction_override",
     "rust",
   )
-  const application_value_codec = operation.plan.application_value_codec
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `            async fn ${method_name}(
@@ -11021,14 +10393,6 @@ function render_rust_operation_method(
           operation_field(operation, "output", "payload"),
           "rust",
         )
-        const encoded_payload = application_value_codec === "f64_array"
-          ? `smithy_encode_f64_array(&input.${input_payload})?`
-          : `input.${input_payload}.into_bytes()`
-        const decoded_payload = application_value_codec === "f64_array"
-          ? `smithy_decode_f64_array(&result.payload, "${operation_label}")?`
-          : `String::from_utf8(result.payload).map_err(|error| {
-                    Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
-                })?`
         return `            async fn ${method_name}(
                 &self,
                 input: smithy::${operation.input},
@@ -11037,7 +10401,7 @@ function render_rust_operation_method(
                     self,
                     openkache_client_core::Opcode::${operation.name},
                     [],
-                    ${encoded_payload},
+                    input.${input_payload}.into_bytes(),
                     openkache_client_core::SetOptions::new(),
                 )
                     .await?;
@@ -11046,7 +10410,9 @@ function render_rust_operation_method(
                     &[${result_constant("value")}],
                     "${operation_label}",
                 )?;
-                let payload = ${decoded_payload};
+                let payload = String::from_utf8(result.payload).map_err(|error| {
+                    Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
+                })?;
                 Ok(smithy::${operation.output} { ${output_payload}: payload })
             }`
       }
@@ -11271,52 +10637,9 @@ function render_rust_operation_method(
 
 /** Renders generated Rust operation implementations backed by the shared client core. */
 export function render_rust_operations(contract: Client_Contract): string {
-  const managed_operations = managed_operation_entries(contract)
-  const methods = managed_operations
+  const methods = managed_operation_entries(contract)
     .map((operation) => render_rust_operation_method(contract, operation))
     .join("\n\n")
-  const f64_array_helpers = has_application_value_codec(
-    managed_operations,
-    "f64_array",
-  )
-    ? `fn smithy_encode_f64_array(values: &[f64]) -> std::result::Result<Vec<u8>, Error> {
-    let mut payload = Vec::with_capacity(values.len() * 8);
-    for value in values {
-        if !value.is_finite() {
-            return Err(Error::Protocol(
-                "binary64 array input must contain finite values".into(),
-            ));
-        }
-        payload.extend_from_slice(&value.to_be_bytes());
-    }
-    Ok(payload)
-}
-
-fn smithy_decode_f64_array(
-    payload: &[u8],
-    operation: &str,
-) -> std::result::Result<Vec<f64>, Error> {
-    if payload.len() % 8 != 0 {
-        return Err(Error::Protocol(format!(
-            "{operation} response has a malformed binary64 array length",
-        )));
-    }
-    let mut values = Vec::with_capacity(payload.len() / 8);
-    for chunk in payload.chunks_exact(8) {
-        let value = f64::from_be_bytes(chunk.try_into().map_err(|_| {
-            Error::Protocol(format!("{operation} response has an invalid binary64 value"))
-        })?);
-        if !value.is_finite() {
-            return Err(Error::Protocol(format!(
-                "{operation} response contains a non-finite binary64 value",
-            )));
-        }
-        values.push(value);
-    }
-    Ok(values)
-}
-`
-    : ""
   return `// Generated from the OpenKache Smithy client contract. Do not edit.
 
 fn smithy_require_kind(
@@ -11332,8 +10655,6 @@ fn smithy_require_kind(
         result.kind,
     )))
 }
-
-${f64_array_helpers}
 
 macro_rules! impl_smithy_api {
     ($client:ident) => {
