@@ -15,8 +15,13 @@ type smithyClient struct {
 
 var _ SmithyOpenKacheAPI = smithyClient{}
 
-func smithySetOptions(input SmithySetInput) (SetOptions, error) {
-	if input.ExpirationMode == nil && input.TTLMilliseconds != nil {
+func smithySetOptions(
+	condition *SmithySetCondition,
+	expirationMode *SmithyExpirationMode,
+	ttlMilliseconds *uint64,
+	evictionMode *SmithyEvictionMode,
+) (SetOptions, error) {
+	if expirationMode == nil && ttlMilliseconds != nil {
 		return SetOptions{}, validationError(
 			"set.ttl_milliseconds",
 			fmt.Sprintf(
@@ -26,17 +31,17 @@ func smithySetOptions(input SmithySetInput) (SetOptions, error) {
 		)
 	}
 	options := SetOptions{}
-	if input.Condition != nil {
-		options.Condition = *input.Condition
+	if condition != nil {
+		options.Condition = *condition
 	}
-	if input.ExpirationMode != nil {
-		options.ExpirationMode = *input.ExpirationMode
+	if expirationMode != nil {
+		options.ExpirationMode = *expirationMode
 	}
-	if input.EvictionMode != nil {
-		options.EvictionMode = *input.EvictionMode
+	if evictionMode != nil {
+		options.EvictionMode = *evictionMode
 	}
-	if input.TTLMilliseconds != nil {
-		options.TTLMillis = *input.TTLMilliseconds
+	if ttlMilliseconds != nil {
+		options.TTLMillis = *ttlMilliseconds
 	}
 	if err := validateSetOptions(options); err != nil {
 		return SetOptions{}, err
@@ -45,45 +50,46 @@ func smithySetOptions(input SmithySetInput) (SetOptions, error) {
 }
 
 func smithyNamespacePolicyWire(
-	policy *SmithyNamespacePolicy,
+	defaultExpiration SmithyExpirationDefault,
+	defaultTTLMilliseconds *uint64,
+	expirationOverride SmithyOverridePolicy,
+	defaultEviction SmithyEvictionDefault,
+	evictionOverride SmithyOverridePolicy,
 ) (uint8, uint64, error) {
-	if policy == nil {
-		return 0, 0, nil
-	}
 	var flags uint8 = uint8(SmithyPolicyNoExpiry)
 	var ttl uint64
-	switch policy.DefaultExpiration {
+	switch defaultExpiration {
 	case SmithyExpirationDefaultNoExpiry:
-		if policy.DefaultTtlMilliseconds != nil {
+		if defaultTTLMilliseconds != nil {
 			return 0, 0, validationError(
 				"namespace.policy.default_ttl_milliseconds",
 				"is only valid with FixedTtl expiration",
 			)
 		}
 	case SmithyExpirationDefaultFixedTtl:
-		if policy.DefaultTtlMilliseconds == nil || *policy.DefaultTtlMilliseconds == 0 {
+		if defaultTTLMilliseconds == nil || *defaultTTLMilliseconds == 0 {
 			return 0, 0, validationError(
 				"namespace.policy.default_ttl_milliseconds",
 				"must be greater than zero with FixedTtl expiration",
 			)
 		}
 		flags |= uint8(SmithyPolicyFixedTTL)
-		ttl = *policy.DefaultTtlMilliseconds
+		ttl = *defaultTTLMilliseconds
 	default:
 		return 0, 0, validationError(
 			"namespace.policy.default_expiration",
 			"contains an unknown value",
 		)
 	}
-	if policy.ExpirationOverride == SmithyOverridePolicyAllowed {
+	if expirationOverride == SmithyOverridePolicyAllowed {
 		flags |= uint8(SmithyPolicyExpirationOverride)
-	} else if policy.ExpirationOverride != SmithyOverridePolicyDisallowed {
+	} else if expirationOverride != SmithyOverridePolicyDisallowed {
 		return 0, 0, validationError(
 			"namespace.policy.expiration_override",
 			"contains an unknown value",
 		)
 	}
-	switch policy.DefaultEviction {
+	switch defaultEviction {
 	case SmithyEvictionDefaultEvictable:
 	case SmithyEvictionDefaultEvictionProtected:
 		flags |= uint8(SmithyPolicyEvictionProtected)
@@ -93,9 +99,9 @@ func smithyNamespacePolicyWire(
 			"contains an unknown value",
 		)
 	}
-	if policy.EvictionOverride == SmithyOverridePolicyAllowed {
+	if evictionOverride == SmithyOverridePolicyAllowed {
 		flags |= uint8(SmithyPolicyEvictionOverride)
-	} else if policy.EvictionOverride != SmithyOverridePolicyDisallowed {
+	} else if evictionOverride != SmithyOverridePolicyDisallowed {
 		return 0, 0, validationError(
 			"namespace.policy.eviction_override",
 			"contains an unknown value",

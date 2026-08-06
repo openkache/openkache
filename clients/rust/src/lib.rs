@@ -108,10 +108,16 @@ fn smithy_set_options(
     Ok(options)
 }
 
-fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespacePolicy> {
-    let default_expiration = match policy.default_expiration {
+fn smithy_namespace_policy(
+    default_expiration: smithy::ExpirationDefault,
+    default_ttl_milliseconds: Option<u64>,
+    expiration_override: smithy::OverridePolicy,
+    default_eviction: smithy::EvictionDefault,
+    eviction_override: smithy::OverridePolicy,
+) -> Result<NamespacePolicy> {
+    let default_expiration = match default_expiration {
         smithy::ExpirationDefault::NoExpiry => {
-            if policy.default_ttl_milliseconds.is_some() {
+            if default_ttl_milliseconds.is_some() {
                 return Err(Error::Configuration {
                     field: "namespace.policy.default_ttl_milliseconds",
                     message: format!(
@@ -123,9 +129,7 @@ fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespaceP
             ExpirationDefault::NoExpiry
         }
         smithy::ExpirationDefault::FixedTtl => {
-            let ttl_ms = policy
-                .default_ttl_milliseconds
-                .ok_or_else(|| Error::Configuration {
+            let ttl_ms = default_ttl_milliseconds.ok_or_else(|| Error::Configuration {
                     field: "namespace.policy.default_ttl_milliseconds",
                     message: format!(
                         "is required with {} expiration",
@@ -143,15 +147,15 @@ fn smithy_namespace_policy(policy: smithy::NamespacePolicy) -> Result<NamespaceP
     };
     Ok(NamespacePolicy {
         default_expiration,
-        expiration_override: match policy.expiration_override {
+        expiration_override: match expiration_override {
             smithy::OverridePolicy::Allowed => OverridePolicy::Allowed,
             smithy::OverridePolicy::Disallowed => OverridePolicy::Disallowed,
         },
-        default_eviction: match policy.default_eviction {
+        default_eviction: match default_eviction {
             smithy::EvictionDefault::Evictable => EvictionDefault::Evictable,
             smithy::EvictionDefault::EvictionProtected => EvictionDefault::EvictionProtected,
         },
-        eviction_override: match policy.eviction_override {
+        eviction_override: match eviction_override {
             smithy::OverridePolicy::Allowed => OverridePolicy::Allowed,
             smithy::OverridePolicy::Disallowed => OverridePolicy::Disallowed,
         },

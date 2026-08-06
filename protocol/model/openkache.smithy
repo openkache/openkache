@@ -10,6 +10,44 @@ namespace openkache.protocol
 @trait(selector: "member")
 structure unsignedLong {}
 
+/// Semantic role consumed by generated client adapters.
+enum OperationFieldRole {
+    PAYLOAD = "payload"
+    NAMESPACE_ID = "namespace_id"
+    ITEM_ID = "item_id"
+    VALUE = "value"
+    CONDITION = "condition"
+    EXPIRATION_MODE = "expiration_mode"
+    TTL_MILLISECONDS = "ttl_milliseconds"
+    EVICTION_MODE = "eviction_mode"
+    EXPECTED_REVISION = "expected_revision"
+    NAME = "name"
+    CREATE_IF_MISSING = "create_if_missing"
+    POLICY = "policy"
+    OUTCOME = "outcome"
+    DELETED = "deleted"
+    JSON = "json"
+    DESCRIPTOR = "descriptor"
+    CREATED = "created"
+    REVISION = "revision"
+    DEFAULT_EXPIRATION = "default_expiration"
+    DEFAULT_TTL_MILLISECONDS = "default_ttl_milliseconds"
+    EXPIRATION_OVERRIDE = "expiration_override"
+    DEFAULT_EVICTION = "default_eviction"
+    EVICTION_OVERRIDE = "eviction_override"
+}
+
+/// Gives a Smithy member its language-neutral semantic role.
+///
+/// Generated clients use this role instead of reproducing member names in
+/// every language renderer. Renaming a member therefore changes the model
+/// shape without requiring operation-specific generator edits.
+@trait(selector: "member")
+structure operationField {
+    @required
+    role: OperationFieldRole
+}
+
 /// Request scope used by a generated operation contract.
 enum OperationScope {
     GLOBAL = "global"
@@ -465,70 +503,87 @@ structure PingOutput {}
 structure GetInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 
     @required
+    @operationField(role: "item_id")
     itemId: ItemId
 }
 
 structure GetOutput {
+    @operationField(role: "value")
     value: Value
 }
 
 structure SetInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 
     @required
+    @operationField(role: "item_id")
     itemId: ItemId
 
     @required
+    @operationField(role: "value")
     value: Value
 
+    @operationField(role: "condition")
     condition: SetCondition
 
+    @operationField(role: "expiration_mode")
     expirationMode: ExpirationMode
 
+    @operationField(role: "eviction_mode")
     evictionMode: EvictionMode
 
     @unsignedLong
+    @operationField(role: "ttl_milliseconds")
     ttlMilliseconds: Long
 }
 
 structure SetOutput {
     @required
+    @operationField(role: "outcome")
     outcome: SetOutcome
 }
 
 structure DeleteInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 
     @required
+    @operationField(role: "item_id")
     itemId: ItemId
 }
 
 structure DeleteOutput {
     @required
+    @operationField(role: "deleted")
     deleted: Boolean
 }
 
 structure StatsOutput {
     @required
+    @operationField(role: "json")
     json: String
 }
 
 structure StatsInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 }
 
 structure SyncInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 }
 
@@ -536,57 +591,70 @@ structure SyncOutput {}
 
 structure EchoInput {
     @required
+    @operationField(role: "payload")
     message: String
 }
 
 structure EchoOutput {
     @required
+    @operationField(role: "payload")
     message: String
 }
 
 structure NamespaceOpenInput {
     @required
+    @operationField(role: "name")
     name: String
 
     @required
+    @operationField(role: "create_if_missing")
     createIfMissing: Boolean
 
+    @operationField(role: "policy")
     policy: NamespacePolicy
 }
 
 structure NamespaceOpenOutput {
     @required
+    @operationField(role: "descriptor")
     descriptor: NamespaceDescriptor
 
     @required
+    @operationField(role: "created")
     created: Boolean
 }
 
 structure NamespaceUpdatePolicyInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 
     @required
     @unsignedLong
+    @operationField(role: "expected_revision")
     expectedRevision: Long
 
     @required
+    @operationField(role: "policy")
     policy: NamespacePolicy
 }
 
 structure NamespaceUpdatePolicyOutput {
     @required
+    @operationField(role: "descriptor")
     descriptor: NamespaceDescriptor
 }
 
 structure NamespaceDeleteInput {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 
     @required
     @unsignedLong
+    @operationField(role: "expected_revision")
     expectedRevision: Long
 }
 
@@ -595,30 +663,38 @@ structure NamespaceDeleteOutput {}
 structure NamespaceDescriptor {
     @required
     @unsignedLong
+    @operationField(role: "namespace_id")
     namespaceId: Long
 
     @required
     @unsignedLong
+    @operationField(role: "revision")
     revision: Long
 
     @required
+    @operationField(role: "policy")
     policy: NamespacePolicy
 }
 
 structure NamespacePolicy {
     @required
+    @operationField(role: "default_expiration")
     defaultExpiration: ExpirationDefault
 
     @unsignedLong
+    @operationField(role: "default_ttl_milliseconds")
     defaultTtlMilliseconds: Long
 
     @required
+    @operationField(role: "expiration_override")
     expirationOverride: OverridePolicy
 
     @required
+    @operationField(role: "default_eviction")
     defaultEviction: EvictionDefault
 
     @required
+    @operationField(role: "eviction_override")
     evictionOverride: OverridePolicy
 }
 

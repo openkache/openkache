@@ -2,6 +2,7 @@ import {
   load_native_module,
   type Native_Client,
   type Native_Client_Options,
+  type Native_Namespace_Policy,
 } from "./native-binding.js"
 import {
   assert_json_value,
@@ -814,33 +815,73 @@ function raw_operation_transport(
         )
       }
     },
-    namespace_open: async (input) => {
+    namespace_open: async (
+      name,
+      create_if_missing,
+      policy_default_expiration,
+      policy_expiration_override,
+      policy_default_eviction,
+      policy_eviction_override,
+      policy_default_ttl_milliseconds,
+    ) => {
       try {
+        const policy: Native_Namespace_Policy | undefined =
+          policy_default_expiration === undefined
+            ? undefined
+            : policy_expiration_override === undefined ||
+                policy_default_eviction === undefined ||
+                policy_eviction_override === undefined
+              ? (() => {
+                  throw new OpenKache_Error(
+                    "namespace policy is missing a required field",
+                  )
+                })()
+              : {
+                  default_expiration: policy_default_expiration,
+                  default_ttl_milliseconds: policy_default_ttl_milliseconds,
+                  expiration_override: policy_expiration_override,
+                  default_eviction: policy_default_eviction,
+                  eviction_override: policy_eviction_override,
+                }
         return await native_client.namespace_open(
-          input.name,
-          input.create_if_missing,
-          input.policy,
+          name,
+          create_if_missing,
+          policy,
         )
       } catch (error) {
         throw as_openkache_error(error)
       }
     },
-    namespace_update_policy: async (input) => {
+    namespace_update_policy: async (
+      namespace_id,
+      expected_revision,
+      default_expiration,
+      expiration_override,
+      default_eviction,
+      eviction_override,
+      default_ttl_milliseconds,
+    ) => {
       try {
         return await native_client.namespace_update_policy(
-          input.namespace_id,
-          input.expected_revision,
-          input.policy,
+          namespace_id,
+          expected_revision,
+          {
+            default_expiration,
+            default_ttl_milliseconds,
+            expiration_override,
+            default_eviction,
+            eviction_override,
+          },
         )
       } catch (error) {
         throw as_openkache_error(error)
       }
     },
-    namespace_delete: async (input) => {
+    namespace_delete: async (namespace_id, expected_revision) => {
       try {
         await native_client.namespace_delete(
-          input.namespace_id,
-          input.expected_revision,
+          namespace_id,
+          expected_revision,
         )
       } catch (error) {
         throw as_openkache_error(error)

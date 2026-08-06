@@ -320,6 +320,39 @@ pub struct OperationResult {
     pub payload: Vec<u8>,
 }
 
+pub(crate) fn operation_result(kind: contract::FfiResultKind, payload: Vec<u8>) -> OperationResult {
+    OperationResult {
+        kind: kind.code(),
+        payload,
+    }
+}
+
+pub(crate) fn operation_get_result<T: Into<Vec<u8>>>(
+    outcome: GetOutcome<T>,
+) -> OperationResult {
+    match outcome {
+        GetOutcome::Found(value) => operation_result(contract::FfiResultKind::Value, value.into()),
+        GetOutcome::NotFound => operation_result(contract::FfiResultKind::NotFound, Vec::new()),
+    }
+}
+
+pub(crate) fn operation_set_result(outcome: SetOutcome) -> OperationResult {
+    let kind = match outcome {
+        SetOutcome::Created => contract::FfiResultKind::Created,
+        SetOutcome::Replaced => contract::FfiResultKind::Replaced,
+        SetOutcome::NotStored => contract::FfiResultKind::NotStored,
+    };
+    operation_result(kind, Vec::new())
+}
+
+pub(crate) fn operation_delete_result(outcome: DeleteOutcome) -> OperationResult {
+    let kind = match outcome {
+        DeleteOutcome::Deleted => contract::FfiResultKind::Deleted,
+        DeleteOutcome::NotFound => contract::FfiResultKind::NotDeleted,
+    };
+    operation_result(kind, Vec::new())
+}
+
 /// Successful lookup result, separate from transport or protocol failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GetOutcome<T> {
@@ -1288,82 +1321,52 @@ macro_rules! raw_client_methods {
                             }
                             _ => unreachable!("global response kind checked above"),
                         };
-                        Ok(OperationResult {
-                            kind: kind.code(),
-                            payload: match contract.response_kind {
+                        Ok(operation_result(kind, match contract.response_kind {
                                 contract::OperationResponseKind::ApplicationValue => {
                                     response.payload
                                 }
                                 contract::OperationResponseKind::Pong
                                 | contract::OperationResponseKind::Empty => Vec::new(),
                                 _ => unreachable!("global response kind checked above"),
-                            },
-                        })
+                            }))
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::Value,
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        Ok(match self.get(item_id).await? {
-                            GetOutcome::Found(value) => OperationResult {
-                                kind: contract::FfiResultKind::Value.code(),
-                                payload: value.into_bytes(),
-                            },
-                            GetOutcome::NotFound => OperationResult {
-                                kind: contract::FfiResultKind::NotFound.code(),
-                                payload: Vec::new(),
-                            },
-                        })
+                        Ok(operation_get_result(self.get(item_id).await?))
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::SetOutcome,
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        let result = match self
-                            .set(item_id, ItemValue::new(value.as_ref().to_vec()), set_options)
-                            .await?
-                        {
-                            SetOutcome::Created => contract::FfiResultKind::Created,
-                            SetOutcome::Replaced => contract::FfiResultKind::Replaced,
-                            SetOutcome::NotStored => contract::FfiResultKind::NotStored,
-                        };
-                        Ok(OperationResult {
-                            kind: result.code(),
-                            payload: Vec::new(),
-                        })
+                        Ok(operation_set_result(
+                            self.set(item_id, ItemValue::new(value.as_ref().to_vec()), set_options)
+                                .await?,
+                        ))
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::DeleteOutcome,
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        let result = match self.delete(item_id).await? {
-                            DeleteOutcome::Deleted => contract::FfiResultKind::Deleted,
-                            DeleteOutcome::NotFound => contract::FfiResultKind::NotDeleted,
-                        };
-                        Ok(OperationResult {
-                            kind: result.code(),
-                            payload: Vec::new(),
-                        })
+                        Ok(operation_delete_result(self.delete(item_id).await?))
                     }
                     (
                         contract::OperationRequestKind::ScopedNamespace,
                         contract::OperationResponseKind::StatsJson,
-                    ) => Ok(OperationResult {
-                        kind: contract::FfiResultKind::Value.code(),
-                        payload: self.stats().await?.into_bytes(),
-                    }),
+                    ) => Ok(operation_result(
+                        contract::FfiResultKind::Value,
+                        self.stats().await?.into_bytes(),
+                    )),
                     (
                         contract::OperationRequestKind::ScopedNamespace,
                         contract::OperationResponseKind::Empty,
                     ) => {
                         self.sync().await?;
-                        Ok(OperationResult {
-                            kind: contract::FfiResultKind::Ok.code(),
-                            payload: Vec::new(),
-                        })
+                        Ok(operation_result(contract::FfiResultKind::Ok, Vec::new()))
                     }
                     _ => Err(Error::configuration(
                         "operation",
@@ -1409,70 +1412,47 @@ macro_rules! raw_client_methods {
                         contract::OperationResponseKind::Value,
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        Ok(match self.get_in_namespace(namespace_id, item_id).await? {
-                            GetOutcome::Found(value) => OperationResult {
-                                kind: contract::FfiResultKind::Value.code(),
-                                payload: value.into_bytes(),
-                            },
-                            GetOutcome::NotFound => OperationResult {
-                                kind: contract::FfiResultKind::NotFound.code(),
-                                payload: Vec::new(),
-                            },
-                        })
+                        Ok(operation_get_result(
+                            self.get_in_namespace(namespace_id, item_id).await?,
+                        ))
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::SetOutcome,
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        let result = match self
-                            .set_in_namespace(
+                        Ok(operation_set_result(
+                            self.set_in_namespace(
                                 namespace_id,
                                 item_id,
                                 ItemValue::new(value.as_ref().to_vec()),
                                 set_options,
                             )
-                            .await?
-                        {
-                            SetOutcome::Created => contract::FfiResultKind::Created,
-                            SetOutcome::Replaced => contract::FfiResultKind::Replaced,
-                            SetOutcome::NotStored => contract::FfiResultKind::NotStored,
-                        };
-                        Ok(OperationResult {
-                            kind: result.code(),
-                            payload: Vec::new(),
-                        })
+                            .await?,
+                        ))
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::DeleteOutcome,
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
-                        let result = match self.delete_in_namespace(namespace_id, item_id).await? {
-                            DeleteOutcome::Deleted => contract::FfiResultKind::Deleted,
-                            DeleteOutcome::NotFound => contract::FfiResultKind::NotDeleted,
-                        };
-                        Ok(OperationResult {
-                            kind: result.code(),
-                            payload: Vec::new(),
-                        })
+                        Ok(operation_delete_result(
+                            self.delete_in_namespace(namespace_id, item_id).await?,
+                        ))
                     }
                     (
                         contract::OperationRequestKind::ScopedNamespace,
                         contract::OperationResponseKind::StatsJson,
-                    ) => Ok(OperationResult {
-                        kind: contract::FfiResultKind::Value.code(),
-                        payload: self.stats_in_namespace(namespace_id).await?.into_bytes(),
-                    }),
+                    ) => Ok(operation_result(
+                        contract::FfiResultKind::Value,
+                        self.stats_in_namespace(namespace_id).await?.into_bytes(),
+                    )),
                     (
                         contract::OperationRequestKind::ScopedNamespace,
                         contract::OperationResponseKind::Empty,
                     ) => {
                         self.sync_in_namespace(namespace_id).await?;
-                        Ok(OperationResult {
-                            kind: contract::FfiResultKind::Ok.code(),
-                            payload: Vec::new(),
-                        })
+                        Ok(operation_result(contract::FfiResultKind::Ok, Vec::new()))
                     }
                     _ => Err(Error::configuration(
                         "operation",

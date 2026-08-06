@@ -1178,21 +1178,17 @@ public actor OpenKacheRawClient {
     }
 
     internal func smithyNamespaceOpen(
-        _ input: Smithy_Namespace_Open_Input
+        name: String,
+        createIfMissing: Bool,
+        policyFlags: UInt8,
+        ttl: UInt64
     ) async throws -> (descriptor: Smithy_Namespace_Descriptor, created: Bool) {
-        if input.createIfMissing && input.policy == nil {
-            throw OpenKacheError("namespace policy is required when createIfMissing is true")
-        }
-        if !input.createIfMissing && input.policy != nil {
-            throw OpenKacheError("namespace policy is only valid when createIfMissing is true")
-        }
-        let (flags, ttl) = try smithyPolicyFlags(input.policy)
         return try await perform { handle in
             let result = try NativeBridge.namespaceOpen(
                 handle,
-                name: input.name,
-                createIfMissing: input.createIfMissing,
-                policyFlags: flags,
+                name: name,
+                createIfMissing: createIfMissing,
+                policyFlags: policyFlags,
                 ttl: ttl
             )
             return try consumeResult(result) { kind, payload in
@@ -1212,15 +1208,17 @@ public actor OpenKacheRawClient {
     }
 
     internal func smithyNamespaceUpdatePolicy(
-        _ input: Smithy_Namespace_Update_Policy_Input
+        namespaceID: UInt64,
+        expectedRevision: UInt64,
+        policyFlags: UInt8,
+        ttl: UInt64
     ) async throws -> Smithy_Namespace_Descriptor {
-        let (flags, ttl) = try smithyPolicyFlags(input.policy)
         return try await perform { handle in
             let result = try NativeBridge.namespaceUpdatePolicy(
                 handle,
-                namespaceID: input.namespaceId,
-                expectedRevision: input.expectedRevision,
-                policyFlags: flags,
+                namespaceID: namespaceID,
+                expectedRevision: expectedRevision,
+                policyFlags: policyFlags,
                 ttl: ttl
             )
             return try consumeResult(result) { kind, payload in
@@ -1315,44 +1313,45 @@ private func smithySetFlags(
     return (flags, ttlMilliseconds ?? 0)
 }
 
-private func smithyPolicyFlags(
-    _ policy: Smithy_Namespace_Policy?
+internal func smithyPolicyFlags(
+    defaultExpiration: Smithy_Expiration_Default,
+    defaultTtlMilliseconds: UInt64?,
+    expirationOverride: Smithy_Override_Policy,
+    defaultEviction: Smithy_Eviction_Default,
+    evictionOverride: Smithy_Override_Policy
 ) throws -> (flags: UInt8, ttl: UInt64) {
-    guard let policy else {
-        return (0, 0)
-    }
     var flags: UInt8
-    switch policy.defaultExpiration {
+    switch defaultExpiration {
     case .noExpiry:
-        guard policy.defaultTtlMilliseconds == nil else {
+        guard defaultTtlMilliseconds == nil else {
             throw OpenKacheError("defaultTtlMilliseconds is invalid with noExpiry")
         }
         flags = Smithy_Value_Format.policyNoExpiry
     case .fixedTtl:
-        guard let ttl = policy.defaultTtlMilliseconds, ttl > 0 else {
+        guard let ttl = defaultTtlMilliseconds, ttl > 0 else {
             throw OpenKacheError("defaultTtlMilliseconds must be positive with fixedTtl")
         }
         flags = Smithy_Value_Format.policyFixedTtl
     }
-    switch policy.expirationOverride {
+    switch expirationOverride {
     case .allowed:
         flags |= Smithy_Value_Format.policyExpirationOverride
     case .disallowed:
         break
     }
-    switch policy.defaultEviction {
+    switch defaultEviction {
     case .evictable:
         break
     case .evictionProtected:
         flags |= Smithy_Value_Format.policyEvictionProtected
     }
-    switch policy.evictionOverride {
+    switch evictionOverride {
     case .allowed:
         flags |= Smithy_Value_Format.policyEvictionOverride
     case .disallowed:
         break
     }
-    return (flags, policy.defaultTtlMilliseconds ?? 0)
+    return (flags, defaultTtlMilliseconds ?? 0)
 }
 
 private func smithyNamespaceDescriptor(

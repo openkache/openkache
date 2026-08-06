@@ -182,42 +182,18 @@ macro_rules! protected_client_methods {
                 (
                     crate::contract::OperationRequestKind::ScopedItem,
                     crate::contract::OperationResponseKind::Value,
-                ) => Ok(match self.get(application_key).await? {
-                    GetOutcome::Found(value) => crate::OperationResult {
-                        kind: crate::contract::FfiResultKind::Value.code(),
-                        payload: value,
-                    },
-                    GetOutcome::NotFound => crate::OperationResult {
-                        kind: crate::contract::FfiResultKind::NotFound.code(),
-                        payload: Vec::new(),
-                    },
-                }),
+                ) => Ok(crate::operation_get_result(self.get(application_key).await?)),
                 (
                     crate::contract::OperationRequestKind::ScopedItem,
                     crate::contract::OperationResponseKind::SetOutcome,
-                ) => Ok(crate::OperationResult {
-                    kind: match self
-                        .set(application_key, value.as_ref().to_vec(), set_options)
-                        .await?
-                    {
-                        SetOutcome::Created => crate::contract::FfiResultKind::Created,
-                        SetOutcome::Replaced => crate::contract::FfiResultKind::Replaced,
-                        SetOutcome::NotStored => crate::contract::FfiResultKind::NotStored,
-                    }
-                    .code(),
-                    payload: Vec::new(),
-                }),
+                ) => Ok(crate::operation_set_result(
+                    self.set(application_key, value.as_ref().to_vec(), set_options)
+                        .await?,
+                )),
                 (
                     crate::contract::OperationRequestKind::ScopedItem,
                     crate::contract::OperationResponseKind::DeleteOutcome,
-                ) => Ok(crate::OperationResult {
-                    kind: match self.delete(application_key).await? {
-                        DeleteOutcome::Deleted => crate::contract::FfiResultKind::Deleted,
-                        DeleteOutcome::NotFound => crate::contract::FfiResultKind::NotDeleted,
-                    }
-                    .code(),
-                    payload: Vec::new(),
-                }),
+                ) => Ok(crate::operation_delete_result(self.delete(application_key).await?)),
                 (
                     crate::contract::OperationRequestKind::ScopedNamespace,
                     crate::contract::OperationResponseKind::StatsJson
@@ -254,15 +230,12 @@ macro_rules! protected_client_methods {
                     Ok(match self.raw.get_in_namespace(namespace_id, item_id).await? {
                         GetOutcome::Found(value) => {
                             let value = self.protection.open(item_id, value)?;
-                            crate::OperationResult {
-                                kind: crate::contract::FfiResultKind::Value.code(),
-                                payload: value,
-                            }
+                            crate::operation_result(crate::contract::FfiResultKind::Value, value)
                         }
-                        GetOutcome::NotFound => crate::OperationResult {
-                            kind: crate::contract::FfiResultKind::NotFound.code(),
-                            payload: Vec::new(),
-                        },
+                        GetOutcome::NotFound => crate::operation_result(
+                            crate::contract::FfiResultKind::NotFound,
+                            Vec::new(),
+                        ),
                     })
                 }
                 (
@@ -271,33 +244,20 @@ macro_rules! protected_client_methods {
                 ) => {
                     let item_id = self.protection.item_id(application_key.as_ref());
                     let value = self.protection.seal_owned(item_id, value.as_ref().to_vec())?;
-                    Ok(crate::OperationResult {
-                        kind: match self
-                            .raw
+                    Ok(crate::operation_set_result(
+                        self.raw
                             .set_in_namespace(namespace_id, item_id, value, set_options)
-                            .await?
-                        {
-                            SetOutcome::Created => crate::contract::FfiResultKind::Created,
-                            SetOutcome::Replaced => crate::contract::FfiResultKind::Replaced,
-                            SetOutcome::NotStored => crate::contract::FfiResultKind::NotStored,
-                        }
-                        .code(),
-                        payload: Vec::new(),
-                    })
+                            .await?,
+                    ))
                 }
                 (
                     crate::contract::OperationRequestKind::ScopedItem,
                     crate::contract::OperationResponseKind::DeleteOutcome,
                 ) => {
                     let item_id = self.protection.item_id(application_key);
-                    Ok(crate::OperationResult {
-                        kind: match self.raw.delete_in_namespace(namespace_id, item_id).await? {
-                            DeleteOutcome::Deleted => crate::contract::FfiResultKind::Deleted,
-                            DeleteOutcome::NotFound => crate::contract::FfiResultKind::NotDeleted,
-                        }
-                        .code(),
-                        payload: Vec::new(),
-                    })
+                    Ok(crate::operation_delete_result(
+                        self.raw.delete_in_namespace(namespace_id, item_id).await?,
+                    ))
                 }
                 (
                     crate::contract::OperationRequestKind::ScopedNamespace,

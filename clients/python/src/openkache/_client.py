@@ -753,22 +753,36 @@ class _RawOperationTransport(SmithyOperationTransport):
             )
 
     async def namespace_open(
-        self, input: SmithyNamespaceOpenInput
+        self,
+        *,
+        name: str,
+        create_if_missing: bool,
+        policy_default_expiration: SmithyExpirationDefault | None,
+        policy_default_ttl_milliseconds: int | None,
+        policy_expiration_override: SmithyOverridePolicy | None,
+        policy_default_eviction: SmithyEvictionDefault | None,
+        policy_eviction_override: SmithyOverridePolicy | None,
     ) -> SmithyNamespaceOpenOutput:
-        if input.create_if_missing and input.policy is None:
+        if create_if_missing and policy_default_expiration is None:
             raise OpenKacheValueError(
                 "namespace policy is required when create_if_missing is true"
             )
-        if not input.create_if_missing and input.policy is not None:
+        if not create_if_missing and policy_default_expiration is not None:
             raise OpenKacheValueError(
                 "namespace policy is only valid when create_if_missing is true"
             )
-        policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
+        policy_flags, ttl_ms = _namespace_policy_wire(
+            policy_default_expiration,
+            policy_default_ttl_milliseconds,
+            policy_expiration_override,
+            policy_default_eviction,
+            policy_eviction_override,
+        )
         try:
             kind, payload = await asyncio.to_thread(
                 self._owner._native.namespace_open,
-                name=input.name.encode("utf-8"),
-                create_if_missing=input.create_if_missing,
+                name=name.encode("utf-8"),
+                create_if_missing=create_if_missing,
                 policy_flags=policy_flags,
                 ttl_ms=ttl_ms,
             )
@@ -789,14 +803,28 @@ class _RawOperationTransport(SmithyOperationTransport):
         )
 
     async def namespace_update_policy(
-        self, input: SmithyNamespaceUpdatePolicyInput
+        self,
+        *,
+        namespace_id: int,
+        expected_revision: int,
+        default_expiration: SmithyExpirationDefault,
+        default_ttl_milliseconds: int | None,
+        expiration_override: SmithyOverridePolicy,
+        default_eviction: SmithyEvictionDefault,
+        eviction_override: SmithyOverridePolicy,
     ) -> SmithyNamespaceDescriptor:
-        policy_flags, ttl_ms = _namespace_policy_wire(input.policy)
+        policy_flags, ttl_ms = _namespace_policy_wire(
+            default_expiration,
+            default_ttl_milliseconds,
+            expiration_override,
+            default_eviction,
+            eviction_override,
+        )
         try:
             kind, payload = await asyncio.to_thread(
                 self._owner._native.namespace_update_policy,
-                namespace_id=input.namespace_id,
-                expected_revision=input.expected_revision,
+                namespace_id=namespace_id,
+                expected_revision=expected_revision,
                 policy_flags=policy_flags,
                 ttl_ms=ttl_ms,
             )
@@ -815,12 +843,14 @@ class _RawOperationTransport(SmithyOperationTransport):
             raise OpenKacheError(str(error)) from error
         return _namespace_descriptor(decoded)
 
-    async def namespace_delete(self, input: SmithyNamespaceDeleteInput) -> None:
+    async def namespace_delete(
+        self, *, namespace_id: int, expected_revision: int
+    ) -> None:
         try:
             await asyncio.to_thread(
                 self._owner._native.namespace_delete,
-                namespace_id=input.namespace_id,
-                expected_revision=input.expected_revision,
+                namespace_id=namespace_id,
+                expected_revision=expected_revision,
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
@@ -1110,19 +1140,41 @@ def _is_exact_binary64_integer(value: int) -> bool:
 
 
 def _namespace_policy_wire(
-    policy: SmithyNamespacePolicy | None,
+    default_expiration: SmithyExpirationDefault | None,
+    default_ttl_milliseconds: int | None,
+    expiration_override: SmithyOverridePolicy | None,
+    default_eviction: SmithyEvictionDefault | None,
+    eviction_override: SmithyOverridePolicy | None,
 ) -> tuple[int, int]:
-    if policy is None:
+    if default_expiration is None:
+        if any(
+            value is not None
+            for value in (
+                default_ttl_milliseconds,
+                expiration_override,
+                default_eviction,
+                eviction_override,
+            )
+        ):
+            raise OpenKacheValueError(
+                "namespace policy fields require default_expiration"
+            )
         return 0, 0
     try:
-        default_expiration = SmithyExpirationDefault(policy.default_expiration)
-        expiration_override = SmithyOverridePolicy(policy.expiration_override)
-        default_eviction = SmithyEvictionDefault(policy.default_eviction)
-        eviction_override = SmithyOverridePolicy(policy.eviction_override)
+        default_expiration = SmithyExpirationDefault(default_expiration)
+        if expiration_override is None:
+            raise ValueError("expiration_override is missing")
+        expiration_override = SmithyOverridePolicy(expiration_override)
+        if default_eviction is None:
+            raise ValueError("default_eviction is missing")
+        default_eviction = SmithyEvictionDefault(default_eviction)
+        if eviction_override is None:
+            raise ValueError("eviction_override is missing")
+        eviction_override = SmithyOverridePolicy(eviction_override)
     except ValueError as error:
         raise OpenKacheValueError(f"invalid namespace policy enum: {error}") from error
     flags = SMITHY_POLICY_NO_EXPIRY
-    ttl_ms = policy.default_ttl_milliseconds
+    ttl_ms = default_ttl_milliseconds
     if default_expiration is SmithyExpirationDefault.NO_EXPIRY:
         if ttl_ms is not None:
             raise OpenKacheValueError(
