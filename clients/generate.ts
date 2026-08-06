@@ -10595,7 +10595,7 @@ export function render_csharp_operations(contract: Client_Contract): string {
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
-                $"\${operation} response has a malformed binary64 array length.");
+                    $"{operation} response has a malformed binary64 array length.");
         }
         var values = new double[payload.Length / 8];
         for (var index = 0; index < values.Length; index++)
@@ -10606,7 +10606,7 @@ export function render_csharp_operations(contract: Client_Contract): string {
             {
                 throw new OpenKacheException(
                     "PROTOCOL_ERROR",
-                    $"\${operation} response contains a non-finite binary64 value.");
+                    $"{operation} response contains a non-finite binary64 value.");
             }
             values[index] = value;
         }
