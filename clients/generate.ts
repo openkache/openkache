@@ -97,7 +97,11 @@ type Known_Operation_Field_Role =
   | "payload"
   | "namespace_id"
   | "item_id"
+  | "item_id_a"
+  | "item_id_b"
   | "value"
+  | "value_a"
+  | "value_b"
   | "condition"
   | "expiration_mode"
   | "ttl_milliseconds"
@@ -185,7 +189,11 @@ export interface Api_Contract {
 }
 
 /** Native binding ABI identifiers shared by language-neutral adapters. */
-type Ffi_Input_Kind = "none" | "application_key" | "item_id"
+type Ffi_Input_Kind =
+  | "none"
+  | "application_key"
+  | "item_id"
+  | "item_id_pair"
 
 /** Native dispatch and buffer contract for one FFI operation. */
 export interface Ffi_Operation_Contract {
@@ -1011,6 +1019,9 @@ function operation_field_requirements(
         )
       }
       break
+    case "scoped_item_pair":
+      input("namespace_id", "item_id_a", "item_id_b")
+      break
     case "scoped_namespace":
       input("namespace_id")
       break
@@ -1036,6 +1047,9 @@ function operation_field_requirements(
       break
     case "value":
       output("value")
+      break
+    case "value_pair":
+      output("value_a", "value_b")
       break
     case "set_outcome":
       output("outcome")
@@ -1177,9 +1191,9 @@ function ffi_operation_contract(
     "inputKind",
     `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (!["none", "application_key", "item_id"].includes(input_kind)) {
+  if (!["none", "application_key", "item_id", "item_id_pair"].includes(input_kind)) {
     throw new Error(
-      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}.inputKind must be none, application_key, or item_id`,
+      `${location}.${FFI_OPERATION_CONTRACT_TRAIT_ID}.inputKind must be none, application_key, item_id, or item_id_pair`,
     )
   }
   return {
@@ -2522,6 +2536,16 @@ function protocol_ffi_operation_contract(
         supports_scoped: true,
         dedicated_abi: false,
       }
+    case "scoped_item_pair":
+      return {
+        input_kind: "item_id_pair",
+        accepts_value: false,
+        accepts_set_options: false,
+        supports_protected: false,
+        supports_raw: true,
+        supports_scoped: true,
+        dedicated_abi: false,
+      }
     case "scoped_namespace":
       return {
         input_kind: "none",
@@ -2601,6 +2625,7 @@ pub enum FfiInputKind {
     None,
     ApplicationKey,
     ItemId,
+    ItemIdPair,
 }
 
 /// Native dispatch and buffer contract for one FFI operation.
@@ -3440,12 +3465,24 @@ function render_java_operation_metadata(
     (operation) => operation.input_kind === "item_id",
     (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
   )
+  const item_pair = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.input_kind === "item_id_pair",
+    (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
+  )
   const scoped_clause = scoped.length > 0
     ? `case ${scoped} -> true;\n            default -> false;`
     : "default -> false;"
   const item_clause = item.length > 0
     ? `case ${item} -> true;\n            default -> false;`
     : "default -> false;"
+  const item_bytes_clause = [
+    ...(item.length > 0 ? [`case ${item} -> ${values.item_id_bytes};`] : []),
+    ...(item_pair.length > 0
+      ? [`case ${item_pair} -> ${values.item_id_bytes * 2};`]
+      : []),
+    "default -> 0;",
+  ].join("\n            ")
   return `    /** Returns whether the Smithy operation is valid on the scoped exact-ID ABI. */
     public static boolean operationSupportsScoped(int operation) {
         return switch (operation) {
@@ -3457,6 +3494,13 @@ function render_java_operation_metadata(
     public static boolean operationRequiresItemId(int operation) {
         return switch (operation) {
             ${item_clause}
+        };
+    }
+
+    /** Returns the exact item-ID byte span required by the scoped ABI. */
+    public static int operationItemIdBytes(int operation) {
+        return switch (operation) {
+            ${item_bytes_clause}
         };
     }
 `
@@ -3476,12 +3520,22 @@ function render_kotlin_operation_metadata(
     (operation) => operation.input_kind === "item_id",
     (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
   )
+  const item_pair = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.input_kind === "item_id_pair",
+    (operation) => `OPERATION_${snake_case(operation.name).toUpperCase()}`,
+  )
   const scoped_clause = scoped.length > 0
     ? `${scoped} -> true\n        else -> false`
     : "else -> false"
   const item_clause = item.length > 0
     ? `${item} -> true\n        else -> false`
     : "else -> false"
+  const item_bytes_clause = [
+    ...(item.length > 0 ? [`${item} -> ITEM_ID_BYTES`] : []),
+    ...(item_pair.length > 0 ? [`${item_pair} -> ITEM_ID_BYTES * 2`] : []),
+    "else -> 0",
+  ].join("\n        ")
   return `    /** Returns whether the Smithy operation is valid on the scoped exact-ID ABI. */
     public fun operationSupportsScoped(operation: Int): Boolean = when (operation) {
         ${scoped_clause}
@@ -3490,6 +3544,11 @@ function render_kotlin_operation_metadata(
     /** Returns whether the scoped ABI requires one exact item ID. */
     public fun operationRequiresItemId(operation: Int): Boolean = when (operation) {
         ${item_clause}
+    }
+
+    /** Returns the exact item-ID byte span required by the scoped ABI. */
+    public fun operationItemIdBytes(operation: Int): Int = when (operation) {
+        ${item_bytes_clause}
     }
 `
 }
@@ -3508,12 +3567,24 @@ function render_dart_operation_metadata(
     (operation) => operation.input_kind === "item_id",
     (operation) => `smithyOperation${pascal_case(snake_case(operation.name))}`,
   )
+  const item_pair = operation_cases(
+    values.operation_contracts,
+    (operation) => operation.input_kind === "item_id_pair",
+    (operation) => `smithyOperation${pascal_case(snake_case(operation.name))}`,
+  )
   const scoped_clause = scoped.length > 0
     ? `${scoped.replaceAll(", ", " || ")} => true,\n  _ => false,`
     : "_ => false,"
   const item_clause = item.length > 0
     ? `${item.replaceAll(", ", " || ")} => true,\n  _ => false,`
     : "_ => false,"
+  const item_bytes_clause = [
+    ...(item.length > 0 ? [`${item.replaceAll(", ", " || ")} => smithyItemIdBytes,`] : []),
+    ...(item_pair.length > 0
+      ? [`${item_pair.replaceAll(", ", " || ")} => smithyItemIdBytes * 2,`]
+      : []),
+    "_ => 0,",
+  ].join("\n  ")
   return `/// Returns whether the Smithy operation is valid on the scoped exact-ID ABI.
 bool smithyOperationSupportsScoped(int operation) => switch (operation) {
   ${scoped_clause}
@@ -3522,6 +3593,11 @@ bool smithyOperationSupportsScoped(int operation) => switch (operation) {
 /// Returns whether the scoped ABI requires one exact item ID.
 bool smithyOperationRequiresItemId(int operation) => switch (operation) {
   ${item_clause}
+};
+
+/// Returns the exact item-ID byte span required by the scoped ABI.
+int smithyOperationItemIdBytes(int operation) => switch (operation) {
+  ${item_bytes_clause}
 };
 `
 }
@@ -4445,6 +4521,7 @@ type Operation_Request_Route =
   | "global_empty"
   | "global_application_value"
   | "scoped_item"
+  | "scoped_item_pair"
   | "scoped_namespace"
   | "namespace_open"
   | "namespace_update_policy"
@@ -4473,6 +4550,7 @@ const OPERATION_REQUEST_ROUTES: Readonly<
   empty: "global_empty",
   application_value: "global_application_value",
   scoped_item: "scoped_item",
+  scoped_item_pair: "scoped_item_pair",
   scoped_namespace: "scoped_namespace",
   namespace_open: "namespace_open",
   namespace_update_policy: "namespace_update_policy",
@@ -4493,6 +4571,7 @@ const OPERATION_RESULT_KINDS: Readonly<
   pong: ["ok"],
   application_value: ["value"],
   value: ["value", "not_found"],
+  value_pair: ["value"],
   set_outcome: ["created", "replaced", "not_stored"],
   delete_outcome: ["deleted", "not_deleted"],
   stats_json: ["value"],
@@ -4760,7 +4839,11 @@ const OPERATION_FIELD_DEFAULT_NAMES: Record<Known_Operation_Field_Role, string> 
   payload: "message",
   namespace_id: "namespaceId",
   item_id: "itemId",
+  item_id_a: "itemIdA",
+  item_id_b: "itemIdB",
   value: "value",
+  value_a: "valueA",
+  value_b: "valueB",
   condition: "condition",
   expiration_mode: "expirationMode",
   ttl_milliseconds: "ttlMilliseconds",
@@ -4934,6 +5017,18 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     "item_id",
     "java",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "java",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "java",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "java")
   const input_condition = operation_field_name_for(
     operation,
@@ -5039,6 +5134,23 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
             }
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             return new ${operation.output}(result.payload());
+        });
+    }`
+    case "value_pair":
+      return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.${input_namespace_id}(),
+                smithyConcatItemIds(input.${input_item_id_a}(), input.${input_item_id_b}()),
+                new byte[0],
+                0,
+                0);
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
+            byte[][] values = smithyDecodeValuePair(result.payload(), "${operation_label}");
+            return new ${operation.output}(values[0], values[1]);
         });
     }`
     case "set_outcome":
@@ -5224,6 +5336,52 @@ export function render_java_operations(contract: Client_Contract): string {
     }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `    private static byte[] smithyConcatItemIds(byte[] first, byte[] second) {
+        Objects.requireNonNull(first, "first item ID");
+        Objects.requireNonNull(second, "second item ID");
+        if (first.length != SmithyContract.ITEM_ID_BYTES
+            || second.length != SmithyContract.ITEM_ID_BYTES) {
+            throw new OpenKacheClientException("item IDs must contain exactly "
+                + SmithyContract.ITEM_ID_BYTES + " bytes");
+        }
+        byte[] combined = new byte[first.length + second.length];
+        System.arraycopy(first, 0, combined, 0, first.length);
+        System.arraycopy(second, 0, combined, first.length, second.length);
+        return combined;
+    }
+
+    private static byte[][] smithyDecodeValuePair(byte[] payload, String operation) {
+        ByteBuffer buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
+        byte[][] values = new byte[2][];
+        for (int index = 0; index < values.length; index++) {
+            if (buffer.remaining() < Integer.BYTES) {
+                throw new OpenKacheClientException(
+                    operation + " response is missing a value-pair length");
+            }
+            long length = Integer.toUnsignedLong(buffer.getInt());
+            if (length == 0xffff_ffffL) {
+                values[index] = null;
+                continue;
+            }
+            if (length > buffer.remaining()) {
+                throw new OpenKacheClientException(
+                    operation + " response contains a truncated value-pair entry");
+            }
+            byte[] value = new byte[(int) length];
+            buffer.get(value);
+            values[index] = value;
+        }
+        if (buffer.hasRemaining()) {
+            throw new OpenKacheClientException(
+                operation + " response contains trailing value-pair bytes");
+        }
+        return values;
+    }
+`
+    : ""
   const set_condition = structure_field_name_for(
     contract,
     "SetInput",
@@ -5333,6 +5491,7 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
     String smithyDecodeUtf8(byte[] payload, String operation);
 
 ${f64_array_helpers}
+${value_pair_helpers}
 
     ${methods}
 
@@ -5455,6 +5614,18 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
     "item_id",
     "kotlin",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "kotlin",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "kotlin",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "kotlin")
   const input_expected_revision = operation_field_name_for(
     operation,
@@ -5471,6 +5642,18 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "kotlin")
   const output_value = operation_field_name_for(operation, "output", "value", "kotlin")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "kotlin",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "kotlin",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -5550,6 +5733,20 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 ${result_constant("not_found")} -> ${operation.output}(${output_value} = null)
                 else -> throw smithyUnexpectedKind("${operation_label}", result.kind)
             }
+        }`
+    case "value_pair":
+      return `${prefix}            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.${input_namespace_id},
+                smithyConcatItemIds(input.${input_item_id_a}, input.${input_item_id_b}),
+                byteArrayOf(),
+            )
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
+            val values = smithyDecodeValuePair(result.payload, "${operation_label}")
+            return ${operation.output}(
+                ${output_value_a} = values[0],
+                ${output_value_b} = values[1],
+            )
         }`
     case "set_outcome":
       return `${prefix}            val flags = smithySetFlags(input)
@@ -5698,6 +5895,40 @@ export function render_kotlin_operations(contract: Client_Contract): string {
     }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `    private fun smithyConcatItemIds(first: ByteArray, second: ByteArray): ByteArray {
+        require(first.size == SmithyContract.ITEM_ID_BYTES
+            && second.size == SmithyContract.ITEM_ID_BYTES) {
+            "item IDs must contain exactly \${SmithyContract.ITEM_ID_BYTES} bytes"
+        }
+        return first + second
+    }
+
+    private fun smithyDecodeValuePair(payload: ByteArray, operation: String): Array<ByteArray?> {
+        val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
+        val values = arrayOfNulls<ByteArray>(2)
+        for (index in values.indices) {
+            require(buffer.remaining() >= Integer.BYTES) {
+                "\$operation response is missing a value-pair length"
+            }
+            val length = buffer.int.toLong() and 0xffff_ffffL
+            if (length == 0xffff_ffffL) continue
+            require(length <= buffer.remaining()) {
+                "\$operation response contains a truncated value-pair entry"
+            }
+            val value = ByteArray(length.toInt())
+            buffer.get(value)
+            values[index] = value
+        }
+        require(!buffer.hasRemaining()) {
+            "\$operation response contains trailing value-pair bytes"
+        }
+        return values
+    }
+`
+    : ""
   const set_condition = structure_field_name_for(
     contract,
     "SetInput",
@@ -5807,6 +6038,8 @@ public interface SmithyGeneratedOperations : SmithyOpenKacheApi {
 
 ${f64_array_helpers}
 
+${value_pair_helpers}
+
 ${methods}
 
     private fun smithySetFlags(input: SetInput): Pair<Int, Long> {
@@ -5907,6 +6140,18 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     "item_id",
     "dart",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "dart",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "dart",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "dart")
   const input_expected_revision = operation_field_name_for(
     operation,
@@ -5923,6 +6168,18 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "dart")
   const output_value = operation_field_name_for(operation, "output", "value", "dart")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "dart",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "dart",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -6001,6 +6258,20 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     }
     _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
       return ${operation.output}(${output_value}: result.payload);
+  });`
+    case "value_pair":
+      return `${prefix}    final result = _invokeScoped(
+      ${operation_constant},
+      input.${input_namespace_id},
+      _smithyConcatItemIds(input.${input_item_id_a}, input.${input_item_id_b}),
+      const <int>[],
+    );
+    _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
+    final values = _smithyDecodeValuePair(result.payload, '${operation_label}');
+    return ${operation.output}(
+      ${output_value_a}: values[0],
+      ${output_value_b}: values[1],
+    );
   });`
     case "set_outcome":
       return `${prefix}    final flags = _smithySetFlags(input);
@@ -6177,6 +6448,49 @@ List<double> _smithyDecodeF64Array(List<int> payload, String operation) {
 }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `List<int> _smithyConcatItemIds(List<int> first, List<int> second) {
+  if (first.length != smithyItemIdBytes || second.length != smithyItemIdBytes) {
+    throw ArgumentError('item IDs must contain exactly \$smithyItemIdBytes bytes');
+  }
+  return <int>[...first, ...second];
+}
+
+List<List<int>?> _smithyDecodeValuePair(List<int> payload, String operation) {
+  final data = ByteData.sublistView(Uint8List.fromList(payload));
+  final values = <List<int>?>[];
+  var offset = 0;
+  for (var index = 0; index < 2; index++) {
+    if (offset + 4 > payload.length) {
+      throw OpenKacheClientException(
+        '\$operation response is missing a value-pair length',
+      );
+    }
+    final length = data.getUint32(offset, Endian.big);
+    offset += 4;
+    if (length == 0xffffffff) {
+      values.add(null);
+      continue;
+    }
+    if (length > payload.length - offset) {
+      throw OpenKacheClientException(
+        '\$operation response contains a truncated value-pair entry',
+      );
+    }
+    values.add(payload.sublist(offset, offset + length));
+    offset += length;
+  }
+  if (offset != payload.length) {
+    throw OpenKacheClientException(
+      '\$operation response contains trailing value-pair bytes',
+    );
+  }
+  return values;
+}
+`
+    : ""
   const set_condition = structure_field_name_for(
     contract,
     "SetInput",
@@ -6348,6 +6662,8 @@ String _smithyDecodeUtf8(List<int> payload, String operation) {
 }
 
 ${f64_array_helpers}
+
+${value_pair_helpers}
 
 void _smithyRequireKind(_NativeResult result, int expected, String operation) {
   if (result.kind != expected) {
@@ -6980,6 +7296,18 @@ function render_typescript_operation_method(
     "item_id",
     "typescript",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "typescript",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "typescript",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "typescript")
   const input_condition = operation_field_name_for(
     operation,
@@ -7060,6 +7388,18 @@ function render_typescript_operation_method(
     "typescript",
   )
   const output_value = operation_field_name_for(operation, "output", "value", "typescript")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "typescript",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "typescript",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -7137,6 +7477,25 @@ function render_typescript_operation_method(
     return result.kind === ${result_constant("not_found")}
       ? {}
       : { ${output_value}: result.payload };
+  }`
+    case "value_pair":
+      return `  async ${method_name}(
+    input: ${typescript_api_name(operation.input)},
+  ): Promise<${typescript_api_name(operation.output)}> {
+    this.#transport.assert_open();
+    const result = await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.${input_namespace_id},
+      {
+        item_id: smithy_concat_item_ids(input.${input_item_id_a}, input.${input_item_id_b}),
+        expected_kinds: [${result_kinds}],
+      },
+    );
+    const values = smithy_decode_value_pair(result.payload, ${operation_value});
+    return {
+      ${output_value_a}: values[0],
+      ${output_value_b}: values[1],
+    };
   }`
     case "set_outcome":
       return `  async ${method_name}(
@@ -7323,6 +7682,49 @@ function smithy_decode_f64_array(payload: Uint8Array, operation: number): readon
 }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `function smithy_concat_item_ids(first: Uint8Array, second: Uint8Array): Uint8Array {
+  if (first.byteLength !== ${contract.item_id_bytes} || second.byteLength !== ${contract.item_id_bytes}) {
+    throw new Error("item IDs must contain exactly ${contract.item_id_bytes} bytes");
+  }
+  const combined = new Uint8Array(first.byteLength + second.byteLength);
+  combined.set(first, 0);
+  combined.set(second, first.byteLength);
+  return combined;
+}
+
+function smithy_decode_value_pair(
+  payload: Uint8Array,
+  operation: number,
+): readonly [Uint8Array | undefined, Uint8Array | undefined] {
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const values: Array<Uint8Array | undefined> = [];
+  let offset = 0;
+  for (let index = 0; index < 2; index++) {
+    if (offset + 4 > payload.byteLength) {
+      throw new Error(\`operation \${operation} response is missing a value-pair length\`);
+    }
+    const length = view.getUint32(offset, false);
+    offset += 4;
+    if (length === 0xffff_ffff) {
+      values.push(undefined);
+      continue;
+    }
+    if (length > payload.byteLength - offset) {
+      throw new Error(\`operation \${operation} response contains a truncated value-pair entry\`);
+    }
+    values.push(payload.slice(offset, offset + length));
+    offset += length;
+  }
+  if (offset !== payload.byteLength) {
+    throw new Error(\`operation \${operation} response contains trailing value-pair bytes\`);
+  }
+  return [values[0], values[1]];
+}
+`
+    : ""
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 import type {
@@ -7355,6 +7757,8 @@ export interface Smithy_Operation_Result {
 }
 
 ${f64_array_helpers}
+
+${value_pair_helpers}
 
 /** Native-facing hooks used by generated Smithy operations. */
 export interface Smithy_Operation_Transport {
@@ -7528,7 +7932,9 @@ export function render_go_contract(contract: Client_Contract): string {
     )
     .join("\n")
   const item_id_operations = contract.api.operations.filter(
-    (operation) => operation.contract?.request_kind === "scoped_item",
+    (operation) =>
+      operation.contract?.request_kind === "scoped_item"
+      || operation.contract?.request_kind === "scoped_item_pair",
   )
   const item_id_cases = item_id_operations
     .map((operation) => `SmithyOpcode${operation.name}`)
@@ -7761,6 +8167,18 @@ function render_go_operation_method(
     "item_id",
     "go",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "go",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "go",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "go")
   const input_condition = operation_field_name_for(
     operation,
@@ -7801,6 +8219,18 @@ function render_go_operation_method(
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "go")
   const output_value = operation_field_name_for(operation, "output", "value", "go")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "go",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "go",
+  )
   const output_outcome = operation_field_name_for(operation, "output", "outcome", "go")
   const output_deleted = operation_field_name_for(operation, "output", "deleted", "go")
   const output_json = operation_field_name_for(operation, "output", "json", "go")
@@ -7936,6 +8366,38 @@ function render_go_operation_method(
 		return ${output}{}, err
 	}
 	return ${output}{${output_value}: &value}, nil
+}`
+    case "value_pair":
+      return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+	itemIDs, err := smithyConcatItemIDs(input.${input_item_id_a}, input.${input_item_id_b})
+	if err != nil {
+		return ${output}{}, err
+	}
+	result, err := s.client.invokeScopedBytes(
+		ctx,
+		${opcode},
+		input.${input_namespace_id},
+		itemIDs,
+		nil,
+		SetOptions{},
+	)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	if result.kind != ${result_constant("value")} {
+		return ${output}{}, unexpectedResult("${label}", result.kind)
+	}
+	values, err := smithyDecodeValuePair(result.data)
+	if err != nil {
+		return ${output}{}, operationError("${label}", err)
+	}
+	return ${output}{
+		${output_value_a}: values[0],
+		${output_value_b}: values[1],
+	}, nil
 }`
     case "set_outcome":
       return `func (s smithyClient) ${method}(
@@ -8192,6 +8654,48 @@ func smithyDecodeF64Array(payload []byte) ([]float64, error) {
 }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `func smithyConcatItemIDs(first, second []byte) ([]byte, error) {
+	if len(first) != SmithyItemIDBytes || len(second) != SmithyItemIDBytes {
+		return nil, validationError(
+			"item_id",
+			fmt.Sprintf("each pair member must contain exactly %d bytes", SmithyItemIDBytes),
+		)
+	}
+	combined := make([]byte, 0, len(first)+len(second))
+	combined = append(combined, first...)
+	combined = append(combined, second...)
+	return combined, nil
+}
+
+func smithyDecodeValuePair(payload []byte) ([2]*[]byte, error) {
+	var values [2]*[]byte
+	offset := 0
+	for index := range values {
+		if len(payload)-offset < 4 {
+			return values, validationError("value_pair", "response is missing an entry length")
+		}
+		length := binary.BigEndian.Uint32(payload[offset : offset+4])
+		offset += 4
+		if length == ^uint32(0) {
+			continue
+		}
+		if uint64(length) > uint64(len(payload)-offset) {
+			return values, validationError("value_pair", "response contains a truncated entry")
+		}
+		value := append([]byte(nil), payload[offset:offset+int(length)]...)
+		values[index] = &value
+		offset += int(length)
+	}
+	if offset != len(payload) {
+		return values, validationError("value_pair", "response contains trailing bytes")
+	}
+	return values, nil
+}
+`
+    : ""
   return `// Code generated from the OpenKache Smithy client contract. DO NOT EDIT.
 
 package openkache
@@ -8199,12 +8703,15 @@ package openkache
 import (
 	"context"
 	"encoding/binary"
+${value_pair_helpers.length > 0 ? '\t"fmt"\n' : ""}
 	"math"
 )
 
 ${methods}
 
 ${f64_array_helpers}
+
+${value_pair_helpers}
 `
 }
 
@@ -8412,6 +8919,18 @@ function render_python_operation_method(
     "item_id",
     "python",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "python",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "python",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "python")
   const input_condition = operation_field_name_for(
     operation,
@@ -8438,6 +8957,18 @@ function render_python_operation_method(
     "python",
   )
   const output_value = operation_field_name_for(operation, "output", "value", "python")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "python",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "python",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -8561,6 +9092,20 @@ function render_python_operation_method(
             ${output_value}=None
             if kind == ${result_constant("not_found")}
             else payload
+        )`
+    case "value_pair":
+      return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        self._smithy_transport.assert_open()
+        kind, payload = await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.${input_namespace_id},
+            item_id=_smithy_concat_item_ids(input.${input_item_id_a}, input.${input_item_id_b}),
+            expected_kinds=(${result_kinds},),
+        )
+        values = _smithy_decode_value_pair(payload, ${operation_value})
+        return ${output}(
+            ${output_value_a}=values[0],
+            ${output_value_b}=values[1],
         )`
     case "set_outcome":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
@@ -8733,6 +9278,38 @@ def _smithy_decode_f64_array(payload: bytes, operation: int) -> list[float]:
     return values
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `def _smithy_concat_item_ids(first: bytes, second: bytes) -> bytes:
+    if len(first) != ${contract.item_id_bytes} or len(second) != ${contract.item_id_bytes}:
+        raise ValueError("item IDs must contain exactly ${contract.item_id_bytes} bytes")
+    return first + second
+
+
+def _smithy_decode_value_pair(
+    payload: bytes,
+    operation: int,
+) -> tuple[bytes | None, bytes | None]:
+    values: list[bytes | None] = []
+    offset = 0
+    for _ in range(2):
+        if len(payload) - offset < 4:
+            raise ValueError(f"operation {operation} response is missing a value-pair length")
+        length = int.from_bytes(payload[offset:offset + 4], "big")
+        offset += 4
+        if length == 0xFFFF_FFFF:
+            values.append(None)
+            continue
+        if length > len(payload) - offset:
+            raise ValueError(f"operation {operation} response contains a truncated value-pair entry")
+        values.append(payload[offset:offset + length])
+        offset += length
+    if offset != len(payload):
+        raise ValueError(f"operation {operation} response contains trailing value-pair bytes")
+    return values[0], values[1]
+`
+    : ""
   return `# Generated from the OpenKache Smithy contract. Do not edit.
 
 from __future__ import annotations
@@ -8756,6 +9333,7 @@ from .smithy_contract import (
 )
 
 ${f64_array_helpers}
+${value_pair_helpers}
 class SmithyOperationTransport(Protocol):
     """Native-facing hooks used by generated Smithy operations."""
 
@@ -9461,6 +10039,18 @@ function render_swift_operation_method(
     "item_id",
     "swift",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "swift",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "swift",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "swift")
   const input_condition = operation_field_name_for(
     operation,
@@ -9501,6 +10091,18 @@ function render_swift_operation_method(
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "swift")
   const output_value = operation_field_name_for(operation, "output", "value", "swift")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "swift",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "swift",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -9626,6 +10228,27 @@ function render_swift_operation_method(
     default:
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
+  }`
+    case "value_pair":
+      return `  public func ${method_name}(
+    _ input: ${input}
+  ) async throws -> ${output} {
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.${input_namespace_id},
+      itemID: smithyConcatItemIDs(input.${input_item_id_a}, input.${input_item_id_b})
+    )
+    guard result.kind == ${result_constant("value")} else {
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
+    let values = try smithyDecodeValuePair(
+      result.payload,
+      operation: "${operation_label}"
+    )
+    return ${output}(
+      ${output_value_a}: values.first,
+      ${output_value_b}: values.second
+    )
   }`
     case "set_outcome":
       return `  public func ${method_name}(
@@ -9816,11 +10439,59 @@ private func smithyDecodeF64Array(
 }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `private func smithyConcatItemIDs(_ first: Data, _ second: Data) -> Data {
+  precondition(
+    first.count == Smithy_Value_Format.itemIdBytes
+      && second.count == Smithy_Value_Format.itemIdBytes,
+    "item IDs must contain exactly \(Smithy_Value_Format.itemIdBytes) bytes"
+  )
+  var combined = Data(capacity: first.count + second.count)
+  combined.append(first)
+  combined.append(second)
+  return combined
+}
+
+private func smithyDecodeValuePair(
+  _ payload: Data,
+  operation: String
+) throws -> (first: Data?, second: Data?) {
+  var offset = 0
+  var values: [Data?] = []
+  for _ in 0..<2 {
+    guard payload.count - offset >= 4 else {
+      throw OpenKacheError("\(operation) response is missing a value-pair length")
+    }
+    let length = payload[offset..<(offset + 4)].reduce(UInt32(0)) {
+      ($0 << 8) | UInt32($1)
+    }
+    offset += 4
+    if length == UInt32.max {
+      values.append(nil)
+      continue
+    }
+    let count = Int(length)
+    guard count <= payload.count - offset else {
+      throw OpenKacheError("\(operation) response contains a truncated value-pair entry")
+    }
+    values.append(Data(payload[offset..<(offset + count)]))
+    offset += count
+  }
+  guard offset == payload.count else {
+    throw OpenKacheError("\(operation) response contains trailing value-pair bytes")
+  }
+  return (values[0], values[1])
+}
+`
+    : ""
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
 import Foundation
 
 ${f64_array_helpers}
+${value_pair_helpers}
 extension OpenKacheRawClient: Smithy_OpenKache_Api {
 ${methods}
 }
@@ -10161,6 +10832,18 @@ function render_csharp_operation_method_body(
     "item_id",
     "csharp",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "csharp",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "csharp",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "csharp")
   const input_condition = operation_field_name_for(
     operation,
@@ -10201,6 +10884,18 @@ function render_csharp_operation_method_body(
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "csharp")
   const output_value = operation_field_name_for(operation, "output", "value", "csharp")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "csharp",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "csharp",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -10330,6 +11025,26 @@ function render_csharp_operation_method_body(
                 var kind when kind == ${result_constant("not_found")} => null,
                 _ => throw UnexpectedKind("${label}", result.Kind),
             },
+        };
+    }`
+    case "value_pair":
+      return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
+        Smithy.${operation.input} input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.${operation.name},
+            input.${input_namespace_id},
+            ValidateItemIdPair(ConcatItemIds(input.${input_item_id_a}, input.${input_item_id_b})),
+            ReadOnlyMemory<byte>.Empty,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("${label}", result, ${result_constant("value")});
+        var values = DecodeValuePair(result.Payload, "${label}");
+        return new Smithy.${operation.output}
+        {
+            ${output_value_a} = values.First,
+            ${output_value_b} = values.Second,
         };
     }`
     case "set_outcome":
@@ -10614,6 +11329,73 @@ export function render_csharp_operations(contract: Client_Contract): string {
     }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `    private static byte[] ConcatItemIds(byte[] first, byte[] second)
+    {
+        if (first.Length != Protocol.ItemIdBytes || second.Length != Protocol.ItemIdBytes)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"item IDs must contain exactly {Protocol.ItemIdBytes} bytes.");
+        }
+        var combined = new byte[first.Length + second.Length];
+        first.CopyTo(combined, 0);
+        second.CopyTo(combined, first.Length);
+        return combined;
+    }
+
+    private static byte[] ValidateItemIdPair(byte[] itemId)
+    {
+        if (itemId.Length != Protocol.ItemIdBytes * 2)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"item ID pair must contain exactly {Protocol.ItemIdBytes * 2} bytes.");
+        }
+        return itemId;
+    }
+
+    private static (byte[]? First, byte[]? Second) DecodeValuePair(
+        byte[] payload,
+        string operation)
+    {
+        var values = new byte[]?[2];
+        var offset = 0;
+        for (var index = 0; index < values.Length; index++)
+        {
+            if (payload.Length - offset < 4)
+            {
+                throw new OpenKacheException(
+                    "PROTOCOL_ERROR",
+                    $"{operation} response is missing a value-pair length.");
+            }
+            var length = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(offset, 4));
+            offset += 4;
+            if (length == uint.MaxValue)
+            {
+                continue;
+            }
+            if (length > (uint)(payload.Length - offset))
+            {
+                throw new OpenKacheException(
+                    "PROTOCOL_ERROR",
+                    $"{operation} response contains a truncated value-pair entry.");
+            }
+            values[index] = payload.AsSpan(offset, checked((int)length)).ToArray();
+            offset += checked((int)length);
+        }
+        if (offset != payload.Length)
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"{operation} response contains trailing value-pair bytes.");
+        }
+        return (values[0], values[1]);
+    }
+`
+    : ""
   return `// SPDX-FileCopyrightText: 2026 OpenStd Inc.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10627,6 +11409,7 @@ namespace OpenKache;
 public sealed partial class Client
 {
 ${f64_array_helpers}
+${value_pair_helpers}
 ${methods}
 }
 `
@@ -10889,6 +11672,18 @@ function render_rust_operation_method(
     "item_id",
     "rust",
   )
+  const input_item_id_a = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_a",
+    "rust",
+  )
+  const input_item_id_b = operation_field_name_for(
+    operation,
+    "input",
+    "item_id_b",
+    "rust",
+  )
   const input_value = operation_field_name_for(operation, "input", "value", "rust")
   const input_condition = operation_field_name_for(
     operation,
@@ -10929,6 +11724,18 @@ function render_rust_operation_method(
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "rust")
   const output_value = operation_field_name_for(operation, "output", "value", "rust")
+  const output_value_a = operation_field_name_for(
+    operation,
+    "output",
+    "value_a",
+    "rust",
+  )
+  const output_value_b = operation_field_name_for(
+    operation,
+    "output",
+    "value_b",
+    "rust",
+  )
   const output_outcome = operation_field_name_for(
     operation,
     "output",
@@ -11080,6 +11887,38 @@ function render_rust_operation_method(
                     Some(result.payload)
                 };
                 Ok(smithy::${operation.output} { ${output_value}: value })
+            }`
+    case "value_pair":
+      return `            async fn ${method_name}(
+                &self,
+                input: smithy::${operation.input},
+            ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
+                let item_ids = smithy_concat_item_ids(
+                    &input.${input_item_id_a},
+                    &input.${input_item_id_b},
+                )?;
+                let result = $client::execute_scoped(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    input.${input_namespace_id},
+                    item_ids,
+                    [],
+                    SetOptions::new(),
+                )
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[${result_constant("value")}],
+                    "${operation_label}",
+                )?;
+                let (value_a, value_b) = smithy_decode_value_pair(
+                    &result.payload,
+                    "${operation_label}",
+                )?;
+                Ok(smithy::${operation.output} {
+                    ${output_value_a}: value_a,
+                    ${output_value_b}: value_b,
+                })
             }`
     case "set_outcome":
       return `            async fn ${method_name}(
@@ -11317,6 +12156,70 @@ fn smithy_decode_f64_array(
 }
 `
     : ""
+  const value_pair_helpers = managed_operations.some(
+    (operation) => operation.plan.result_plan.response_kind === "value_pair",
+  )
+    ? `fn smithy_concat_item_ids(
+    first: &[u8],
+    second: &[u8],
+) -> std::result::Result<Vec<u8>, Error> {
+    if first.len() != openkache_client_core::ITEM_ID_BYTES
+        || second.len() != openkache_client_core::ITEM_ID_BYTES
+    {
+        return Err(Error::Protocol(format!(
+            "item IDs must contain exactly {} bytes",
+            openkache_client_core::ITEM_ID_BYTES,
+        )));
+    }
+    let mut combined = Vec::with_capacity(first.len() + second.len());
+    combined.extend_from_slice(first);
+    combined.extend_from_slice(second);
+    Ok(combined)
+}
+
+fn smithy_decode_value_pair(
+    payload: &[u8],
+    operation: &str,
+) -> std::result::Result<(Option<Vec<u8>>, Option<Vec<u8>>), Error> {
+    let mut values = [None, None];
+    let mut offset = 0;
+    for value in &mut values {
+        let end = offset.checked_add(4).ok_or_else(|| {
+            Error::Protocol(format!("{operation} response has an invalid value-pair length"))
+        })?;
+        let length = u32::from_be_bytes(payload.get(offset..end).ok_or_else(|| {
+            Error::Protocol(format!(
+                "{operation} response is missing a value-pair length",
+            ))
+        })?.try_into().map_err(|_| {
+            Error::Protocol(format!("{operation} response has an invalid value-pair length"))
+        })?);
+        offset = end;
+        if length == u32::MAX {
+            continue;
+        }
+        let length = usize::try_from(length).map_err(|_| {
+            Error::Protocol(format!("{operation} response has an oversized value-pair entry"))
+        })?;
+        let end = offset.checked_add(length).ok_or_else(|| {
+            Error::Protocol(format!("{operation} response has an oversized value-pair entry"))
+        })?;
+        *value = Some(payload.get(offset..end).ok_or_else(|| {
+            Error::Protocol(format!(
+                "{operation} response contains a truncated value-pair entry",
+            ))
+        })?.to_vec());
+        offset = end;
+    }
+    if offset != payload.len() {
+        return Err(Error::Protocol(format!(
+            "{operation} response contains trailing value-pair bytes",
+        )));
+    }
+    Ok((values[0].take(), values[1].take()))
+}
+`
+    : ""
   return `// Generated from the OpenKache Smithy client contract. Do not edit.
 
 fn smithy_require_kind(
@@ -11334,6 +12237,8 @@ fn smithy_require_kind(
 }
 
 ${f64_array_helpers}
+
+${value_pair_helpers}
 
 macro_rules! impl_smithy_api {
     ($client:ident) => {
