@@ -150,6 +150,7 @@ impl KeyResolver {
         match input {
             KeyInput::Portable(key) => self.space.resolve(key),
             KeyInput::ConfiguredLogical(bytes) => self.space.resolve_logical_bytes(&bytes),
+            #[cfg(feature = "ffi")]
             KeyInput::TypedLogical { spec, bytes } => {
                 KeySpace::new(spec).resolve_logical_bytes(&bytes)
             }
@@ -221,6 +222,7 @@ pub(crate) enum KeyInput {
     /// Logical bytes interpreted using the resolver's configured key space.
     ConfiguredLogical(Vec<u8>),
     /// Logical bytes carrying an explicit ABI key-space discriminator.
+    #[cfg(feature = "ffi")]
     TypedLogical {
         spec: KeySpec,
         bytes: Vec<u8>,
@@ -239,6 +241,7 @@ impl KeyInput {
         Self::ConfiguredLogical(bytes)
     }
 
+    #[cfg(feature = "ffi")]
     pub(crate) fn typed_logical(spec: KeySpec, bytes: Vec<u8>) -> Self {
         Self::TypedLogical { spec, bytes }
     }
@@ -271,10 +274,9 @@ impl KeyInput {
     pub(crate) fn into_exact_bytes(self) -> Option<Vec<u8>> {
         match self {
             Self::Canonical(bytes) => Some(bytes),
-            Self::Portable(_)
-            | Self::ConfiguredLogical(_)
-            | Self::TypedLogical { .. }
-            | Self::CanonicalInSpace(_) => None,
+            Self::Portable(_) | Self::ConfiguredLogical(_) | Self::CanonicalInSpace(_) => None,
+            #[cfg(feature = "ffi")]
+            Self::TypedLogical { .. } => None,
         }
     }
 }
