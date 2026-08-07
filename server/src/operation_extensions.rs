@@ -96,10 +96,7 @@ pub(super) fn application_value(opcode: Opcode, value: Vec<u8>) -> Option<Extens
 pub(super) const fn handles(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        Opcode::Get2
-            | Opcode::ExperimentalEcho
-            | Opcode::ExperimentalReverse
-            | Opcode::SquareArray
+        Opcode::Get2 | Opcode::ExperimentalEcho | Opcode::ExperimentalReverse | Opcode::SquareArray
     )
 }
 

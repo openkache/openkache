@@ -15,6 +15,7 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
+  OPERATION_EFFECTS,
   OPERATION_RETRY_MODES,
   OPERATION_SCOPES,
   derive_wire_request_layout,
@@ -117,11 +118,9 @@ type Known_Operation_Field_Role =
   | "eviction_override"
 
 /**
- * Roles are declared by the Smithy OperationFieldRole enum.
- *
  * Keep the well-known roles typed for renderer convenience, but retain the
  * string boundary so adding a model-only role does not require a generator
- * union edit before extraction can validate and preserve it.
+ * union edit before extraction can preserve it.
  */
 type Operation_Field_Role = string
 
@@ -131,6 +130,7 @@ type Api_Operation_Scope = Api_Operation_Contract["scope"]
 type Api_Operation_Request_Kind = Api_Operation_Contract["request_kind"]
 type Api_Operation_Response_Kind = Api_Operation_Contract["response_kind"]
 type Api_Operation_Retry_Mode = Api_Operation_Contract["retry_mode"]
+type Api_Operation_Effect = Api_Operation_Contract["effect"]
 
 /** One resolved Smithy API field type. */
 export interface Api_Type {
@@ -630,43 +630,8 @@ function api_type(
   }
 }
 
-const OPERATION_FIELD_ROLE_SHAPE_ID = "openkache.protocol#OperationFieldRole"
-
-function smithy_operation_field_roles(shapes: Json_Object): readonly string[] {
-  const shape = object_member(
-    shapes,
-    OPERATION_FIELD_ROLE_SHAPE_ID,
-    "Smithy AST.shapes",
-  )
-  if (shape_type(shape, `Smithy AST.shapes.${OPERATION_FIELD_ROLE_SHAPE_ID}`) !== "enum") {
-    throw new Error(`${OPERATION_FIELD_ROLE_SHAPE_ID} must be an enum`)
-  }
-  const members = object_member(shape, "members", OPERATION_FIELD_ROLE_SHAPE_ID)
-  const roles = Object.entries(members).map(([name, value]) => {
-    const member = object_value(value, `${OPERATION_FIELD_ROLE_SHAPE_ID}.${name}`)
-    const traits = object_member(
-      member,
-      "traits",
-      `${OPERATION_FIELD_ROLE_SHAPE_ID}.${name}`,
-    )
-    return string_member(
-      traits,
-      "smithy.api#enumValue",
-      `${OPERATION_FIELD_ROLE_SHAPE_ID}.${name}.traits`,
-    )
-  })
-  if (roles.length === 0) {
-    throw new Error(`${OPERATION_FIELD_ROLE_SHAPE_ID} must define at least one role`)
-  }
-  if (new Set(roles).size !== roles.length) {
-    throw new Error(`${OPERATION_FIELD_ROLE_SHAPE_ID} must not define duplicate roles`)
-  }
-  return roles
-}
-
 function operation_field_role(
   member_traits: Json_Object | undefined,
-  operation_field_roles: readonly string[],
   location: string,
 ): Operation_Field_Role | undefined {
   const value = member_traits?.[OPERATION_FIELD_TRAIT_ID]
@@ -677,18 +642,12 @@ function operation_field_role(
     "role",
     `${location}.${OPERATION_FIELD_TRAIT_ID}`,
   )
-  if (!operation_field_roles.includes(role)) {
-    throw new Error(
-      `${location}.${OPERATION_FIELD_TRAIT_ID}.role must be one of ${operation_field_roles.join(", ")}`,
-    )
-  }
   return role as Operation_Field_Role
 }
 
 function api_structure(
   shapes: Json_Object,
   target: string,
-  operation_field_roles: readonly string[],
 ): Api_Structure {
   const shape = object_member(shapes, target, "Smithy AST.shapes")
   if (shape_type(shape, `Smithy AST.shapes.${target}`) !== "structure") {
@@ -702,7 +661,6 @@ function api_structure(
       const traits = optional_object_member(member, "traits", `${target}.${name}`)
       const field_role = operation_field_role(
         traits,
-        operation_field_roles,
         `${target}.${name}`,
       )
       return {
@@ -736,16 +694,6 @@ function operation_contract(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
     )
   }
-  const request_kind = string_member(
-    contract,
-    "requestKind",
-    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-  )
-  const response_kind = string_member(
-    contract,
-    "responseKind",
-    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-  )
   const retry_mode = string_member(
     contract,
     "retryMode",
@@ -754,6 +702,16 @@ function operation_contract(
   if (!OPERATION_RETRY_MODES.includes(retry_mode as Api_Operation_Retry_Mode)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
+    )
+  }
+  const effect = string_member(
+    contract,
+    "effect",
+    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+  )
+  if (!OPERATION_EFFECTS.includes(effect as Api_Operation_Effect)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.effect must be read_only, mutation, or barrier`,
     )
   }
   const statuses = (member: string): readonly string[] => {
@@ -787,12 +745,17 @@ function operation_contract(
   return {
     error_statuses,
     request_fields: [],
-    request_kind: request_kind as Api_Operation_Request_Kind,
+    request_kind: typeof contract["requestKind"] === "string"
+      ? contract["requestKind"] as Api_Operation_Request_Kind
+      : "",
     request_item_count: 0,
     response_fields: [],
     response_value_count: 0,
-    response_kind: response_kind as Api_Operation_Response_Kind,
+    response_kind: typeof contract["responseKind"] === "string"
+      ? contract["responseKind"] as Api_Operation_Response_Kind
+      : "",
     retry_mode: retry_mode as Api_Operation_Retry_Mode,
+    effect: effect as Api_Operation_Effect,
     scope: scope as Api_Operation_Scope,
     success_statuses,
   }
@@ -841,7 +804,6 @@ function api_contract(
   shapes: Json_Object,
   service_shape_id: string,
   namespace: string,
-  operation_field_roles: readonly string[],
   fallback_operation_names?: readonly string[],
   protocol_operations?: readonly {
     readonly contract: Api_Operation_Contract
@@ -908,7 +870,6 @@ function api_contract(
     const structure = api_structure(
       shapes,
       `${namespace}#${name}`,
-      operation_field_roles,
     )
     structures_by_name.set(name, structure)
     for (const member of structure.members) {
@@ -1328,7 +1289,6 @@ function namespace_descriptor_contract(
   const descriptor = api_structure(
     shapes,
     `${namespace}#FfiNamespaceDescriptor`,
-    [],
   )
   if (descriptor.members.length === 0) {
     throw new Error("Smithy FfiNamespaceDescriptor must define at least one member")
@@ -1973,7 +1933,6 @@ export function extract_client_contract(
   const client_namespace = client_service_id.slice(0, client_service_id.lastIndexOf("#"))
   const service = object_member(shapes, client_service_id, "Smithy AST.shapes")
   const location = `Smithy AST.shapes.${client_service_id}`
-  const operation_field_roles = smithy_operation_field_roles(shapes)
   const trait_ids = (trait_id: string): readonly string[] =>
     client_service_id === SERVICE_SHAPE_ID
       ? [trait_id, trait_id.replace("openkache.client#", "openkache.protocol#")]
@@ -1986,7 +1945,6 @@ export function extract_client_contract(
     shapes,
     client_service_id,
     API_NAMESPACE,
-    operation_field_roles,
     wire.opcodes.map((entry) => entry.name),
     wire.operations,
   )
@@ -2422,7 +2380,6 @@ function render_rust_operation_contract(contract: Client_Contract): string {
               ...operation,
               contract: operation_contract,
             }))},
-            request_label: ${rust_string_literal(operation_contract.request_kind)},
             request_value_count: ${operation_contract.request_value_count ?? 0},
             request_item_count: ${operation_contract.request_item_count},
             request_fields: ${field_slice(operation_contract.request_fields)},
@@ -2430,10 +2387,10 @@ function render_rust_operation_contract(contract: Client_Contract): string {
               ...operation,
               contract: operation_contract,
             }))},
-            response_label: ${rust_string_literal(operation_contract.response_kind)},
             response_value_count: ${operation_contract.response_value_count},
             response_fields: ${field_slice(operation_contract.response_fields)},
             retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode)},
+            effect: OperationEffect::${enum_variant(operation_contract.effect)},
             success_statuses: ${status_slice(operation_contract.success_statuses)},
             error_statuses: ${status_slice(operation_contract.error_statuses)},
         },`
@@ -2465,6 +2422,14 @@ pub enum OperationRetryMode {
     WhenNotCreating,
 }
 
+/// Storage effect declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationEffect {
+    ReadOnly,
+    Mutation,
+    Barrier,
+}
+
 /// One Smithy operation-field role and its cardinality.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationField {
@@ -2483,18 +2448,15 @@ pub struct OperationContract {
     /// Rust enum. Modelled operations may compose existing wire primitives
     /// without extending shared infrastructure.
     pub request_kind: &'static str,
-    /// Original Smithy requestKind label, retained for diagnostics only.
-    pub request_label: &'static str,
     pub request_value_count: usize,
     pub request_item_count: usize,
     pub request_fields: &'static [OperationField],
     /// Generated transport descriptor derived from the Smithy output field plan.
     pub response_kind: &'static str,
-    /// Original Smithy responseKind label, retained for diagnostics only.
-    pub response_label: &'static str,
     pub response_value_count: usize,
     pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
+    pub effect: OperationEffect,
     pub success_statuses: &'static [openkache_protocol::Status],
     pub error_statuses: &'static [openkache_protocol::Status],
 }
@@ -4678,7 +4640,7 @@ function operation_result_kind_constants(
 /** One language-neutral operation plan shared by every source renderer. */
 interface Managed_Operation_Plan {
   readonly binding: Operation_Field_Binding
-  readonly application_value_codec?: Application_Value_Codec
+  readonly application_value_codecs?: Application_Value_Codec_Pair
   readonly contract: Api_Operation_Contract
   readonly input: string
   readonly name: string
@@ -4704,6 +4666,11 @@ interface Managed_Api_Operation extends Api_Operation {
  * without editing a central list of operation families.
  */
 type Application_Value_Codec = string
+
+interface Application_Value_Codec_Pair {
+  readonly input: Application_Value_Codec
+  readonly output: Application_Value_Codec
+}
 
 type Application_Value_Language =
   | "java"
@@ -5057,20 +5024,30 @@ function render_go_optional_raw_bytes_codec(
  */
 function render_application_value_codec(
   language: Application_Value_Language,
-  codec: Application_Value_Codec,
+  codecs: Application_Value_Codec_Pair,
   input: string,
   payload: string,
   diagnostic: string,
   output?: string,
   output_field?: string,
 ): Rendered_Application_Value_Codec {
-  const registration = WIRE_CODEC_REGISTRY.find((candidate) =>
-    candidate.name === codec
+  const input_registration = WIRE_CODEC_REGISTRY.find((candidate) =>
+    candidate.name === codecs.input
   )
-  if (registration === undefined) {
-    throw new Error(`wire codec ${JSON.stringify(codec)} has no renderer registration`)
+  const output_registration = WIRE_CODEC_REGISTRY.find((candidate) =>
+    candidate.name === codecs.output
+  )
+  if (input_registration === undefined) {
+    throw new Error(
+      `wire codec ${JSON.stringify(codecs.input)} has no renderer registration`,
+    )
   }
-  return registration.render(
+  if (output_registration === undefined) {
+    throw new Error(
+      `wire codec ${JSON.stringify(codecs.output)} has no renderer registration`,
+    )
+  }
+  const encoded = input_registration.render(
     language,
     input,
     payload,
@@ -5078,6 +5055,15 @@ function render_application_value_codec(
     output,
     output_field,
   )
+  const decoded = output_registration.render(
+    language,
+    input,
+    payload,
+    diagnostic,
+    output,
+    output_field,
+  )
+  return { encode: encoded.encode, decode: decoded.decode }
 }
 
 function operation_structure(
@@ -5316,11 +5302,11 @@ function render_go_composite_field(
   )
 }
 
-function application_value_codec(
+function application_value_codecs(
   contract: Client_Contract,
   operation: Api_Operation & { readonly contract: Api_Operation_Contract },
   binding: Operation_Field_Binding,
-): Application_Value_Codec | undefined {
+): Application_Value_Codec_Pair | undefined {
   const input_payload = binding.input.payload
   const output_payload = binding.output.payload
   if (input_payload === undefined && output_payload === undefined) return undefined
@@ -5331,12 +5317,7 @@ function application_value_codec(
   }
   const input_codec = application_value_codec_for_type(input_payload[0]!.type)
   const output_codec = application_value_codec_for_type(output_payload[0]!.type)
-  if (input_codec !== output_codec) {
-    throw new Error(
-      `operation ${operation.name} input and output payload codecs differ: ${input_codec} vs ${output_codec}`,
-    )
-  }
-  return input_codec
+  return { input: input_codec, output: output_codec }
 }
 
 /**
@@ -5403,7 +5384,7 @@ function managed_operation_entries(
     const operation_plan = derive_operation_plan(contract, managed_operation)
     const result_plan = operation_result_plan(managed_operation.contract, binding)
     const plan: Managed_Operation_Plan = {
-      application_value_codec: application_value_codec(
+      application_value_codecs: application_value_codecs(
         contract,
         managed_operation,
         binding,
@@ -5434,7 +5415,9 @@ function has_application_value_codec(
   codec: Application_Value_Codec,
 ): boolean {
   return operations.some(
-    (operation) => operation.plan.application_value_codec === codec,
+    (operation) =>
+      operation.plan.application_value_codecs?.input === codec ||
+      operation.plan.application_value_codecs?.output === codec,
   )
 }
 
@@ -5740,7 +5723,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     "java",
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "java")
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "java")
     ?? "new byte[0]"
   switch (operation.plan.result_plan.response_route) {
@@ -5771,7 +5754,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         )
         const codec = render_application_value_codec(
           "java",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}()`,
           "result.payload()",
           `"${operation_label}"`,
@@ -6387,7 +6370,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
     "created",
     "kotlin",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "kotlin")
     ?? "byteArrayOf()"
   const prefix = `    override suspend fun ${method_name}(input: ${operation.input}): ${operation.output} =
@@ -6416,7 +6399,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
         )
         const codec = render_application_value_codec(
           "kotlin",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.payload",
           `"${operation_label}"`,
@@ -6935,7 +6918,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     "created",
     "dart",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "dart")
     ?? "const <int>[]"
   const prefix = `  @override
@@ -6963,7 +6946,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         )
         const codec = render_application_value_codec(
           "dart",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.payload",
           `'${operation_label}'`,
@@ -8176,7 +8159,7 @@ function render_typescript_operation_method(
     "descriptor",
     "typescript",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "typescript")
   const scoped_request_value = input_request_value === undefined
     ? ""
@@ -8205,7 +8188,7 @@ function render_typescript_operation_method(
         )
         const codec = render_application_value_codec(
           "typescript",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.payload",
           String(operation_value),
@@ -8746,7 +8729,9 @@ export function render_go_contract(contract: Client_Contract): string {
     )
     .join("\n")
   const item_id_operations = contract.api.operations.filter(
-    (operation) => operation.contract?.request_kind === "scoped_item",
+    (operation) =>
+      operation.contract?.request_kind === "item" ||
+      operation.contract?.request_kind === "set",
   )
   const item_id_cases = item_id_operations
     .map((operation) => `SmithyOpcode${operation.name}`)
@@ -9075,7 +9060,7 @@ function render_go_operation_method(
     "eviction_override",
     "go",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "go")
     ?? "nil"
   switch (operation.plan.result_plan.response_route) {
@@ -9105,7 +9090,7 @@ function render_go_operation_method(
         )
         const codec = render_application_value_codec(
           "go",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.data",
           `"${label}"`,
@@ -9898,7 +9883,7 @@ function render_python_operation_method(
     "eviction_override",
     "python",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "python")
   const scoped_request_value = input_request_value === undefined
     ? ""
@@ -9924,7 +9909,7 @@ function render_python_operation_method(
         )
         const codec = render_application_value_codec(
           "python",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "payload",
           String(operation_value),
@@ -11047,7 +11032,7 @@ function render_swift_operation_method(
     "eviction_override",
     "swift",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "swift")
     ?? "Data()"
   switch (operation.plan.result_plan.response_route) {
@@ -11074,7 +11059,7 @@ function render_swift_operation_method(
         )
         const codec = render_application_value_codec(
           "swift",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.payload",
           `"${operation_label}"`,
@@ -11874,7 +11859,7 @@ function render_csharp_operation_method_body(
     "eviction_override",
     "csharp",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "csharp")
     ?? "ReadOnlyMemory<byte>.Empty"
   switch (operation.plan.result_plan.response_route) {
@@ -11904,7 +11889,7 @@ function render_csharp_operation_method_body(
         )
         const codec = render_application_value_codec(
           "csharp",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.Payload",
           `"${label}"`,
@@ -12761,7 +12746,7 @@ function render_rust_operation_method(
     "eviction_override",
     "rust",
   )
-  const application_value_codec = operation.plan.application_value_codec
+  const application_value_codecs = operation.plan.application_value_codecs
   const input_request_value = operation_request_value_name(operation, "rust")
     ?? "Vec::new()"
   switch (operation.plan.result_plan.response_route) {
@@ -12797,7 +12782,7 @@ function render_rust_operation_method(
         )
         const codec = render_application_value_codec(
           "rust",
-          application_value_codec!,
+          application_value_codecs!,
           `input.${input_payload}`,
           "result.payload",
           `"${operation_label}"`,

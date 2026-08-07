@@ -109,6 +109,9 @@ fn is_builtin(opcode: Opcode) -> bool {
 }
 
 /// Verifies that every modeled opcode has a server-owned execution path.
+///
+/// This runs during server bind rather than allowing an omitted extension to
+/// reach a panic or an accidental fallback response.
 pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
     for value in u8::MIN..=u8::MAX {
         let Ok(opcode) = Opcode::try_from(value) else {
@@ -156,7 +159,6 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
     if let Some(extension) = super::operation_extensions::execute(&context).await {
         return Some(encode_extension_response(context.opcode, extension));
     }
-
     let OperationContext {
         cache,
         opcode,

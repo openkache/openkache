@@ -10,42 +10,16 @@ namespace openkache.protocol
 @trait(selector: "member")
 structure unsignedLong {}
 
-/// Semantic role consumed by generated client adapters.
-enum OperationFieldRole {
-    PAYLOAD = "payload"
-    NAMESPACE_ID = "namespace_id"
-    ITEM_ID = "item_id"
-    VALUE = "value"
-    CONDITION = "condition"
-    EXPIRATION_MODE = "expiration_mode"
-    TTL_MILLISECONDS = "ttl_milliseconds"
-    EVICTION_MODE = "eviction_mode"
-    EXPECTED_REVISION = "expected_revision"
-    NAME = "name"
-    CREATE_IF_MISSING = "create_if_missing"
-    POLICY = "policy"
-    OUTCOME = "outcome"
-    DELETED = "deleted"
-    JSON = "json"
-    DESCRIPTOR = "descriptor"
-    CREATED = "created"
-    REVISION = "revision"
-    DEFAULT_EXPIRATION = "default_expiration"
-    DEFAULT_TTL_MILLISECONDS = "default_ttl_milliseconds"
-    EXPIRATION_OVERRIDE = "expiration_override"
-    DEFAULT_EVICTION = "default_eviction"
-    EVICTION_OVERRIDE = "eviction_override"
-}
-
 /// Gives a Smithy member its language-neutral semantic role.
 ///
 /// Generated clients use this role instead of reproducing member names in
-/// every language renderer. Renaming a member therefore changes the model
-/// shape without requiring operation-specific generator edits.
+/// every language renderer. Roles are intentionally open strings: the shared
+/// generator validates only the structural contract it owns, while a server
+/// extension may introduce a new semantic role without editing a central enum.
 @trait(selector: "member")
 structure operationField {
     @required
-    role: OperationFieldRole
+    role: String
 }
 
 /// Selects a registered payload codec for a wire-visible Smithy shape.
@@ -74,6 +48,17 @@ enum OperationRetryMode {
     WHEN_NOT_CREATING = "when_not_creating"
 }
 
+/// Storage effect used by timeout, retry, and concurrency handling.
+///
+/// This is deliberately independent from request/response shapes. A mutation
+/// may return a value and a read may return an empty response, so the server
+/// must not infer its safety policy from a route or payload family.
+enum OperationEffect {
+    READ_ONLY = "read_only"
+    MUTATION = "mutation"
+    BARRIER = "barrier"
+}
+
 list OperationStatuses {
     member: String
 }
@@ -84,18 +69,11 @@ structure operationContract {
     @required
     scope: OperationScope
 
-    /// Legacy framing hint. New operations may use any string here; the
-    /// request plan is derived from operation-field roles and shapes.
-    @required
-    requestKind: String
-
-    /// Legacy response hint. New operations may use any string here; the
-    /// response plan is derived from operation-field roles and shapes.
-    @required
-    responseKind: String
-
     @required
     retryMode: OperationRetryMode
+
+    @required
+    effect: OperationEffect
 
     @required
     successStatuses: OperationStatuses
@@ -378,9 +356,8 @@ enum Opcode {
 
 @operationContract(
     scope: "global",
-    requestKind: "empty",
-    responseKind: "pong",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
@@ -391,9 +368,8 @@ operation Ping {
 
 @operationContract(
     scope: "global",
-    requestKind: "application_value",
-    responseKind: "application_value",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
@@ -404,9 +380,8 @@ operation ExperimentalEcho {
 
 @operationContract(
     scope: "global",
-    requestKind: "application_value",
-    responseKind: "application_value",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
@@ -417,9 +392,8 @@ operation ExperimentalReverse {
 
 @operationContract(
     scope: "global",
-    requestKind: "application_value",
-    responseKind: "application_value",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
@@ -430,9 +404,8 @@ operation SquareArray {
 
 @operationContract(
     scope: "item",
-    requestKind: "scoped_item",
-    responseKind: "value",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok", "not_found"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
@@ -443,9 +416,8 @@ operation Get {
 
 @operationContract(
     scope: "item",
-    requestKind: "scoped_item",
-    responseKind: "value",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
@@ -456,9 +428,8 @@ operation Get2 {
 
 @operationContract(
     scope: "item",
-    requestKind: "scoped_item",
-    responseKind: "set_outcome",
     retryMode: "never",
+    effect: "mutation",
     successStatuses: ["created", "replaced", "not_stored"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "no_capacity", "policy_conflict", "namespace_not_found"]
 )
@@ -469,9 +440,8 @@ operation Set {
 
 @operationContract(
     scope: "item",
-    requestKind: "scoped_item",
-    responseKind: "delete_outcome",
     retryMode: "never",
+    effect: "mutation",
     successStatuses: ["deleted", "not_found"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found", "namespace_not_empty"]
 )
@@ -482,9 +452,8 @@ operation Delete {
 
 @operationContract(
     scope: "namespace",
-    requestKind: "scoped_namespace",
-    responseKind: "stats_json",
     retryMode: "always",
+    effect: "read_only",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
@@ -495,9 +464,8 @@ operation Stats {
 
 @operationContract(
     scope: "namespace",
-    requestKind: "scoped_namespace",
-    responseKind: "empty",
     retryMode: "never",
+    effect: "barrier",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
@@ -508,9 +476,8 @@ operation Sync {
 
 @operationContract(
     scope: "namespace_management",
-    requestKind: "namespace_open",
-    responseKind: "namespace_descriptor",
     retryMode: "when_not_creating",
+    effect: "mutation",
     successStatuses: ["ok", "created"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "namespace_not_found"]
 )
@@ -521,9 +488,8 @@ operation NamespaceOpen {
 
 @operationContract(
     scope: "namespace_management",
-    requestKind: "namespace_update_policy",
-    responseKind: "namespace_descriptor",
     retryMode: "never",
+    effect: "mutation",
     successStatuses: ["ok"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found"]
 )
@@ -534,9 +500,8 @@ operation NamespaceUpdatePolicy {
 
 @operationContract(
     scope: "namespace_management",
-    requestKind: "namespace_delete",
-    responseKind: "empty",
     retryMode: "never",
+    effect: "mutation",
     successStatuses: ["deleted"],
     errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error", "conflict", "namespace_not_found", "namespace_not_empty"]
 )
