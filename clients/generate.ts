@@ -5541,12 +5541,12 @@ function render_application_value_codec(
 }
 
 function operation_structure(
-  contract: Client_Contract,
+  contract: Api_Contract,
   operation: Api_Operation,
   direction: "input" | "output",
 ): Api_Structure {
   const name = direction === "input" ? operation.input : operation.output
-  const structure = contract.api.structures.find((candidate) => candidate.name === name)
+  const structure = contract.structures.find((candidate) => candidate.name === name)
   if (structure === undefined) {
     throw new Error(
       `operation ${operation.name} ${direction} structure ${name} is missing from the Smithy contract`,
@@ -5560,7 +5560,7 @@ function required_payload_member(
   operation: Api_Operation,
   direction: "input" | "output",
 ): Api_Member {
-  const structure = operation_structure(contract, operation, direction)
+  const structure = operation_structure(contract.api, operation, direction)
   const members = structure.members.filter((member) => member.required)
   if (structure.members.length !== 1 || members.length !== 1) {
     throw new Error(
@@ -5578,7 +5578,7 @@ function operation_field_binding(
     direction: "input" | "output",
   ): Partial<Record<Operation_Field_Role, readonly Api_Member[]>> => {
     const bound: Partial<Record<Operation_Field_Role, Api_Member[]>> = {}
-    for (const member of operation_structure(contract, operation, direction).members) {
+    for (const member of operation_structure(contract.api, operation, direction).members) {
       const role = member.operation_field_role
       if (role === undefined) continue
       bound[role] = [...(bound[role] ?? []), member]
