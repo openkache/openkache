@@ -837,6 +837,17 @@ response = status | payload_len | payload
 `payload_len` is present for every response, including responses with an empty
 payload. Responses have no version, request identifier, flags, Item ID, or TTL.
 
+### Optional-value sequences
+
+Operations whose Smithy output contains multiple `value` fields use one
+ordered optional-value sequence. The sequence is a transport primitive; the
+operation model supplies its field count and each field's codec.
+
+Each field is encoded as a four-octet big-endian length followed by that many
+value octets. `FF FF FF FF` is the missing-value sentinel. A zero length is a
+present empty value. Fields retain their modeled order, and the complete
+sequence is bounded by the protocol's maximum value size.
+
 ### Status codes
 
 | Status | Name | Meaning |
