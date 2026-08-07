@@ -49,14 +49,28 @@ pub(super) enum OperationFieldValue<'a> {
 }
 
 impl OperationInputView<'_> {
+    /// Returns the generated role metadata for this operation.
+    ///
+    /// Server extensions can inspect this open role list without adding a
+    /// field to the shared operation context. Repeated roles remain a
+    /// cardinality in the generated contract rather than an operation-name
+    /// special case.
+    pub(super) fn fields(&self) -> &'static [crate::contract::OperationField] {
+        crate::contract::operation_contract(self.opcode).request_fields
+    }
+
+    /// Returns the modeled cardinality for one semantic role.
+    pub(super) fn field_count(&self, role: &str) -> usize {
+        self.fields()
+            .iter()
+            .find(|field| field.role == role)
+            .map_or(0, |field| field.count)
+    }
+
     /// Returns the modeled value for a role without requiring a wire-family
     /// or operation-name match in the extension.
     pub(super) fn field(&self, role: &str) -> Option<OperationFieldValue<'_>> {
-        if !crate::contract::operation_contract(self.opcode)
-            .request_fields
-            .iter()
-            .any(|field| field.role == role && field.count > 0)
-        {
+        if self.field_count(role) == 0 {
             return None;
         }
         match role {
@@ -81,13 +95,6 @@ pub(super) struct OperationContext<'a, 'cache> {
     pub(super) cache: &'a NetworkWorkerCache<'cache>,
     pub(super) opcode: Opcode,
     pub(super) input: OperationInputView<'a>,
-    pub(super) namespace_id: Option<u64>,
-    pub(super) item_ids: &'a [ItemId],
-    pub(super) set_options: SetOptions,
-    pub(super) namespace_name: Option<&'a [u8]>,
-    pub(super) namespace_policy: Option<NamespacePolicy>,
-    pub(super) expected_revision: Option<u64>,
-    pub(super) create_if_missing: bool,
     pub(super) administrator: bool,
     pub(super) namespaces: &'a Mutex<NamespaceRegistry>,
     pub(super) observability: &'a ObservabilityState,
@@ -171,18 +178,21 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
         cache,
         opcode,
         input,
-        namespace_id,
-        item_ids,
-        set_options,
-        namespace_name,
-        namespace_policy,
-        expected_revision,
-        create_if_missing,
         administrator,
         namespaces,
         observability,
     } = context;
-    let OperationInputView { value, .. } = input;
+    let OperationInputView {
+        namespace_id,
+        item_ids,
+        value,
+        namespace_name,
+        namespace_policy,
+        expected_revision,
+        create_if_missing,
+        set_options,
+        ..
+    } = input;
 
     match opcode {
         Opcode::Get => {

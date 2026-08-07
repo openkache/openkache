@@ -44,6 +44,8 @@ use crate::{
 #[allow(unused_imports)]
 pub(crate) use crate::{contract, protocol};
 
+#[path = "operation_codecs.rs"]
+mod operation_codecs;
 #[path = "operation_extensions.rs"]
 mod operation_extensions;
 #[path = "operation_handlers.rs"]
@@ -1728,7 +1730,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 let request_started = std::time::Instant::now();
                 let may_mutate = request_may_mutate(&request);
                 let response_permit = if let Some(response_budget_bytes) =
-                    response_budget_bytes(request.opcode, request.value.len(), max_item_bytes)
+                    response_budget_bytes(request.opcode, max_item_bytes)
                 {
                     match request_budget
                         .acquire(response_budget_bytes, request_timeout)
@@ -1863,15 +1865,11 @@ fn request_may_mutate(request: &Request) -> bool {
     )
 }
 
-fn response_budget_bytes(
-    opcode: Opcode,
-    _request_value_bytes: usize,
-    max_item_bytes: usize,
-) -> Option<usize> {
+fn response_budget_bytes(opcode: Opcode, max_item_bytes: usize) -> Option<usize> {
     let contract = crate::contract::operation_contract(opcode);
     let response_field_count = crate::contract::operation_response_field_count(opcode);
     match contract.response_kind {
-        "application_value" => Some(max_item_bytes),
+        "application_value" => Some(contract.response_payload_bound.min(max_item_bytes)),
         "composite" | "value" => {
             if response_field_count > 1 {
                 openkache_protocol::optional_values_max_encoded_len(
@@ -1879,8 +1877,11 @@ fn response_budget_bytes(
                     max_item_bytes,
                 )
             } else {
-                Some(max_item_bytes)
+                Some(contract.response_payload_bound.min(max_item_bytes))
             }
+        }
+        "stats_json" | "namespace_descriptor" => {
+            Some(contract.response_payload_bound.min(max_item_bytes))
         }
         _ => None,
     }
@@ -1988,13 +1989,6 @@ async fn execute_request(
         cache,
         opcode,
         input,
-        namespace_id,
-        item_ids: &item_ids,
-        set_options,
-        namespace_name: namespace_name.as_deref(),
-        namespace_policy,
-        expected_revision,
-        create_if_missing,
         administrator,
         namespaces,
         observability,
