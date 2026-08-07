@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -220,23 +221,27 @@ impl RequestFrame {
 /// Byte-weighted memory budget shared by every connection and network worker.
 #[derive(Clone)]
 pub(super) struct RequestBudget {
-    inner: Arc<Mutex<RequestBudgetState>>,
+    inner: Arc<RequestBudgetInner>,
 }
 
-struct RequestBudgetState {
+struct RequestBudgetInner {
     capacity: usize,
-    used: usize,
+    used: AtomicUsize,
+    waiters: Mutex<RequestBudgetWaiters>,
+}
+
+struct RequestBudgetWaiters {
     next_waiter_id: u64,
     waiters: HashMap<u64, Waker>,
 }
 
 pub(super) struct RequestBudgetPermit {
-    inner: Arc<Mutex<RequestBudgetState>>,
+    inner: Arc<RequestBudgetInner>,
     bytes: usize,
 }
 
 struct RequestBudgetAcquire {
-    inner: Arc<Mutex<RequestBudgetState>>,
+    inner: Arc<RequestBudgetInner>,
     bytes: usize,
     waiter_id: Option<u64>,
 }
@@ -244,12 +249,14 @@ struct RequestBudgetAcquire {
 impl RequestBudget {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(RequestBudgetState {
+            inner: Arc::new(RequestBudgetInner {
                 capacity,
-                used: 0,
-                next_waiter_id: 0,
-                waiters: HashMap::new(),
-            })),
+                used: AtomicUsize::new(0),
+                waiters: Mutex::new(RequestBudgetWaiters {
+                    next_waiter_id: 0,
+                    waiters: HashMap::new(),
+                }),
+            }),
         }
     }
 
@@ -264,13 +271,7 @@ impl RequestBudget {
                 bytes: 0,
             });
         }
-        if bytes
-            > self
-                .inner
-                .lock()
-                .expect("request budget lock poisoned")
-                .capacity
-        {
+        if bytes > self.inner.capacity {
             return Err(StreamReadError::TooLarge);
         }
         network_runtime::timeout(
@@ -292,20 +293,27 @@ impl Future for RequestBudgetAcquire {
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let inner = Arc::clone(&self.inner);
         let bytes = self.bytes;
-        let mut state = inner.lock().expect("request budget lock poisoned");
-        if state.used <= state.capacity - bytes {
+        if try_reserve(&inner, bytes) {
             if let Some(waiter_id) = self.waiter_id.take() {
-                state.waiters.remove(&waiter_id);
+                inner
+                    .waiters
+                    .lock()
+                    .expect("request budget waiter lock poisoned")
+                    .waiters
+                    .remove(&waiter_id);
             }
-            state.used += bytes;
             return Poll::Ready(RequestBudgetPermit {
-                inner: Arc::clone(&inner),
+                inner,
                 bytes,
             });
         }
 
+        let mut waiters = inner
+            .waiters
+            .lock()
+            .expect("request budget waiter lock poisoned");
         if let Some(waiter_id) = self.waiter_id
-            && let Some(waiter) = state.waiters.get_mut(&waiter_id)
+            && let Some(waiter) = waiters.waiters.get_mut(&waiter_id)
         {
             if !waiter.will_wake(context.waker()) {
                 waiter.clone_from(context.waker());
@@ -313,14 +321,31 @@ impl Future for RequestBudgetAcquire {
             return Poll::Pending;
         }
 
-        let waiter_id = state.next_waiter_id;
-        state.next_waiter_id = state
+        let waiter_id = waiters.next_waiter_id;
+        waiters.next_waiter_id = waiters
             .next_waiter_id
             .checked_add(1)
             .expect("request budget waiter identifier overflowed");
-        state.waiters.insert(waiter_id, context.waker().clone());
-        drop(state);
+        waiters.waiters.insert(waiter_id, context.waker().clone());
+        drop(waiters);
         self.waiter_id = Some(waiter_id);
+
+        // A permit can be released between the first atomic check and waiter
+        // registration. Recheck while the waiter is installed so that this
+        // race cannot leave the future asleep with available budget.
+        if try_reserve(&inner, bytes) {
+            let mut waiters = inner
+                .waiters
+                .lock()
+                .expect("request budget waiter lock poisoned");
+            waiters.waiters.remove(&waiter_id);
+            self.waiter_id = None;
+            drop(waiters);
+            return Poll::Ready(RequestBudgetPermit {
+                inner,
+                bytes,
+            });
+        }
         Poll::Pending
     }
 }
@@ -329,8 +354,9 @@ impl Drop for RequestBudgetAcquire {
     fn drop(&mut self) {
         if let Some(waiter_id) = self.waiter_id {
             self.inner
+                .waiters
                 .lock()
-                .expect("request budget lock poisoned")
+                .expect("request budget waiter lock poisoned")
                 .waiters
                 .remove(&waiter_id);
         }
@@ -342,20 +368,45 @@ impl Drop for RequestBudgetPermit {
         if self.bytes == 0 {
             return;
         }
+        self.inner
+            .used
+            .fetch_sub(self.bytes, Ordering::Release);
         let mut waiters = {
-            let mut state = self.inner.lock().expect("request budget lock poisoned");
-            state.used = state
-                .used
-                .checked_sub(self.bytes)
-                .expect("released request bytes must be reserved");
+            let mut state = self
+                .inner
+                .waiters
+                .lock()
+                .expect("request budget waiter lock poisoned");
             std::mem::take(&mut state.waiters)
         };
         for (_, waiter) in waiters.drain() {
             waiter.wake();
         }
-        let mut state = self.inner.lock().expect("request budget lock poisoned");
+        let mut state = self
+            .inner
+            .waiters
+            .lock()
+            .expect("request budget waiter lock poisoned");
         if state.waiters.is_empty() {
             state.waiters = waiters;
+        }
+    }
+}
+
+fn try_reserve(inner: &RequestBudgetInner, bytes: usize) -> bool {
+    let mut used = inner.used.load(Ordering::Acquire);
+    loop {
+        if used > inner.capacity.saturating_sub(bytes) {
+            return false;
+        }
+        match inner.used.compare_exchange_weak(
+            used,
+            used + bytes,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(observed) => used = observed,
         }
     }
 }

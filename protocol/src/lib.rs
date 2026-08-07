@@ -761,6 +761,10 @@ impl Request {
                 actual: frame.len(),
             });
         }
+        Self::decode_parts(frame, header, frame[header.encoded_len..].to_vec())
+    }
+
+    fn decode_parts(frame: &[u8], header: RequestHeader, value: Vec<u8>) -> Result<Self> {
         let item_id = header.item_id_start.map(|start| {
             ItemId::new(
                 frame[start..start + ITEM_ID_BYTES]
@@ -838,7 +842,7 @@ impl Request {
             } else {
                 SetOptions::NONE
             },
-            value: frame[header.encoded_len..].to_vec(),
+            value,
             namespace_name,
             namespace_policy,
             expected_revision,
@@ -866,7 +870,11 @@ impl Request {
                 actual: frame.len(),
             });
         }
-        let mut request = Self::decode(&frame)?;
+        // Decode the fixed metadata before moving the frame. `decode` would
+        // allocate a temporary value Vec and then `copy_within` would move the
+        // same bytes a second time. The owned path only performs the one
+        // in-place compaction needed to make the value start at offset zero.
+        let mut request = Self::decode_parts(&frame, header, Vec::new())?;
         if header.opcode == Opcode::Set {
             frame.copy_within(header.encoded_len.., 0);
             frame.truncate(header.value_len);
@@ -1541,8 +1549,19 @@ impl Response {
     }
 
     /// Consumes and encodes this response.
-    pub fn into_encoded(self) -> Result<Vec<u8>> {
-        self.encode()
+    pub fn into_encoded(mut self) -> Result<Vec<u8>> {
+        validate_value_length(self.payload.len())?;
+        let (length, length_bytes) = encode_varuint(self.payload.len() as u64);
+        let header_len = RESPONSE_FIXED_BYTES + length_bytes;
+        self.payload.reserve(header_len);
+        let payload_len = self.payload.len();
+        self.payload
+            .resize(header_len + payload_len, 0);
+        self.payload.copy_within(0..payload_len, header_len);
+        self.payload[0] = self.status as u8;
+        self.payload[RESPONSE_FIXED_BYTES..header_len]
+            .copy_from_slice(&length[..length_bytes]);
+        Ok(self.payload)
     }
 
     /// Decodes a response header when enough bytes are available.
@@ -1597,7 +1616,24 @@ impl Response {
     }
 
     /// Decodes a response.
-    pub fn decode_owned(frame: Vec<u8>) -> Result<Self> {
-        Self::decode(&frame)
+    pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
+        let header = Self::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
+            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
+            actual: frame.len(),
+        })?;
+        let expected = header.frame_len()?;
+        if frame.len() != expected {
+            return Err(ProtocolError::FrameLength {
+                expected,
+                actual: frame.len(),
+            });
+        }
+        let payload_len = header.payload_len;
+        frame.copy_within(header.encoded_len.., 0);
+        frame.truncate(payload_len);
+        Ok(Self {
+            status: header.status,
+            payload: frame,
+        })
     }
 }

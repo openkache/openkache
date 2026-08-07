@@ -60,16 +60,33 @@ pub(crate) fn encode_inline_value(value: &[u8]) -> Vec<u8> {
 
 pub(crate) fn encode_blob_ref(blob_ref: BlobRef) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(STORED_BLOB_REF_BYTES);
-    encoded.push(BLOB_VALUE_TAG);
-    encoded.extend_from_slice(&blob_ref.encode());
+    encoded.resize(STORED_BLOB_REF_BYTES, 0);
+    write_blob_ref(&mut encoded, blob_ref);
     encoded
 }
 
 pub(crate) fn encode_large_value_ref(value_ref: BlobRef) -> Vec<u8> {
     let mut encoded = Vec::with_capacity(STORED_LARGE_VALUE_REF_BYTES);
-    encoded.push(LARGE_VALUE_TAG);
-    encoded.extend_from_slice(&value_ref.encode());
+    encoded.resize(STORED_LARGE_VALUE_REF_BYTES, 0);
+    write_large_value_ref(&mut encoded, value_ref);
     encoded
+}
+
+/// Writes a fixed-size generation-relative BlobRef directly into an existing
+/// Item body. SET staging uses this to avoid allocating a temporary Vec for
+/// the nine-byte reference.
+pub(crate) fn write_blob_ref(output: &mut [u8], blob_ref: BlobRef) {
+    debug_assert_eq!(output.len(), STORED_BLOB_REF_BYTES);
+    output[0] = BLOB_VALUE_TAG;
+    output[1..].copy_from_slice(&blob_ref.encode());
+}
+
+/// Writes a fixed-size generation-relative large-value reference directly
+/// into an existing Item body.
+pub(crate) fn write_large_value_ref(output: &mut [u8], value_ref: BlobRef) {
+    debug_assert_eq!(output.len(), STORED_LARGE_VALUE_REF_BYTES);
+    output[0] = LARGE_VALUE_TAG;
+    output[1..].copy_from_slice(&value_ref.encode());
 }
 
 pub(crate) fn decode_stored_value(encoded: &[u8]) -> Result<StoredValue<'_>> {

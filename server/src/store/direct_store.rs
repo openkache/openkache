@@ -1,6 +1,7 @@
 //! Direct mutable SG store backed by a worker-local variable-generation ring.
 
 use std::cell::Cell;
+use std::cmp::Reverse;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
@@ -18,6 +19,7 @@ use crate::storage_backend;
 use crate::types::StoredItemValue;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
+const READ_CANDIDATE_PARALLELISM: usize = 2;
 
 struct MutableGeneration {
     logical_sg_id: u32,
@@ -178,6 +180,7 @@ enum PreparedReadBacking {
 
 struct PreparedReadCandidate {
     table_location: TableLocation,
+    bucket_index: usize,
     sequence: u64,
     backing: PreparedReadBacking,
 }
@@ -213,17 +216,42 @@ struct DirectReadPlan {
 
 impl DirectReadPlan {
     async fn read(self, purpose: ReadPurpose) -> Result<KeyedObservation> {
+        let DirectReadPlan {
+            data,
+            large_values,
+            config,
+            storage_key,
+            candidates,
+            io,
+            _job_pins,
+        } = self;
+        let mut candidates = candidates;
+        // Start with the newest generation while allowing one speculative
+        // sibling read to overlap an SSD miss or stale Table candidate.
+        candidates.sort_unstable_by_key(|candidate| Reverse(candidate.sequence));
         let mut newest = None;
-        for candidate in self.candidates {
-            let item = candidate
-                .read_item(
-                    &self.data,
-                    &self.config,
-                    self.storage_key,
-                    purpose,
-                    &self.io,
-                )
-                .await?;
+        let mut read_error: Option<(u64, KvError)> = None;
+        let mut reads = futures_util::stream::iter(candidates.into_iter())
+            .map(|candidate| async {
+                let result = candidate
+                    .read_item(&data, &config, storage_key, purpose, &io)
+                    .await;
+                (candidate, result)
+            })
+            .buffer_unordered(READ_CANDIDATE_PARALLELISM);
+        while let Some((candidate, result)) = reads.next().await {
+            let item = match result {
+                Ok(item) => item,
+                Err(error) => {
+                    if read_error
+                        .as_ref()
+                        .is_none_or(|(sequence, _)| candidate.sequence > *sequence)
+                    {
+                        read_error = Some((candidate.sequence, error));
+                    }
+                    continue;
+                }
+            };
             let Some(item) = item else {
                 continue;
             };
@@ -235,6 +263,13 @@ impl DirectReadPlan {
             {
                 newest = Some((candidate, item));
             }
+        }
+        if let Some((error_sequence, error)) = read_error
+            && newest
+                .as_ref()
+                .is_none_or(|(candidate, _)| error_sequence >= candidate.sequence)
+        {
+            return Err(error);
         }
         let Some((candidate, item)) = newest else {
             return Ok(match purpose {
@@ -249,11 +284,11 @@ impl DirectReadPlan {
                 }
                 candidate
                     .read_value(
-                        &self.data,
-                        &self.large_values,
-                        &self.config,
+                        &data,
+                        &large_values,
+                        &config,
                         item.value,
-                        &self.io,
+                        &io,
                     )
                     .await
                     .map(|value| KeyedObservation::Value(Some(value)))
@@ -288,11 +323,7 @@ impl PreparedReadCandidate {
                 }))
             }
             PreparedReadBacking::Ram { backing, .. } => {
-                let bucket_index = bucket_hash(
-                    &storage_key,
-                    self.table_location.bucket_hash_index,
-                    config.bucket_count(),
-                );
+                let bucket_index = self.bucket_index;
                 let start = bucket_index * BUCKET_BYTES;
                 let bucket = &backing.segment[start..start + BUCKET_BYTES];
                 let Some((state, range)) = find_item_state_and_value_range(bucket, &storage_key)
@@ -317,11 +348,7 @@ impl PreparedReadCandidate {
                 Ok(Some(ObservedItem { state, value }))
             }
             PreparedReadBacking::Ssd(backing) => {
-                let bucket_index = bucket_hash(
-                    &storage_key,
-                    self.table_location.bucket_hash_index,
-                    config.bucket_count(),
-                );
+                let bucket_index = self.bucket_index;
                 let bytes = read_exact_direct(
                     data,
                     io.bucket_read_pool.take_bucket().await,
@@ -716,21 +743,18 @@ impl Kvkache {
     ) -> KeyedObservationPlan {
         let mut candidates = Vec::new();
         let mut job_pins = Vec::new();
+        let bucket_hashes = BucketHashSequence::new(&storage_key, self.config.bucket_count());
         for table_location in self.table.candidate_locations(&storage_key) {
             let Some(backing) = self.directory.read_backing(table_location.sg_index) else {
                 continue;
             };
+            let bucket_index = bucket_hashes.get(table_location.bucket_hash_index);
             let (sequence, backing) = match backing {
                 ReadBacking::Mutable { lane, _job_pin } => {
                     job_pins.push(_job_pin);
                     let Some(generation) = self.mutable[lane].as_ref() else {
                         continue;
                     };
-                    let bucket_index = bucket_hash(
-                        &storage_key,
-                        table_location.bucket_hash_index,
-                        self.config.bucket_count(),
-                    );
                     let start = bucket_index * BUCKET_BYTES;
                     let item = find_item_in_bucket(
                         &generation.segment.bytes[start..start + BUCKET_BYTES],
@@ -769,6 +793,7 @@ impl Kvkache {
             };
             candidates.push(PreparedReadCandidate {
                 table_location,
+                bucket_index,
                 sequence,
                 backing,
             });
@@ -1290,13 +1315,12 @@ impl Kvkache {
                     in_place: true,
                 }));
             }
-            if generation
+            let Some((bucket_index, bucket_hash_index)) = generation
                 .segment
                 .choose_bucket(&storage_key, fixed_item_bytes)
-                .is_none()
-            {
+            else {
                 continue;
-            }
+            };
             let Some(staged) = stage_mutable_value(generation, lane, value, large, blob)? else {
                 continue;
             };
@@ -1310,13 +1334,29 @@ impl Kvkache {
                     return Err(error);
                 }
             };
-            let item = live_item(
-                storage_key,
-                staged.encoded,
-                expires_at_ms,
-                eviction_protected,
-            );
-            let location = generation.segment.append(item, true).ok_or_else(|| {
+            let staged_value = match staged.encoding {
+                StagedMutableEncoding::Inline => StagedValue::Inline(value),
+                StagedMutableEncoding::Blob(handle) => StagedValue::Blob(BlobRef {
+                    value_offset: handle.slot,
+                    value_len: handle.value_len,
+                }),
+                StagedMutableEncoding::Large(handle) => StagedValue::Large(BlobRef {
+                    value_offset: handle.slot,
+                    value_len: handle.value_len,
+                }),
+            };
+            let location = generation
+                .segment
+                .append_staged_value_at(
+                    storage_key,
+                    staged_value,
+                    expires_at_ms,
+                    eviction_protected,
+                    true,
+                    bucket_index,
+                    bucket_hash_index,
+                )
+                .ok_or_else(|| {
                 KvError::Worker("chosen mutable SG Bucket rejected an Item".into())
             })?;
             if previous_in_generation.is_some_and(|previous| {
@@ -1531,7 +1571,7 @@ impl Kvkache {
         let mut segment_write = readable.segment.as_ref().clone();
         rewrite_segment_values(&mut segment_write, |encoded| {
             match decode_stored_value(encoded)? {
-                StoredValue::Inline(_) => Ok(None),
+                StoredValue::Inline(_) => Ok(false),
                 StoredValue::Blob(blob_ref) => {
                     let handle = BlobHandle {
                         slot: blob_ref.value_offset,
@@ -1541,7 +1581,8 @@ impl Kvkache {
                         value_offset: 0,
                         value_len: 0,
                     });
-                    Ok(Some(encode_blob_ref(blob_ref)))
+                    write_blob_ref(encoded, blob_ref);
+                    Ok(true)
                 }
                 StoredValue::Large(value_ref) => {
                     let handle = BlobHandle {
@@ -1552,7 +1593,8 @@ impl Kvkache {
                         value_offset: 0,
                         value_len: 0,
                     });
-                    Ok(Some(encode_large_value_ref(value_ref)))
+                    write_large_value_ref(encoded, value_ref);
+                    Ok(true)
                 }
             }
         })?;
@@ -1966,6 +2008,7 @@ impl Kvkache {
 
     async fn locate_item(&self, storage_key: &StorageKey) -> Result<Option<LocatedItem>> {
         let mut newest = None;
+        let bucket_hashes = BucketHashSequence::new(storage_key, self.config.bucket_count());
         for table_location in self.table.candidate_locations(storage_key) {
             let Some(backing) = self.directory.read_backing(table_location.sg_index) else {
                 continue;
@@ -1978,7 +2021,11 @@ impl Kvkache {
                 ReadBacking::Ssd(backing) => backing.sequence,
             };
             let Some(item) = self
-                .read_candidate(storage_key, table_location, &backing)
+                .read_candidate(
+                    storage_key,
+                    bucket_hashes.get(table_location.bucket_hash_index),
+                    &backing,
+                )
                 .await?
             else {
                 continue;
@@ -2001,14 +2048,9 @@ impl Kvkache {
     async fn read_candidate(
         &self,
         storage_key: &StorageKey,
-        table_location: TableLocation,
+        bucket_index: usize,
         backing: &ReadBacking,
     ) -> Result<Option<Item>> {
-        let bucket_index = bucket_hash(
-            storage_key,
-            table_location.bucket_hash_index,
-            self.config.bucket_count(),
-        );
         match backing {
             ReadBacking::Mutable { lane, .. } => {
                 let Some(generation) = self.mutable[*lane].as_ref() else {
@@ -2489,8 +2531,14 @@ enum InPlaceValue {
 }
 
 struct StagedMutableValue {
-    encoded: Vec<u8>,
+    encoding: StagedMutableEncoding,
     mutable_value: Option<MutableValueHandle>,
+}
+
+enum StagedMutableEncoding {
+    Inline,
+    Blob(BlobHandle),
+    Large(BlobHandle),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2602,9 +2650,10 @@ fn try_replace_value_in_place(
             return Err(error);
         }
     };
+    let encoded = encode_staged_mutable_value(&staged.encoding, value);
     let item = live_item(
         storage_key,
-        staged.encoded,
+        encoded,
         expires_at_ms,
         eviction_protected,
     );
@@ -2639,7 +2688,7 @@ fn stage_mutable_value(
             handle,
         };
         return Ok(Some(StagedMutableValue {
-            encoded: encode_large_value_handle(handle),
+            encoding: StagedMutableEncoding::Large(handle),
             mutable_value: Some(mutable_value),
         }));
     }
@@ -2655,14 +2704,22 @@ fn stage_mutable_value(
             handle,
         };
         return Ok(Some(StagedMutableValue {
-            encoded: encode_blob_handle(handle),
+            encoding: StagedMutableEncoding::Blob(handle),
             mutable_value: Some(mutable_value),
         }));
     }
     Ok(Some(StagedMutableValue {
-        encoded: encode_inline_value(value),
+        encoding: StagedMutableEncoding::Inline,
         mutable_value: None,
     }))
+}
+
+fn encode_staged_mutable_value(encoding: &StagedMutableEncoding, value: &[u8]) -> Vec<u8> {
+    match encoding {
+        StagedMutableEncoding::Inline => encode_inline_value(value),
+        StagedMutableEncoding::Blob(handle) => encode_blob_handle(*handle),
+        StagedMutableEncoding::Large(handle) => encode_large_value_handle(*handle),
+    }
 }
 
 fn clear_mutable_value(

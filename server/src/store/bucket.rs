@@ -121,6 +121,26 @@ pub(crate) struct MutableSegment {
     bucket_selection_policy: BucketSelectionPolicy,
 }
 
+/// A value representation that can be written into a Bucket without first
+/// materializing its encoded bytes. Inline values borrow the request payload;
+/// Blob and large values carry their already-reserved generation-relative
+/// reference.
+pub(crate) enum StagedValue<'a> {
+    Inline(&'a [u8]),
+    Blob(BlobRef),
+    Large(BlobRef),
+}
+
+impl StagedValue<'_> {
+    fn encoded_len(&self) -> usize {
+        match self {
+            Self::Inline(value) => STORED_VALUE_TAG_BYTES + value.len(),
+            Self::Blob(_) => STORED_BLOB_REF_BYTES,
+            Self::Large(_) => STORED_LARGE_VALUE_REF_BYTES,
+        }
+    }
+}
+
 impl MutableSegment {
     pub(crate) fn new(config: &Config, sg_index: usize) -> Self {
         Self::with_bytes(
@@ -194,6 +214,25 @@ impl MutableSegment {
     pub(crate) fn append(&mut self, item: Item, count_accepted: bool) -> Option<TableLocation> {
         let (bucket_index, bucket_hash_index) =
             self.choose_bucket(&item.storage_key, item.encoded_len())?;
+        self.append_at(item, bucket_index, bucket_hash_index, count_accepted)
+    }
+
+    /// Appends an item using a bucket choice that was already computed by the
+    /// caller. SET admission frequently needs the choice for a fit check
+    /// before it stages the value; recomputing the hash sequence here used to
+    /// perform the same routing work twice.
+    pub(crate) fn append_at(
+        &mut self,
+        item: Item,
+        bucket_index: usize,
+        bucket_hash_index: u8,
+        count_accepted: bool,
+    ) -> Option<TableLocation> {
+        if bucket_index >= self.bytes.len() / BUCKET_BYTES
+            || bucket_hash_index >= self.bucket_choice_count as u8
+        {
+            return None;
+        }
         let previous_used_bytes = bucket_used_bytes(self.bucket(bucket_index));
         if !append_item_to_bucket(self.bucket_mut(bucket_index), &item) {
             return None;
@@ -202,6 +241,74 @@ impl MutableSegment {
         self.item_count += 1;
         if count_accepted {
             self.accepted_item_bytes += (STORAGE_KEY_BYTES + item.value.len()) as u64;
+        }
+        Some(TableLocation {
+            sg_index: self.sg_index as u32,
+            bucket_hash_index,
+        })
+    }
+
+    /// Appends a staged SET value directly into the selected Bucket. The
+    /// fixed-size BlobRef forms are encoded on the stack and inline values are
+    /// copied only once into their final Bucket body.
+    pub(crate) fn append_staged_value(
+        &mut self,
+        storage_key: StorageKey,
+        value: StagedValue<'_>,
+        expires_at_ms: u64,
+        eviction_protected: bool,
+        count_accepted: bool,
+    ) -> Option<TableLocation> {
+        let encoded_len = value.encoded_len();
+        let (bucket_index, bucket_hash_index) =
+            self.choose_bucket(&storage_key, ITEM_FIXED_BYTES
+                + if expires_at_ms == 0 {
+                    0
+                } else {
+                    ITEM_EXPIRATION_BYTES
+                }
+                + encoded_len)?;
+        self.append_staged_value_at(
+            storage_key,
+            value,
+            expires_at_ms,
+            eviction_protected,
+            count_accepted,
+            bucket_index,
+            bucket_hash_index,
+        )
+    }
+
+    pub(crate) fn append_staged_value_at(
+        &mut self,
+        storage_key: StorageKey,
+        value: StagedValue<'_>,
+        expires_at_ms: u64,
+        eviction_protected: bool,
+        count_accepted: bool,
+        bucket_index: usize,
+        bucket_hash_index: u8,
+    ) -> Option<TableLocation> {
+        let encoded_len = value.encoded_len();
+        if bucket_index >= self.bytes.len() / BUCKET_BYTES
+            || bucket_hash_index >= self.bucket_choice_count as u8
+        {
+            return None;
+        }
+        let previous_used_bytes = bucket_used_bytes(self.bucket(bucket_index));
+        if !append_staged_value_to_bucket(
+            self.bucket_mut(bucket_index),
+            storage_key,
+            value,
+            expires_at_ms,
+            eviction_protected,
+        ) {
+            return None;
+        }
+        self.used_bytes += bucket_used_bytes(self.bucket(bucket_index)) - previous_used_bytes;
+        self.item_count += 1;
+        if count_accepted {
+            self.accepted_item_bytes += (STORAGE_KEY_BYTES + encoded_len) as u64;
         }
         Some(TableLocation {
             sg_index: self.sg_index as u32,
@@ -447,7 +554,7 @@ fn item_state_at(bucket: &[u8], span: ItemSpan) -> Option<(ItemState, usize)> {
 
 pub(crate) fn rewrite_segment_values(
     segment: &mut [u8],
-    mut rewrite: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>>,
+    mut rewrite: impl FnMut(&mut [u8]) -> Result<bool>,
 ) -> Result<()> {
     for bucket in segment.chunks_exact_mut(BUCKET_BYTES) {
         let count = bucket_item_count(bucket);
@@ -460,16 +567,7 @@ pub(crate) fn rewrite_segment_values(
             if state.is_tombstone {
                 continue;
             }
-            let encoded = bucket[value_start..span.end].to_vec();
-            let Some(replacement) = rewrite(&encoded)? else {
-                continue;
-            };
-            if replacement.len() != encoded.len() {
-                return Err(KvError::Worker(
-                    "seal-time value rewrite changed the encoded Item length".into(),
-                ));
-            }
-            bucket[value_start..span.end].copy_from_slice(&replacement);
+            let _rewritten = rewrite(&mut bucket[value_start..span.end])?;
         }
     }
     Ok(())
@@ -488,6 +586,69 @@ pub(crate) fn append_item_to_bucket(bucket: &mut [u8], item: &Item) -> bool {
         count,
         ItemOffset {
             key_prefix: item.storage_key.as_bytes()[0],
+            item_byte_offset: start,
+        },
+    );
+    bucket[0] = (count + 1) as u8;
+    true
+}
+
+fn append_staged_value_to_bucket(
+    bucket: &mut [u8],
+    storage_key: StorageKey,
+    value: StagedValue<'_>,
+    expires_at_ms: u64,
+    eviction_protected: bool,
+) -> bool {
+    let encoded_len = value.encoded_len();
+    let item_len = ITEM_FIXED_BYTES
+        + if expires_at_ms == 0 {
+            0
+        } else {
+            ITEM_EXPIRATION_BYTES
+        }
+        + encoded_len;
+    if bucket.len() != BUCKET_BYTES || !bucket_can_fit(bucket, item_len) {
+        return false;
+    }
+    let count = bucket_item_count(bucket);
+    let end = items_start(bucket, count);
+    let start = end - item_len;
+    let storage_key_end = start + ITEM_STORAGE_KEY_SUFFIX_BYTES;
+    bucket[start..storage_key_end].copy_from_slice(&storage_key.as_bytes()[1..]);
+    bucket[storage_key_end] = if expires_at_ms == 0 {
+        if eviction_protected {
+            PROTECTED_LIVE_KIND
+        } else {
+            LIVE_KIND
+        }
+    } else if eviction_protected {
+        PROTECTED_EXPIRING_LIVE_KIND
+    } else {
+        EXPIRING_LIVE_KIND
+    };
+    let mut value_start = storage_key_end + ITEM_KIND_BYTES;
+    if expires_at_ms != 0 {
+        let expiration_end = value_start + ITEM_EXPIRATION_BYTES;
+        bucket[value_start..expiration_end].copy_from_slice(&expires_at_ms.to_le_bytes());
+        value_start = expiration_end;
+    }
+    let value_end = value_start + encoded_len;
+    match value {
+        StagedValue::Inline(value) => {
+            bucket[value_start] = INLINE_VALUE_TAG;
+            bucket[value_start + STORED_VALUE_TAG_BYTES..value_end].copy_from_slice(value);
+        }
+        StagedValue::Blob(blob_ref) => write_blob_ref(&mut bucket[value_start..value_end], blob_ref),
+        StagedValue::Large(value_ref) => {
+            write_large_value_ref(&mut bucket[value_start..value_end], value_ref)
+        }
+    }
+    write_item_offset(
+        bucket,
+        count,
+        ItemOffset {
+            key_prefix: storage_key.as_bytes()[0],
             item_byte_offset: start,
         },
     );

@@ -1,5 +1,7 @@
 //! Reusable cross-thread completion slots for storage worker requests.
 
+use std::any::Any;
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -8,6 +10,16 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 const DEFAULT_RETAINED_CAPACITY: usize = 256;
+const LOCAL_RETAINED_CAPACITY: usize = 8;
+
+struct LocalCompletionPool {
+    slab: *const (),
+    slots: Vec<Arc<dyn Any + Send + Sync>>,
+}
+
+thread_local! {
+    static LOCAL_COMPLETIONS: RefCell<Vec<LocalCompletionPool>> = const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CompletionDisconnected;
@@ -139,17 +151,17 @@ impl<T> CompletionSlabState<T> {
     }
 }
 
-pub(super) struct CompletionSlab<T> {
+pub(super) struct CompletionSlab<T: Send + Sync + 'static> {
     state: Mutex<CompletionSlabState<T>>,
 }
 
-impl<T> Default for CompletionSlab<T> {
+impl<T: Send + Sync + 'static> Default for CompletionSlab<T> {
     fn default() -> Self {
         Self::with_retained_capacity(DEFAULT_RETAINED_CAPACITY)
     }
 }
 
-impl<T> CompletionSlab<T> {
+impl<T: Send + Sync + 'static> CompletionSlab<T> {
     pub(super) fn with_retained_capacity(retained_capacity: usize) -> Self {
         Self {
             state: Mutex::new(CompletionSlabState::with_retained_capacity(
@@ -159,9 +171,9 @@ impl<T> CompletionSlab<T> {
     }
 
     pub(super) fn register(&self) -> (CompletionSender<T>, CompletionReceiver<'_, T>) {
-        let mut slot = lock(&self.state)
-            .free
-            .pop()
+        let slab = self as *const Self as *const ();
+        let mut slot = take_local_slot::<T>(slab)
+            .or_else(|| lock(&self.state).free.pop())
             .unwrap_or_else(|| Arc::new(CompletionSlot::default()));
         let generation = slot.activate().unwrap_or_else(|| {
             slot = Arc::new(CompletionSlot::default());
@@ -186,6 +198,9 @@ impl<T> CompletionSlab<T> {
         if !slot.deactivate(generation) {
             return;
         }
+        if retain_local_slot(self as *const Self as *const (), slot.clone()) {
+            return;
+        }
         let mut state = lock(&self.state);
         if state.free.len() < state.retained_capacity {
             state.free.push(slot);
@@ -193,13 +208,13 @@ impl<T> CompletionSlab<T> {
     }
 }
 
-pub(super) struct CompletionSender<T> {
+pub(super) struct CompletionSender<T: Send + Sync + 'static> {
     slot: Arc<CompletionSlot<T>>,
     generation: u64,
     finished: bool,
 }
 
-impl<T> CompletionSender<T> {
+impl<T: Send + Sync + 'static> CompletionSender<T> {
     pub(super) fn send(mut self, value: T) -> Result<(), T> {
         let result = self.slot.complete(self.generation, value);
         self.finished = true;
@@ -207,7 +222,7 @@ impl<T> CompletionSender<T> {
     }
 }
 
-impl<T> Drop for CompletionSender<T> {
+impl<T: Send + Sync + 'static> Drop for CompletionSender<T> {
     fn drop(&mut self) {
         if !self.finished {
             self.slot.disconnect(self.generation);
@@ -215,13 +230,13 @@ impl<T> Drop for CompletionSender<T> {
     }
 }
 
-pub(super) struct CompletionReceiver<'a, T> {
+pub(super) struct CompletionReceiver<'a, T: Send + Sync + 'static> {
     slab: &'a CompletionSlab<T>,
     slot: Option<Arc<CompletionSlot<T>>>,
     generation: u64,
 }
 
-impl<T> CompletionReceiver<'_, T> {
+impl<T: Send + Sync + 'static> CompletionReceiver<'_, T> {
     fn release(&mut self) {
         if let Some(slot) = self.slot.take() {
             self.slab.recycle(slot, self.generation);
@@ -261,7 +276,7 @@ impl<T> CompletionReceiver<'_, T> {
     }
 }
 
-impl<T: Unpin> Future for CompletionReceiver<'_, T> {
+impl<T: Unpin + Send + Sync + 'static> Future for CompletionReceiver<'_, T> {
     type Output = Result<T, CompletionDisconnected>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -277,7 +292,7 @@ impl<T: Unpin> Future for CompletionReceiver<'_, T> {
     }
 }
 
-impl<T> Drop for CompletionReceiver<'_, T> {
+impl<T: Send + Sync + 'static> Drop for CompletionReceiver<'_, T> {
     fn drop(&mut self) {
         self.release();
     }
@@ -287,4 +302,41 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn take_local_slot<T: Send + Sync + 'static>(
+    slab: *const (),
+) -> Option<Arc<CompletionSlot<T>>> {
+    LOCAL_COMPLETIONS.with(|pools| {
+        let mut pools = pools.borrow_mut();
+        let pool = pools.iter_mut().find(|pool| pool.slab == slab)?;
+        let slot = pool.slots.pop()?;
+        slot.downcast::<CompletionSlot<T>>().ok()
+    })
+}
+
+fn retain_local_slot<T: Send + Sync + 'static>(
+    slab: *const (),
+    slot: Arc<CompletionSlot<T>>,
+) -> bool {
+    LOCAL_COMPLETIONS.with(|pools| {
+        let mut pools = pools.borrow_mut();
+        let pool = pools.iter_mut().find(|pool| pool.slab == slab);
+        let pool = match pool {
+            Some(pool) => pool,
+            None => {
+                pools.push(LocalCompletionPool {
+                    slab,
+                    slots: Vec::with_capacity(LOCAL_RETAINED_CAPACITY),
+                });
+                pools.last_mut().expect("new local completion pool exists")
+            }
+        };
+        if pool.slots.len() >= LOCAL_RETAINED_CAPACITY {
+            return false;
+        }
+        let slot: Arc<dyn Any + Send + Sync> = slot;
+        pool.slots.push(slot);
+        true
+    })
 }

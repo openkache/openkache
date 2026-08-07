@@ -399,9 +399,15 @@ async fn serve_resp_connection(
     let _connection_guard = ActiveRespConnection { network_shard };
     let mut pending = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut responses = Vec::new();
+    // All supported runtime backends return the owned read buffer. Keep that
+    // allocation on the connection instead of allocating a fresh 64 KiB Vec
+    // for every socket read.
+    let mut read_buffer = vec![0_u8; READ_BUFFER_BYTES];
     loop {
-        let input = vec![0_u8; READ_BUFFER_BYTES];
-        let (bytes_read, input) = match stream.read(input).await {
+        if read_buffer.len() < READ_BUFFER_BYTES {
+            read_buffer.resize(READ_BUFFER_BYTES, 0);
+        }
+        let (bytes_read, returned_buffer) = match stream.read(read_buffer).await {
             Ok(result) => result,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::TimedOut {
@@ -410,10 +416,11 @@ async fn serve_resp_connection(
                 return Err(error);
             }
         };
+        read_buffer = returned_buffer;
         if bytes_read == 0 {
             return Ok(());
         }
-        pending.extend_from_slice(&input[..bytes_read]);
+        pending.extend_from_slice(&read_buffer[..bytes_read]);
         if pending.len() > MAX_BUFFER_BYTES {
             network_shard.protocol_error();
             responses.clear();

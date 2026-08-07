@@ -2086,7 +2086,7 @@ async fn execute_request(
                 }
             };
             let item_id = item_id.expect("SET requests have a validated item ID");
-            let worker = cache.namespace_item_worker(namespace_id, item_id);
+            let (storage_key, worker) = cache.namespace_item_route(namespace_id, item_id);
             let reservation = match namespaces
                 .lock()
                 .map_err(|_| Status::InternalError)
@@ -2098,9 +2098,8 @@ async fn execute_request(
                 }
             };
             let outcome = cache
-                .set_in_namespace(
-                    namespace_id,
-                    item_id,
+                .set_in_namespace_with_key(
+                    storage_key,
                     crate::types::StoredItemValue::new(value),
                     effective_options,
                 )
@@ -2156,7 +2155,7 @@ async fn execute_request(
                 ));
             }
             let item_id = item_id.expect("DELETE requests have a validated item ID");
-            let worker = cache.namespace_item_worker(namespace_id, item_id);
+            let (storage_key, worker) = cache.namespace_item_route(namespace_id, item_id);
             if let Err(status) = namespaces
                 .lock()
                 .map_err(|_| Status::InternalError)
@@ -2164,7 +2163,7 @@ async fn execute_request(
             {
                 return Some(response_bytes(status, b"namespace metadata is unavailable"));
             }
-            let deleted = cache.delete_in_namespace(namespace_id, item_id).await;
+            let deleted = cache.delete_in_namespace_with_key(storage_key).await;
             return match deleted {
                 Ok(deleted) => {
                     let Ok(mut registry) = namespaces.lock() else {
