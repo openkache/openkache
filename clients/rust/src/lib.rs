@@ -19,12 +19,13 @@ use std::time::Duration;
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
-    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES,
-    ItemId, ItemValue, NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PrivateKey,
-    Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value,
-    value_envelope,
+    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts,
+    ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome,
+    Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, GetOutcome, ITEM_ID_BYTES,
+    ItemId, ItemValue, KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor,
+    NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result,
+    RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome,
+    canonical_key_bytes, value, value_envelope, CLIENT_ROOT_KEY_BYTES,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{

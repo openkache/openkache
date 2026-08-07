@@ -53,7 +53,7 @@ client, err := openkache.Connect(ctx, openkache.Options{
     Address:           "cache.example.com:4433",
     ServerName:        "cache.example.com",
     Certificate:       caCertificateDER,
-    DataProtectionKey: dataProtectionKey, // exactly 32 bytes
+    DataProtectionKey: dataProtectionKey, // optional; exactly 32 bytes when supplied
 })
 if err != nil {
     return err
@@ -71,8 +71,10 @@ _ = outcome
 value, found, err := client.Get(ctx, []byte("profile"))
 ```
 
-`Get` returns `found` separately so an empty stored value is not confused with
-a cache miss. `Close` is idempotent and waits for in-flight native operations.
+`Get` and `Set` treat the `[]byte` key as a v1 `Bytes` PortableKey and encode
+it as canonical deterministic CBOR before crossing the native ABI. `Get`
+returns `found` separately so an empty stored value is not confused with a
+cache miss. `Close` is idempotent and waits for in-flight native operations.
 `Reconnect` explicitly replaces the connection without replaying an operation,
 and `ConnectionState` returns a best-effort lifecycle snapshot.
 `GetJSON` and `SetJSON` delegate JSON parsing and RFC 8785 canonicalization to
@@ -91,6 +93,8 @@ Use `client.Smithy()` when an application needs the generated
   settings; zero values select documented core defaults.
 - `EncryptionCompact` selects deterministic AES-256-SIV-CMAC protection;
   `EncryptionRobust` (the default) selects randomized AES-256-GCM-SIV.
+- An empty `DataProtectionKey` selects unprotected values while retaining
+  client-side Item ID derivation.
 - `OPENKACHE_CLIENT_LIBRARY` or `Options.NativeLibrary` selects the native
   artifact. The native artifact must have ABI version 4 and the extended
   connect symbol when `Identity` is used.

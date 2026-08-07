@@ -1,637 +1,373 @@
-# OpenKache value format
+# OpenKache v1 Client Value Format
 
-This document specifies the complete client-owned representation of values stored through
-OpenKache's formatted APIs. It covers serialization, compression, authenticated encryption, key
-derivation, validation, and the boundary between the shared client core and language adapters.
+> **Status: Draft — v1 pre-freeze**
+>
+> This document defines OpenKache's default formatted client value profile. It
+> is a client-side convention, not a server-required value encoding.
+>
+> The packed codec layout below is the target v1 contract. The key-conversion
+> change in this branch is implemented; migration of the shared value codec
+> from its prior serialization-id body to this layout is a separate change.
 
-The [client index](README.md) describes implementation and migration status.
-The [wire protocol specification](../protocol/SPEC.md) defines server-visible
-framing and operation semantics.
+The server stores values as opaque bytes. It does not interpret serialization,
+compression, encryption, or client metadata. Applications MAY use the raw
+client API with an exact 32-byte Item ID and opaque value bytes instead. Raw
+operations bypass this document's formatted value path but still obey protocol
+framing, namespace scoping, and size limits.
 
-The format is a pre-release design. Implementations may replace earlier
-envelope and value-protection code without a compatibility path. Format version
-`1` is the first specified version.
+The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
+and **MAY** are to be interpreted as described by
+[RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
-The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**, and **MAY** are to be
-interpreted as described in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
+## 1. Scope and profile selection
 
-## Goals
-
-The value format has five design goals:
-
-1. The server stores one opaque byte string and never parses application values.
-2. `openkache-client-core` is the only implementation of serialization, compression, key
-   derivation, and encryption.
-3. Language packages are thin adapters from native values to core-owned value types.
-4. Per-item overhead remains small enough for caches containing many short values.
-5. Decoders reject ambiguous, unsupported, authentication-failing, or oversized input before
-   exposing it to an application codec.
-
-The format contains no magic bytes and no encoded body length. An OpenKache protocol frame already
-provides the exact container boundary. Callers that need to store arbitrary unformatted protocol
-bytes use the low-level raw client rather than the formatted API.
-
-The interoperable v1 version bytes, layout sizes, algorithm identifiers, key sizes, derivation
-context strings, and shared numeric compression defaults are declared in the
-[Smithy client model](model/openkache.smithy) and generated into each language build. The shared
-core owns the algorithms and policy implementation, including the compression thresholds and
-cryptographic operation flow.
-
-## Processing model
-
-A formatted write applies these stages in order:
+The formatted value path is:
 
 ```text
-native language value
-  -> core logical value
-  -> core serialization
+native value
+  -> selected value codec or exact RawBytes
+  -> codec payload
   -> optional Zstandard compression
-  -> optional authenticated encryption
-  -> value-format container
-  -> opaque server storage
+  -> optional authenticated protection
+  -> ValueEnvelope
+  -> opaque server value
 ```
 
-A read applies the exact reverse order. Compression always precedes encryption. Serialization
-metadata is part of the transformed body, so encryption hides both the serialized payload and its
-serialization identifier.
+Formatted key conversion and Item ID derivation are defined separately in
+[Key Format](KEY_FORMAT.md); they are not part of this document. Value codecs
+have their own value model and conversion rules. The key input restrictions do
+not apply to values.
 
-## Container
+V1 provides two value codecs:
+
+| Codec | Meaning |
+|---|---|
+| `RawBytes` | Exact application bytes, including empty input and embedded `00` octets. |
+| CBOR | A CBOR value encoded under the selected v1 value-CBOR profile. |
+
+`RawBytes` describes a value payload, not a key type or an Item ID.
+
+There is no separate client-only metadata envelope. Applications that need
+custom metadata MAY place it inside `RawBytes`, or use the raw client API.
+
+## 2. Client protection mode
+
+The formatted client selects one protection mode when it is initialized. The
+mode applies to every formatted value operation; encryption cannot be enabled
+or disabled for an individual value.
+
+| Initialization | Formatted writes and reads |
+|---|---|
+| No `client_root_key` | Use `Unprotected` for every value. The default root is 32 zero octets and affects only the formatted Item ID. |
+| Explicit `client_root_key` | Protect every value. `AES-256-GCM-SIV` is the default; `AES-256-SIV-CMAC` is an explicit client-wide alternative. |
+
+When protection is enabled, the client MUST require an explicitly supplied
+32-octet key and MUST reject the all-zero key. A client MUST reject a
+formatted value whose encryption ID conflicts with its configured mode.
+
+This policy applies only to the formatted client path. Raw APIs continue to
+accept exact Item IDs and opaque value bytes; callers own any protection for
+raw values.
+
+With `Unprotected`, no value-encryption key is derived.
+
+The client selects one immutable complete client profile at initialization.
+All formatted operations use that profile; protection cannot vary per value.
+The profile determines both the key rules in [Key Format](KEY_FORMAT.md) and
+this value format. `value_envelope_version` identifies the value side of that
+profile; it does not perform key conversion or Item ID derivation and is not an
+additional Item ID input.
+
+The no-key profile still writes a complete `ValueEnvelope`. Its
+`encryption_id` is `0`, while the codec and compression IDs continue to
+identify the payload. This preserves self-describing, cross-language decoding;
+only the raw client API bypasses the envelope.
+
+## 3. ValueEnvelope
+
+### 3.1 Layout
 
 ```text
-container = version:vu128 | format:u8 | body
+value_envelope = value_envelope_version:vu128 | format_flags:u8 | body
 ```
 
-| Field | Size | Description |
+| Field | Size | Meaning |
 |---|---:|---|
-| `version` | 1–17 bytes | Canonical unsigned VU128 format version |
-| `format` | 1 byte | Compression and encryption algorithm identifiers |
-| `body` | remaining bytes | Serialized, optionally compressed, optionally encrypted value |
+| `value_envelope_version` | 1–9 bytes | Canonical profile selector; v1 is `01`. |
+| `format_flags` | 1 byte | Packed encryption, compression, and codec IDs. |
+| `body` | remaining bytes | Codec payload after the selected transforms. |
 
-Version `1` encodes as the single byte `01`.
+The envelope has no magic prefix and no body-length field. The enclosing
+protocol frame supplies the exact value boundary; `value_len` is the canonical
+[`vu128`](../protocol/SPEC.md#unsigned-vu128) length of the complete envelope.
 
-### Unsigned VU128
+`value_envelope_version` MUST use the shortest canonical `vu128`. Decoders
+MUST reject truncation, overflow, reserved prefixes, and overlong encodings.
+The v1 maximum encoded width is nine bytes.
 
-Unsigned integers use John Millikin's revised
-[VU128 encoding](https://john-millikin.com/vu128-efficient-variable-length-integers). Implementations
-MUST use the shortest canonical encoding and MUST reject truncated, overlong, or overflowing
-encodings even if a low-level VU128 library accepts them.
-
-The layouts relevant to this format are:
-
-| Value range | Encoded size |
-|---|---:|
-| `[0, 2^7)` | 1 byte |
-| `[2^7, 2^14)` | 2 bytes |
-| `[2^14, 2^21)` | 3 bytes |
-| `[2^21, 2^28)` | 4 bytes |
-| `[2^28, 2^128)` | 5–17 bytes using a binary length prefix |
-
-Examples:
+### 3.2 Packed flags
 
 ```text
-0          -> 00
-1          -> 01
-127        -> 7f
-128        -> 80 02
-16383      -> bf ff
-16384      -> c0 00 02
+bits 0..1 = encryption_id
+bits 2..3 = compression_id
+bits 4..5 = codec_id
+bits 6..7 = zero
+
+format_flags =
+    encryption_id
+  | (compression_id << 2)
+  | (codec_id << 4)
 ```
 
-Version and serialization identifiers currently fit in one byte, but using one canonical integer
-encoding keeps their extension rules uniform.
+Encoders MUST emit only assigned IDs with zero high bits. Decoders MUST
+reject unassigned IDs and nonzero high bits; they MUST NOT guess.
 
-### Format byte
+#### Encryption IDs
 
-The low nibble identifies compression. The high nibble identifies encryption.
+The ID selects the complete algorithm profile. The profile name is the full
+algorithm name; nonce and repetition behavior are normative properties of that
+profile. Numeric IDs are wire assignments, not a security ranking.
 
-```text
-bits 0..3 = compression algorithm
-bits 4..7 = encryption algorithm
+| ID | Algorithm/profile | Policy |
+|---:|---|---|
+| `0` | `Unprotected` | No confidentiality or authentication; selected when no key is configured. |
+| `1` | `AES-256-GCM-SIV` ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452)) | Fresh random nonce per write; default when protection is enabled. |
+| `2` | `AES-256-SIV-CMAC` ([RFC 5297](https://www.rfc-editor.org/rfc/rfc5297)) | Deterministic and nonce-free; explicit opt-in. |
 
-format = compression_id | (encryption_id << 4)
-```
+#### Compression IDs
 
-Compression identifiers:
-
-| ID | Name |
+| ID | Meaning |
 |---:|---|
 | `0` | None |
 | `1` | Zstandard |
-| `2..15` | Reserved |
 
-Encryption identifiers:
+#### Codec IDs
 
-| ID | Name | Profile |
-|---:|---|---|
-| `0` | None | Unprotected |
-| `1` | AES-256-SIV-CMAC | Compact |
-| `2` | AES-256-GCM-SIV | Robust |
-| `3..15` | Reserved |
-
-Common format bytes:
-
-| Byte | Meaning |
+| ID | Meaning |
 |---:|---|
-| `0x00` | Serialized value without compression or encryption |
-| `0x01` | Zstandard-compressed value |
-| `0x10` | Compact AES-SIV value |
-| `0x11` | Zstandard followed by Compact AES-SIV |
-| `0x20` | Robust AES-GCM-SIV value |
-| `0x21` | Zstandard followed by Robust AES-GCM-SIV |
+| `0` | `RawBytes` |
+| `1` | CBOR |
 
-A decoder MUST reject every unassigned compression or encryption identifier. It MUST NOT guess an
-algorithm or try multiple algorithms.
-
-For version `1`, fixed container overhead, excluding the serialized value and any Zstandard
-framing, is:
-
-| Profile | Version and format | Cryptographic metadata | Total |
-|---|---:|---:|---:|
-| Unprotected | 2 bytes | 0 bytes | 2 bytes |
-| Compact | 2 bytes | 16-byte synthetic IV | 18 bytes |
-| Robust | 2 bytes | 12-byte nonce and 16-byte tag | 30 bytes |
-
-These totals are transform overhead, not minimum valid container sizes. A serialized value always
-contains at least its one-byte serialization identifier. An empty raw value therefore occupies `3`
-bytes when unprotected, `19` bytes with Compact encryption, or `31` bytes with Robust encryption.
-
-## Serialized value
-
-Before compression or encryption, the body has this representation:
+### 3.3 Body
 
 ```text
-serialized_value = serialization_id:vu128 | serialization_payload
+codec_payload =
+    exact_application_bytes
+  | cbor_value
+
+transformed_body = protect(compress(codec_payload))
 ```
 
-The serialization identifier is inside the transformed body. It is therefore compressed and
-encrypted with the application payload.
-
-Serialization identifiers:
-
-| ID | Name | Payload |
-|---:|---|---|
-| `0` | Raw bytes | Exact remaining bytes |
-| `1` | Canonical JSON | RFC 8785 UTF-8 JSON |
-| `2..2^128-1` | Reserved for future core codecs | Not yet valid |
-
-An unknown identifier MUST produce an unsupported-serialization error. A language adapter MUST NOT
-assign an identifier or implement a serializer itself.
-
-### Raw bytes
-
-Raw serialization has this form:
+`codec_id` is in `format_flags`, not in the payload. `RawBytes` has no
+terminator, sentinel, embedded length, or metadata header. An empty,
+uncompressed, unprotected `RawBytes` value is exactly:
 
 ```text
-00 | exact application bytes
+01 00
 ```
 
-An empty application byte string is valid and serializes as the single byte `00`. The formatted raw
-API still adds the value-format container. Only the exact-item-ID, exact-value protocol client
-bypasses the format entirely.
+The CBOR codec is independent from the key codec. It MAY support CBOR values
+that are not valid keys, including containers, booleans, null, floating-point
+values, and application-approved tags. Its supported value types, canonicality
+requirements, and native conversion rules are value-codec requirements; they
+are not inherited from [Key Format](KEY_FORMAT.md).
 
-### Canonical JSON
+## 4. Compression
 
-JSON serialization follows the
-[JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785) in RFC 8785. The core handles
-both encoding and decoding. Language adapters convert native values into the core's logical value
-model and MUST NOT call facilities such as `JSON.stringify` to produce stored bytes.
+Compression ID `1` is one standard Zstandard frame under
+[RFC 8878](https://www.rfc-editor.org/rfc/rfc8878). Encoders MUST use a
+declared content size, no external dictionary, no skippable frame, and no
+trailing bytes. Decoders MUST reject missing content sizes, multiple frames,
+dictionary requirements, oversized windows, trailing bytes, and output above
+the decoded-value limit.
 
-The common logical JSON model contains:
+The initial SDK policy is Zstandard level 1, no compression below 1,024
+codec-payload bytes, and no compression unless it saves at least 64 bytes. An
+encoder MAY retain the uncompressed body when compression is not beneficial.
 
-- null;
-- booleans;
-- finite IEEE-754 binary64 numbers;
-- Unicode strings;
-- dense arrays;
-- objects with unique string keys.
+When a value combines secret or otherwise sensitive material with
+attacker-controlled or probeable bytes, compression SHOULD be disabled or the
+components SHOULD be stored separately. Compression can expose relationships
+through final ciphertext length; encryption does not hide that length.
 
-The following values are invalid:
+## 5. Protection
 
-- NaN or positive or negative infinity;
-- sparse arrays;
-- cyclic containers;
-- duplicate object keys;
-- lone Unicode surrogate code points;
-- functions, symbols, language-specific objects, or implicit `undefined` values.
+### 5.1 Key material and AAD
 
-The core MUST preserve valid Unicode string data without normalization. It MUST sort object
-property names lexicographically by unsigned UTF-16 code units, as required by RFC 8785, rather
-than by UTF-8 bytes, Unicode scalar values, locale, or insertion order.
-
-The decoder MUST reject a JSON payload that is valid JSON but is not the exact RFC 8785
-serialization of its decoded logical value. This includes payloads with insignificant whitespace,
-non-canonical string escapes, non-canonical number spelling, or incorrectly ordered object
-properties. Parsing without canonicality validation is insufficient.
-
-Integers outside the interoperable binary64 range `-(2^53 - 1)..=(2^53 - 1)` SHOULD be represented
-by an application-defined decimal string contract. Binary fields SHOULD use the raw serialization
-or an application-defined textual representation.
-
-Canonical JSON permits any JSON value at the top level. A higher-level API MAY restrict its input
-to objects, but that restriction is not part of the stored format.
-
-### Future typed codecs
-
-Protobuf, FlatBuffers, and other schema-aware encodings require separate core-owned codec
-specifications before receiving standard serialization identifiers. Those specifications must
-define schema registration, type identity, canonical payload production, and native-to-core value
-conversion. Passing language-serialized bytes through an adapter and labeling them as a standard
-codec is not permitted.
-
-Applications may store independently serialized data as raw bytes, but the format does not claim
-cross-language codec compatibility for such data.
-
-## Compression
-
-Compression ID `1` means one complete Zstandard frame as specified by
-[RFC 8878](https://www.rfc-editor.org/rfc/rfc8878):
+Protected values derive an independent value root:
 
 ```text
-compressed_body = zstd(serialized_value)
-```
-
-The encoder:
-
-- MUST compress the complete serialized value, including its serialization identifier;
-- MUST emit exactly one standard Zstandard frame and MUST NOT emit a skippable frame;
-- MUST NOT use an external dictionary;
-- MUST include the frame content size;
-- MUST NOT append another standard or skippable frame or any trailing bytes;
-- SHOULD omit the optional Zstandard content checksum to minimize overhead;
-- MUST set the compression identifier only when it stores an actual Zstandard frame.
-
-The decoder:
-
-- MUST reject a skippable frame;
-- MUST reject a frame without a declared content size;
-- MUST reject a dictionary requirement;
-- MUST reject multiple frames or trailing bytes;
-- MUST reject a requested window size above the decoded-value limit;
-- MUST reject a declared or produced size above the decoded-value limit;
-- MUST verify that the produced byte count equals the declared content size.
-
-Compression level and the decision to compress are encoder policy rather than wire semantics.
-The initial recommended policy is Zstandard level `1`, no compression below `1,024` serialized
-bytes, and a compressed-frame length at least `64` bytes smaller than the serialized value. The
-encoder stores the uncompressed representation when compression does not satisfy its policy.
-
-The core's low-level, Rust, C++, and Swift clients leave compression disabled unless explicitly
-selected. Python and TypeScript convenience clients enable the same Smithy-defined Zstandard
-policy for their protected JSON APIs by default; callers can disable it through their language
-options. This activation choice is an API convenience policy, not a wire-format difference: the
-format byte always records whether the core stored a Zstandard frame.
-
-Encryption does not hide the stored length. An application that combines secrets with
-attacker-controlled data and lets the attacker observe value lengths across chosen writes SHOULD
-disable compression or separate those inputs to avoid a compression length oracle.
-
-## Data protection key
-
-Encrypted formats require an application-managed 32-byte `DataProtectionKey` with 256 bits of
-cryptographic randomness. A password, padded string, truncated string, or unhashed passphrase is
-not a valid key.
-
-The key SHOULD be unique to one application security domain. Clients that intentionally share
-entries use the same key, but unrelated applications or environments SHOULD use different keys.
-Reusing a key across trust domains permits same-item ciphertext replay between those domains.
-
-The data protection key never leaves the client. Encrypted values use per-item encryption keys so
-that nonce reuse and deterministic equality are scoped to one exact 32-byte item ID.
-
-All subkeys use the BLAKE3
-[derive-key mode](https://github.com/BLAKE3-team/BLAKE3-specs/blob/master/blake3.pdf). Context
-strings below are exact, case-sensitive UTF-8 bytes. Implementations MUST NOT add terminators,
-lengths, or implementation-specific prefixes. Every `BLAKE3-DERIVE-KEY` and
-`BLAKE3-KEYED-HASH` operation below returns the first 32 bytes of BLAKE3's extendable output.
-
-### Protected item ID
-
-Formatted protected clients derive the exact 32-byte wire item ID in the core:
-
-```text
-item_id_root =
-  BLAKE3-DERIVE-KEY(
-    context  = "OpenKache client item key root v1",
-    material = data_protection_key[32]
-  )
-
-item_id =
-  BLAKE3-KEYED-HASH(
-    key   = item_id_root[32],
-    input = application_key
-  )
-```
-
-`application_key` is one exact byte string supplied to the core. A language adapter that accepts a
-native text key MUST reject ill-formed Unicode and encode the scalar sequence as UTF-8 without
-normalization. It MUST NOT include a terminator or length prefix. A byte-oriented key API passes
-its bytes unchanged.
-
-The keyed hash accepts the exact application-key bytes without a length prefix because it receives
-one complete input byte string. Enabling, disabling, or rotating the data protection key changes
-the item ID and makes entries written under the previous setting unreachable without an explicit
-migration strategy.
-
-The low-level raw client accepts an exact caller-supplied item ID and does not perform this
-derivation. An unprotected formatted primitive likewise accepts an exact 32-byte wire item ID; it
-MUST NOT invent a separate unkeyed mapping from arbitrary application keys.
-
-### Value root key
-
-First derive a value root:
-
-```text
-value_root_key =
+value_encryption_root_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 root key",
-    material = data_protection_key[32]
+    material = client_root_key[32]
   )
+
+item_id_material = value_encryption_root_key[32] | item_id[32]
 ```
 
-Per-item derivations use this fixed 64-byte material:
+Derived secrets MUST be zeroized. Implementations SHOULD derive per-item keys
+on demand rather than retain a high-cardinality key cache.
 
-```text
-item_id_material = value_root_key[32] | item_id[32]
-```
-
-The item ID is the exact wire item ID, not the original application key. Because both components
-have fixed lengths, their concatenation is unambiguous.
-
-Derived secrets MUST be zeroized when their owning object is destroyed or the operation completes.
-Implementations SHOULD derive per-item encryption keys on demand rather than retaining a
-high-cardinality key cache.
-
-## Associated data
-
-Both encryption profiles authenticate the same canonical associated data:
+Both protected profiles authenticate:
 
 ```text
 aad =
   ascii("openkache/value-format/aad/v1")
+  | namespace_id:u64be
   | item_id[32]
-  | encoded_version
-  | format
+  | encoded_value_envelope_version
+  | format_flags
 ```
 
-`encoded_version` is the exact canonical VU128 byte sequence stored in the container. For version
-`1`, it is `01`. `format` is the exact one-byte field stored after the version.
+The version and flags are the exact bytes stored in the envelope. The
+namespace is included separately in AAD even though it is also part of Item ID
+derivation. AAD binds the ciphertext to its namespace, Item ID, profile,
+codec, and transforms; it does not provide freshness.
 
-The domain string is not stored and consumes no capacity. Authenticating the item ID prevents a
-server or intermediary from moving a valid ciphertext to another cache item. Authenticating the
-header prevents changing the version or transform algorithms without detection.
-
-The associated data does not provide freshness. A server can replay an older valid container for
-the same item ID. Applications that require rollback detection must serialize and validate their
-own monotonic version or other freshness data.
-
-## Compact encryption
-
-Encryption ID `1` is deterministic AES-256-SIV-CMAC as specified by
-[RFC 5297](https://www.rfc-editor.org/rfc/rfc5297). It uses one 256-bit AES-CMAC key and one
-256-bit AES-CTR key, equivalent to the RFC's 64-byte AES-SIV-CMAC-512 combined-key variant.
-
-Derive the keys independently:
+### 5.2 AES-256-GCM-SIV (ID 1)
 
 ```text
-compact_mac_key =
+gcm_siv_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-GCM-SIV key",
+    material = item_id_material[64]
+  )
+
+gcm_siv_body = nonce[12] | ciphertext | tag[16]
+```
+
+The encoder MUST obtain a fresh 12-byte nonce from the operating-system
+cryptographic random source for every write, including repeated writes. It
+MUST fail if randomness fails and MUST NOT substitute a timestamp, Item ID,
+plaintext, or process-local counter. Overhead is 28 bytes; the nonce is public.
+
+### 5.3 AES-256-SIV-CMAC (ID 2)
+
+Derive independent 32-byte AES-SIV-CMAC keys:
+
+```text
+deterministic_siv_mac_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
     material = item_id_material[64]
   )
 
-compact_encryption_key =
+deterministic_siv_encryption_key =
   BLAKE3-DERIVE-KEY(
     context  = "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
     material = item_id_material[64]
   )
+
+deterministic_siv_key =
+  deterministic_siv_mac_key[32] | deterministic_siv_encryption_key[32]
 ```
 
-The RFC 5297 combined key is:
+Pass the complete AAD as exactly one RFC 5297 associated-data component; do
+not split it into multiple S2V components or add a nonce component.
 
 ```text
-compact_key = compact_mac_key[32] | compact_encryption_key[32]
+deterministic_siv_body = synthetic_iv[16] | ciphertext
 ```
 
-Pass the complete canonical `aad` byte string as exactly one RFC 5297 associated-data component.
-Do not split its domain, item ID, version, or format fields into separate S2V components, because
-component boundaries affect the synthetic IV. Do not supply an optional nonce component. An empty,
-fixed, or all-zero nonce component is not equivalent to omitting that component; implementations
-MUST NOT use a nonce-requiring AEAD wrapper that cannot express RFC 5297 deterministic mode.
+Overhead is 16 bytes and there is no random nonce. Repeated identical writes
+to one Item ID therefore repeat the stored bytes; per-item keys prevent
+cross-Item-ID plaintext equality comparison.
 
-Encrypt the serialized or compressed bytes and store:
+### 5.4 Unprotected (ID 0)
 
-```text
-compact_body = synthetic_iv[16] | ciphertext
+The transformed body is stored directly. This profile provides no
+confidentiality or authentication; parser bounds and compression validation
+remain mandatory. Clients that require protection MUST reject it.
 
-container =
-  version:vu128
-  | format:u8
-  | synthetic_iv[16]
-  | ciphertext
-```
+### 5.5 Size comparison
 
-There is no random nonce. The synthetic IV is also the 16-byte authentication tag. For version
-`1`, the complete fixed container overhead is exactly 18 bytes: one version byte, one format byte,
-and the synthetic IV. The encrypted serialization identifier remains part of the ciphertext.
+| Profile | Envelope/crypto overhead | Empty uncompressed `RawBytes` |
+|---|---:|---:|
+| Unprotected | 2 bytes | 2 bytes |
+| AES-256-GCM-SIV | 30 bytes | 30 bytes |
+| AES-256-SIV-CMAC | 18 bytes | 18 bytes |
 
-Compact encryption is deterministic. Under one per-item encryption key, identical transformed
-plaintext and associated data produce identical stored bytes. Because every item has a different
-derived key,
-the server cannot compare value equality across different item IDs, but it can observe whether
-the complete value of one item repeats across writes.
+AES-256-GCM-SIV is 12 bytes larger than AES-256-SIV-CMAC. Compression adds
+its own frame overhead and may enlarge small values.
 
-Compact encryption is appropriate only when that per-item equality leakage is acceptable.
+## 6. Processing requirements
 
-## Robust encryption
+### 6.1 Encoding
 
-Encryption ID `2` is AES-256-GCM-SIV as specified by
-[RFC 8452](https://www.rfc-editor.org/rfc/rfc8452).
+An encoder MUST:
 
-Derive its per-item encryption key:
+1. Convert a structured native value using the selected value codec, or accept
+   exact `RawBytes`.
+2. Encode the selected codec and enforce the decoded-payload limit.
+3. Apply compression only when policy permits.
+4. Encode version `1` and the packed `format_flags`.
+5. Construct AAD from the exact namespace, Item ID, and header bytes.
+6. Apply the selected protection profile.
+7. Enforce the complete ValueEnvelope limit before sending.
 
-```text
-robust_key =
-  BLAKE3-DERIVE-KEY(
-    context  = "OpenKache value format v1 AES-256-GCM-SIV key",
-    material = item_id_material[64]
-  )
-```
+It MUST NOT emit a magic prefix, body length, unassigned ID, non-canonical
+`vu128`, or an algorithm inconsistent with the flags.
 
-Generate a fresh 12-byte nonce from the operating system cryptographic random source for every
-write, including repeated writes of the same value to the same item. The write MUST fail if the
-random source fails; an implementation MUST NOT substitute a deterministic fallback.
+### 6.2 Decoding
 
-Store the RFC 8452 ciphertext and tag as:
+A decoder MUST:
 
-```text
-robust_body = nonce[12] | ciphertext | tag[16]
+1. Parse one canonical `value_envelope_version:vu128` from the exact envelope
+   slice.
+2. Require version `1`.
+3. Parse and validate `format_flags`.
+4. Enforce the configured protection policy.
+5. Construct AAD from the supplied namespace, Item ID, and exact header.
+6. Check version-specific minimum body sizes before slicing.
+7. Authenticate and decrypt before decompression or codec parsing.
+8. Validate and bounded-decompress one Zstandard frame when selected.
+9. For a structured codec, decode exactly one complete payload item and reject
+   codec-invalid or trailing bytes. For `RawBytes`, return the exact payload.
 
-container =
-  version:vu128
-  | format:u8
-  | nonce[12]
-  | ciphertext
-  | tag[16]
-```
+Authentication failures MUST use one generic error. Unauthenticated plaintext
+MUST be zeroized before returning that error.
 
-For version `1`, the complete fixed container overhead is exactly 30 bytes: one version byte, one
-format byte, a 12-byte nonce, and a 16-byte tag.
+### 6.3 Limits
 
-The nonce is public and MUST NOT be derived from only the item ID, a timestamp, plaintext, or a
-process-local counter. Per-item ID derivation limits the random-nonce collision domain to repeated
-writes of one item. AES-GCM-SIV additionally prevents an accidental nonce repeat from causing the
-catastrophic failure associated with AES-GCM or ChaCha20-Poly1305. A repeated nonce under one key
-reveals whether the corresponding plaintext and associated data also repeat, and repetition
-worsens the scheme's security bounds. Implementations MUST NOT reuse nonces intentionally.
+- Complete stored `ValueEnvelope`: at most 64 MiB.
+- Decoded codec payload: at most 64 MiB.
 
-Robust encryption is the recommended default because repeated writes of the same value produce
-independent stored representations.
+Implementations MAY use lower limits, but MUST check declared sizes, Zstandard
+windows, produced output, and all arithmetic before allocation.
 
-## Unencrypted values
+## 7. Versioning and compatibility
 
-Encryption ID `0` stores the serialized or compressed bytes directly:
+`value_envelope_version` is the value-side selector for an immutable complete
+client profile. V1 readers accept only `1`, reject unknown versions and IDs,
+and never guess. The old magic-prefixed envelope `4F 4B 56 01` is not v1.
 
-```text
-container = version:vu128 | format:u8 | transformed_body
-```
+Future profiles are capability extensions: newer profiles add values or
+policies that older profiles cannot represent. A newer client SHOULD use the
+oldest supported complete profile that represents the key, value, and required
+security policy at initialization. A v1-representable client therefore uses
+the v1 key rules and v1 ValueEnvelope together.
 
-The format provides no value authentication in this mode. Parser bounds and Zstandard validation
-remain mandatory, but they are not a substitute for cryptographic integrity.
+The client MUST NOT calculate a v1 Item ID and store a newer-profile value
+under it, or combine a newer key contract with a v1 value envelope. Migration
+to a newer profile is an explicit read/decode/write operation and MUST account
+for a changed Item ID.
 
-The format supports unencrypted values so raw and explicitly unprotected APIs can share the same
-serialization and compression contract. A client configured to require value protection MUST
-reject encryption ID `0`. Accepting unencrypted formatted values requires an explicit unprotected
-configuration; a decoder MUST NOT treat a missing encryption profile as an automatic fallback.
+| Policy | Meaning |
+|---|---|
+| `Exact(vN)` | Require `vN`; fail if it cannot represent the client configuration. |
+| `OldestCompatible` | Default; choose the oldest complete profile that works. |
+| `LatestSupported` | Explicit opt-in; may make older clients unable to read. |
 
-## Size limits
+## 8. Replay and ownership
 
-Two independent limits apply:
+V1 authenticates identity and transform selection, not time or write order.
+Valid older values can be replayed to the same Item ID. Generation/version and
+server CAS are intentionally deferred; freshness MUST NOT be inferred from an
+Item ID, nonce, synthetic IV, TTL, or namespace revision.
 
-1. The complete stored container MUST NOT exceed the protocol maximum value size of 64 MiB.
-2. The decoded serialized value MUST NOT exceed 64 MiB.
-
-The first limit includes the version, format byte, nonce or synthetic IV, ciphertext, and tag. The
-second includes the serialization identifier and serialization payload.
-
-An implementation MAY enforce lower configured container and decoded-value limits. It MUST apply
-each limit consistently to encoding and decoding, including declared Zstandard content size,
-requested Zstandard window size, and produced output.
-
-An implementation MUST use checked arithmetic for every size calculation. It MUST authenticate an
-encrypted body before trusting or allocating based on compressed or serialized contents. A
-declared Zstandard content size or requested window size above the decoded limit MUST be rejected
-before decompression, and decompression MUST remain bounded by that limit even if the frame is
-malformed.
-
-## Encoding procedure
-
-An encoder implements these steps:
-
-1. Convert the native language value to a core-owned logical value.
-2. Serialize it in the core and prefix the canonical serialization identifier.
-3. Reject the value if the complete serialized representation exceeds the decoded-value limit.
-4. Apply Zstandard only when configured and beneficial; update the compression nibble to match the
-   bytes actually selected.
-5. Encode version `1` canonically and construct the format byte.
-6. Construct the canonical associated data from the exact item ID and header bytes.
-7. Apply the selected encryption profile:
-   - none: copy the transformed body;
-   - Compact: derive both per-item AES-SIV keys and prepend the 16-byte synthetic IV;
-   - Robust: derive the per-item AES-GCM-SIV key, generate a 12-byte nonce, and append the 16-byte
-     tag.
-8. Reject the result if the complete container exceeds the protocol value limit.
-9. Send the complete container as the raw protocol operation's opaque value bytes.
-
-The encoder MUST NOT emit a length field, magic bytes, reserved algorithm identifier, or
-non-canonical VU128.
-
-## Decoding procedure
-
-A decoder implements these steps in order:
-
-1. Parse one canonical unsigned VU128 from the start of the exact container slice.
-2. Reject a version other than `1`.
-3. Read one format byte and reject unassigned compression or encryption identifiers.
-4. Reject an encryption identifier that violates the client's configured protection policy.
-5. Construct the canonical associated data from the item ID and exact header bytes.
-6. Validate the minimum encrypted body size before slicing:
-   - Compact requires at least a 16-byte synthetic IV and one encrypted serialization-ID byte;
-   - Robust requires a 12-byte nonce, a 16-byte tag, and one encrypted serialization-ID byte.
-7. Derive the selected per-item encryption key or keys.
-8. Authenticate and decrypt before decompression or serialization parsing.
-9. If compressed, validate one bounded Zstandard frame and decompress it.
-10. Parse one canonical serialization identifier from the transformed plaintext.
-11. Dispatch to the selected core codec and reject an unsupported identifier or invalid payload.
-12. Convert the core logical value to the language adapter's native result.
-
-Authentication failure MUST NOT reveal whether the key, nonce, header, tag, ciphertext, or
-compressed contents were responsible. The public error MUST identify only a value-authentication
-failure. Implementations MUST zeroize any unauthenticated plaintext produced internally before
-returning that error.
-
-## Protocol integration
-
-The [wire protocol specification](../protocol/SPEC.md) defines value limits,
-server opacity, and `SET` flags. This format begins with the exact opaque value
-slice carried by a protocol request or response; it does not add protocol
-fields.
-
-The low-level raw API sends exact item IDs and value bytes without this
-container. It is an explicit escape hatch and does not claim compatibility with
-formatted APIs.
-
-## Core and language responsibilities
-
-`openkache-client-core` handles:
-
-- value-format parsing and production;
-- canonical VU128 handling;
-- the serialization registry and all serializers;
-- Zstandard policy, encoding, and decoding;
-- BLAKE3 key derivation and secret zeroization;
-- Compact and Robust authenticated encryption;
-- format validation and stable error categories;
-- the protected application-key and plaintext-value operations used by bindings.
-
-Language adapters handle only:
-
-- conversion between native values and core logical values;
-- transfer of raw byte buffers without reformatting them;
-- runtime-appropriate asynchronous APIs;
-- native configuration and error wrappers;
-- deterministic resource cleanup.
-
-Language adapters MUST NOT duplicate VU128, JSON serialization, compression, key derivation,
-encryption, nonce generation, or container parsing. A future browser implementation must reuse the
-same core through WebAssembly or another shared-core boundary rather than reimplementing the
-format in JavaScript.
-
-## Versioning
-
-There is no compatibility requirement for pre-release envelope or flag-based value
-representations. Writers emit version `1`; readers accept version `1` only.
-
-The earlier magic-prefixed envelope beginning with `4f 4b 56 01` is not version `1` of this format
-and MUST be rejected rather than unwrapped or migrated implicitly.
-
-The TypeScript adapter may still place that legacy envelope inside a version-1 Raw serialization
-for package-local backwards compatibility. That nested payload is not a value-format v1 codec and
-MUST NOT be used as a cross-language interchange format. TypeScript applications that need
-interoperability MUST use its `set_json` and `get_json` APIs (or the raw API with an independently
-specified byte contract).
-
-A future version is required when changing:
-
-- header field order or meaning;
-- an assigned algorithm identifier or its byte-level semantics;
-- associated-data construction;
-- KDF context strings or input material;
-- an assigned serializer's byte contract;
-- encryption body layout.
-
-Assigning a reserved compression, encryption, or serialization identifier with a complete
-specification does not require a container version change. Decoders still reject the identifier
-until they implement that specification.
-
-Unknown versions MUST fail explicitly. A decoder MUST NOT search for a magic prefix, guess that an
-unknown value is plaintext, or fall back to an earlier format.
+The protocol owns frame lengths, namespace IDs, Item IDs, and server semantics.
+The shared client core owns `vu128`, codecs, compression, protection, AAD,
+bounded parsing, and stable errors. Language adapters own native conversion,
+memory ownership, runtime integration, and error wrappers; they MUST NOT
+duplicate wire or cryptographic logic.

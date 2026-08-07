@@ -370,8 +370,7 @@ internal sealed class NativeClient : IAsyncDisposable
         using var addressBuffer = new NativeBuffer(Encoding.UTF8.GetBytes(address));
         using var serverNameBuffer = new NativeBuffer(Encoding.UTF8.GetBytes(serverName));
         using var certificateBuffer = new NativeBuffer(certificate);
-        using var dataProtectionKey = new NativeBuffer(
-            new byte[Protocol.ValueFormatDataProtectionKeyBytes]);
+        using var dataProtectionKey = new NativeBuffer(Array.Empty<byte>());
         var options = new NativeMethods.ConnectOptions
         {
             Address = addressBuffer.Pointer,

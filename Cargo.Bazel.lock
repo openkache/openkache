@@ -1,5 +1,5 @@
 {
-  "checksum": "41a0048e0f117fb8a498dc8178bfa28630d39fb224d7500fe49b34267f57bfd5",
+  "checksum": "79453d341f482c6a3427543cc32f3cb17091691d5bb290d8c0013b8810ed0801",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -1857,54 +1857,6 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "base64 0.23.0": {
-      "name": "base64",
-      "version": "0.23.0",
-      "package_url": "https://github.com/marshallpierce/rust-base64",
-      "repository": {
-        "Http": {
-          "url": "https://static.crates.io/crates/base64/0.23.0/download",
-          "sha256": "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9"
-        }
-      },
-      "targets": [
-        {
-          "Library": {
-            "crate_name": "base64",
-            "crate_root": "src/lib.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
-        }
-      ],
-      "library_target_name": "base64",
-      "common_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "crate_features": {
-          "common": [
-            "alloc",
-            "default",
-            "simd-unsafe",
-            "std"
-          ],
-          "selects": {}
-        },
-        "edition": "2021",
-        "version": "0.23.0"
-      },
-      "license": "MIT OR Apache-2.0",
-      "license_ids": [
-        "Apache-2.0",
-        "MIT"
-      ],
-      "license_file": "LICENSE-APACHE"
-    },
     "bindgen 0.72.1": {
       "name": "bindgen",
       "version": "0.72.1",
@@ -1963,7 +1915,7 @@
               "target": "cexpr"
             },
             {
-              "id": "clang-sys 1.8.1",
+              "id": "clang-sys 1.9.1",
               "target": "clang_sys"
             },
             {
@@ -2019,7 +1971,7 @@
         "link_deps": {
           "common": [
             {
-              "id": "clang-sys 1.8.1",
+              "id": "clang-sys 1.9.1",
               "target": "clang_sys"
             }
           ],
@@ -3273,14 +3225,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "clang-sys 1.8.1": {
+    "clang-sys 1.9.1": {
       "name": "clang-sys",
-      "version": "1.8.1",
+      "version": "1.9.1",
       "package_url": "https://github.com/KyleMayes/clang-sys",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/clang-sys/1.8.1/download",
-          "sha256": "0b023947811758c97c59bf9d1c188fd619ad4718dcaa767947df1cadb14f39f4"
+          "url": "https://static.crates.io/crates/clang-sys/1.9.1/download",
+          "sha256": "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
         }
       },
       "targets": [
@@ -3358,7 +3310,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "1.8.1"
+        "version": "1.9.1"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -3959,7 +3911,7 @@
               "target": "futures_util"
             },
             {
-              "id": "noq-proto 1.1.0",
+              "id": "noq-proto 1.1.1",
               "target": "noq_proto"
             },
             {
@@ -3967,7 +3919,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -5127,7 +5079,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -10990,14 +10942,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "http 1.4.2": {
+    "http 1.5.0": {
       "name": "http",
-      "version": "1.4.2",
+      "version": "1.5.0",
       "package_url": "https://github.com/hyperium/http",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/http/1.4.2/download",
-          "sha256": "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+          "url": "https://static.crates.io/crates/http/1.5.0/download",
+          "sha256": "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
         }
       },
       "targets": [
@@ -11040,7 +10992,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "1.4.2"
+        "version": "1.5.0"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -11085,7 +11037,7 @@
               "target": "bytes"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             }
           ],
@@ -11146,7 +11098,7 @@
               "target": "futures_core"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -11358,7 +11310,7 @@
               "target": "futures_core"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -11460,7 +11412,7 @@
               "target": "futures_util"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -11488,7 +11440,7 @@
               "target": "pin_project_lite"
             },
             {
-              "id": "socket2 0.6.5",
+              "id": "socket2 0.5.10",
               "target": "socket2"
             },
             {
@@ -15824,14 +15776,14 @@
       ],
       "license_file": "LICENSE"
     },
-    "noq-proto 1.1.0": {
+    "noq-proto 1.1.1": {
       "name": "noq-proto",
-      "version": "1.1.0",
+      "version": "1.1.1",
       "package_url": "https://github.com/n0-computer/noq",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/noq-proto/1.1.0/download",
-          "sha256": "334c3c9833f7b2c573cceb9896ddc7aaeb58c8807cbb63211b24d1fe88bf866e"
+          "url": "https://static.crates.io/crates/noq-proto/1.1.1/download",
+          "sha256": "baa7b5ccd819a9c68a0d955e67a881032d09b1a17219b1f90b0997a0888e1a15"
         }
       },
       "targets": [
@@ -15900,7 +15852,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -15951,7 +15903,7 @@
           ],
           "selects": {}
         },
-        "version": "1.1.0"
+        "version": "1.1.1"
       },
       "license": "MIT OR Apache-2.0",
       "license_ids": [
@@ -16756,7 +16708,7 @@
               "target": "owo_colors"
             },
             {
-              "id": "rand 0.10.2",
+              "id": "rand 0.9.5",
               "target": "rand"
             },
             {
@@ -16764,7 +16716,7 @@
               "target": "rcgen"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -16780,7 +16732,7 @@
               "target": "smallvec"
             },
             {
-              "id": "socket2 0.6.5",
+              "id": "socket2 0.4.10",
               "target": "socket2"
             },
             {
@@ -16857,7 +16809,7 @@
               "target": "anstream"
             },
             {
-              "id": "base64 0.23.0",
+              "id": "base64 0.22.1",
               "target": "base64"
             },
             {
@@ -17046,7 +16998,7 @@
               "target": "aes_siv"
             },
             {
-              "id": "base64 0.23.0",
+              "id": "base64 0.22.1",
               "target": "base64"
             },
             {
@@ -17074,11 +17026,11 @@
               "target": "futures_util"
             },
             {
-              "id": "getrandom 0.4.3",
+              "id": "getrandom 0.3.4",
               "target": "getrandom"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -17090,7 +17042,7 @@
               "target": "quinn"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -17530,7 +17482,7 @@
               "target": "bytes"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -17607,7 +17559,7 @@
         "deps": {
           "common": [
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -19376,7 +19328,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -19401,7 +19353,7 @@
             ],
             "cfg(not(all(target_family = \"wasm\", target_os = \"unknown\")))": [
               {
-                "id": "socket2 0.6.5",
+                "id": "socket2 0.5.10",
                 "target": "socket2"
               }
             ]
@@ -19506,7 +19458,7 @@
               "target": "rustc_hash"
             },
             {
-              "id": "rustls 0.23.42",
+              "id": "rustls 0.23.43",
               "target": "rustls"
             },
             {
@@ -19614,7 +19566,7 @@
           "selects": {
             "cfg(not(all(target_family = \"wasm\", target_os = \"unknown\")))": [
               {
-                "id": "socket2 0.6.5",
+                "id": "socket2 0.5.10",
                 "target": "socket2"
               }
             ],
@@ -19862,6 +19814,7 @@
         "crate_features": {
           "common": [
             "alloc",
+            "default",
             "os_rng",
             "small_rng",
             "std",
@@ -20641,7 +20594,7 @@
               "target": "futures_util"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -21364,14 +21317,14 @@
       ],
       "license_file": "LICENSE-APACHE"
     },
-    "rustls 0.23.42": {
+    "rustls 0.23.43": {
       "name": "rustls",
-      "version": "0.23.42",
+      "version": "0.23.43",
       "package_url": "https://github.com/rustls/rustls",
       "repository": {
         "Http": {
-          "url": "https://static.crates.io/crates/rustls/0.23.42/download",
-          "sha256": "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
+          "url": "https://static.crates.io/crates/rustls/0.23.43/download",
+          "sha256": "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
         }
       },
       "targets": [
@@ -21449,7 +21402,7 @@
           "selects": {}
         },
         "edition": "2021",
-        "version": "0.23.42"
+        "version": "0.23.43"
       },
       "build_script_attrs": {
         "compile_data_glob": [
@@ -25984,7 +25937,7 @@
               "target": "futures_util"
             },
             {
-              "id": "http 1.4.2",
+              "id": "http 1.5.0",
               "target": "http"
             },
             {
@@ -31627,7 +31580,7 @@
     "aes-gcm-siv 0.12.0-rc.3",
     "aes-siv 0.8.0-rc.3",
     "anstream 1.0.0",
-    "base64 0.23.0",
+    "base64 0.22.1",
     "blake3 1.8.5",
     "boring 4.22.0",
     "clap 4.6.4",
@@ -31641,9 +31594,9 @@
     "event-listener 5.4.2",
     "flume 0.12.0",
     "futures-util 0.3.33",
-    "getrandom 0.4.3",
+    "getrandom 0.3.4",
     "glommio 0.9.0",
-    "http 1.4.2",
+    "http 1.5.0",
     "indicatif 0.18.6",
     "kanal 0.1.1",
     "kimojio 0.17.0",
@@ -31661,11 +31614,11 @@
     "polyval 0.7.3",
     "quiche 0.29.3",
     "quinn 0.11.11",
-    "rand 0.10.2",
+    "rand 0.9.5",
     "rcgen 0.14.8",
     "reedline 0.49.0",
     "rustix 1.1.4",
-    "rustls 0.23.42",
+    "rustls 0.23.43",
     "rustls-native-certs 0.8.4",
     "serde 1.0.229",
     "serde_json 1.0.151",
@@ -31674,7 +31627,7 @@
     "signal-hook 0.4.4",
     "smallvec 1.15.2",
     "snmalloc-rs 0.7.4",
-    "socket2 0.6.5",
+    "socket2 0.4.10",
     "thiserror 2.0.19",
     "tikv-jemallocator 0.7.0",
     "time 0.3.54",

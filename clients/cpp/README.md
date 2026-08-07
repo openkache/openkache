@@ -46,8 +46,10 @@ Rust/C core is the native binary.
 
 ## API
 
-Construct `openkache::Connect_Options` with the server address and 32-byte
-data-protection key, then call `openkache::Client::connect`. A DER/PEM trust
+Construct `openkache::Connect_Options` with the server address and, when
+protection is wanted, a persistent 32-byte data-protection key, then call
+`openkache::Client::connect`. Omitting the key selects unprotected formatted
+values while retaining Item ID derivation. A DER/PEM trust
 certificate is optional; an empty buffer uses system roots. `get` returns
 `std::optional<Bytes>`, `set` returns `Set_Outcome`, and `remove` reports
 whether a value existed. `Set_Options` supports conditional writes,

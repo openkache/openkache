@@ -33,7 +33,11 @@ pub use config::{
     ServerTrust, SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
-pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+pub use key::{
+    canonical_key_bytes, ClientRootKey, DataProtectionKey, ItemId, KeyError, KeySpec,
+    PortableInteger, PortableKey, CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES,
+    MAX_CANONICAL_KEY_BYTES,
+};
 pub use openkache_protocol::{
     FieldSequence, ITEM_ID_BYTES, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, Opcode,
     decode_optional_values, encode_field_sequence, encode_optional_values,
@@ -246,6 +250,9 @@ pub enum Error {
     /// Client-side value encoding or decoding failed.
     #[error("value transformation failed: {0}")]
     Value(#[from] value::Error),
+    /// Client-side key conversion or Item ID derivation failed.
+    #[error("key transformation failed: {0}")]
+    Key(#[from] key::KeyError),
     /// The client was explicitly and permanently closed.
     #[error("client is closed")]
     ClientClosed,
@@ -1319,6 +1326,14 @@ macro_rules! builder_methods {
 macro_rules! raw_client_methods {
     ($client:ident) => {
         impl $client {
+            /// Resolves and returns the namespace used by formatted operations.
+            ///
+            /// If no explicit namespace ID is configured, this opens the
+            /// configured namespace name with the builder's policy.
+            pub async fn ensure_namespace_id(&self) -> Result<u64> {
+                self.0.ensure_namespace().await
+            }
+
             /// Verifies the connection and returns the complete request round-trip time.
             pub async fn ping(&self) -> Result<Duration> {
                 self.0.ping().await

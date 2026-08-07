@@ -346,9 +346,13 @@ cache.set(item_id, value, options)
 
 `namespace_id` is a fixed eight-octet `u64be` in the numeric range
 `1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
-identity. `0` is reserved and MUST be rejected. The ID is carried per request
-rather than bound to a lane, so a lane may be reused for different namespaces
-and retries can be encoded deterministically.
+identity. Once assigned, a `namespace_id` MUST NOT be reused for a different
+namespace, including after deletion. A server MAY retain allocation tombstones
+or a monotonic allocator state to enforce this rule. `0` is reserved and MUST
+be rejected. The ID is carried per request rather than bound to a lane, so a
+lane may be reused for different namespaces and retries can be encoded
+deterministically. Clients do not allocate namespace IDs; they treat the
+server-returned ID as opaque and MUST NOT synthesize or recycle one.
 
 The wire protocol has no default namespace concept. An SDK MAY expose
 `client.set(item_id, value, options)` as a convenience shorthand, but it MUST
@@ -388,9 +392,11 @@ narrower profile.
 `namespace_id`. `PING` is connection-scoped and carries none. `NAMESPACE_OPEN`
 resolves a name to a namespace descriptor and can create a missing named
 namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
-optimistic-concurrency check. `NAMESPACE_DELETE` deletes an empty named
-namespace with an optimistic-concurrency check. Any namespace, including the
-empty-name namespace, may be deleted when it is empty.
+optimistic-concurrency check. `NAMESPACE_DELETE` removes a named namespace
+identity with an optimistic-concurrency check. Any namespace, including the
+empty-name namespace, may be deleted once no request is using it.
+Recreating a deleted name, if allowed by the deployment, creates a new
+namespace identity and therefore receives a new `namespace_id`.
 
 An item is identified by the pair `(namespace_id, item_id)`. The same 32-octet
 Item ID in two namespaces denotes two independent items.
@@ -417,10 +423,13 @@ existing policy. A newly created namespace starts at revision `1`.
 | 0–1 | `03` | `00` = `IfEmpty`; `01`–`11` = reserved |
 | 2–7 | `FC` | Reserved; MUST be zero |
 
-Version 1 supports only `IfEmpty`. The namespace is considered empty at the
-delete linearization point when it contains no logically present item; expired
-items do not prevent deletion. A live item causes `NamespaceNotEmpty` and no
-deletion. Force deletion and asynchronous purge are not defined by v1.
+Version 1 accepts only the `IfEmpty` wire value for compatibility. The server
+does not retain or scan a namespace-wide Item ID index. Deletion therefore
+linearizes after in-flight namespace requests drain and removes only the
+namespace identity; storage records from the retired namespace remain
+unreachable because namespace IDs are never reused. A concurrent request may
+receive `NamespaceNotEmpty` and retry the deletion. Physical purge of those
+records is not part of v1; they may remain until ordinary storage eviction.
 
 `revision` and `expected_revision` are fixed eight-octet `u64be` values, not
 `vu128` fields. A namespace revision is positive, starts at `1`, and increases
@@ -746,12 +755,11 @@ namespace ID exists. An authorized request for a missing namespace returns
 
 `SYNC` has the request layout `06 | namespace_id:u64be`.
 
-`SYNC` is a namespace persistence barrier. Its linearization point fixes the
-set of mutations for that namespace covered by the barrier. A successful
-response is sent only after all mutations in that namespace whose mutation
-linearization points precede that `SYNC` linearization point have completed the
-server's configured persistence operation across all storage workers. Mutations
-linearized after that point need not be included.
+`SYNC` is a storage persistence barrier scoped by namespace authorization. The
+server does not retain a namespace-wide mutation index, so the implementation
+may flush all storage workers. A successful response is sent only after the
+configured persistence operation completes. Mutations submitted after the
+barrier begins need not be included.
 
 - Authorized success: `Ok` with an empty payload, sent only after the barrier
   completes.
@@ -813,11 +821,10 @@ were written.
 ```
 
 The only valid v1 `delete_flags` value is `00` (`IfEmpty`). The server checks
-the revision and atomically tests whether the namespace has any logically
-present items. Authorization is deployment-specific because v1 has no owner or
-account field. A successful deletion returns `Deleted` with an empty payload.
-The namespace is deleted when it is empty; there is no reserved default
-namespace exception in v1.
+the revision and waits for no in-flight namespace request before removing the
+namespace identity. Authorization is deployment-specific because v1 has no
+owner or account field. A successful deletion returns `Deleted` with an empty
+payload. There is no reserved default namespace exception in v1.
 
 ## Response frames
 
@@ -870,7 +877,7 @@ sequence is bounded by the protocol's maximum value size.
 | `88` | `PolicyConflict` | The request selects an item policy disallowed by the namespace |
 | `89` | `Conflict` | `expected_revision` does not match the current namespace revision |
 | `8A` | `NamespaceNotFound` | The requested namespace does not exist |
-| `8B` | `NamespaceNotEmpty` | `IfEmpty` deletion found a logically present item |
+| `8B` | `NamespaceNotEmpty` | `IfEmpty` deletion raced an in-flight namespace request |
 
 Statuses `06` through `7F` and `8C` through `FF` are unassigned. A client MUST
 treat an unassigned status as a malformed response and discard the lane.
@@ -983,7 +990,7 @@ When a server can respond to a malformed request:
 - a capacity failure caused by protected items maps to `NoCapacity`;
 - a revision mismatch maps to `Conflict`;
 - a missing namespace maps to `NamespaceNotFound`;
-- a non-empty namespace deletion maps to `NamespaceNotEmpty`;
+- a namespace deletion with an in-flight request maps to `NamespaceNotEmpty`;
 - other protocol validation failures map to `InvalidRequest`.
 
 The server MAY send that error response before the request body is complete
@@ -1187,6 +1194,8 @@ A protocol v1 implementation is not complete unless it:
 - uses a one-octet namespace name length and enforces the 255-octet ceiling;
 - starts namespace revisions at one and enforces
   `expected_revision` on policy updates and deletion;
+- never reuses a previously assigned `namespace_id` for a different namespace,
+  including after namespace deletion;
 - encodes namespace policies and descriptors exactly as specified;
 - accepts only `IfEmpty` for the v1 namespace-delete flags;
 - omits `item_id_len` from every request;
@@ -1217,7 +1226,7 @@ A protocol v1 implementation is not complete unless it:
   completion;
 - discards a lane after framing or response-status meaning becomes ambiguous;
 - treats mutation outcomes as ambiguous when transport fails before a response;
-- implements `SYNC` as the documented namespace persistence barrier.
+- implements `SYNC` as the documented storage persistence barrier.
 
 ## Reference
 

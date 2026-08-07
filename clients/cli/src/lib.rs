@@ -19,7 +19,7 @@ use openkache_client::Client;
 use openkache_client::LocalClient;
 use openkache_client::{
     Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
-    PrivateKey, ServerTrust, SetOptions, SetOutcome,
+    KeySpec, PrivateKey, ServerTrust, SetOptions, SetOutcome,
 };
 use owo_colors::OwoColorize;
 use reedline::{
@@ -163,7 +163,7 @@ pub struct Arguments {
     )]
     pub client_key: Option<PathBuf>,
 
-    /// Base64-encoded 32-byte data-protection key.
+    /// Optional Base64-encoded 32-byte data-protection key.
     #[arg(
         long,
         env = "OPENKACHE_DATA_PROTECTION_KEY",
@@ -173,7 +173,7 @@ pub struct Arguments {
     )]
     pub data_protection_key: Option<String>,
 
-    /// File containing a Base64-encoded 32-byte data-protection key.
+    /// Optional file containing a Base64-encoded 32-byte data-protection key.
     #[arg(
         long,
         env = "OPENKACHE_DATA_PROTECTION_KEY_FILE",
@@ -349,7 +349,12 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
 
     #[cfg(feature = "quic-compio")]
     {
-        let mut builder = LocalClient::builder(endpoint, data_protection_key).server_trust(trust);
+        let mut builder = match data_protection_key {
+            Some(key) => LocalClient::builder(endpoint, key),
+            None => LocalClient::builder_unprotected(endpoint),
+        }
+        .server_trust(trust)
+        .key_spec(KeySpec::Text);
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
@@ -362,7 +367,12 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
 
     #[cfg(feature = "quic-quinn")]
     {
-        let mut builder = Client::builder(endpoint, data_protection_key).server_trust(trust);
+        let mut builder = match data_protection_key {
+            Some(key) => Client::builder(endpoint, key),
+            None => Client::builder_unprotected(endpoint),
+        }
+        .server_trust(trust)
+        .key_spec(KeySpec::Text);
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
@@ -400,20 +410,16 @@ fn endpoint_from_arguments(arguments: &Arguments) -> Result<Endpoint> {
     Endpoint::from_str(address).map_err(CliError::from)
 }
 
-fn data_protection_key_from_arguments(arguments: &Arguments) -> Result<DataProtectionKey> {
+fn data_protection_key_from_arguments(
+    arguments: &Arguments,
+) -> Result<Option<DataProtectionKey>> {
     let encoded = match (
         arguments.data_protection_key.as_deref(),
         arguments.data_protection_key_file.as_deref(),
     ) {
         (Some(value), None) => value.to_string(),
         (None, Some(path)) => std::fs::read_to_string(path)?,
-        (None, None) => {
-            return Err(CliError::Configuration(
-                "provide --data-protection-key or --data-protection-key-file (or the matching \
-                 environment variable)"
-                    .to_string(),
-            ));
-        }
+        (None, None) => return Ok(None),
         (Some(_), Some(_)) => {
             return Err(CliError::Configuration(
                 "data-protection key may be supplied only once".to_string(),
@@ -427,7 +433,9 @@ fn data_protection_key_from_arguments(arguments: &Arguments) -> Result<DataProte
             "data-protection key must not be empty".to_string(),
         ));
     }
-    DataProtectionKey::from_base64(encoded).map_err(CliError::from)
+    DataProtectionKey::from_base64(encoded)
+        .map(Some)
+        .map_err(CliError::from)
 }
 
 fn trust_from_arguments(arguments: &Arguments) -> Result<ServerTrust> {
