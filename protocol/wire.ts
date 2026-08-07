@@ -330,6 +330,43 @@ export interface Wire_Contract {
   readonly v1: Wire_V1_Contract
 }
 
+/**
+ * Returns the maximum payload bytes a modeled response may occupy.
+ *
+ * Response budgeting is a property of the output shape, never of the
+ * request's input value length.  Optional-value and composite responses carry
+ * one length/sentinel prefix per modeled field, while status-only responses
+ * carry no payload.  The bound is intentionally conservative for codecs whose
+ * exact expansion is not part of protocol-v1 yet.
+ */
+export function response_payload_bound(
+  contract: Pick<Wire_Contract, "max_value_bytes" | "v1">,
+  operation: Pick<Wire_Operation, "contract">,
+): number {
+  const route = derive_wire_response_route(operation.contract)
+  const response_value_count = operation.contract.response_value_count
+  const composite_field_count = operation.contract.response_fields.reduce(
+    (count, field) => count + field.count,
+    0,
+  )
+  const optional_count = route === "composite"
+    ? composite_field_count
+    : route === "value"
+    ? response_value_count
+    : 0
+  if (optional_count > 1) {
+    const entry_bytes =
+      (contract.v1.optional_value_length_bytes ?? 4) + contract.max_value_bytes
+    return optional_count * entry_bytes
+  }
+  return route === "application_value" ||
+      route === "value" ||
+      route === "stats_json" ||
+      route === "namespace_descriptor"
+    ? contract.max_value_bytes
+    : 0
+}
+
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const MODEL_DIRECTORY = "model"
 const SMITHY_EXECUTABLE = process.env.OPENKACHE_SMITHY_EXECUTABLE ?? "smithy"
@@ -1493,6 +1530,7 @@ function rust_operation_contract(contract: Wire_Contract): string {
             request_fields: ${field_slice(operation.contract.request_fields)},
             response_kind: ${rust_string_literal(response_route(operation))},
             response_value_count: ${operation.contract.response_value_count},
+            response_payload_bound: ${formatted_decimal(response_payload_bound(contract, operation))},
             response_fields: ${field_slice(operation.contract.response_fields)},
             retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
             effect: OperationEffect::${enum_variant(operation.contract.effect)},
@@ -1556,6 +1594,8 @@ pub struct OperationContract {
     /// Generated transport descriptor derived from the Smithy output field plan.
     pub response_kind: &'static str,
     pub response_value_count: usize,
+    /// Conservative maximum response payload bytes derived from the output shape.
+    pub response_payload_bound: usize,
     pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
     pub effect: OperationEffect,
@@ -1783,6 +1823,21 @@ function max_request_frame_bytes_for_contract(contract: Wire_Contract): number {
   return Math.max(...sizes)
 }
 
+/** Computes a conservative complete response-frame bound from output shapes. */
+function max_response_frame_bytes_for_contract(contract: Wire_Contract): number {
+  const operations = contract.operations
+  const maximum_payload = operations === undefined || operations.length === 0
+    ? contract.max_value_bytes
+    : Math.max(
+      ...operations.map((operation) => response_payload_bound(contract, operation)),
+    )
+  return (
+    contract.v1.status_bytes +
+    contract.v1.max_varuint_bytes +
+    maximum_payload
+  )
+}
+
 /** Renders operation-specific protocol constants for semantic adapters. */
 export function render_rust_semantic_constants(contract: Wire_Contract): string {
   const v1 = contract.v1
@@ -1857,7 +1912,7 @@ pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
 /// Conservative maximum complete response frame size for protocol v1.
 pub const MAX_RESPONSE_FRAME_BYTES: usize =
-    STATUS_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
+    ${formatted_decimal(max_response_frame_bytes_for_contract(contract))};
 /// Bytes in every namespace ID and namespace revision.
 pub const NAMESPACE_ID_BYTES: usize = ${formatted_decimal(v1.namespace_id_bytes)};
 pub const NAMESPACE_REVISION_BYTES: usize = ${formatted_decimal(v1.namespace_revision_bytes)};
