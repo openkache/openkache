@@ -1896,8 +1896,9 @@ async fn execute_request(
     // one lifecycle lock so an open cannot observe a descriptor while delete
     // is concurrently removing it (or vice versa).
     let lifecycle_lock = if matches!(
-        crate::contract::operation_contract(opcode).request_kind,
-        "namespace_open" | "namespace_delete"
+        crate::contract::operation_contract(opcode).request_route,
+        crate::contract::OperationRequestRoute::NamespaceOpen
+            | crate::contract::OperationRequestRoute::NamespaceDelete
     ) {
         match namespaces.lock() {
             Ok(registry) => Some(registry.lifecycle_lock()),
@@ -1921,8 +1922,12 @@ async fn execute_request(
     // mutex only protects map metadata; this async lock covers the cache
     // operation and its corresponding item-tracking update.
     let namespace_lock = if matches!(
-        crate::contract::operation_contract(opcode).request_kind,
-        "item" | "set" | "namespace" | "namespace_update_policy" | "namespace_delete"
+        crate::contract::operation_contract(opcode).request_route,
+        crate::contract::OperationRequestRoute::Item
+            | crate::contract::OperationRequestRoute::Set
+            | crate::contract::OperationRequestRoute::Namespace
+            | crate::contract::OperationRequestRoute::NamespaceUpdatePolicy
+            | crate::contract::OperationRequestRoute::NamespaceDelete
     ) {
         let namespace_id = namespace_id.expect("namespace-scoped requests have a validated ID");
         let operation_lock = namespaces
@@ -1968,6 +1973,12 @@ async fn execute_request(
         create_if_missing,
         set_options,
     );
+    if !input.is_valid() {
+        return Some(response_bytes(
+            Status::InvalidRequest,
+            b"operation field sequence is invalid",
+        ));
+    }
     operation_handlers::execute(operation_handlers::OperationContext {
         cache,
         opcode,
