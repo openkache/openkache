@@ -1866,8 +1866,7 @@ fn request_may_mutate(request: &Request) -> bool {
 }
 
 fn response_budget_bytes(opcode: Opcode, _max_item_bytes: usize) -> Option<usize> {
-    let payload_bound = crate::contract::operation_contract(opcode)
-        .response_payload_bound;
+    let payload_bound = crate::contract::operation_contract(opcode).response_payload_bound;
     (payload_bound > 0).then_some(payload_bound)
 }
 

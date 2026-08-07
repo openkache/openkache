@@ -120,40 +120,37 @@ impl<'a> OperationInputView<'a> {
                 "value" | "payload" => value.take().map(OperationFieldStorage::OwnedBytes),
                 "name" => namespace_name.map(OperationFieldStorage::Bytes),
                 "policy" => namespace_policy.map(OperationFieldStorage::Policy),
-                "default_expiration" => namespace_policy
-                    .map(|policy| OperationFieldStorage::ExpirationDefault(policy.default_expiration)),
-                "default_ttl_milliseconds" => namespace_policy.and_then(|policy| {
-                    match policy.default_expiration {
+                "default_expiration" => namespace_policy.map(|policy| {
+                    OperationFieldStorage::ExpirationDefault(policy.default_expiration)
+                }),
+                "default_ttl_milliseconds" => {
+                    namespace_policy.and_then(|policy| match policy.default_expiration {
                         ExpirationDefault::FixedTtl { ttl_ms } => {
                             Some(OperationFieldStorage::UnsignedLong(ttl_ms))
                         }
                         ExpirationDefault::NoExpiry => None,
-                    }
+                    })
+                }
+                "expiration_override" => namespace_policy.map(|policy| {
+                    OperationFieldStorage::OverridePolicy(policy.expiration_override)
                 }),
-                "expiration_override" => namespace_policy
-                    .map(|policy| OperationFieldStorage::OverridePolicy(policy.expiration_override)),
                 "default_eviction" => namespace_policy
                     .map(|policy| OperationFieldStorage::EvictionDefault(policy.default_eviction)),
                 "eviction_override" => namespace_policy
                     .map(|policy| OperationFieldStorage::OverridePolicy(policy.eviction_override)),
                 "expected_revision" => expected_revision.map(OperationFieldStorage::UnsignedLong),
                 "condition" => Some(OperationFieldStorage::SetCondition(set_options.condition)),
-                "expiration_mode" => {
-                    Some(OperationFieldStorage::ExpirationMode(set_options.expiration_mode))
-                }
-                "eviction_mode" => {
-                    Some(OperationFieldStorage::EvictionMode(set_options.eviction_mode))
-                }
-                "ttl_milliseconds" => set_options
-                    .ttl_ms
-                    .map(OperationFieldStorage::UnsignedLong),
+                "expiration_mode" => Some(OperationFieldStorage::ExpirationMode(
+                    set_options.expiration_mode,
+                )),
+                "eviction_mode" => Some(OperationFieldStorage::EvictionMode(
+                    set_options.eviction_mode,
+                )),
+                "ttl_milliseconds" => set_options.ttl_ms.map(OperationFieldStorage::UnsignedLong),
                 "create_if_missing" => Some(OperationFieldStorage::Boolean(create_if_missing)),
                 _ => None,
             };
-            fields[index] = Some(OperationFieldRecord {
-                plan,
-                value: field,
-            });
+            fields[index] = Some(OperationFieldRecord { plan, value: field });
         }
         let field_len = plan.len();
         Self {
@@ -214,11 +211,7 @@ impl<'a> OperationInputView<'a> {
     /// operation-specific accessor. Existing storage fields retain their
     /// zero-copy slices; callers that need a new wire primitive can add a
     /// codec-backed `OperationFieldValue` without changing the dispatch path.
-    pub(super) fn field_at(
-        &self,
-        role: &str,
-        index: usize,
-    ) -> Option<OperationFieldValue<'_>> {
+    pub(super) fn field_at(&self, role: &str, index: usize) -> Option<OperationFieldValue<'_>> {
         self.field_plan_at(role, index)?;
         self.fields
             .iter()
