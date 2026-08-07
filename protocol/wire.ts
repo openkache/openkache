@@ -1552,6 +1552,17 @@ ${names}
 function rust_operation_contract(contract: Wire_Contract): string {
   const operations = contract.operations
   if (operations === undefined) return ""
+  const max_request_fields = operations.reduce(
+    (maximum, operation) => Math.max(
+      maximum,
+      operation.contract.request_plan?.length ??
+        operation.contract.request_fields.reduce(
+          (count, field) => count + field.count,
+          0,
+        ),
+    ),
+    0,
+  )
   const status_variant = (status: string): string => {
     const entry = contract.statuses.find(
       (candidate) =>
@@ -1645,7 +1656,14 @@ function rust_operation_contract(contract: Wire_Contract): string {
         `        Opcode::${operation.name} => ${optional_value_count(operation)},`,
     )
     .join("\n")
-  return `/// Request scope declared by the Smithy operation contract.
+  return `/// Maximum number of ordered request fields in any modeled operation.
+///
+/// Server operation views use this generated bound for a stack-resident field
+/// record array, keeping the request hot path allocation-free while allowing
+/// the Smithy model to grow the array when a new shape needs more fields.
+pub const MAX_OPERATION_REQUEST_FIELDS: usize = ${max_request_fields};
+
+/// Request scope declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationScope {
     Global,

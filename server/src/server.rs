@@ -1866,8 +1866,7 @@ fn request_may_mutate(request: &Request) -> bool {
 }
 
 fn response_budget_bytes(opcode: Opcode, _max_item_bytes: usize) -> Option<usize> {
-    let payload_bound = crate::contract::operation_contract(opcode)
-        .response_payload_bound;
+    let payload_bound = crate::contract::operation_contract(opcode).response_payload_bound;
     (payload_bound > 0).then_some(payload_bound)
 }
 
@@ -1958,17 +1957,17 @@ async fn execute_request(
             b"namespace does not exist",
         ));
     }
-    let input = operation_handlers::OperationInputView {
+    let input = operation_handlers::OperationInputView::from_request(
         opcode,
         namespace_id,
-        item_ids: &item_ids,
+        &item_ids,
         value,
-        namespace_name: namespace_name.as_deref(),
+        namespace_name.as_deref(),
         namespace_policy,
         expected_revision,
         create_if_missing,
         set_options,
-    };
+    );
     operation_handlers::execute(operation_handlers::OperationContext {
         cache,
         opcode,
