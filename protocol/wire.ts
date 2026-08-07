@@ -1659,41 +1659,6 @@ function rust_operation_contract(contract: Wire_Contract): string {
         return 0
     }
   }
-  const operation_flag_metadata = (
-    predicate: (operation: Wire_Operation) => boolean,
-  ): string =>
-    operations
-      .map(
-        (operation) =>
-          `        Opcode::${operation.name} => ${predicate(operation)},`,
-      )
-      .join("\n")
-  const field_index_modules = (
-    direction: "request" | "response",
-  ): string => {
-    const constants = operations.flatMap((operation) => {
-      const plan = direction === "request"
-        ? operation.contract.request_plan ?? []
-        : operation.contract.response_plan ?? []
-      const ordinals = new Map<string, number>()
-      return plan.map((field, index) => {
-        const ordinal = ordinals.get(field.role) ?? 0
-        ordinals.set(field.role, ordinal + 1)
-        return `    /// ${direction} field ${field.path.join(".")} for ${operation.name}.
-    pub const ${rust_const_identifier(operation.name)}_${rust_const_identifier(field.role)}_${ordinal}: usize = ${index};`
-      })
-    })
-    return `/// Direct numeric indexes for generated operation fields.
-///
-/// These constants are derived from Smithy member order. Server behavior can
-/// use them with OperationInputView::field_at_index and avoid a hot-path
-/// string-role scan while keeping the role vocabulary open.
-#[allow(dead_code)]
-pub mod ${direction}_fields {
-${constants.join("\n")}
-}
-`
-  }
   const status_slice = (statuses: readonly string[]): string =>
     `&[${statuses
       .map((status) => `Status::${status_variant(status)}`)
@@ -1748,6 +1713,41 @@ ${constants.join("\n")}
       (operation) => `    ${optional_value_count(operation)}`,
     )
     .join(",\n")
+  const operation_flag_metadata = (
+    predicate: (operation: Wire_Operation) => boolean,
+  ): string =>
+    operations
+      .map(
+        (operation) =>
+          `        Opcode::${operation.name} => ${predicate(operation)},`,
+      )
+      .join("\n")
+  const field_index_modules = (
+    direction: "request" | "response",
+  ): string => {
+    const constants = operations.flatMap((operation) => {
+      const plan = direction === "request"
+        ? operation.contract.request_plan ?? []
+        : operation.contract.response_plan ?? []
+      const ordinals = new Map<string, number>()
+      return plan.map((field, index) => {
+        const ordinal = ordinals.get(field.role) ?? 0
+        ordinals.set(field.role, ordinal + 1)
+        return `    /// ${direction} field ${field.path.join(".")} for ${operation.name}.
+    pub const ${rust_const_identifier(operation.name)}_${rust_const_identifier(field.role)}_${ordinal}: usize = ${index};`
+      })
+    })
+    return `/// Direct numeric indexes for generated operation fields.
+///
+/// These constants are derived from Smithy member order. Server behavior can
+/// use them with OperationInputView::field_at_index and avoid a hot-path
+/// string-role scan while keeping the role vocabulary open.
+#[allow(dead_code)]
+pub mod ${direction}_fields {
+${constants.join("\n")}
+}
+`
+  }
   return `/// Maximum number of ordered request fields in any modeled operation.
 ///
 /// Server operation views use this generated bound for a stack-resident field

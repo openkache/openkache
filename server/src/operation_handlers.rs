@@ -335,12 +335,7 @@ impl<'a> OperationInputView<'a> {
         self.field_at_index(field_index)
     }
 
-    /// Returns one generated field by its model-derived numeric slot.
-    ///
-    /// Generic field-sequence requests are borrowed directly from their
-    /// single payload allocation.  The same numeric accessor is used for
-    /// legacy requests whose fields have already been decoded into typed
-    /// storage records.
+    /// Returns one ordered field by its generated numeric index.
     pub(super) fn field_at_index(&self, index: usize) -> Option<OperationFieldValue<'_>> {
         if index >= self.field_len {
             return None;
@@ -484,14 +479,6 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
-    /// Returns one boolean field by its generated numeric slot.
-    pub(super) fn boolean_at(&self, index: usize) -> Option<bool> {
-        match self.field_at_index(index) {
-            Some(OperationFieldValue::Boolean(value)) => Some(value),
-            _ => None,
-        }
-    }
-
     /// Decodes one unsigned integer from a generated role without allocating.
     pub(super) fn unsigned_long_at_role(
         &self,
@@ -556,6 +543,14 @@ impl<'a> OperationInputView<'a> {
 
     fn is_generic(&self) -> bool {
         self.generic_payload.is_some()
+    }
+
+    /// Returns a boolean field by its generated numeric slot.
+    pub(super) fn boolean_at(&self, index: usize) -> Option<bool> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::Boolean(value)) => Some(value),
+            _ => None,
+        }
     }
 
     /// Reconstructs the existing SET semantic options from independent fields.
