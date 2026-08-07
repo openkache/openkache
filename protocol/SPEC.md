@@ -294,21 +294,23 @@ possible next frame; it MUST terminate the lane after the error response.
 
 ### Opcodes
 
-| Opcode | Name | Request layout | Value |
-|---:|---|---|---|
-| `01` | `PING` | opcode only | no Item ID, no value |
-| `02` | `GET` | opcode + namespace ID + Item ID | no value |
-| `03` | `SET` | opcode + namespace ID + flags + Item ID + optional TTL + value length + value | value is `0..=64 MiB` |
-| `04` | `DELETE` | opcode + namespace ID + Item ID | no value |
-| `05` | `STATS` | opcode + namespace ID | no Item ID, no value |
-| `06` | `SYNC` | opcode + namespace ID | no Item ID, no value |
-| `07` | `NAMESPACE_OPEN` | opcode + flags + name length + name + optional policy | namespace descriptor |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + expected revision + policy | namespace descriptor |
-| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + expected revision | no value |
-| `0A` | `EXPERIMENTAL_ECHO` | opcode + value length + value | UTF-8 application value |
-| `0B` | `EXPERIMENTAL_REVERSE` | opcode + value length + value | reversed UTF-8 application value |
-| `0C` | `SQUARE_ARRAY` | opcode + value length + value | squared binary64 array |
-| `0D` | `GET2` | opcode + namespace ID + Item ID + Item ID | ordered optional values |
+<!-- BEGIN GENERATED OPCODE TABLE. Do not edit this block by hand. -->
+ | Opcode | Name | Request layout | Response payload |
+ |---|---|---|---|
+ | `01` | `PING` | opcode only | PONG |
+ | `02` | `GET` | opcode + namespace ID + 1 item ID | optional value |
+ | `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome |
+ | `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted |
+ | `05` | `STATS` | opcode + namespace ID | opaque payload |
+ | `06` | `SYNC` | opcode + namespace ID | empty |
+ | `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload |
+ | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload |
+ | `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty |
+ | `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload |
+ | `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload |
+ | `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload |
+ | `0D` | `GET2` | opcode + namespace ID + 2 item IDs | 2 ordered optional values |
+ <!-- END GENERATED OPCODE TABLE. -->
 
 ### `SET` flags
 

@@ -48,6 +48,17 @@ structure operationField {
     role: OperationFieldRole
 }
 
+/// Selects a registered payload codec for a wire-visible Smithy shape.
+///
+/// The operation contract never names a language-specific encoder. A codec is
+/// resolved once by the shared generator registry and then rendered for every
+/// client language.
+@trait(selector: "member")
+structure wireCodec {
+    @required
+    name: String
+}
+
 /// Request scope used by a generated operation contract.
 enum OperationScope {
     GLOBAL = "global"
@@ -103,11 +114,15 @@ structure operationContract {
     @required
     scope: OperationScope
 
+    /// Legacy framing hint. New operations may use any string here; the
+    /// request plan is derived from operation-field roles and shapes.
     @required
-    requestKind: OperationRequestKind
+    requestKind: String
 
+    /// Legacy response hint. New operations may use any string here; the
+    /// response plan is derived from operation-field roles and shapes.
     @required
-    responseKind: OperationResponseKind
+    responseKind: String
 
     @required
     retryMode: OperationRetryMode
@@ -169,6 +184,14 @@ structure WireV1 {
 
     @required
     namespaceNameMaxBytes: Integer
+
+    /// Width of each optional-value response length prefix.
+    @required
+    optionalValueLengthBytes: Integer
+
+    /// Sentinel reserved for a missing optional value.
+    @required
+    optionalValueMissing: Long
 
     @required
     setFlagsBytes: Integer
@@ -302,6 +325,8 @@ structure wireStatus {
         namespaceRevisionBytes: 8,
         namespaceNameLengthBytes: 1,
         namespaceNameMaxBytes: 255,
+        optionalValueLengthBytes: 4,
+        optionalValueMissing: 4294967295,
         setFlagsBytes: 1,
         setConditionMask: 3,
         setConditionAnyBits: 0,

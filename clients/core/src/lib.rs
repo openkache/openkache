@@ -34,7 +34,10 @@ pub use config::{
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
-pub use openkache_protocol::{ITEM_ID_BYTES, Opcode};
+pub use openkache_protocol::{
+    decode_optional_values, encode_optional_values, ITEM_ID_BYTES, Opcode,
+    OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
+};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
