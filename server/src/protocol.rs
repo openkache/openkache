@@ -55,16 +55,23 @@ pub(super) fn field_sequence_response<T: AsRef<[u8]>>(
         )
         .expect("static response fits the protocol limit");
     }
-    let encoded_values = values
-        .iter()
-        .map(|value| value.as_ref().map(AsRef::as_ref))
-        .collect::<Vec<_>>();
-    match encode_optional_values(&encoded_values) {
+    let mut encoder = OptionalValuesEncoder::new(expected);
+    for value in values {
+        let result = encoder.push(value.as_ref().map(AsRef::as_ref));
+        if result.is_err() {
+            return Response::new(
+                Status::TooLarge,
+                b"operation response fields exceed the protocol limit".to_vec(),
+            )
+            .expect("static response fits the protocol limit");
+        }
+    }
+    match encoder.finish() {
         Ok(payload) => Response::new(Status::Ok, payload)
             .expect("optional-value payload was validated by the protocol encoder"),
         Err(_) => Response::new(
-            Status::TooLarge,
-            b"operation response fields exceed the protocol limit".to_vec(),
+            Status::InternalError,
+            b"operation response field count changed while encoding".to_vec(),
         )
         .expect("static response fits the protocol limit"),
     }
