@@ -675,7 +675,8 @@ bind two `item_id` members and two `value` members:
 
 The server may issue the two storage reads concurrently, but the response
 always preserves the request order. An `Ok` response carries the generic
-optional-values payload made of two independently encoded entries:
+ordered field-sequence payload. Protocol v1 encodes this particular sequence
+as two independently encoded optional-value entries:
 
 ```text
 value_0_len:u32be | value_0:value_0_len |
@@ -905,7 +906,7 @@ For a valid request, the following are the domain success and result statuses:
 | `EXPERIMENTAL_ECHO` | `Ok` | The input UTF-8 bytes unchanged |
 | `EXPERIMENTAL_REVERSE` | `Ok` | The input UTF-8 string reversed by Unicode scalar value |
 | `SQUARE_ARRAY` | `Ok` | Squared binary64 array |
-| `GET2` | `Ok` | Ordered pair of independently optional item values |
+| `GET2` | `Ok` | Ordered field sequence of two independently optional item values |
 
 Common error statuses MAY be returned when their stated condition applies. A
 client receiving a status that is neither an allowed domain status nor an
