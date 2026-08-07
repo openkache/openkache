@@ -16,7 +16,6 @@ use super::{
     descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
     response, response_bytes,
 };
-use crate::contract::{OperationRequestKind, OperationResponseKind};
 use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions};
 
 /// Borrowed context passed from the protocol server to one concrete handler.
@@ -40,24 +39,19 @@ pub(super) struct OperationContext<'a, 'cache> {
 }
 
 /// Returns whether an operation can be answered without touching storage.
-pub(super) const fn is_immediate(opcode: Opcode) -> bool {
+pub(super) fn is_immediate(opcode: Opcode) -> bool {
     let contract = crate::contract::operation_contract(opcode);
-    matches!(
-        (contract.request_kind, contract.response_kind),
-        (OperationRequestKind::Empty, OperationResponseKind::Pong)
-            | (
-                OperationRequestKind::ApplicationValue,
-                OperationResponseKind::ApplicationValue
-            )
-    )
+    (contract.request_kind == "empty" && contract.response_kind == "pong")
+        || (contract.request_kind == "application_value"
+            && contract.response_kind == "application_value")
 }
 
 /// Executes an already-classified immediate operation.
 pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
     let contract = crate::contract::operation_contract(opcode);
     match contract.response_kind {
-        OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
-        OperationResponseKind::ApplicationValue => response(Status::Ok, value),
+        "pong" => response_bytes(Status::Ok, b"PONG"),
+        "application_value" => response(Status::Ok, value),
         _ => response_bytes(
             Status::InternalError,
             b"invalid immediate operation contract",

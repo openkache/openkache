@@ -1355,40 +1355,40 @@ macro_rules! raw_client_methods {
                 let contract = contract::operation_contract(operation);
                 match (contract.request_kind, contract.response_kind) {
                     (
-                        contract::OperationRequestKind::Empty,
-                        contract::OperationResponseKind::Pong
-                        | contract::OperationResponseKind::Empty,
+                        "empty",
+                        "pong"
+                        | "empty",
                     )
                     | (
-                        contract::OperationRequestKind::ApplicationValue,
-                        contract::OperationResponseKind::ApplicationValue,
+                        "application_value",
+                        "application_value",
                     ) => {
                         let request = Request::new(operation, None, value.as_ref().to_vec())
                             .map_err(Error::protocol)?;
                         let response = self.0.request(request).await?;
                         let kind = match contract.response_kind {
-                            contract::OperationResponseKind::Pong
-                            | contract::OperationResponseKind::Empty => {
+                            "pong"
+                            | "empty" => {
                                 contract::FfiResultKind::Ok
                             }
-                            contract::OperationResponseKind::ApplicationValue => {
+                            "application_value" => {
                                 contract::FfiResultKind::Value
                             }
                             _ => unreachable!("global response kind checked above"),
                         };
                         Ok(operation_result(kind, match contract.response_kind {
-                                contract::OperationResponseKind::ApplicationValue => {
+                                "application_value" => {
                                     response.payload
                                 }
-                                contract::OperationResponseKind::Pong
-                                | contract::OperationResponseKind::Empty => Vec::new(),
+                                "pong"
+                                | "empty" => Vec::new(),
                                 _ => unreachable!("global response kind checked above"),
                             }))
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::Value
-                        | contract::OperationResponseKind::Composite,
+                        "item" | "set",
+                        "value"
+                        | "composite",
                     ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
@@ -1404,10 +1404,10 @@ macro_rules! raw_client_methods {
                         )
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
+                        "item" | "set",
                         response_kind,
                     ) if contract.request_value_count > 0
-                        && response_kind != contract::OperationResponseKind::SetOutcome => {
+                        && response_kind != "set_outcome" => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
                         let namespace_id = self.0.ensure_namespace().await?;
@@ -1430,8 +1430,8 @@ macro_rules! raw_client_methods {
                         )
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::SetOutcome,
+                        "item" | "set",
+                        "set_outcome",
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
                         Ok(operation_set_result(
@@ -1440,22 +1440,22 @@ macro_rules! raw_client_methods {
                         ))
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::DeleteOutcome,
+                        "item" | "set",
+                        "delete_outcome",
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
                         Ok(operation_delete_result(self.delete(item_id).await?))
                     }
                     (
-                        contract::OperationRequestKind::ScopedNamespace,
-                        contract::OperationResponseKind::StatsJson,
+                        "namespace",
+                        "stats_json",
                     ) => Ok(operation_result(
                         contract::FfiResultKind::Value,
                         self.stats().await?.into_bytes(),
                     )),
                     (
-                        contract::OperationRequestKind::ScopedNamespace,
-                        contract::OperationResponseKind::Empty,
+                        "namespace",
+                        "empty",
                     ) => {
                         self.sync().await?;
                         Ok(operation_result(contract::FfiResultKind::Ok, Vec::new()))
@@ -1500,9 +1500,9 @@ macro_rules! raw_client_methods {
                 let contract = contract::operation_contract(operation);
                 match (contract.request_kind, contract.response_kind) {
                     (
-                        contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::Value
-                        | contract::OperationResponseKind::Composite,
+                        "item" | "set",
+                        "value"
+                        | "composite",
                     ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
@@ -1517,10 +1517,10 @@ macro_rules! raw_client_methods {
                         )
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
+                        "item" | "set",
                         response_kind,
                     ) if contract.request_value_count > 0
-                        && response_kind != contract::OperationResponseKind::SetOutcome => {
+                        && response_kind != "set_outcome" => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
                         let request = Request::new_scoped_items_with_options(
@@ -1542,8 +1542,8 @@ macro_rules! raw_client_methods {
                         )
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::SetOutcome,
+                        "item" | "set",
+                        "set_outcome",
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
                         Ok(operation_set_result(
@@ -1557,8 +1557,8 @@ macro_rules! raw_client_methods {
                         ))
                     }
                     (
-                        contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::DeleteOutcome,
+                        "item" | "set",
+                        "delete_outcome",
                     ) => {
                         let item_id = ItemId::from_slice(item_id.as_ref())?;
                         Ok(operation_delete_result(
@@ -1566,15 +1566,15 @@ macro_rules! raw_client_methods {
                         ))
                     }
                     (
-                        contract::OperationRequestKind::ScopedNamespace,
-                        contract::OperationResponseKind::StatsJson,
+                        "namespace",
+                        "stats_json",
                     ) => Ok(operation_result(
                         contract::FfiResultKind::Value,
                         self.stats_in_namespace(namespace_id).await?.into_bytes(),
                     )),
                     (
-                        contract::OperationRequestKind::ScopedNamespace,
-                        contract::OperationResponseKind::Empty,
+                        "namespace",
+                        "empty",
                     ) => {
                         self.sync_in_namespace(namespace_id).await?;
                         Ok(operation_result(contract::FfiResultKind::Ok, Vec::new()))
@@ -2083,15 +2083,15 @@ fn validate_response_contract(
             })
     };
     match operation_contract.response_kind {
-        contract::OperationResponseKind::Pong => {
+        "pong" => {
             if response.payload == b"PONG" {
                 Ok(())
             } else {
                 invalid_payload("PING success payload must be PONG")
             }
         }
-        contract::OperationResponseKind::ApplicationValue => Ok(()),
-        contract::OperationResponseKind::Composite => {
+        "application_value" => Ok(()),
+        "composite" => {
             if response.status != Status::Ok {
                 invalid_payload("composite responses must have an OK status")
             } else {
@@ -2106,7 +2106,7 @@ fn validate_response_contract(
                 })
             }
         }
-        contract::OperationResponseKind::Value => {
+        "value" => {
             if operation_contract.response_value_count > 1 {
                 if response.status != Status::Ok {
                     invalid_payload("multi-value GET responses must have an OK status")
@@ -2127,29 +2127,30 @@ fn validate_response_contract(
                 Ok(())
             }
         }
-        contract::OperationResponseKind::SetOutcome => {
+        "set_outcome" => {
             if response.payload.is_empty() {
                 Ok(())
             } else {
                 invalid_payload("SET success responses must have an empty payload")
             }
         }
-        contract::OperationResponseKind::DeleteOutcome => {
+        "delete_outcome" => {
             if response.payload.is_empty() {
                 Ok(())
             } else {
                 invalid_payload("DELETE domain responses must have an empty payload")
             }
         }
-        contract::OperationResponseKind::StatsJson => validate_stats_payload(&response.payload),
-        contract::OperationResponseKind::NamespaceDescriptor => descriptor_payload(),
-        contract::OperationResponseKind::Empty => {
+        "stats_json" => validate_stats_payload(&response.payload),
+        "namespace_descriptor" => descriptor_payload(),
+        "empty" => {
             if response.payload.is_empty() {
                 Ok(())
             } else {
                 invalid_payload("empty-response operations must have an empty payload")
             }
         }
+        _ => invalid_payload("unknown generated response route"),
     }
 }
 

@@ -162,37 +162,37 @@ macro_rules! protected_client_methods {
             let contract = crate::contract::operation_contract(operation);
             match (contract.request_kind, contract.response_kind) {
                 (
-                    crate::contract::OperationRequestKind::Empty,
-                    crate::contract::OperationResponseKind::Pong
-                    | crate::contract::OperationResponseKind::Empty,
+                    "empty",
+                    "pong"
+                    | "empty",
                 )
                 | (
-                    crate::contract::OperationRequestKind::ApplicationValue,
-                    crate::contract::OperationResponseKind::ApplicationValue,
+                    "application_value",
+                    "application_value",
                 ) => {
                     self.raw
                         .execute_raw(operation, [], value, set_options)
                         .await
                 }
                 (
-                    crate::contract::OperationRequestKind::ScopedItem,
-                    crate::contract::OperationResponseKind::Value,
+                    "item" | "set",
+                    "value",
                 ) => Ok(crate::operation_get_result(self.get(application_key).await?)),
                 (
-                    crate::contract::OperationRequestKind::ScopedItem,
-                    crate::contract::OperationResponseKind::SetOutcome,
+                    "item" | "set",
+                    "set_outcome",
                 ) => Ok(crate::operation_set_result(
                     self.set(application_key, value.as_ref().to_vec(), set_options)
                         .await?,
                 )),
                 (
-                    crate::contract::OperationRequestKind::ScopedItem,
-                    crate::contract::OperationResponseKind::DeleteOutcome,
+                    "item" | "set",
+                    "delete_outcome",
                 ) => Ok(crate::operation_delete_result(self.delete(application_key).await?)),
                 (
-                    crate::contract::OperationRequestKind::ScopedNamespace,
-                    crate::contract::OperationResponseKind::StatsJson
-                    | crate::contract::OperationResponseKind::Empty,
+                    "namespace",
+                    "stats_json"
+                    | "empty",
                 ) => {
                     self.raw
                         .execute_raw(operation, [], value, set_options)
@@ -218,8 +218,8 @@ macro_rules! protected_client_methods {
             let contract = crate::contract::operation_contract(operation);
             match (contract.request_kind, contract.response_kind) {
                 (
-                    crate::contract::OperationRequestKind::ScopedItem,
-                    crate::contract::OperationResponseKind::Value,
+                    "item" | "set",
+                    "value",
                 ) => {
                     let item_id = self.protection.item_id(application_key);
                     Ok(match self.raw.get_in_namespace(namespace_id, item_id).await? {
@@ -234,8 +234,8 @@ macro_rules! protected_client_methods {
                     })
                 }
                 (
-                    crate::contract::OperationRequestKind::ScopedItem,
-                    crate::contract::OperationResponseKind::SetOutcome,
+                    "item" | "set",
+                    "set_outcome",
                 ) => {
                     let item_id = self.protection.item_id(application_key.as_ref());
                     let value = self.protection.seal_owned(item_id, value.as_ref().to_vec())?;
@@ -246,8 +246,8 @@ macro_rules! protected_client_methods {
                     ))
                 }
                 (
-                    crate::contract::OperationRequestKind::ScopedItem,
-                    crate::contract::OperationResponseKind::DeleteOutcome,
+                    "item" | "set",
+                    "delete_outcome",
                 ) => {
                     let item_id = self.protection.item_id(application_key);
                     Ok(crate::operation_delete_result(
@@ -255,9 +255,9 @@ macro_rules! protected_client_methods {
                     ))
                 }
                 (
-                    crate::contract::OperationRequestKind::ScopedNamespace,
-                    crate::contract::OperationResponseKind::StatsJson
-                    | crate::contract::OperationResponseKind::Empty,
+                    "namespace",
+                    "stats_json"
+                    | "empty",
                 ) => {
                     self.raw
                         .execute_scoped(operation, namespace_id, [], value, set_options)

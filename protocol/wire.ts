@@ -1337,27 +1337,18 @@ function rust_operation_contract(contract: Wire_Contract): string {
   }
   const enum_variant = (value: string): string =>
     pascal_case(value)
-  const request_variant = (operation: Wire_Operation): string => {
-    switch (derive_wire_request_layout(operation.contract)) {
-      case "empty":
-        return "Empty"
-      case "application_value":
-        return "ApplicationValue"
-      case "item":
-      case "set":
-        return "ScopedItem"
-      case "namespace":
-        return "ScopedNamespace"
-      case "namespace_open":
-        return "NamespaceOpen"
-      case "namespace_update_policy":
-        return "NamespaceUpdatePolicy"
-      case "namespace_delete":
-        return "NamespaceDelete"
-    }
-  }
-  const response_variant = (operation: Wire_Operation): string =>
-    enum_variant(derive_wire_response_route(operation.contract))
+  /*
+   * Keep the generated contract's transport descriptors opaque.  The Smithy
+   * field plan is the source of truth; a closed Rust enum would turn every
+   * newly modelled shape into an infrastructure change even when it reuses
+   * the existing byte primitives.  The server adapter can still compare the
+   * generated descriptor with its local framing vocabulary without exposing a
+   * per-operation family in the shared contract.
+   */
+  const request_layout = (operation: Wire_Operation): string =>
+    derive_wire_request_layout(operation.contract)
+  const response_route = (operation: Wire_Operation): string =>
+    derive_wire_response_route(operation.contract)
   const optional_value_count = (operation: Wire_Operation): number => {
     switch (derive_wire_response_route(operation.contract)) {
       case "composite":
@@ -1388,12 +1379,12 @@ function rust_operation_contract(contract: Wire_Contract): string {
     .map(
       (operation) => `        Opcode::${operation.name} => OperationContract {
             scope: OperationScope::${enum_variant(operation.contract.scope)},
-            request_kind: OperationRequestKind::${request_variant(operation)},
+            request_kind: ${rust_string_literal(request_layout(operation))},
             request_label: ${rust_string_literal(operation.contract.request_kind)},
             request_value_count: ${operation.contract.request_value_count ?? 0},
             request_item_count: ${operation.contract.request_item_count},
             request_fields: ${field_slice(operation.contract.request_fields)},
-            response_kind: OperationResponseKind::${response_variant(operation)},
+            response_kind: ${rust_string_literal(response_route(operation))},
             response_label: ${rust_string_literal(operation.contract.response_kind)},
             response_value_count: ${operation.contract.response_value_count},
             response_fields: ${field_slice(operation.contract.response_fields)},
@@ -1418,32 +1409,6 @@ pub enum OperationScope {
     NamespaceManagement,
 }
 
-/// Native request shape declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationRequestKind {
-    Empty,
-    ApplicationValue,
-    ScopedItem,
-    ScopedNamespace,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
-}
-
-/// Response payload shape declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationResponseKind {
-    Empty,
-    Pong,
-    ApplicationValue,
-    Composite,
-    Value,
-    SetOutcome,
-    DeleteOutcome,
-    StatsJson,
-    NamespaceDescriptor,
-}
-
 /// Retry behavior declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationRetryMode {
@@ -1464,13 +1429,19 @@ pub struct OperationField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
     pub scope: OperationScope,
-    pub request_kind: OperationRequestKind,
+    /// Generated transport descriptor derived from the Smithy input field plan.
+    ///
+    /// This is intentionally an open string descriptor rather than a closed
+    /// Rust enum.  Modelled operations may compose the existing wire
+    /// primitives without extending shared infrastructure.
+    pub request_kind: &'static str,
     /// Original Smithy requestKind label, retained for diagnostics only.
     pub request_label: &'static str,
     pub request_value_count: usize,
     pub request_item_count: usize,
     pub request_fields: &'static [OperationField],
-    pub response_kind: OperationResponseKind,
+    /// Generated transport descriptor derived from the Smithy output field plan.
+    pub response_kind: &'static str,
     /// Original Smithy responseKind label, retained for diagnostics only.
     pub response_label: &'static str,
     pub response_value_count: usize,
