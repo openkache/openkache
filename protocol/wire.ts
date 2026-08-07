@@ -357,7 +357,10 @@ export function response_payload_bound(
   if (optional_count > 1) {
     const entry_bytes =
       (contract.v1.optional_value_length_bytes ?? 4) + contract.max_value_bytes
-    return optional_count * entry_bytes
+    // Protocol v1 applies one aggregate payload ceiling to the complete
+    // response, even when the output shape contains multiple optional
+    // fields. Keep the shape-derived count while respecting that global cap.
+    return Math.min(optional_count * entry_bytes, contract.max_value_bytes)
   }
   return route === "application_value" ||
       route === "value" ||
