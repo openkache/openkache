@@ -67,29 +67,6 @@ enum OperationScope {
     NAMESPACE_MANAGEMENT = "namespace_management"
 }
 
-/// Native request shape used by a generated operation adapter.
-enum OperationRequestKind {
-    EMPTY = "empty"
-    APPLICATION_VALUE = "application_value"
-    SCOPED_ITEM = "scoped_item"
-    SCOPED_NAMESPACE = "scoped_namespace"
-    NAMESPACE_OPEN = "namespace_open"
-    NAMESPACE_UPDATE_POLICY = "namespace_update_policy"
-    NAMESPACE_DELETE = "namespace_delete"
-}
-
-/// Response payload contract used by the shared client core.
-enum OperationResponseKind {
-    EMPTY = "empty"
-    PONG = "pong"
-    APPLICATION_VALUE = "application_value"
-    VALUE = "value"
-    SET_OUTCOME = "set_outcome"
-    DELETE_OUTCOME = "delete_outcome"
-    STATS_JSON = "stats_json"
-    NAMESPACE_DESCRIPTOR = "namespace_descriptor"
-}
-
 /// Retry policy used by a generated operation contract.
 enum OperationRetryMode {
     ALWAYS = "always"
