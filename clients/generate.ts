@@ -2360,30 +2360,18 @@ function render_rust_operation_contract(contract: Client_Contract): string {
     return ""
   }
   const enum_variant = (value: string): string => pascal_case(snake_case(value))
-  const request_variant = (operation: Api_Operation & {
+  /*
+   * Transport descriptors are generated as opaque strings rather than a
+   * closed request/response enum.  Adding a Smithy operation that composes
+   * existing byte primitives must only update the model and its codec
+   * registration, not every language/runtime matcher.
+   */
+  const request_layout = (operation: Api_Operation & {
     readonly contract: Api_Operation_Contract
-  }): string => {
-    switch (derive_wire_request_layout(operation.contract)) {
-      case "empty":
-        return "Empty"
-      case "application_value":
-        return "ApplicationValue"
-      case "item":
-      case "set":
-        return "ScopedItem"
-      case "namespace":
-        return "ScopedNamespace"
-      case "namespace_open":
-        return "NamespaceOpen"
-      case "namespace_update_policy":
-        return "NamespaceUpdatePolicy"
-      case "namespace_delete":
-        return "NamespaceDelete"
-    }
-  }
-  const response_variant = (operation: Api_Operation & {
+  }): string => derive_wire_request_layout(operation.contract)
+  const response_route = (operation: Api_Operation & {
     readonly contract: Api_Operation_Contract
-  }): string => enum_variant(derive_wire_response_route(operation.contract))
+  }): string => derive_wire_response_route(operation.contract)
   const response_field_count = (operation: Api_Operation & {
     readonly contract: Api_Operation_Contract
   }): number => {
@@ -2430,18 +2418,18 @@ function render_rust_operation_contract(contract: Client_Contract): string {
       }
       return `        openkache_protocol::Opcode::${operation.name} => OperationContract {
             scope: OperationScope::${enum_variant(operation_contract.scope)},
-            request_kind: OperationRequestKind::${request_variant({
+            request_kind: ${rust_string_literal(request_layout({
               ...operation,
               contract: operation_contract,
-            })},
+            }))},
             request_label: ${rust_string_literal(operation_contract.request_kind)},
             request_value_count: ${operation_contract.request_value_count ?? 0},
             request_item_count: ${operation_contract.request_item_count},
             request_fields: ${field_slice(operation_contract.request_fields)},
-            response_kind: OperationResponseKind::${response_variant({
+            response_kind: ${rust_string_literal(response_route({
               ...operation,
               contract: operation_contract,
-            })},
+            }))},
             response_label: ${rust_string_literal(operation_contract.response_kind)},
             response_value_count: ${operation_contract.response_value_count},
             response_fields: ${field_slice(operation_contract.response_fields)},
@@ -2469,32 +2457,6 @@ pub enum OperationScope {
     NamespaceManagement,
 }
 
-/// Native request shape declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationRequestKind {
-    Empty,
-    ApplicationValue,
-    ScopedItem,
-    ScopedNamespace,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
-}
-
-/// Response payload shape declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationResponseKind {
-    Empty,
-    Pong,
-    ApplicationValue,
-    Composite,
-    Value,
-    SetOutcome,
-    DeleteOutcome,
-    StatsJson,
-    NamespaceDescriptor,
-}
-
 /// Retry behavior declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationRetryMode {
@@ -2515,13 +2477,19 @@ pub struct OperationField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
     pub scope: OperationScope,
-    pub request_kind: OperationRequestKind,
+    /// Generated transport descriptor derived from the Smithy input field plan.
+    ///
+    /// This is intentionally an open string descriptor rather than a closed
+    /// Rust enum. Modelled operations may compose existing wire primitives
+    /// without extending shared infrastructure.
+    pub request_kind: &'static str,
     /// Original Smithy requestKind label, retained for diagnostics only.
     pub request_label: &'static str,
     pub request_value_count: usize,
     pub request_item_count: usize,
     pub request_fields: &'static [OperationField],
-    pub response_kind: OperationResponseKind,
+    /// Generated transport descriptor derived from the Smithy output field plan.
+    pub response_kind: &'static str,
     /// Original Smithy responseKind label, retained for diagnostics only.
     pub response_label: &'static str,
     pub response_value_count: usize,
@@ -4730,37 +4698,12 @@ interface Managed_Api_Operation extends Api_Operation {
   readonly plan: Managed_Operation_Plan
 }
 
-type Application_Value_Codec = "f64_array" | "utf8" | "raw_bytes"
-
-/** One codec registration shared by every generated language renderer. */
-export interface Wire_Codec_Registration {
-  readonly name: string
-  readonly renderer: Application_Value_Codec
-  readonly matches: (type: Api_Type) => boolean
-}
-
 /**
- * Application payload codecs are registered by wire shape, not operation.
- * Adding a new representation requires one registration and one set of
- * language helper templates, never another operation-name branch.
+ * A codec name is model data, not a generator union.  The registry is
+ * deliberately open-ended so a new `@wireCodec` value can be introduced
+ * without editing a central list of operation families.
  */
-export const WIRE_CODEC_REGISTRY: readonly Wire_Codec_Registration[] = [
-  {
-    name: "utf8",
-    renderer: "utf8",
-    matches: (type) => type.kind === "string",
-  },
-  {
-    name: "packed_f64_be",
-    renderer: "f64_array",
-    matches: (type) => type.kind === "list" && type.member?.kind === "double",
-  },
-  {
-    name: "raw_bytes",
-    renderer: "raw_bytes",
-    matches: (type) => type.kind === "blob",
-  },
-]
+type Application_Value_Codec = string
 
 type Application_Value_Language =
   | "java"
@@ -4778,12 +4721,339 @@ interface Rendered_Application_Value_Codec {
   readonly decode: string
 }
 
+/** One codec registration shared by every generated language renderer. */
+export interface Wire_Codec_Registration {
+  readonly name: string
+  readonly matches: (type: Api_Type) => boolean
+  /**
+   * Language-specific syntax is owned by the codec registration itself.
+   * Operation renderers only ask the registry for encode/decode expressions.
+   */
+  readonly render: (
+    language: Application_Value_Language,
+    input: string,
+    payload: string,
+    diagnostic: string,
+    output?: string,
+    output_field?: string,
+  ) => Rendered_Application_Value_Codec
+  readonly render_optional: (
+    language: Application_Value_Language,
+    payload: string,
+    diagnostic: string,
+  ) => string
+  readonly render_go_optional: (
+    payload: string,
+    decoded: string,
+    diagnostic: string,
+    output: string,
+  ) => Rendered_Go_Composite_Field
+}
+
+/**
+ * Application payload codecs are registered by wire shape, not operation.
+ * Adding a new representation requires one registration and one set of
+ * language helper templates, never another operation-name branch.
+ */
+export const WIRE_CODEC_REGISTRY: readonly Wire_Codec_Registration[] = [
+  {
+    name: "utf8",
+    matches: (type) => type.kind === "string",
+    render: render_utf8_codec,
+    render_optional: render_optional_utf8_codec,
+    render_go_optional: render_go_optional_utf8_codec,
+  },
+  {
+    name: "packed_f64_be",
+    matches: (type) => type.kind === "list" && type.member?.kind === "double",
+    render: render_f64_array_codec,
+    render_optional: render_optional_f64_array_codec,
+    render_go_optional: render_go_optional_f64_array_codec,
+  },
+  {
+    name: "raw_bytes",
+    matches: (type) => type.kind === "blob",
+    render: render_raw_bytes_codec,
+    render_optional: render_optional_raw_bytes_codec,
+    render_go_optional: render_go_optional_raw_bytes_codec,
+  },
+]
+
 /**
  * Renders the language-specific edge of a registered payload codec.
  *
  * Operation renderers only provide the input/output expressions and consume
  * this pair. Codec selection therefore remains a single registry decision,
  * while the unavoidable ABI syntax for each language lives in one place.
+ */
+function render_utf8_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+      return {
+        encode: `${input}.getBytes(StandardCharsets.UTF_8)`,
+        decode: `smithyDecodeUtf8(${payload}, ${diagnostic})`,
+      }
+    case "kotlin":
+      return {
+        encode: `${input}.toByteArray()`,
+        decode: `smithyDecodeUtf8(${payload}, ${diagnostic})`,
+      }
+    case "dart":
+      return {
+        encode: `utf8.encode(${input})`,
+        decode: `_smithyDecodeUtf8(${payload}, ${diagnostic})`,
+      }
+    case "typescript":
+      return {
+        encode: `new TextEncoder().encode(${input})`,
+        decode: `this.#transport.decode_utf8(${payload}, ${diagnostic})`,
+      }
+    case "go":
+      return {
+        encode: `wireValue := []byte(${input})`,
+        decode: `return ${output ?? "struct{}"}{${output_field ?? "Payload"}: string(${payload})}, nil`,
+      }
+    case "python":
+      return {
+        encode: `${input}.encode("utf-8")`,
+        decode: `self._smithy_transport.decode_utf8(${payload}, ${diagnostic})`,
+      }
+    case "swift":
+      return {
+        encode: `Data(${input}.utf8)`,
+        decode: `guard let value = String(data: ${payload}, encoding: .utf8) else {
+      throw OpenKacheError(${diagnostic} + " response is not valid UTF-8")
+    }`,
+      }
+    case "csharp":
+      return {
+        encode: `ValidateValue(Encoding.UTF8.GetBytes(${input}))`,
+        decode: `new UTF8Encoding(false, true).GetString(${payload})`,
+      }
+    case "rust":
+      return {
+        encode: `${input}.into_bytes()`,
+        decode: `String::from_utf8(${payload}).map_err(|error| {
+                    Error::Protocol(format!("{} response is not UTF-8: {error}", ${diagnostic}))
+                })?`,
+      }
+  }
+}
+
+function render_raw_bytes_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  _diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+    case "kotlin":
+    case "dart":
+    case "typescript":
+    case "python":
+      return { encode: input, decode: payload }
+    case "go":
+      return {
+        encode: `wireValue := ${input}`,
+        decode: `return ${output ?? "struct{}"}{${output_field ?? "Payload"}: ${payload}}, nil`,
+      }
+    case "swift":
+      return { encode: input, decode: `let value = ${payload}` }
+    case "csharp":
+      return { encode: `ValidateValue(${input})`, decode: payload }
+    case "rust":
+      return { encode: input, decode: payload }
+  }
+}
+
+function render_f64_array_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+      return {
+        encode: `smithyEncodeF64Array(${input})`,
+        decode: `smithyDecodeF64Array(${payload}, ${diagnostic})`,
+      }
+    case "kotlin":
+      return {
+        encode: `smithyEncodeF64Array(${input})`,
+        decode: `smithyDecodeF64Array(${payload}, ${diagnostic})`,
+      }
+    case "dart":
+      return {
+        encode: `_smithyEncodeF64Array(${input})`,
+        decode: `_smithyDecodeF64Array(${payload}, ${diagnostic})`,
+      }
+    case "typescript":
+      return {
+        encode: `smithy_encode_f64_array(${input})`,
+        decode: `smithy_decode_f64_array(${payload}, ${diagnostic})`,
+      }
+    case "go":
+      return {
+        encode: `wireValue, err := smithyEncodeF64Array(${input})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, err
+\t}`,
+        decode: `values, err := smithyDecodeF64Array(${payload})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, operationError(${diagnostic}, err)
+\t}
+\treturn ${output ?? "struct{}"}{${output_field ?? "Payload"}: values}, nil`,
+      }
+    case "python":
+      return {
+        encode: `_smithy_encode_f64_array(${input})`,
+        decode: `_smithy_decode_f64_array(${payload}, ${diagnostic})`,
+      }
+    case "swift":
+      return {
+        encode: `try smithyEncodeF64Array(${input})`,
+        decode: `let value = try smithyDecodeF64Array(
+      ${payload},
+      operation: ${diagnostic}
+    )`,
+      }
+    case "csharp":
+      return {
+        encode: `EncodeF64Array(${input})`,
+        decode: `DecodeF64Array(${payload}, ${diagnostic})`,
+      }
+    case "rust":
+      return {
+        encode: `smithy_encode_f64_array(&${input})?`,
+        decode: `smithy_decode_f64_array(&${payload}, ${diagnostic})?`,
+      }
+  }
+}
+
+function render_optional_utf8_codec(
+  language: Application_Value_Language,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : smithyDecodeUtf8(${payload}, ${diagnostic}))`
+    case "kotlin":
+      return `${payload}?.let { smithyDecodeUtf8(it, ${diagnostic}) }`
+    case "dart":
+      return `${payload} == null ? null : _smithyDecodeUtf8(${payload}!, ${diagnostic})`
+    case "typescript":
+      return `${payload} === undefined ? undefined : this.#transport.decode_utf8(${payload}!, ${diagnostic})`
+    case "go":
+      return `smithyDecodeOptionalUTF8(${payload})`
+    case "python":
+      return `${payload} if ${payload} is None else self._smithy_transport.decode_utf8(${payload}, ${diagnostic})`
+    case "swift":
+      return `try ${payload}.map { data in
+      guard let value = String(data: data, encoding: .utf8) else {
+        throw OpenKacheError(${diagnostic} + " response is not valid UTF-8")
+      }
+      return value
+    }`
+    case "csharp":
+      return `${payload} is null ? null : new UTF8Encoding(false, true).GetString(${payload}!)`
+    case "rust":
+      return `${payload}.map(|value| String::from_utf8(value).map_err(|error| {
+                    Error::Protocol(format!("{} response is not UTF-8: {error}", ${diagnostic}))
+                })).transpose()?`
+  }
+}
+
+function render_optional_f64_array_codec(
+  language: Application_Value_Language,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : smithyDecodeF64Array(${payload}, ${diagnostic}))`
+    case "kotlin":
+      return `${payload}?.let { smithyDecodeF64Array(it, ${diagnostic}) }`
+    case "dart":
+      return `${payload} == null ? null : _smithyDecodeF64Array(${payload}!, ${diagnostic})`
+    case "typescript":
+      return `${payload} === undefined ? undefined : smithy_decode_f64_array(${payload}!, ${diagnostic})`
+    case "go":
+      return `smithyDecodeOptionalF64Array(${payload}, ${diagnostic})`
+    case "python":
+      return `${payload} if ${payload} is None else _smithy_decode_f64_array(${payload}, ${diagnostic})`
+    case "swift":
+      return `try ${payload}.map { try smithyDecodeF64Array($0, operation: ${diagnostic}) }`
+    case "csharp":
+      return `${payload} is null ? null : DecodeF64Array(${payload}!, ${diagnostic})`
+    case "rust":
+      return `${payload}.map(|value| smithy_decode_f64_array(&value, ${diagnostic})).transpose()?`
+  }
+}
+
+function render_optional_raw_bytes_codec(
+  _language: Application_Value_Language,
+  payload: string,
+  _diagnostic: string,
+): string {
+  return payload
+}
+
+function render_go_optional_utf8_codec(
+  payload: string,
+  decoded: string,
+  _diagnostic: string,
+  _output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded} := smithyDecodeOptionalUTF8(${payload})`,
+  }
+}
+
+function render_go_optional_f64_array_codec(
+  payload: string,
+  decoded: string,
+  diagnostic: string,
+  output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded}, err := smithyDecodeOptionalF64Array(${payload}, ${diagnostic})
+\t\tif err != nil {
+\t\t\treturn ${output}{}, operationError(${diagnostic}, err)
+\t\t}`,
+  }
+}
+
+function render_go_optional_raw_bytes_codec(
+  payload: string,
+  decoded: string,
+  _diagnostic: string,
+  _output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded} := ${payload}`,
+  }
+}
+
+/**
+ * Resolves a model codec once and delegates rendering to its registration.
+ * No operation renderer needs a codec-name switch.
  */
 function render_application_value_codec(
   language: Application_Value_Language,
@@ -4794,139 +5064,20 @@ function render_application_value_codec(
   output?: string,
   output_field?: string,
 ): Rendered_Application_Value_Codec {
-  switch (language) {
-    case "java":
-      return {
-        encode: codec === "f64_array"
-          ? `smithyEncodeF64Array(${input})`
-          : codec === "raw_bytes"
-          ? input
-          : `${input}.getBytes(StandardCharsets.UTF_8)`,
-        decode: codec === "f64_array"
-          ? `smithyDecodeF64Array(${payload}, ${diagnostic})`
-          : codec === "raw_bytes"
-          ? payload
-          : `smithyDecodeUtf8(${payload}, ${diagnostic})`,
-      }
-    case "kotlin":
-      return {
-        encode: codec === "f64_array"
-          ? `smithyEncodeF64Array(${input})`
-          : codec === "raw_bytes"
-          ? input
-          : `${input}.toByteArray()`,
-        decode: codec === "f64_array"
-          ? `smithyDecodeF64Array(${payload}, ${diagnostic})`
-          : codec === "raw_bytes"
-          ? payload
-          : `smithyDecodeUtf8(${payload}, ${diagnostic})`,
-      }
-    case "dart":
-      return {
-        encode: codec === "f64_array"
-          ? `_smithyEncodeF64Array(${input})`
-          : codec === "raw_bytes"
-          ? input
-          : `utf8.encode(${input})`,
-        decode: codec === "f64_array"
-          ? `_smithyDecodeF64Array(${payload}, ${diagnostic})`
-          : codec === "raw_bytes"
-          ? payload
-          : `_smithyDecodeUtf8(${payload}, ${diagnostic})`,
-      }
-    case "typescript":
-      return {
-        encode: codec === "f64_array"
-          ? `smithy_encode_f64_array(${input})`
-          : codec === "raw_bytes"
-          ? input
-          : `new TextEncoder().encode(${input})`,
-        decode: codec === "f64_array"
-          ? `smithy_decode_f64_array(${payload}, ${diagnostic})`
-          : codec === "raw_bytes"
-          ? payload
-          : `this.#transport.decode_utf8(${payload}, ${diagnostic})`,
-      }
-    case "go":
-      return {
-        encode: codec === "f64_array"
-          ? `wireValue, err := smithyEncodeF64Array(${input})
-\tif err != nil {
-\t\treturn ${output ?? "struct{}"}{}, err
-\t}`
-          : codec === "raw_bytes"
-          ? `wireValue := ${input}`
-          : `wireValue := []byte(${input})`,
-        decode: codec === "f64_array"
-          ? `values, err := smithyDecodeF64Array(${payload})
-\tif err != nil {
-\t\treturn ${output ?? "struct{}"}{}, operationError(${diagnostic}, err)
-\t}
-\treturn ${output ?? "struct{}"}{${output_field ?? "Payload"}: values}, nil`
-          : codec === "raw_bytes"
-          ? `return ${output ?? "struct{}"}{${output_field ?? "Payload"}: ${payload}}, nil`
-          : `return ${output ?? "struct{}"}{${output_field ?? "Payload"}: string(${payload})}, nil`,
-      }
-    case "python":
-      return {
-        encode: codec === "f64_array"
-          ? `_smithy_encode_f64_array(${input})`
-          : codec === "raw_bytes"
-          ? input
-          : `${input}.encode("utf-8")`,
-        decode: codec === "f64_array"
-          ? `_smithy_decode_f64_array(${payload}, ${diagnostic})`
-          : codec === "raw_bytes"
-          ? payload
-          : `self._smithy_transport.decode_utf8(${payload}, ${diagnostic})`,
-      }
-    case "swift":
-      return {
-        encode: codec === "f64_array"
-          ? `try smithyEncodeF64Array(${input})`
-          : codec === "raw_bytes"
-          ? input
-          : `Data(${input}.utf8)`,
-        decode: codec === "f64_array"
-          ? `let value = try smithyDecodeF64Array(
-      ${payload},
-      operation: ${diagnostic}
-    )`
-          : codec === "raw_bytes"
-          ? `let value = ${payload}`
-          : `guard let value = String(data: ${payload}, encoding: .utf8) else {
-      throw OpenKacheError(${diagnostic} + " response is not valid UTF-8")
-    }`,
-      }
-    case "csharp":
-      return {
-        encode: codec === "f64_array"
-          ? `EncodeF64Array(${input})`
-          : codec === "raw_bytes"
-          ? `ValidateValue(${input})`
-          : `ValidateValue(Encoding.UTF8.GetBytes(${input}))`,
-        decode: codec === "f64_array"
-          ? `DecodeF64Array(${payload}, ${diagnostic})`
-          : codec === "raw_bytes"
-          ? payload
-          : `new UTF8Encoding(false, true).GetString(${payload})`,
-      }
-    case "rust":
-      return {
-        encode: codec === "f64_array"
-          ? `smithy_encode_f64_array(&${input})?`
-          : codec === "raw_bytes"
-          ? input
-          : `${input}.into_bytes()`,
-        decode: codec === "f64_array"
-          ? `smithy_decode_f64_array(&${payload}, ${diagnostic})?`
-          : codec === "raw_bytes"
-          ? payload
-          : `String::from_utf8(${payload}).map_err(|error| {
-                    Error::Protocol(format!("{} response is not UTF-8: {error}", ${diagnostic}))
-                })?`,
-      }
+  const registration = WIRE_CODEC_REGISTRY.find((candidate) =>
+    candidate.name === codec
+  )
+  if (registration === undefined) {
+    throw new Error(`wire codec ${JSON.stringify(codec)} has no renderer registration`)
   }
+  return registration.render(
+    language,
+    input,
+    payload,
+    diagnostic,
+    output,
+    output_field,
+  )
 }
 
 function operation_structure(
@@ -5029,7 +5180,7 @@ function application_value_codec_for_type(type: Api_Type): Application_Value_Cod
       `wire codec ${JSON.stringify(registration.name)} does not match payload shape ${type.kind}`,
     )
   }
-  return registration.renderer
+  return registration.name
 }
 
 /** Returns the ordered top-level fields carried by a composite output. */
@@ -5075,6 +5226,41 @@ function operation_uses_optional_values(operation: Managed_Api_Operation): boole
 }
 
 /**
+ * One framing descriptor feeds every generated optional-value decoder.
+ *
+ * The language snippets are necessarily written in each target language, but
+ * their width, sentinel, aggregate value limit, and byte order come from this
+ * one contract projection.  A framing change therefore cannot silently drift
+ * in one adapter.
+ */
+export interface Optional_Value_Framing {
+  readonly encoding: "big_endian"
+  readonly length_bytes: number
+  readonly max_encoded_entry_bytes: number
+  readonly max_value_bytes: number
+  readonly missing_sentinel: number
+}
+
+export function optional_value_framing(
+  contract: Pick<Client_Contract, "max_value_bytes" | "v1">,
+): Optional_Value_Framing {
+  const length_bytes = contract.v1.optional_value_length_bytes ?? 4
+  const missing_sentinel = contract.v1.optional_value_missing ?? 0xffff_ffff
+  if (length_bytes !== 4 || missing_sentinel !== 0xffff_ffff) {
+    throw new Error(
+      "optional-value framing must use four big-endian length bytes and 0xffffffff as the missing sentinel",
+    )
+  }
+  return {
+    encoding: "big_endian",
+    length_bytes,
+    max_encoded_entry_bytes: length_bytes + contract.max_value_bytes,
+    max_value_bytes: contract.max_value_bytes,
+    missing_sentinel,
+  }
+}
+
+/**
  * Renders a nullable decode for one field in the optional-value sequence.
  * The sequence is always byte-oriented; the registered field codec supplies
  * the language-specific conversion after the missing sentinel is handled.
@@ -5085,57 +5271,13 @@ function render_composite_field_decode(
   payload: string,
   diagnostic: string,
 ): string {
-  switch (language) {
-    case "java":
-      return `(${payload} == null ? null : ${
-        render_application_value_codec(language, codec, "", payload, diagnostic).decode
-      })`
-    case "kotlin":
-      return `${payload}?.let { ${
-        render_application_value_codec(language, codec, "it", "it", diagnostic).decode
-      } }`
-    case "dart":
-      return `${payload} == null ? null : ${
-        render_application_value_codec(language, codec, `${payload}!`, `${payload}!`, diagnostic).decode
-      }`
-    case "typescript":
-      return `${payload} === undefined ? undefined : ${
-        render_application_value_codec(language, codec, `${payload}!`, `${payload}!`, diagnostic).decode
-      }`
-    case "python":
-      return `${payload} if ${payload} is None else ${
-        render_application_value_codec(language, codec, payload, payload, diagnostic).decode
-      }`
-    case "csharp":
-      return `${payload} is null ? null : ${
-        render_application_value_codec(language, codec, `${payload}!`, `${payload}!`, diagnostic).decode
-      }`
-    case "swift":
-      if (codec === "raw_bytes") return payload
-      if (codec === "f64_array") {
-        return `try ${payload}.map { try smithyDecodeF64Array($0, operation: ${diagnostic}) }`
-      }
-      return `try ${payload}.map { data in
-      guard let value = String(data: data, encoding: .utf8) else {
-        throw OpenKacheError(${diagnostic} + " response is not valid UTF-8")
-      }
-      return value
-    }`
-    case "go":
-      if (codec === "raw_bytes") return payload
-      if (codec === "f64_array") {
-        return `smithyDecodeOptionalF64Array(${payload}, ${diagnostic})`
-      }
-      return `smithyDecodeOptionalUTF8(${payload})`
-    case "rust":
-      if (codec === "raw_bytes") return payload
-      if (codec === "f64_array") {
-        return `${payload}.map(|value| smithy_decode_f64_array(&value, ${diagnostic})).transpose()?`
-      }
-      return `${payload}.map(|value| String::from_utf8(value).map_err(|error| {
-                    Error::Protocol(format!("{} response is not UTF-8: {error}", ${diagnostic}))
-                })).transpose()?`
+  const registration = WIRE_CODEC_REGISTRY.find((candidate) =>
+    candidate.name === codec
+  )
+  if (registration === undefined) {
+    throw new Error(`wire codec ${JSON.stringify(codec)} has no renderer registration`)
   }
+  return registration.render_optional(language, payload, diagnostic)
 }
 
 interface Rendered_Go_Composite_Field {
@@ -5158,28 +5300,20 @@ function render_go_composite_field(
   diagnostic: string,
 ): Rendered_Go_Composite_Field {
   const codec = operation_composite_field_codec(operation, field)
+  const registration = WIRE_CODEC_REGISTRY.find((candidate) =>
+    candidate.name === codec
+  )
+  if (registration === undefined) {
+    throw new Error(`wire codec ${JSON.stringify(codec)} has no renderer registration`)
+  }
   const payload = `values[${index}]`
   const decoded = `decodedValue${index}`
-  switch (codec) {
-    case "raw_bytes":
-      return {
-        expression: decoded,
-        statements: `		${decoded} := ${payload}`,
-      }
-    case "utf8":
-      return {
-        expression: decoded,
-        statements: `		${decoded} := smithyDecodeOptionalUTF8(${payload})`,
-      }
-    case "f64_array":
-      return {
-        expression: decoded,
-        statements: `		${decoded}, err := smithyDecodeOptionalF64Array(${payload}, ${diagnostic})
-		if err != nil {
-			return ${operation.output}{}, operationError(${diagnostic}, err)
-		}`,
-      }
-  }
+  return registration.render_go_optional(
+    payload,
+    decoded,
+    diagnostic,
+    operation.output,
+  )
 }
 
 function application_value_codec(
@@ -5878,12 +6012,13 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
 
 export function render_java_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const methods = managed_operations
     .map(render_java_operation_method)
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `    private static byte[] smithyEncodeF64Array(double[] values) {
         ByteBuffer buffer = ByteBuffer.allocate(values.length * Double.BYTES)
@@ -5944,14 +6079,18 @@ export function render_java_operations(contract: Client_Contract): string {
         ByteBuffer buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
         byte[][] values = new byte[valueCount][];
         for (int index = 0; index < values.length; index++) {
-            if (buffer.remaining() < ${contract.v1.optional_value_length_bytes ?? 4}) {
+            if (buffer.remaining() < ${framing.length_bytes}) {
                 throw new OpenKacheClientException(
                     operation + " response is missing an optional-value length");
             }
             long length = Integer.toUnsignedLong(buffer.getInt());
-            if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}L) {
+            if (length == ${framing.missing_sentinel}L) {
                 values[index] = null;
                 continue;
+            }
+            if (length > ${framing.max_value_bytes}L) {
+                throw new OpenKacheClientException(
+                    operation + " response optional-value entry exceeds the maximum value size");
             }
             if (length > buffer.remaining()) {
                 throw new OpenKacheClientException(
@@ -6467,12 +6606,13 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
 
 export function render_kotlin_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const methods = managed_operations
     .map(render_kotlin_operation_method)
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `    private fun smithyEncodeF64Array(values: DoubleArray): ByteArray {
         val buffer = ByteBuffer.allocate(values.size * java.lang.Double.BYTES)
@@ -6521,11 +6661,14 @@ export function render_kotlin_operations(contract: Client_Contract): string {
         val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
         val values = arrayOfNulls<ByteArray>(valueCount)
         for (index in values.indices) {
-            require(buffer.remaining() >= ${contract.v1.optional_value_length_bytes ?? 4}) {
+            require(buffer.remaining() >= ${framing.length_bytes}) {
                 "\$operation response is missing an optional-value length"
             }
-            val length = buffer.int.toLong() and ${contract.v1.optional_value_missing ?? 0xffff_ffff}L
-            if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}L) continue
+            val length = buffer.int.toLong() and ${framing.missing_sentinel}L
+            if (length == ${framing.missing_sentinel}L) continue
+            require(length <= ${framing.max_value_bytes}L) {
+                "\$operation response optional-value entry exceeds the maximum value size"
+            }
             require(length <= buffer.remaining()) {
                 "\$operation response contains a truncated optional-value entry"
             }
@@ -7032,12 +7175,13 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
 
 export function render_dart_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const methods = managed_operations
     .map(render_dart_operation_method)
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `List<int> _smithyEncodeF64Array(List<double> values) {
   final data = ByteData(values.length * 8);
@@ -7095,16 +7239,21 @@ List<List<int>?> _smithyDecodeOptionalValues(
   final values = <List<int>?>[];
   var offset = 0;
   for (var index = 0; index < valueCount; index++) {
-    if (offset + ${contract.v1.optional_value_length_bytes ?? 4} > payload.length) {
+    if (offset + ${framing.length_bytes} > payload.length) {
       throw OpenKacheClientException(
         '\$operation response is missing an optional-value length',
       );
     }
     final length = data.getUint32(offset, Endian.big);
-    offset += ${contract.v1.optional_value_length_bytes ?? 4};
-    if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
+    offset += ${framing.length_bytes};
+    if (length == ${framing.missing_sentinel}) {
       values.add(null);
       continue;
+    }
+    if (length > ${framing.max_value_bytes}) {
+      throw OpenKacheClientException(
+        '\$operation response optional-value entry exceeds the maximum value size',
+      );
     }
     if (length > payload.length - offset) {
       throw OpenKacheClientException(
@@ -8285,6 +8434,7 @@ ${scoped_request_value}        expected_kinds: [${result_kinds}],
 /** Renders generated TypeScript Smithy operation implementations. */
 export function render_typescript_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const imported_types = new Set<string>(["Smithy_OpenKache_Api"])
   for (const operation of managed_operations) {
     imported_types.add(typescript_api_name(operation.input))
@@ -8304,7 +8454,7 @@ export function render_typescript_operations(contract: Client_Contract): string 
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `function smithy_encode_f64_array(values: readonly number[]): Uint8Array {
   const payload = new Uint8Array(values.length * 8);
@@ -8362,14 +8512,19 @@ function smithy_decode_optional_values(
   const values: Array<Uint8Array | undefined> = [];
   let offset = 0;
   for (let index = 0; index < valueCount; index++) {
-    if (offset + ${contract.v1.optional_value_length_bytes ?? 4} > payload.byteLength) {
+    if (offset + ${framing.length_bytes} > payload.byteLength) {
       throw new Error(\`operation \${operation} response is missing an optional-value length\`);
     }
     const length = view.getUint32(offset, false);
-    offset += ${contract.v1.optional_value_length_bytes ?? 4};
-    if (length === ${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
+    offset += ${framing.length_bytes};
+    if (length === ${framing.missing_sentinel}) {
       values.push(undefined);
       continue;
+    }
+    if (length > ${framing.max_value_bytes}) {
+      throw new Error(
+        \`operation \${operation} response optional-value entry exceeds the maximum value size\`,
+      );
     }
     if (length > payload.byteLength - offset) {
       throw new Error(\`operation \${operation} response contains a truncated optional-value entry\`);
@@ -9310,12 +9465,13 @@ ${decode_statements}
 /** Renders generated Go operation implementations backed by the shared client core. */
 export function render_go_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const methods = managed_operations
     .map((operation) => render_go_operation_method(contract, operation))
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `func smithyEncodeF64Array(values []float64) ([]byte, error) {
 	payload := make([]byte, len(values)*8)
@@ -9367,13 +9523,19 @@ func smithyDecodeOptionalValues(payload []byte, valueCount int) ([]*[]byte, erro
 	values := make([]*[]byte, valueCount)
 	offset := 0
 	for index := range values {
-		if len(payload)-offset < ${contract.v1.optional_value_length_bytes ?? 4} {
+		if len(payload)-offset < ${framing.length_bytes} {
 			return values, validationError("optional_values", "response is missing an entry length")
 		}
-		length := binary.BigEndian.Uint32(payload[offset : offset+${contract.v1.optional_value_length_bytes ?? 4}])
-		offset += ${contract.v1.optional_value_length_bytes ?? 4}
-		if length == uint32(${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
+		length := binary.BigEndian.Uint32(payload[offset : offset+${framing.length_bytes}])
+		offset += ${framing.length_bytes}
+		if length == uint32(${framing.missing_sentinel}) {
 			continue
+		}
+		if uint64(length) > uint64(${framing.max_value_bytes}) {
+			return values, validationError(
+				"optional_values",
+				"response optional-value entry exceeds the maximum value size",
+			)
 		}
 		if uint64(length) > uint64(len(payload)-offset) {
 			return values, validationError("optional_values", "response contains a truncated entry")
@@ -9965,6 +10127,7 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
 /** Renders generated Python Smithy operation implementations. */
 export function render_python_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const imported_types = new Set<string>()
   for (const operation of managed_operations) {
     imported_types.add(python_api_name(operation.input))
@@ -9985,7 +10148,7 @@ export function render_python_operations(contract: Client_Contract): string {
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `def _smithy_encode_f64_array(values: list[float]) -> bytes:
     payload = bytearray()
@@ -10029,13 +10192,17 @@ def _smithy_decode_optional_values(
     values: list[bytes | None] = []
     offset = 0
     for _ in range(value_count):
-        if len(payload) - offset < ${contract.v1.optional_value_length_bytes ?? 4}:
+        if len(payload) - offset < ${framing.length_bytes}:
             raise ValueError(f"operation {operation} response is missing an optional-value length")
-        length = int.from_bytes(payload[offset:offset + ${contract.v1.optional_value_length_bytes ?? 4}], "big")
-        offset += ${contract.v1.optional_value_length_bytes ?? 4}
-        if length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}:
+        length = int.from_bytes(payload[offset:offset + ${framing.length_bytes}], "big")
+        offset += ${framing.length_bytes}
+        if length == ${framing.missing_sentinel}:
             values.append(None)
             continue
+        if length > ${framing.max_value_bytes}:
+            raise ValueError(
+                f"operation {operation} response optional-value entry exceeds the maximum value size"
+            )
         if length > len(payload) - offset:
             raise ValueError(f"operation {operation} response contains a truncated optional-value entry")
         values.append(payload[offset:offset + length])
@@ -11155,12 +11322,13 @@ function render_swift_operation_method(
 /** Renders generated Swift Smithy operation implementations. */
 export function render_swift_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const methods = managed_operations
     .map((operation) => render_swift_operation_method(contract, operation))
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `private func smithyEncodeF64Array(_ values: [Double]) throws -> Data {
   var payload = Data(capacity: values.count * 8)
@@ -11224,16 +11392,21 @@ private func smithyDecodeOptionalValues(
   var values: [Data?] = []
   values.reserveCapacity(valueCount)
   for _ in 0..<valueCount {
-    guard payload.count - offset >= ${contract.v1.optional_value_length_bytes ?? 4} else {
+    guard payload.count - offset >= ${framing.length_bytes} else {
       throw OpenKacheError("\(operation) response is missing an optional-value length")
     }
-    let length = payload[offset..<(offset + ${contract.v1.optional_value_length_bytes ?? 4})].reduce(UInt32(0)) {
+    let length = payload[offset..<(offset + ${framing.length_bytes})].reduce(UInt32(0)) {
       ($0 << 8) | UInt32($1)
     }
-    offset += ${contract.v1.optional_value_length_bytes ?? 4}
-    if length == UInt32(${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
+    offset += ${framing.length_bytes}
+    if length == UInt32(${framing.missing_sentinel}) {
       values.append(nil)
       continue
+    }
+    guard length <= UInt32(${framing.max_value_bytes}) else {
+      throw OpenKacheError(
+        "\(operation) response optional-value entry exceeds the maximum value size"
+      )
     }
     let count = Int(length)
     guard count <= payload.count - offset else {
@@ -12071,12 +12244,13 @@ ${render_csharp_operation_method_body(contract, operation)}`
 /** Renders generated C# Smithy operation implementations. */
 export function render_csharp_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const framing = optional_value_framing(contract)
   const methods = managed_operations
     .map((operation) => render_csharp_operation_method(contract, operation))
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `    private static byte[] EncodeF64Array(double[] values)
     {
@@ -12168,17 +12342,23 @@ export function render_csharp_operations(contract: Client_Contract): string {
         var offset = 0;
         for (var index = 0; index < values.Length; index++)
         {
-            if (payload.Length - offset < ${contract.v1.optional_value_length_bytes ?? 4})
+            if (payload.Length - offset < ${framing.length_bytes})
             {
                 throw new OpenKacheException(
                     "PROTOCOL_ERROR",
                     $"{operation} response is missing an optional-value length.");
             }
-            var length = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(offset, ${contract.v1.optional_value_length_bytes ?? 4}));
-            offset += ${contract.v1.optional_value_length_bytes ?? 4};
-            if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}u)
+            var length = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(offset, ${framing.length_bytes}));
+            offset += ${framing.length_bytes};
+            if (length == ${framing.missing_sentinel}u)
             {
                 continue;
+            }
+            if (length > ${framing.max_value_bytes}u)
+            {
+                throw new OpenKacheException(
+                    "PROTOCOL_ERROR",
+                    $"{operation} response optional-value entry exceeds the maximum value size.");
             }
             if (length > (uint)(payload.Length - offset))
             {
@@ -12947,7 +13127,7 @@ export function render_rust_operations(contract: Client_Contract): string {
     .join("\n\n")
   const f64_array_helpers = has_application_value_codec(
     managed_operations,
-    "f64_array",
+    "packed_f64_be",
   )
     ? `fn smithy_encode_f64_array(values: &[f64]) -> std::result::Result<Vec<u8>, Error> {
     let mut payload = Vec::with_capacity(values.len() * 8);

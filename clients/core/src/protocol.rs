@@ -10,7 +10,7 @@ use openkache_protocol::{
 };
 
 use crate::contract::{
-    DELETE_IF_EMPTY, NAMESPACE_NAME_MAX_BYTES, OPEN_CREATE_IF_MISSING, OperationRequestKind,
+    DELETE_IF_EMPTY, NAMESPACE_NAME_MAX_BYTES, OPEN_CREATE_IF_MISSING,
     POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED,
     POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_FLAGS_BYTES, POLICY_NO_EXPIRY,
     POLICY_RESERVED_MASK, SET_CONDITION_ANY_BITS, SET_CONDITION_MASK, SET_EVICTABLE_BITS,
@@ -574,11 +574,11 @@ impl Request {
         let mut output = Vec::new();
         output.push(self.opcode as u8);
         match contract.request_kind {
-            OperationRequestKind::Empty => {}
-            OperationRequestKind::ApplicationValue => {
+            "empty" => {}
+            "application_value" => {
                 append_varuint(&mut output, self.value.len() as u64);
             }
-            OperationRequestKind::ScopedItem => {
+            "item" | "set" => {
                 append_namespace_id(&mut output, self.namespace_id)?;
                 if contract.request_value_count > 0 {
                     output.push(self.set_options.flags()?);
@@ -593,10 +593,10 @@ impl Request {
                     append_varuint(&mut output, self.value.len() as u64);
                 }
             }
-            OperationRequestKind::ScopedNamespace => {
+            "namespace" => {
                 append_namespace_id(&mut output, self.namespace_id)?;
             }
-            OperationRequestKind::NamespaceOpen => {
+            "namespace_open" => {
                 output.push(if self.create_if_missing {
                     OPEN_CREATE_IF_MISSING
                 } else {
@@ -621,7 +621,7 @@ impl Request {
                     );
                 }
             }
-            OperationRequestKind::NamespaceUpdatePolicy => {
+            "namespace_update_policy" => {
                 append_namespace_id(&mut output, self.namespace_id)?;
                 append_revision(&mut output, self.expected_revision)?;
                 output.extend_from_slice(
@@ -631,10 +631,17 @@ impl Request {
                         .encode()?,
                 );
             }
-            OperationRequestKind::NamespaceDelete => {
+            "namespace_delete" => {
                 output.push(DELETE_IF_EMPTY);
                 append_namespace_id(&mut output, self.namespace_id)?;
                 append_revision(&mut output, self.expected_revision)?;
+            }
+            _ => {
+                return Err(ProtocolError::InvalidRequestShape {
+                    opcode: self.opcode,
+                    expected_item_id: 0,
+                    expected_value: "known generated request layout",
+                });
             }
         }
         Ok(output)
@@ -644,12 +651,12 @@ impl Request {
         validate_value_length(self.value.len())?;
         let contract = operation_contract(self.opcode);
         match contract.request_kind {
-            OperationRequestKind::Empty => {
+            "empty" => {
                 if self.has_non_empty_fields() {
                     return Err(invalid_shape(self.opcode, 0, "0"));
                 }
             }
-            OperationRequestKind::ApplicationValue => {
+            "application_value" => {
                 if self.namespace_id.is_some()
                     || !self.item_ids.is_empty()
                     || self.set_options != SetWireOptions::NONE
@@ -661,7 +668,7 @@ impl Request {
                     return Err(invalid_shape(self.opcode, 0, "any"));
                 }
             }
-            OperationRequestKind::ScopedItem => {
+            "item" | "set" => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.item_ids.len() != contract.request_item_count
                     || self.namespace_name.is_some()
@@ -687,13 +694,13 @@ impl Request {
                     self.set_options.flags()?;
                 }
             }
-            OperationRequestKind::ScopedNamespace => {
+            "namespace" => {
                 validate_namespace_id(self.namespace_id)?;
                 if self.has_non_empty_fields_except_namespace() {
                     return Err(invalid_shape(self.opcode, 0, "0"));
                 }
             }
-            OperationRequestKind::NamespaceOpen => {
+            "namespace_open" => {
                 let name =
                     self.namespace_name
                         .as_deref()
@@ -720,7 +727,7 @@ impl Request {
                     policy.encode()?;
                 }
             }
-            OperationRequestKind::NamespaceUpdatePolicy => {
+            "namespace_update_policy" => {
                 validate_namespace_id(self.namespace_id)?;
                 validate_revision(self.expected_revision)?;
                 self.namespace_policy
@@ -735,12 +742,19 @@ impl Request {
                     return Err(invalid_shape(self.opcode, 0, "0"));
                 }
             }
-            OperationRequestKind::NamespaceDelete => {
+            "namespace_delete" => {
                 validate_namespace_id(self.namespace_id)?;
                 validate_revision(self.expected_revision)?;
                 if self.has_non_empty_fields_except_namespace_revision() {
                     return Err(invalid_shape(self.opcode, 0, "0"));
                 }
+            }
+            _ => {
+                return Err(ProtocolError::InvalidRequestShape {
+                    opcode: self.opcode,
+                    expected_item_id: 0,
+                    expected_value: "known generated request layout",
+                });
             }
         }
         Ok(())

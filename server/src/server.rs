@@ -23,7 +23,7 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
 use crate::contract::{
-    MAX_REQUEST_FRAME_BYTES, NAMESPACE_NAME_MAX_BYTES, OperationRequestKind, OperationResponseKind,
+    MAX_REQUEST_FRAME_BYTES, NAMESPACE_NAME_MAX_BYTES,
 };
 use crate::network_runtime;
 use crate::observability::{
@@ -1858,15 +1858,15 @@ async fn write_response<S: SendStream>(
 fn request_may_mutate(request: &Request) -> bool {
     let contract = crate::contract::operation_contract(request.opcode);
     match contract.request_kind {
-        OperationRequestKind::ScopedItem => matches!(
+        "item" | "set" => matches!(
             contract.response_kind,
-            OperationResponseKind::SetOutcome | OperationResponseKind::DeleteOutcome
+            "set_outcome" | "delete_outcome"
         ),
-        OperationRequestKind::ScopedNamespace => {
-            contract.response_kind == OperationResponseKind::Empty
+        "namespace" => {
+            contract.response_kind == "empty"
         }
-        OperationRequestKind::NamespaceOpen => request.create_if_missing,
-        OperationRequestKind::NamespaceUpdatePolicy | OperationRequestKind::NamespaceDelete => true,
+        "namespace_open" => request.create_if_missing,
+        "namespace_update_policy" | "namespace_delete" => true,
         _ => false,
     }
 }
@@ -1879,8 +1879,8 @@ fn response_budget_bytes(
     let contract = crate::contract::operation_contract(opcode);
     let response_field_count = crate::contract::operation_response_field_count(opcode);
     match contract.response_kind {
-        OperationResponseKind::ApplicationValue => Some(request_value_bytes),
-        OperationResponseKind::Composite | OperationResponseKind::Value => {
+        "application_value" => Some(request_value_bytes),
+        "composite" | "value" => {
             if response_field_count > 1 {
                 openkache_protocol::optional_values_max_encoded_len(
                     response_field_count,
@@ -1921,7 +1921,7 @@ async fn execute_request(
     // is concurrently removing it (or vice versa).
     let lifecycle_lock = if matches!(
         crate::contract::operation_contract(opcode).request_kind,
-        OperationRequestKind::NamespaceOpen | OperationRequestKind::NamespaceDelete
+        "namespace_open" | "namespace_delete"
     ) {
         match namespaces.lock() {
             Ok(registry) => Some(registry.lifecycle_lock()),
@@ -1946,10 +1946,10 @@ async fn execute_request(
     // operation and its corresponding item-tracking update.
     let namespace_lock = if matches!(
         crate::contract::operation_contract(opcode).request_kind,
-        OperationRequestKind::ScopedItem
-            | OperationRequestKind::ScopedNamespace
-            | OperationRequestKind::NamespaceUpdatePolicy
-            | OperationRequestKind::NamespaceDelete
+        "item" | "set"
+            | "namespace"
+            | "namespace_update_policy"
+            | "namespace_delete"
     ) {
         let namespace_id = namespace_id.expect("namespace-scoped requests have a validated ID");
         let operation_lock = namespaces
