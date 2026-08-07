@@ -11,24 +11,71 @@ use std::sync::Mutex;
 
 use openkache_protocol::{Opcode, Status};
 
+use super::operation_extensions::ExtensionResponse;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState, SetOutcome, cache_error_response,
     descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
     response, response_bytes,
 };
-use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions};
+use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions, optional_values_response};
 
 /// Borrowed context passed from the protocol server to one concrete handler.
 ///
 /// The context deliberately contains storage primitives and decoded request
 /// fields, rather than exposing transport or frame details to API handlers.
-pub(super) struct OperationContext<'a, 'cache> {
-    pub(super) cache: &'a NetworkWorkerCache<'cache>,
+#[derive(Clone)]
+pub(super) struct OperationInputView<'a> {
     pub(super) opcode: Opcode,
     pub(super) namespace_id: Option<u64>,
     pub(super) item_ids: &'a [ItemId],
-    pub(super) set_options: SetOptions,
     pub(super) value: Vec<u8>,
+    pub(super) namespace_name: Option<&'a [u8]>,
+    pub(super) namespace_policy: Option<NamespacePolicy>,
+    pub(super) expected_revision: Option<u64>,
+    pub(super) create_if_missing: bool,
+    pub(super) set_options: SetOptions,
+}
+
+/// A typed, borrowed operation field exposed to server-owned behavior.
+#[derive(Clone, Copy)]
+pub(super) enum OperationFieldValue<'a> {
+    UnsignedLong(u64),
+    ItemIds(&'a [ItemId]),
+    Bytes(&'a [u8]),
+    Policy(NamespacePolicy),
+    SetOptions(SetOptions),
+    Boolean(bool),
+}
+
+impl OperationInputView<'_> {
+    /// Returns the modeled value for a role without requiring a wire-family
+    /// or operation-name match in the extension.
+    pub(super) fn field(&self, role: &str) -> Option<OperationFieldValue<'_>> {
+        match role {
+            "namespace_id" => self.namespace_id.map(OperationFieldValue::UnsignedLong),
+            "expected_revision" => self
+                .expected_revision
+                .map(OperationFieldValue::UnsignedLong),
+            "item_id" => Some(OperationFieldValue::ItemIds(self.item_ids)),
+            "value" | "payload" => Some(OperationFieldValue::Bytes(&self.value)),
+            "name" => self.namespace_name.map(OperationFieldValue::Bytes),
+            "policy" => self.namespace_policy.map(OperationFieldValue::Policy),
+            "condition" | "expiration_mode" | "ttl_milliseconds" | "eviction_mode" => {
+                Some(OperationFieldValue::SetOptions(self.set_options))
+            }
+            "create_if_missing" => Some(OperationFieldValue::Boolean(self.create_if_missing)),
+            _ => None,
+        }
+    }
+}
+
+pub(super) struct OperationContext<'a, 'cache> {
+    pub(super) cache: &'a NetworkWorkerCache<'cache>,
+    pub(super) opcode: Opcode,
+    pub(super) input: OperationInputView<'a>,
+    pub(super) namespace_id: Option<u64>,
+    pub(super) item_ids: &'a [ItemId],
+    pub(super) set_options: SetOptions,
     pub(super) namespace_name: Option<&'a [u8]>,
     pub(super) namespace_policy: Option<NamespacePolicy>,
     pub(super) expected_revision: Option<u64>,
@@ -46,28 +93,79 @@ pub(super) fn is_immediate(opcode: Opcode) -> bool {
             && contract.response_kind == "application_value")
 }
 
+fn is_builtin(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Ping
+            | Opcode::Get
+            | Opcode::Set
+            | Opcode::Delete
+            | Opcode::Stats
+            | Opcode::Sync
+            | Opcode::NamespaceOpen
+            | Opcode::NamespaceUpdatePolicy
+            | Opcode::NamespaceDelete
+    )
+}
+
+/// Verifies that every modeled opcode has a server-owned execution path.
+///
+/// This runs during server bind rather than allowing an omitted extension to
+/// reach a panic or an accidental fallback response.
+pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
+    for value in u8::MIN..=u8::MAX {
+        let Ok(opcode) = Opcode::try_from(value) else {
+            continue;
+        };
+        if is_builtin(opcode) || super::operation_extensions::handles(opcode) {
+            continue;
+        }
+        return Err("modeled operation has no registered server handler");
+    }
+    Ok(())
+}
+
 /// Executes an already-classified immediate operation.
 pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
     let contract = crate::contract::operation_contract(opcode);
-    match contract.response_kind {
-        "pong" => response_bytes(Status::Ok, b"PONG"),
-        "application_value" => response(Status::Ok, value),
-        _ => response_bytes(
-            Status::InternalError,
-            b"invalid immediate operation contract",
-        ),
+    if contract.response_kind == "pong" {
+        return response_bytes(Status::Ok, b"PONG");
+    }
+    if contract.response_kind == "application_value" {
+        return match super::operation_extensions::application_value(opcode, value) {
+            Some(extension) => encode_extension_response(opcode, extension),
+            None => response_bytes(
+                Status::InternalError,
+                b"application-value operation has no server implementation",
+            ),
+        };
+    }
+    response_bytes(
+        Status::InternalError,
+        b"invalid immediate operation contract",
+    )
+}
+
+fn encode_extension_response(opcode: Opcode, extension: ExtensionResponse) -> Response {
+    match extension {
+        ExtensionResponse::Response(response) => response,
+        ExtensionResponse::ApplicationValue(value) => response(Status::Ok, value),
+        ExtensionResponse::OptionalValues(values) => optional_values_response(opcode, &values),
     }
 }
 
 /// Dispatches a decoded, non-immediate request to server-owned behavior.
 pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Response> {
+    if let Some(extension) = super::operation_extensions::execute(&context).await {
+        return Some(encode_extension_response(context.opcode, extension));
+    }
     let OperationContext {
         cache,
         opcode,
+        input,
         namespace_id,
         item_ids,
         set_options,
-        value,
         namespace_name,
         namespace_policy,
         expected_revision,
@@ -76,6 +174,7 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
         namespaces,
         observability,
     } = context;
+    let OperationInputView { value, .. } = input;
 
     match opcode {
         Opcode::Get => {
@@ -405,7 +504,10 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 }
             }
         }
-        _ => unreachable!("immediate response operation escaped handler dispatch"),
+        _ => Some(response_bytes(
+            Status::InternalError,
+            b"operation has no server implementation",
+        )),
     }
 }
 

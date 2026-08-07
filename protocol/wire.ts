@@ -24,14 +24,10 @@ export const OPERATION_SCOPES = [
 
 export type Wire_Operation_Scope = (typeof OPERATION_SCOPES)[number]
 
-/**
- * Operation request kinds are compatibility labels. Request framing is
- * derived from field roles and shapes; a new operation may use any model
- * label without adding a generator family entry.
- */
+/** Generated transport descriptors understood by the protocol-v1 adapter. */
 export type Wire_Operation_Request_Kind = string
 
-/** Response labels remain model-defined compatibility metadata. */
+/** Generated response transport descriptors understood by the adapters. */
 export type Wire_Operation_Response_Kind = string
 
 export const OPERATION_RETRY_MODES = [
@@ -42,6 +38,10 @@ export const OPERATION_RETRY_MODES = [
 
 export type Wire_Operation_Retry_Mode = (typeof OPERATION_RETRY_MODES)[number]
 
+export const OPERATION_EFFECTS = ["read_only", "mutation", "barrier"] as const
+
+export type Wire_Operation_Effect = (typeof OPERATION_EFFECTS)[number]
+
 export interface Wire_Operation_Contract {
   readonly error_statuses: readonly string[]
   /**
@@ -50,6 +50,7 @@ export interface Wire_Operation_Contract {
    * operation-specific request family.
    */
   readonly request_fields: readonly Wire_Operation_Field[]
+  /** Generated request transport descriptor derived from the field plan. */
   readonly request_kind: Wire_Operation_Request_Kind
   /**
    * Number of value fields in the request shape. Production extraction uses
@@ -62,10 +63,13 @@ export interface Wire_Operation_Contract {
   readonly response_fields: readonly Wire_Operation_Field[]
   /** Number of optional values carried by a value response, derived from Smithy roles. */
   readonly response_value_count: number
+  /** Generated response transport descriptor derived from the field plan. */
   readonly response_kind: Wire_Operation_Response_Kind
   readonly retry_mode: Wire_Operation_Retry_Mode
   readonly scope: Wire_Operation_Scope
   readonly success_statuses: readonly string[]
+  /** Explicit storage effect used by runtime retry/timeout policy. */
+  readonly effect: Wire_Operation_Effect
 }
 
 /** Count of one Smithy operation-field role in a request or response shape. */
@@ -86,8 +90,7 @@ export interface Wire_Operation {
  * The finite set of request layouts understood by protocol v1.
  *
  * These are transport layouts, not operation names. A Smithy operation selects
- * one by declaring field roles; its requestKind label is retained only as
- * model metadata and never creates a new generated enum variant.
+ * one by declaring field roles; no operation-specific request label is needed.
  */
 export type Wire_Request_Layout =
   | "empty"
@@ -125,39 +128,88 @@ function operation_has_role(
   return fields.some((field) => field.role === role && field.count > 0)
 }
 
+function validate_operation_field_roles(
+  fields: readonly Wire_Operation_Field[],
+  allowed: readonly string[] | undefined,
+  direction: "request" | "response",
+): void {
+  if (allowed === undefined) return
+  const allowed_roles = new Set(allowed)
+  const unsupported = fields
+    .filter((field) => field.count > 0 && !allowed_roles.has(field.role))
+    .map((field) => field.role)
+  if (unsupported.length > 0) {
+    throw new Error(
+      `${direction} roles are not supported by protocol-v1 framing: ${[
+        ...new Set(unsupported),
+      ].join(", ")}`,
+    )
+  }
+}
+
 /** Derives the protocol-v1 request layout from Smithy input roles. */
 export function derive_wire_request_layout(
   contract: Wire_Operation_Contract,
 ): Wire_Request_Layout {
   const { request_fields } = contract
   const has_role = (role: string): boolean => operation_has_role(request_fields, role)
+  let layout: Wire_Request_Layout
   if (has_role("name") && has_role("create_if_missing") && has_role("policy")) {
-    return "namespace_open"
-  }
-  if (has_role("expected_revision") && has_role("policy")) {
-    return "namespace_update_policy"
-  }
-  if (
+    layout = "namespace_open"
+  } else if (has_role("expected_revision") && has_role("policy")) {
+    layout = "namespace_update_policy"
+  } else if (
     has_role("expected_revision") &&
     has_role("namespace_id") &&
     !has_role("item_id")
   ) {
-    return "namespace_delete"
-  }
-  if (has_role("item_id")) {
+    layout = "namespace_delete"
+  } else if (has_role("item_id")) {
     const value_count = contract.request_value_count ?? (
       request_fields.find((field) => field.role === "value")?.count ?? 0
     )
-    return value_count > 0 ? "set" : "item"
+    layout = value_count > 0 ? "set" : "item"
+  } else if (has_role("namespace_id")) {
+    layout = "namespace"
+  } else if (has_role("payload")) {
+    layout = "application_value"
+  } else if (request_fields.length === 0) {
+    layout = "empty"
+  } else {
+    throw new Error(
+      `operation request roles do not describe a protocol-v1 layout: ${request_fields
+        .map((field) => `${field.role}×${field.count}`)
+        .join(", ")}`,
+    )
   }
-  if (has_role("namespace_id")) return "namespace"
-  if (has_role("payload")) return "application_value"
-  if (request_fields.length === 0) return "empty"
-  throw new Error(
-    `operation request roles do not describe a protocol-v1 layout: ${request_fields
-      .map((field) => `${field.role}×${field.count}`)
-      .join(", ")}`,
-  )
+  const policy_roles = [
+    "policy",
+    "default_expiration",
+    "default_ttl_milliseconds",
+    "expiration_override",
+    "default_eviction",
+    "eviction_override",
+  ]
+  const allowed = {
+    empty: [],
+    application_value: ["payload"],
+    item: ["namespace_id", "item_id"],
+    set: [
+      "namespace_id",
+      "item_id",
+      "value",
+      "condition",
+      "expiration_mode",
+      "ttl_milliseconds",
+      "eviction_mode",
+    ],
+    namespace: ["namespace_id"],
+    namespace_open: ["name", "create_if_missing", ...policy_roles],
+    namespace_update_policy: ["namespace_id", "expected_revision", ...policy_roles],
+    namespace_delete: ["namespace_id", "expected_revision"],
+  } satisfies Record<Wire_Request_Layout, readonly string[]>
+  validate_operation_field_roles(request_fields, allowed[layout], "request")
+  return layout
 }
 
 /** Derives the protocol response route from Smithy output roles and scope. */
@@ -166,23 +218,49 @@ export function derive_wire_response_route(
 ): Wire_Response_Route {
   const { response_fields } = contract
   const has_role = (role: string): boolean => operation_has_role(response_fields, role)
-  if (has_role("descriptor")) return "namespace_descriptor"
-  if (response_fields.length > 1) return "composite"
-  if (has_role("payload") && response_fields.length === 1) {
-    return "application_value"
+  let route: Wire_Response_Route
+  if (has_role("descriptor")) route = "namespace_descriptor"
+  else if (response_fields.length > 1) route = "composite"
+  else if (has_role("payload") && response_fields.length === 1) route = "application_value"
+  else if (has_role("value") && response_fields.length === 1) route = "value"
+  else if (has_role("outcome")) route = "set_outcome"
+  else if (has_role("deleted")) route = "delete_outcome"
+  else if (has_role("json")) route = "stats_json"
+  else if (response_fields.length === 0) {
+    route = contract.scope === "global" ? "pong" : "empty"
+  } else {
+    throw new Error(
+      `operation response roles do not describe a protocol-v1 route: ${response_fields
+        .map((field) => `${field.role}×${field.count}`)
+        .join(", ")}`,
+    )
   }
-  if (has_role("value") && response_fields.length === 1) return "value"
-  if (has_role("outcome")) return "set_outcome"
-  if (has_role("deleted")) return "delete_outcome"
-  if (has_role("json")) return "stats_json"
-  if (response_fields.length === 0) {
-    return contract.scope === "global" ? "pong" : "empty"
+  const policy_roles = [
+    "policy",
+    "default_expiration",
+    "default_ttl_milliseconds",
+    "expiration_override",
+    "default_eviction",
+    "eviction_override",
+  ]
+  const allowed: Partial<Record<Wire_Response_Route, readonly string[]>> = {
+    pong: [],
+    empty: [],
+    application_value: ["payload"],
+    value: ["value"],
+    set_outcome: ["outcome"],
+    delete_outcome: ["deleted"],
+    stats_json: ["json"],
+    namespace_descriptor: [
+      "descriptor",
+      "created",
+      "namespace_id",
+      "revision",
+      ...policy_roles,
+    ],
   }
-  throw new Error(
-    `operation response roles do not describe a protocol-v1 route: ${response_fields
-      .map((field) => `${field.role}×${field.count}`)
-      .join(", ")}`,
-  )
+  validate_operation_field_roles(response_fields, allowed[route], "response")
+  return route
 }
 
 /** Protocol v1 constants consumed by the Rust protocol crate. */
@@ -965,6 +1043,7 @@ function operation_contract(
   shape: Json_Object,
   target: string,
   statuses: readonly Wire_Entry[],
+  strict: boolean,
 ): Wire_Operation_Contract | undefined {
   const traits = optional_object_member(shape, "traits", target)
   const value = traits?.[OPERATION_CONTRACT_TRAIT_ID]
@@ -976,16 +1055,6 @@ function operation_contract(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.scope must be global, item, namespace, or namespace_management`,
     )
   }
-  const request_kind = string_member(
-    contract,
-    "requestKind",
-    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-  )
-  const response_kind = string_member(
-    contract,
-    "responseKind",
-    `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-  )
   const retry_mode = string_member(
     contract,
     "retryMode",
@@ -994,6 +1063,25 @@ function operation_contract(
   if (!OPERATION_RETRY_MODES.includes(retry_mode as Wire_Operation_Retry_Mode)) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
+    )
+  }
+  const effect_value = contract["effect"]
+  const effect = effect_value === undefined
+    ? (strict
+      ? (() => {
+          throw new Error(
+            `${target}.${OPERATION_CONTRACT_TRAIT_ID}.effect must be read_only, mutation, or barrier`,
+          )
+        })()
+      : "read_only")
+    : string_member(
+      contract,
+      "effect",
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
+    )
+  if (!OPERATION_EFFECTS.includes(effect as Wire_Operation_Effect)) {
+    throw new Error(
+      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.effect must be read_only, mutation, or barrier`,
     )
   }
 
@@ -1055,18 +1143,37 @@ function operation_contract(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID} has overlapping success and error statuses`,
     )
   }
-  return {
+  const legacy_request_kind = typeof contract["requestKind"] === "string"
+    ? contract["requestKind"] as string
+    : undefined
+  const legacy_response_kind = typeof contract["responseKind"] === "string"
+    ? contract["responseKind"] as string
+    : undefined
+  const derived_contract = {
     error_statuses,
     request_fields,
-    request_kind: request_kind as Wire_Operation_Contract["request_kind"],
     request_value_count,
     request_item_count,
     response_fields,
     response_value_count,
-    response_kind: response_kind as Wire_Operation_Contract["response_kind"],
     retry_mode: retry_mode as Wire_Operation_Contract["retry_mode"],
     scope: scope as Wire_Operation_Contract["scope"],
     success_statuses,
+    effect: effect as Wire_Operation_Effect,
+  }
+  const layout_contract = {
+    ...derived_contract,
+    request_kind: "",
+    response_kind: "",
+  } as Wire_Operation_Contract
+  return {
+    ...derived_contract,
+    request_kind: request_fields.length > 0 || legacy_request_kind === undefined
+      ? derive_wire_request_layout(layout_contract)
+      : legacy_request_kind,
+    response_kind: response_fields.length > 0 || legacy_response_kind === undefined
+      ? derive_wire_response_route(layout_contract)
+      : legacy_response_kind,
   }
 }
 
@@ -1089,6 +1196,7 @@ function wire_operations(
       object_value(shape, `Smithy AST.shapes.${target}`),
       target,
       statuses,
+      strict,
     )
     if (contract === undefined) {
       if (strict) {
@@ -1380,15 +1488,14 @@ function rust_operation_contract(contract: Wire_Contract): string {
       (operation) => `        Opcode::${operation.name} => OperationContract {
             scope: OperationScope::${enum_variant(operation.contract.scope)},
             request_kind: ${rust_string_literal(request_layout(operation))},
-            request_label: ${rust_string_literal(operation.contract.request_kind)},
             request_value_count: ${operation.contract.request_value_count ?? 0},
             request_item_count: ${operation.contract.request_item_count},
             request_fields: ${field_slice(operation.contract.request_fields)},
             response_kind: ${rust_string_literal(response_route(operation))},
-            response_label: ${rust_string_literal(operation.contract.response_kind)},
             response_value_count: ${operation.contract.response_value_count},
             response_fields: ${field_slice(operation.contract.response_fields)},
             retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
+            effect: OperationEffect::${enum_variant(operation.contract.effect)},
             success_statuses: ${status_slice(operation.contract.success_statuses)},
             error_statuses: ${status_slice(operation.contract.error_statuses)},
         },`,
@@ -1417,6 +1524,14 @@ pub enum OperationRetryMode {
     WhenNotCreating,
 }
 
+/// Storage effect declared by the Smithy operation contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationEffect {
+    ReadOnly,
+    Mutation,
+    Barrier,
+}
+
 /// One ordered Smithy operation-field role and its cardinality.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationField {
@@ -1435,18 +1550,15 @@ pub struct OperationContract {
     /// Rust enum.  Modelled operations may compose the existing wire
     /// primitives without extending shared infrastructure.
     pub request_kind: &'static str,
-    /// Original Smithy requestKind label, retained for diagnostics only.
-    pub request_label: &'static str,
     pub request_value_count: usize,
     pub request_item_count: usize,
     pub request_fields: &'static [OperationField],
     /// Generated transport descriptor derived from the Smithy output field plan.
     pub response_kind: &'static str,
-    /// Original Smithy responseKind label, retained for diagnostics only.
-    pub response_label: &'static str,
     pub response_value_count: usize,
     pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
+    pub effect: OperationEffect,
     pub success_statuses: &'static [Status],
     pub error_statuses: &'static [Status],
 }
@@ -1848,10 +1960,8 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
         return "empty"
     }
   }
-  const payload_codecs = (operation: Wire_Operation): string => {
-    const codecs = operation.contract.response_fields
-      .filter((field) => field.role === "payload")
-      .flatMap((field) => field.codecs ?? [])
+  const field_codecs = (fields: readonly Wire_Operation_Field[]): string => {
+    const codecs = fields.flatMap((field) => field.codecs ?? [])
     const unique = [...new Set(codecs)]
     return unique.length === 0 ? "—" : unique.map((codec) => `\`${codec}\``).join(", ")
   }
@@ -1861,11 +1971,11 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
       if (opcode === undefined) {
         throw new Error(`operation ${operation.name} has no opcode`)
       }
-      return `| \`${opcode.value.toString(16).padStart(2, "0").toUpperCase()}\` | \`${wire_name(operation.name).toUpperCase()}\` | ${request_layout(operation)} | ${response_payload(operation)} | ${payload_codecs(operation)} |`
+      return `| \`${opcode.value.toString(16).padStart(2, "0").toUpperCase()}\` | \`${wire_name(operation.name).toUpperCase()}\` | ${request_layout(operation)} | ${response_payload(operation)} | ${field_codecs(operation.contract.request_fields)} | ${field_codecs(operation.contract.response_fields)} | \`${operation.contract.effect}\` |`
     })
     .join("\n")
-  return `| Opcode | Name | Request layout | Response payload | Payload codec |
-|---|---|---|---|---|
+  return `| Opcode | Name | Request layout | Response payload | Request codecs | Response codecs | Effect |
+|---|---|---|---|---|---|---|
 ${rows}`
 }
 

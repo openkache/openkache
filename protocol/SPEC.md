@@ -295,17 +295,17 @@ possible next frame; it MUST terminate the lane after the error response.
 ### Opcodes
 
 <!-- openkache:generated-protocol-operation-table:start -->
-| Opcode | Name | Request layout | Response payload | Payload codec |
-|---|---|---|---|---|
-| `01` | `PING` | opcode only | PONG | — |
-| `02` | `GET` | opcode + namespace ID + 1 item ID | optional value | — |
-| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome | — |
-| `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted | — |
-| `05` | `STATS` | opcode + namespace ID | JSON object | — |
-| `06` | `SYNC` | opcode + namespace ID | empty | — |
-| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | namespace descriptor | — |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | namespace descriptor | — |
-| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — |
+| Opcode | Name | Request layout | Response payload | Request codecs | Response codecs | Effect |
+|---|---|---|---|---|---|---|
+| `01` | `PING` | opcode only | PONG | — | — | `read_only` |
+| `02` | `GET` | opcode + namespace ID + 1 item ID | optional value | — | — | `read_only` |
+| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome | — | — | `mutation` |
+| `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted | — | — | `mutation` |
+| `05` | `STATS` | opcode + namespace ID | JSON object | — | — | `read_only` |
+| `06` | `SYNC` | opcode + namespace ID | empty | — | — | `barrier` |
+| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | namespace descriptor | — | — | `mutation` |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | namespace descriptor | — | — | `mutation` |
+| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — | — | `mutation` |
 <!-- openkache:generated-protocol-operation-table:end -->
 
 ### `SET` flags
