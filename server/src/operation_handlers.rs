@@ -188,6 +188,17 @@ impl<'a> OperationInputView<'a> {
             };
             fields[index] = Some(OperationFieldRecord { plan, value: field });
         }
+        if !is_generic
+            && plan.iter().enumerate().any(|(index, field)| {
+                field.required
+                    && fields[index]
+                        .as_ref()
+                        .and_then(|record| record.value.as_ref())
+                        .is_none()
+            })
+        {
+            generic_error = Some("required operation request field is missing");
+        }
         let field_len = plan.len();
         Self {
             opcode,
