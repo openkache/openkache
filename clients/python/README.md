@@ -34,7 +34,7 @@ the reproducible development shell supplies all of these tools.
 ```python
 from pathlib import Path
 
-from openkache import Client, SetOptions
+from openkache import Client, KeySpec, SetOptions
 
 client = await Client.connect(
     "cache.example.com:4433",
@@ -54,8 +54,13 @@ finally:
 ```
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
-`get_raw` for exact bytes; empty raw values are supported. Keys may be UTF-8
-strings or bytes and must not be empty. JSON numbers are finite, and integers
+`get_raw` for exact bytes; empty raw values are supported. A `str` key is the
+v1 `Text` PortableKey by default. Select `key_spec=KeySpec.BYTES` or
+`key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
+precision integers. The selected spec is enforced for every formatted
+operation and the key is converted to canonical deterministic CBOR before the
+native ABI. Empty and NUL-containing keys are valid. JSON numbers
+are finite, and integers
 must be exactly representable as IEEE-754 binary64 values. Python converts a
 native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
 core reparses that input and owns canonical serialization, compression,
@@ -100,8 +105,12 @@ result = await client.raw.get(
 
 - `certificate` accepts a DER/PEM path or bytes containing one trusted
   certificate or PEM chain.
-- `data_protection_key` is an application-managed 32-byte secret shared by
-  clients that must address the same protected entries.
+- `data_protection_key` is optional. When supplied it is an
+  application-managed 32-byte secret shared by clients that must address the
+  same protected entries. When omitted, values are unprotected.
+- `key_spec` selects `KeySpec.TEXT` (the default), `KeySpec.BYTES`, or
+  `KeySpec.INTEGER`. Use the same spec and logical key type in every language
+  client that must share entries.
 - `server_name` defaults to the hostname from `address` and is used for TLS
   verification after DNS resolution.
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private

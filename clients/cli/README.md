@@ -2,15 +2,16 @@
 
 `openkache-cli` is a standalone command-line client for Bash scripts,
 administration, and interactive cache inspection. It uses the shared Rust
-client for QUIC, TLS, retries, application-key derivation, and value protection.
+client for QUIC, TLS, retries, application-key derivation, and value
+protection.
 
 ## Purpose
 
 The CLI provides one-shot commands that compose naturally with Unix pipelines
 and an interactive shell that keeps one connection open for multiple commands.
-It uses application keys and protected values by default, so the same
-data-protection key addresses the same entries as the Rust and other
-core-backed clients.
+It uses text application keys. Supply a data-protection key to protect values;
+when omitted, it uses the unprotected formatted profile while retaining the
+same Item ID derivation as other text-key clients.
 
 ## Commands
 
@@ -74,8 +75,9 @@ openkache-cli set lease value --if-present
 
 ## Configuration
 
-The data-protection key is required. Prefer an environment variable or a file
-so secrets do not appear in the process list:
+The data-protection key is optional. Supply it through an environment variable
+or a file so secrets do not appear in the process list when protection is
+wanted:
 
 ```bash
 export OPENKACHE_DATA_PROTECTION_KEY='base64-encoded-32-byte-key'

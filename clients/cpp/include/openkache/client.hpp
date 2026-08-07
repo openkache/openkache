@@ -128,7 +128,8 @@ struct Connect_Options {
     std::string server_name;
     /// One DER certificate or PEM chain. Empty selects system trust roots.
     std::vector<Byte> certificate;
-    std::array<Byte, OPENKACHE_SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES> data_protection_key{};
+    /// Optional exact 32-byte root key. Empty selects unprotected values.
+    std::vector<Byte> data_protection_key;
     bool compression_enabled = false;
     std::int32_t compression_level = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_LEVEL;
     std::size_t minimum_input_size = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES;
@@ -279,45 +280,56 @@ public:
         }
     }
 
-    /// Retrieves an application-key value, or `std::nullopt` when absent.
+    /// Retrieves a Bytes PortableKey value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
+        const auto canonical_key = canonical_key_bytes(key, 2);
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, key, {}, Set_Options{}),
+            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
             "GET");
     }
 
-    /// Convenience overload for textual application keys.
+    /// Convenience overload for a Text PortableKey.
     std::optional<Bytes> get(std::string_view key) const {
-        return get(as_bytes(key));
+        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
+        return get_outcome(
+            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            "GET");
     }
 
-    /// Stores an application-key value and returns the server outcome.
+    /// Stores a Bytes PortableKey value and returns the server outcome.
     Set_Outcome set(
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options = {}) const {
+        const auto canonical_key = canonical_key_bytes(key, 2);
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, key, value, options),
+            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, value, options),
             "SET");
     }
 
-    /// Convenience overload for textual keys and values.
+    /// Convenience overload for a Text PortableKey and textual value bytes.
     Set_Outcome set(
         std::string_view key,
         std::string_view value,
         Set_Options options = {}) const {
-        return set(as_bytes(key), as_bytes(value), options);
+        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
+        return set_outcome(
+            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, as_bytes(value), options),
+            "SET");
     }
 
-    /// Deletes an application-key value and reports whether it existed.
+    /// Deletes a Bytes PortableKey value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
+        const auto canonical_key = canonical_key_bytes(key, 2);
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, key, {}, Set_Options{}));
+            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
     }
 
-    /// Convenience overload for textual application keys.
+    /// Convenience overload for a Text PortableKey.
     bool remove(std::string_view key) const {
-        return remove(as_bytes(key));
+        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
+        return delete_outcome(
+            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
     }
 
     /// Retrieves exact bytes for a fixed-size protocol item ID.
@@ -512,6 +524,45 @@ private:
             reinterpret_cast<const Byte*>(value.data()),
             value.size(),
         };
+    }
+
+    static Bytes canonical_key_bytes(
+        std::span<const Byte> payload,
+        Byte major) {
+        if (major != 2 && major != 3) {
+            throw Error("OpenKache key type is not supported");
+        }
+        const auto length = payload.size();
+        Bytes encoded;
+        if (length <= 23) {
+            encoded.push_back(static_cast<Byte>((major << 5) | length));
+        } else if (length <= 0xff) {
+            encoded = {
+                static_cast<Byte>((major << 5) | 24),
+                static_cast<Byte>(length),
+            };
+        } else if (length <= 0xffff) {
+            encoded = {
+                static_cast<Byte>((major << 5) | 25),
+                static_cast<Byte>(length >> 8),
+                static_cast<Byte>(length),
+            };
+        } else if (length <= 0xffff'ffffu) {
+            encoded = {
+                static_cast<Byte>((major << 5) | 26),
+                static_cast<Byte>(length >> 24),
+                static_cast<Byte>(length >> 16),
+                static_cast<Byte>(length >> 8),
+                static_cast<Byte>(length),
+            };
+        } else {
+            throw Error("OpenKache key length exceeds canonical CBOR uint32");
+        }
+        if (encoded.size() + payload.size() > (1u << 20)) {
+            throw Error("OpenKache canonical key exceeds 1048576 bytes");
+        }
+        encoded.insert(encoded.end(), payload.begin(), payload.end());
+        return encoded;
     }
 
     static std::pair<Byte, std::uint64_t> namespace_policy_wire(

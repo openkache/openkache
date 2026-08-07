@@ -92,6 +92,12 @@ Canonical JSON accepts only null, booleans, finite numbers, strings, dense
 arrays, and regular objects with string keys. Cycles, sparse arrays, binary
 objects, `undefined`, `bigint`, and non-finite numbers are rejected.
 
+Keys follow the configured `key_spec` (`text` by default): text keys are exact
+UTF-8 strings, byte keys are exact `Uint8Array` values, and integer keys are
+safe integer-valued `number` or `bigint` values. Empty and NUL-containing keys
+are valid; floating-point, unsupported native types, and unpaired surrogates
+are rejected.
+
 Use `{ condition: "if_absent" }` to create without overwriting or
 `{ condition: "if_present" }` to update only an existing item. Use `set_raw`
 and `get_raw` when the complete value is binary or already serialized.
@@ -115,8 +121,10 @@ The runtime-neutral codec layer is available from
 - `certificate` is one trusted DER or PEM server or CA certificate.
 - `identity` contains the DER or PEM client certificate chain and private key
   used for mutual TLS.
-- `data_protection_key` is a persistent application-managed 32-byte random
-  secret. Clients sharing protected values must use the same key.
+- `data_protection_key` is optional. When supplied it is a persistent
+  application-managed 32-byte random secret; clients sharing protected values
+  must use the same key. When omitted, Item IDs are still derived but values
+  are stored unprotected.
 - `compression` controls Zstandard level, minimum input size, and required
   savings.
 - `timeouts.connect_ms` and `timeouts.request_ms` bound connection and complete
