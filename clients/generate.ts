@@ -1921,10 +1921,28 @@ export function extract_client_contract(
   const ast_object = object_value(ast, "Smithy AST")
   const shapes = object_member(ast_object, "shapes", "Smithy AST")
   const wire = extract_protocol_wire_contract(ast)
+  // The server-visible wire contract carries ordered field plans for
+  // zero-copy extension dispatch. Client renderers derive their richer
+  // `Operation_Field_Plan` from Smithy API structures below, so do not leak
+  // server-only plan metadata into the client contract or create a second
+  // source of truth for language generation.
+  const client_wire = wire.operations === undefined
+    ? wire
+    : {
+      ...wire,
+      operations: wire.operations.map((operation) => {
+        const {
+          request_plan: _request_plan,
+          response_plan: _response_plan,
+          ...contract
+        } = operation.contract
+        return { ...operation, contract }
+      }),
+    }
   const client_service_id = shapes[CLIENT_SERVICE_SHAPE_ID] === undefined
     ? SERVICE_SHAPE_ID
     : CLIENT_SERVICE_SHAPE_ID
-  if (client_service_id === CLIENT_SERVICE_SHAPE_ID && wire.operations === undefined) {
+  if (client_service_id === CLIENT_SERVICE_SHAPE_ID && client_wire.operations === undefined) {
     throw new Error(
       "protocol operation semantics are incomplete; strict protocol generation must provide " +
         "an operationContract for every opcode",
@@ -1945,8 +1963,8 @@ export function extract_client_contract(
     shapes,
     client_service_id,
     API_NAMESPACE,
-    wire.opcodes.map((entry) => entry.name),
-    wire.operations,
+    client_wire.opcodes.map((entry) => entry.name),
+    client_wire.operations,
   )
   const api = {
     ...parsed_api,
@@ -1955,11 +1973,11 @@ export function extract_client_contract(
     // in the same stable order as the wire contract.
     operations: [...parsed_api.operations].sort(
       (left, right) =>
-        (wire.opcodes.find((entry) => entry.name === left.name)?.value ?? 0) -
-        (wire.opcodes.find((entry) => entry.name === right.name)?.value ?? 0),
+        (client_wire.opcodes.find((entry) => entry.name === left.name)?.value ?? 0) -
+        (client_wire.opcodes.find((entry) => entry.name === right.name)?.value ?? 0),
     ),
   }
-  const opcode_names = new Set(wire.opcodes.map((entry) => entry.name))
+  const opcode_names = new Set(client_wire.opcodes.map((entry) => entry.name))
   const status_names = new Set(
     wire.statuses.flatMap((entry) => [
       entry.name,
@@ -2004,7 +2022,7 @@ export function extract_client_contract(
       }
     }
   }
-  for (const opcode of wire.opcodes) {
+  for (const opcode of client_wire.opcodes) {
     if (!api_operation_names.has(opcode.name)) {
       throw new Error(
         `wire opcode ${opcode.name} has no matching client operation`,
@@ -2036,7 +2054,7 @@ export function extract_client_contract(
     }
   }
   return {
-    ...wire,
+    ...client_wire,
     api,
     client_defaults: client_defaults_contract(client_defaults_trait),
     ffi,
