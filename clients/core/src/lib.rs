@@ -173,7 +173,7 @@ pub enum ServerErrorCode {
     Conflict,
     /// The requested namespace does not exist.
     NamespaceNotFound,
-    /// Namespace deletion requires an empty namespace.
+    /// Namespace deletion raced an in-flight namespace operation.
     NamespaceNotEmpty,
 }
 
