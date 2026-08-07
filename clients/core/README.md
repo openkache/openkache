@@ -16,8 +16,8 @@ The main API layers are:
   opaque values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
-- `ValueCodec`, which will own Raw and deterministic CBOR serialization, optional
-  Zstandard compression, and formatted-value encryption;
+- `ValueCodec`, which will own Raw and CBOR value codecs, optional Zstandard
+  compression, and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
@@ -80,24 +80,25 @@ let outcome = client
 
 `ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
 and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
-v1 contract renames the root secret to `ClientRootKey` and binds the selected
-namespace into both item-ID derivation and value AAD. The checked-in
-implementation still exposes the previous `DataProtectionKey` surface until
-that migration is completed.
+v1 contract calls the root secret `client_root_key` and binds the selected
+namespace into both Item ID derivation and value AAD. The checked-in
+implementation still exposes the previous `DataProtectionKey` and
+`Compact`/`Robust` API names until that migration is completed; those names are
+not v1 wire identifiers.
 
 `ValueCodec` stores its metadata inside the opaque value:
 
 ```text
-version:vu128 | flags:u8 | body
+value_envelope_version:vu128 | flags:u8 | body
 
 flags bits 0..1 = encryption identifier
 flags bits 2..3 = compression identifier
 flags bits 4..5 = codec identifier
 flags bits 6..7 = reserved (zero in v1)
 
-body = encrypt(compress(selected codec payload))
-Compact body = AES-256-SIV-CMAC synthetic_iv[16] | ciphertext
-Robust body  = nonce[12] | AES-256-GCM-SIV ciphertext | tag[16]
+body = protect(compress(selected codec payload))
+AES-256-SIV-CMAC body = synthetic_iv[16] | ciphertext
+AES-256-GCM-SIV body = nonce[12] | ciphertext | tag[16]
 ```
 
 For protected profiles, the packed flags and body are authenticated with the

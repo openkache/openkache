@@ -61,9 +61,9 @@ and rings instead.
 
 ### 🔒 End-to-end encryption
 
-Secure clients may compress values and encrypt them with the v1 Compact
-AES-SIV-CMAC or Robust AES-GCM-SIV profiles before transmission. The
-authenticated value is bound to its exact 32-byte wire item ID and namespace,
+Secure clients may compress values and encrypt them with the v1
+AES-256-SIV-CMAC or AES-256-GCM-SIV profiles before transmission. The
+authenticated value is bound to its exact 32-byte wire Item ID and namespace,
 so moving ciphertext to another cache item or namespace fails authentication.
 Protected clients hide typed application keys behind namespace-bound BLAKE3
 item IDs. The server observes
@@ -414,7 +414,7 @@ OpenKache is in **active development**. Core components are stable, the server p
 | Core engine | ✅ Done | Allocators, BCF53 filter, types, and client foundations |
 | Server protocol | 🚧 In progress | Recovery, operational hardening, and stable configuration |
 | Production hardening | 🔜 Next | Benchmarks, fuzzing, CI/CD, musl release artifacts, and capacity guidance |
-| E2E encryption | 🚧 Pre-freeze | Zstandard plus the v1 Compact/Robust value profiles are being migrated |
+| E2E encryption | 🚧 Pre-freeze | Zstandard plus the v1 AES-256-SIV-CMAC/AES-256-GCM-SIV profiles are being migrated |
 | Clustering | 📅 Future | Consistent hashing, gossip protocol, replication, failover |
 | General availability | 🎯 Future | Stable API, cross-platform packages, production docs |
 
