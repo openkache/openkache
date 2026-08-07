@@ -7,6 +7,7 @@
 
 use super::operation_handlers::OperationContext;
 use super::protocol::Response;
+use crate::types::StoredItemValue;
 use openkache_protocol::Opcode;
 
 /// Domain-level result returned by a server operation extension.
@@ -23,7 +24,7 @@ pub(super) enum ExtensionResponse {
     ApplicationValue(Vec<u8>),
     /// Ordered nullable values. The shared handler owns the length prefixes
     /// and missing-value sentinel.
-    OptionalValues(Vec<Option<Vec<u8>>>),
+    OptionalValues(Vec<Option<StoredItemValue>>),
 }
 
 /// Executes a non-immediate operation extension.
