@@ -22,9 +22,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 use crate::channel::{self, AsyncReceiver, Sender};
-use crate::contract::{
-    MAX_REQUEST_FRAME_BYTES, NAMESPACE_NAME_MAX_BYTES,
-};
+use crate::contract::{MAX_REQUEST_FRAME_BYTES, NAMESPACE_NAME_MAX_BYTES};
 use crate::network_runtime;
 use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
@@ -46,8 +44,8 @@ use crate::{
 #[allow(unused_imports)]
 pub(crate) use crate::{contract, protocol};
 
-#[path = "experimental_api.rs"]
-mod experimental_api;
+#[path = "operation_extensions.rs"]
+mod operation_extensions;
 #[path = "operation_handlers.rs"]
 mod operation_handlers;
 
@@ -1071,6 +1069,9 @@ impl KacheServer {
         tls: ServerTlsConfig,
         access_policy: AccessPolicy,
     ) -> Result<Self> {
+        if let Err(message) = operation_handlers::validate_handler_registry() {
+            return Err(ServerError::NetworkWorker(message.into()));
+        }
         let request_timeout = Duration::from_micros(config.timeouts.request_max_time_us);
         let max_item_bytes = config.storage.max_item_size_mib * 1024 * 1024;
         let network = config.network.clone();
@@ -1856,30 +1857,21 @@ async fn write_response<S: SendStream>(
 }
 
 fn request_may_mutate(request: &Request) -> bool {
-    let contract = crate::contract::operation_contract(request.opcode);
-    match contract.request_kind {
-        "item" | "set" => matches!(
-            contract.response_kind,
-            "set_outcome" | "delete_outcome"
-        ),
-        "namespace" => {
-            contract.response_kind == "empty"
-        }
-        "namespace_open" => request.create_if_missing,
-        "namespace_update_policy" | "namespace_delete" => true,
-        _ => false,
-    }
+    matches!(
+        crate::contract::operation_contract(request.opcode).effect,
+        crate::contract::OperationEffect::Mutation | crate::contract::OperationEffect::Barrier
+    )
 }
 
 fn response_budget_bytes(
     opcode: Opcode,
-    request_value_bytes: usize,
+    _request_value_bytes: usize,
     max_item_bytes: usize,
 ) -> Option<usize> {
     let contract = crate::contract::operation_contract(opcode);
     let response_field_count = crate::contract::operation_response_field_count(opcode);
     match contract.response_kind {
-        "application_value" => Some(request_value_bytes),
+        "application_value" => Some(max_item_bytes),
         "composite" | "value" => {
             if response_field_count > 1 {
                 openkache_protocol::optional_values_max_encoded_len(
@@ -1946,10 +1938,7 @@ async fn execute_request(
     // operation and its corresponding item-tracking update.
     let namespace_lock = if matches!(
         crate::contract::operation_contract(opcode).request_kind,
-        "item" | "set"
-            | "namespace"
-            | "namespace_update_policy"
-            | "namespace_delete"
+        "item" | "set" | "namespace" | "namespace_update_policy" | "namespace_delete"
     ) {
         let namespace_id = namespace_id.expect("namespace-scoped requests have a validated ID");
         let operation_lock = namespaces
@@ -1984,13 +1973,24 @@ async fn execute_request(
             b"namespace does not exist",
         ));
     }
-    operation_handlers::execute(operation_handlers::OperationContext {
-        cache,
+    let input = operation_handlers::OperationInputView {
         opcode,
         namespace_id,
         item_ids: &item_ids,
-        set_options,
         value,
+        namespace_name: namespace_name.as_deref(),
+        namespace_policy,
+        expected_revision,
+        create_if_missing,
+        set_options,
+    };
+    operation_handlers::execute(operation_handlers::OperationContext {
+        cache,
+        opcode,
+        input,
+        namespace_id,
+        item_ids: &item_ids,
+        set_options,
         namespace_name: namespace_name.as_deref(),
         namespace_policy,
         expected_revision,

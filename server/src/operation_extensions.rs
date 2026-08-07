@@ -7,14 +7,23 @@
 
 use std::sync::Mutex;
 
-use openkache_protocol::{ItemId, Opcode, Response, Status};
+use openkache_protocol::{ItemId, Opcode, Status};
 
 use super::operation_handlers::OperationContext;
+use super::protocol::Response;
 use super::{
-    NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response,
-    response_bytes,
+    NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response_bytes,
 };
-use super::protocol::optional_values_response;
+
+/// Domain-level result returned by a server operation extension.
+///
+/// The shared handler owns protocol framing for successful application and
+/// ordered optional values.
+pub(super) enum ExtensionResponse {
+    Response(Response),
+    ApplicationValue(Vec<u8>),
+    OptionalValues(Vec<Option<Vec<u8>>>),
+}
 
 /// Executes an operation whose behavior belongs to an API-owned extension.
 ///
@@ -22,7 +31,7 @@ use super::protocol::optional_values_response;
 /// request. Keeping the opcode match here makes the shared dispatch path
 /// stable while allowing the server to add behavior without teaching the
 /// framing or client infrastructure about that behavior.
-pub(super) async fn execute(context: &OperationContext<'_, '_>) -> Option<Response> {
+pub(super) async fn execute(context: &OperationContext<'_, '_>) -> Option<ExtensionResponse> {
     match context.opcode {
         Opcode::Get2 => {
             execute_get2(
@@ -66,20 +75,32 @@ const APPLICATION_VALUE_EXTENSIONS: &[ApplicationValueExtension] = &[
 ];
 
 /// Applies the server-owned implementation for an application-value opcode.
-pub(super) fn application_value_response(opcode: Opcode, value: Vec<u8>) -> Response {
+pub(super) fn application_value(opcode: Opcode, value: Vec<u8>) -> Option<ExtensionResponse> {
     let Some(extension) = APPLICATION_VALUE_EXTENSIONS
         .iter()
         .find(|extension| extension.opcode == opcode)
     else {
-        return response_bytes(
-            Status::InternalError,
-            b"application-value operation has no server implementation",
-        );
+        return None;
     };
     match (extension.handler)(value) {
-        Ok(value) => response(Status::Ok, value),
-        Err(message) => response_bytes(Status::InvalidRequest, message),
+        Ok(value) => Some(ExtensionResponse::ApplicationValue(value)),
+        Err(message) => Some(ExtensionResponse::Response(response_bytes(
+            Status::InvalidRequest,
+            message,
+        ))),
     }
+}
+
+/// Reports whether this extension owns an operation outside the built-in
+/// server handler match.
+pub(super) const fn handles(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Get2
+            | Opcode::ExperimentalEcho
+            | Opcode::ExperimentalReverse
+            | Opcode::SquareArray
+    )
 }
 
 fn echo_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
@@ -126,19 +147,19 @@ pub(super) async fn execute_get2(
     namespace_id: Option<u64>,
     item_ids: &[ItemId],
     namespaces: &Mutex<NamespaceRegistry>,
-) -> Option<Response> {
+) -> Option<ExtensionResponse> {
     let namespace_id = namespace_id.expect("GET2 has a validated namespace ID");
     let [first_item, second_item] = item_ids else {
-        return Some(response_bytes(
+        return Some(ExtensionResponse::Response(response_bytes(
             Status::InvalidRequest,
             b"GET2 requires exactly two item IDs",
-        ));
+        )));
     };
     if !namespace_exists(namespaces, namespace_id) {
-        return Some(response_bytes(
+        return Some(ExtensionResponse::Response(response_bytes(
             Status::NamespaceNotFound,
             b"namespace does not exist",
-        ));
+        )));
     }
 
     let (first, second) = futures_util::future::join(
@@ -155,17 +176,17 @@ pub(super) async fn execute_get2(
                         registry.prune_item(namespace_id, item_id).map_err(|_| ())
                     });
                     if pruned.is_err() {
-                        return Some(response_bytes(
+                        return Some(ExtensionResponse::Response(response_bytes(
                             Status::InternalError,
                             b"namespace metadata is unavailable",
-                        ));
+                        )));
                     }
                 }
                 values.push(value);
             }
-            Err(error) => return Some(cache_error_response(error)),
+            Err(error) => return Some(ExtensionResponse::Response(cache_error_response(error))),
         }
     }
 
-    Some(optional_values_response(Opcode::Get2, &values))
+    Some(ExtensionResponse::OptionalValues(values))
 }
