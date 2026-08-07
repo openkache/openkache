@@ -382,6 +382,23 @@ fn operation_values_result(
     }
 }
 
+fn operation_scoped_value_result(
+    operation: Opcode,
+    response: Response,
+    value_count: usize,
+) -> Result<OperationResult> {
+    match response.status {
+        Status::Ok => Ok(operation_result(
+            contract::FfiResultKind::Value,
+            response.payload,
+        )),
+        Status::NotFound if value_count == 1 && response.payload.is_empty() => Ok(
+            operation_result(contract::FfiResultKind::NotFound, Vec::new()),
+        ),
+        status => Err(unexpected_status(Operation::from_opcode(operation), status)),
+    }
+}
+
 /// Successful lookup result, separate from transport or protocol failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GetOutcome<T> {
@@ -1316,8 +1333,8 @@ macro_rules! raw_client_methods {
             ///
             /// * `operation` - Smithy protocol operation to execute.
             /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
-            /// * `value` - Raw operation payload, including the value for SET or an application
-            ///   payload for a global operation.
+            /// * `value` - Raw operation payload, including a storage value or an application
+            ///   payload when the generated request shape carries one.
             /// * `set_options` - Conditional and expiration options used by SET.
             ///
             /// # Returns
@@ -1371,7 +1388,7 @@ macro_rules! raw_client_methods {
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::Value,
-                    ) => {
+                    ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
                         let namespace_id = self.0.ensure_namespace().await?;
@@ -1380,6 +1397,32 @@ macro_rules! raw_client_methods {
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
                         operation_values_result(
+                            operation,
+                            response,
+                            contract.response_value_count,
+                        )
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        response_kind,
+                    ) if contract.request_value_count > 0
+                        && response_kind != contract::OperationResponseKind::SetOutcome => {
+                        let item_ids =
+                            parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
+                        let namespace_id = self.0.ensure_namespace().await?;
+                        let request = Request::new_scoped_items_with_options(
+                            operation,
+                            namespace_id,
+                            item_ids
+                                .into_iter()
+                                .map(ItemId::into_protocol)
+                                .collect(),
+                            set_options.into_protocol()?,
+                            value.as_ref().to_vec(),
+                        )
+                        .map_err(Error::protocol)?;
+                        let response = self.0.request(request).await?;
+                        operation_scoped_value_result(
                             operation,
                             response,
                             contract.response_value_count,
@@ -1458,7 +1501,7 @@ macro_rules! raw_client_methods {
                     (
                         contract::OperationRequestKind::ScopedItem,
                         contract::OperationResponseKind::Value,
-                    ) => {
+                    ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
                         let response = self
@@ -1466,6 +1509,31 @@ macro_rules! raw_client_methods {
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
                         operation_values_result(
+                            operation,
+                            response,
+                            contract.response_value_count,
+                        )
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        response_kind,
+                    ) if contract.request_value_count > 0
+                        && response_kind != contract::OperationResponseKind::SetOutcome => {
+                        let item_ids =
+                            parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
+                        let request = Request::new_scoped_items_with_options(
+                            operation,
+                            namespace_id,
+                            item_ids
+                                .into_iter()
+                                .map(ItemId::into_protocol)
+                                .collect(),
+                            set_options.into_protocol()?,
+                            value.as_ref().to_vec(),
+                        )
+                        .map_err(Error::protocol)?;
+                        let response = self.0.request(request).await?;
+                        operation_scoped_value_result(
                             operation,
                             response,
                             contract.response_value_count,

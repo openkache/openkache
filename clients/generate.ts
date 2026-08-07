@@ -2502,15 +2502,19 @@ function protocol_ffi_operation_contract(
         dedicated_abi: false,
       }
     case "scoped_item":
+      {
+        const request_value_count = semantic.request_value_count ??
+          (semantic.response_kind === "set_outcome" ? 1 : 0)
       return {
         input_kind: "item_id",
         request_item_count: semantic.request_item_count,
-        accepts_value: semantic.response_kind === "set_outcome",
+        accepts_value: request_value_count > 0,
         accepts_set_options: semantic.response_kind === "set_outcome",
         supports_protected: true,
         supports_raw: true,
         supports_scoped: true,
         dedicated_abi: false,
+      }
       }
     case "scoped_namespace":
       return {
@@ -5059,6 +5063,27 @@ function operation_result_constant(
   }
 }
 
+function operation_request_value_count(
+  operation: Managed_Api_Operation,
+): number {
+  return operation.contract.request_value_count ??
+    operation.plan.operation.input.fields.filter((field) => field.role === "value").length
+}
+
+function operation_request_value_name(
+  operation: Managed_Api_Operation,
+  language: Operation_Render_Language,
+): string | undefined {
+  if (operation_request_value_count(operation) === 0) return undefined
+  const values = operation.plan.binding.input.value ?? []
+  if (values.length !== 1) {
+    throw new Error(
+      `operation ${operation.name} request value role must bind exactly one member`,
+    )
+  }
+  return operation_field_name(values[0]!, language)
+}
+
 function render_java_operation_method(operation: Managed_Api_Operation): string {
   const operation_constant = managed_operation_constant(operation, "java")
   const operation_label = managed_operation_label(operation)
@@ -5117,6 +5142,8 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
   )
   const input_policy = operation_field_name_for(operation, "input", "policy", "java")
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "java")
+    ?? "new byte[0]"
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    @Override
@@ -5145,9 +5172,13 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `smithyEncodeF64Array(input.${input_payload}())`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}()`
           : `input.${input_payload}().getBytes(StandardCharsets.UTF_8)`
         const decoded_payload = application_value_codec === "f64_array"
           ? `smithyDecodeF64Array(result.payload(), "${operation_label}")`
+          : application_value_codec === "raw_bytes"
+          ? `result.payload()`
           : `smithyDecodeUtf8(result.payload(), "${operation_label}")`
         return `    @Override
     default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
@@ -5179,7 +5210,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 ${operation_constant},
                 input.${input_namespace_id}(),
                 ${input_item_id_expression},
-                new byte[0],
+                ${input_request_value},
                 0,
                 0);
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
@@ -5197,7 +5228,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 ${operation_constant},
                 input.${input_namespace_id}(),
                 ${input_item_id_expression},
-                new byte[0],
+                ${input_request_value},
                 0,
                 0);
             if (result.kind() == ${result_constant("not_found")}) {
@@ -5727,6 +5758,8 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
     "kotlin",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "kotlin")
+    ?? "byteArrayOf()"
   const prefix = `    override suspend fun ${method_name}(input: ${operation.input}): ${operation.output} =
         withContext(Dispatchers.IO) {
             requireNotNull(input)
@@ -5753,9 +5786,13 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `smithyEncodeF64Array(input.${input_payload})`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}`
           : `input.${input_payload}.toByteArray()`
         const decoded_payload = application_value_codec === "f64_array"
           ? `smithyDecodeF64Array(result.payload, "${operation_label}")`
+          : application_value_codec === "raw_bytes"
+          ? `result.payload`
           : `smithyDecodeUtf8(result.payload, "${operation_label}")`
         return `${prefix}            val result = smithyInvoke(
                 ${operation_constant},
@@ -5777,7 +5814,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 ${operation_constant},
                 input.${input_namespace_id},
                 ${input_item_id_expression},
-                byteArrayOf(),
+                ${input_request_value},
             )
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             val values = smithyDecodeOptionalValues(
@@ -5791,7 +5828,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
                 ${operation_constant},
                 input.${input_namespace_id},
                 ${input_item_id_expression},
-                byteArrayOf(),
+                ${input_request_value},
             )
             when (result.kind) {
                 ${result_constant("value")} -> ${operation.output}(${output_value} = result.payload)
@@ -6241,6 +6278,8 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     "dart",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "dart")
+    ?? "const <int>[]"
   const prefix = `  @override
   Future<${operation.output}> ${method_name}(${operation.input} input) => _run(() {
 `
@@ -6266,9 +6305,13 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `_smithyEncodeF64Array(input.${input_payload})`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}`
           : `utf8.encode(input.${input_payload})`
         const decoded_payload = application_value_codec === "f64_array"
           ? `_smithyDecodeF64Array(result.payload, '${operation_label}')`
+          : application_value_codec === "raw_bytes"
+          ? `result.payload`
           : `_smithyDecodeUtf8(result.payload, '${operation_label}')`
         return `${prefix}    final result = _invoke(
       ${operation_constant},
@@ -6292,7 +6335,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       ${operation_constant},
       input.${input_namespace_id},
       ${input_item_id_expression},
-      const <int>[],
+      ${input_request_value},
     );
     _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     final values = _smithyDecodeOptionalValues(
@@ -6306,7 +6349,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
       ${operation_constant},
       input.${input_namespace_id},
       ${input_item_id_expression},
-      const <int>[],
+      ${input_request_value},
     );
     if (result.kind == ${result_constant("not_found")}) {
       return const ${operation.output}();
@@ -7446,6 +7489,10 @@ function render_typescript_operation_method(
     "typescript",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "typescript")
+  const scoped_request_value = input_request_value === undefined
+    ? ""
+    : `        value: input.${input_request_value},\n`
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `  async ${method_name}(
@@ -7470,9 +7517,13 @@ function render_typescript_operation_method(
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `smithy_encode_f64_array(input.${input_payload})`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}`
           : `new TextEncoder().encode(input.${input_payload})`
         const decoded_payload = application_value_codec === "f64_array"
           ? `smithy_decode_f64_array(result.payload, ${operation_value})`
+          : application_value_codec === "raw_bytes"
+          ? `result.payload`
           : `this.#transport.decode_utf8(result.payload, ${operation_value})`
         return `  async ${method_name}(
     input: ${typescript_api_name(operation.input)},
@@ -7502,7 +7553,7 @@ function render_typescript_operation_method(
       input.${input_namespace_id},
       {
         item_id: ${input_item_id_expression},
-        expected_kinds: [${result_kinds}],
+${scoped_request_value}        expected_kinds: [${result_kinds}],
       },
     );
     const values = smithy_decode_optional_values(
@@ -7521,7 +7572,7 @@ function render_typescript_operation_method(
       input.${input_namespace_id},
       {
         item_id: ${input_item_id_expression},
-        expected_kinds: [${result_kinds}],
+${scoped_request_value}        expected_kinds: [${result_kinds}],
       },
     );
     return result.kind === ${result_constant("not_found")}
@@ -8302,6 +8353,8 @@ function render_go_operation_method(
     "go",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "go")
+    ?? "nil"
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `func (s smithyClient) ${method}(
@@ -8332,6 +8385,8 @@ function render_go_operation_method(
 \tif err != nil {
 \t\treturn ${output}{}, err
 \t}`
+          : application_value_codec === "raw_bytes"
+          ? `wireValue := input.${input_payload}`
           : `wireValue := []byte(input.${input_payload})`
         const decoded_payload = application_value_codec === "f64_array"
           ? `values, err := smithyDecodeF64Array(result.data)
@@ -8339,6 +8394,8 @@ function render_go_operation_method(
 \t\treturn ${output}{}, operationError("${label}", err)
 \t}
 \treturn ${output}{${output_payload}: values}, nil`
+          : application_value_codec === "raw_bytes"
+          ? `return ${output}{${output_payload}: result.data}, nil`
           : `return ${output}{${output_payload}: string(result.data)}, nil`
         return `func (s smithyClient) ${method}(
 	ctx context.Context,
@@ -8380,7 +8437,7 @@ function render_go_operation_method(
 			${opcode},
 			input.${input_namespace_id},
 			itemIDs,
-			nil,
+			${input_request_value === "nil" ? "nil" : `input.${input_request_value}`},
 			SetOptions{},
 		)
 		if err != nil {
@@ -8411,7 +8468,7 @@ function render_go_operation_method(
 		${opcode},
 		input.${input_namespace_id},
 		itemID,
-		nil,
+		${input_request_value === "nil" ? "nil" : `input.${input_request_value}`},
 		SetOptions{},
 	)
 	if err != nil {
@@ -9055,6 +9112,10 @@ function render_python_operation_method(
     "python",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "python")
+  const scoped_request_value = input_request_value === undefined
+    ? ""
+    : `            value=input.${input_request_value},\n`
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    async def ${method_name}(self, input: ${input}) -> ${output}:
@@ -9076,9 +9137,13 @@ function render_python_operation_method(
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `_smithy_encode_f64_array(input.${input_payload})`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}`
           : `input.${input_payload}.encode("utf-8")`
         const decoded_payload = application_value_codec === "f64_array"
           ? `_smithy_decode_f64_array(payload, ${operation_value})`
+          : application_value_codec === "raw_bytes"
+          ? `payload`
           : `self._smithy_transport.decode_utf8(payload, ${operation_value})`
         return `    async def ${method_name}(self, input: ${input}) -> ${output}:
         self._smithy_transport.assert_open()
@@ -9103,7 +9168,7 @@ function render_python_operation_method(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
-            expected_kinds=(${result_kinds},),
+${scoped_request_value}            expected_kinds=(${result_kinds},),
         )
         values = _smithy_decode_optional_values(
             payload, ${operation.plan.operation.response_value_count}, ${operation_value})
@@ -9117,7 +9182,7 @@ function render_python_operation_method(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
-            expected_kinds=(${result_kinds},),
+${scoped_request_value}            expected_kinds=(${result_kinds},),
         )
         return ${output}(
             ${output_value}=None
@@ -10167,6 +10232,8 @@ function render_swift_operation_method(
     "swift",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "swift")
+    ?? "Data()"
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `  public func ${method_name}(
@@ -10191,12 +10258,16 @@ function render_swift_operation_method(
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `try smithyEncodeF64Array(input.${input_payload})`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}`
           : `Data(input.${input_payload}.utf8)`
         const decoded_payload = application_value_codec === "f64_array"
           ? `let value = try smithyDecodeF64Array(
       result.payload,
       operation: "${operation_label}"
     )`
+          : application_value_codec === "raw_bytes"
+          ? `let value = result.payload`
           : `guard let value = String(data: result.payload, encoding: .utf8) else {
       throw OpenKacheError("${operation_label} response is not valid UTF-8")
     }`
@@ -10227,7 +10298,8 @@ function render_swift_operation_method(
     let result = try await smithyInvokeScoped(
       ${operation_constant},
       namespaceID: input.${input_namespace_id},
-      itemID: ${input_item_id_expression}
+      itemID: ${input_item_id_expression},
+      value: ${input_request_value === "Data()" ? "Data()" : `input.${input_request_value}`}
     )
     guard result.kind == ${result_constant("value")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
@@ -10248,7 +10320,8 @@ function render_swift_operation_method(
     let result = try await smithyInvokeScoped(
       ${operation_constant},
       namespaceID: input.${input_namespace_id},
-      itemID: ${input_item_id_expression}
+      itemID: ${input_item_id_expression},
+      value: ${input_request_value === "Data()" ? "Data()" : `input.${input_request_value}`}
     )
     switch result.kind {
     case ${result_constant("value")}:
@@ -10953,6 +11026,8 @@ function render_csharp_operation_method_body(
     "csharp",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "csharp")
+    ?? "ReadOnlyMemory<byte>.Empty"
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
@@ -10980,9 +11055,13 @@ function render_csharp_operation_method_body(
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `EncodeF64Array(input.${input_payload})`
+          : application_value_codec === "raw_bytes"
+          ? `ValidateValue(input.${input_payload})`
           : `ValidateValue(Encoding.UTF8.GetBytes(input.${input_payload}))`
         const decoded_payload = application_value_codec === "f64_array"
           ? `DecodeF64Array(result.Payload, "${label}")`
+          : application_value_codec === "raw_bytes"
+          ? `result.Payload`
           : `new UTF8Encoding(false, true).GetString(result.Payload)`
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
@@ -11016,7 +11095,7 @@ function render_csharp_operation_method_body(
             Protocol.Opcode.${operation.name},
             input.${input_namespace_id},
             ${input_item_id_expression},
-            ReadOnlyMemory<byte>.Empty,
+            ${input_request_value === "ReadOnlyMemory<byte>.Empty" ? "ReadOnlyMemory<byte>.Empty" : `input.${input_request_value}`},
             cancellationToken: cancellationToken).ConfigureAwait(false);
         ExpectKind("${label}", result, ${result_constant("value")});
         var values = DecodeOptionalValues(
@@ -11038,7 +11117,7 @@ ${output_values}
             Protocol.Opcode.${operation.name},
             input.${input_namespace_id},
             ${input_item_id_expression},
-            ReadOnlyMemory<byte>.Empty,
+            ${input_request_value === "ReadOnlyMemory<byte>.Empty" ? "ReadOnlyMemory<byte>.Empty" : `input.${input_request_value}`},
             cancellationToken: cancellationToken).ConfigureAwait(false);
         return new Smithy.${operation.output}
         {
@@ -11795,6 +11874,8 @@ function render_rust_operation_method(
     "rust",
   )
   const application_value_codec = operation.plan.application_value_codec
+  const input_request_value = operation_request_value_name(operation, "rust")
+    ?? "Vec::new()"
   switch (operation.plan.result_plan.response_kind) {
     case "pong":
       return `            async fn ${method_name}(
@@ -11828,9 +11909,13 @@ function render_rust_operation_method(
         )
         const encoded_payload = application_value_codec === "f64_array"
           ? `smithy_encode_f64_array(&input.${input_payload})?`
+          : application_value_codec === "raw_bytes"
+          ? `input.${input_payload}`
           : `input.${input_payload}.into_bytes()`
         const decoded_payload = application_value_codec === "f64_array"
           ? `smithy_decode_f64_array(&result.payload, "${operation_label}")?`
+          : application_value_codec === "raw_bytes"
+          ? `result.payload`
           : `String::from_utf8(result.payload).map_err(|error| {
                     Error::Protocol(format!("${operation_label} response is not UTF-8: {error}"))
                 })?`
@@ -11870,7 +11955,7 @@ function render_rust_operation_method(
                     openkache_client_core::Opcode::${operation.name},
                     input.${input_namespace_id},
                     ${input_item_id_expression},
-                    [],
+                    ${input_request_value === "Vec::new()" ? "Vec::new()" : `input.${input_request_value}`},
                     SetOptions::new(),
                 )
                     .await?;
@@ -11898,7 +11983,7 @@ ${output_values}
                     openkache_client_core::Opcode::${operation.name},
                     input.${input_namespace_id},
                     ${input_item_id_expression},
-                    [],
+                    ${input_request_value === "Vec::new()" ? "Vec::new()" : `input.${input_request_value}`},
                     SetOptions::new(),
                 )
                     .await?;
