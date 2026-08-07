@@ -58,7 +58,7 @@ pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
     match contract.response_kind {
         OperationResponseKind::Pong => response_bytes(Status::Ok, b"PONG"),
         OperationResponseKind::ApplicationValue => {
-            super::experimental_api::application_value_response(contract.value_transform, value)
+            super::experimental_api::application_value_response(opcode, value)
         }
         _ => response_bytes(
             Status::InternalError,

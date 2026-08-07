@@ -14,7 +14,6 @@ use super::{
     NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response,
     response_bytes,
 };
-use crate::contract::OperationValueTransform;
 
 /// Executes an operation whose behavior belongs to an API-owned extension.
 ///
@@ -37,52 +36,85 @@ pub(super) async fn execute(context: &OperationContext<'_, '_>) -> Option<Respon
     }
 }
 
-/// Applies an API-owned transform to an application-value request.
-pub(super) fn application_value_response(
-    transform: OperationValueTransform,
-    value: Vec<u8>,
-) -> Response {
-    match transform_application_value(transform, value) {
+type ApplicationValueHandler = fn(Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]>;
+
+struct ApplicationValueExtension {
+    opcode: Opcode,
+    handler: ApplicationValueHandler,
+}
+
+/// Server-owned implementations for application-value operations.
+///
+/// This registry is deliberately outside the generated protocol contract:
+/// Smithy describes the payload shape and codec, while the server chooses the
+/// behavior attached to each operation. The transport only needs to pass the
+/// decoded bytes through this extension point.
+const APPLICATION_VALUE_EXTENSIONS: &[ApplicationValueExtension] = &[
+    ApplicationValueExtension {
+        opcode: Opcode::ExperimentalEcho,
+        handler: echo_application_value,
+    },
+    ApplicationValueExtension {
+        opcode: Opcode::ExperimentalReverse,
+        handler: reverse_utf8_application_value,
+    },
+    ApplicationValueExtension {
+        opcode: Opcode::SquareArray,
+        handler: square_array_application_value,
+    },
+];
+
+/// Applies the server-owned implementation for an application-value opcode.
+pub(super) fn application_value_response(opcode: Opcode, value: Vec<u8>) -> Response {
+    let Some(extension) = APPLICATION_VALUE_EXTENSIONS
+        .iter()
+        .find(|extension| extension.opcode == opcode)
+    else {
+        return response_bytes(
+            Status::InternalError,
+            b"application-value operation has no server implementation",
+        );
+    };
+    match (extension.handler)(value) {
         Ok(value) => response(Status::Ok, value),
         Err(message) => response_bytes(Status::InvalidRequest, message),
     }
 }
 
-fn transform_application_value(
-    transform: OperationValueTransform,
-    value: Vec<u8>,
-) -> std::result::Result<Vec<u8>, &'static [u8]> {
-    match transform {
-        OperationValueTransform::Identity => Ok(value),
-        OperationValueTransform::ReverseUtf8 => {
-            let value = std::str::from_utf8(&value)
-                .map_err(|_| b"application value must be valid UTF-8" as &'static [u8])?;
-            Ok(value.chars().rev().collect::<String>().into_bytes())
-        }
-        OperationValueTransform::SquareArray => {
-            const F64_BYTES: usize = std::mem::size_of::<f64>();
-            if value.len() % F64_BYTES != 0 {
-                return Err(b"square_array payload length must be a multiple of eight");
-            }
-            let mut squared = Vec::with_capacity(value.len());
-            for chunk in value.chunks_exact(F64_BYTES) {
-                let input = f64::from_be_bytes(
-                    chunk
-                        .try_into()
-                        .expect("chunks_exact returned a fixed-width chunk"),
-                );
-                if !input.is_finite() {
-                    return Err(b"square_array input must contain finite values");
-                }
-                let output = input * input;
-                if !output.is_finite() {
-                    return Err(b"square_array result must contain finite values");
-                }
-                squared.extend_from_slice(&output.to_be_bytes());
-            }
-            Ok(squared)
-        }
+fn echo_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
+    std::str::from_utf8(&value)
+        .map(|_| value)
+        .map_err(|_| b"application value must be valid UTF-8" as &'static [u8])
+}
+
+fn reverse_utf8_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
+    let value = std::str::from_utf8(&value)
+        .map_err(|_| b"application value must be valid UTF-8" as &'static [u8])?;
+    Ok(value.chars().rev().collect::<String>().into_bytes())
+}
+
+fn square_array_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
+    const F64_BYTES: usize = std::mem::size_of::<f64>();
+    if value.len() % F64_BYTES != 0 {
+        return Err(b"square_array payload length must be a multiple of eight");
     }
+    let mut squared = Vec::with_capacity(value.len());
+    for chunk in value.chunks_exact(F64_BYTES) {
+        let input = f64::from_be_bytes(
+            chunk
+                .try_into()
+                .expect("chunks_exact returned a fixed-width chunk"),
+        );
+        if !input.is_finite() {
+            return Err(b"square_array input must contain finite values");
+        }
+        let output = input * input;
+        if !output.is_finite() {
+            return Err(b"square_array result must contain finite values");
+        }
+        squared.extend_from_slice(&output.to_be_bytes());
+    }
+    Ok(squared)
 }
 
 /// Executes the experimental two-item read without teaching the shared

@@ -72,8 +72,6 @@ pub enum ProtocolError {
     InvalidNamespacePolicy(&'static str),
     #[error("namespace revision must be positive")]
     InvalidRevision,
-    #[error("optional-value payload is invalid: {0}")]
-    InvalidOptionalValues(&'static str),
 }
 
 impl From<openkache_protocol::ProtocolError> for ProtocolError {

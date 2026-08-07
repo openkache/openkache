@@ -90,13 +90,6 @@ enum OperationResponseKind {
     NAMESPACE_DESCRIPTOR = "namespace_descriptor"
 }
 
-/// Application-value transformation performed by the server before responding.
-enum OperationValueTransform {
-    IDENTITY = "identity"
-    REVERSE_UTF8 = "reverse_utf8"
-    SQUARE_ARRAY = "square_array"
-}
-
 /// Retry policy used by a generated operation contract.
 enum OperationRetryMode {
     ALWAYS = "always"
@@ -133,9 +126,6 @@ structure operationContract {
     @required
     errorStatuses: OperationStatuses
 
-    /// Optional application-value transform; omitted operations preserve their
-    /// request payload unchanged.
-    valueTransform: OperationValueTransform
 }
 
 /// Values that are visible on the client/server wire.
@@ -428,8 +418,7 @@ operation Ping {
     responseKind: "application_value",
     retryMode: "always",
     successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
-    valueTransform: "identity"
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
 operation ExperimentalEcho {
     input: ExperimentalEchoInput
@@ -442,8 +431,7 @@ operation ExperimentalEcho {
     responseKind: "application_value",
     retryMode: "always",
     successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
-    valueTransform: "reverse_utf8"
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
 operation ExperimentalReverse {
     input: ExperimentalReverseInput
@@ -456,8 +444,7 @@ operation ExperimentalReverse {
     responseKind: "application_value",
     retryMode: "always",
     successStatuses: ["ok"],
-    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"],
-    valueTransform: "square_array"
+    errorStatuses: ["invalid_request", "too_large", "overloaded", "timeout", "forbidden", "internal_error"]
 )
 operation SquareArray {
     input: SquareArrayInput
@@ -708,36 +695,42 @@ structure SyncOutput {}
 structure ExperimentalEchoInput {
     @required
     @operationField(role: "payload")
+    @wireCodec(name: "utf8")
     message: String
 }
 
 structure ExperimentalEchoOutput {
     @required
     @operationField(role: "payload")
+    @wireCodec(name: "utf8")
     message: String
 }
 
 structure ExperimentalReverseInput {
     @required
     @operationField(role: "payload")
+    @wireCodec(name: "utf8")
     message: String
 }
 
 structure ExperimentalReverseOutput {
     @required
     @operationField(role: "payload")
+    @wireCodec(name: "utf8")
     message: String
 }
 
 structure SquareArrayInput {
     @required
     @operationField(role: "payload")
+    @wireCodec(name: "packed_f64_be")
     values: FloatingPointArray
 }
 
 structure SquareArrayOutput {
     @required
     @operationField(role: "payload")
+    @wireCodec(name: "packed_f64_be")
     values: FloatingPointArray
 }
 

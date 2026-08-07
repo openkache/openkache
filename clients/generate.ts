@@ -20,7 +20,6 @@ import {
   OPERATION_RETRY_MODES,
   OPERATION_RESPONSE_KINDS,
   OPERATION_SCOPES,
-  OPERATION_VALUE_TRANSFORMS,
   extract_wire_contract as extract_protocol_wire_contract,
   render_rust_semantic_constants as render_protocol_rust_semantic_constants,
   render_rust_wire as render_protocol_rust_wire,
@@ -133,8 +132,6 @@ type Api_Operation_Scope = Api_Operation_Contract["scope"]
 type Api_Operation_Request_Kind = Api_Operation_Contract["request_kind"]
 type Api_Operation_Response_Kind = Api_Operation_Contract["response_kind"]
 type Api_Operation_Retry_Mode = Api_Operation_Contract["retry_mode"]
-type Api_Operation_Value_Transform =
-  NonNullable<Api_Operation_Contract["value_transform"]>
 
 /** One resolved Smithy API field type. */
 export interface Api_Type {
@@ -728,7 +725,6 @@ function api_structure(
 function operation_contract(
   shape: Json_Object,
   target: string,
-  value_transforms: readonly string[] = OPERATION_VALUE_TRANSFORMS,
 ): Api_Operation_Contract | undefined {
   const traits = optional_object_member(shape, "traits", target)
   const value = traits?.[OPERATION_CONTRACT_TRAIT_ID] ??
@@ -768,25 +764,6 @@ function operation_contract(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.retryMode must be always, never, or when_not_creating`,
     )
   }
-  const value_transform_value = contract["valueTransform"]
-  const value_transform =
-    value_transform_value === undefined
-      ? undefined
-      : string_member(
-          contract,
-          "valueTransform",
-          `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-        )
-  if (
-    value_transform !== undefined &&
-    !value_transforms.includes(value_transform)
-  ) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be one of ${value_transforms.join(", ")}`,
-    )
-  }
-  const parsed_value_transform =
-    value_transform as Api_Operation_Value_Transform | undefined
   const statuses = (member: string): readonly string[] => {
     const values = array_member(
       contract,
@@ -826,9 +803,6 @@ function operation_contract(
     retry_mode: retry_mode as Api_Operation_Retry_Mode,
     scope: scope as Api_Operation_Scope,
     success_statuses,
-    ...(parsed_value_transform === undefined
-      ? {}
-      : { value_transform: parsed_value_transform }),
   }
 }
 
@@ -881,7 +855,6 @@ function api_contract(
     readonly contract: Api_Operation_Contract
     readonly name: string
   }[],
-  value_transforms?: readonly string[],
 ): Api_Contract {
   const service = object_member(shapes, service_shape_id, "Smithy AST.shapes")
   // The protocol Opcode enum is the canonical operation-name source. A
@@ -920,7 +893,7 @@ function api_contract(
       )
       const semantic_contract = protocol_operations?.find(
         (operation) => operation.name === shape_name(target),
-      )?.contract ?? operation_contract(shape, target, value_transforms)
+      )?.contract ?? operation_contract(shape, target)
       return {
         ...(semantic_contract === undefined ? {} : { contract: semantic_contract }),
         input: shape_name(input),
@@ -2024,7 +1997,6 @@ export function extract_client_contract(
     operation_field_roles,
     wire.opcodes.map((entry) => entry.name),
     wire.operations,
-    wire.operation_vocabularies?.value_transforms,
   )
   const api = {
     ...parsed_api,
@@ -2395,16 +2367,6 @@ function render_rust_operation_contract(contract: Client_Contract): string {
   ) {
     return ""
   }
-  const modeled_value_transforms = operations.flatMap((operation) =>
-    operation.contract?.value_transform === undefined
-      ? []
-      : [operation.contract.value_transform])
-  const value_transforms =
-    contract.operation_vocabularies?.value_transforms ??
-    (modeled_value_transforms.length === 0
-      ? []
-      : [...new Set(["identity", ...modeled_value_transforms])])
-  const has_value_transforms = value_transforms.length > 0
   const request_kinds = [
     ...new Set([
       ...OPERATION_REQUEST_KINDS,
@@ -2451,9 +2413,6 @@ function render_rust_operation_contract(contract: Client_Contract): string {
             response_value_count: ${operation_contract.response_value_count},
             response_fields: ${field_slice(operation_contract.response_fields)},
             retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode)},
-${has_value_transforms
-  ? `            value_transform: OperationValueTransform::${enum_variant(operation_contract.value_transform ?? "identity")},`
-  : ""}
             success_statuses: ${status_slice(operation_contract.success_statuses)},
             error_statuses: ${status_slice(operation_contract.error_statuses)},
         },`
@@ -2495,15 +2454,6 @@ pub struct OperationField {
     pub count: usize,
 }
 
-${has_value_transforms
-  ? `/// Application-value transformation declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationValueTransform {
-${value_transforms.map((value) => `    ${pascal_case(snake_case(value))},`).join("\n")}
-}
-`
-  : ""}
-
 /// Generated semantic metadata for one protocol operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
@@ -2516,7 +2466,6 @@ pub struct OperationContract {
     pub response_value_count: usize,
     pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
-${has_value_transforms ? "    pub value_transform: OperationValueTransform,\n" : ""}
     pub success_statuses: &'static [openkache_protocol::Status],
     pub error_statuses: &'static [openkache_protocol::Status],
 }
