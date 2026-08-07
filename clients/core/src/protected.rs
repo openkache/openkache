@@ -190,12 +190,6 @@ macro_rules! protected_client_methods {
                 ))
         }
 
-        /// Resolves one native logical/canonical key through the shared core.
-        #[cfg(feature = "ffi")]
-        pub(crate) fn resolve_key_input(&self, input: KeyInput) -> Result<ResolvedKey> {
-            self.protection.resolve_key_input(input)
-        }
-
         /// Verifies the connection and returns the complete request round-trip time.
         pub async fn ping(&self) -> Result<Duration> {
             self.raw.ping().await
@@ -249,33 +243,27 @@ macro_rules! protected_client_methods {
             value: impl AsRef<[u8]>,
             set_options: SetOptions,
         ) -> Result<crate::OperationResult> {
-            let contract = crate::contract::operation_contract(operation);
-            let binding = if matches!(contract.request_kind, "item" | "set") {
-                Some(
-                    self.resolve_and_bind_key(KeyInput::portable(application_key))
-                        .await?,
-                )
-            } else {
-                None
-            };
-            self.execute_operation_with_binding(operation, binding, value, set_options)
+            self.execute_operation_key_input(
+                operation,
+                KeyInput::portable(application_key),
+                value,
+                set_options,
+            )
                 .await
         }
 
-        /// Executes an operation after its key has crossed the shared core
-        /// key boundary.
-        ///
-        #[cfg(feature = "ffi")]
-        pub(crate) async fn execute_operation_resolved(
+        /// Executes an operation after resolving and binding its key through
+        /// the shared core key boundary.
+        pub(crate) async fn execute_operation_key_input(
             &self,
             operation: crate::Opcode,
-            application_key: ResolvedKey,
+            input: KeyInput,
             value: impl AsRef<[u8]>,
             set_options: SetOptions,
         ) -> Result<crate::OperationResult> {
             let contract = crate::contract::operation_contract(operation);
             let binding = if matches!(contract.request_kind, "item" | "set") {
-                Some(self.bind_resolved_key(&application_key).await?)
+                Some(self.resolve_and_bind_key(input).await?)
             } else {
                 None
             };
@@ -510,10 +498,10 @@ macro_rules! protected_client_methods {
             &self,
             canonical_key: impl AsRef<[u8]>,
         ) -> Result<GetOutcome<Value>> {
-            let key = self.protection.resolve_key_input(KeyInput::canonical_in_space(
+            self.get_value_key_input(KeyInput::canonical_in_space(
                 canonical_key.as_ref().to_owned(),
-            ))?;
-            self.get_value_with_key(&key).await
+            ))
+            .await
         }
 
         async fn get_value_at_item_id(
@@ -537,6 +525,40 @@ macro_rules! protected_client_methods {
             let key = self.protection.resolve_key_input(input)?;
             let namespace_id = self.raw.ensure_namespace_id().await?;
             self.protection.bind_resolved_key(namespace_id, &key)
+        }
+
+        /// Retrieves a value after resolving and binding one logical key.
+        ///
+        /// Native adapters use this boundary for typed JSON operations so
+        /// they do not carry [`ResolvedKey`] or repeat the resolve/bind
+        /// sequence themselves.
+        pub(crate) async fn get_value_key_input(
+            &self,
+            input: KeyInput,
+        ) -> Result<GetOutcome<Value>> {
+            let binding = self.resolve_and_bind_key(input).await?;
+            self.get_value_at_item_id(binding.namespace_id, binding.item_id)
+                .await
+        }
+
+        /// Stores a value after resolving and binding one logical key.
+        pub(crate) async fn set_value_key_input(
+            &self,
+            input: KeyInput,
+            value: Value,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let binding = self.resolve_and_bind_key(input).await?;
+            self.set_value_at_binding(binding, value, options).await
+        }
+
+        /// Deletes a value after resolving and binding one logical key.
+        pub(crate) async fn delete_key_input(
+            &self,
+            input: KeyInput,
+        ) -> Result<DeleteOutcome> {
+            let binding = self.resolve_and_bind_key(input).await?;
+            self.delete_at_binding(binding).await
         }
 
         async fn bind_resolved_key(&self, key: &ResolvedKey) -> Result<KeyBinding> {
@@ -674,10 +696,12 @@ macro_rules! protected_client_methods {
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            let key = self.protection.resolve_key_input(KeyInput::canonical_in_space(
-                canonical_key.as_ref().to_owned(),
-            ))?;
-            self.set_value_with_key(&key, value, options).await
+            self.set_value_key_input(
+                KeyInput::canonical_in_space(canonical_key.as_ref().to_owned()),
+                value,
+                options,
+            )
+            .await
         }
 
         /// Deletes a value for a portable key.
@@ -707,10 +731,10 @@ macro_rules! protected_client_methods {
             &self,
             canonical_key: impl AsRef<[u8]>,
         ) -> Result<DeleteOutcome> {
-            let key = self.protection.resolve_key_input(KeyInput::canonical_in_space(
+            self.delete_key_input(KeyInput::canonical_in_space(
                 canonical_key.as_ref().to_owned(),
-            ))?;
-            self.delete_with_key(&key).await
+            ))
+            .await
         }
 
         /// Returns server statistics as their JSON text.

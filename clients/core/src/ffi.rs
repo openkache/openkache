@@ -40,8 +40,7 @@ use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, Endpoint,
     EvictionDefault, ExpirationDefault, GetOutcome, LocalProtectedClient, NamespacePolicy,
-    OverridePolicy, PrivateKey, ResolvedKey, RetryPolicy, ServerTrust, SetCondition, SetOptions,
-    SetOutcome,
+    OverridePolicy, PrivateKey, RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
@@ -112,7 +111,7 @@ pub struct FfiClient {
 enum Command {
     Execute {
         operation: FfiOperation,
-        key: Option<KeyInput>,
+        input: Option<FfiOperationInput>,
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
@@ -144,6 +143,17 @@ enum Command {
         response: SyncSender<FfiResult>,
     },
     Shutdown,
+}
+
+/// Key material carried by one native operation before it reaches the protected
+/// client.
+///
+/// Logical keys stay inside [`KeyInput`], where canonicalization and key-space
+/// validation live. Exact item IDs are a different raw-transport concern and
+/// therefore never enter the logical key resolver.
+enum FfiOperationInput {
+    Logical(KeyInput),
+    ExactItemId(Vec<u8>),
 }
 
 type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
@@ -265,9 +275,13 @@ impl FfiClient {
         set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
-        self.execute_with_key(
+        self.execute_with_input(
             operation,
-            Some(KeyInput::canonical(application_key)),
+            Some(if raw {
+                FfiOperationInput::ExactItemId(application_key)
+            } else {
+                FfiOperationInput::Logical(KeyInput::canonical_key(application_key))
+            }),
             value,
             set_options,
             raw,
@@ -283,19 +297,22 @@ impl FfiClient {
         set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
-        self.execute_with_key(
+        self.execute_with_input(
             operation,
-            Some(KeyInput::from_ffi(key_spec, application_key)),
+            Some(FfiOperationInput::Logical(KeyInput::from_ffi(
+                key_spec,
+                application_key,
+            ))),
             value,
             set_options,
             raw,
         )
     }
 
-    fn execute_with_key(
+    fn execute_with_input(
         &self,
         operation: FfiOperation,
-        key: Option<KeyInput>,
+        input: Option<FfiOperationInput>,
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
@@ -306,7 +323,7 @@ impl FfiClient {
         };
         let command = Command::Execute {
             operation,
-            key,
+            input,
             value,
             set_options,
             raw,
@@ -517,14 +534,14 @@ fn run_worker(
         match command {
             Command::Execute {
                 operation,
-                key,
+                input,
                 value,
                 set_options,
                 raw,
                 response,
             } => {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.block_on(execute(&client, operation, key, value, set_options, raw))
+                    runtime.block_on(execute(&client, operation, input, value, set_options, raw))
                 }))
                 .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
                 state.store(
@@ -624,27 +641,33 @@ fn run_worker(
 async fn execute(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    key: Option<KeyInput>,
+    input: Option<FfiOperationInput>,
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
 ) -> FfiResult {
     let result = if raw {
-        match key {
-            Some(key) => match key.into_exact_bytes() {
-                Some(item_id) => execute_raw(client, operation, item_id, value, set_options).await,
-                None => Err(crate::Error::configuration(
-                    "item_id",
-                    "exact-item-ID operations require exact item-ID bytes",
-                )),
-            },
+        match input {
+            Some(FfiOperationInput::ExactItemId(item_id)) => {
+                execute_raw(client, operation, item_id, value, set_options).await
+            }
+            Some(FfiOperationInput::Logical(_)) => Err(crate::Error::configuration(
+                "item_id",
+                "exact-item-ID operations require exact item-ID bytes",
+            )),
             None => execute_raw(client, operation, Vec::new(), value, set_options).await,
         }
     } else if let Some(result) = execute_protocol_global(client, operation, value.clone()).await {
         result
     } else {
-        match key {
-            Some(key) => execute_protected(client, operation, key, value, set_options).await,
+        match input {
+            Some(FfiOperationInput::Logical(key)) => {
+                execute_protected(client, operation, key, value, set_options).await
+            }
+            Some(FfiOperationInput::ExactItemId(_)) => Err(crate::Error::configuration(
+                "application_key",
+                "protected operations require a logical application key",
+            )),
             None => Err(crate::Error::configuration(
                 "application_key",
                 "protected operation requires a key",
@@ -664,20 +687,22 @@ async fn execute_protected(
     if operation == FfiOperation::Reconnect {
         return client.reconnect().await.map(|()| ok_result());
     }
-    let key = client.resolve_key_input(input)?;
     if operation == FfiOperation::GetJson {
-        return client.get_value_resolved(key).await.and_then(json_result);
+        return client
+            .get_value_key_input(input)
+            .await
+            .and_then(json_result);
     }
     if operation == FfiOperation::SetJson {
         return match parse_json(&value) {
             Ok(json) => client
-                .set_value_resolved(key, Value::Json(json), set_options)
+                .set_value_key_input(input, Value::Json(json), set_options)
                 .await
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         };
     }
-    execute_protected_data_plane(client, operation, key, value, set_options).await
+    execute_protected_data_plane(client, operation, input, value, set_options).await
 }
 
 async fn execute_protocol_global(
@@ -705,7 +730,7 @@ async fn execute_protocol_global(
 async fn execute_protected_data_plane(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    key: ResolvedKey,
+    input: KeyInput,
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
@@ -718,7 +743,7 @@ async fn execute_protected_data_plane(
     let contract = crate::contract::operation_contract(opcode);
     if matches!(contract.request_kind, "item" | "set") {
         client
-            .execute_operation_resolved(opcode, key, value, set_options)
+            .execute_operation_key_input(opcode, input, value, set_options)
             .await
             .and_then(operation_result)
     } else {

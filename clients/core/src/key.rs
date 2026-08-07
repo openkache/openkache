@@ -138,7 +138,7 @@ impl KeyResolver {
 
     /// Converts one internal key input through the single core-owned boundary.
     ///
-    /// The compatibility `Canonical` variant deliberately accepts any valid
+    /// The compatibility `CanonicalKey` variant deliberately accepts any valid
     /// canonical v1 key because the original native ABI did not carry a
     /// configured key-space discriminator. New callers should use
     /// `CanonicalInSpace`, `ConfiguredLogical`, `TypedLogical`, or `Portable`,
@@ -155,7 +155,7 @@ impl KeyResolver {
                 KeySpace::new(spec).resolve_logical_bytes(&bytes)
             }
             #[cfg(feature = "ffi")]
-            KeyInput::Canonical(bytes) => ResolvedKey::from_canonical(&bytes),
+            KeyInput::CanonicalKey(bytes) => ResolvedKey::from_canonical(&bytes),
             KeyInput::CanonicalInSpace(bytes) => self.space.resolve_canonical(&bytes),
         }
     }
@@ -227,8 +227,14 @@ pub(crate) enum KeyInput {
         spec: KeySpec,
         bytes: Vec<u8>,
     },
+    /// A complete canonical key item supplied through the compatibility FFI.
+    ///
+    /// This is distinct from [`CanonicalInSpace`](Self::CanonicalInSpace):
+    /// compatibility callers carry no configured key-space discriminator, so
+    /// the canonical item is validated but not compared with the resolver's
+    /// configured [`KeySpec`].
     #[cfg(feature = "ffi")]
-    Canonical(Vec<u8>),
+    CanonicalKey(Vec<u8>),
     CanonicalInSpace(Vec<u8>),
 }
 
@@ -247,8 +253,8 @@ impl KeyInput {
     }
 
     #[cfg(feature = "ffi")]
-    pub(crate) fn canonical(bytes: Vec<u8>) -> Self {
-        Self::Canonical(bytes)
+    pub(crate) fn canonical_key(bytes: Vec<u8>) -> Self {
+        Self::CanonicalKey(bytes)
     }
 
     pub(crate) fn canonical_in_space(bytes: Vec<u8>) -> Self {
@@ -263,21 +269,6 @@ impl KeyInput {
     #[cfg(feature = "ffi")]
     pub(crate) fn from_ffi(spec: crate::contract::FfiKeySpec, bytes: Vec<u8>) -> Self {
         Self::typed_logical(spec.into(), bytes)
-    }
-
-    /// Returns bytes for an exact-item-ID invocation.
-    ///
-    /// Exact-ID operations deliberately do not interpret the bytes as a
-    /// logical key. Keeping this conversion here prevents the FFI dispatcher
-    /// from reaching into the logical-key representation.
-    #[cfg(feature = "ffi")]
-    pub(crate) fn into_exact_bytes(self) -> Option<Vec<u8>> {
-        match self {
-            Self::Canonical(bytes) => Some(bytes),
-            Self::Portable(_) | Self::ConfiguredLogical(_) | Self::CanonicalInSpace(_) => None,
-            #[cfg(feature = "ffi")]
-            Self::TypedLogical { .. } => None,
-        }
     }
 }
 
