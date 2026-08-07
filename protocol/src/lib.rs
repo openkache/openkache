@@ -244,16 +244,18 @@ impl Response {
 /// strictly smaller. The aggregate payload is bounded by the same wire value
 /// ceiling used by response frames.
 pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
-    let payload_len = values.iter().try_fold(0usize, |length, value| {
-        let value_len = value.map_or(0, <[u8]>::len);
-        if value_len >= OPTIONAL_VALUE_MISSING as usize {
-            return None;
-        }
-        length
-            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)?
-            .checked_add(value_len)
-    })
-    .ok_or(ProtocolError::FrameLengthOverflow)?;
+    let payload_len = values
+        .iter()
+        .try_fold(0usize, |length, value| {
+            let value_len = value.map_or(0, <[u8]>::len);
+            if value_len >= OPTIONAL_VALUE_MISSING as usize {
+                return None;
+            }
+            length
+                .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)?
+                .checked_add(value_len)
+        })
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
     validate_value_length(payload_len)?;
     let mut payload = Vec::with_capacity(payload_len);
     for value in values {
@@ -269,10 +271,7 @@ pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
 }
 
 /// Decodes ordered optional opaque values from the shared response codec.
-pub fn decode_optional_values(
-    payload: &[u8],
-    value_count: usize,
-) -> Result<Vec<Option<Vec<u8>>>> {
+pub fn decode_optional_values(payload: &[u8], value_count: usize) -> Result<Vec<Option<Vec<u8>>>> {
     validate_value_length(payload.len())?;
     let minimum = value_count
         .checked_mul(OPTIONAL_VALUE_LENGTH_BYTES)

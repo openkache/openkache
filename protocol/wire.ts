@@ -56,16 +56,6 @@ export const OPERATION_RESPONSE_KINDS = [
 /** See `Wire_Operation_Request_Kind` for why this remains open-ended. */
 export type Wire_Operation_Response_Kind = string
 
-export const OPERATION_VALUE_TRANSFORMS = [
-  "identity",
-] as const
-
-/**
- * Runtime Smithy enum values are authoritative. The literal fallback above
- * remains only for legacy AST fixtures that do not contain the enum shape.
- */
-export type Wire_Operation_Value_Transform = string
-
 export const OPERATION_RETRY_MODES = [
   "always",
   "never",
@@ -110,19 +100,12 @@ export interface Wire_Operation_Contract {
   readonly retry_mode: Wire_Operation_Retry_Mode
   readonly scope: Wire_Operation_Scope
   readonly success_statuses: readonly string[]
-  /** Optional application-value transform; omitted means identity. */
-  readonly value_transform?: Wire_Operation_Value_Transform
 }
 
 /** Count of one Smithy operation-field role in a request or response shape. */
 export interface Wire_Operation_Field {
   readonly count: number
   readonly role: string
-}
-
-/** Smithy operation vocabularies extracted from the protocol model. */
-export interface Wire_Operation_Vocabularies {
-  readonly value_transforms: readonly string[]
 }
 
 /** One protocol opcode and its Smithy semantic operation contract. */
@@ -194,11 +177,6 @@ export interface Wire_Contract {
    */
   readonly operations?: readonly Wire_Operation[]
   readonly opcodes: readonly Wire_Entry[]
-  /**
-   * Values extracted from `OperationValueTransform` when the model exposes
-   * that enum. Legacy fixtures may omit this field.
-   */
-  readonly operation_vocabularies?: Wire_Operation_Vocabularies
   readonly statuses: readonly Wire_Entry[]
   readonly v1: Wire_V1_Contract
 }
@@ -239,8 +217,6 @@ const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
 const OPERATION_CONTRACT_TRAIT_ID = "openkache.protocol#operationContract"
 const OPERATION_FIELD_TRAIT_ID = "openkache.protocol#operationField"
-const OPERATION_VALUE_TRANSFORM_SHAPE_ID =
-  "openkache.protocol#OperationValueTransform"
 
 function object_value(value: unknown, location: string): Json_Object {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -822,33 +798,6 @@ function wire_enum_entries(
   return entries
 }
 
-function smithy_enum_values(
-  shapes: Json_Object,
-  shape_id: string,
-  kind: string,
-): readonly string[] {
-  const enum_shape = object_member(shapes, shape_id, "Smithy AST.shapes")
-  if (shape_type(enum_shape, `Smithy AST.shapes.${shape_id}`) !== "enum") {
-    throw new Error(`${shape_id} must be an enum`)
-  }
-  const members = object_member(enum_shape, "members", shape_id)
-  const values = Object.entries(members).map(([name, value]) => {
-    const member_shape = object_value(value, `${shape_id}.${name}`)
-    return string_member(
-      object_member(member_shape, "traits", `${shape_id}.${name}`),
-      "smithy.api#enumValue",
-      `${shape_id}.${name}.traits`,
-    )
-  })
-  if (values.length === 0) {
-    throw new Error(`${kind} enum must define at least one value`)
-  }
-  if (new Set(values).size !== values.length) {
-    throw new Error(`duplicate ${kind} enum value`)
-  }
-  return values
-}
-
 function optional_object_member(
   object: Json_Object,
   member: string,
@@ -929,7 +878,6 @@ function operation_contract(
   shape: Json_Object,
   target: string,
   statuses: readonly Wire_Entry[],
-  value_transforms: readonly string[] = OPERATION_VALUE_TRANSFORMS,
 ): Wire_Operation_Contract | undefined {
   const traits = optional_object_member(shape, "traits", target)
   const value = traits?.[OPERATION_CONTRACT_TRAIT_ID]
@@ -970,25 +918,6 @@ function operation_contract(
     )
   }
 
-  const value_transform_value = contract["valueTransform"]
-  const value_transform =
-    value_transform_value === undefined
-      ? undefined
-      : string_member(
-          contract,
-          "valueTransform",
-          `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-        )
-  if (
-    value_transform !== undefined &&
-    !value_transforms.includes(value_transform)
-  ) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be one of ${value_transforms.join(", ")}`,
-    )
-  }
-  const parsed_value_transform =
-    value_transform as Wire_Operation_Value_Transform | undefined
   const request_fields = operation_shape_fields(
     shapes,
     shape,
@@ -1059,9 +988,6 @@ function operation_contract(
     retry_mode: retry_mode as Wire_Operation_Contract["retry_mode"],
     scope: scope as Wire_Operation_Contract["scope"],
     success_statuses,
-    ...(parsed_value_transform === undefined
-      ? {}
-      : { value_transform: parsed_value_transform }),
   }
 }
 
@@ -1069,7 +995,6 @@ function wire_operations(
   shapes: Json_Object,
   opcodes: readonly Wire_Entry[],
   statuses: readonly Wire_Entry[],
-  value_transforms: readonly string[],
   strict: boolean,
 ): readonly Wire_Operation[] | undefined {
   const operations: Wire_Operation[] = []
@@ -1085,7 +1010,6 @@ function wire_operations(
       object_value(shape, `Smithy AST.shapes.${target}`),
       target,
       statuses,
-      value_transforms,
     )
     if (contract === undefined) {
       if (strict) {
@@ -1151,32 +1075,17 @@ export function extract_wire_contract(ast: unknown, strict_operations = false): 
     WIRE_STATUS_TRAIT_ID,
     "status",
   )
-  const operation_value_transform_shape =
-    shapes[OPERATION_VALUE_TRANSFORM_SHAPE_ID]
-  const value_transforms =
-    operation_value_transform_shape === undefined
-      ? undefined
-      : smithy_enum_values(
-          shapes,
-          OPERATION_VALUE_TRANSFORM_SHAPE_ID,
-          "operation value transform",
-        )
-
   const contract = {
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
     v1: wire_v1_contract(contract_trait.v1),
-    ...(value_transforms === undefined
-      ? {}
-      : { operation_vocabularies: { value_transforms } }),
   }
   const operations = wire_operations(
     shapes,
     opcodes,
     statuses,
-    value_transforms ?? OPERATION_VALUE_TRANSFORMS,
     strict_operations,
   )
   return operations === undefined ? contract : { ...contract, operations }
@@ -1347,15 +1256,6 @@ function rust_operation_contract(contract: Wire_Contract): string {
       ...operations.map((operation) => operation.contract.response_kind),
     ]),
   ]
-  const modeled_value_transforms = operations.flatMap((operation) =>
-    operation.contract.value_transform === undefined
-      ? []
-      : [operation.contract.value_transform])
-  const value_transforms = contract.operation_vocabularies?.value_transforms ??
-    (modeled_value_transforms.length === 0
-      ? []
-      : [...new Set(["identity", ...modeled_value_transforms])])
-  const has_value_transforms = value_transforms.length > 0
   const status_variant = (status: string): string => {
     const entry = contract.statuses.find(
       (candidate) =>
@@ -1393,9 +1293,6 @@ function rust_operation_contract(contract: Wire_Contract): string {
             response_value_count: ${operation.contract.response_value_count},
             response_fields: ${field_slice(operation.contract.response_fields)},
             retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
-${has_value_transforms
-  ? `            value_transform: OperationValueTransform::${enum_variant(operation.contract.value_transform ?? "identity")},`
-  : ""}
             success_statuses: ${status_slice(operation.contract.success_statuses)},
             error_statuses: ${status_slice(operation.contract.error_statuses)},
         },`,
@@ -1437,15 +1334,6 @@ pub struct OperationField {
     pub count: usize,
 }
 
-${has_value_transforms
-  ? `/// Application-value transformation declared by the Smithy operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationValueTransform {
-${value_transforms.map((value) => `    ${enum_variant(value)},`).join("\n")}
-}
-`
-  : ""}
-
 /// Generated semantic metadata for one protocol operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
@@ -1458,7 +1346,6 @@ pub struct OperationContract {
     pub response_value_count: usize,
     pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
-${has_value_transforms ? "    pub value_transform: OperationValueTransform,\n" : ""}
     pub success_statuses: &'static [Status],
     pub error_statuses: &'static [Status],
 }
