@@ -610,8 +610,7 @@ async fn execute_protocol_global(
     let contract = crate::contract::operation_contract(opcode);
     if !matches!(
         contract.request_kind,
-        "empty"
-            | "application_value"
+        "empty" | "application_value" | "field_sequence"
     ) {
         return None;
     }

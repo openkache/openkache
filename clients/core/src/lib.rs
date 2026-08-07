@@ -35,8 +35,8 @@ pub use config::{
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 pub use openkache_protocol::{
-    ITEM_ID_BYTES, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, Opcode,
-    decode_optional_values, encode_optional_values,
+    FieldSequence, ITEM_ID_BYTES, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, Opcode,
+    decode_optional_values, encode_field_sequence, encode_optional_values,
 };
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
@@ -1362,6 +1362,11 @@ macro_rules! raw_client_methods {
                     | (
                         "application_value",
                         "application_value",
+                    )
+                    | (
+                        "field_sequence",
+                        "field_sequence"
+                        | "composite",
                     ) => {
                         let request = Request::new(operation, None, value.as_ref().to_vec())
                             .map_err(Error::protocol)?;
@@ -1371,13 +1376,17 @@ macro_rules! raw_client_methods {
                             | "empty" => {
                                 contract::FfiResultKind::Ok
                             }
-                            "application_value" => {
+                            "application_value"
+                            | "field_sequence"
+                            | "composite" => {
                                 contract::FfiResultKind::Value
                             }
                             _ => unreachable!("global response kind checked above"),
                         };
                         Ok(operation_result(kind, match contract.response_kind {
-                                "application_value" => {
+                                "application_value"
+                                | "field_sequence"
+                                | "composite" => {
                                     response.payload
                                 }
                                 "pong"
@@ -1388,6 +1397,7 @@ macro_rules! raw_client_methods {
                     (
                         "item" | "set",
                         "value"
+                        | "field_sequence"
                         | "composite",
                     ) if contract.request_value_count == 0 => {
                         let item_ids =
@@ -1502,6 +1512,7 @@ macro_rules! raw_client_methods {
                     (
                         "item" | "set",
                         "value"
+                        | "field_sequence"
                         | "composite",
                     ) if contract.request_value_count == 0 => {
                         let item_ids =
@@ -2091,7 +2102,7 @@ fn validate_response_contract(
             }
         }
         "application_value" => Ok(()),
-        "composite" => {
+        "field_sequence" | "composite" => {
             if response.status != Status::Ok {
                 invalid_payload("composite responses must have an OK status")
             } else {

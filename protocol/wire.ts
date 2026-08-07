@@ -92,6 +92,8 @@ export interface Wire_Operation_Field {
 
 /** One ordered Smithy field projected into the server operation plan. */
 export interface Wire_Operation_Field_Plan {
+  /** Stable zero-based position in the flattened Smithy field plan. */
+  readonly index: number
   readonly codecs?: readonly string[]
   readonly path: readonly string[]
   readonly required: boolean
@@ -115,6 +117,7 @@ export interface Wire_Operation {
 export type Wire_Request_Layout =
   | "empty"
   | "application_value"
+  | "field_sequence"
   | "item"
   | "set"
   | "namespace"
@@ -134,6 +137,7 @@ export type Wire_Response_Route =
   | "empty"
   | "pong"
   | "application_value"
+  | "field_sequence"
   | "composite"
   | "value"
   | "set_outcome"
@@ -191,16 +195,12 @@ export function derive_wire_request_layout(
     layout = value_count > 0 ? "set" : "item"
   } else if (has_role("namespace_id")) {
     layout = "namespace"
-  } else if (has_role("payload")) {
+  } else if (has_role("payload") && request_fields.length === 1) {
     layout = "application_value"
   } else if (request_fields.length === 0) {
     layout = "empty"
   } else {
-    throw new Error(
-      `operation request roles do not describe a protocol-v1 layout: ${request_fields
-        .map((field) => `${field.role}×${field.count}`)
-        .join(", ")}`,
-    )
+    layout = "field_sequence"
   }
   const policy_roles = [
     "policy",
@@ -228,7 +228,16 @@ export function derive_wire_request_layout(
     namespace_update_policy: ["namespace_id", "expected_revision", ...policy_roles],
     namespace_delete: ["namespace_id", "expected_revision"],
   } satisfies Record<Wire_Request_Layout, readonly string[]>
-  validate_operation_field_roles(request_fields, allowed[layout], "request")
+  if (layout !== "field_sequence") {
+    try {
+      validate_operation_field_roles(request_fields, allowed[layout], "request")
+    } catch {
+      // Unknown semantic roles and new cardinalities use the generic field
+      // sequence transport. Legacy layouts remain fail-closed only when the
+      // field sequence itself cannot be represented.
+      layout = "field_sequence"
+    }
+  }
   return layout
 }
 
@@ -242,21 +251,34 @@ export function derive_wire_response_route(
     : contract.response_plan.length
   const has_role = (role: string): boolean => operation_has_role(response_fields, role)
   let route: Wire_Response_Route
-  if (has_role("descriptor")) route = "namespace_descriptor"
-  else if (response_field_count > 1) route = "composite"
+  const legacy_descriptor_roles = [
+    "descriptor",
+    "created",
+    "namespace_id",
+    "revision",
+    "policy",
+    "default_expiration",
+    "default_ttl_milliseconds",
+    "expiration_override",
+    "default_eviction",
+    "eviction_override",
+  ]
+  const has_only_roles = (roles: readonly string[]): boolean => {
+    const allowed_roles = new Set(roles)
+    return response_fields.every((field) => allowed_roles.has(field.role))
+  }
+  if (has_role("descriptor") && has_only_roles(legacy_descriptor_roles)) {
+    route = "namespace_descriptor"
+  } else if (response_field_count > 1) route = "field_sequence"
   else if (has_role("payload") && response_fields.length === 1) route = "application_value"
   else if (has_role("value") && response_fields.length === 1) route = "value"
-  else if (has_role("outcome")) route = "set_outcome"
-  else if (has_role("deleted")) route = "delete_outcome"
-  else if (has_role("json")) route = "stats_json"
+  else if (has_role("outcome") && response_fields.length === 1) route = "set_outcome"
+  else if (has_role("deleted") && response_fields.length === 1) route = "delete_outcome"
+  else if (has_role("json") && response_fields.length === 1) route = "stats_json"
   else if (response_fields.length === 0) {
     route = contract.scope === "global" ? "pong" : "empty"
   } else {
-    throw new Error(
-      `operation response roles do not describe a protocol-v1 route: ${response_fields
-        .map((field) => `${field.role}×${field.count}`)
-        .join(", ")}`,
-    )
+    route = "field_sequence"
   }
   const policy_roles = [
     "policy",
@@ -270,6 +292,7 @@ export function derive_wire_response_route(
     pong: [],
     empty: [],
     application_value: ["payload"],
+    field_sequence: undefined,
     value: ["value"],
     set_outcome: ["outcome"],
     delete_outcome: ["deleted"],
@@ -374,7 +397,7 @@ export function response_payload_bound(
         0,
       )
     : operation.contract.response_plan.length
-  const optional_count = route === "composite"
+  const optional_count = route === "field_sequence" || route === "composite"
     ? composite_field_count
     : route === "value"
     ? response_value_count
@@ -388,6 +411,7 @@ export function response_payload_bound(
     return Math.min(optional_count * entry_bytes, contract.max_value_bytes)
   }
   return route === "application_value" ||
+      route === "field_sequence" ||
       route === "value" ||
       route === "stats_json" ||
       route === "namespace_descriptor"
@@ -1081,6 +1105,7 @@ function operation_shape_field_plan(
           codecs.push(codec_name)
         }
         fields.push({
+          index: fields.length,
           ...(codecs.length === 0 ? {} : { codecs }),
           path: [...path, member_name],
           required: required_parent && traits?.["smithy.api#required"] !== undefined,
@@ -1577,14 +1602,34 @@ function rust_operation_contract(contract: Wire_Contract): string {
   }
   const enum_variant = (value: string): string =>
     pascal_case(value)
-  /*
-   * Keep the generated contract's transport descriptors opaque.  The Smithy
-   * field plan is the source of truth; a closed Rust enum would turn every
-   * newly modelled shape into an infrastructure change even when it reuses
-   * the existing byte primitives.  The server adapter can still compare the
-   * generated descriptor with its local framing vocabulary without exposing a
-   * per-operation family in the shared contract.
-   */
+  const request_route_variant = (operation: Wire_Operation): string =>
+    pascal_case(derive_wire_request_layout(operation.contract))
+  const response_route_variant = (operation: Wire_Operation): string =>
+    pascal_case(derive_wire_response_route(operation.contract))
+  const role_names = [
+    ...new Set(
+      operations.flatMap((operation) => [
+        ...(operation.contract.request_plan ?? []),
+        ...(operation.contract.response_plan ?? []),
+      ]).map((field) => field.role),
+    ),
+  ]
+  const role_variant_names = new Map<string, string>()
+  const used_role_variants = new Set<string>()
+  for (const [index, role] of role_names.entries()) {
+    let variant = pascal_case(role.replace(/[^A-Za-z0-9_]+/g, "_"))
+    if (variant.length === 0 || /^[0-9]/.test(variant)) {
+      variant = `Role${index}${variant}`
+    }
+    if (["Self", "Super", "Crate", "Where", "Loop", "Match", "Ref", "Type"].includes(variant)) {
+      variant = `Role${variant}`
+    }
+    while (used_role_variants.has(variant)) {
+      variant = `${variant}${index}`
+    }
+    used_role_variants.add(variant)
+    role_variant_names.set(role, variant)
+  }
   const request_layout = (operation: Wire_Operation): string =>
     derive_wire_request_layout(operation.contract)
   const response_route = (operation: Wire_Operation): string =>
@@ -1592,6 +1637,7 @@ function rust_operation_contract(contract: Wire_Contract): string {
   const optional_value_count = (operation: Wire_Operation): number => {
     const ordered_count = operation.contract.response_plan?.length
     switch (derive_wire_response_route(operation.contract)) {
+      case "field_sequence":
       case "composite":
         return ordered_count ?? operation.contract.response_fields.reduce(
           (count, field) => count + field.count,
@@ -1624,21 +1670,23 @@ function rust_operation_contract(contract: Wire_Contract): string {
         (field) =>
           `OperationFieldPlan { role: ${rust_string_literal(field.role)}, required: ${field.required}, shape: ${rust_string_literal(field.shape)}, path: &[${field.path
             .map(rust_string_literal)
-            .join(", ")}], codecs: &[${(field.codecs ?? [])
+            .join(", ")}], index: ${field.index}, role_id: OperationFieldRole::${role_variant_names.get(field.role)}, codecs: &[${(field.codecs ?? [])
             .map(rust_string_literal)
             .join(", ")}] }`,
       )
       .join(", ")}]`
   const metadata = operations
     .map(
-      (operation) => `        Opcode::${operation.name} => OperationContract {
+      (operation) => `    OperationContract {
             scope: OperationScope::${enum_variant(operation.contract.scope)},
             request_kind: ${rust_string_literal(request_layout(operation))},
+            request_route: OperationRequestRoute::${request_route_variant(operation)},
             request_value_count: ${operation.contract.request_value_count ?? 0},
             request_item_count: ${operation.contract.request_item_count},
             request_fields: ${field_slice(operation.contract.request_fields)},
             request_plan: ${plan_slice(operation.contract.request_plan)},
             response_kind: ${rust_string_literal(response_route(operation))},
+            response_route: OperationResponseRoute::${response_route_variant(operation)},
             response_value_count: ${operation.contract.response_value_count},
             response_payload_bound: ${formatted_decimal(response_payload_bound(contract, operation))},
             response_fields: ${field_slice(operation.contract.response_fields)},
@@ -1647,15 +1695,14 @@ function rust_operation_contract(contract: Wire_Contract): string {
             effect: OperationEffect::${enum_variant(operation.contract.effect)},
             success_statuses: ${status_slice(operation.contract.success_statuses)},
             error_statuses: ${status_slice(operation.contract.error_statuses)},
-        },`,
+        }`,
     )
-    .join("\n")
+    .join(",\n")
   const optional_value_metadata = operations
     .map(
-      (operation) =>
-        `        Opcode::${operation.name} => ${optional_value_count(operation)},`,
+      (operation) => `    ${optional_value_count(operation)}`,
     )
-    .join("\n")
+    .join(",\n")
   return `/// Maximum number of ordered request fields in any modeled operation.
 ///
 /// Server operation views use this generated bound for a stack-resident field
@@ -1688,6 +1735,77 @@ pub enum OperationEffect {
     Barrier,
 }
 
+/// Generated numeric key for a semantic operation-field role.
+///
+/// Role names remain open strings in the Smithy model.  This enum is a
+/// generated index, not a hand-maintained infrastructure registry; adding a
+/// role regenerates its key and leaves the runtime lookup allocation-free.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+pub enum OperationFieldRole {
+${role_names
+  .map((role) => `    ${role_variant_names.get(role)},`)
+  .join("\n")}
+}
+
+impl OperationFieldRole {
+    /// Returns the dense generated role index.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// Returns the original Smithy role string.
+    pub const fn name(self) -> &'static str {
+        match self {
+${role_names
+  .map((role) => `            Self::${role_variant_names.get(role)} => ${rust_string_literal(role)},`)
+  .join("\n")}
+        }
+    }
+
+    /// Resolves a role string at a compatibility boundary.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+${role_names
+  .map((role) => `            ${rust_string_literal(role)} => Some(Self::${role_variant_names.get(role)}),`)
+  .join("\n")}
+            _ => None,
+        }
+    }
+}
+
+/// Transport request routes generated from Smithy field plans.
+///
+/// These are wire primitives, not API families. A new operation reuses one of
+/// these routes without adding an operation-specific branch to the server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationRequestRoute {
+    Empty,
+    ApplicationValue,
+    FieldSequence,
+    Item,
+    Set,
+    Namespace,
+    NamespaceOpen,
+    NamespaceUpdatePolicy,
+    NamespaceDelete,
+}
+
+/// Transport response routes generated from Smithy output field plans.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationResponseRoute {
+    Empty,
+    Pong,
+    ApplicationValue,
+    FieldSequence,
+    Composite,
+    Value,
+    SetOutcome,
+    DeleteOutcome,
+    StatsJson,
+    NamespaceDescriptor,
+}
+
 /// One ordered Smithy operation-field role and its cardinality.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationField {
@@ -1699,7 +1817,9 @@ pub struct OperationField {
 /// One ordered field in a generated request or response plan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationFieldPlan {
+    pub index: usize,
     pub role: &'static str,
+    pub role_id: OperationFieldRole,
     pub required: bool,
     pub shape: &'static str,
     pub path: &'static [&'static str],
@@ -1716,12 +1836,14 @@ pub struct OperationContract {
     /// Rust enum.  Modelled operations may compose the existing wire
     /// primitives without extending shared infrastructure.
     pub request_kind: &'static str,
+    pub request_route: OperationRequestRoute,
     pub request_value_count: usize,
     pub request_item_count: usize,
     pub request_fields: &'static [OperationField],
     pub request_plan: &'static [OperationFieldPlan],
     /// Generated transport descriptor derived from the Smithy output field plan.
     pub response_kind: &'static str,
+    pub response_route: OperationResponseRoute,
     pub response_value_count: usize,
     /// Conservative maximum response payload bytes derived from the output shape.
     pub response_payload_bound: usize,
@@ -1734,10 +1856,13 @@ pub struct OperationContract {
 }
 
 /// Returns the generated contract for a protocol operation.
-pub const fn operation_contract(opcode: Opcode) -> OperationContract {
-    match opcode {
+pub const OPERATION_CONTRACTS: [OperationContract; Opcode::COUNT] = [
 ${metadata}
-    }
+];
+
+/// Returns the generated contract for a protocol operation.
+pub const fn operation_contract(opcode: Opcode) -> OperationContract {
+    OPERATION_CONTRACTS[opcode.index()]
 }
 
 /// Returns the number of modeled value fields in an operation response.
@@ -1747,9 +1872,9 @@ ${metadata}
 /// can distinguish a missing value; opaque, status-only, and descriptor
 /// responses return zero.
 pub const fn operation_response_field_count(opcode: Opcode) -> usize {
-    match opcode {
+    [
 ${optional_value_metadata}
-    }
+    ][opcode.index()]
 }
 `
 }
@@ -1774,6 +1899,8 @@ function rust_request_layout(contract: Wire_Contract): string {
       case "empty":
         return `[${fixed("OPCODE_BYTES")}]`
       case "application_value":
+        return `[${fixed("OPCODE_BYTES")}, WireRequestStep::ValueLength]`
+      case "field_sequence":
         return `[${fixed("OPCODE_BYTES")}, WireRequestStep::ValueLength]`
       case "item":
         return `[
@@ -1830,11 +1957,11 @@ function rust_request_layout(contract: Wire_Contract): string {
   }
   const metadata = operations
     .map(
-      (operation) => `        Opcode::${operation.name} => WireRequestLayout {
+      (operation) => `    WireRequestLayout {
             steps: &${step_expression(operation)},
-        },`,
+        }`,
     )
-    .join("\n")
+    .join(",\n")
   return `/// Primitive request parsing steps generated from the wire layout.
 ///
 /// These steps describe only byte consumption. They do not assign a meaning
@@ -1871,10 +1998,13 @@ pub struct WireRequestLayout {
 }
 
 /// Returns the wire-level request layout for one assigned opcode.
-pub const fn wire_request_layout(opcode: Opcode) -> WireRequestLayout {
-    match opcode {
+pub const WIRE_REQUEST_LAYOUTS: [WireRequestLayout; Opcode::COUNT] = [
 ${metadata}
-    }
+];
+
+/// Returns the wire-level request layout for one assigned opcode.
+pub const fn wire_request_layout(opcode: Opcode) -> WireRequestLayout {
+    WIRE_REQUEST_LAYOUTS[opcode.index()]
 }
 `
 }
@@ -1913,6 +2043,8 @@ function max_request_frame_bytes_for_contract(contract: Wire_Contract): number {
       case "empty":
         return v1.opcode_bytes
       case "application_value":
+        return v1.opcode_bytes + v1.max_varuint_bytes + contract.max_value_bytes
+      case "field_sequence":
         return v1.opcode_bytes + v1.max_varuint_bytes + contract.max_value_bytes
       case "item":
       case "set": {
@@ -2104,6 +2236,8 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
         return "opcode only"
       case "application_value":
         return "opcode + value_len + value"
+      case "field_sequence":
+        return "opcode + field_sequence_len + ordered field sequence"
       case "item":
         return `opcode + namespace ID + ${request_item_count} item ID${request_item_count === 1 ? "" : "s"}`
       case "set":
@@ -2126,6 +2260,7 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
       case "application_value":
         return "opaque payload"
       case "composite":
+      case "field_sequence":
         return "ordered field sequence"
       case "value":
         return value_count === 1

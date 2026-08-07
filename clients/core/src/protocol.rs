@@ -44,6 +44,8 @@ pub enum ProtocolError {
     ConflictingSetConditions,
     #[error("invalid optional-values payload: {0}")]
     InvalidOptionalValues(&'static str),
+    #[error("invalid operation field sequence: {0}")]
+    InvalidFieldSequence(&'static str),
     #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
     InvalidRequestShape {
         opcode: Opcode,
@@ -97,6 +99,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
                 Self::InvalidOptionalValues(message)
+            }
+            openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
+                Self::InvalidFieldSequence(message)
             }
         }
     }
@@ -575,7 +580,7 @@ impl Request {
         output.push(self.opcode as u8);
         match contract.request_kind {
             "empty" => {}
-            "application_value" => {
+            "application_value" | "field_sequence" => {
                 append_varuint(&mut output, self.value.len() as u64);
             }
             "item" | "set" => {
@@ -656,7 +661,7 @@ impl Request {
                     return Err(invalid_shape(self.opcode, 0, "0"));
                 }
             }
-            "application_value" => {
+            "application_value" | "field_sequence" => {
                 if self.namespace_id.is_some()
                     || !self.item_ids.is_empty()
                     || self.set_options != SetWireOptions::NONE

@@ -9,9 +9,11 @@
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use openkache_protocol::{Opcode, Status};
+use openkache_protocol::{FieldSequence, Opcode, Status};
 
-use super::operation_extensions::ExtensionResponse;
+use super::operation_extensions::{
+    ExtensionError, ExtensionPayload, ExtensionResponse, ExtensionSuccessStatus,
+};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState, SetOutcome, cache_error_response,
     descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
@@ -19,7 +21,7 @@ use super::{
 };
 use crate::protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId, NamespacePolicy,
-    OverridePolicy, Response, SetCondition, SetOptions, field_values_response,
+    OverridePolicy, Response, SetCondition, SetOptions, field_sequence_response,
 };
 
 /// Borrowed context passed from the protocol server to one concrete handler.
@@ -30,6 +32,11 @@ pub(super) struct OperationInputView<'a> {
     pub(super) opcode: Opcode,
     fields: [Option<OperationFieldRecord<'a>>; crate::contract::MAX_OPERATION_REQUEST_FIELDS],
     field_len: usize,
+    /// Owned only for generic field-sequence requests. The offset table keeps
+    /// every field borrowed from this one allocation.
+    generic_payload: Option<Vec<u8>>,
+    generic_offsets: [(usize, usize); crate::contract::MAX_OPERATION_REQUEST_FIELDS],
+    generic_error: Option<&'static str>,
 }
 
 /// One generated plan entry and its decoded semantic value.
@@ -102,6 +109,33 @@ impl<'a> OperationInputView<'a> {
         let mut value = Some(value);
         let plan = crate::contract::operation_contract(opcode).request_plan;
         let mut fields = std::array::from_fn(|_| None);
+        let mut generic_payload = None;
+        let mut generic_offsets =
+            [(usize::MAX, usize::MAX); crate::contract::MAX_OPERATION_REQUEST_FIELDS];
+        let mut generic_error = None;
+        let is_generic = crate::contract::operation_contract(opcode).request_route
+            == crate::contract::OperationRequestRoute::FieldSequence;
+        if is_generic {
+            let payload = value.take().unwrap_or_default();
+            if plan.len() > generic_offsets.len() {
+                generic_error = Some("generated operation request field bound is stale");
+            } else if FieldSequence::decode(
+                &payload,
+                plan.len(),
+                &mut generic_offsets[..plan.len()],
+            )
+            .is_err()
+            {
+                generic_error = Some("operation field sequence is malformed");
+            } else if plan
+                .iter()
+                .zip(generic_offsets.iter())
+                .any(|(field, &(start, _))| field.required && start == usize::MAX)
+            {
+                generic_error = Some("required operation request field is missing");
+            }
+            generic_payload = Some(payload);
+        }
         for (index, plan) in plan.iter().enumerate() {
             assert!(
                 index < fields.len(),
@@ -117,7 +151,9 @@ impl<'a> OperationInputView<'a> {
                     item_index += 1;
                     value
                 }
-                "value" | "payload" => value.take().map(OperationFieldStorage::OwnedBytes),
+                "value" | "payload" if !is_generic => {
+                    value.take().map(OperationFieldStorage::OwnedBytes)
+                }
                 "name" => namespace_name.map(OperationFieldStorage::Bytes),
                 "policy" => namespace_policy.map(OperationFieldStorage::Policy),
                 "default_expiration" => namespace_policy.map(|policy| {
@@ -157,7 +193,15 @@ impl<'a> OperationInputView<'a> {
             opcode,
             fields,
             field_len,
+            generic_payload,
+            generic_offsets,
+            generic_error,
         }
+    }
+
+    /// Returns whether the generated generic field sequence decoded cleanly.
+    pub(super) fn is_valid(&self) -> bool {
+        self.generic_error.is_none()
     }
 
     /// Returns the generated role metadata for this operation.
@@ -178,10 +222,46 @@ impl<'a> OperationInputView<'a> {
 
     /// Returns the modeled cardinality for one semantic role.
     pub(super) fn field_count(&self, role: &str) -> usize {
+        self.field_role(role)
+            .map_or(0, |role| self.field_count_role(role))
+    }
+
+    /// Returns the modeled cardinality for a generated numeric role.
+    pub(super) fn field_count_role(&self, role: crate::contract::OperationFieldRole) -> usize {
         self.fields()
             .iter()
-            .filter(|field| field.role == role)
+            .filter(|field| field.role_id == role)
             .count()
+    }
+
+    fn field_role(&self, role: &str) -> Option<crate::contract::OperationFieldRole> {
+        crate::contract::OperationFieldRole::from_name(role)
+    }
+
+    /// Returns the generated numeric field index for one role occurrence.
+    ///
+    /// The lookup is performed only at the semantic boundary; subsequent
+    /// `field_at_index` calls are direct array access and do not scan strings.
+    pub(super) fn field_index_at(&self, role: &str, index: usize) -> Option<usize> {
+        self.field_role(role)
+            .and_then(|role| self.field_index_at_role(role, index))
+    }
+
+    /// Returns one generated numeric field index for a role occurrence.
+    ///
+    /// The plan stores a generated role key, so this scan compares compact
+    /// integers rather than repeatedly comparing role strings.
+    pub(super) fn field_index_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<usize> {
+        self.fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| field.role_id == role)
+            .nth(index)
+            .map(|(field_index, _)| field_index)
     }
 
     /// Returns one ordered generated plan entry for a semantic role.
@@ -193,9 +273,19 @@ impl<'a> OperationInputView<'a> {
         role: &str,
         index: usize,
     ) -> Option<&'static crate::contract::OperationFieldPlan> {
+        self.field_role(role)
+            .and_then(|role| self.field_plan_at_role(role, index))
+    }
+
+    /// Returns one generated numeric plan entry for a role occurrence.
+    pub(super) fn field_plan_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<&'static crate::contract::OperationFieldPlan> {
         self.fields()
             .iter()
-            .filter(|field| field.role == role)
+            .filter(|field| field.role_id == role)
             .nth(index)
     }
 
@@ -212,13 +302,35 @@ impl<'a> OperationInputView<'a> {
     /// zero-copy slices; callers that need a new wire primitive can add a
     /// codec-backed `OperationFieldValue` without changing the dispatch path.
     pub(super) fn field_at(&self, role: &str, index: usize) -> Option<OperationFieldValue<'_>> {
-        self.field_plan_at(role, index)?;
+        let field_index = self.field_index_at(role, index)?;
+        self.field_at_index(field_index)
+    }
+
+    /// Returns one ordered field by its generated numeric role key.
+    pub(super) fn field_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<OperationFieldValue<'_>> {
+        let field_index = self.field_index_at_role(role, index)?;
+        self.field_at_index(field_index)
+    }
+
+    /// Returns one ordered field by its generated numeric index.
+    pub(super) fn field_at_index(&self, index: usize) -> Option<OperationFieldValue<'_>> {
+        if index >= self.field_len {
+            return None;
+        }
+        if let Some(payload) = self.generic_payload.as_deref() {
+            let (start, end) = *self.generic_offsets.get(index)?;
+            if start == usize::MAX {
+                return None;
+            }
+            return Some(OperationFieldValue::Bytes(&payload[start..end]));
+        }
         self.fields
-            .iter()
-            .take(self.field_len)
-            .filter_map(Option::as_ref)
-            .filter(|field| field.plan.role == role)
-            .nth(index)?
+            .get(index)?
+            .as_ref()?
             .value
             .as_ref()
             .map(OperationFieldStorage::as_value)
@@ -226,23 +338,62 @@ impl<'a> OperationInputView<'a> {
 
     /// Returns one namespace/item-style unsigned long field.
     pub(super) fn unsigned_long(&self, role: &str) -> Option<u64> {
-        match self.field(role) {
+        let role = self.field_role(role)?;
+        self.unsigned_long_role(role, 0)
+    }
+
+    /// Returns one unsigned integer using a generated numeric role.
+    pub(super) fn unsigned_long_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<u64> {
+        match self.field_at_role(role, index) {
             Some(OperationFieldValue::UnsignedLong(value)) => Some(value),
+            Some(OperationFieldValue::Bytes(value)) if self.is_generic() => {
+                super::operation_codecs::decode_u64_be(value).ok()
+            }
             _ => None,
         }
     }
 
     /// Returns one item ID field by generated role ordinal.
     pub(super) fn item_id_at(&self, index: usize) -> Option<ItemId> {
-        match self.field_at("item_id", index) {
+        self.item_id_at_role(crate::contract::OperationFieldRole::ItemId, index)
+    }
+
+    /// Returns one item ID using the generated numeric role key.
+    pub(super) fn item_id_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<ItemId> {
+        match self.field_at_role(role, index) {
             Some(OperationFieldValue::ItemId(value)) => Some(value),
+            Some(OperationFieldValue::Bytes(value))
+                if value.len() == openkache_protocol::ITEM_ID_BYTES =>
+            {
+                Some(ItemId::new(
+                    value.try_into().expect("validated item ID width"),
+                ))
+            }
             _ => None,
         }
     }
 
     /// Returns one borrowed byte field by generated role.
     pub(super) fn bytes(&self, role: &str) -> Option<&[u8]> {
-        match self.field(role) {
+        let role = self.field_role(role)?;
+        self.bytes_role(role, 0)
+    }
+
+    /// Returns one borrowed byte field by generated numeric role.
+    pub(super) fn bytes_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<&[u8]> {
+        match self.field_at_role(role, index) {
             Some(OperationFieldValue::Bytes(value)) => Some(value),
             _ => None,
         }
@@ -250,7 +401,7 @@ impl<'a> OperationInputView<'a> {
 
     /// Returns the modeled namespace policy field.
     pub(super) fn policy(&self) -> Option<NamespacePolicy> {
-        match self.field("policy") {
+        match self.field_at_role(crate::contract::OperationFieldRole::Policy, 0) {
             Some(OperationFieldValue::Policy(value)) => Some(value),
             _ => None,
         }
@@ -258,38 +409,130 @@ impl<'a> OperationInputView<'a> {
 
     /// Returns the modeled boolean field.
     pub(super) fn boolean(&self, role: &str) -> Option<bool> {
-        match self.field(role) {
+        let role = self.field_role(role)?;
+        self.boolean_role(role, 0)
+    }
+
+    /// Returns one boolean using a generated numeric role.
+    pub(super) fn boolean_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Option<bool> {
+        match self.field_at_role(role, index) {
             Some(OperationFieldValue::Boolean(value)) => Some(value),
+            Some(OperationFieldValue::Bytes(value)) if self.is_generic() => {
+                super::operation_codecs::decode_bool(value).ok()
+            }
             _ => None,
         }
     }
 
+    /// Decodes one unsigned integer from a generated role without allocating.
+    pub(super) fn unsigned_long_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Result<Option<u64>, &'static [u8]> {
+        match self.field_at_role(role, index) {
+            None => Ok(None),
+            Some(OperationFieldValue::UnsignedLong(value)) => Ok(Some(value)),
+            Some(OperationFieldValue::Bytes(value)) => {
+                super::operation_codecs::decode_u64_be(value).map(Some)
+            }
+            _ => Err(b"field is not an unsigned 64-bit value"),
+        }
+    }
+
+    /// Decodes one signed 32-bit value from a generated role.
+    pub(super) fn signed_int_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Result<Option<i32>, &'static [u8]> {
+        match self.field_at_role(role, index) {
+            None => Ok(None),
+            Some(OperationFieldValue::Bytes(value)) => {
+                super::operation_codecs::decode_i32_be(value).map(Some)
+            }
+            _ => Err(b"field is not a signed 32-bit value"),
+        }
+    }
+
+    /// Decodes one binary64 value from a generated role.
+    pub(super) fn float_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Result<Option<f64>, &'static [u8]> {
+        match self.field_at_role(role, index) {
+            None => Ok(None),
+            Some(OperationFieldValue::Bytes(value)) => {
+                super::operation_codecs::decode_f64_be(value).map(Some)
+            }
+            _ => Err(b"field is not a binary64 value"),
+        }
+    }
+
+    /// Decodes one canonical boolean from a generated role.
+    pub(super) fn boolean_at_role(
+        &self,
+        role: crate::contract::OperationFieldRole,
+        index: usize,
+    ) -> Result<Option<bool>, &'static [u8]> {
+        match self.field_at_role(role, index) {
+            None => Ok(None),
+            Some(OperationFieldValue::Boolean(value)) => Ok(Some(value)),
+            Some(OperationFieldValue::Bytes(value)) => {
+                super::operation_codecs::decode_bool(value).map(Some)
+            }
+            _ => Err(b"field is not a boolean value"),
+        }
+    }
+
+    fn is_generic(&self) -> bool {
+        self.generic_payload.is_some()
+    }
+
     /// Reconstructs the existing SET semantic options from independent fields.
     pub(super) fn set_options(&self) -> SetOptions {
-        let condition = match self.field("condition") {
+        let condition = match self.field_at_role(crate::contract::OperationFieldRole::Condition, 0)
+        {
             Some(OperationFieldValue::SetCondition(value)) => value,
             _ => SetCondition::Any,
         };
-        let expiration_mode = match self.field("expiration_mode") {
-            Some(OperationFieldValue::ExpirationMode(value)) => value,
-            _ => ExpirationMode::Inherit,
-        };
-        let ttl_ms = self.unsigned_long("ttl_milliseconds");
-        let eviction_mode = match self.field("eviction_mode") {
-            Some(OperationFieldValue::EvictionMode(value)) => value,
-            _ => EvictionMode::Inherit,
-        };
+        let expiration_mode =
+            match self.field_at_role(crate::contract::OperationFieldRole::ExpirationMode, 0) {
+                Some(OperationFieldValue::ExpirationMode(value)) => value,
+                _ => ExpirationMode::Inherit,
+            };
+        let ttl_ms =
+            self.unsigned_long_role(crate::contract::OperationFieldRole::TtlMilliseconds, 0);
+        let eviction_mode =
+            match self.field_at_role(crate::contract::OperationFieldRole::EvictionMode, 0) {
+                Some(OperationFieldValue::EvictionMode(value)) => value,
+                _ => EvictionMode::Inherit,
+            };
         SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
     }
 
     /// Moves an owned payload out of one generated value role without copying.
     pub(super) fn take_owned_bytes(&mut self, role: &str) -> Option<Vec<u8>> {
+        let role = self.field_role(role)?;
+        self.take_owned_bytes_role(role)
+    }
+
+    /// Moves an owned payload out of a generated numeric role without copying.
+    pub(super) fn take_owned_bytes_role(
+        &mut self,
+        role: crate::contract::OperationFieldRole,
+    ) -> Option<Vec<u8>> {
         let record = self
             .fields
             .iter_mut()
             .take(self.field_len)
             .filter_map(Option::as_mut)
-            .find(|field| field.plan.role == role)?;
+            .find(|field| field.plan.role_id == role)?;
         let value = record.value.take()?;
         match value {
             OperationFieldStorage::OwnedBytes(value) => Some(value),
@@ -332,9 +575,16 @@ pub(super) struct OperationContext<'a, 'cache> {
 /// Returns whether an operation can be answered without touching storage.
 pub(super) fn is_immediate(opcode: Opcode) -> bool {
     let contract = crate::contract::operation_contract(opcode);
-    (contract.request_kind == "empty" && contract.response_kind == "pong")
-        || (contract.request_kind == "application_value"
-            && contract.response_kind == "application_value")
+    matches!(
+        (contract.request_route, contract.response_route),
+        (
+            crate::contract::OperationRequestRoute::Empty,
+            crate::contract::OperationResponseRoute::Pong,
+        ) | (
+            crate::contract::OperationRequestRoute::ApplicationValue,
+            crate::contract::OperationResponseRoute::ApplicationValue,
+        )
+    )
 }
 
 fn is_builtin(opcode: Opcode) -> bool {
@@ -357,6 +607,7 @@ fn is_builtin(opcode: Opcode) -> bool {
 /// This runs during server bind rather than allowing an omitted extension to
 /// reach a panic or an accidental fallback response.
 pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
+    super::operation_extensions::validate_registry()?;
     for value in u8::MIN..=u8::MAX {
         let Ok(opcode) = Opcode::try_from(value) else {
             continue;
@@ -372,17 +623,22 @@ pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
 /// Executes an already-classified immediate operation.
 pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
     let contract = crate::contract::operation_contract(opcode);
-    if contract.response_kind == "pong" {
-        return response_bytes(Status::Ok, b"PONG");
-    }
-    if contract.response_kind == "application_value" {
-        return match super::operation_extensions::application_value(opcode, value) {
-            Some(extension) => encode_extension_response(opcode, extension),
-            None => response_bytes(
-                Status::InternalError,
-                b"application-value operation has no server implementation",
-            ),
-        };
+    match contract.response_route {
+        crate::contract::OperationResponseRoute::Pong => {
+            return response_bytes(Status::Ok, b"PONG");
+        }
+        crate::contract::OperationResponseRoute::ApplicationValue => {
+            return match super::operation_extensions::application_value(opcode, value)
+                .and_then(|extension| encode_extension_response(opcode, extension))
+            {
+                Some(response) => response,
+                None => response_bytes(
+                    Status::InternalError,
+                    b"application-value operation has no server implementation",
+                ),
+            };
+        }
+        _ => {}
     }
     response_bytes(
         Status::InternalError,
@@ -390,18 +646,123 @@ pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
     )
 }
 
-fn encode_extension_response(opcode: Opcode, extension: ExtensionResponse) -> Response {
+pub(super) fn encode_extension_response(
+    opcode: Opcode,
+    extension: ExtensionResponse,
+) -> Option<Response> {
     match extension {
-        ExtensionResponse::Response(response) => response,
-        ExtensionResponse::ApplicationValue(value) => response(Status::Ok, value),
-        ExtensionResponse::FieldValues(values) => field_values_response(opcode, &values),
+        ExtensionResponse::Success { status, payload } => {
+            let status = extension_success_status(opcode, status);
+            match payload {
+                ExtensionPayload::ApplicationValue(value) => Some(response(status, value)),
+                ExtensionPayload::FieldSequence(values) => {
+                    let mut response = field_sequence_response(opcode, values.values());
+                    if response.status == Status::Ok {
+                        response.status = status;
+                    }
+                    Some(response)
+                }
+            }
+        }
+        ExtensionResponse::Error(error) => extension_error_response(opcode, error),
+        ExtensionResponse::Abandoned => None,
     }
+}
+
+fn extension_success_status(opcode: Opcode, status: ExtensionSuccessStatus) -> Status {
+    let status = match status {
+        ExtensionSuccessStatus::Ok => Status::Ok,
+        ExtensionSuccessStatus::Created => Status::Created,
+        ExtensionSuccessStatus::Replaced => Status::Replaced,
+        ExtensionSuccessStatus::Deleted => Status::Deleted,
+        ExtensionSuccessStatus::NotStored => Status::NotStored,
+        ExtensionSuccessStatus::NotFound => Status::NotFound,
+    };
+    if crate::contract::operation_contract(opcode)
+        .success_statuses
+        .contains(&status)
+    {
+        status
+    } else {
+        Status::InternalError
+    }
+}
+
+/// Maps a transport-neutral extension failure through the generated status
+/// contract.  A behavior cannot accidentally return a status that its Smithy
+/// operation did not declare.
+fn extension_error_response(opcode: Opcode, error: ExtensionError) -> Option<Response> {
+    let contract = crate::contract::operation_contract(opcode);
+    match error {
+        ExtensionError::AmbiguousMutation => None,
+        ExtensionError::Storage(error) => {
+            let response = cache_error_response(error);
+            if contract.error_statuses.contains(&response.status) {
+                Some(response)
+            } else {
+                Some(response_bytes(
+                    Status::InternalError,
+                    b"extension storage failure is not allowed by its contract",
+                ))
+            }
+        }
+        ExtensionError::InvalidRequest(message) => {
+            extension_status_response(contract, Status::InvalidRequest, message)
+        }
+        ExtensionError::NamespaceNotFound => extension_status_response(
+            contract,
+            Status::NamespaceNotFound,
+            b"namespace does not exist",
+        ),
+        ExtensionError::Forbidden => {
+            extension_status_response(contract, Status::Forbidden, b"operation is forbidden")
+        }
+        ExtensionError::TooLarge => {
+            extension_status_response(contract, Status::TooLarge, b"operation value is too large")
+        }
+        ExtensionError::Overloaded => {
+            extension_status_response(contract, Status::Overloaded, b"server is overloaded")
+        }
+        ExtensionError::Timeout => {
+            extension_status_response(contract, Status::Timeout, b"operation timed out")
+        }
+        ExtensionError::Internal(message) => {
+            extension_status_response(contract, Status::InternalError, message)
+        }
+        ExtensionError::NoCapacity => {
+            extension_status_response(contract, Status::NoCapacity, b"storage has no capacity")
+        }
+        ExtensionError::PolicyConflict => {
+            extension_status_response(contract, Status::PolicyConflict, b"policy conflict")
+        }
+        ExtensionError::Conflict => {
+            extension_status_response(contract, Status::Conflict, b"operation revision conflict")
+        }
+        ExtensionError::NamespaceNotEmpty => extension_status_response(
+            contract,
+            Status::NamespaceNotEmpty,
+            b"namespace is not empty",
+        ),
+    }
+}
+
+fn extension_status_response(
+    contract: crate::contract::OperationContract,
+    status: Status,
+    message: &'static [u8],
+) -> Option<Response> {
+    let status = if contract.error_statuses.contains(&status) {
+        status
+    } else {
+        Status::InternalError
+    };
+    Some(response_bytes(status, message))
 }
 
 /// Dispatches a decoded, non-immediate request to server-owned behavior.
 pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Response> {
     if let Some(extension) = super::operation_extensions::execute(&context).await {
-        return Some(encode_extension_response(context.opcode, extension));
+        return encode_extension_response(context.opcode, extension);
     }
     let OperationContext {
         cache,
@@ -412,11 +773,15 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
         observability,
     } = context;
     let mut input = input;
-    let namespace_id = input.unsigned_long("namespace_id");
-    let expected_revision = input.unsigned_long("expected_revision");
-    let namespace_name = input.bytes("name");
+    let namespace_id =
+        input.unsigned_long_role(crate::contract::OperationFieldRole::NamespaceId, 0);
+    let expected_revision =
+        input.unsigned_long_role(crate::contract::OperationFieldRole::ExpectedRevision, 0);
+    let namespace_name = input.bytes_role(crate::contract::OperationFieldRole::Name, 0);
     let namespace_policy = input.policy();
-    let create_if_missing = input.boolean("create_if_missing").unwrap_or(false);
+    let create_if_missing = input
+        .boolean_role(crate::contract::OperationFieldRole::CreateIfMissing, 0)
+        .unwrap_or(false);
     let set_options = input.set_options();
 
     match opcode {
@@ -542,7 +907,7 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 .item_id_at(0)
                 .expect("SET requests have a validated item ID");
             let value = input
-                .take_owned_bytes("value")
+                .take_owned_bytes_role(crate::contract::OperationFieldRole::Value)
                 .expect("SET requests have a validated value");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             let reservation = match namespaces

@@ -4547,6 +4547,7 @@ interface Operation_Field_Binding {
 type Operation_Request_Route =
   | "global_empty"
   | "global_application_value"
+  | "global_field_sequence"
   | "scoped_item"
   | "scoped_namespace"
   | "namespace_open"
@@ -4575,6 +4576,7 @@ interface Operation_Result_Plan {
 type Operation_Response_Route =
   | "pong"
   | "application_value"
+  | "field_sequence"
   | "composite"
   | "value"
   | "set_outcome"
@@ -4596,6 +4598,7 @@ const OPERATION_RESULT_KINDS: Readonly<
   empty: ["ok"],
   pong: ["ok"],
   application_value: ["value"],
+  field_sequence: ["value"],
   // Composite field sequences are returned as an opaque successful payload.
   // The ordered field plan, not a named operation family, decodes the result.
   composite: ["value"],
@@ -4663,6 +4666,7 @@ function operation_result_kind_constants(
 
 /** One language-neutral operation plan shared by every source renderer. */
 interface Managed_Operation_Plan {
+  readonly api: Api_Contract
   readonly binding: Operation_Field_Binding
   readonly application_value_codecs?: Application_Value_Codec_Pair
   readonly contract: Api_Operation_Contract
@@ -4760,6 +4764,34 @@ export const WIRE_CODEC_REGISTRY: readonly Wire_Codec_Registration[] = [
     render: render_f64_array_codec,
     render_optional: render_optional_f64_array_codec,
     render_go_optional: render_go_optional_f64_array_codec,
+  },
+  {
+    name: "u64_be",
+    matches: (type) => type.kind === "long" || type.kind === "unsigned_long",
+    render: render_u64_codec,
+    render_optional: render_optional_u64_codec,
+    render_go_optional: render_go_optional_u64_codec,
+  },
+  {
+    name: "bool_u8",
+    matches: (type) => type.kind === "boolean",
+    render: render_bool_codec,
+    render_optional: render_optional_bool_codec,
+    render_go_optional: render_go_optional_bool_codec,
+  },
+  {
+    name: "f64_be",
+    matches: (type) => type.kind === "double",
+    render: render_f64_codec,
+    render_optional: render_optional_f64_codec,
+    render_go_optional: render_go_optional_f64_codec,
+  },
+  {
+    name: "i32_be",
+    matches: (type) => type.kind === "integer",
+    render: render_i32_codec,
+    render_optional: render_optional_i32_codec,
+    render_go_optional: render_go_optional_i32_codec,
   },
   {
     name: "raw_bytes",
@@ -4934,6 +4966,248 @@ function render_f64_array_codec(
   }
 }
 
+function render_u64_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+    case "kotlin":
+      return {
+        encode: `smithyEncodeU64(${input})`,
+        decode: `smithyDecodeU64(${payload}, ${diagnostic})`,
+      }
+    case "dart":
+      return {
+        encode: `_smithyEncodeU64(${input})`,
+        decode: `_smithyDecodeU64(${payload}, ${diagnostic})`,
+      }
+    case "typescript":
+      return {
+        encode: `smithy_encode_u64(${input})`,
+        decode: `smithy_decode_u64(${payload}, ${diagnostic})`,
+      }
+    case "go":
+      return {
+        encode: `wireValue, err := smithyEncodeU64(${input})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, err
+\t}`,
+        decode: `value, err := smithyDecodeU64(${payload})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, operationError(${diagnostic}, err)
+\t}
+\treturn ${output ?? "struct{}"}{${output_field ?? "Payload"}: value}, nil`,
+      }
+    case "python":
+      return {
+        encode: `_smithy_encode_u64(${input})`,
+        decode: `_smithy_decode_u64(${payload}, ${diagnostic})`,
+      }
+    case "swift":
+      return {
+        encode: `smithyEncodeU64(${input})`,
+        decode: `try smithyDecodeU64(${payload}, operation: ${diagnostic})`,
+      }
+    case "csharp":
+      return {
+        encode: `EncodeU64(${input})`,
+        decode: `DecodeU64(${payload}, ${diagnostic})`,
+      }
+    case "rust":
+      return {
+        encode: `${input}.to_be_bytes().to_vec()`,
+        decode: `u64::from_be_bytes(${payload}.try_into().map_err(|_| {
+                    Error::Protocol(format!("{} response has an invalid u64 field", ${diagnostic}))
+                })?)`,
+      }
+  }
+}
+
+function render_bool_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+    case "kotlin":
+      return {
+        encode: `smithyEncodeBool(${input})`,
+        decode: `smithyDecodeBool(${payload}, ${diagnostic})`,
+      }
+    case "dart":
+      return {
+        encode: `_smithyEncodeBool(${input})`,
+        decode: `_smithyDecodeBool(${payload}, ${diagnostic})`,
+      }
+    case "typescript":
+      return {
+        encode: `smithy_encode_bool(${input})`,
+        decode: `smithy_decode_bool(${payload}, ${diagnostic})`,
+      }
+    case "go":
+      return {
+        encode: `wireValue := smithyEncodeBool(${input})`,
+        decode: `value, err := smithyDecodeBool(${payload})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, operationError(${diagnostic}, err)
+\t}
+\treturn ${output ?? "struct{}"}{${output_field ?? "Payload"}: value}, nil`,
+      }
+    case "python":
+      return {
+        encode: `_smithy_encode_bool(${input})`,
+        decode: `_smithy_decode_bool(${payload}, ${diagnostic})`,
+      }
+    case "swift":
+      return {
+        encode: `smithyEncodeBool(${input})`,
+        decode: `try smithyDecodeBool(${payload}, operation: ${diagnostic})`,
+      }
+    case "csharp":
+      return {
+        encode: `EncodeBool(${input})`,
+        decode: `DecodeBool(${payload}, ${diagnostic})`,
+      }
+    case "rust":
+      return {
+        encode: `vec![if ${input} { 1 } else { 0 }]`,
+        decode: `match ${payload}.as_slice() {
+                    [0] => false,
+                    [1] => true,
+                    _ => return Err(Error::Protocol(format!(
+                        "{} response has an invalid boolean field", ${diagnostic}))),
+                }`,
+      }
+  }
+}
+
+function render_f64_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+    case "kotlin":
+      return {
+        encode: `smithyEncodeF64(${input})`,
+        decode: `smithyDecodeF64(${payload}, ${diagnostic})`,
+      }
+    case "dart":
+      return {
+        encode: `_smithyEncodeF64(${input})`,
+        decode: `_smithyDecodeF64(${payload}, ${diagnostic})`,
+      }
+    case "typescript":
+      return {
+        encode: `smithy_encode_f64(${input})`,
+        decode: `smithy_decode_f64(${payload}, ${diagnostic})`,
+      }
+    case "go":
+      return {
+        encode: `wireValue := smithyEncodeF64(${input})`,
+        decode: `value, err := smithyDecodeF64(${payload})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, operationError(${diagnostic}, err)
+\t}
+\treturn ${output ?? "struct{}"}{${output_field ?? "Payload"}: value}, nil`,
+      }
+    case "python":
+      return {
+        encode: `_smithy_encode_f64(${input})`,
+        decode: `_smithy_decode_f64(${payload}, ${diagnostic})`,
+      }
+    case "swift":
+      return {
+        encode: `smithyEncodeF64(${input})`,
+        decode: `try smithyDecodeF64(${payload}, operation: ${diagnostic})`,
+      }
+    case "csharp":
+      return {
+        encode: `EncodeF64(${input})`,
+        decode: `DecodeF64(${payload}, ${diagnostic})`,
+      }
+    case "rust":
+      return {
+        encode: `${input}.to_be_bytes().to_vec()`,
+        decode: `f64::from_be_bytes(${payload}.try_into().map_err(|_| {
+                    Error::Protocol(format!("{} response has an invalid f64 field", ${diagnostic}))
+                })?)`,
+      }
+  }
+}
+
+function render_i32_codec(
+  language: Application_Value_Language,
+  input: string,
+  payload: string,
+  diagnostic: string,
+  output?: string,
+  output_field?: string,
+): Rendered_Application_Value_Codec {
+  switch (language) {
+    case "java":
+    case "kotlin":
+      return {
+        encode: `smithyEncodeI32(${input})`,
+        decode: `smithyDecodeI32(${payload}, ${diagnostic})`,
+      }
+    case "dart":
+      return {
+        encode: `_smithyEncodeI32(${input})`,
+        decode: `_smithyDecodeI32(${payload}, ${diagnostic})`,
+      }
+    case "typescript":
+      return {
+        encode: `smithy_encode_i32(${input})`,
+        decode: `smithy_decode_i32(${payload}, ${diagnostic})`,
+      }
+    case "go":
+      return {
+        encode: `wireValue := smithyEncodeI32(${input})`,
+        decode: `value, err := smithyDecodeI32(${payload})
+\tif err != nil {
+\t\treturn ${output ?? "struct{}"}{}, operationError(${diagnostic}, err)
+\t}
+\treturn ${output ?? "struct{}"}{${output_field ?? "Payload"}: value}, nil`,
+      }
+    case "python":
+      return {
+        encode: `_smithy_encode_i32(${input})`,
+        decode: `_smithy_decode_i32(${payload}, ${diagnostic})`,
+      }
+    case "swift":
+      return {
+        encode: `smithyEncodeI32(${input})`,
+        decode: `try smithyDecodeI32(${payload}, operation: ${diagnostic})`,
+      }
+    case "csharp":
+      return {
+        encode: `EncodeI32(${input})`,
+        decode: `DecodeI32(${payload}, ${diagnostic})`,
+      }
+    case "rust":
+      return {
+        encode: `${input}.to_be_bytes().to_vec()`,
+        decode: `i32::from_be_bytes(${payload}.try_into().map_err(|_| {
+                    Error::Protocol(format!("{} response has an invalid i32 field", ${diagnostic}))
+                })?)`,
+      }
+  }
+}
+
 function render_optional_utf8_codec(
   language: Application_Value_Language,
   payload: string,
@@ -5003,6 +5277,124 @@ function render_optional_raw_bytes_codec(
   return payload
 }
 
+function render_optional_u64_codec(
+  language: Application_Value_Language,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : smithyDecodeU64(${payload}, ${diagnostic}))`
+    case "kotlin":
+      return `${payload}?.let { smithyDecodeU64(it, ${diagnostic}) }`
+    case "dart":
+      return `${payload} == null ? null : _smithyDecodeU64(${payload}!, ${diagnostic})`
+    case "typescript":
+      return `${payload} === undefined ? undefined : smithy_decode_u64(${payload}!, ${diagnostic})`
+    case "go":
+      return `smithyDecodeOptionalU64(${payload})`
+    case "python":
+      return `${payload} if ${payload} is None else _smithy_decode_u64(${payload}, ${diagnostic})`
+    case "swift":
+      return `try ${payload}.map { try smithyDecodeU64($0, operation: ${diagnostic}) }`
+    case "csharp":
+      return `${payload} is null ? null : DecodeU64(${payload}!, ${diagnostic})`
+    case "rust":
+      return `${payload}.map(|value| u64::from_be_bytes(value.try_into().map_err(|_| {
+                    Error::Protocol(format!("{} response has an invalid u64 field", ${diagnostic}))
+                })?)).transpose()?`
+  }
+}
+
+function render_optional_bool_codec(
+  language: Application_Value_Language,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : smithyDecodeBool(${payload}, ${diagnostic}))`
+    case "kotlin":
+      return `${payload}?.let { smithyDecodeBool(it, ${diagnostic}) }`
+    case "dart":
+      return `${payload} == null ? null : _smithyDecodeBool(${payload}!, ${diagnostic})`
+    case "typescript":
+      return `${payload} === undefined ? undefined : smithy_decode_bool(${payload}!, ${diagnostic})`
+    case "go":
+      return `smithyDecodeOptionalBool(${payload})`
+    case "python":
+      return `${payload} if ${payload} is None else _smithy_decode_bool(${payload}, ${diagnostic})`
+    case "swift":
+      return `try ${payload}.map { try smithyDecodeBool($0, operation: ${diagnostic}) }`
+    case "csharp":
+      return `${payload} is null ? null : DecodeBool(${payload}!, ${diagnostic})`
+    case "rust":
+      return `${payload}.map(|value| match value.as_slice() {
+                    [0] => Ok(false),
+                    [1] => Ok(true),
+                    _ => Err(Error::Protocol(format!("{} response has an invalid boolean field", ${diagnostic}))),
+                }).transpose()?`
+  }
+}
+
+function render_optional_f64_codec(
+  language: Application_Value_Language,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : smithyDecodeF64(${payload}, ${diagnostic}))`
+    case "kotlin":
+      return `${payload}?.let { smithyDecodeF64(it, ${diagnostic}) }`
+    case "dart":
+      return `${payload} == null ? null : _smithyDecodeF64(${payload}!, ${diagnostic})`
+    case "typescript":
+      return `${payload} === undefined ? undefined : smithy_decode_f64(${payload}!, ${diagnostic})`
+    case "go":
+      return `smithyDecodeOptionalF64(${payload})`
+    case "python":
+      return `${payload} if ${payload} is None else _smithy_decode_f64(${payload}, ${diagnostic})`
+    case "swift":
+      return `try ${payload}.map { try smithyDecodeF64($0, operation: ${diagnostic}) }`
+    case "csharp":
+      return `${payload} is null ? null : DecodeF64(${payload}!, ${diagnostic})`
+    case "rust":
+      return `${payload}.map(|value| f64::from_be_bytes(value.try_into().map_err(|_| {
+                    Error::Protocol(format!("{} response has an invalid f64 field", ${diagnostic}))
+                })?)).transpose()?`
+  }
+}
+
+function render_optional_i32_codec(
+  language: Application_Value_Language,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : smithyDecodeI32(${payload}, ${diagnostic}))`
+    case "kotlin":
+      return `${payload}?.let { smithyDecodeI32(it, ${diagnostic}) }`
+    case "dart":
+      return `${payload} == null ? null : _smithyDecodeI32(${payload}!, ${diagnostic})`
+    case "typescript":
+      return `${payload} === undefined ? undefined : smithy_decode_i32(${payload}!, ${diagnostic})`
+    case "go":
+      return `smithyDecodeOptionalI32(${payload})`
+    case "python":
+      return `${payload} if ${payload} is None else _smithy_decode_i32(${payload}, ${diagnostic})`
+    case "swift":
+      return `try ${payload}.map { try smithyDecodeI32($0, operation: ${diagnostic}) }`
+    case "csharp":
+      return `${payload} is null ? null : DecodeI32(${payload}!, ${diagnostic})`
+    case "rust":
+      return `${payload}.map(|value| i32::from_be_bytes(value.try_into().map_err(|_| {
+                    Error::Protocol(format!("{} response has an invalid i32 field", ${diagnostic}))
+                })?)).transpose()?`
+  }
+}
+
 function render_go_optional_utf8_codec(
   payload: string,
   decoded: string,
@@ -5039,6 +5431,63 @@ function render_go_optional_raw_bytes_codec(
   return {
     expression: decoded,
     statements: `\t\t${decoded} := ${payload}`,
+  }
+}
+
+function render_go_optional_u64_codec(
+  payload: string,
+  decoded: string,
+  _diagnostic: string,
+  _output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded} := smithyDecodeOptionalU64(${payload})`,
+  }
+}
+
+function render_go_optional_bool_codec(
+  payload: string,
+  decoded: string,
+  diagnostic: string,
+  output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded}, err := smithyDecodeOptionalBool(${payload})
+\t\tif err != nil {
+\t\t\treturn ${output}{}, operationError(${diagnostic}, err)
+\t\t}`,
+  }
+}
+
+function render_go_optional_f64_codec(
+  payload: string,
+  decoded: string,
+  diagnostic: string,
+  output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded}, err := smithyDecodeOptionalF64(${payload})
+\t\tif err != nil {
+\t\t\treturn ${output}{}, operationError(${diagnostic}, err)
+\t\t}`,
+  }
+}
+
+function render_go_optional_i32_codec(
+  payload: string,
+  decoded: string,
+  diagnostic: string,
+  output: string,
+): Rendered_Go_Composite_Field {
+  return {
+    expression: decoded,
+    statements: `\t\t${decoded}, err := smithyDecodeOptionalI32(${payload})
+\t\tif err != nil {
+\t\t\treturn ${output}{}, operationError(${diagnostic}, err)
+\t\t}`,
   }
 }
 
@@ -5193,16 +5642,14 @@ function application_value_codec_for_type(type: Api_Type): Application_Value_Cod
   return registration.name
 }
 
-/** Returns the ordered top-level fields carried by a composite output. */
+/** Returns the ordered fields carried by a generic field-sequence output. */
 function operation_composite_fields(
   operation: Managed_Api_Operation,
 ): readonly Operation_Field_Plan[] {
-  const fields = operation.plan.operation.output.fields.filter(
-    (field) => field.path.length === 1,
-  )
-  if (fields.length < 2) {
+  const fields = operation.plan.operation.output.fields
+  if (fields.length === 0) {
     throw new Error(
-      `operation ${operation.name} composite output must define at least two top-level operation fields`,
+      `operation ${operation.name} field-sequence output must define at least one modeled operation field`,
     )
   }
   return fields
@@ -5229,10 +5676,51 @@ function operation_composite_value_count(operation: Managed_Api_Operation): numb
 }
 
 function operation_uses_optional_values(operation: Managed_Api_Operation): boolean {
-  return operation.plan.operation.request_item_count > 1 ||
+  return operation.plan.request_route === "global_field_sequence" ||
+    operation.plan.operation.request_item_count > 1 ||
+    operation.plan.result_plan.response_route === "field_sequence" ||
     operation.plan.result_plan.response_route === "composite" ||
     (operation.plan.result_plan.response_route === "value" &&
       operation.plan.operation.response_value_count > 1)
+}
+
+interface Field_Sequence_Helper_Usage {
+  readonly codecs: ReadonlySet<Application_Value_Codec>
+  readonly request: boolean
+  readonly response: boolean
+}
+
+/**
+ * Selects only the generic helpers used by the modeled field-sequence routes.
+ *
+ * Keeping this usage-driven prevents a blob-only GET2 from emitting unused
+ * scalar helpers in every language, while a future mixed-scalar operation
+ * automatically pulls in the codecs it actually needs.
+ */
+function field_sequence_helper_usage(
+  operations: readonly Managed_Api_Operation[],
+): Field_Sequence_Helper_Usage {
+  const codecs = new Set<Application_Value_Codec>()
+  let request = false
+  let response = false
+  for (const operation of operations) {
+    if (operation.plan.request_route === "global_field_sequence") {
+      request = true
+      for (const field of operation_field_sequence_fields(operation, "input")) {
+        codecs.add(application_value_codec_for_type(field.type))
+      }
+    }
+    if (
+      operation.plan.result_plan.response_route === "field_sequence" ||
+      operation.plan.result_plan.response_route === "composite"
+    ) {
+      response = true
+      for (const field of operation_composite_fields(operation)) {
+        codecs.add(application_value_codec_for_type(field.type))
+      }
+    }
+  }
+  return { codecs, request, response }
 }
 
 /**
@@ -5326,6 +5814,999 @@ function render_go_composite_field(
   )
 }
 
+function composite_structure_name(
+  structure_name: string,
+  language: Application_Value_Language,
+): string {
+  switch (language) {
+    case "typescript":
+      return typescript_api_name(structure_name)
+    case "go":
+      return go_api_name(structure_name)
+    case "python":
+      return python_api_name(structure_name)
+    case "swift":
+      return `Smithy_${typescript_name(structure_name)}`
+    case "java":
+    case "kotlin":
+    case "dart":
+      return structure_name
+    case "rust":
+      return `smithy::${structure_name}`
+    case "csharp":
+      return `Smithy.${structure_name}`
+  }
+}
+
+function composite_missing_expression(
+  language: Application_Value_Language,
+  expression: string,
+): string {
+  switch (language) {
+    case "typescript":
+      return `${expression} === undefined`
+    case "python":
+      return `${expression} is None`
+    case "swift":
+      return `${expression} == nil`
+    case "rust":
+      return `${expression}.is_none()`
+    case "go":
+      return `${expression} == nil`
+    case "java":
+    case "kotlin":
+    case "dart":
+    case "csharp":
+      return `${expression} == null`
+  }
+}
+
+interface Rendered_Composite_Structure {
+  readonly expression: string
+  readonly leaves: readonly string[]
+}
+
+/**
+ * Recursively projects flattened response paths into generated DTOs.
+ *
+ * The wire decoder still returns one ordered value vector. This is the
+ * language-specific object-construction edge: nested structure shape is
+ * reconstructed from the Smithy model rather than an operation-name switch.
+ */
+function render_composite_output(
+  operation: Managed_Api_Operation,
+  language: Application_Value_Language,
+  decoded: readonly string[],
+): string {
+  const root = operation.plan.api.structures.find(
+    (structure) => structure.name === operation.output,
+  )
+  if (root === undefined) {
+    throw new Error(`operation ${operation.name} output structure ${operation.output} is missing`)
+  }
+  const fields = operation_composite_fields(operation)
+  const values = new Map(
+    fields.map((field, index) => [field.path.join("\u0000"), decoded[index]!]),
+  )
+  const plan_for_path = (path: readonly string[]): Operation_Field_Plan | undefined =>
+    fields.find((field) =>
+      field.path.length === path.length &&
+      field.path.every((segment, index) => segment === path[index])
+    )
+  const has_prefix = (path: readonly string[]): boolean =>
+    fields.some((field) =>
+      field.path.length > path.length &&
+      path.every((segment, index) => segment === field.path[index])
+    )
+  const render_structure = (
+    structure: Api_Structure,
+    path: readonly string[],
+    required: boolean,
+  ): Rendered_Composite_Structure => {
+    const children: string[] = []
+    const leaves: string[] = []
+    for (const member of structure.members) {
+      const member_path = [...path, member.name]
+      const leaf = plan_for_path(member_path)
+      let expression: string | undefined
+      let child_leaves: readonly string[] = []
+      if (leaf !== undefined) {
+        expression = values.get(member_path.join("\u0000"))
+        if (expression === undefined) {
+          throw new Error(
+            `operation ${operation.name} composite field ${member_path.join(".")} has no decoded value`,
+          )
+        }
+        child_leaves = [expression]
+      } else if (member.type.kind === "structure" && member.type.name !== undefined && has_prefix(member_path)) {
+        const nested = operation.plan.api.structures.find(
+          (candidate) => candidate.name === member.type.name,
+        )
+        if (nested === undefined) {
+          throw new Error(
+            `operation ${operation.name} output path ${member_path.join(".")} targets missing structure ${member.type.name}`,
+          )
+        }
+        const rendered = render_structure(nested, member_path, member.required)
+        expression = rendered.expression
+        child_leaves = rendered.leaves
+      } else {
+        throw new Error(
+          `operation ${operation.name} composite output member ${member_path.join(".")} is not present in the ordered response plan`,
+        )
+      }
+      children.push(render_composite_member(language, member, expression, member_path))
+      leaves.push(...child_leaves)
+    }
+    const type_name = composite_structure_name(structure.name, language)
+    const constructed = render_composite_structure(language, type_name, children)
+    if (required || leaves.length === 0) {
+      return { expression: constructed, leaves }
+    }
+    const missing = leaves.map((leaf) => composite_missing_expression(language, leaf))
+    return {
+      expression: render_optional_composite_structure(language, constructed, missing, type_name),
+      leaves,
+    }
+  }
+  return render_structure(root, [], true).expression
+}
+
+function render_composite_member(
+  language: Application_Value_Language,
+  member: Api_Member,
+  expression: string,
+  _path: readonly string[],
+): string {
+  const name = operation_field_name(member, language)
+  switch (language) {
+    case "java":
+    case "kotlin":
+      return expression
+    case "dart":
+    case "typescript":
+    case "go":
+      return `${name}: ${expression}`
+    case "python":
+      return `${name}=${expression}`
+    case "swift":
+      return `${name}: ${expression}`
+    case "csharp":
+    case "rust":
+      return `${name}${language === "csharp" ? " = " : ": "}${expression}`
+  }
+}
+
+function render_composite_structure(
+  language: Application_Value_Language,
+  type_name: string,
+  children: readonly string[],
+): string {
+  switch (language) {
+    case "java":
+      return `new ${type_name}(${children.join(", ")})`
+    case "kotlin":
+      return `${type_name}(${children.join(", ")})`
+    case "dart":
+      // Decoded members are runtime values; a const constructor cannot
+      // capture them in Dart.
+      return `${type_name}(${children.join(", ")})`
+    case "typescript":
+      return `{ ${children.join(", ")} }`
+    case "go":
+      return `${type_name}{${children.join(", ")}}`
+    case "python":
+      return `${type_name}(${children.join(", ")})`
+    case "swift":
+      return `${type_name}(${children.join(", ")})`
+    case "csharp":
+      return `new ${type_name} { ${children.join(", ")} }`
+    case "rust":
+      return `${type_name} { ${children.join(", ")} }`
+  }
+}
+
+function render_optional_composite_structure(
+  language: Application_Value_Language,
+  constructed: string,
+  missing: readonly string[],
+  type_name: string,
+): string {
+  const condition = missing.join(language === "python" ? " and " : " && ")
+  switch (language) {
+    case "java":
+    case "dart":
+    case "csharp":
+      return `(${condition} ? null : ${constructed})`
+    case "kotlin":
+      return `(if (${condition}) null else ${constructed})`
+    case "typescript":
+      return `(${condition} ? undefined : ${constructed})`
+    case "python":
+      return `(${constructed} if not (${condition}) else None)`
+    case "swift":
+      return `(${condition} ? nil : ${constructed})`
+    case "go":
+      return `func() *${type_name} { if ${condition} { return nil }; value := ${constructed}; return &value }()`
+    case "rust":
+      return `if ${condition} { None } else { Some(${constructed}) }`
+  }
+}
+
+/** Shared Java helpers for ordered field-sequence framing and scalar codecs. */
+function render_java_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `    private static byte[] smithyEncodeFieldSequence(byte[]... values) {
+        int total = 0;
+        for (byte[] value : values) {
+            int entry = value == null
+                ? ${framing.length_bytes}
+                : Math.addExact(${framing.length_bytes}, value.length);
+            if (value != null && value.length > ${framing.max_value_bytes}) {
+                throw new OpenKacheClientException("field-sequence entry exceeds the maximum value size");
+            }
+            total = Math.addExact(total, entry);
+        }
+        ByteBuffer buffer = ByteBuffer.allocate(total).order(ByteOrder.BIG_ENDIAN);
+        for (byte[] value : values) {
+            if (value == null) {
+                buffer.putInt((int) ${framing.missing_sentinel}L);
+            } else {
+                buffer.putInt(value.length);
+                buffer.put(value);
+            }
+        }
+        return buffer.array();
+    }
+
+    private static byte[] smithyEncodeU64(long value) {
+        return ByteBuffer.allocate(Long.BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putLong(value).array();
+    }
+
+    private static long smithyDecodeU64(byte[] payload, String operation) {
+        if (payload.length != Long.BYTES) {
+            throw new OpenKacheClientException(operation + " response has an invalid u64 field");
+        }
+        return ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getLong();
+    }
+
+    private static byte[] smithyEncodeBool(boolean value) {
+        return new byte[] { (byte) (value ? 1 : 0) };
+    }
+
+    private static boolean smithyDecodeBool(byte[] payload, String operation) {
+        if (payload.length != 1 || (payload[0] != 0 && payload[0] != 1)) {
+            throw new OpenKacheClientException(operation + " response has an invalid boolean field");
+        }
+        return payload[0] == 1;
+    }
+
+    private static byte[] smithyEncodeF64(double value) {
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException("binary64 field must be finite");
+        }
+        return ByteBuffer.allocate(Double.BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putDouble(value).array();
+    }
+
+    private static double smithyDecodeF64(byte[] payload, String operation) {
+        if (payload.length != Double.BYTES) {
+            throw new OpenKacheClientException(operation + " response has an invalid f64 field");
+        }
+        double value = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getDouble();
+        if (!Double.isFinite(value)) {
+            throw new OpenKacheClientException(operation + " response contains a non-finite f64 field");
+        }
+        return value;
+    }
+
+    private static byte[] smithyEncodeI32(int value) {
+        return ByteBuffer.allocate(Integer.BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putInt(value).array();
+    }
+
+    private static int smithyDecodeI32(byte[] payload, String operation) {
+        if (payload.length != Integer.BYTES) {
+            throw new OpenKacheClientException(operation + " response has an invalid i32 field");
+        }
+        return ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).getInt();
+    }
+`
+}
+
+/** Shared Kotlin helpers for ordered field-sequence framing and scalar codecs. */
+function render_kotlin_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `    private fun smithyEncodeFieldSequence(values: List<ByteArray?>): ByteArray {
+        val total = values.sumOf { value ->
+            val size = value?.size ?: 0
+            require(size <= ${framing.max_value_bytes}) {
+                "field-sequence entry exceeds the maximum value size"
+            }
+            ${framing.length_bytes} + size
+        }
+        val buffer = ByteBuffer.allocate(total).order(ByteOrder.BIG_ENDIAN)
+        values.forEach { value ->
+            if (value == null) {
+                buffer.putInt(${framing.missing_sentinel}L.toInt())
+            } else {
+                buffer.putInt(value.size)
+                buffer.put(value)
+            }
+        }
+        return buffer.array()
+    }
+
+    private fun smithyEncodeU64(value: Long): ByteArray =
+        ByteBuffer.allocate(java.lang.Long.BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putLong(value).array()
+
+    private fun smithyDecodeU64(payload: ByteArray, operation: String): Long {
+        require(payload.size == java.lang.Long.BYTES) {
+            "\$operation response has an invalid u64 field"
+        }
+        return ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).long
+    }
+
+    private fun smithyEncodeBool(value: Boolean): ByteArray =
+        byteArrayOf(if (value) 1 else 0)
+
+    private fun smithyDecodeBool(payload: ByteArray, operation: String): Boolean {
+        require(payload.size == 1 && (payload[0].toInt() == 0 || payload[0].toInt() == 1)) {
+            "\$operation response has an invalid boolean field"
+        }
+        return payload[0].toInt() == 1
+    }
+
+    private fun smithyEncodeF64(value: Double): ByteArray {
+        require(value.isFinite()) { "binary64 field must be finite" }
+        return ByteBuffer.allocate(java.lang.Double.BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putDouble(value).array()
+    }
+
+    private fun smithyDecodeF64(payload: ByteArray, operation: String): Double {
+        require(payload.size == java.lang.Double.BYTES) {
+            "\$operation response has an invalid f64 field"
+        }
+        return ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).double.also { value ->
+            require(value.isFinite()) {
+                "\$operation response contains a non-finite f64 field"
+            }
+        }
+    }
+
+    private fun smithyEncodeI32(value: Int): ByteArray =
+        ByteBuffer.allocate(java.lang.Integer.BYTES).order(ByteOrder.BIG_ENDIAN)
+            .putInt(value).array()
+
+    private fun smithyDecodeI32(payload: ByteArray, operation: String): Int {
+        require(payload.size == java.lang.Integer.BYTES) {
+            "\$operation response has an invalid i32 field"
+        }
+        return ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN).int
+    }
+`
+}
+
+/** Shared Dart helpers for ordered field-sequence framing and scalar codecs. */
+function render_dart_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `List<int> _smithyEncodeFieldSequence(List<List<int>?> values) {
+  final output = BytesBuilder(copy: false);
+  for (final value in values) {
+    if (value == null) {
+      final missing = ByteData(${framing.length_bytes})
+        ..setUint32(0, ${framing.missing_sentinel}, Endian.big);
+      output.add(missing.buffer.asUint8List());
+      continue;
+    }
+    if (value.length > ${framing.max_value_bytes}) {
+      throw const OpenKacheClientException(
+        'field-sequence entry exceeds the maximum value size',
+      );
+    }
+    final length = ByteData(${framing.length_bytes})
+      ..setUint32(0, value.length, Endian.big);
+    output.add(length.buffer.asUint8List());
+    output.add(value);
+  }
+  return output.takeBytes();
+}
+
+List<int> _smithyEncodeU64(int value) {
+  final bytes = ByteData(8)..setUint64(0, value, Endian.big);
+  return bytes.buffer.asUint8List();
+}
+
+int _smithyDecodeU64(List<int> payload, String operation) {
+  if (payload.length != 8) {
+    throw OpenKacheClientException(
+      '\$operation response has an invalid u64 field',
+    );
+  }
+  return ByteData.sublistView(Uint8List.fromList(payload)).getUint64(0, Endian.big);
+}
+
+List<int> _smithyEncodeBool(bool value) => <int>[value ? 1 : 0];
+
+bool _smithyDecodeBool(List<int> payload, String operation) {
+  if (payload.length != 1 || (payload[0] != 0 && payload[0] != 1)) {
+    throw OpenKacheClientException(
+      '\$operation response has an invalid boolean field',
+    );
+  }
+  return payload[0] == 1;
+}
+
+List<int> _smithyEncodeF64(double value) {
+  if (!value.isFinite) {
+    throw const OpenKacheClientException('binary64 field must be finite');
+  }
+  final bytes = ByteData(8)..setFloat64(0, value, Endian.big);
+  return bytes.buffer.asUint8List();
+}
+
+double _smithyDecodeF64(List<int> payload, String operation) {
+  if (payload.length != 8) {
+    throw OpenKacheClientException(
+      '\$operation response has an invalid f64 field',
+    );
+  }
+  final value = ByteData.sublistView(Uint8List.fromList(payload))
+      .getFloat64(0, Endian.big);
+  if (!value.isFinite) {
+    throw OpenKacheClientException(
+      '\$operation response contains a non-finite f64 field',
+    );
+  }
+  return value;
+}
+
+List<int> _smithyEncodeI32(int value) {
+  final bytes = ByteData(4)..setInt32(0, value, Endian.big);
+  return bytes.buffer.asUint8List();
+}
+
+int _smithyDecodeI32(List<int> payload, String operation) {
+  if (payload.length != 4) {
+    throw OpenKacheClientException(
+      '\$operation response has an invalid i32 field',
+    );
+  }
+  return ByteData.sublistView(Uint8List.fromList(payload)).getInt32(0, Endian.big);
+}
+`
+}
+
+/** Shared TypeScript helpers for ordered field-sequence framing and scalars. */
+function render_typescript_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `function smithy_encode_field_sequence(
+  values: readonly (Uint8Array | undefined)[],
+): Uint8Array {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (const value of values) {
+    const length = value === undefined ? ${framing.missing_sentinel} : value.byteLength;
+    if (value !== undefined && value.byteLength > ${framing.max_value_bytes}) {
+      throw new Error("field-sequence entry exceeds the maximum value size");
+    }
+    const prefix = new Uint8Array(${framing.length_bytes});
+    new DataView(prefix.buffer).setUint32(0, length, false);
+    chunks.push(prefix);
+    total += prefix.byteLength;
+    if (value !== undefined) {
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  }
+  const payload = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    payload.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return payload;
+}
+
+function smithy_encode_u64(value: number | bigint): Uint8Array {
+  const payload = new Uint8Array(8);
+  new DataView(payload.buffer).setBigUint64(0, BigInt.asUintN(64, BigInt(value)), false);
+  return payload;
+}
+
+function smithy_decode_u64(payload: Uint8Array, operation: number): bigint {
+  if (payload.byteLength !== 8) {
+    throw new Error(\`operation \${operation} response has an invalid u64 field\`);
+  }
+  return new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+    .getBigUint64(0, false);
+}
+
+function smithy_encode_bool(value: boolean): Uint8Array {
+  return Uint8Array.of(value ? 1 : 0);
+}
+
+function smithy_decode_bool(payload: Uint8Array, operation: number): boolean {
+  if (payload.byteLength !== 1 || (payload[0] !== 0 && payload[0] !== 1)) {
+    throw new Error(\`operation \${operation} response has an invalid boolean field\`);
+  }
+  return payload[0] === 1;
+}
+
+function smithy_encode_f64(value: number): Uint8Array {
+  if (!Number.isFinite(value)) {
+    throw new Error("binary64 field must be finite");
+  }
+  const payload = new Uint8Array(8);
+  new DataView(payload.buffer).setFloat64(0, value, false);
+  return payload;
+}
+
+function smithy_decode_f64(payload: Uint8Array, operation: number): number {
+  if (payload.byteLength !== 8) {
+    throw new Error(\`operation \${operation} response has an invalid f64 field\`);
+  }
+  const value = new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+    .getFloat64(0, false);
+  if (!Number.isFinite(value)) {
+    throw new Error(\`operation \${operation} response contains a non-finite f64 field\`);
+  }
+  return value;
+}
+
+function smithy_encode_i32(value: number): Uint8Array {
+  const payload = new Uint8Array(4);
+  new DataView(payload.buffer).setInt32(0, value, false);
+  return payload;
+}
+
+function smithy_decode_i32(payload: Uint8Array, operation: number): number {
+  if (payload.byteLength !== 4) {
+    throw new Error(\`operation \${operation} response has an invalid i32 field\`);
+  }
+  return new DataView(payload.buffer, payload.byteOffset, payload.byteLength)
+    .getInt32(0, false);
+}
+`
+}
+
+/** Shared Python helpers for ordered field-sequence framing and scalars. */
+function render_python_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `def _smithy_encode_field_sequence(values: list[bytes | None]) -> bytes:
+    payload = bytearray()
+    for value in values:
+        if value is None:
+            payload.extend((${framing.missing_sentinel}).to_bytes(${framing.length_bytes}, "big"))
+            continue
+        if len(value) > ${framing.max_value_bytes}:
+            raise ValueError("field-sequence entry exceeds the maximum value size")
+        payload.extend(len(value).to_bytes(${framing.length_bytes}, "big"))
+        payload.extend(value)
+    return bytes(payload)
+
+
+def _smithy_encode_u64(value: int) -> bytes:
+    if value < 0 or value >= 1 << 64:
+        raise ValueError("u64 field is outside the wire range")
+    return value.to_bytes(8, "big")
+
+
+def _smithy_decode_u64(payload: bytes, operation: int) -> int:
+    if len(payload) != 8:
+        raise ValueError(f"operation {operation} response has an invalid u64 field")
+    return int.from_bytes(payload, "big")
+
+
+def _smithy_encode_bool(value: bool) -> bytes:
+    return bytes((1 if value else 0,))
+
+
+def _smithy_decode_bool(payload: bytes, operation: int) -> bool:
+    if len(payload) != 1 or payload[0] not in (0, 1):
+        raise ValueError(f"operation {operation} response has an invalid boolean field")
+    return payload[0] == 1
+
+
+def _smithy_encode_f64(value: float) -> bytes:
+    if not math.isfinite(value):
+        raise ValueError("binary64 field must be finite")
+    return struct.pack(">d", value)
+
+
+def _smithy_decode_f64(payload: bytes, operation: int) -> float:
+    if len(payload) != 8:
+        raise ValueError(f"operation {operation} response has an invalid f64 field")
+    value = struct.unpack(">d", payload)[0]
+    if not math.isfinite(value):
+        raise ValueError(f"operation {operation} response contains a non-finite f64 field")
+    return value
+
+
+def _smithy_encode_i32(value: int) -> bytes:
+    if value < -(1 << 31) or value >= 1 << 31:
+        raise ValueError("i32 field is outside the wire range")
+    return value.to_bytes(4, "big", signed=True)
+
+
+def _smithy_decode_i32(payload: bytes, operation: int) -> int:
+    if len(payload) != 4:
+        raise ValueError(f"operation {operation} response has an invalid i32 field")
+    return int.from_bytes(payload, "big", signed=True)
+`
+}
+
+/** Shared Swift helpers for ordered field-sequence framing and scalars. */
+function render_swift_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `private func smithyEncodeFieldSequence(_ values: [Data?]) throws -> Data {
+  var payload = Data()
+  for value in values {
+    guard let value else {
+      payload.append(contentsOf: UInt32(${framing.missing_sentinel}).bigEndianBytes)
+      continue
+    }
+    guard value.count <= ${framing.max_value_bytes} else {
+      throw OpenKacheError("field-sequence entry exceeds the maximum value size")
+    }
+    payload.append(contentsOf: UInt32(value.count).bigEndianBytes)
+    payload.append(value)
+  }
+  return payload
+}
+
+private func smithyEncodeU64(_ value: UInt64) -> Data {
+  var encoded = value.bigEndian
+  return Data(bytes: &encoded, count: MemoryLayout<UInt64>.size)
+}
+
+private func smithyDecodeU64(_ payload: Data, operation: String) throws -> UInt64 {
+  guard payload.count == MemoryLayout<UInt64>.size else {
+    throw OpenKacheError("\(operation) response has an invalid u64 field")
+  }
+  return payload.withUnsafeBytes { pointer in
+    UInt64(bigEndian: pointer.load(as: UInt64.self))
+  }
+}
+
+private func smithyEncodeBool(_ value: Bool) -> Data {
+  Data([value ? 1 : 0])
+}
+
+private func smithyDecodeBool(_ payload: Data, operation: String) throws -> Bool {
+  guard payload.count == 1, payload[0] == 0 || payload[0] == 1 else {
+    throw OpenKacheError("\(operation) response has an invalid boolean field")
+  }
+  return payload[0] == 1
+}
+
+private func smithyEncodeF64(_ value: Double) throws -> Data {
+  guard value.isFinite else {
+    throw OpenKacheError("binary64 field must be finite")
+  }
+  var encoded = value.bitPattern.bigEndian
+  return Data(bytes: &encoded, count: MemoryLayout<UInt64>.size)
+}
+
+private func smithyDecodeF64(_ payload: Data, operation: String) throws -> Double {
+  guard payload.count == MemoryLayout<UInt64>.size else {
+    throw OpenKacheError("\(operation) response has an invalid f64 field")
+  }
+  let bits = payload.withUnsafeBytes { pointer in
+    UInt64(bigEndian: pointer.load(as: UInt64.self))
+  }
+  let value = Double(bitPattern: bits)
+  guard value.isFinite else {
+    throw OpenKacheError("\(operation) response contains a non-finite f64 field")
+  }
+  return value
+}
+
+private func smithyEncodeI32(_ value: Int32) -> Data {
+  var encoded = value.bigEndian
+  return Data(bytes: &encoded, count: MemoryLayout<Int32>.size)
+}
+
+private func smithyDecodeI32(_ payload: Data, operation: String) throws -> Int32 {
+  guard payload.count == MemoryLayout<Int32>.size else {
+    throw OpenKacheError("\(operation) response has an invalid i32 field")
+  }
+  return payload.withUnsafeBytes { pointer in
+    Int32(bigEndian: pointer.load(as: Int32.self))
+  }
+}
+
+private extension UInt32 {
+  var bigEndianBytes: [UInt8] {
+    withUnsafeBytes(of: self.bigEndian) { Array($0) }
+  }
+}
+`
+}
+
+/** Shared .NET helpers for ordered field-sequence framing and scalar codecs. */
+function render_csharp_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `    private static byte[] EncodeFieldSequence(byte[]?[] values)
+    {
+        var total = 0;
+        foreach (var value in values)
+        {
+            if (value is not null && value.Length > ${framing.max_value_bytes})
+            {
+                throw new OpenKacheException(
+                    "PROTOCOL_ERROR",
+                    "field-sequence entry exceeds the maximum value size.");
+            }
+            total = checked(total + sizeof(uint) + (value?.Length ?? 0));
+        }
+        var payload = new byte[total];
+        var offset = 0;
+        foreach (var value in values)
+        {
+            if (value is null)
+            {
+                BinaryPrimitives.WriteUInt32BigEndian(
+                    payload.AsSpan(offset, sizeof(uint)),
+                    ${framing.missing_sentinel}u);
+                offset += sizeof(uint);
+                continue;
+            }
+            BinaryPrimitives.WriteUInt32BigEndian(
+                payload.AsSpan(offset, sizeof(uint)),
+                (uint)value.Length);
+            offset += sizeof(uint);
+            value.CopyTo(payload, offset);
+            offset += value.Length;
+        }
+        return payload;
+    }
+
+    private static byte[] EncodeU64(ulong value)
+    {
+        var payload = new byte[sizeof(ulong)];
+        BinaryPrimitives.WriteUInt64BigEndian(payload, value);
+        return payload;
+    }
+
+    private static ulong DecodeU64(byte[] payload, string operation)
+    {
+        if (payload.Length != sizeof(ulong))
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"{operation} response has an invalid u64 field.");
+        }
+        return BinaryPrimitives.ReadUInt64BigEndian(payload);
+    }
+
+    private static byte[] EncodeBool(bool value) => [value ? (byte)1 : (byte)0];
+
+    private static bool DecodeBool(byte[] payload, string operation)
+    {
+        if (payload.Length != 1 || (payload[0] != 0 && payload[0] != 1))
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"{operation} response has an invalid boolean field.");
+        }
+        return payload[0] == 1;
+    }
+
+    private static byte[] EncodeF64(double value)
+    {
+        if (!double.IsFinite(value))
+        {
+            throw new OpenKacheException("PROTOCOL_ERROR", "binary64 field must be finite.");
+        }
+        var payload = new byte[sizeof(double)];
+        BinaryPrimitives.WriteInt64BigEndian(
+            payload,
+            BitConverter.DoubleToInt64Bits(value));
+        return payload;
+    }
+
+    private static double DecodeF64(byte[] payload, string operation)
+    {
+        if (payload.Length != sizeof(double))
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"{operation} response has an invalid f64 field.");
+        }
+        var value = BitConverter.Int64BitsToDouble(
+            BinaryPrimitives.ReadInt64BigEndian(payload));
+        if (!double.IsFinite(value))
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"{operation} response contains a non-finite f64 field.");
+        }
+        return value;
+    }
+
+    private static byte[] EncodeI32(int value)
+    {
+        var payload = new byte[sizeof(int)];
+        BinaryPrimitives.WriteInt32BigEndian(payload, value);
+        return payload;
+    }
+
+    private static int DecodeI32(byte[] payload, string operation)
+    {
+        if (payload.Length != sizeof(int))
+        {
+            throw new OpenKacheException(
+                "PROTOCOL_ERROR",
+                $"{operation} response has an invalid i32 field.");
+        }
+        return BinaryPrimitives.ReadInt32BigEndian(payload);
+    }
+`
+}
+
+/** Shared Go helpers for ordered field-sequence framing and scalar codecs. */
+function render_go_field_sequence_helpers(
+  framing: Optional_Value_Framing,
+): string {
+  return `func smithyEncodeFieldSequence(values ...[]byte) ([]byte, error) {
+	total := 0
+	for _, value := range values {
+		if len(value) > ${framing.max_value_bytes} {
+			return nil, validationError(
+				"field_sequence",
+				"entry exceeds the maximum value size",
+			)
+		}
+		total += ${framing.length_bytes} + len(value)
+	}
+	payload := make([]byte, total)
+	offset := 0
+	for _, value := range values {
+		if value == nil {
+			binary.BigEndian.PutUint32(
+				payload[offset:offset+${framing.length_bytes}],
+				${framing.missing_sentinel},
+			)
+		} else {
+			binary.BigEndian.PutUint32(
+				payload[offset:offset+${framing.length_bytes}],
+				uint32(len(value)),
+			)
+			copy(payload[offset+${framing.length_bytes}:], value)
+		}
+		offset += ${framing.length_bytes} + len(value)
+	}
+	return payload, nil
+}
+
+func smithyEncodeU64(value uint64) []byte {
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, value)
+	return payload
+}
+
+func smithyDecodeU64(payload []byte) (uint64, error) {
+	if len(payload) != 8 {
+		return 0, validationError("u64", "field must contain exactly eight bytes")
+	}
+	return binary.BigEndian.Uint64(payload), nil
+}
+
+func smithyEncodeBool(value bool) []byte {
+	if value {
+		return []byte{1}
+	}
+	return []byte{0}
+}
+
+func smithyDecodeBool(payload []byte) (bool, error) {
+	if len(payload) != 1 || (payload[0] != 0 && payload[0] != 1) {
+		return false, validationError("bool", "field must contain exactly one byte")
+	}
+	return payload[0] == 1, nil
+}
+
+func smithyEncodeF64(value float64) []byte {
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, math.Float64bits(value))
+	return payload
+}
+
+func smithyDecodeF64(payload []byte) (float64, error) {
+	if len(payload) != 8 {
+		return 0, validationError("f64", "field must contain exactly eight bytes")
+	}
+	value := math.Float64frombits(binary.BigEndian.Uint64(payload))
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, validationError("f64", "field must be finite")
+	}
+	return value, nil
+}
+
+func smithyEncodeI32(value int32) []byte {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, uint32(value))
+	return payload
+}
+
+func smithyDecodeI32(payload []byte) (int32, error) {
+	if len(payload) != 4 {
+		return 0, validationError("i32", "field must contain exactly four bytes")
+	}
+	return int32(binary.BigEndian.Uint32(payload)), nil
+}
+
+func smithyDecodeOptionalU64(value *[]byte) (*uint64, error) {
+	if value == nil {
+		return nil, nil
+	}
+	decoded, err := smithyDecodeU64(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &decoded, nil
+}
+
+func smithyDecodeOptionalBool(value *[]byte) (*bool, error) {
+	if value == nil {
+		return nil, nil
+	}
+	decoded, err := smithyDecodeBool(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &decoded, nil
+}
+
+func smithyDecodeOptionalF64(value *[]byte) (*float64, error) {
+	if value == nil {
+		return nil, nil
+	}
+	decoded, err := smithyDecodeF64(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &decoded, nil
+}
+
+func smithyDecodeOptionalI32(value *[]byte) (*int32, error) {
+	if value == nil {
+		return nil, nil
+	}
+	decoded, err := smithyDecodeI32(*value)
+	if err != nil {
+		return nil, err
+	}
+	return &decoded, nil
+}
+`
+}
+
+/** Shared Rust helpers for ordered field-sequence framing. */
+function render_rust_field_sequence_helpers(): string {
+  return `fn smithy_encode_field_sequence(
+    values: &[Option<Vec<u8>>],
+) -> std::result::Result<Vec<u8>, Error> {
+    let borrowed = values
+        .iter()
+        .map(|value| value.as_deref())
+        .collect::<Vec<_>>();
+    openkache_client_core::encode_field_sequence(&borrowed)
+        .map_err(|error| Error::Protocol(error.to_string()))
+}
+`
+}
+
 function application_value_codecs(
   contract: Client_Contract,
   operation: Api_Operation & { readonly contract: Api_Operation_Contract },
@@ -5375,6 +6856,8 @@ function operation_request_route(
       return "global_empty"
     case "application_value":
       return "global_application_value"
+    case "field_sequence":
+      return "global_field_sequence"
     case "item":
     case "set":
       return "scoped_item"
@@ -5408,6 +6891,7 @@ function managed_operation_entries(
     const operation_plan = derive_operation_plan(contract, managed_operation)
     const result_plan = operation_result_plan(managed_operation.contract, binding)
     const plan: Managed_Operation_Plan = {
+      api: contract.api,
       application_value_codecs: application_value_codecs(
         contract,
         managed_operation,
@@ -5562,6 +7046,202 @@ function operation_field_name_for(
     type: { kind: "string" },
   }
   return operation_field_name(fallback, language)
+}
+
+/** Resolves one Smithy field plan path to a language-specific input expression. */
+function operation_field_path_expression(
+  operation: Managed_Api_Operation,
+  field: Operation_Field_Plan,
+  language: Application_Value_Language,
+): string {
+  let expression = "input"
+  let structure = operation_structure(
+    operation.plan.api,
+    operation,
+    "input",
+  )
+  for (const segment of field.path) {
+    const member = structure.members.find((candidate) => candidate.name === segment)
+    if (member === undefined) {
+      throw new Error(
+        `operation ${operation.name} input path ${field.path.join(".")} is not present in ${structure.name}`,
+      )
+    }
+    const name = operation_field_name(member, language)
+    switch (language) {
+      case "java":
+        expression = `${expression}.${name}()`
+        break
+      case "kotlin":
+      case "dart":
+      case "typescript":
+      case "python":
+      case "rust":
+      case "swift":
+      case "csharp":
+        expression = `${expression}.${name}`
+        break
+      case "go":
+        expression = `${expression}.${name}`
+        break
+    }
+    if (member.type.kind === "structure" && member.type.name !== undefined) {
+      const nested = operation.plan.api.structures.find(
+        (candidate) => candidate.name === member.type.name,
+      )
+      if (nested === undefined) {
+        throw new Error(
+          `operation ${operation.name} input path ${field.path.join(".")} targets missing structure ${member.type.name}`,
+        )
+      }
+      structure = nested
+    }
+  }
+  return expression
+}
+
+function operation_field_sequence_fields(
+  operation: Managed_Api_Operation,
+  direction: "input" | "output",
+): readonly Operation_Field_Plan[] {
+  const fields = operation.plan.operation[direction].fields
+  if (fields.length === 0) {
+    throw new Error(
+      `operation ${operation.name} ${direction} field sequence has no modeled fields`,
+    )
+  }
+  return fields
+}
+
+function operation_field_sequence_codec(
+  operation: Managed_Api_Operation,
+  field: Operation_Field_Plan,
+): Wire_Codec_Registration {
+  const codec = application_value_codec_for_type(field.type)
+  const registration = WIRE_CODEC_REGISTRY.find((candidate) => candidate.name === codec)
+  if (registration === undefined) {
+    throw new Error(
+      `operation ${operation.name} field ${field.path.join(".")} has no codec registration ${codec}`,
+    )
+  }
+  return registration
+}
+
+/**
+ * Renders one field-sequence request value for languages whose codec syntax is
+ * expression-shaped. Go has a statement/error boundary and is rendered by its
+ * operation-specific helper below.
+ */
+function render_field_sequence_encoded_value(
+  language: Exclude<Application_Value_Language, "go">,
+  operation: Managed_Api_Operation,
+  field: Operation_Field_Plan,
+  diagnostic: string,
+): string {
+  const input = operation_field_path_expression(operation, field, language)
+  const encoded = operation_field_sequence_codec(operation, field).render(
+    language,
+    input,
+    "field",
+    diagnostic,
+  ).encode
+  if (field.required) return encoded
+  const with_value = encoded.split(input).join("value")
+  switch (language) {
+    case "java":
+      return `(${input} == null ? null : ${encoded})`
+    case "kotlin":
+      return `${input}?.let { value -> ${with_value} }`
+    case "dart":
+      return `${input} == null ? null : ${
+        encoded.split(input).join(`${input}!`)
+      }`
+    case "typescript":
+      return `${input} === undefined ? undefined : ${
+        encoded.split(input).join(`${input}!`)
+      }`
+    case "python":
+      return `${input} if ${input} is None else ${encoded}`
+    case "swift":
+      return `${input}.map { value in ${with_value} }`
+    case "csharp":
+      return `${input} is null ? null : ${
+        encoded.split(input).join(`${input}!`)
+      }`
+    case "rust":
+      return field.required
+        ? `Some(${encoded})`
+        : `${input}.as_ref().map(|value| ${with_value})`
+  }
+}
+
+function render_field_sequence_request_payload(
+  language: Exclude<Application_Value_Language, "go">,
+  operation: Managed_Api_Operation,
+  diagnostic: string,
+): string {
+  const values = operation_field_sequence_fields(operation, "input")
+    .map((field) =>
+      render_field_sequence_encoded_value(language, operation, field, diagnostic)
+    )
+  switch (language) {
+    case "java":
+      return `smithyEncodeFieldSequence(${values.join(", ")})`
+    case "kotlin":
+      return `smithyEncodeFieldSequence(listOf(${values.join(", ")}))`
+    case "dart":
+      return `_smithyEncodeFieldSequence(<List<int>?>[${values.join(", ")}])`
+    case "typescript":
+      return `smithy_encode_field_sequence([${values.join(", ")}])`
+    case "python":
+      return `_smithy_encode_field_sequence([${values.join(", ")}])`
+    case "swift":
+      return `try smithyEncodeFieldSequence([${values.join(", ")}])`
+    case "csharp":
+      return `EncodeFieldSequence(new byte[]?[] { ${values.join(", ")} })`
+    case "rust":
+      return `smithy_encode_field_sequence(&[${values.join(", ")}])?`
+  }
+}
+
+function render_go_field_sequence_request(
+  operation: Managed_Api_Operation,
+  diagnostic: string,
+): { readonly statements: string; readonly payload: string } {
+  const values: string[] = []
+  const statements: string[] = []
+  operation_field_sequence_fields(operation, "input").forEach((field, index) => {
+    const input = operation_field_path_expression(operation, field, "go")
+    const codec_input = field.required ? input : `*${input}`
+    const rendered = operation_field_sequence_codec(operation, field).render(
+      "go",
+      codec_input,
+      "field",
+      diagnostic,
+      operation.output,
+      `Field${index}`,
+    )
+    const value_name = `fieldValue${index}`
+    let encoded = rendered.encode.split("wireValue").join(value_name)
+    if (!field.required) {
+      // Optional Go members are pointers. Keep the missing sentinel semantics
+      // in the field-sequence encoder and only run the codec when present.
+      encoded = `var ${value_name} []byte
+\t\tif ${input} != nil {
+\t\t\t${encoded.split("\n").join("\n\t\t\t")}
+\t\t}`
+    }
+    statements.push(encoded)
+    values.push(value_name)
+  })
+  statements.push(`fieldSequencePayload, err := smithyEncodeFieldSequence(${values.join(", ")})
+		if err != nil {
+			return ${operation.output}{}, err
+		}`)
+  return {
+    statements: statements.join("\n\t\t"),
+    payload: "fieldSequencePayload",
+  }
 }
 
 function structure_field_name_for(
@@ -5801,9 +7481,10 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
             render_composite_field_decode(
               "java",
@@ -5812,22 +7493,41 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
               `"${operation_label}"`,
             ),
           )
-          .join(", ")
-        return `    @Override
-    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
-        Objects.requireNonNull(input, "input");
-        return smithySubmit(() -> {
-            NativeResult result = smithyExecuteScoped(
+        const output_expression = render_composite_output(
+          operation,
+          "java",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "java",
+            operation,
+            `"${operation_label}"`,
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `smithyExecuteScoped(
                 ${operation_constant},
                 input.${input_namespace_id}(),
                 ${input_item_id_expression},
                 ${input_request_value},
                 0,
-                0);
+                0)`
+          : `smithyExecute(
+                ${operation_constant},
+                new byte[0],
+                ${generic_request},
+                0,
+                0)`
+        return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = ${invocation};
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             byte[][] values = smithyDecodeOptionalValues(
                 result.payload(), ${operation_composite_value_count(operation)}, "${operation_label}");
-            return new ${operation.output}(${output_values});
+            return ${output_expression};
         });
     }`
       }
@@ -6020,6 +7720,11 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
 export function render_java_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_java_field_sequence_helpers(framing)
+    : ""
   const methods = managed_operations
     .map(render_java_operation_method)
     .join("\n\n")
@@ -6224,6 +7929,7 @@ public interface SmithyGeneratedOperations extends SmithyOpenKacheApi {
     String smithyDecodeUtf8(byte[] payload, String operation);
 
 ${f64_array_helpers}
+${field_sequence_helpers}
 ${optional_values_helpers}
 
     ${methods}
@@ -6441,32 +8147,47 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
         }`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
-            `${operation_field_name(field, "kotlin")} = ${
-              render_composite_field_decode(
-                "kotlin",
-                operation_composite_field_codec(operation, field),
-                `values[${index}]`,
-                `"${operation_label}"`,
-              )
-            }`,
+            render_composite_field_decode(
+              "kotlin",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              `"${operation_label}"`,
+            ),
           )
-          .join(",\n                ")
-        return `${prefix}            val result = smithyInvokeScoped(
+        const output_expression = render_composite_output(
+          operation,
+          "kotlin",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "kotlin",
+            operation,
+            `"${operation_label}"`,
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `smithyInvokeScoped(
                 ${operation_constant},
                 input.${input_namespace_id},
                 ${input_item_id_expression},
                 ${input_request_value},
-            )
+            )`
+          : `smithyInvoke(
+                ${operation_constant},
+                byteArrayOf(),
+                ${generic_request},
+            )`
+        return `${prefix}            val result = ${invocation}
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             val values = smithyDecodeOptionalValues(
                 result.payload, ${operation_composite_value_count(operation)}, "${operation_label}")
-            ${operation.output}(
-                ${output_values},
-            )
+            ${output_expression}
         }`
       }
     case "value":
@@ -6614,6 +8335,11 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
 export function render_kotlin_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_kotlin_field_sequence_helpers(framing)
+    : ""
   const methods = managed_operations
     .map(render_kotlin_operation_method)
     .join("\n\n")
@@ -6799,6 +8525,7 @@ public interface SmithyGeneratedOperations : SmithyOpenKacheApi {
 
 ${f64_array_helpers}
 
+${field_sequence_helpers}
 ${optional_values_helpers}
 
 ${methods}
@@ -6988,32 +8715,47 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     );
   });`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
-            `${operation_field_name(field, "dart")}: ${
-              render_composite_field_decode(
-                "dart",
-                operation_composite_field_codec(operation, field),
-                `values[${index}]`,
-                `'${operation_label}'`,
-              )
-            }`,
+            render_composite_field_decode(
+              "dart",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              `'${operation_label}'`,
+            ),
           )
-          .join(",\n      ")
-        return `${prefix}    final result = _invokeScoped(
+        const output_expression = render_composite_output(
+          operation,
+          "dart",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "dart",
+            operation,
+            `'${operation_label}'`,
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `_invokeScoped(
       ${operation_constant},
       input.${input_namespace_id},
       ${input_item_id_expression},
       ${input_request_value},
-    );
+    )`
+          : `_invoke(
+      ${operation_constant},
+      const <int>[],
+      ${generic_request},
+    )`
+        return `${prefix}    final result = ${invocation};
     _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     final values = _smithyDecodeOptionalValues(
       result.payload, ${operation_composite_value_count(operation)}, '${operation_label}');
-    return ${operation.output}(
-      ${output_values},
-    );
+    return ${output_expression};
   });`
       }
     case "value":
@@ -7183,6 +8925,11 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
 export function render_dart_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_dart_field_sequence_helpers(framing)
+    : ""
   const methods = managed_operations
     .map(render_dart_operation_method)
     .join("\n\n")
@@ -7337,7 +9084,7 @@ List<List<int>?> _smithyDecodeOptionalValues(
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 part of '../openkache.dart';
 // The generated hook keeps optional arguments aligned with the native ABI.
-// ignore_for_file: unused_element_parameter
+// ignore_for_file: unused_element_parameter, unused_element
 
 /// Generated operation implementations backed by the shared native contract.
 mixin SmithyGeneratedOperations implements SmithyOpenKacheApi {
@@ -7451,6 +9198,7 @@ String _smithyDecodeUtf8(List<int> payload, String operation) {
 
 ${f64_array_helpers}
 
+${field_sequence_helpers}
 ${optional_values_helpers}
 
 void _smithyRequireKind(_NativeResult result, int expected, String operation) {
@@ -8232,37 +9980,51 @@ function render_typescript_operation_method(
     };
   }`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
-            `${operation_field_name(field, "typescript")}: ${
-              render_composite_field_decode(
-                "typescript",
-                operation_composite_field_codec(operation, field),
-                `values[${index}]`,
-                String(operation_value),
-              )
-            }`,
+            render_composite_field_decode(
+              "typescript",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              String(operation_value),
+            ),
           )
-          .join(",\n      ")
-        return `  async ${method_name}(
-    input: ${typescript_api_name(operation.input)},
-  ): Promise<${typescript_api_name(operation.output)}> {
-    this.#transport.assert_open();
-    const result = await this.#transport.invoke_scoped(
+        const output_expression = render_composite_output(
+          operation,
+          "typescript",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "typescript",
+            operation,
+            String(operation_value),
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `this.#transport.invoke_scoped(
       ${operation_value},
       input.${input_namespace_id},
       {
         item_id: ${input_item_id_expression},
 ${scoped_request_value}        expected_kinds: [${result_kinds}],
       },
-    );
+    )`
+          : `this.#transport.invoke(${operation_value}, {
+      value: ${generic_request},
+      expected_kinds: [${result_kinds}],
+    })`
+        return `  async ${method_name}(
+    input: ${typescript_api_name(operation.input)},
+  ): Promise<${typescript_api_name(operation.output)}> {
+    this.#transport.assert_open();
+    const result = await ${invocation};
     const values = smithy_decode_optional_values(
       result.payload, ${operation_composite_value_count(operation)}, ${operation_value});
-    return {
-      ${output_values},
-    };
+    return ${output_expression};
   }`
       }
     case "value":
@@ -8442,6 +10204,11 @@ ${scoped_request_value}        expected_kinds: [${result_kinds}],
 export function render_typescript_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_typescript_field_sequence_helpers(framing)
+    : ""
   const imported_types = new Set<string>(["Smithy_OpenKache_Api"])
   for (const operation of managed_operations) {
     imported_types.add(typescript_api_name(operation.input))
@@ -8579,6 +10346,7 @@ export interface Smithy_Operation_Result {
 
 ${f64_array_helpers}
 
+${field_sequence_helpers}
 ${optional_values_helpers}
 
 /** Native-facing hooks used by generated Smithy operations. */
@@ -9144,6 +10912,7 @@ function render_go_operation_method(
 	${decoded_payload}
 }`
       }
+    case "field_sequence":
     case "composite":
       {
         const decoded_fields = operation_composite_fields(operation)
@@ -9153,28 +10922,42 @@ function render_go_operation_method(
         const decode_statements = decoded_fields
           .map((field) => field.statements)
           .join("\n")
-        const output_values = operation_composite_fields(operation)
-          .map(
-            (field, index) =>
-              `${operation_field_name(field, "go")}: ${decoded_fields[index]!.expression}`,
-          )
-          .join(",\n\t\t")
-        return `func (s smithyClient) ${method}(
-	ctx context.Context,
-	input ${input},
-) (${output}, error) {
-		itemIDs, err := smithyConcatItemIDs(${input_item_ids.map((name) => `input.${name}`).join(", ")})
-		if err != nil {
-			return ${output}{}, err
-		}
-		result, err := s.client.invokeScopedBytes(
+        const output_expression = render_composite_output(
+          operation,
+          "go",
+          decoded_fields.map((field) => field.expression),
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_go_field_sequence_request(operation, `"${label}"`)
+          : undefined
+        const invocation = generic_request === undefined
+          ? `s.client.invokeScopedBytes(
 			ctx,
 			${opcode},
 			input.${input_namespace_id},
 			itemIDs,
 			${input_request_value === "nil" ? "nil" : `input.${input_request_value}`},
 			SetOptions{},
-		)
+		)`
+          : `s.client.invoke(
+			ctx,
+			${opcode},
+			nil,
+			fieldSequencePayload,
+			SetOptions{},
+		)`
+        return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+${generic_request === undefined ? "" : `		${generic_request.statements}
+`}
+${generic_request === undefined ? `		itemIDs, err := smithyConcatItemIDs(${input_item_ids.map((name) => `input.${name}`).join(", ")})
+		if err != nil {
+			return ${output}{}, err
+		}
+` : ""}
+		result, err := ${invocation}
 		if err != nil {
 			return ${output}{}, operationError("${label}", err)
 		}
@@ -9186,9 +10969,7 @@ function render_go_operation_method(
 			return ${output}{}, operationError("${label}", err)
 		}
 ${decode_statements}
-		return ${output}{
-			${output_values},
-		}, nil
+		return ${output_expression}, nil
 	}`
       }
     case "value":
@@ -9475,6 +11256,11 @@ ${decode_statements}
 export function render_go_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_go_field_sequence_helpers(framing)
+    : ""
   const methods = managed_operations
     .map((operation) => render_go_operation_method(contract, operation))
     .join("\n\n")
@@ -9594,6 +11380,7 @@ ${methods}
 
 ${f64_array_helpers}
 
+${field_sequence_helpers}
 ${optional_values_helpers}
 `
 }
@@ -9951,33 +11738,48 @@ function render_python_operation_method(
             ${output_payload}=${decoded_payload}
         )`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
-            `${operation_field_name(field, "python")}=${
-              render_composite_field_decode(
-                "python",
-                operation_composite_field_codec(operation, field),
-                `values[${index}]`,
-                String(operation_value),
-              )
-            }`,
+            render_composite_field_decode(
+              "python",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              String(operation_value),
+            ),
           )
-          .join(",\n            ")
-        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
-        self._smithy_transport.assert_open()
-        _, payload = await self._smithy_transport.invoke_scoped(
+        const output_expression = render_composite_output(
+          operation,
+          "python",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "python",
+            operation,
+            String(operation_value),
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `_smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
 ${scoped_request_value}            expected_kinds=(${result_kinds},),
-        )
+        )`
+          : `_smithy_transport.invoke(
+            ${operation_value},
+            value=${generic_request},
+            expected_kinds=(${result_kinds},),
+        )`
+        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        self._smithy_transport.assert_open()
+        _, payload = await ${invocation}
         values = _smithy_decode_optional_values(
             payload, ${operation_composite_value_count(operation)}, ${operation_value})
-        return ${output}(
-            ${output_values}
-        )`
+        return ${output_expression}`
       }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
@@ -10137,6 +11939,11 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
 export function render_python_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_python_field_sequence_helpers(framing)
+    : ""
   const imported_types = new Set<string>()
   for (const operation of managed_operations) {
     imported_types.add(python_api_name(operation.input))
@@ -10244,6 +12051,7 @@ from .smithy_contract import (
 )
 
 ${f64_array_helpers}
+${field_sequence_helpers}
 ${optional_values_helpers}
 class SmithyOperationTransport(Protocol):
     """Native-facing hooks used by generated Smithy operations."""
@@ -11104,29 +12912,45 @@ function render_swift_operation_method(
     return ${output}(${output_payload}: value)
   }`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
-            `${operation_field_name(field, "swift")}: ${
-              render_composite_field_decode(
-                "swift",
-                operation_composite_field_codec(operation, field),
-                `values[${index}]`,
-                `"${operation_label}"`,
-              )
-            }`,
+            render_composite_field_decode(
+              "swift",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              `"${operation_label}"`,
+            ),
           )
-          .join(",\n      ")
-        return `  public func ${method_name}(
-    _ input: ${input}
-  ) async throws -> ${output} {
-    let result = try await smithyInvokeScoped(
+        const output_expression = render_composite_output(
+          operation,
+          "swift",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "swift",
+            operation,
+            `"${operation_label}"`,
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `smithyInvokeScoped(
       ${operation_constant},
       namespaceID: input.${input_namespace_id},
       itemID: ${input_item_id_expression},
       value: ${input_request_value === "Data()" ? "Data()" : `input.${input_request_value}`}
-    )
+    )`
+          : `smithyInvoke(
+      ${operation_constant},
+      value: ${generic_request}
+    )`
+        return `  public func ${method_name}(
+    _ input: ${input}
+  ) async throws -> ${output} {
+    let result = try await ${invocation}
     guard result.kind == ${result_constant("value")} else {
       throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
     }
@@ -11135,9 +12959,7 @@ function render_swift_operation_method(
       valueCount: ${operation_composite_value_count(operation)},
       operation: "${operation_label}"
     )
-    return ${output}(
-      ${output_values}
-    )
+    return ${output_expression}
   }`
       }
     case "value":
@@ -11332,6 +13154,11 @@ function render_swift_operation_method(
 export function render_swift_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_swift_field_sequence_helpers(framing)
+    : ""
   const methods = managed_operations
     .map((operation) => render_swift_operation_method(contract, operation))
     .join("\n\n")
@@ -11436,6 +13263,7 @@ private func smithyDecodeOptionalValues(
 import Foundation
 
 ${f64_array_helpers}
+${field_sequence_helpers}
 ${optional_values_helpers}
 extension OpenKacheRawClient: Smithy_OpenKache_Api {
 ${methods}
@@ -11937,40 +13765,54 @@ function render_csharp_operation_method_body(
         };
     }`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
+        const output_decoded_values = operation_composite_fields(operation)
           .map((field, index) =>
-            `            ${operation_field_name(field, "csharp")} = ${
-              render_composite_field_decode(
-                "csharp",
-                operation_composite_field_codec(operation, field),
-                `values[${index}]`,
-                `"${label}"`,
-              )
-            },`,
+            render_composite_field_decode(
+              "csharp",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              `"${label}"`,
+            ),
           )
-          .join("\n")
+        const output_expression = render_composite_output(
+          operation,
+          "csharp",
+          output_decoded_values,
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "csharp",
+            operation,
+            `"${label}"`,
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `RequestScopedAsync(
+            Protocol.Opcode.${operation.name},
+            input.${input_namespace_id},
+            ${input_item_id_expression},
+            ${input_request_value === "ReadOnlyMemory<byte>.Empty" ? "ReadOnlyMemory<byte>.Empty" : `input.${input_request_value}`},
+            cancellationToken: cancellationToken)`
+          : `RequestAsync(
+            Protocol.Opcode.${operation.name},
+            ReadOnlyMemory<byte>.Empty,
+            ${generic_request},
+            cancellationToken: cancellationToken)`
         return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
         Smithy.${operation.input} input,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var result = await RequestScopedAsync(
-            Protocol.Opcode.${operation.name},
-            input.${input_namespace_id},
-            ${input_item_id_expression},
-            ${input_request_value === "ReadOnlyMemory<byte>.Empty" ? "ReadOnlyMemory<byte>.Empty" : `input.${input_request_value}`},
-            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var result = await ${invocation}.ConfigureAwait(false);
         ExpectKind("${label}", result, ${result_constant("value")});
         var values = DecodeOptionalValues(
             result.Payload,
             ${operation_composite_value_count(operation)},
             "${label}");
-        return new Smithy.${operation.output}
-        {
-${output_values}
-        };
+        return ${output_expression};
     }`
       }
     case "value":
@@ -12254,6 +14096,11 @@ ${render_csharp_operation_method_body(contract, operation)}`
 export function render_csharp_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
   const framing = optional_value_framing(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_csharp_field_sequence_helpers(framing)
+    : ""
   const methods = managed_operations
     .map((operation) => render_csharp_operation_method(contract, operation))
     .join("\n\n")
@@ -12401,6 +14248,7 @@ namespace OpenKache;
 public sealed partial class Client
 {
 ${f64_array_helpers}
+${field_sequence_helpers}
 ${optional_values_helpers}
 ${methods}
 }
@@ -12834,25 +14682,36 @@ function render_rust_operation_method(
                 Ok(smithy::${operation.output} { ${output_payload}: payload })
             }`
       }
+    case "field_sequence":
     case "composite":
       {
-        const output_values = operation_composite_fields(operation)
-          .map((field) =>
-            `                    ${operation_field_name(field, "rust")}: ${
-              render_composite_field_decode(
-                "rust",
-                operation_composite_field_codec(operation, field),
-                "values.remove(0)",
-                `"${operation_label}"`,
-              )
-            },`,
-          )
+        const decoded_fields = operation_composite_fields(operation)
+          .map((field, index) => ({
+            name: `decoded_value_${index}`,
+            expression: render_composite_field_decode(
+              "rust",
+              operation_composite_field_codec(operation, field),
+              "values.remove(0)",
+              `"${operation_label}"`,
+            ),
+          }))
+        const decoded_statements = decoded_fields
+          .map((field) => `                let ${field.name} = ${field.expression};`)
           .join("\n")
-        return `            async fn ${method_name}(
-                &self,
-                input: smithy::${operation.input},
-            ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
-                let result = $client::execute_scoped(
+        const output_expression = render_composite_output(
+          operation,
+          "rust",
+          decoded_fields.map((field) => field.name),
+        )
+        const generic_request = operation.plan.request_route === "global_field_sequence"
+          ? render_field_sequence_request_payload(
+            "rust",
+            operation,
+            `"${operation_label}"`,
+          )
+          : undefined
+        const invocation = generic_request === undefined
+          ? `$client::execute_scoped(
                     self,
                     openkache_client_core::Opcode::${operation.name},
                     input.${input_namespace_id},
@@ -12860,7 +14719,20 @@ function render_rust_operation_method(
                     ${input_request_value === "Vec::new()" ? "Vec::new()" : `input.${input_request_value}`},
                     SetOptions::new(),
                 )
-                    .await?;
+                    .await?`
+          : `$client::execute_raw(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    [],
+                    ${generic_request},
+                    SetOptions::new(),
+                )
+                    .await?`
+        return `            async fn ${method_name}(
+                &self,
+                input: smithy::${operation.input},
+            ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
+                let result = ${invocation};
                 smithy_require_kind(
                     &result,
                     &[${result_constant("value")}],
@@ -12871,9 +14743,8 @@ function render_rust_operation_method(
                     ${operation_composite_value_count(operation)},
                     "${operation_label}",
                 )?;
-                Ok(smithy::${operation.output} {
-${output_values}
-                })
+${decoded_statements}
+                Ok(${output_expression})
             }`
       }
     case "value":
@@ -13131,6 +15002,11 @@ ${output_values}
 /** Renders generated Rust operation implementations backed by the shared client core. */
 export function render_rust_operations(contract: Client_Contract): string {
   const managed_operations = managed_operation_entries(contract)
+  const field_sequence_helpers = managed_operations.some(
+    operation_uses_optional_values,
+  )
+    ? render_rust_field_sequence_helpers()
+    : ""
   const methods = managed_operations
     .map((operation) => render_rust_operation_method(contract, operation))
     .join("\n\n")
@@ -13225,6 +15101,7 @@ fn smithy_require_kind(
 
 ${f64_array_helpers}
 
+${field_sequence_helpers}
 ${optional_values_helpers}
 
 macro_rules! impl_smithy_api {

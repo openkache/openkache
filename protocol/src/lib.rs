@@ -281,10 +281,7 @@ pub fn optional_values_max_encoded_len(
     value_count: usize,
     max_value_bytes: usize,
 ) -> Option<usize> {
-    value_count.checked_mul(
-        OPTIONAL_VALUE_LENGTH_BYTES
-            .checked_add(max_value_bytes)?,
-    )
+    value_count.checked_mul(OPTIONAL_VALUE_LENGTH_BYTES.checked_add(max_value_bytes)?)
 }
 
 /// Decodes ordered optional opaque values from the shared response codec.
@@ -332,6 +329,112 @@ pub fn decode_optional_values(payload: &[u8], value_count: usize) -> Result<Vec<
         ));
     }
     Ok(values)
+}
+
+/// Encodes an ordered operation field sequence.
+///
+/// Field sequences intentionally reuse the same length/sentinel primitive as
+/// optional-value responses, but are named independently because they may be
+/// used on either side of a request/response operation. The operation plan
+/// supplies field order, cardinality, requiredness, and codecs; this primitive
+/// only carries bounded opaque field bytes.
+pub fn encode_field_sequence(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
+    encode_optional_values(values)
+}
+
+/// A zero-copy view over an ordered operation field sequence.
+///
+/// The cursor validates all entry boundaries once, then returns borrowed field
+/// slices without allocating one buffer per field. A missing field is encoded
+/// by the shared `OPTIONAL_VALUE_MISSING` sentinel and returns `None`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FieldSequence<'a, 'b> {
+    payload: &'a [u8],
+    offsets: &'b [(usize, usize)],
+    field_count: usize,
+}
+
+impl<'a, 'b> FieldSequence<'a, 'b> {
+    /// Decodes a field sequence and validates its exact field cardinality.
+    ///
+    /// `offsets` is supplied by the caller so a request handler can keep the
+    /// small index array on its stack while the payload remains borrowed.
+    pub fn decode(
+        payload: &'a [u8],
+        field_count: usize,
+        offsets: &'b mut [(usize, usize)],
+    ) -> Result<Self> {
+        if offsets.len() < field_count {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "field offset storage is smaller than the modeled field count",
+            ));
+        }
+        validate_value_length(payload.len())?;
+        let minimum = field_count
+            .checked_mul(OPTIONAL_VALUE_LENGTH_BYTES)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        if payload.len() < minimum {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "field sequence is missing an entry length",
+            ));
+        }
+        let mut cursor = 0usize;
+        for offset in offsets.iter_mut().take(field_count) {
+            let end = cursor
+                .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            let length = u32::from_be_bytes(
+                payload[cursor..end]
+                    .try_into()
+                    .expect("field sequence length has a fixed width"),
+            );
+            cursor = end;
+            if length == OPTIONAL_VALUE_MISSING {
+                *offset = (usize::MAX, usize::MAX);
+                continue;
+            }
+            let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+            validate_value_length(length)?;
+            let end = cursor
+                .checked_add(length)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            if payload.get(cursor..end).is_none() {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "field sequence entry is truncated",
+                ));
+            }
+            *offset = (cursor, end);
+            cursor = end;
+        }
+        if cursor != payload.len() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "field sequence contains trailing bytes",
+            ));
+        }
+        Ok(Self {
+            payload,
+            offsets,
+            field_count,
+        })
+    }
+
+    /// Returns the number of fields represented by this cursor.
+    pub const fn len(self) -> usize {
+        self.field_count
+    }
+
+    /// Returns one borrowed field, or `None` when the modeled field is absent.
+    pub fn get(self, index: usize) -> Option<&'a [u8]> {
+        if index >= self.field_count {
+            return None;
+        }
+        let (start, end) = *self.offsets.get(index)?;
+        if start == usize::MAX {
+            None
+        } else {
+            Some(&self.payload[start..end])
+        }
+    }
 }
 
 /// Encodes one canonical unsigned 64-bit `vu128`.
@@ -402,6 +505,8 @@ pub enum ProtocolError {
     ValueTooLarge { size: usize, maximum: usize },
     #[error("invalid optional-value payload: {0}")]
     InvalidOptionalValues(&'static str),
+    #[error("invalid operation field sequence: {0}")]
+    InvalidFieldSequence(&'static str),
 }
 
 /// Convenience result type for common wire operations.
