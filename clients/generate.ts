@@ -2358,6 +2358,7 @@ function render_rust_operation_contract(contract: Client_Contract): string {
     readonly contract: Api_Operation_Contract
   }): number => {
     switch (derive_wire_response_route(operation.contract)) {
+      case "field_sequence":
       case "composite":
         return operation.contract.response_fields.reduce(
           (count, field) => count + field.count,
