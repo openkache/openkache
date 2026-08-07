@@ -34,7 +34,10 @@ pub use config::{
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
-pub use openkache_protocol::{ITEM_ID_BYTES, Opcode};
+pub use openkache_protocol::{
+    ITEM_ID_BYTES, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, Opcode,
+    decode_optional_values, encode_optional_values,
+};
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -362,16 +365,36 @@ fn parse_item_ids(bytes: &[u8], item_count: usize) -> Result<Vec<ItemId>> {
         .collect()
 }
 
-fn operation_values_result(operation: Opcode, response: Response) -> Result<OperationResult> {
+fn operation_values_result(
+    operation: Opcode,
+    response: Response,
+    value_count: usize,
+) -> Result<OperationResult> {
     match response.status {
         Status::Ok => Ok(operation_result(
             contract::FfiResultKind::Value,
             response.payload,
         )),
-        Status::NotFound if response.payload.is_empty() => Ok(operation_result(
-            contract::FfiResultKind::NotFound,
-            Vec::new(),
+        Status::NotFound if value_count == 1 && response.payload.is_empty() => Ok(
+            operation_result(contract::FfiResultKind::NotFound, Vec::new()),
+        ),
+        status => Err(unexpected_status(Operation::from_opcode(operation), status)),
+    }
+}
+
+fn operation_scoped_value_result(
+    operation: Opcode,
+    response: Response,
+    value_count: usize,
+) -> Result<OperationResult> {
+    match response.status {
+        Status::Ok => Ok(operation_result(
+            contract::FfiResultKind::Value,
+            response.payload,
         )),
+        Status::NotFound if value_count == 1 && response.payload.is_empty() => Ok(
+            operation_result(contract::FfiResultKind::NotFound, Vec::new()),
+        ),
         status => Err(unexpected_status(Operation::from_opcode(operation), status)),
     }
 }
@@ -1310,8 +1333,8 @@ macro_rules! raw_client_methods {
             ///
             /// * `operation` - Smithy protocol operation to execute.
             /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
-            /// * `value` - Raw operation payload, including the value for SET or an application
-            ///   payload for a global operation.
+            /// * `value` - Raw operation payload, including a storage value or an application
+            ///   payload when the generated request shape carries one.
             /// * `set_options` - Conditional and expiration options used by SET.
             ///
             /// # Returns
@@ -1364,8 +1387,9 @@ macro_rules! raw_client_methods {
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::Value,
-                    ) => {
+                        contract::OperationResponseKind::Value
+                        | contract::OperationResponseKind::Composite,
+                    ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
                         let namespace_id = self.0.ensure_namespace().await?;
@@ -1373,7 +1397,37 @@ macro_rules! raw_client_methods {
                             .0
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
-                        operation_values_result(operation, response)
+                        operation_values_result(
+                            operation,
+                            response,
+                            contract::operation_response_field_count(operation),
+                        )
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        response_kind,
+                    ) if contract.request_value_count > 0
+                        && response_kind != contract::OperationResponseKind::SetOutcome => {
+                        let item_ids =
+                            parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
+                        let namespace_id = self.0.ensure_namespace().await?;
+                        let request = Request::new_scoped_items_with_options(
+                            operation,
+                            namespace_id,
+                            item_ids
+                                .into_iter()
+                                .map(ItemId::into_protocol)
+                                .collect(),
+                            set_options.into_protocol()?,
+                            value.as_ref().to_vec(),
+                        )
+                        .map_err(Error::protocol)?;
+                        let response = self.0.request(request).await?;
+                        operation_scoped_value_result(
+                            operation,
+                            response,
+                            contract::operation_response_field_count(operation),
+                        )
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -1447,15 +1501,45 @@ macro_rules! raw_client_methods {
                 match (contract.request_kind, contract.response_kind) {
                     (
                         contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::Value,
-                    ) => {
+                        contract::OperationResponseKind::Value
+                        | contract::OperationResponseKind::Composite,
+                    ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
                         let response = self
                             .0
                             .get_values_in_namespace(operation, namespace_id, item_ids)
                             .await?;
-                        operation_values_result(operation, response)
+                        operation_values_result(
+                            operation,
+                            response,
+                            contract::operation_response_field_count(operation),
+                        )
+                    }
+                    (
+                        contract::OperationRequestKind::ScopedItem,
+                        response_kind,
+                    ) if contract.request_value_count > 0
+                        && response_kind != contract::OperationResponseKind::SetOutcome => {
+                        let item_ids =
+                            parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
+                        let request = Request::new_scoped_items_with_options(
+                            operation,
+                            namespace_id,
+                            item_ids
+                                .into_iter()
+                                .map(ItemId::into_protocol)
+                                .collect(),
+                            set_options.into_protocol()?,
+                            value.as_ref().to_vec(),
+                        )
+                        .map_err(Error::protocol)?;
+                        let response = self.0.request(request).await?;
+                        operation_scoped_value_result(
+                            operation,
+                            response,
+                            contract::operation_response_field_count(operation),
+                        )
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
@@ -2007,8 +2091,37 @@ fn validate_response_contract(
             }
         }
         contract::OperationResponseKind::ApplicationValue => Ok(()),
+        contract::OperationResponseKind::Composite => {
+            if response.status != Status::Ok {
+                invalid_payload("composite responses must have an OK status")
+            } else {
+                openkache_protocol::decode_optional_values(
+                    &response.payload,
+                    contract::operation_response_field_count(opcode),
+                )
+                .map(|_| ())
+                .map_err(|error| Error::UnexpectedResponse {
+                    operation,
+                    message: format!("composite payload is invalid: {error}"),
+                })
+            }
+        }
         contract::OperationResponseKind::Value => {
-            if response.status == Status::NotFound && !response.payload.is_empty() {
+            if operation_contract.response_value_count > 1 {
+                if response.status != Status::Ok {
+                    invalid_payload("multi-value GET responses must have an OK status")
+                } else {
+                    openkache_protocol::decode_optional_values(
+                        &response.payload,
+                        contract::operation_response_field_count(opcode),
+                    )
+                    .map(|_| ())
+                    .map_err(|error| Error::UnexpectedResponse {
+                        operation,
+                        message: format!("optional-values payload is invalid: {error}"),
+                    })
+                }
+            } else if response.status == Status::NotFound && !response.payload.is_empty() {
                 invalid_payload("GET NotFound responses must have an empty payload")
             } else {
                 Ok(())

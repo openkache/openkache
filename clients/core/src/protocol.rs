@@ -42,6 +42,8 @@ pub enum ProtocolError {
     UnknownRequestFlags(u8),
     #[error("if-absent and if-present conditions cannot be combined")]
     ConflictingSetConditions,
+    #[error("invalid optional-values payload: {0}")]
+    InvalidOptionalValues(&'static str),
     #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
     InvalidRequestShape {
         opcode: Opcode,
@@ -92,6 +94,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
+            }
+            openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
+                Self::InvalidOptionalValues(message)
             }
         }
     }
@@ -452,10 +457,26 @@ impl Request {
         set_options: SetWireOptions,
         value: Vec<u8>,
     ) -> Result<Self> {
+        Self::new_scoped_items_with_options(
+            opcode,
+            namespace_id,
+            item_id.into_iter().collect(),
+            set_options,
+            value,
+        )
+    }
+
+    pub(crate) fn new_scoped_items_with_options(
+        opcode: Opcode,
+        namespace_id: u64,
+        item_ids: Vec<ItemId>,
+        set_options: SetWireOptions,
+        value: Vec<u8>,
+    ) -> Result<Self> {
         let request = Self {
             opcode,
             namespace_id: Some(namespace_id),
-            item_ids: item_id.into_iter().collect(),
+            item_ids,
             set_options,
             value,
             namespace_name: None,
@@ -472,19 +493,13 @@ impl Request {
         namespace_id: u64,
         item_ids: Vec<ItemId>,
     ) -> Result<Self> {
-        let request = Self {
+        Self::new_scoped_items_with_options(
             opcode,
-            namespace_id: Some(namespace_id),
+            namespace_id,
             item_ids,
-            set_options: SetWireOptions::NONE,
-            value: Vec::new(),
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: None,
-            create_if_missing: false,
-        };
-        request.validate()?;
-        Ok(request)
+            SetWireOptions::NONE,
+            Vec::new(),
+        )
     }
 
     pub(crate) fn namespace_open(

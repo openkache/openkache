@@ -24,40 +24,15 @@ export const OPERATION_SCOPES = [
 
 export type Wire_Operation_Scope = (typeof OPERATION_SCOPES)[number]
 
-export const OPERATION_REQUEST_KINDS = [
-  "empty",
-  "application_value",
-  "scoped_item",
-  "scoped_namespace",
-  "namespace_open",
-  "namespace_update_policy",
-  "namespace_delete",
-] as const
-
-export type Wire_Operation_Request_Kind = (typeof OPERATION_REQUEST_KINDS)[number]
-
-export const OPERATION_RESPONSE_KINDS = [
-  "empty",
-  "pong",
-  "application_value",
-  "value",
-  "set_outcome",
-  "delete_outcome",
-  "stats_json",
-  "namespace_descriptor",
-] as const
-
-export type Wire_Operation_Response_Kind = (typeof OPERATION_RESPONSE_KINDS)[number]
-
-export const OPERATION_VALUE_TRANSFORMS = [
-  "identity",
-] as const
-
 /**
- * Runtime Smithy enum values are authoritative. The literal fallback above
- * remains only for legacy AST fixtures that do not contain the enum shape.
+ * Operation request kinds are compatibility labels. Request framing is
+ * derived from field roles and shapes; a new operation may use any model
+ * label without adding a generator family entry.
  */
-export type Wire_Operation_Value_Transform = string
+export type Wire_Operation_Request_Kind = string
+
+/** Response labels remain model-defined compatibility metadata. */
+export type Wire_Operation_Response_Kind = string
 
 export const OPERATION_RETRY_MODES = [
   "always",
@@ -67,33 +42,14 @@ export const OPERATION_RETRY_MODES = [
 
 export type Wire_Operation_Retry_Mode = (typeof OPERATION_RETRY_MODES)[number]
 
-export const OPERATION_REQUEST_SCOPES: Readonly<
-  Record<Wire_Operation_Request_Kind, Wire_Operation_Scope>
-> = {
-  empty: "global",
-  application_value: "global",
-  scoped_item: "item",
-  scoped_namespace: "namespace",
-  namespace_open: "namespace_management",
-  namespace_update_policy: "namespace_management",
-  namespace_delete: "namespace_management",
-}
-
-/** Response shapes permitted for each protocol-owned request shape. */
-export const OPERATION_RESPONSE_KINDS_BY_REQUEST: Readonly<
-  Record<Wire_Operation_Request_Kind, readonly Wire_Operation_Response_Kind[]>
-> = {
-  empty: ["pong"],
-  application_value: ["application_value"],
-  scoped_item: ["value", "set_outcome", "delete_outcome"],
-  scoped_namespace: ["stats_json", "empty"],
-  namespace_open: ["namespace_descriptor"],
-  namespace_update_policy: ["namespace_descriptor"],
-  namespace_delete: ["empty"],
-}
-
 export interface Wire_Operation_Contract {
   readonly error_statuses: readonly string[]
+  /**
+   * Ordered field-role counts derived from the Smithy input structure. The
+   * runtime uses these only for framing; it does not need to know an
+   * operation-specific request family.
+   */
+  readonly request_fields: readonly Wire_Operation_Field[]
   readonly request_kind: Wire_Operation_Request_Kind
   /**
    * Number of value fields in the request shape. Production extraction uses
@@ -103,25 +59,130 @@ export interface Wire_Operation_Contract {
   readonly request_value_count?: number
   /** Number of item IDs carried by a scoped-item request, derived from Smithy roles. */
   readonly request_item_count: number
+  readonly response_fields: readonly Wire_Operation_Field[]
   /** Number of optional values carried by a value response, derived from Smithy roles. */
   readonly response_value_count: number
   readonly response_kind: Wire_Operation_Response_Kind
   readonly retry_mode: Wire_Operation_Retry_Mode
   readonly scope: Wire_Operation_Scope
   readonly success_statuses: readonly string[]
-  /** Optional application-value transform; omitted means identity. */
-  readonly value_transform?: Wire_Operation_Value_Transform
 }
 
-/** Smithy operation vocabularies extracted from the protocol model. */
-export interface Wire_Operation_Vocabularies {
-  readonly value_transforms: readonly string[]
+/** Count of one Smithy operation-field role in a request or response shape. */
+export interface Wire_Operation_Field {
+  readonly count: number
+  readonly role: string
+  /** Optional codec declarations attached to members of this role. */
+  readonly codecs?: readonly string[]
 }
 
 /** One protocol opcode and its Smithy semantic operation contract. */
 export interface Wire_Operation {
   readonly contract: Wire_Operation_Contract
   readonly name: string
+}
+
+/**
+ * The finite set of request layouts understood by protocol v1.
+ *
+ * These are transport layouts, not operation names. A Smithy operation selects
+ * one by declaring field roles; its requestKind label is retained only as
+ * model metadata and never creates a new generated enum variant.
+ */
+export type Wire_Request_Layout =
+  | "empty"
+  | "application_value"
+  | "item"
+  | "set"
+  | "namespace"
+  | "namespace_open"
+  | "namespace_update_policy"
+  | "namespace_delete"
+
+/**
+ * The transport response routes understood by the shared adapters.
+ *
+ * Server behavior remains outside this route classification. The route only
+ * identifies the wire payload framing that clients must decode. `composite`
+ * is an ordered field sequence derived from the output shape; it is not a
+ * per-operation response family.
+ */
+export type Wire_Response_Route =
+  | "empty"
+  | "pong"
+  | "application_value"
+  | "composite"
+  | "value"
+  | "set_outcome"
+  | "delete_outcome"
+  | "stats_json"
+  | "namespace_descriptor"
+
+function operation_has_role(
+  fields: readonly Wire_Operation_Field[],
+  role: string,
+): boolean {
+  return fields.some((field) => field.role === role && field.count > 0)
+}
+
+/** Derives the protocol-v1 request layout from Smithy input roles. */
+export function derive_wire_request_layout(
+  contract: Wire_Operation_Contract,
+): Wire_Request_Layout {
+  const { request_fields } = contract
+  const has_role = (role: string): boolean => operation_has_role(request_fields, role)
+  if (has_role("name") && has_role("create_if_missing") && has_role("policy")) {
+    return "namespace_open"
+  }
+  if (has_role("expected_revision") && has_role("policy")) {
+    return "namespace_update_policy"
+  }
+  if (
+    has_role("expected_revision") &&
+    has_role("namespace_id") &&
+    !has_role("item_id")
+  ) {
+    return "namespace_delete"
+  }
+  if (has_role("item_id")) {
+    const value_count = contract.request_value_count ?? (
+      request_fields.find((field) => field.role === "value")?.count ?? 0
+    )
+    return value_count > 0 ? "set" : "item"
+  }
+  if (has_role("namespace_id")) return "namespace"
+  if (has_role("payload")) return "application_value"
+  if (request_fields.length === 0) return "empty"
+  throw new Error(
+    `operation request roles do not describe a protocol-v1 layout: ${request_fields
+      .map((field) => `${field.role}×${field.count}`)
+      .join(", ")}`,
+  )
+}
+
+/** Derives the protocol response route from Smithy output roles and scope. */
+export function derive_wire_response_route(
+  contract: Wire_Operation_Contract,
+): Wire_Response_Route {
+  const { response_fields } = contract
+  const has_role = (role: string): boolean => operation_has_role(response_fields, role)
+  if (has_role("descriptor")) return "namespace_descriptor"
+  if (response_fields.length > 1) return "composite"
+  if (has_role("payload") && response_fields.length === 1) {
+    return "application_value"
+  }
+  if (has_role("value") && response_fields.length === 1) return "value"
+  if (has_role("outcome")) return "set_outcome"
+  if (has_role("deleted")) return "delete_outcome"
+  if (has_role("json")) return "stats_json"
+  if (response_fields.length === 0) {
+    return contract.scope === "global" ? "pong" : "empty"
+  }
+  throw new Error(
+    `operation response roles do not describe a protocol-v1 route: ${response_fields
+      .map((field) => `${field.role}×${field.count}`)
+      .join(", ")}`,
+  )
 }
 
 /** Protocol v1 constants consumed by the Rust protocol crate. */
@@ -137,6 +198,9 @@ export interface Wire_V1_Contract {
   readonly namespace_revision_bytes: number
   readonly namespace_name_length_bytes: number
   readonly namespace_name_max_bytes: number
+  /** Optional-value response framing; defaults preserve legacy AST fixtures. */
+  readonly optional_value_length_bytes?: number
+  readonly optional_value_missing?: number
   readonly set_flags_bytes: number
   readonly set_condition_mask: number
   readonly set_condition_any_bits: number
@@ -184,11 +248,6 @@ export interface Wire_Contract {
    */
   readonly operations?: readonly Wire_Operation[]
   readonly opcodes: readonly Wire_Entry[]
-  /**
-   * Values extracted from `OperationValueTransform` when the model exposes
-   * that enum. Legacy fixtures may omit this field.
-   */
-  readonly operation_vocabularies?: Wire_Operation_Vocabularies
   readonly statuses: readonly Wire_Entry[]
   readonly v1: Wire_V1_Contract
 }
@@ -229,8 +288,7 @@ const WIRE_OPCODE_TRAIT_ID = "openkache.protocol#wireOpcode"
 const WIRE_STATUS_TRAIT_ID = "openkache.protocol#wireStatus"
 const OPERATION_CONTRACT_TRAIT_ID = "openkache.protocol#operationContract"
 const OPERATION_FIELD_TRAIT_ID = "openkache.protocol#operationField"
-const OPERATION_VALUE_TRANSFORM_SHAPE_ID =
-  "openkache.protocol#OperationValueTransform"
+const WIRE_CODEC_TRAIT_ID = "openkache.protocol#wireCodec"
 
 function object_value(value: unknown, location: string): Json_Object {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -284,6 +342,18 @@ function integer_member(
     )
   }
   return value
+}
+
+function optional_integer_member(
+  object: Json_Object,
+  member: string,
+  location: string,
+  minimum = 0,
+  maximum = Number.MAX_SAFE_INTEGER,
+): number | undefined {
+  return object[member] === undefined
+    ? undefined
+    : integer_member(object, member, location, minimum, maximum)
 }
 
 function shape_name(shape_id: string): string {
@@ -343,6 +413,20 @@ function unique_wire_values(entries: readonly Wire_Entry[], kind: string): void 
 
 function wire_v1_contract(value: unknown): Wire_V1_Contract {
   const contract = object_value(value, `${WIRE_CONTRACT_TRAIT_ID}.v1`)
+  const optional_value_length_bytes = optional_integer_member(
+    contract,
+    "optionalValueLengthBytes",
+    "wireContract.v1",
+    1,
+    0xff,
+  )
+  const optional_value_missing = optional_integer_member(
+    contract,
+    "optionalValueMissing",
+    "wireContract.v1",
+    0,
+    Number.MAX_SAFE_INTEGER,
+  )
   const v1 = {
     alpn: string_member(contract, "alpn", "wireContract.v1"),
     opcode_bytes: integer_member(contract, "opcodeBytes", "wireContract.v1", 1, 0xff),
@@ -397,6 +481,10 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
       0,
       0xff,
     ),
+    ...(optional_value_length_bytes === undefined
+      ? {}
+      : { optional_value_length_bytes }),
+    ...(optional_value_missing === undefined ? {} : { optional_value_missing }),
     set_flags_bytes: integer_member(
       contract,
       "setFlagsBytes",
@@ -651,6 +739,16 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
     )
   }
   if (
+    (v1.optional_value_length_bytes !== undefined &&
+      v1.optional_value_length_bytes !== 4) ||
+    (v1.optional_value_missing !== undefined &&
+      v1.optional_value_missing !== 0xffff_ffff)
+  ) {
+    throw new Error(
+      "wire v1 optional-value framing must use four big-endian length bytes and 0xffffffff as the missing sentinel",
+    )
+  }
+  if (
     v1.namespace_id_bytes !== 8 ||
     v1.namespace_revision_bytes !== 8 ||
     v1.namespace_name_length_bytes !== 1 ||
@@ -772,33 +870,6 @@ function wire_enum_entries(
   return entries
 }
 
-function smithy_enum_values(
-  shapes: Json_Object,
-  shape_id: string,
-  kind: string,
-): readonly string[] {
-  const enum_shape = object_member(shapes, shape_id, "Smithy AST.shapes")
-  if (shape_type(enum_shape, `Smithy AST.shapes.${shape_id}`) !== "enum") {
-    throw new Error(`${shape_id} must be an enum`)
-  }
-  const members = object_member(enum_shape, "members", shape_id)
-  const values = Object.entries(members).map(([name, value]) => {
-    const member_shape = object_value(value, `${shape_id}.${name}`)
-    return string_member(
-      object_member(member_shape, "traits", `${shape_id}.${name}`),
-      "smithy.api#enumValue",
-      `${shape_id}.${name}.traits`,
-    )
-  })
-  if (values.length === 0) {
-    throw new Error(`${kind} enum must define at least one value`)
-  }
-  if (new Set(values).size !== values.length) {
-    throw new Error(`duplicate ${kind} enum value`)
-  }
-  return values
-}
-
 function optional_object_member(
   object: Json_Object,
   member: string,
@@ -808,13 +879,12 @@ function optional_object_member(
   return value === undefined ? undefined : object_value(value, `${location}.${member}`)
 }
 
-function operation_shape_field_count(
+function operation_shape_fields(
   shapes: Json_Object,
   operation_shape: Json_Object,
   operation_target: string,
   direction: "input" | "output",
-  role: string,
-): number {
+): readonly Wire_Operation_Field[] {
   const shape_reference = object_member(
     operation_shape,
     direction,
@@ -829,22 +899,65 @@ function operation_shape_field_count(
   if (shape_type(structure, `Smithy AST.shapes.${shape_target}`) !== "structure") {
     throw new Error(`${shape_target} must be a structure`)
   }
-  const members = object_member(structure, "members", shape_target)
-  return Object.entries(members).filter(([member_name, value]) => {
-    const member = object_value(value, `${shape_target}.${member_name}`)
-    const traits = optional_object_member(
-      member,
-      "traits",
-      `${shape_target}.${member_name}`,
-    )
-    const field = traits?.[OPERATION_FIELD_TRAIT_ID]
-    if (field === undefined) return false
-    return string_member(
-      object_value(field, `${shape_target}.${member_name}.${OPERATION_FIELD_TRAIT_ID}`),
-      "role",
-      `${shape_target}.${member_name}.${OPERATION_FIELD_TRAIT_ID}`,
-    ) === role
-  }).length
+  const fields = new Map<string, { count: number; codecs: string[] }>()
+  const visit = (target: string, ancestors: ReadonlySet<string>): void => {
+    if (ancestors.has(target)) {
+      throw new Error(`${operation_target}.${direction} shape cycle through ${target}`)
+    }
+    const next_ancestors = new Set(ancestors).add(target)
+    const current = object_member(shapes, target, "Smithy AST.shapes")
+    const members = object_member(current, "members", target)
+    for (const [member_name, value] of Object.entries(members)) {
+      const member = object_value(value, `${target}.${member_name}`)
+      const traits = optional_object_member(member, "traits", `${target}.${member_name}`)
+      const field = traits?.[OPERATION_FIELD_TRAIT_ID]
+      if (field !== undefined) {
+        const role = string_member(
+          object_value(field, `${target}.${member_name}.${OPERATION_FIELD_TRAIT_ID}`),
+          "role",
+          `${target}.${member_name}.${OPERATION_FIELD_TRAIT_ID}`,
+        )
+        const entry = fields.get(role) ?? { count: 0, codecs: [] }
+        entry.count += 1
+        const codec = traits?.[WIRE_CODEC_TRAIT_ID]
+        if (codec !== undefined) {
+          const codec_name = string_member(
+            object_value(codec, `${target}.${member_name}.${WIRE_CODEC_TRAIT_ID}`),
+            "name",
+            `${target}.${member_name}.${WIRE_CODEC_TRAIT_ID}`,
+          )
+          entry.codecs.push(codec_name)
+        }
+        fields.set(role, entry)
+      }
+      const nested_target = member["target"]
+      if (typeof nested_target === "string") {
+        const nested = shapes[nested_target]
+        if (
+          nested !== undefined &&
+          shape_type(
+            object_value(nested, `Smithy AST.shapes.${nested_target}`),
+            `Smithy AST.shapes.${nested_target}`,
+          ) === "structure"
+        ) {
+          visit(nested_target, next_ancestors)
+        }
+      }
+    }
+  }
+  visit(shape_target, new Set())
+  return [...fields].map(([role, entry]) => ({
+    count: entry.count,
+    role,
+    ...(entry.codecs.length === 0 ? {} : { codecs: entry.codecs }),
+  }))
+}
+
+function operation_field_count(
+  fields: readonly Wire_Operation_Field[],
+  role: string,
+): number {
+  return fields.find((field) => field.role === role)?.count ?? 0
 }
 
 function operation_contract(
@@ -852,7 +965,6 @@ function operation_contract(
   shape: Json_Object,
   target: string,
   statuses: readonly Wire_Entry[],
-  value_transforms: readonly string[] = OPERATION_VALUE_TRANSFORMS,
 ): Wire_Operation_Contract | undefined {
   const traits = optional_object_member(shape, "traits", target)
   const value = traits?.[OPERATION_CONTRACT_TRAIT_ID]
@@ -869,37 +981,11 @@ function operation_contract(
     "requestKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (!OPERATION_REQUEST_KINDS.includes(request_kind as Wire_Operation_Request_Kind)) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind is not a supported request kind`,
-    )
-  }
-  if (OPERATION_REQUEST_SCOPES[request_kind as Wire_Operation_Request_Kind] !== scope) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind ${request_kind} is incompatible with scope ${scope}`,
-    )
-  }
-
   const response_kind = string_member(
     contract,
     "responseKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (!OPERATION_RESPONSE_KINDS.includes(response_kind as Wire_Operation_Response_Kind)) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
-    )
-  }
-  const allowed_response_kinds =
-    OPERATION_RESPONSE_KINDS_BY_REQUEST[
-      request_kind as Wire_Operation_Request_Kind
-    ]
-  if (!allowed_response_kinds.includes(response_kind as Wire_Operation_Response_Kind)) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID} responseKind ${response_kind} is incompatible with requestKind ${request_kind}`,
-    )
-  }
-
   const retry_mode = string_member(
     contract,
     "retryMode",
@@ -911,62 +997,21 @@ function operation_contract(
     )
   }
 
-  const value_transform_value = contract["valueTransform"]
-  const value_transform =
-    value_transform_value === undefined
-      ? undefined
-      : string_member(
-          contract,
-          "valueTransform",
-          `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
-        )
-  if (
-    value_transform !== undefined &&
-    !value_transforms.includes(value_transform)
-  ) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.valueTransform must be one of ${value_transforms.join(", ")}`,
-    )
-  }
-  const parsed_value_transform =
-    value_transform as Wire_Operation_Value_Transform | undefined
-  const request_item_count = operation_shape_field_count(
+  const request_fields = operation_shape_fields(
     shapes,
     shape,
     target,
     "input",
-    "item_id",
   )
-  const request_value_count = operation_shape_field_count(
-    shapes,
-    shape,
-    target,
-    "input",
-    "value",
-  )
-  const response_value_count = operation_shape_field_count(
+  const response_fields = operation_shape_fields(
     shapes,
     shape,
     target,
     "output",
-    "value",
   )
-  if (request_kind === "scoped_item" && request_item_count === 0) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID} scoped_item operations must define at least one item_id member`,
-    )
-  }
-  if (request_kind !== "scoped_item" && request_item_count !== 0) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID} non-scoped-item operations cannot define item_id members`,
-    )
-  }
-  if (response_kind === "value" && response_value_count === 0) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID} value operations must define at least one value member`,
-    )
-  }
-
+  const request_item_count = operation_field_count(request_fields, "item_id")
+  const request_value_count = operation_field_count(request_fields, "value")
+  const response_value_count = operation_field_count(response_fields, "value")
   const status_names = new Set(
     statuses.flatMap((status) => [
       status.name,
@@ -1012,17 +1057,16 @@ function operation_contract(
   }
   return {
     error_statuses,
+    request_fields,
     request_kind: request_kind as Wire_Operation_Contract["request_kind"],
     request_value_count,
     request_item_count,
+    response_fields,
     response_value_count,
     response_kind: response_kind as Wire_Operation_Contract["response_kind"],
     retry_mode: retry_mode as Wire_Operation_Contract["retry_mode"],
     scope: scope as Wire_Operation_Contract["scope"],
     success_statuses,
-    ...(parsed_value_transform === undefined
-      ? {}
-      : { value_transform: parsed_value_transform }),
   }
 }
 
@@ -1030,7 +1074,6 @@ function wire_operations(
   shapes: Json_Object,
   opcodes: readonly Wire_Entry[],
   statuses: readonly Wire_Entry[],
-  value_transforms: readonly string[],
   strict: boolean,
 ): readonly Wire_Operation[] | undefined {
   const operations: Wire_Operation[] = []
@@ -1046,7 +1089,6 @@ function wire_operations(
       object_value(shape, `Smithy AST.shapes.${target}`),
       target,
       statuses,
-      value_transforms,
     )
     if (contract === undefined) {
       if (strict) {
@@ -1112,32 +1154,17 @@ export function extract_wire_contract(ast: unknown, strict_operations = false): 
     WIRE_STATUS_TRAIT_ID,
     "status",
   )
-  const operation_value_transform_shape =
-    shapes[OPERATION_VALUE_TRANSFORM_SHAPE_ID]
-  const value_transforms =
-    operation_value_transform_shape === undefined
-      ? undefined
-      : smithy_enum_values(
-          shapes,
-          OPERATION_VALUE_TRANSFORM_SHAPE_ID,
-          "operation value transform",
-        )
-
   const contract = {
     item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,
     v1: wire_v1_contract(contract_trait.v1),
-    ...(value_transforms === undefined
-      ? {}
-      : { operation_vocabularies: { value_transforms } }),
   }
   const operations = wire_operations(
     shapes,
     opcodes,
     statuses,
-    value_transforms ?? OPERATION_VALUE_TRANSFORMS,
     strict_operations,
   )
   return operations === undefined ? contract : { ...contract, operations }
@@ -1296,15 +1323,6 @@ ${names}
 function rust_operation_contract(contract: Wire_Contract): string {
   const operations = contract.operations
   if (operations === undefined) return ""
-  const modeled_value_transforms = operations.flatMap((operation) =>
-    operation.contract.value_transform === undefined
-      ? []
-      : [operation.contract.value_transform])
-  const value_transforms = contract.operation_vocabularies?.value_transforms ??
-    (modeled_value_transforms.length === 0
-      ? []
-      : [...new Set(["identity", ...modeled_value_transforms])])
-  const has_value_transforms = value_transforms.length > 0
   const status_variant = (status: string): string => {
     const entry = contract.statuses.find(
       (candidate) =>
@@ -1319,26 +1337,76 @@ function rust_operation_contract(contract: Wire_Contract): string {
   }
   const enum_variant = (value: string): string =>
     pascal_case(value)
+  const request_variant = (operation: Wire_Operation): string => {
+    switch (derive_wire_request_layout(operation.contract)) {
+      case "empty":
+        return "Empty"
+      case "application_value":
+        return "ApplicationValue"
+      case "item":
+      case "set":
+        return "ScopedItem"
+      case "namespace":
+        return "ScopedNamespace"
+      case "namespace_open":
+        return "NamespaceOpen"
+      case "namespace_update_policy":
+        return "NamespaceUpdatePolicy"
+      case "namespace_delete":
+        return "NamespaceDelete"
+    }
+  }
+  const response_variant = (operation: Wire_Operation): string =>
+    enum_variant(derive_wire_response_route(operation.contract))
+  const optional_value_count = (operation: Wire_Operation): number => {
+    switch (derive_wire_response_route(operation.contract)) {
+      case "composite":
+        return operation.contract.response_fields.reduce(
+          (count, field) => count + field.count,
+          0,
+        )
+      case "value":
+        return operation.contract.response_value_count
+      default:
+        return 0
+    }
+  }
   const status_slice = (statuses: readonly string[]): string =>
     `&[${statuses
       .map((status) => `Status::${status_variant(status)}`)
+      .join(", ")}]`
+  const field_slice = (fields: readonly Wire_Operation_Field[]): string =>
+    `&[${fields
+      .map(
+        (field) =>
+          `OperationField { role: ${rust_string_literal(field.role)}, count: ${field.count}, codecs: &[${(field.codecs ?? [])
+            .map(rust_string_literal)
+            .join(", ")}] }`,
+      )
       .join(", ")}]`
   const metadata = operations
     .map(
       (operation) => `        Opcode::${operation.name} => OperationContract {
             scope: OperationScope::${enum_variant(operation.contract.scope)},
-            request_kind: OperationRequestKind::${enum_variant(operation.contract.request_kind)},
+            request_kind: OperationRequestKind::${request_variant(operation)},
+            request_label: ${rust_string_literal(operation.contract.request_kind)},
             request_value_count: ${operation.contract.request_value_count ?? 0},
             request_item_count: ${operation.contract.request_item_count},
-            response_kind: OperationResponseKind::${enum_variant(operation.contract.response_kind)},
+            request_fields: ${field_slice(operation.contract.request_fields)},
+            response_kind: OperationResponseKind::${response_variant(operation)},
+            response_label: ${rust_string_literal(operation.contract.response_kind)},
             response_value_count: ${operation.contract.response_value_count},
+            response_fields: ${field_slice(operation.contract.response_fields)},
             retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
-${has_value_transforms
-  ? `            value_transform: OperationValueTransform::${enum_variant(operation.contract.value_transform ?? "identity")},`
-  : ""}
             success_statuses: ${status_slice(operation.contract.success_statuses)},
             error_statuses: ${status_slice(operation.contract.error_statuses)},
         },`,
+    )
+    .join("\n")
+  const optional_value_metadata = operations
+    .map(
+      (operation) =>
+        `        Opcode::${operation.name} => ${optional_value_count(operation)},`,
     )
     .join("\n")
   return `/// Request scope declared by the Smithy operation contract.
@@ -1368,6 +1436,7 @@ pub enum OperationResponseKind {
     Empty,
     Pong,
     ApplicationValue,
+    Composite,
     Value,
     SetOutcome,
     DeleteOutcome,
@@ -1383,26 +1452,30 @@ pub enum OperationRetryMode {
     WhenNotCreating,
 }
 
-${has_value_transforms
-  ? `/// Application-value transformation declared by the Smithy operation contract.
+/// One ordered Smithy operation-field role and its cardinality.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationValueTransform {
-${value_transforms.map((value) => `    ${enum_variant(value)},`).join("\n")}
+pub struct OperationField {
+    pub role: &'static str,
+    pub count: usize,
+    pub codecs: &'static [&'static str],
 }
-`
-  : ""}
 
 /// Generated semantic metadata for one protocol operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
     pub scope: OperationScope,
     pub request_kind: OperationRequestKind,
+    /// Original Smithy requestKind label, retained for diagnostics only.
+    pub request_label: &'static str,
     pub request_value_count: usize,
     pub request_item_count: usize,
+    pub request_fields: &'static [OperationField],
     pub response_kind: OperationResponseKind,
+    /// Original Smithy responseKind label, retained for diagnostics only.
+    pub response_label: &'static str,
     pub response_value_count: usize,
+    pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
-${has_value_transforms ? "    pub value_transform: OperationValueTransform,\n" : ""}
     pub success_statuses: &'static [Status],
     pub error_statuses: &'static [Status],
 }
@@ -1411,6 +1484,18 @@ ${has_value_transforms ? "    pub value_transform: OperationValueTransform,\n" :
 pub const fn operation_contract(opcode: Opcode) -> OperationContract {
     match opcode {
 ${metadata}
+    }
+}
+
+/// Returns the number of modeled value fields in an operation response.
+///
+/// This count is derived from the Smithy output field plan. A single-value
+/// lookup keeps its legacy raw-value framing but still returns one so clients
+/// can distinguish a missing value; opaque, status-only, and descriptor
+/// responses return zero.
+pub const fn operation_response_field_count(opcode: Opcode) -> usize {
+    match opcode {
+${optional_value_metadata}
     }
 }
 `
@@ -1428,38 +1513,23 @@ ${metadata}
 function rust_request_layout(contract: Wire_Contract): string {
   const operations = contract.operations
   if (operations === undefined) return ""
-  const request_kind = (operation: Wire_Operation): string => {
-    const { request_kind, request_value_count, response_kind } = operation.contract
-    // `request_value_count` is present for all production Smithy ASTs. Keep
-    // the response-kind fallback only for old unit fixtures that predate the
-    // role count; it is never used by generated production output.
-    if (
-      request_kind === "scoped_item" &&
-      (request_value_count ?? (response_kind === "set_outcome" ? 1 : 0)) > 0
-    ) {
-      return "Set"
-    }
-    if (request_kind === "scoped_item") return "Item"
-    if (request_kind === "scoped_namespace") return "Namespace"
-    return pascal_case(request_kind)
-  }
   const step_expression = (operation: Wire_Operation): string => {
-    const kind = request_kind(operation)
+    const kind = derive_wire_request_layout(operation.contract)
     const fixed = (bytes: string): string =>
       `WireRequestStep::Fixed { bytes: ${bytes} }`
     switch (kind) {
-      case "Empty":
+      case "empty":
         return `[${fixed("OPCODE_BYTES")}]`
-      case "ApplicationValue":
+      case "application_value":
         return `[${fixed("OPCODE_BYTES")}, WireRequestStep::ValueLength]`
-      case "Item":
+      case "item":
         return `[
             ${fixed(
               "OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES * " +
                 operation.contract.request_item_count,
             )},
         ]`
-      case "Set":
+      case "set":
         return `[
             ${fixed(
               "OPCODE_BYTES + NAMESPACE_ID_BYTES + SET_FLAGS_BYTES + ITEM_ID_BYTES",
@@ -1471,9 +1541,9 @@ function rust_request_layout(contract: Wire_Contract): string {
             },
             WireRequestStep::ValueLength,
         ]`
-      case "Namespace":
+      case "namespace":
         return `[${fixed("OPCODE_BYTES + NAMESPACE_ID_BYTES")}]`
-      case "NamespaceOpen":
+      case "namespace_open":
         return `[
             ${fixed("OPCODE_BYTES + OPEN_FLAGS_BYTES")},
             WireRequestStep::ByteLength,
@@ -1486,7 +1556,7 @@ function rust_request_layout(contract: Wire_Contract): string {
                 value_expected: POLICY_FIXED_TTL,
             },
         ]`
-      case "NamespaceUpdatePolicy":
+      case "namespace_update_policy":
         return `[
             ${fixed("OPCODE_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES")},
             WireRequestStep::ByteThenVarUInt {
@@ -1495,7 +1565,7 @@ function rust_request_layout(contract: Wire_Contract): string {
                 expected: POLICY_FIXED_TTL,
             },
         ]`
-      case "NamespaceDelete":
+      case "namespace_delete":
         return `[
             ${fixed(
               "OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES",
@@ -1584,17 +1654,18 @@ function max_request_frame_bytes_for_contract(contract: Wire_Contract): number {
   }
 
   const sizes = operations.map((operation) => {
-    const { request_kind, request_item_count, request_value_count, response_kind } =
-      operation.contract
-    switch (request_kind) {
+    const { request_item_count, request_value_count } = operation.contract
+    const kind = derive_wire_request_layout(operation.contract)
+    switch (kind) {
       case "empty":
         return v1.opcode_bytes
       case "application_value":
         return v1.opcode_bytes + v1.max_varuint_bytes + contract.max_value_bytes
-      case "scoped_item": {
+      case "item":
+      case "set": {
         const item_count = request_item_count * contract.item_id_bytes
-        const is_value_request =
-          (request_value_count ?? (response_kind === "set_outcome" ? 1 : 0)) > 0
+        const is_value_request = kind === "set" ||
+          (request_value_count ?? 0) > 0
         const prefix =
           v1.opcode_bytes +
           v1.namespace_id_bytes +
@@ -1604,7 +1675,7 @@ function max_request_frame_bytes_for_contract(contract: Wire_Contract): number {
           (is_value_request ? v1.max_varuint_bytes : 0)
         return prefix + (is_value_request ? contract.max_value_bytes : 0)
       }
-      case "scoped_namespace":
+      case "namespace":
         return v1.opcode_bytes + v1.namespace_id_bytes
       case "namespace_open":
         return (
@@ -1619,6 +1690,11 @@ function max_request_frame_bytes_for_contract(contract: Wire_Contract): number {
       case "namespace_delete":
         return v1.opcode_bytes + v1.delete_flags_bytes + v1.namespace_id_bytes +
           v1.namespace_revision_bytes
+      default:
+        // Unknown request labels remain safe to frame from their role shape.
+        // A role-less operation consumes only its opcode; unknown item/value
+        // shapes have already been normalized to the SET/ITEM branches.
+        return v1.opcode_bytes
     }
   })
   return Math.max(...sizes)
@@ -1704,6 +1780,9 @@ pub const NAMESPACE_ID_BYTES: usize = ${formatted_decimal(v1.namespace_id_bytes)
 pub const NAMESPACE_REVISION_BYTES: usize = ${formatted_decimal(v1.namespace_revision_bytes)};
 /// Bytes in the fixed namespace name length field.
 pub const NAMESPACE_NAME_LENGTH_BYTES: usize = ${formatted_decimal(v1.namespace_name_length_bytes)};
+/// Width and missing sentinel used by the generic optional-value codec.
+pub const OPTIONAL_VALUE_LENGTH_BYTES: usize = ${formatted_decimal(v1.optional_value_length_bytes ?? 4)};
+pub const OPTIONAL_VALUE_MISSING: u32 = ${formatted_decimal(v1.optional_value_missing ?? 0xffff_ffff)};
 
 /// First assigned status value reserved for errors.
 pub const ERROR_STATUS_MINIMUM: u8 = ${formatted_byte(v1.error_status_minimum)};
@@ -1732,4 +1811,111 @@ ${rust_operation_contract(contract)}
 
 ${rust_request_layout(contract)}
 `
+}
+
+/**
+ * Renders the protocol operation table used by `SPEC.md`.
+ *
+ * Keeping this table generator-owned gives documentation a stale-checkable
+ * representation of opcode assignments and the role-derived framing shape.
+ */
+export function render_protocol_spec_operation_table(contract: Wire_Contract): string {
+  const operations = contract.operations
+  if (operations === undefined) {
+    throw new Error("protocol operation metadata is required for the specification table")
+  }
+  const field_count = (
+    fields: readonly Wire_Operation_Field[],
+    role: string,
+  ): number => fields.find((field) => field.role === role)?.count ?? 0
+  const request_layout = (operation: Wire_Operation): string => {
+    const { request_fields, request_item_count } = operation.contract
+    const item_count = field_count(request_fields, "item_id")
+    switch (derive_wire_request_layout(operation.contract)) {
+      case "empty":
+        return "opcode only"
+      case "application_value":
+        return "opcode + value_len + value"
+      case "item":
+        return `opcode + namespace ID + ${request_item_count} item ID${request_item_count === 1 ? "" : "s"}`
+      case "set":
+        return `opcode + namespace ID + flags + ${item_count} item ID${item_count === 1 ? "" : "s"} + value`
+      case "namespace":
+        return "opcode + namespace ID"
+      case "namespace_open":
+        return "opcode + flags + name + optional policy"
+      case "namespace_update_policy":
+        return "opcode + namespace ID + revision + policy"
+      case "namespace_delete":
+        return "opcode + flags + namespace ID + revision"
+    }
+  }
+  const response_payload = (operation: Wire_Operation): string => {
+    const { response_fields, response_value_count } = operation.contract
+    const value_count =
+      response_value_count ?? field_count(response_fields, "value")
+    switch (derive_wire_response_route(operation.contract)) {
+      case "application_value":
+        return "opaque payload"
+      case "composite":
+        return "ordered field sequence"
+      case "value":
+        return value_count === 1
+          ? "optional value"
+          : `${value_count} ordered optional values`
+      case "set_outcome":
+        return "set_outcome"
+      case "delete_outcome":
+        return "deleted"
+      case "stats_json":
+        return "JSON object"
+      case "namespace_descriptor":
+        return "namespace descriptor"
+      case "pong":
+        return "PONG"
+      case "empty":
+        return "empty"
+    }
+  }
+  const payload_codecs = (operation: Wire_Operation): string => {
+    const codecs = operation.contract.response_fields
+      .filter((field) => field.role === "payload")
+      .flatMap((field) => field.codecs ?? [])
+    const unique = [...new Set(codecs)]
+    return unique.length === 0 ? "—" : unique.map((codec) => `\`${codec}\``).join(", ")
+  }
+  const rows = operations
+    .map((operation) => {
+      const opcode = contract.opcodes.find((entry) => entry.name === operation.name)
+      if (opcode === undefined) {
+        throw new Error(`operation ${operation.name} has no opcode`)
+      }
+      return `| \`${opcode.value.toString(16).padStart(2, "0").toUpperCase()}\` | \`${wire_name(operation.name).toUpperCase()}\` | ${request_layout(operation)} | ${response_payload(operation)} | ${payload_codecs(operation)} |`
+    })
+    .join("\n")
+  return `| Opcode | Name | Request layout | Response payload | Payload codec |
+|---|---|---|---|---|
+${rows}`
+}
+
+export const PROTOCOL_SPEC_OPERATION_TABLE_START =
+  "<!-- openkache:generated-protocol-operation-table:start -->"
+export const PROTOCOL_SPEC_OPERATION_TABLE_END =
+  "<!-- openkache:generated-protocol-operation-table:end -->"
+
+/** Returns the stale generated operation-table paths in a protocol spec. */
+export function protocol_spec_operation_table_issues(
+  spec: string,
+  contract: Wire_Contract,
+): readonly string[] {
+  const start = spec.indexOf(PROTOCOL_SPEC_OPERATION_TABLE_START)
+  const end = spec.indexOf(PROTOCOL_SPEC_OPERATION_TABLE_END)
+  if (start < 0 || end < 0 || end < start) {
+    return ["protocol/SPEC.md (generated operation table markers missing)"]
+  }
+  const actual = spec
+    .slice(start + PROTOCOL_SPEC_OPERATION_TABLE_START.length, end)
+    .trim()
+  const expected = render_protocol_spec_operation_table(contract).trim()
+  return actual === expected ? [] : ["protocol/SPEC.md (generated operation table stale)"]
 }

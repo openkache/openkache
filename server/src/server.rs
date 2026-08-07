@@ -1874,9 +1874,20 @@ fn response_budget_bytes(
     request_value_bytes: usize,
     max_item_bytes: usize,
 ) -> Option<usize> {
-    match crate::contract::operation_contract(opcode).response_kind {
+    let contract = crate::contract::operation_contract(opcode);
+    let response_field_count = crate::contract::operation_response_field_count(opcode);
+    match contract.response_kind {
         OperationResponseKind::ApplicationValue => Some(request_value_bytes),
-        OperationResponseKind::Value => Some(max_item_bytes),
+        OperationResponseKind::Composite | OperationResponseKind::Value => {
+            if response_field_count > 1 {
+                openkache_protocol::optional_values_max_encoded_len(
+                    response_field_count,
+                    max_item_bytes,
+                )
+            } else {
+                Some(max_item_bytes)
+            }
+        }
         _ => None,
     }
 }

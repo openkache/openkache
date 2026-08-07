@@ -294,17 +294,19 @@ possible next frame; it MUST terminate the lane after the error response.
 
 ### Opcodes
 
-| Opcode | Name | Request layout | Value |
-|---:|---|---|---|
-| `01` | `PING` | opcode only | no Item ID, no value |
-| `02` | `GET` | opcode + namespace ID + Item ID | no value |
-| `03` | `SET` | opcode + namespace ID + flags + Item ID + optional TTL + value length + value | value is `0..=64 MiB` |
-| `04` | `DELETE` | opcode + namespace ID + Item ID | no value |
-| `05` | `STATS` | opcode + namespace ID | no Item ID, no value |
-| `06` | `SYNC` | opcode + namespace ID | no Item ID, no value |
-| `07` | `NAMESPACE_OPEN` | opcode + flags + name length + name + optional policy | namespace descriptor |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + expected revision + policy | namespace descriptor |
-| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + expected revision | no value |
+<!-- openkache:generated-protocol-operation-table:start -->
+| Opcode | Name | Request layout | Response payload | Payload codec |
+|---|---|---|---|---|
+| `01` | `PING` | opcode only | PONG | — |
+| `02` | `GET` | opcode + namespace ID + 1 item ID | optional value | — |
+| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome | — |
+| `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted | — |
+| `05` | `STATS` | opcode + namespace ID | JSON object | — |
+| `06` | `SYNC` | opcode + namespace ID | empty | — |
+| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | namespace descriptor | — |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | namespace descriptor | — |
+| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — |
+<!-- openkache:generated-protocol-operation-table:end -->
 
 ### `SET` flags
 
@@ -774,6 +776,17 @@ response = status | payload_len | payload
 
 `payload_len` is present for every response, including responses with an empty
 payload. Responses have no version, request identifier, flags, Item ID, or TTL.
+
+### Optional-value sequences
+
+Operations whose Smithy output contains multiple `value` fields use one
+ordered optional-value sequence. The sequence is a transport primitive; the
+operation model supplies its field count and each field's codec.
+
+Each field is encoded as a four-octet big-endian length followed by that many
+value octets. `FF FF FF FF` is the missing-value sentinel. A zero length is a
+present empty value. Fields retain their modeled order, and the complete
+sequence is bounded by the protocol's maximum value size.
 
 ### Status codes
 
