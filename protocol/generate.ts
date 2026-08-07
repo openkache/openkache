@@ -18,6 +18,9 @@ import {
   render_rust_semantic_constants,
   render_rust_server_contract,
   render_protocol_spec_operation_table,
+  protocol_spec_operation_table_issues,
+  PROTOCOL_SPEC_OPERATION_TABLE_END,
+  PROTOCOL_SPEC_OPERATION_TABLE_START,
   smithy_wire_ast,
   type Wire_Contract,
 } from "./wire"
@@ -28,6 +31,9 @@ export {
   render_rust_server_contract,
   render_rust_wire,
   render_protocol_spec_operation_table,
+  protocol_spec_operation_table_issues,
+  PROTOCOL_SPEC_OPERATION_TABLE_END,
+  PROTOCOL_SPEC_OPERATION_TABLE_START,
   smithy_wire_ast,
 } from "./wire"
 export type {
@@ -46,6 +52,7 @@ const GENERATED_WIRE_OUTPUT = process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
   join(GENERATED_OUTPUT_ROOT, "protocol/generated_local/wire_values.rs")
 const GENERATED_SERVER_OUTPUT = process.env.OPENKACHE_RUST_SERVER_OUTPUT ??
   join(GENERATED_OUTPUT_ROOT, "server/generated_local/server_contract.rs")
+const SPEC_OUTPUT = join(PROTOCOL_DIRECTORY, "SPEC.md")
 
 /** Returns generated outputs that are missing or differ from the wire contract. */
 export function generated_output_issues(
@@ -106,6 +113,19 @@ export function main(): number {
     }
     const contract: Wire_Contract = extract_wire_contract(smithy_wire_ast(), true)
     const check_only = process.env.OPENKACHE_GENERATION_CHECK === "1"
+    if (check_only) {
+      const spec_issues = protocol_spec_operation_table_issues(
+        readFileSync(SPEC_OUTPUT, "utf8"),
+        contract,
+      )
+      if (spec_issues.length > 0) {
+        throw new Error(
+          "generated protocol documentation is stale:\n" +
+            spec_issues.map((path) => `  - ${path}`).join("\n") +
+            "\nUpdate the marked operation table in protocol/SPEC.md.",
+        )
+      }
+    }
     if (target === "rust-server") {
       write_output(GENERATED_SERVER_OUTPUT, render_rust_server_contract(contract), check_only)
     } else {

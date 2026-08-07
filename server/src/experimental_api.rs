@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use openkache_protocol::{ItemId, MAX_VALUE_BYTES, Opcode, Response, Status};
+use openkache_protocol::{ItemId, Opcode, Response, Status, encode_optional_values};
 
 use super::operation_handlers::OperationContext;
 use super::{
@@ -166,38 +166,18 @@ pub(super) async fn execute_get2(
         }
     }
 
-    let Some(payload) = encode_optional_values(&values) else {
-        return Some(response_bytes(
-            Status::TooLarge,
-            b"GET2 response exceeds the protocol response limit",
-        ));
+    let encoded_values = values
+        .iter()
+        .map(|value| value.as_deref().map(AsRef::as_ref))
+        .collect::<Vec<_>>();
+    let payload = match encode_optional_values(&encoded_values) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return Some(response_bytes(
+                Status::TooLarge,
+                b"GET2 response exceeds the protocol response limit",
+            ));
+        }
     };
     Some(response(Status::Ok, payload))
-}
-
-/// Encodes the ordered optional values used only by the GET2 API contract.
-fn encode_optional_values(
-    values: &[Option<super::super::types::StoredItemValue>],
-) -> Option<Vec<u8>> {
-    const LENGTH_BYTES: usize = std::mem::size_of::<u32>();
-    const MISSING: u32 = u32::MAX;
-    let payload_len = values.iter().try_fold(0usize, |length, value| {
-        let value_len = value.as_ref().map_or(0, |value| value.len());
-        if value_len >= MISSING as usize {
-            return None;
-        }
-        length.checked_add(LENGTH_BYTES)?.checked_add(value_len)
-    })?;
-    if payload_len > MAX_VALUE_BYTES {
-        return None;
-    }
-    let mut payload = Vec::with_capacity(payload_len);
-    for value in values {
-        let length = value.as_ref().map_or(MISSING, |value| value.len() as u32);
-        payload.extend_from_slice(&length.to_be_bytes());
-        if let Some(value) = value {
-            payload.extend_from_slice(value.as_ref());
-        }
-    }
-    Some(payload)
 }

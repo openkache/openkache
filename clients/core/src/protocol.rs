@@ -918,56 +918,6 @@ fn validate_value_length(value_len: usize) -> Result<()> {
     Ok(())
 }
 
-/// Decodes an ordered sequence of independently optional opaque values.
-///
-/// This codec belongs to the client semantic adapter because it is used by
-/// the modeled GET2 response, not by the shared wire-framing crate.
-pub(crate) fn decode_optional_values(
-    payload: &[u8],
-    value_count: usize,
-) -> Result<Vec<Option<Vec<u8>>>> {
-    const LENGTH_BYTES: usize = std::mem::size_of::<u32>();
-    const MISSING: u32 = u32::MAX;
-    validate_value_length(payload.len())?;
-    let mut cursor = 0usize;
-    let mut values = Vec::with_capacity(value_count);
-    for _ in 0..value_count {
-        let end = cursor
-            .checked_add(LENGTH_BYTES)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        let length_bytes: [u8; LENGTH_BYTES] = payload
-            .get(cursor..end)
-            .ok_or(ProtocolError::InvalidOptionalValues(
-                "optional-value payload is missing an entry length",
-            ))?
-            .try_into()
-            .expect("optional-value length has a fixed width");
-        cursor = end;
-        let length = u32::from_be_bytes(length_bytes);
-        if length == MISSING {
-            values.push(None);
-            continue;
-        }
-        let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-        let end = cursor
-            .checked_add(length)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        let bytes = payload
-            .get(cursor..end)
-            .ok_or(ProtocolError::InvalidOptionalValues(
-                "optional-value payload entry is truncated",
-            ))?;
-        values.push(Some(bytes.to_vec()));
-        cursor = end;
-    }
-    if cursor != payload.len() {
-        return Err(ProtocolError::InvalidOptionalValues(
-            "optional-value payload contains trailing bytes",
-        ));
-    }
-    Ok(values)
-}
-
 fn invalid_shape(
     opcode: Opcode,
     expected_item_id: usize,

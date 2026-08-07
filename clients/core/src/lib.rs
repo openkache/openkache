@@ -2094,7 +2094,7 @@ fn validate_response_contract(
                 if response.status != Status::Ok {
                     invalid_payload("multi-value GET responses must have an OK status")
                 } else {
-                    crate::protocol::decode_optional_values(
+                    openkache_protocol::decode_optional_values(
                         &response.payload,
                         operation_contract.response_value_count,
                     )

@@ -294,23 +294,23 @@ possible next frame; it MUST terminate the lane after the error response.
 
 ### Opcodes
 
-<!-- BEGIN GENERATED OPCODE TABLE. Do not edit this block by hand. -->
- | Opcode | Name | Request layout | Response payload |
- |---|---|---|---|
- | `01` | `PING` | opcode only | PONG |
- | `02` | `GET` | opcode + namespace ID + 1 item ID | optional value |
- | `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome |
- | `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted |
- | `05` | `STATS` | opcode + namespace ID | opaque payload |
- | `06` | `SYNC` | opcode + namespace ID | empty |
- | `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload |
- | `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload |
- | `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty |
- | `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload |
- | `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload |
- | `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload |
- | `0D` | `GET2` | opcode + namespace ID + 2 item IDs | 2 ordered optional values |
- <!-- END GENERATED OPCODE TABLE. -->
+<!-- openkache:generated-protocol-operation-table:start -->
+| Opcode | Name | Request layout | Response payload | Payload codec |
+|---|---|---|---|---|
+| `01` | `PING` | opcode only | PONG | — |
+| `02` | `GET` | opcode + namespace ID + 1 item ID | optional value | — |
+| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome | — |
+| `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted | — |
+| `05` | `STATS` | opcode + namespace ID | JSON object | — |
+| `06` | `SYNC` | opcode + namespace ID | empty | — |
+| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | namespace descriptor | — |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | namespace descriptor | — |
+| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — |
+| `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload | `utf8` |
+| `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload | `utf8` |
+| `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload | `packed_f64_be` |
+| `0D` | `GET2` | opcode + namespace ID + 2 item IDs | 2 ordered optional values | — |
+<!-- openkache:generated-protocol-operation-table:end -->
 
 ### `SET` flags
 
