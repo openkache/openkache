@@ -17,14 +17,34 @@ use super::{
     operation_codecs, response_bytes,
 };
 
+/// A domain value returned by an operation extension.
+///
+/// Storage-backed values retain their zero-copy ownership until the shared
+/// response encoder consumes them; transformed values own their output bytes.
+#[derive(Clone, Debug)]
+pub(super) enum ExtensionValue {
+    Stored(StoredItemValue),
+    Bytes(Vec<u8>),
+}
+
+impl AsRef<[u8]> for ExtensionValue {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Stored(value) => value.as_ref(),
+            Self::Bytes(value) => value,
+        }
+    }
+}
+
 /// Domain-level result returned by a server operation extension.
 ///
-/// The shared handler owns protocol framing for successful application and
-/// ordered optional values.
+/// The shared handler owns protocol framing for successful application values
+/// and ordered field sequences. Extension behavior never selects a wire
+/// sentinel, length prefix, or response route.
 pub(super) enum ExtensionResponse {
     Response(Response),
     ApplicationValue(Vec<u8>),
-    OptionalValues(Vec<Option<StoredItemValue>>),
+    FieldValues(Vec<Option<ExtensionValue>>),
 }
 
 /// Executes an operation whose behavior belongs to an API-owned extension.
@@ -171,11 +191,11 @@ pub(super) async fn execute_get2(
                         )));
                     }
                 }
-                values.push(value);
+                values.push(value.map(ExtensionValue::Stored));
             }
             Err(error) => return Some(ExtensionResponse::Response(cache_error_response(error))),
         }
     }
 
-    Some(ExtensionResponse::OptionalValues(values))
+    Some(ExtensionResponse::FieldValues(values))
 }

@@ -17,7 +17,7 @@ use super::{
     descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
     response, response_bytes,
 };
-use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions, optional_values_response};
+use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions, field_values_response};
 
 /// Borrowed context passed from the protocol server to one concrete handler.
 ///
@@ -55,16 +55,16 @@ impl OperationInputView<'_> {
     /// field to the shared operation context. Repeated roles remain a
     /// cardinality in the generated contract rather than an operation-name
     /// special case.
-    pub(super) fn fields(&self) -> &'static [crate::contract::OperationField] {
-        crate::contract::operation_contract(self.opcode).request_fields
+    pub(super) fn fields(&self) -> &'static [crate::contract::OperationFieldPlan] {
+        crate::contract::operation_contract(self.opcode).request_plan
     }
 
     /// Returns the modeled cardinality for one semantic role.
     pub(super) fn field_count(&self, role: &str) -> usize {
         self.fields()
             .iter()
-            .find(|field| field.role == role)
-            .map_or(0, |field| field.count)
+            .filter(|field| field.role == role)
+            .count()
     }
 
     /// Returns the modeled value for a role without requiring a wire-family
@@ -86,6 +86,27 @@ impl OperationInputView<'_> {
                 Some(OperationFieldValue::SetOptions(self.set_options))
             }
             "create_if_missing" => Some(OperationFieldValue::Boolean(self.create_if_missing)),
+            _ => None,
+        }
+    }
+
+    /// Returns one ordered occurrence of a modeled role.
+    ///
+    /// Repeated fields are addressed by ordinal rather than by an
+    /// operation-specific accessor. Existing storage fields retain their
+    /// zero-copy slices; callers that need a new wire primitive can add a
+    /// codec-backed `OperationFieldValue` without changing the dispatch path.
+    pub(super) fn field_at(
+        &self,
+        role: &str,
+        index: usize,
+    ) -> Option<OperationFieldValue<'_>> {
+        let value = self.field(role)?;
+        match value {
+            OperationFieldValue::ItemIds(item_ids) => item_ids
+                .get(index)
+                .map(|_| OperationFieldValue::ItemIds(&item_ids[index..index + 1])),
+            _ if index == 0 => Some(value),
             _ => None,
         }
     }
@@ -165,7 +186,7 @@ fn encode_extension_response(opcode: Opcode, extension: ExtensionResponse) -> Re
     match extension {
         ExtensionResponse::Response(response) => response,
         ExtensionResponse::ApplicationValue(value) => response(Status::Ok, value),
-        ExtensionResponse::OptionalValues(values) => optional_values_response(opcode, &values),
+        ExtensionResponse::FieldValues(values) => field_values_response(opcode, &values),
     }
 }
 

@@ -1865,26 +1865,10 @@ fn request_may_mutate(request: &Request) -> bool {
     )
 }
 
-fn response_budget_bytes(opcode: Opcode, max_item_bytes: usize) -> Option<usize> {
-    let contract = crate::contract::operation_contract(opcode);
-    let response_field_count = crate::contract::operation_response_field_count(opcode);
-    match contract.response_kind {
-        "application_value" => Some(contract.response_payload_bound.min(max_item_bytes)),
-        "composite" | "value" => {
-            if response_field_count > 1 {
-                openkache_protocol::optional_values_max_encoded_len(
-                    response_field_count,
-                    max_item_bytes,
-                )
-            } else {
-                Some(contract.response_payload_bound.min(max_item_bytes))
-            }
-        }
-        "stats_json" | "namespace_descriptor" => {
-            Some(contract.response_payload_bound.min(max_item_bytes))
-        }
-        _ => None,
-    }
+fn response_budget_bytes(opcode: Opcode, _max_item_bytes: usize) -> Option<usize> {
+    let payload_bound = crate::contract::operation_contract(opcode)
+        .response_payload_bound;
+    (payload_bound > 0).then_some(payload_bound)
 }
 
 /// Dispatches a decoded protocol request to the SSD-backed worker runtime.

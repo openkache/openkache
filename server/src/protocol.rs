@@ -16,12 +16,14 @@ pub use openkache_protocol::{ItemId, Opcode, Response, Status};
 
 const MAX_POLICY_BYTES: usize = POLICY_FLAGS_BYTES + openkache_protocol::MAX_VARUINT_BYTES;
 
-/// Encodes an ordered optional-value response from its modeled field count.
+/// Encodes an ordered response field sequence from its generated field count.
 ///
-/// Server-owned handlers provide the values and decide what they mean. This
+/// Server-owned handlers provide domain values and decide what they mean. This
 /// helper owns only the shared response framing contract: field cardinality,
-/// length width, missing sentinel, and protocol-size validation.
-pub(super) fn optional_values_response<T: AsRef<[u8]>>(
+/// length width, missing sentinel, and protocol-size validation. Optional
+/// values are one reusable field-sequence encoding; the operation contract
+/// remains responsible for declaring the ordered fields and their requiredness.
+pub(super) fn field_values_response<T: AsRef<[u8]>>(
     opcode: Opcode,
     values: &[Option<T>],
 ) -> Response {
@@ -29,7 +31,20 @@ pub(super) fn optional_values_response<T: AsRef<[u8]>>(
     if expected == 0 || values.len() != expected {
         return Response::new(
             Status::InternalError,
-            b"operation optional-value response does not match its modeled fields".to_vec(),
+            b"operation response fields do not match their generated plan".to_vec(),
+        )
+        .expect("static response fits the protocol limit");
+    }
+    let plan = crate::contract::operation_contract(opcode).response_plan;
+    if plan.len() == expected
+        && values
+            .iter()
+            .zip(plan)
+            .any(|(value, field)| field.required && value.is_none())
+    {
+        return Response::new(
+            Status::InternalError,
+            b"required operation response field is missing".to_vec(),
         )
         .expect("static response fits the protocol limit");
     }
@@ -42,7 +57,7 @@ pub(super) fn optional_values_response<T: AsRef<[u8]>>(
             .expect("optional-value payload was validated by the protocol encoder"),
         Err(_) => Response::new(
             Status::TooLarge,
-            b"operation optional-value response exceeds the protocol limit".to_vec(),
+            b"operation response fields exceed the protocol limit".to_vec(),
         )
         .expect("static response fits the protocol limit"),
     }
