@@ -50,6 +50,11 @@ export interface Wire_Operation_Contract {
    * operation-specific request family.
    */
   readonly request_fields: readonly Wire_Operation_Field[]
+  /**
+   * Ordered request field plan. This preserves requiredness, shape, and
+   * member order for server-owned extensions; legacy fixtures may omit it.
+   */
+  readonly request_plan?: readonly Wire_Operation_Field_Plan[]
   /** Generated request transport descriptor derived from the field plan. */
   readonly request_kind: Wire_Operation_Request_Kind
   /**
@@ -61,6 +66,11 @@ export interface Wire_Operation_Contract {
   /** Number of item IDs carried by a scoped-item request, derived from Smithy roles. */
   readonly request_item_count: number
   readonly response_fields: readonly Wire_Operation_Field[]
+  /**
+   * Ordered response field plan. This is the generic field-sequence source of
+   * truth; optional-value framing is only one encoding used by that plan.
+   */
+  readonly response_plan?: readonly Wire_Operation_Field_Plan[]
   /** Number of optional values carried by a value response, derived from Smithy roles. */
   readonly response_value_count: number
   /** Generated response transport descriptor derived from the field plan. */
@@ -78,6 +88,16 @@ export interface Wire_Operation_Field {
   readonly role: string
   /** Optional codec declarations attached to members of this role. */
   readonly codecs?: readonly string[]
+}
+
+/** One ordered Smithy field projected into the server operation plan. */
+export interface Wire_Operation_Field_Plan {
+  readonly codecs?: readonly string[]
+  readonly path: readonly string[]
+  readonly required: boolean
+  readonly role: string
+  /** Smithy shape name used by codec adapters and diagnostics. */
+  readonly shape: string
 }
 
 /** One protocol opcode and its Smithy semantic operation contract. */
@@ -345,10 +365,12 @@ export function response_payload_bound(
 ): number {
   const route = derive_wire_response_route(operation.contract)
   const response_value_count = operation.contract.response_value_count
-  const composite_field_count = operation.contract.response_fields.reduce(
-    (count, field) => count + field.count,
-    0,
-  )
+  const composite_field_count = operation.contract.response_plan === undefined
+    ? operation.contract.response_fields.reduce(
+      (count, field) => count + field.count,
+      0,
+    )
+    : operation.contract.response_plan.filter((field) => field.path.length === 1).length
   const optional_count = route === "composite"
     ? composite_field_count
     : route === "value"
@@ -997,12 +1019,12 @@ function optional_object_member(
   return value === undefined ? undefined : object_value(value, `${location}.${member}`)
 }
 
-function operation_shape_fields(
+function operation_shape_field_plan(
   shapes: Json_Object,
   operation_shape: Json_Object,
   operation_target: string,
   direction: "input" | "output",
-): readonly Wire_Operation_Field[] {
+): readonly Wire_Operation_Field_Plan[] {
   const shape_reference = object_member(
     operation_shape,
     direction,
@@ -1017,8 +1039,12 @@ function operation_shape_fields(
   if (shape_type(structure, `Smithy AST.shapes.${shape_target}`) !== "structure") {
     throw new Error(`${shape_target} must be a structure`)
   }
-  const fields = new Map<string, { count: number; codecs: string[] }>()
-  const visit = (target: string, ancestors: ReadonlySet<string>): void => {
+  const fields: Wire_Operation_Field_Plan[] = []
+  const visit = (
+    target: string,
+    path: readonly string[],
+    ancestors: ReadonlySet<string>,
+  ): void => {
     if (ancestors.has(target)) {
       throw new Error(`${operation_target}.${direction} shape cycle through ${target}`)
     }
@@ -1035,8 +1061,12 @@ function operation_shape_fields(
           "role",
           `${target}.${member_name}.${OPERATION_FIELD_TRAIT_ID}`,
         )
-        const entry = fields.get(role) ?? { count: 0, codecs: [] }
-        entry.count += 1
+        const member_target = string_member(
+          member,
+          "target",
+          `${target}.${member_name}`,
+        )
+        const codecs: string[] = []
         const codec = traits?.[WIRE_CODEC_TRAIT_ID]
         if (codec !== undefined) {
           const codec_name = string_member(
@@ -1044,9 +1074,15 @@ function operation_shape_fields(
             "name",
             `${target}.${member_name}.${WIRE_CODEC_TRAIT_ID}`,
           )
-          entry.codecs.push(codec_name)
+          codecs.push(codec_name)
         }
-        fields.set(role, entry)
+        fields.push({
+          ...(codecs.length === 0 ? {} : { codecs }),
+          path: [...path, member_name],
+          required: traits?.["smithy.api#required"] !== undefined,
+          role,
+          shape: shape_name(member_target),
+        })
       }
       const nested_target = member["target"]
       if (typeof nested_target === "string") {
@@ -1058,13 +1094,35 @@ function operation_shape_fields(
             `Smithy AST.shapes.${nested_target}`,
           ) === "structure"
         ) {
-          visit(nested_target, next_ancestors)
+          visit(nested_target, [...path, member_name], next_ancestors)
         }
       }
     }
   }
-  visit(shape_target, new Set())
-  return [...fields].map(([role, entry]) => ({
+  visit(shape_target, [], new Set())
+  return fields
+}
+
+function operation_shape_fields(
+  shapes: Json_Object,
+  operation_shape: Json_Object,
+  operation_target: string,
+  direction: "input" | "output",
+): readonly Wire_Operation_Field[] {
+  const fields = operation_shape_field_plan(
+    shapes,
+    operation_shape,
+    operation_target,
+    direction,
+  )
+  const grouped = new Map<string, { count: number; codecs: string[] }>()
+  for (const field of fields) {
+    const entry = grouped.get(field.role) ?? { count: 0, codecs: [] }
+    entry.count += 1
+    entry.codecs.push(...(field.codecs ?? []))
+    grouped.set(field.role, entry)
+  }
+  return [...grouped].map(([role, entry]) => ({
     count: entry.count,
     role,
     ...(entry.codecs.length === 0 ? {} : { codecs: entry.codecs }),
@@ -1131,7 +1189,19 @@ function operation_contract(
     target,
     "input",
   )
+  const request_plan = operation_shape_field_plan(
+    shapes,
+    shape,
+    target,
+    "input",
+  )
   const response_fields = operation_shape_fields(
+    shapes,
+    shape,
+    target,
+    "output",
+  )
+  const response_plan = operation_shape_field_plan(
     shapes,
     shape,
     target,
@@ -1192,9 +1262,11 @@ function operation_contract(
   const derived_contract = {
     error_statuses,
     request_fields,
+    request_plan,
     request_value_count,
     request_item_count,
     response_fields,
+    response_plan,
     response_value_count,
     retry_mode: retry_mode as Wire_Operation_Contract["retry_mode"],
     scope: scope as Wire_Operation_Contract["scope"],
@@ -1498,9 +1570,12 @@ function rust_operation_contract(contract: Wire_Contract): string {
   const response_route = (operation: Wire_Operation): string =>
     derive_wire_response_route(operation.contract)
   const optional_value_count = (operation: Wire_Operation): number => {
+    const ordered_count = operation.contract.response_plan?.filter(
+      (field) => field.path.length === 1,
+    ).length
     switch (derive_wire_response_route(operation.contract)) {
       case "composite":
-        return operation.contract.response_fields.reduce(
+        return ordered_count ?? operation.contract.response_fields.reduce(
           (count, field) => count + field.count,
           0,
         )
@@ -1523,6 +1598,19 @@ function rust_operation_contract(contract: Wire_Contract): string {
             .join(", ")}] }`,
       )
       .join(", ")}]`
+  const plan_slice = (
+    fields: readonly Wire_Operation_Field_Plan[] | undefined,
+  ): string =>
+    `&[${(fields ?? [])
+      .map(
+        (field) =>
+          `OperationFieldPlan { role: ${rust_string_literal(field.role)}, required: ${field.required}, shape: ${rust_string_literal(field.shape)}, path: &[${field.path
+            .map(rust_string_literal)
+            .join(", ")}], codecs: &[${(field.codecs ?? [])
+            .map(rust_string_literal)
+            .join(", ")}] }`,
+      )
+      .join(", ")}]`
   const metadata = operations
     .map(
       (operation) => `        Opcode::${operation.name} => OperationContract {
@@ -1531,10 +1619,12 @@ function rust_operation_contract(contract: Wire_Contract): string {
             request_value_count: ${operation.contract.request_value_count ?? 0},
             request_item_count: ${operation.contract.request_item_count},
             request_fields: ${field_slice(operation.contract.request_fields)},
+            request_plan: ${plan_slice(operation.contract.request_plan)},
             response_kind: ${rust_string_literal(response_route(operation))},
             response_value_count: ${operation.contract.response_value_count},
             response_payload_bound: ${formatted_decimal(response_payload_bound(contract, operation))},
             response_fields: ${field_slice(operation.contract.response_fields)},
+            response_plan: ${plan_slice(operation.contract.response_plan)},
             retry_mode: OperationRetryMode::${enum_variant(operation.contract.retry_mode)},
             effect: OperationEffect::${enum_variant(operation.contract.effect)},
             success_statuses: ${status_slice(operation.contract.success_statuses)},
@@ -1581,6 +1671,16 @@ pub struct OperationField {
     pub codecs: &'static [&'static str],
 }
 
+/// One ordered field in a generated request or response plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationFieldPlan {
+    pub role: &'static str,
+    pub required: bool,
+    pub shape: &'static str,
+    pub path: &'static [&'static str],
+    pub codecs: &'static [&'static str],
+}
+
 /// Generated semantic metadata for one protocol operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationContract {
@@ -1594,12 +1694,14 @@ pub struct OperationContract {
     pub request_value_count: usize,
     pub request_item_count: usize,
     pub request_fields: &'static [OperationField],
+    pub request_plan: &'static [OperationFieldPlan],
     /// Generated transport descriptor derived from the Smithy output field plan.
     pub response_kind: &'static str,
     pub response_value_count: usize,
     /// Conservative maximum response payload bytes derived from the output shape.
     pub response_payload_bound: usize,
     pub response_fields: &'static [OperationField],
+    pub response_plan: &'static [OperationFieldPlan],
     pub retry_mode: OperationRetryMode,
     pub effect: OperationEffect,
     pub success_statuses: &'static [Status],
