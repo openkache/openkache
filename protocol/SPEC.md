@@ -309,7 +309,7 @@ possible next frame; it MUST terminate the lane after the error response.
 | `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload | `utf8` | `utf8` | `read_only` |
 | `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload | `utf8` | `utf8` | `read_only` |
 | `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload | `packed_f64_be` | `packed_f64_be` | `read_only` |
-| `0D` | `GET2` | opcode + namespace ID + 2 item IDs | 2 ordered optional values | — | — | `read_only` |
+| `0D` | `GET2` | opcode + namespace ID + 2 item IDs | ordered field sequence | — | — | `read_only` |
 <!-- openkache:generated-protocol-operation-table:end -->
 
 ### `SET` flags
