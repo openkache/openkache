@@ -237,10 +237,13 @@ export function derive_wire_response_route(
   contract: Wire_Operation_Contract,
 ): Wire_Response_Route {
   const { response_fields } = contract
+  const response_field_count = contract.response_plan === undefined
+    ? response_fields.reduce((count, field) => count + field.count, 0)
+    : contract.response_plan.length
   const has_role = (role: string): boolean => operation_has_role(response_fields, role)
   let route: Wire_Response_Route
   if (has_role("descriptor")) route = "namespace_descriptor"
-  else if (response_fields.length > 1) route = "composite"
+  else if (response_field_count > 1) route = "composite"
   else if (has_role("payload") && response_fields.length === 1) route = "application_value"
   else if (has_role("value") && response_fields.length === 1) route = "value"
   else if (has_role("outcome")) route = "set_outcome"
@@ -367,10 +370,10 @@ export function response_payload_bound(
   const response_value_count = operation.contract.response_value_count
   const composite_field_count = operation.contract.response_plan === undefined
     ? operation.contract.response_fields.reduce(
-      (count, field) => count + field.count,
-      0,
-    )
-    : operation.contract.response_plan.filter((field) => field.path.length === 1).length
+        (count, field) => count + field.count,
+        0,
+      )
+    : operation.contract.response_plan.length
   const optional_count = route === "composite"
     ? composite_field_count
     : route === "value"
@@ -1044,6 +1047,7 @@ function operation_shape_field_plan(
     target: string,
     path: readonly string[],
     ancestors: ReadonlySet<string>,
+    required_parent: boolean,
   ): void => {
     if (ancestors.has(target)) {
       throw new Error(`${operation_target}.${direction} shape cycle through ${target}`)
@@ -1079,7 +1083,7 @@ function operation_shape_field_plan(
         fields.push({
           ...(codecs.length === 0 ? {} : { codecs }),
           path: [...path, member_name],
-          required: traits?.["smithy.api#required"] !== undefined,
+          required: required_parent && traits?.["smithy.api#required"] !== undefined,
           role,
           shape: shape_name(member_target),
         })
@@ -1094,12 +1098,17 @@ function operation_shape_field_plan(
             `Smithy AST.shapes.${nested_target}`,
           ) === "structure"
         ) {
-          visit(nested_target, [...path, member_name], next_ancestors)
+          visit(
+            nested_target,
+            [...path, member_name],
+            next_ancestors,
+            required_parent && traits?.["smithy.api#required"] !== undefined,
+          )
         }
       }
     }
   }
-  visit(shape_target, [], new Set())
+  visit(shape_target, [], new Set(), true)
   return fields
 }
 
@@ -1570,9 +1579,7 @@ function rust_operation_contract(contract: Wire_Contract): string {
   const response_route = (operation: Wire_Operation): string =>
     derive_wire_response_route(operation.contract)
   const optional_value_count = (operation: Wire_Operation): number => {
-    const ordered_count = operation.contract.response_plan?.filter(
-      (field) => field.path.length === 1,
-    ).length
+    const ordered_count = operation.contract.response_plan?.length
     switch (derive_wire_response_route(operation.contract)) {
       case "composite":
         return ordered_count ?? operation.contract.response_fields.reduce(

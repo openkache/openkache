@@ -939,6 +939,7 @@ function operation_shape_plan(
     current: Api_Structure,
     path: readonly string[],
     ancestors: ReadonlySet<string>,
+    required_parent: boolean,
   ): void => {
     if (ancestors.has(current.name)) {
       throw new Error(
@@ -954,7 +955,7 @@ function operation_shape_plan(
           direction,
           name: member.name,
           path: member_path,
-          required: member.required,
+          required: required_parent && member.required,
           role,
           type: member.type,
         })
@@ -968,11 +969,16 @@ function operation_shape_plan(
             `operation ${operation.name} ${direction} field ${member.name} targets missing structure ${member.type.name}`,
           )
         }
-        visit(nested, member_path, next_ancestors)
+        visit(
+          nested,
+          member_path,
+          next_ancestors,
+          required_parent && member.required,
+        )
       }
     }
   }
-  visit(structure, [], new Set())
+  visit(structure, [], new Set(), true)
   return { fields, name: structure.name }
 }
 
@@ -8748,8 +8754,8 @@ export function render_go_contract(contract: Client_Contract): string {
     .join("\n")
   const item_id_operations = contract.api.operations.filter(
     (operation) =>
-      operation.contract?.request_kind === "item" ||
-      operation.contract?.request_kind === "set",
+      operation.contract !== undefined &&
+      derive_operation_plan(contract, operation).request_item_count > 0,
   )
   const item_id_cases = item_id_operations
     .map((operation) => `SmithyOpcode${operation.name}`)
