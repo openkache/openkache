@@ -7,13 +7,14 @@
 
 use std::sync::Mutex;
 
-use openkache_protocol::{ItemId, Opcode, Response, Status, encode_optional_values};
+use openkache_protocol::{ItemId, Opcode, Response, Status};
 
 use super::operation_handlers::OperationContext;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response,
     response_bytes,
 };
+use super::protocol::optional_values_response;
 
 /// Executes an operation whose behavior belongs to an API-owned extension.
 ///
@@ -166,18 +167,5 @@ pub(super) async fn execute_get2(
         }
     }
 
-    let encoded_values = values
-        .iter()
-        .map(|value| value.as_deref().map(AsRef::as_ref))
-        .collect::<Vec<_>>();
-    let payload = match encode_optional_values(&encoded_values) {
-        Ok(payload) => payload,
-        Err(_) => {
-            return Some(response_bytes(
-                Status::TooLarge,
-                b"GET2 response exceeds the protocol response limit",
-            ));
-        }
-    };
-    Some(response(Status::Ok, payload))
+    Some(optional_values_response(Opcode::Get2, &values))
 }

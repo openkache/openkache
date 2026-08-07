@@ -365,19 +365,6 @@ fn parse_item_ids(bytes: &[u8], item_count: usize) -> Result<Vec<ItemId>> {
         .collect()
 }
 
-fn operation_response_field_count(contract: &contract::OperationContract) -> usize {
-    let field_count = contract
-        .response_fields
-        .iter()
-        .map(|field| field.count)
-        .sum();
-    if field_count == 0 {
-        contract.response_value_count
-    } else {
-        field_count
-    }
-}
-
 fn operation_values_result(
     operation: Opcode,
     response: Response,
@@ -1413,7 +1400,7 @@ macro_rules! raw_client_methods {
                         operation_values_result(
                             operation,
                             response,
-                            operation_response_field_count(&contract),
+                            contract::operation_response_field_count(operation),
                         )
                     }
                     (
@@ -1439,7 +1426,7 @@ macro_rules! raw_client_methods {
                         operation_scoped_value_result(
                             operation,
                             response,
-                            operation_response_field_count(&contract),
+                            contract::operation_response_field_count(operation),
                         )
                     }
                     (
@@ -1526,7 +1513,7 @@ macro_rules! raw_client_methods {
                         operation_values_result(
                             operation,
                             response,
-                            operation_response_field_count(&contract),
+                            contract::operation_response_field_count(operation),
                         )
                     }
                     (
@@ -1551,7 +1538,7 @@ macro_rules! raw_client_methods {
                         operation_scoped_value_result(
                             operation,
                             response,
-                            operation_response_field_count(&contract),
+                            contract::operation_response_field_count(operation),
                         )
                     }
                     (
@@ -2110,7 +2097,7 @@ fn validate_response_contract(
             } else {
                 openkache_protocol::decode_optional_values(
                     &response.payload,
-                    operation_response_field_count(&operation_contract),
+                    contract::operation_response_field_count(opcode),
                 )
                 .map(|_| ())
                 .map_err(|error| Error::UnexpectedResponse {
@@ -2126,7 +2113,7 @@ fn validate_response_contract(
                 } else {
                     openkache_protocol::decode_optional_values(
                         &response.payload,
-                        operation_contract.response_value_count,
+                        contract::operation_response_field_count(opcode),
                     )
                     .map(|_| ())
                     .map_err(|error| Error::UnexpectedResponse {

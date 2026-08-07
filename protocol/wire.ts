@@ -1358,6 +1358,19 @@ function rust_operation_contract(contract: Wire_Contract): string {
   }
   const response_variant = (operation: Wire_Operation): string =>
     enum_variant(derive_wire_response_route(operation.contract))
+  const optional_value_count = (operation: Wire_Operation): number => {
+    switch (derive_wire_response_route(operation.contract)) {
+      case "composite":
+        return operation.contract.response_fields.reduce(
+          (count, field) => count + field.count,
+          0,
+        )
+      case "value":
+        return operation.contract.response_value_count
+      default:
+        return 0
+    }
+  }
   const status_slice = (statuses: readonly string[]): string =>
     `&[${statuses
       .map((status) => `Status::${status_variant(status)}`)
@@ -1388,6 +1401,12 @@ function rust_operation_contract(contract: Wire_Contract): string {
             success_statuses: ${status_slice(operation.contract.success_statuses)},
             error_statuses: ${status_slice(operation.contract.error_statuses)},
         },`,
+    )
+    .join("\n")
+  const optional_value_metadata = operations
+    .map(
+      (operation) =>
+        `        Opcode::${operation.name} => ${optional_value_count(operation)},`,
     )
     .join("\n")
   return `/// Request scope declared by the Smithy operation contract.
@@ -1465,6 +1484,18 @@ pub struct OperationContract {
 pub const fn operation_contract(opcode: Opcode) -> OperationContract {
     match opcode {
 ${metadata}
+    }
+}
+
+/// Returns the number of modeled value fields in an operation response.
+///
+/// This count is derived from the Smithy output field plan. A single-value
+/// lookup keeps its legacy raw-value framing but still returns one so clients
+/// can distinguish a missing value; opaque, status-only, and descriptor
+/// responses return zero.
+pub const fn operation_response_field_count(opcode: Opcode) -> usize {
+    match opcode {
+${optional_value_metadata}
     }
 }
 `

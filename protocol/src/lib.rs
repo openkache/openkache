@@ -270,6 +270,23 @@ pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
     Ok(payload)
 }
 
+/// Returns an upper bound for an optional-value payload.
+///
+/// The bound includes one shared length/sentinel prefix for every field and
+/// `max_value_bytes` bytes for each present field. It intentionally does not
+/// clamp the result to the aggregate response ceiling: callers use the bound
+/// to reserve memory before an operation-specific response is encoded and the
+/// encoder still enforces the aggregate ceiling on the actual payload.
+pub fn optional_values_max_encoded_len(
+    value_count: usize,
+    max_value_bytes: usize,
+) -> Option<usize> {
+    value_count.checked_mul(
+        OPTIONAL_VALUE_LENGTH_BYTES
+            .checked_add(max_value_bytes)?,
+    )
+}
+
 /// Decodes ordered optional opaque values from the shared response codec.
 pub fn decode_optional_values(payload: &[u8], value_count: usize) -> Result<Vec<Option<Vec<u8>>>> {
     validate_value_length(payload.len())?;

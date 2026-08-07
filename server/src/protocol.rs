@@ -16,6 +16,38 @@ pub use openkache_protocol::{ItemId, Opcode, Response, Status};
 
 const MAX_POLICY_BYTES: usize = POLICY_FLAGS_BYTES + openkache_protocol::MAX_VARUINT_BYTES;
 
+/// Encodes an ordered optional-value response from its modeled field count.
+///
+/// Server-owned handlers provide the values and decide what they mean. This
+/// helper owns only the shared response framing contract: field cardinality,
+/// length width, missing sentinel, and protocol-size validation.
+pub(super) fn optional_values_response<T: AsRef<[u8]>>(
+    opcode: Opcode,
+    values: &[Option<T>],
+) -> Response {
+    let expected = crate::contract::operation_response_field_count(opcode);
+    if expected == 0 || values.len() != expected {
+        return Response::new(
+            Status::InternalError,
+            b"operation optional-value response does not match its modeled fields".to_vec(),
+        )
+        .expect("static response fits the protocol limit");
+    }
+    let encoded_values = values
+        .iter()
+        .map(|value| value.as_ref().map(AsRef::as_ref))
+        .collect::<Vec<_>>();
+    match encode_optional_values(&encoded_values) {
+        Ok(payload) => Response::new(Status::Ok, payload)
+            .expect("optional-value payload was validated by the protocol encoder"),
+        Err(_) => Response::new(
+            Status::TooLarge,
+            b"operation optional-value response exceeds the protocol limit".to_vec(),
+        )
+        .expect("static response fits the protocol limit"),
+    }
+}
+
 /// Condition applied atomically by a `SET` request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SetCondition {

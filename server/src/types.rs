@@ -206,6 +206,12 @@ impl Deref for StoredItemValue {
     }
 }
 
+impl AsRef<[u8]> for StoredItemValue {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// Canonical 32-byte server-derived key consumed by routing, indexes, and storage.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]

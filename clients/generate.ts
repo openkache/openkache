@@ -2384,6 +2384,21 @@ function render_rust_operation_contract(contract: Client_Contract): string {
   const response_variant = (operation: Api_Operation & {
     readonly contract: Api_Operation_Contract
   }): string => enum_variant(derive_wire_response_route(operation.contract))
+  const response_field_count = (operation: Api_Operation & {
+    readonly contract: Api_Operation_Contract
+  }): number => {
+    switch (derive_wire_response_route(operation.contract)) {
+      case "composite":
+        return operation.contract.response_fields.reduce(
+          (count, field) => count + field.count,
+          0,
+        )
+      case "value":
+        return operation.contract.response_value_count
+      default:
+        return 0
+    }
+  }
   const field_slice = (
     fields: readonly {
       readonly role: string
@@ -2435,6 +2450,15 @@ function render_rust_operation_contract(contract: Client_Contract): string {
             error_statuses: ${status_slice(operation_contract.error_statuses)},
         },`
     })
+    .join("\n")
+  const response_field_metadata = operations
+    .map(
+      (operation) =>
+        `        openkache_protocol::Opcode::${operation.name} => ${response_field_count({
+          ...operation,
+          contract: operation.contract!,
+        })},`,
+    )
     .join("\n")
   return `/// Request scope declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2513,6 +2537,19 @@ pub const fn operation_contract(
 ) -> OperationContract {
     match opcode {
 ${metadata}
+    }
+}
+
+/// Returns the number of modeled response fields carried by an operation.
+///
+/// A single-value lookup retains its raw-value framing but returns one so the
+/// client core can distinguish a missing value. Opaque, status-only, and
+/// descriptor responses return zero.
+pub const fn operation_response_field_count(
+    opcode: openkache_protocol::Opcode,
+) -> usize {
+    match opcode {
+${response_field_metadata}
     }
 }
 `
