@@ -26,19 +26,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Update locked Nix inputs
-        run: |
-          builder_image="$(sed -n 's/^FROM \(nixos\/nix:[^ ]*\) AS builder$/\1/p' server/Dockerfile)"
-          if ! printf '%s\n' "${builder_image}" | grep -Eq '^nixos/nix:[^@[:space:]]+@sha256:[0-9a-f]{64}$'; then
-            printf 'Invalid pinned builder image: %s\n' "${builder_image}" >&2
-            exit 1
-          fi
-          docker run --rm \
-            --volume "${GITHUB_WORKSPACE}:/workspace" \
-            --workdir /workspace/server \
-            "${builder_image}" \
-            sh -euxc \
-            'git config --global --add safe.directory /workspace && nix --extra-experimental-features "nix-command flakes" flake update nixpkgs rust-overlay'
+      - name: Update and verify locked Nix inputs
+        uses: ./.github/actions/check-container-nix-cache
+        with:
+          update: "true"
 
       - name: Open update pull request
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7769d076bb2fc7f1 # v8

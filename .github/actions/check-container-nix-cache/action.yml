@@ -1,0 +1,112 @@
+name: Verify container Nix binary-cache availability
+description: Reject container Nix inputs that are not available from cache.nixos.org
+inputs:
+  update:
+    description: Update the container flake inputs before checking their closures
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Verify container Nix binary-cache availability
+      shell: bash
+      run: |
+        set -euo pipefail
+        builder_image="$(sed -n 's/^FROM \(nixos\/nix:[^ ]*\) AS builder$/\1/p' server/Dockerfile)"
+        if ! printf '%s\n' "${builder_image}" | grep -Eq '^nixos/nix:[^@[:space:]]+@sha256:[0-9a-f]{64}$'; then
+          printf 'Invalid pinned builder image: %s\n' "${builder_image}" >&2
+          exit 1
+        fi
+        docker run --rm \
+          --volume "${GITHUB_WORKSPACE}:/workspace" \
+          --workdir /workspace/server \
+          "${builder_image}" \
+          sh -euxc '
+            git config --global --add safe.directory /workspace
+            lock_file_arguments=()
+            candidate_lock=""
+            if [ "${{ inputs.update }}" = "true" ]; then
+              candidate_lock="$(mktemp)"
+              if ! nix --extra-experimental-features "nix-command flakes" \
+                flake update nixpkgs rust-overlay --output-lock-file "$candidate_lock"; then
+                printf "Nix input update failed before the cache probe.\n" >&2
+                printf "Why: the workflow must produce a complete candidate lock before checking its package closures.\n" >&2
+                printf "Fix: repair the flake inputs or network access, then rerun the update workflow.\n" >&2
+                exit 1
+              fi
+              lock_file_arguments=(--reference-lock-file "$candidate_lock")
+            fi
+            check_cache() {
+              system="$1"
+              package_reference=".#packages.${system}.nixpkgs-cache-check"
+              manifest_reference=".#cacheManifests.${system}.container.paths"
+              if ! dry_run="$(nix --extra-experimental-features "nix-command flakes" \
+                build --dry-run --json --accept-flake-config --no-update-lock-file \
+                "${lock_file_arguments[@]}" "$package_reference" 2>&1)"; then
+                printf "Nix cache probe could not evaluate the %s container package set.\n" "$system" >&2
+                printf "%s\n" "$dry_run" >&2
+                printf "Why: the workflow must prove that the container inputs can be substituted before a build or PR.\n" >&2
+                printf "Fix: repair server/flake.nix or server/flake.lock, then rerun the container cache probe.\n" >&2
+                exit 1
+              fi
+              uncached_derivations="$(
+                printf "%s\n" "$dry_run" \
+                  | grep -oE "/nix/store/[^\"]+\.drv" \
+                  | grep -v -- "-openkache-container-nixpkgs-cache-check\.drv$" \
+                  || true
+              )"
+              if [ -n "$uncached_derivations" ]; then
+                printf "Uncached Nix derivations for %s would be built:\n%s\n" \
+                  "$system" "$uncached_derivations" >&2
+                printf "Why: container Nix inputs must not make publication compile an uncached Nixpkgs package.\n" >&2
+                printf "Fix: pin a Nixpkgs revision whose outputs are available from cache.nixos.org.\n" >&2
+                exit 1
+              fi
+              if ! cache_paths_json="$(
+                nix --extra-experimental-features "nix-command flakes" \
+                  eval --json --accept-flake-config --no-update-lock-file \
+                  "${lock_file_arguments[@]}" "$manifest_reference"
+              )"; then
+                printf "Nix cache probe could not enumerate the %s container manifest.\n" "$system" >&2
+                printf "Why: the workflow must inspect every package selected by the candidate lock.\n" >&2
+                printf "Fix: repair server/flake.nix or server/flake.lock, then rerun the container cache probe.\n" >&2
+                exit 1
+              fi
+              cache_paths="$(
+                printf "%s\n" "$cache_paths_json" \
+                  | tr -d "[]" \
+                  | tr "," "\n" \
+                  | tr -d "\""
+              )"
+              if [ -z "$cache_paths" ]; then
+                printf "Nix cache probe found an empty %s container manifest.\n" "$system" >&2
+                printf "Why: an empty manifest cannot prove that any Nixpkgs output is substitutable.\n" >&2
+                printf "Fix: list every cacheable package in cacheManifests.%s.container.paths, then rerun the container cache probe.\n" "$system" >&2
+                exit 1
+              fi
+              if ! nix --extra-experimental-features "nix-command flakes" \
+                path-info --recursive --store https://cache.nixos.org $cache_paths >/dev/null; then
+                printf "cache.nixos.org does not contain every %s container package closure.\n" "$system" >&2
+                printf "Why: a local Nix store could hide a missing substitute and make publication build locally.\n" >&2
+                printf "Fix: pin a Nixpkgs revision whose container package outputs are published to cache.nixos.org.\n" >&2
+                exit 1
+              fi
+            }
+            check_cache x86_64-linux &
+            x86_pid=$!
+            check_cache aarch64-linux &
+            aarch64_pid=$!
+            cache_status=0
+            if ! wait "$x86_pid"; then
+              cache_status=1
+            fi
+            if ! wait "$aarch64_pid"; then
+              cache_status=1
+            fi
+            if [ "$cache_status" -ne 0 ]; then
+              exit "$cache_status"
+            fi
+            if [ "${{ inputs.update }}" = "true" ]; then
+              cp "$candidate_lock" flake.lock
+            fi
+          '
