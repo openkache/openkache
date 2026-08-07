@@ -17,38 +17,152 @@ use super::{
     descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
     response, response_bytes,
 };
-use crate::protocol::{ItemId, NamespacePolicy, Response, SetOptions, field_values_response};
+use crate::protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId, NamespacePolicy,
+    OverridePolicy, Response, SetCondition, SetOptions, field_values_response,
+};
 
 /// Borrowed context passed from the protocol server to one concrete handler.
 ///
 /// The context deliberately contains storage primitives and decoded request
 /// fields, rather than exposing transport or frame details to API handlers.
-#[derive(Clone)]
 pub(super) struct OperationInputView<'a> {
     pub(super) opcode: Opcode,
-    pub(super) namespace_id: Option<u64>,
-    pub(super) item_ids: &'a [ItemId],
-    pub(super) value: Vec<u8>,
-    pub(super) namespace_name: Option<&'a [u8]>,
-    pub(super) namespace_policy: Option<NamespacePolicy>,
-    pub(super) expected_revision: Option<u64>,
-    pub(super) create_if_missing: bool,
-    pub(super) set_options: SetOptions,
+    fields: [Option<OperationFieldRecord<'a>>; crate::contract::MAX_OPERATION_REQUEST_FIELDS],
+    field_len: usize,
 }
 
-/// A typed, borrowed operation field exposed to server-owned behavior.
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-pub(super) enum OperationFieldValue<'a> {
+/// One generated plan entry and its decoded semantic value.
+///
+/// Records are ordered exactly like the Smithy request plan. Optional fields
+/// remain present with `None`, so a server extension can distinguish a missing
+/// optional member from a zero/empty value without an operation-specific
+/// context union.
+pub(super) struct OperationFieldRecord<'a> {
+    pub(super) plan: &'static crate::contract::OperationFieldPlan,
+    value: Option<OperationFieldStorage<'a>>,
+}
+
+/// Storage owned or borrowed by one operation-field record.
+///
+/// Application/SET payloads stay owned so dispatch can move the existing
+/// request allocation into storage without copying. All other values are
+/// compact scalar or borrowed views over the decoded request.
+enum OperationFieldStorage<'a> {
     UnsignedLong(u64),
-    ItemIds(&'a [ItemId]),
+    ItemId(ItemId),
     Bytes(&'a [u8]),
+    OwnedBytes(Vec<u8>),
     Policy(NamespacePolicy),
-    SetOptions(SetOptions),
+    ExpirationDefault(ExpirationDefault),
+    OverridePolicy(OverridePolicy),
+    EvictionDefault(EvictionDefault),
+    SetCondition(SetCondition),
+    ExpirationMode(ExpirationMode),
+    EvictionMode(EvictionMode),
     Boolean(bool),
 }
 
-impl OperationInputView<'_> {
+/// A typed, borrowed operation field exposed to server-owned behavior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum OperationFieldValue<'a> {
+    UnsignedLong(u64),
+    ItemId(ItemId),
+    Bytes(&'a [u8]),
+    Policy(NamespacePolicy),
+    ExpirationDefault(ExpirationDefault),
+    OverridePolicy(OverridePolicy),
+    EvictionDefault(EvictionDefault),
+    SetCondition(SetCondition),
+    ExpirationMode(ExpirationMode),
+    EvictionMode(EvictionMode),
+    Boolean(bool),
+}
+
+impl<'a> OperationInputView<'a> {
+    /// Builds a generated field view from the decoded v1 request primitives.
+    ///
+    /// The v1 parser still owns its compact transport layouts, but the
+    /// handler boundary no longer mirrors those layouts with a fixed Rust
+    /// struct. Every modeled plan entry gets one record; adding a role that
+    /// reuses an existing v1 primitive therefore changes only the generated
+    /// plan and the API-owned behavior.
+    pub(super) fn from_request(
+        opcode: Opcode,
+        namespace_id: Option<u64>,
+        item_ids: &'a [ItemId],
+        value: Vec<u8>,
+        namespace_name: Option<&'a [u8]>,
+        namespace_policy: Option<NamespacePolicy>,
+        expected_revision: Option<u64>,
+        create_if_missing: bool,
+        set_options: SetOptions,
+    ) -> OperationInputView<'a> {
+        let mut item_index = 0;
+        let mut value = Some(value);
+        let plan = crate::contract::operation_contract(opcode).request_plan;
+        let mut fields = std::array::from_fn(|_| None);
+        for (index, plan) in plan.iter().enumerate() {
+            assert!(
+                index < fields.len(),
+                "generated operation request field bound is stale"
+            );
+            let field = match plan.role {
+                "namespace_id" => namespace_id.map(OperationFieldStorage::UnsignedLong),
+                "item_id" => {
+                    let value = item_ids
+                        .get(item_index)
+                        .copied()
+                        .map(OperationFieldStorage::ItemId);
+                    item_index += 1;
+                    value
+                }
+                "value" | "payload" => value.take().map(OperationFieldStorage::OwnedBytes),
+                "name" => namespace_name.map(OperationFieldStorage::Bytes),
+                "policy" => namespace_policy.map(OperationFieldStorage::Policy),
+                "default_expiration" => namespace_policy
+                    .map(|policy| OperationFieldStorage::ExpirationDefault(policy.default_expiration)),
+                "default_ttl_milliseconds" => namespace_policy.and_then(|policy| {
+                    match policy.default_expiration {
+                        ExpirationDefault::FixedTtl { ttl_ms } => {
+                            Some(OperationFieldStorage::UnsignedLong(ttl_ms))
+                        }
+                        ExpirationDefault::NoExpiry => None,
+                    }
+                }),
+                "expiration_override" => namespace_policy
+                    .map(|policy| OperationFieldStorage::OverridePolicy(policy.expiration_override)),
+                "default_eviction" => namespace_policy
+                    .map(|policy| OperationFieldStorage::EvictionDefault(policy.default_eviction)),
+                "eviction_override" => namespace_policy
+                    .map(|policy| OperationFieldStorage::OverridePolicy(policy.eviction_override)),
+                "expected_revision" => expected_revision.map(OperationFieldStorage::UnsignedLong),
+                "condition" => Some(OperationFieldStorage::SetCondition(set_options.condition)),
+                "expiration_mode" => {
+                    Some(OperationFieldStorage::ExpirationMode(set_options.expiration_mode))
+                }
+                "eviction_mode" => {
+                    Some(OperationFieldStorage::EvictionMode(set_options.eviction_mode))
+                }
+                "ttl_milliseconds" => set_options
+                    .ttl_ms
+                    .map(OperationFieldStorage::UnsignedLong),
+                "create_if_missing" => Some(OperationFieldStorage::Boolean(create_if_missing)),
+                _ => None,
+            };
+            fields[index] = Some(OperationFieldRecord {
+                plan,
+                value: field,
+            });
+        }
+        let field_len = plan.len();
+        Self {
+            opcode,
+            fields,
+            field_len,
+        }
+    }
+
     /// Returns the generated role metadata for this operation.
     ///
     /// Server extensions can inspect this open role list without adding a
@@ -57,6 +171,12 @@ impl OperationInputView<'_> {
     /// special case.
     pub(super) fn fields(&self) -> &'static [crate::contract::OperationFieldPlan] {
         crate::contract::operation_contract(self.opcode).request_plan
+    }
+
+    /// Returns the decoded ordered records, including missing optional fields.
+    #[allow(dead_code)]
+    pub(super) fn records(&self) -> &[Option<OperationFieldRecord<'_>>] {
+        &self.fields[..self.field_len]
     }
 
     /// Returns the modeled cardinality for one semantic role.
@@ -85,24 +205,7 @@ impl OperationInputView<'_> {
     /// Returns the modeled value for a role without requiring a wire-family
     /// or operation-name match in the extension.
     pub(super) fn field(&self, role: &str) -> Option<OperationFieldValue<'_>> {
-        if self.field_count(role) == 0 {
-            return None;
-        }
-        match role {
-            "namespace_id" => self.namespace_id.map(OperationFieldValue::UnsignedLong),
-            "expected_revision" => self
-                .expected_revision
-                .map(OperationFieldValue::UnsignedLong),
-            "item_id" => Some(OperationFieldValue::ItemIds(self.item_ids)),
-            "value" | "payload" => Some(OperationFieldValue::Bytes(&self.value)),
-            "name" => self.namespace_name.map(OperationFieldValue::Bytes),
-            "policy" => self.namespace_policy.map(OperationFieldValue::Policy),
-            "condition" | "expiration_mode" | "ttl_milliseconds" | "eviction_mode" => {
-                Some(OperationFieldValue::SetOptions(self.set_options))
-            }
-            "create_if_missing" => Some(OperationFieldValue::Boolean(self.create_if_missing)),
-            _ => None,
-        }
+        self.field_at(role, 0)
     }
 
     /// Returns one ordered occurrence of a modeled role.
@@ -117,13 +220,109 @@ impl OperationInputView<'_> {
         index: usize,
     ) -> Option<OperationFieldValue<'_>> {
         self.field_plan_at(role, index)?;
-        let value = self.field(role)?;
-        match value {
-            OperationFieldValue::ItemIds(item_ids) => item_ids
-                .get(index)
-                .map(|_| OperationFieldValue::ItemIds(&item_ids[index..index + 1])),
-            _ if index == 0 => Some(value),
+        self.fields
+            .iter()
+            .take(self.field_len)
+            .filter_map(Option::as_ref)
+            .filter(|field| field.plan.role == role)
+            .nth(index)?
+            .value
+            .as_ref()
+            .map(OperationFieldStorage::as_value)
+    }
+
+    /// Returns one namespace/item-style unsigned long field.
+    pub(super) fn unsigned_long(&self, role: &str) -> Option<u64> {
+        match self.field(role) {
+            Some(OperationFieldValue::UnsignedLong(value)) => Some(value),
             _ => None,
+        }
+    }
+
+    /// Returns one item ID field by generated role ordinal.
+    pub(super) fn item_id_at(&self, index: usize) -> Option<ItemId> {
+        match self.field_at("item_id", index) {
+            Some(OperationFieldValue::ItemId(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns one borrowed byte field by generated role.
+    pub(super) fn bytes(&self, role: &str) -> Option<&[u8]> {
+        match self.field(role) {
+            Some(OperationFieldValue::Bytes(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns the modeled namespace policy field.
+    pub(super) fn policy(&self) -> Option<NamespacePolicy> {
+        match self.field("policy") {
+            Some(OperationFieldValue::Policy(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns the modeled boolean field.
+    pub(super) fn boolean(&self, role: &str) -> Option<bool> {
+        match self.field(role) {
+            Some(OperationFieldValue::Boolean(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Reconstructs the existing SET semantic options from independent fields.
+    pub(super) fn set_options(&self) -> SetOptions {
+        let condition = match self.field("condition") {
+            Some(OperationFieldValue::SetCondition(value)) => value,
+            _ => SetCondition::Any,
+        };
+        let expiration_mode = match self.field("expiration_mode") {
+            Some(OperationFieldValue::ExpirationMode(value)) => value,
+            _ => ExpirationMode::Inherit,
+        };
+        let ttl_ms = self.unsigned_long("ttl_milliseconds");
+        let eviction_mode = match self.field("eviction_mode") {
+            Some(OperationFieldValue::EvictionMode(value)) => value,
+            _ => EvictionMode::Inherit,
+        };
+        SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
+    }
+
+    /// Moves an owned payload out of one generated value role without copying.
+    pub(super) fn take_owned_bytes(&mut self, role: &str) -> Option<Vec<u8>> {
+        let record = self
+            .fields
+            .iter_mut()
+            .take(self.field_len)
+            .filter_map(Option::as_mut)
+            .find(|field| field.plan.role == role)?;
+        let value = record.value.take()?;
+        match value {
+            OperationFieldStorage::OwnedBytes(value) => Some(value),
+            other => {
+                record.value = Some(other);
+                None
+            }
+        }
+    }
+}
+
+impl OperationFieldStorage<'_> {
+    fn as_value(&self) -> OperationFieldValue<'_> {
+        match self {
+            Self::UnsignedLong(value) => OperationFieldValue::UnsignedLong(*value),
+            Self::ItemId(value) => OperationFieldValue::ItemId(*value),
+            Self::Bytes(value) => OperationFieldValue::Bytes(value),
+            Self::OwnedBytes(value) => OperationFieldValue::Bytes(value),
+            Self::Policy(value) => OperationFieldValue::Policy(*value),
+            Self::ExpirationDefault(value) => OperationFieldValue::ExpirationDefault(*value),
+            Self::OverridePolicy(value) => OperationFieldValue::OverridePolicy(*value),
+            Self::EvictionDefault(value) => OperationFieldValue::EvictionDefault(*value),
+            Self::SetCondition(value) => OperationFieldValue::SetCondition(*value),
+            Self::ExpirationMode(value) => OperationFieldValue::ExpirationMode(*value),
+            Self::EvictionMode(value) => OperationFieldValue::EvictionMode(*value),
+            Self::Boolean(value) => OperationFieldValue::Boolean(*value),
         }
     }
 }
@@ -219,23 +418,18 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
         namespaces,
         observability,
     } = context;
-    let OperationInputView {
-        namespace_id,
-        item_ids,
-        value,
-        namespace_name,
-        namespace_policy,
-        expected_revision,
-        create_if_missing,
-        set_options,
-        ..
-    } = input;
+    let mut input = input;
+    let namespace_id = input.unsigned_long("namespace_id");
+    let expected_revision = input.unsigned_long("expected_revision");
+    let namespace_name = input.bytes("name");
+    let namespace_policy = input.policy();
+    let create_if_missing = input.boolean("create_if_missing").unwrap_or(false);
+    let set_options = input.set_options();
 
     match opcode {
         Opcode::Get => {
-            let item_id = item_ids
-                .first()
-                .copied()
+            let item_id = input
+                .item_id_at(0)
                 .expect("GET requests have a validated item ID");
             execute_get(cache, namespace_id, item_id, namespaces).await
         }
@@ -351,10 +545,12 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                     return Some(response_bytes(status, b"SET policy is disallowed"));
                 }
             };
-            let item_id = item_ids
-                .first()
-                .copied()
+            let item_id = input
+                .item_id_at(0)
                 .expect("SET requests have a validated item ID");
+            let value = input
+                .take_owned_bytes("value")
+                .expect("SET requests have a validated value");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             let reservation = match namespaces
                 .lock()
@@ -424,9 +620,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                     b"namespace does not exist",
                 ));
             }
-            let item_id = item_ids
-                .first()
-                .copied()
+            let item_id = input
+                .item_id_at(0)
                 .expect("DELETE requests have a validated item ID");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             if let Err(status) = namespaces

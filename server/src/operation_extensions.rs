@@ -138,11 +138,9 @@ pub(super) async fn execute_get2(
     input: &super::operation_handlers::OperationInputView<'_>,
     namespaces: &Mutex<NamespaceRegistry>,
 ) -> Option<ExtensionResponse> {
-    let namespace_id = match input.field("namespace_id") {
-        Some(super::operation_handlers::OperationFieldValue::UnsignedLong(namespace_id)) => {
-            namespace_id
-        }
-        _ => {
+    let namespace_id = match input.unsigned_long("namespace_id") {
+        Some(namespace_id) => namespace_id,
+        None => {
             return Some(ExtensionResponse::Response(response_bytes(
                 Status::InvalidRequest,
                 b"GET2 requires a namespace ID",
@@ -155,13 +153,8 @@ pub(super) async fn execute_get2(
             b"GET2 requires exactly two item IDs",
         )));
     }
-    let item_at = |index| match input.field_at("item_id", index) {
-        Some(super::operation_handlers::OperationFieldValue::ItemIds(item_ids)) => {
-            item_ids.first().copied()
-        }
-        _ => None,
-    };
-    let (Some(first_item), Some(second_item)) = (item_at(0), item_at(1)) else {
+    let (Some(first_item), Some(second_item)) = (input.item_id_at(0), input.item_id_at(1))
+    else {
         return Some(ExtensionResponse::Response(response_bytes(
             Status::InvalidRequest,
             b"GET2 requires item IDs",

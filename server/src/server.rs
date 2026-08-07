@@ -1958,17 +1958,17 @@ async fn execute_request(
             b"namespace does not exist",
         ));
     }
-    let input = operation_handlers::OperationInputView {
+    let input = operation_handlers::OperationInputView::from_request(
         opcode,
         namespace_id,
-        item_ids: &item_ids,
+        &item_ids,
         value,
-        namespace_name: namespace_name.as_deref(),
+        namespace_name.as_deref(),
         namespace_policy,
         expected_revision,
         create_if_missing,
         set_options,
-    };
+    );
     operation_handlers::execute(operation_handlers::OperationContext {
         cache,
         opcode,
