@@ -340,9 +340,13 @@ cache.set(item_id, value, options)
 
 `namespace_id` is a fixed eight-octet `u64be` in the numeric range
 `1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
-identity. `0` is reserved and MUST be rejected. The ID is carried per request
-rather than bound to a lane, so a lane may be reused for different namespaces
-and retries can be encoded deterministically.
+identity. Once assigned, a `namespace_id` MUST NOT be reused for a different
+namespace, including after deletion. A server MAY retain allocation tombstones
+or a monotonic allocator state to enforce this rule. `0` is reserved and MUST
+be rejected. The ID is carried per request rather than bound to a lane, so a
+lane may be reused for different namespaces and retries can be encoded
+deterministically. Clients do not allocate namespace IDs; they treat the
+server-returned ID as opaque and MUST NOT synthesize or recycle one.
 
 The wire protocol has no default namespace concept. An SDK MAY expose
 `client.set(item_id, value, options)` as a convenience shorthand, but it MUST
@@ -385,6 +389,8 @@ namespace. `NAMESPACE_UPDATE_POLICY` changes a namespace policy with an
 optimistic-concurrency check. `NAMESPACE_DELETE` removes a named namespace
 identity with an optimistic-concurrency check. Any namespace, including the
 empty-name namespace, may be deleted once no request is using it.
+Recreating a deleted name, if allowed by the deployment, creates a new
+namespace identity and therefore receives a new `namespace_id`.
 
 An item is identified by the pair `(namespace_id, item_id)`. The same 32-octet
 Item ID in two namespaces denotes two independent items.
@@ -1110,6 +1116,8 @@ A protocol v1 implementation is not complete unless it:
 - uses a one-octet namespace name length and enforces the 255-octet ceiling;
 - starts namespace revisions at one and enforces
   `expected_revision` on policy updates and deletion;
+- never reuses a previously assigned `namespace_id` for a different namespace,
+  including after namespace deletion;
 - encodes namespace policies and descriptors exactly as specified;
 - accepts only `IfEmpty` for the v1 namespace-delete flags;
 - omits `item_id_len` from every request;

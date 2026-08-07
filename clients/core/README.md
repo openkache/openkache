@@ -16,8 +16,8 @@ The main API layers are:
   opaque values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
-- `ValueCodec`, which owns Raw and RFC 8785 JSON serialization, optional
-  Zstandard compression, and formatted-value encryption;
+- `ValueCodec`, which owns value serialization, optional Zstandard compression,
+  and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
@@ -53,7 +53,9 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. It requires the platform's io_uring driver and exports
+`LocalProtectedClient`. Protected FFI operations accept exactly one canonical
+v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
+discriminator), not raw application bytes. It requires the platform's io_uring driver and exports
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,
@@ -79,23 +81,30 @@ let outcome = client
 ```
 
 `ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. Use
-`DataProtectionKey::derive_item_id` or `DataProtection::item_id` for the
-shared BLAKE3 derivation.
+and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
+v1 contract calls the root secret `client_root_key` and binds the selected
+namespace into both Item ID derivation and value AAD. The Rust API retains
+`DataProtectionKey` as a source-compatible alias; it is not a separate wire
+concept.
 
-`ValueCodec` stores its metadata inside the opaque value:
+`ValueCodec` stores its current metadata inside the opaque value. The packed
+codec layout shown in the pre-freeze value-format specification is the target
+of a separate value-codec migration:
 
 ```text
-version:vu128 | format:u8 | body
+value_envelope_version:vu128 | flags:u8 | body
 
-format bits 0..3 = compression identifier
-format bits 4..7 = encryption identifier
+flags bits 0..1 = encryption identifier
+flags bits 2..3 = compression identifier
+flags bits 4..5 = codec identifier
+flags bits 6..7 = reserved (zero in v1)
 
-Compact body = AES-256-SIV-CMAC synthetic_iv[16] | ciphertext
-Robust body  = nonce[12] | AES-256-GCM-SIV ciphertext | tag[16]
+body = protect(compress(selected codec payload))
+AES-256-SIV-CMAC body = synthetic_iv[16] | ciphertext
+AES-256-GCM-SIV body = nonce[12] | ciphertext | tag[16]
 ```
 
-The encrypted serialization identifier and body are authenticated with the
+For protected profiles, the packed flags and body are authenticated with the
 exact item ID and container header. Neither the wire protocol nor the server
 parses this format.
 
@@ -103,9 +112,9 @@ Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
 
 ```rust
-use openkache_client_core::{DataProtectionKey, ProtectedClient};
+use openkache_client_core::{ClientRootKey, ProtectedClient};
 
-let key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let key = ClientRootKey::from_base64(&configured_base64_secret)?;
 let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```

@@ -54,9 +54,12 @@ released with `openkache_client_free`.
 
 `openkache_client_connect_ex` is the flat generated-binding entry point;
 `openkache_client_connect_with_options` is a named-field convenience wrapper.
-An empty trust buffer selects system roots. `openkache_client_execute` derives
-protected item IDs from application keys, while `openkache_client_execute_raw`
-requires a 32-byte item ID and sends opaque values unchanged.
+An empty trust buffer selects system roots. `openkache_client_execute` accepts
+one complete canonical v1 key item and derives its protected Item ID, while
+`openkache_client_execute_raw` requires a 32-byte item ID and sends opaque
+values unchanged. C callers that construct protected keys directly should use
+the `Integer`, `Text`, and `Bytes` rules in
+[`../KEY_FORMAT.md`](../KEY_FORMAT.md).
 
 `openkache_client_namespace_open`, `openkache_client_namespace_update_policy`,
 and `openkache_client_namespace_delete` manage server-assigned namespaces.
