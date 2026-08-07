@@ -244,30 +244,80 @@ impl Response {
 /// strictly smaller. The aggregate payload is bounded by the same wire value
 /// ceiling used by response frames.
 pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
-    let payload_len = values
-        .iter()
-        .try_fold(0usize, |length, value| {
-            let value_len = value.map_or(0, <[u8]>::len);
-            if value_len >= OPTIONAL_VALUE_MISSING as usize {
-                return None;
-            }
-            length
-                .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)?
-                .checked_add(value_len)
-        })
-        .ok_or(ProtocolError::FrameLengthOverflow)?;
-    validate_value_length(payload_len)?;
-    let mut payload = Vec::with_capacity(payload_len);
+    let mut encoder = OptionalValuesEncoder::new(values.len());
     for value in values {
-        match value {
-            None => payload.extend_from_slice(&OPTIONAL_VALUE_MISSING.to_be_bytes()),
-            Some(value) => {
-                payload.extend_from_slice(&(value.len() as u32).to_be_bytes());
-                payload.extend_from_slice(value);
-            }
+        encoder.push(*value)?;
+    }
+    encoder.finish()
+}
+
+/// Incremental encoder for an ordered optional-value field sequence.
+///
+/// Server behaviors can append already-decoded domain values directly without
+/// first constructing a temporary `Vec<Option<&[u8]>>`.  The encoder owns only
+/// the aggregate framing buffer; it does not interpret operation roles,
+/// requiredness, or response semantics.
+#[derive(Debug)]
+pub struct OptionalValuesEncoder {
+    payload: Vec<u8>,
+    expected_fields: usize,
+    written_fields: usize,
+}
+
+impl OptionalValuesEncoder {
+    /// Creates an encoder for exactly `field_count` ordered fields.
+    pub fn new(field_count: usize) -> Self {
+        Self {
+            payload: Vec::with_capacity(field_count.saturating_mul(OPTIONAL_VALUE_LENGTH_BYTES)),
+            expected_fields: field_count,
+            written_fields: 0,
         }
     }
-    Ok(payload)
+
+    /// Appends one present field or the canonical missing sentinel.
+    pub fn push(&mut self, value: Option<&[u8]>) -> Result<()> {
+        if self.written_fields >= self.expected_fields {
+            return Err(ProtocolError::InvalidOptionalValues(
+                "optional-value encoder received too many fields",
+            ));
+        }
+        let value_len = value.map_or(0, <[u8]>::len);
+        if value_len >= OPTIONAL_VALUE_MISSING as usize {
+            return Err(ProtocolError::ValueTooLarge {
+                size: value_len,
+                maximum: (OPTIONAL_VALUE_MISSING - 1) as usize,
+            });
+        }
+        let next_len = self
+            .payload
+            .len()
+            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
+            .and_then(|length| length.checked_add(value_len))
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        validate_value_length(next_len)?;
+        match value {
+            None => self
+                .payload
+                .extend_from_slice(&OPTIONAL_VALUE_MISSING.to_be_bytes()),
+            Some(value) => {
+                self.payload
+                    .extend_from_slice(&(value_len as u32).to_be_bytes());
+                self.payload.extend_from_slice(value);
+            }
+        }
+        self.written_fields += 1;
+        Ok(())
+    }
+
+    /// Completes the sequence after all declared fields have been appended.
+    pub fn finish(self) -> Result<Vec<u8>> {
+        if self.written_fields != self.expected_fields {
+            return Err(ProtocolError::InvalidOptionalValues(
+                "optional-value encoder received too few fields",
+            ));
+        }
+        Ok(self.payload)
+    }
 }
 
 /// Returns an upper bound for an optional-value payload.
@@ -281,10 +331,7 @@ pub fn optional_values_max_encoded_len(
     value_count: usize,
     max_value_bytes: usize,
 ) -> Option<usize> {
-    value_count.checked_mul(
-        OPTIONAL_VALUE_LENGTH_BYTES
-            .checked_add(max_value_bytes)?,
-    )
+    value_count.checked_mul(OPTIONAL_VALUE_LENGTH_BYTES.checked_add(max_value_bytes)?)
 }
 
 /// Decodes ordered optional opaque values from the shared response codec.

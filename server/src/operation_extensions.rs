@@ -6,7 +6,7 @@
 //! projections unchanged.
 
 use super::operation_handlers::OperationContext;
-use super::protocol::Response;
+use crate::KvError;
 use crate::types::StoredItemValue;
 use openkache_protocol::Opcode;
 
@@ -32,16 +32,33 @@ impl AsRef<[u8]> for ExtensionValue {
     }
 }
 
+/// Transport-neutral failures returned by an operation extension.
+///
+/// An extension must not select a wire status or construct a protocol
+/// response.  The shared adapter maps these domain outcomes through the
+/// generated operation status contract after the behavior returns.
+pub(super) enum ExtensionError {
+    InvalidInput(&'static [u8]),
+    NotFound(&'static [u8]),
+    NamespaceNotFound(&'static [u8]),
+    Conflict(&'static [u8]),
+    Forbidden(&'static [u8]),
+    TooLarge(&'static [u8]),
+    Overloaded(&'static [u8]),
+    Timeout(&'static [u8]),
+    Internal(&'static [u8]),
+    Storage(KvError),
+}
+
 pub(super) enum ExtensionResponse {
-    /// A response whose status and payload are already selected by the server
-    /// behavior (for example, a storage error or authorization failure).
-    Response(Response),
     /// One application payload. The shared handler adds the protocol status
     /// and value framing.
     ApplicationValue(Vec<u8>),
     /// Ordered field values. The shared handler owns length prefixes,
     /// requiredness, and the missing-value sentinel.
     FieldValues(Vec<Option<ExtensionValue>>),
+    /// A transport-neutral domain failure.
+    Error(ExtensionError),
 }
 
 /// Executes a non-immediate operation extension.

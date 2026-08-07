@@ -1895,10 +1895,7 @@ async fn execute_request(
     // Namespace open and delete are identity operations. Serialize them with
     // one lifecycle lock so an open cannot observe a descriptor while delete
     // is concurrently removing it (or vice versa).
-    let lifecycle_lock = if matches!(
-        crate::contract::operation_contract(opcode).request_kind,
-        "namespace_open" | "namespace_delete"
-    ) {
+    let lifecycle_lock = if crate::contract::operation_requires_lifecycle_lock(opcode) {
         match namespaces.lock() {
             Ok(registry) => Some(registry.lifecycle_lock()),
             Err(_) => {
@@ -1920,10 +1917,7 @@ async fn execute_request(
     // allowing unrelated namespaces to proceed concurrently. The registry
     // mutex only protects map metadata; this async lock covers the cache
     // operation and its corresponding item-tracking update.
-    let namespace_lock = if matches!(
-        crate::contract::operation_contract(opcode).request_kind,
-        "item" | "set" | "namespace" | "namespace_update_policy" | "namespace_delete"
-    ) {
+    let namespace_lock = if crate::contract::operation_requires_namespace_lock(opcode) {
         let namespace_id = namespace_id.expect("namespace-scoped requests have a validated ID");
         let operation_lock = namespaces
             .lock()

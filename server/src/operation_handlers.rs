@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use openkache_protocol::{Opcode, Status};
 
-use super::operation_extensions::ExtensionResponse;
+use super::operation_extensions::{ExtensionError, ExtensionResponse};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState, SetOutcome, cache_error_response,
     descriptor_payload, mutation_cache_error_response, namespace_exists, resolve_set_options,
@@ -176,6 +176,28 @@ impl<'a> OperationInputView<'a> {
         &self.fields[..self.field_len]
     }
 
+    /// Returns one generated field by its model-derived numeric slot.
+    ///
+    /// The slot is emitted alongside the Smithy plan, so hot-path handlers can
+    /// avoid scanning semantic role strings.  Role-based accessors remain
+    /// available as a convenience for generic extensions and validation.
+    pub(super) fn field_at_index(&self, index: usize) -> Option<OperationFieldValue<'_>> {
+        self.fields
+            .get(index)?
+            .as_ref()?
+            .value
+            .as_ref()
+            .map(OperationFieldStorage::as_value)
+    }
+
+    /// Returns the generated plan entry at a numeric slot.
+    pub(super) fn field_plan_at_index(
+        &self,
+        index: usize,
+    ) -> Option<&'static crate::contract::OperationFieldPlan> {
+        self.fields.get(index)?.as_ref().map(|field| field.plan)
+    }
+
     /// Returns the modeled cardinality for one semantic role.
     pub(super) fn field_count(&self, role: &str) -> usize {
         self.fields()
@@ -232,9 +254,25 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
+    /// Returns one unsigned-long field by its generated numeric slot.
+    pub(super) fn unsigned_long_at(&self, index: usize) -> Option<u64> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::UnsignedLong(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns one item ID field by generated role ordinal.
     pub(super) fn item_id_at(&self, index: usize) -> Option<ItemId> {
         match self.field_at("item_id", index) {
+            Some(OperationFieldValue::ItemId(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns an item ID by its generated numeric slot.
+    pub(super) fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
+        match self.field_at_index(index) {
             Some(OperationFieldValue::ItemId(value)) => Some(value),
             _ => None,
         }
@@ -248,6 +286,14 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
+    /// Returns borrowed bytes by their generated numeric slot.
+    pub(super) fn bytes_at(&self, index: usize) -> Option<&[u8]> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::Bytes(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns the modeled namespace policy field.
     pub(super) fn policy(&self) -> Option<NamespacePolicy> {
         match self.field("policy") {
@@ -256,9 +302,25 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
+    /// Returns a namespace policy by its generated numeric slot.
+    pub(super) fn policy_at(&self, index: usize) -> Option<NamespacePolicy> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::Policy(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns the modeled boolean field.
     pub(super) fn boolean(&self, role: &str) -> Option<bool> {
         match self.field(role) {
+            Some(OperationFieldValue::Boolean(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns a boolean field by its generated numeric slot.
+    pub(super) fn boolean_at(&self, index: usize) -> Option<bool> {
+        match self.field_at_index(index) {
             Some(OperationFieldValue::Boolean(value)) => Some(value),
             _ => None,
         }
@@ -282,6 +344,30 @@ impl<'a> OperationInputView<'a> {
         SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
     }
 
+    /// Reconstructs SET options from generated field slots.
+    pub(super) fn set_options_at(
+        &self,
+        condition_index: usize,
+        expiration_mode_index: usize,
+        ttl_index: usize,
+        eviction_mode_index: usize,
+    ) -> SetOptions {
+        let condition = match self.field_at_index(condition_index) {
+            Some(OperationFieldValue::SetCondition(value)) => value,
+            _ => SetCondition::Any,
+        };
+        let expiration_mode = match self.field_at_index(expiration_mode_index) {
+            Some(OperationFieldValue::ExpirationMode(value)) => value,
+            _ => ExpirationMode::Inherit,
+        };
+        let ttl_ms = self.unsigned_long_at(ttl_index);
+        let eviction_mode = match self.field_at_index(eviction_mode_index) {
+            Some(OperationFieldValue::EvictionMode(value)) => value,
+            _ => EvictionMode::Inherit,
+        };
+        SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
+    }
+
     /// Moves an owned payload out of one generated value role without copying.
     pub(super) fn take_owned_bytes(&mut self, role: &str) -> Option<Vec<u8>> {
         let record = self
@@ -290,6 +376,19 @@ impl<'a> OperationInputView<'a> {
             .take(self.field_len)
             .filter_map(Option::as_mut)
             .find(|field| field.plan.role == role)?;
+        let value = record.value.take()?;
+        match value {
+            OperationFieldStorage::OwnedBytes(value) => Some(value),
+            other => {
+                record.value = Some(other);
+                None
+            }
+        }
+    }
+
+    /// Moves an owned payload out of a generated numeric slot.
+    pub(super) fn take_owned_bytes_at(&mut self, index: usize) -> Option<Vec<u8>> {
+        let record = self.fields.get_mut(index)?.as_mut()?;
         let value = record.value.take()?;
         match value {
             OperationFieldStorage::OwnedBytes(value) => Some(value),
@@ -331,10 +430,7 @@ pub(super) struct OperationContext<'a, 'cache> {
 
 /// Returns whether an operation can be answered without touching storage.
 pub(super) fn is_immediate(opcode: Opcode) -> bool {
-    let contract = crate::contract::operation_contract(opcode);
-    (contract.request_kind == "empty" && contract.response_kind == "pong")
-        || (contract.request_kind == "application_value"
-            && contract.response_kind == "application_value")
+    crate::contract::operation_is_immediate(opcode)
 }
 
 fn is_builtin(opcode: Opcode) -> bool {
@@ -357,6 +453,7 @@ fn is_builtin(opcode: Opcode) -> bool {
 /// This runs during server bind rather than allowing an omitted extension to
 /// reach a panic or an accidental fallback response.
 pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
+    super::operation_codecs::validate_contract_codecs()?;
     for value in u8::MIN..=u8::MAX {
         let Ok(opcode) = Opcode::try_from(value) else {
             continue;
@@ -392,10 +489,49 @@ pub(super) fn immediate_response(opcode: Opcode, value: Vec<u8>) -> Response {
 
 fn encode_extension_response(opcode: Opcode, extension: ExtensionResponse) -> Response {
     match extension {
-        ExtensionResponse::Response(response) => response,
         ExtensionResponse::ApplicationValue(value) => response(Status::Ok, value),
         ExtensionResponse::FieldValues(values) => field_values_response(opcode, &values),
+        ExtensionResponse::Error(error) => encode_extension_error(opcode, error),
     }
+}
+
+/// Converts a transport-neutral extension failure into an allowed wire
+/// status/payload pair.
+///
+/// The generated operation contract remains authoritative: a behavior cannot
+/// accidentally return a status that its Smithy operation did not advertise.
+fn encode_extension_error(opcode: Opcode, error: ExtensionError) -> Response {
+    let (status, payload) = match error {
+        ExtensionError::InvalidInput(payload) => (Status::InvalidRequest, payload),
+        ExtensionError::NotFound(payload) => (Status::NotFound, payload),
+        ExtensionError::NamespaceNotFound(payload) => (Status::NamespaceNotFound, payload),
+        ExtensionError::Conflict(payload) => (Status::Conflict, payload),
+        ExtensionError::Forbidden(payload) => (Status::Forbidden, payload),
+        ExtensionError::TooLarge(payload) => (Status::TooLarge, payload),
+        ExtensionError::Overloaded(payload) => (Status::Overloaded, payload),
+        ExtensionError::Timeout(payload) => (Status::Timeout, payload),
+        ExtensionError::Internal(payload) => (Status::InternalError, payload),
+        ExtensionError::Storage(error) => {
+            let response = super::cache_error_response(error);
+            return ensure_extension_status(opcode, response);
+        }
+    };
+    ensure_extension_status(opcode, response_bytes(status, payload))
+}
+
+fn ensure_extension_status(opcode: Opcode, response: Response) -> Response {
+    let contract = crate::contract::operation_contract(opcode);
+    if contract
+        .error_statuses
+        .iter()
+        .any(|candidate| *candidate == response.status)
+    {
+        return response;
+    }
+    response_bytes(
+        Status::InternalError,
+        b"operation extension returned an undeclared error",
+    )
 }
 
 /// Dispatches a decoded, non-immediate request to server-owned behavior.
@@ -412,21 +548,24 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
         observability,
     } = context;
     let mut input = input;
-    let namespace_id = input.unsigned_long("namespace_id");
-    let expected_revision = input.unsigned_long("expected_revision");
-    let namespace_name = input.bytes("name");
-    let namespace_policy = input.policy();
-    let create_if_missing = input.boolean("create_if_missing").unwrap_or(false);
-    let set_options = input.set_options();
 
     match opcode {
         Opcode::Get => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::GET_NAMESPACE_ID_0);
             let item_id = input
-                .item_id_at(0)
+                .item_id_at_index(crate::contract::request_fields::GET_ITEM_ID_0)
                 .expect("GET requests have a validated item ID");
             execute_get(cache, namespace_id, item_id, namespaces).await
         }
         Opcode::NamespaceOpen => {
+            let namespace_name =
+                input.bytes_at(crate::contract::request_fields::NAMESPACE_OPEN_NAME_0);
+            let create_if_missing = input
+                .boolean_at(crate::contract::request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0)
+                .unwrap_or(false);
+            let namespace_policy =
+                input.policy_at(crate::contract::request_fields::NAMESPACE_OPEN_POLICY_0);
             let name = namespace_name.expect("namespace-open requests have a validated name");
             let result = namespaces
                 .lock()
@@ -440,6 +579,14 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             })
         }
         Opcode::NamespaceUpdatePolicy => {
+            let namespace_id = input.unsigned_long_at(
+                crate::contract::request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
+            );
+            let expected_revision = input.unsigned_long_at(
+                crate::contract::request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+            );
+            let namespace_policy =
+                input.policy_at(crate::contract::request_fields::NAMESPACE_UPDATE_POLICY_POLICY_0);
             let result = namespaces
                 .lock()
                 .map_err(|_| Status::InternalError)
@@ -456,6 +603,11 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             })
         }
         Opcode::NamespaceDelete => {
+            let namespace_id = input
+                .unsigned_long_at(crate::contract::request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0);
+            let expected_revision = input.unsigned_long_at(
+                crate::contract::request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+            );
             let namespace_id = namespace_id.expect("namespace delete has a validated ID");
             let tracked_items = match namespaces.lock() {
                 Ok(registry) => match registry.tracked_items(namespace_id) {
@@ -518,6 +670,14 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             })
         }
         Opcode::Set => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::SET_NAMESPACE_ID_0);
+            let set_options = input.set_options_at(
+                crate::contract::request_fields::SET_CONDITION_0,
+                crate::contract::request_fields::SET_EXPIRATION_MODE_0,
+                crate::contract::request_fields::SET_TTL_MILLISECONDS_0,
+                crate::contract::request_fields::SET_EVICTION_MODE_0,
+            );
             let namespace_id = namespace_id.expect("SET requests have a validated namespace ID");
             let policy = match namespaces
                 .lock()
@@ -539,10 +699,10 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 }
             };
             let item_id = input
-                .item_id_at(0)
+                .item_id_at_index(crate::contract::request_fields::SET_ITEM_ID_0)
                 .expect("SET requests have a validated item ID");
             let value = input
-                .take_owned_bytes("value")
+                .take_owned_bytes_at(crate::contract::request_fields::SET_VALUE_0)
                 .expect("SET requests have a validated value");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             let reservation = match namespaces
@@ -606,6 +766,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             }
         }
         Opcode::Delete => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::DELETE_NAMESPACE_ID_0);
             let namespace_id = namespace_id.expect("DELETE requests have a validated namespace ID");
             if !namespace_exists(namespaces, namespace_id) {
                 return Some(response_bytes(
@@ -614,7 +776,7 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 ));
             }
             let item_id = input
-                .item_id_at(0)
+                .item_id_at_index(crate::contract::request_fields::DELETE_ITEM_ID_0)
                 .expect("DELETE requests have a validated item ID");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             if let Err(status) = namespaces
@@ -654,6 +816,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             }
         }
         Opcode::Stats => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::STATS_NAMESPACE_ID_0);
             if !administrator {
                 return Some(response_bytes(
                     Status::Forbidden,
@@ -689,6 +853,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             }
         }
         Opcode::Sync => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::SYNC_NAMESPACE_ID_0);
             if !administrator {
                 return Some(response_bytes(
                     Status::Forbidden,
