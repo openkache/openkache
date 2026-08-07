@@ -133,10 +133,6 @@ impl<'a> NetworkWorkerCache<'a> {
         }
     }
 
-    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
-        self.cache.namespace_item_worker(namespace_id, item_id)
-    }
-
     pub(crate) async fn get_in_namespace(
         &self,
         namespace_id: u64,
@@ -220,12 +216,6 @@ impl<'a> NetworkWorkerCache<'a> {
     pub(crate) async fn sync(&self) -> Result<()> {
         self.cache
             .sync_async_with_requester(Some(self.network_worker))
-            .await
-    }
-
-    pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
-        self.cache
-            .sync_workers_async_with_requester(workers, Some(self.network_worker))
             .await
     }
 }
@@ -557,12 +547,6 @@ impl ThreadedKvkache {
 
     fn scoped_storage_key(&self, namespace_id: u64, item_id: ItemId) -> StorageKey {
         derive_scoped_storage_key(&self.server_cipher, namespace_id, item_id)
-    }
-
-    /// Returns the storage worker that owns one namespace-scoped item.
-    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
-        let storage_key = self.scoped_storage_key(namespace_id, item_id);
-        self.owner(&storage_key)
     }
 
     /// Sends one worker request using a reusable completion slot and bounded timeouts.
@@ -1267,42 +1251,6 @@ impl ThreadedKvkache {
             match self
                 .request(
                     thread_id,
-                    Operation::Sync,
-                    requester,
-                    |response| WorkerRequest::Sync { response },
-                )
-                .await?
-            {
-                WorkerResponse::Synced => {}
-                response => {
-                    return Err(KvError::Worker(format!(
-                        "unexpected sync response: {response:?}"
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Flushes exactly the storage workers that have observed mutations for a namespace.
-    pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
-        self.sync_workers_async_with_requester(workers, None).await
-    }
-
-    async fn sync_workers_async_with_requester(
-        &self,
-        workers: &[usize],
-        requester: Option<NetworkWorkerId>,
-    ) -> Result<()> {
-        for &worker in workers {
-            if worker >= self.workers.len() {
-                return Err(KvError::Worker(format!(
-                    "namespace references unknown storage worker {worker}"
-                )));
-            }
-            match self
-                .request(
-                    worker,
                     Operation::Sync,
                     requester,
                     |response| WorkerRequest::Sync { response },

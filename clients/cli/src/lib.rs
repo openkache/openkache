@@ -1,13 +1,18 @@
 //! Scriptable and interactive command-line access to an OpenKache server.
 
-use std::io::{self, Read, Write};
+use std::fmt::Display;
+use std::io::{self, IsTerminal, Read, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Once;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use clap::{Parser, Subcommand, ValueEnum};
+use comfy_table::{Table, presets::UTF8_FULL};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 #[cfg(feature = "quic-quinn")]
 use openkache_client::Client;
 #[cfg(feature = "quic-compio")]
@@ -16,6 +21,13 @@ use openkache_client::{
     Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
     KeySpec, PrivateKey, ServerTrust, SetOptions, SetOutcome,
 };
+use owo_colors::OwoColorize;
+use reedline::{
+    ColumnarMenu, DefaultCompleter, DefaultPrompt, DefaultPromptSegment, Emacs, KeyCode,
+    KeyModifiers, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
+    default_emacs_keybindings,
+};
+use serde_json::Value;
 
 #[cfg(all(feature = "quic-compio", feature = "quic-quinn"))]
 compile_error!("enable exactly one CLI QUIC backend feature");
@@ -45,6 +57,55 @@ pub enum CliError {
 
 /// Result type used by the command-line client.
 pub type Result<T> = std::result::Result<T, CliError>;
+
+/// Renders a client failure with a terminal-aware diagnostic layout.
+///
+/// Errors are written to stderr so command stdout remains safe for values and
+/// machine-readable responses.
+///
+/// # Arguments
+///
+/// * `error` - The client failure to render.
+///
+/// # Returns
+///
+/// Nothing. The formatted diagnostic is written to stderr.
+pub fn report_error(error: &CliError) {
+    report_message(error, "run `openkache-cli --help` for usage");
+}
+
+/// Renders a process-level client failure with the same diagnostic layout as
+/// command failures.
+///
+/// # Arguments
+///
+/// * `message` - Human-readable runtime initialization or configuration error.
+/// * `help` - Actionable follow-up guidance shown below the error.
+///
+/// # Returns
+///
+/// Nothing. The formatted diagnostic is written to stderr.
+pub fn report_message(message: impl Display, help: &str) {
+    static DIAGNOSTIC_HANDLER: Once = Once::new();
+    DIAGNOSTIC_HANDLER.call_once(|| {
+        let _ = miette::set_hook(Box::new(|_| {
+            Box::new(
+                miette::MietteHandlerOpts::new()
+                    .terminal_links(true)
+                    .build(),
+            )
+        }));
+    });
+
+    let report = miette::miette!(
+        severity = miette::Severity::Error,
+        code = "openkache::cli",
+        help = help,
+        "{}",
+        message
+    );
+    anstream::eprintln!("{report:?}");
+}
 
 /// Output encoding for values returned by `get`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -187,8 +248,16 @@ pub enum Command {
 ///
 /// Returns configuration, transport, protocol, value, or terminal I/O errors.
 pub async fn run(arguments: Arguments) -> Result<()> {
-    let client = connect(&arguments).await?;
     let address = arguments.address.clone();
+    let connecting = progress_bar(format!("connecting to {address}"));
+    let client = match connect(&arguments).await {
+        Ok(client) => client,
+        Err(error) => {
+            connecting.abandon();
+            return Err(error);
+        }
+    };
+    connecting.finish_with_message(format!("connected to {address}"));
 
     match arguments.command {
         Command::Shell => run_shell(&client, &address).await,
@@ -399,11 +468,11 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
     match command {
         Command::Ping => {
             client.ping().await?;
-            println!("PONG");
+            print_status("PONG");
         }
         Command::Get { key, output } => match client.get(key.as_bytes()).await? {
             GetOutcome::Found(value) => write_value(&value, output)?,
-            GetOutcome::NotFound => println!("NOT_FOUND"),
+            GetOutcome::NotFound => print_status("NOT_FOUND"),
         },
         Command::Set {
             key,
@@ -416,16 +485,21 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
             let value = value_from_arguments(value, value_stdin)?;
             let options = set_options(if_absent, if_present, ttl_ms)?;
             let outcome = client.set(key.as_bytes(), value, options).await?;
-            println!("{}", set_outcome_label(outcome));
+            print_status(set_outcome_label(outcome));
         }
         Command::Delete { key } => {
             let outcome = client.delete(key.as_bytes()).await?;
-            println!("{}", delete_outcome_label(outcome));
+            print_status(delete_outcome_label(outcome));
         }
-        Command::Stats => println!("{}", client.stats().await?),
+        Command::Stats => print_stats(&client.stats().await?)?,
         Command::Sync => {
-            client.sync().await?;
-            println!("OK");
+            let syncing = progress_bar("waiting for durable mutations".to_owned());
+            if let Err(error) = client.sync().await {
+                syncing.abandon();
+                return Err(error.into());
+            }
+            syncing.finish_with_message("mutations are durable");
+            print_status("OK");
         }
         Command::Shell => {
             return Err(CliError::Command(
@@ -434,6 +508,83 @@ async fn execute_command(client: &ConnectedClient, command: Command) -> Result<(
         }
     }
     Ok(())
+}
+
+fn print_status(status: &'static str) {
+    match status {
+        "NOT_FOUND" | "NOT_STORED" => anstream::println!("{}", status.yellow().bold()),
+        _ => anstream::println!("{}", status.green().bold()),
+    }
+}
+
+fn print_stats(payload: &str) -> Result<()> {
+    if !io::stdout().is_terminal() {
+        // Keep the existing JSON contract for pipes, scripts, and CI.
+        anstream::println!("{payload}");
+        return Ok(());
+    }
+
+    let value: Value = serde_json::from_str(payload)
+        .map_err(|error| CliError::Command(format!("STATS response is not valid JSON: {error}")))?;
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["metric", "value"]);
+    add_stat_rows(&mut table, "", &value);
+
+    anstream::println!("{}", "OpenKache stats".bold());
+    anstream::println!("{table}");
+    Ok(())
+}
+
+fn add_stat_rows(table: &mut Table, prefix: &str, value: &Value) {
+    match value {
+        Value::Object(fields) => {
+            for (name, value) in fields {
+                let path = if prefix.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{prefix}.{name}")
+                };
+                add_stat_rows(table, &path, value);
+            }
+        }
+        Value::Array(values) => {
+            if values.is_empty() {
+                table.add_row(vec![prefix.to_owned(), "[]".to_owned()]);
+            } else {
+                for (index, value) in values.iter().enumerate() {
+                    let path = format!("{prefix}[{index}]");
+                    add_stat_rows(table, &path, value);
+                }
+            }
+        }
+        _ => {
+            table.add_row(vec![prefix.to_owned(), stat_value(value)]);
+        }
+    }
+}
+
+fn stat_value(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn progress_bar(message: String) -> ProgressBar {
+    let progress = ProgressBar::new_spinner();
+    if !io::stderr().is_terminal() {
+        progress.set_draw_target(ProgressDrawTarget::hidden());
+        return progress;
+    }
+
+    let style = ProgressStyle::with_template("{spinner:.green} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+    progress.set_style(style);
+    progress.enable_steady_tick(Duration::from_millis(90));
+    progress.set_message(message);
+    progress
 }
 
 fn value_from_arguments(value: Option<String>, value_stdin: bool) -> Result<Vec<u8>> {
@@ -510,23 +661,36 @@ fn delete_outcome_label(outcome: DeleteOutcome) -> &'static str {
 }
 
 async fn run_shell(client: &ConnectedClient, address: &str) -> Result<()> {
-    println!("Connected to {address}");
-    println!("Type 'help' for commands or 'exit' to quit.");
+    anstream::println!("{}", format!("Connected to {address}").green().bold());
+    anstream::println!("{}", "Type 'help' for commands or 'exit' to quit.".dimmed());
 
+    let mut line_editor = shell_editor();
+    let prompt = DefaultPrompt::new(
+        DefaultPromptSegment::Basic("openkache ❯ ".to_owned()),
+        DefaultPromptSegment::Empty,
+    );
     loop {
-        print!("openkache> ");
-        io::stdout().flush()?;
-        let (bytes, line) = read_shell_line_async().await?;
-        if bytes == 0 {
-            println!();
-            break;
-        }
+        let (editor, signal) = read_shell_signal_async(line_editor, prompt.clone()).await?;
+        line_editor = editor;
+
+        let line = match signal {
+            Signal::Success(line) => line,
+            Signal::CtrlD => {
+                anstream::println!();
+                break;
+            }
+            Signal::CtrlC => {
+                anstream::eprintln!("{}", "input cancelled".yellow());
+                continue;
+            }
+            _ => continue,
+        };
 
         let command = match parse_shell_command(&line) {
             Ok(Some(command)) => command,
             Ok(None) => continue,
             Err(message) => {
-                println!("ERR {message}");
+                print_shell_error(&message);
                 continue;
             }
         };
@@ -535,7 +699,7 @@ async fn run_shell(client: &ConnectedClient, address: &str) -> Result<()> {
             ShellCommand::Help => print_shell_help(),
             ShellCommand::Command(command) => {
                 if let Err(error) = execute_command(client, command).await {
-                    println!("ERR {error}");
+                    print_shell_error(&error.to_string());
                 }
             }
         }
@@ -543,28 +707,81 @@ async fn run_shell(client: &ConnectedClient, address: &str) -> Result<()> {
     Ok(())
 }
 
-async fn read_shell_line_async() -> Result<(usize, String)> {
-    #[cfg(feature = "quic-compio")]
-    {
-        compio::runtime::spawn_blocking(read_shell_line)
-            .await
-            .map_err(|error| CliError::TerminalTask(error.to_string()))?
-            .map_err(CliError::from)
-    }
+fn shell_editor() -> Reedline {
+    let commands = [
+        "ping", "get", "set", "delete", "del", "stats", "sync", "help", "exit", "quit",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    let completer = Box::new(DefaultCompleter::new_with_wordlen(commands, 1));
+    let completion_menu = Box::new(ColumnarMenu::default().with_name("completion_menu"));
+    let mut keybindings = default_emacs_keybindings();
+    keybindings.add_binding(
+        KeyModifiers::NONE,
+        KeyCode::Tab,
+        ReedlineEvent::UntilFound(vec![
+            ReedlineEvent::Menu("completion_menu".to_owned()),
+            ReedlineEvent::MenuNext,
+        ]),
+    );
+    let edit_mode = Box::new(Emacs::new(keybindings));
 
-    #[cfg(feature = "quic-quinn")]
-    {
-        tokio::task::spawn_blocking(read_shell_line)
-            .await
-            .map_err(|error| CliError::TerminalTask(error.to_string()))?
-            .map_err(CliError::from)
-    }
+    Reedline::create()
+        .with_completer(completer)
+        .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+        .with_edit_mode(edit_mode)
+        .with_ansi_colors(std::env::var_os("NO_COLOR").is_none())
 }
 
-fn read_shell_line() -> io::Result<(usize, String)> {
-    let mut line = String::new();
-    let bytes = io::stdin().read_line(&mut line)?;
-    Ok((bytes, line))
+#[cfg(feature = "quic-compio")]
+async fn read_shell_signal_async(
+    editor: Reedline,
+    prompt: DefaultPrompt,
+) -> Result<(Reedline, Signal)> {
+    let (editor, signal) = compio::runtime::spawn_blocking(move || {
+        let mut editor = editor;
+        let signal = editor.read_line(&prompt);
+        (editor, signal)
+    })
+    .await
+    .map_err(|error| CliError::TerminalTask(error.to_string()))?;
+    let signal = signal.map_err(|error| CliError::TerminalTask(error.to_string()))?;
+    Ok((editor, signal))
+}
+
+#[cfg(feature = "quic-quinn")]
+async fn read_shell_signal_async(
+    editor: Reedline,
+    prompt: DefaultPrompt,
+) -> Result<(Reedline, Signal)> {
+    let (editor, signal) = tokio::task::spawn_blocking(move || {
+        let mut editor = editor;
+        let signal = editor.read_line(&prompt);
+        (editor, signal)
+    })
+    .await
+    .map_err(|error| CliError::TerminalTask(error.to_string()))?;
+    let signal = signal.map_err(|error| CliError::TerminalTask(error.to_string()))?;
+    Ok((editor, signal))
+}
+
+fn print_shell_error(message: &str) {
+    anstream::eprintln!("{} {message}", "error:".red().bold());
+}
+
+fn print_shell_help() {
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL);
+    table.set_header(["command", "description"]);
+    table.add_row(["ping", "verify the connection"]);
+    table.add_row(["get <key>", "retrieve a value"]);
+    table.add_row(["set <key> <value>", "store a value"]);
+    table.add_row(["delete <key>", "remove a value"]);
+    table.add_row(["stats", "show server statistics"]);
+    table.add_row(["sync", "wait for durable mutations"]);
+    table.add_row(["exit / quit", "close the shell"]);
+    anstream::println!("{table}");
 }
 
 enum ShellCommand {
@@ -651,15 +868,4 @@ fn parse_set_arguments(arguments: &str) -> std::result::Result<(String, String),
         return Err("usage: set <key> <value>".to_string());
     }
     Ok((key.to_string(), value.to_string()))
-}
-
-fn print_shell_help() {
-    println!("ping");
-    println!("get <key>");
-    println!("set <key> <value>");
-    println!("delete <key>  (alias: del)");
-    println!("stats");
-    println!("sync");
-    println!("help");
-    println!("exit          (alias: quit)");
 }

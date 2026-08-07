@@ -12,16 +12,22 @@ fn main() {
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("ERR failed to initialize Compio runtime: {error}");
+            openkache_cli::report_message(
+                format!("failed to initialize Compio runtime: {error}"),
+                "check that the selected runtime is available on this host",
+            );
             std::process::exit(1);
         }
     };
     if !runtime.driver_type().is_iouring() {
-        eprintln!("ERR openkache-cli requires the io_uring runtime driver");
+        openkache_cli::report_message(
+            "openkache-cli requires the io_uring runtime driver",
+            "use `--no-default-features --features quic-quinn` on platforms without io_uring",
+        );
         std::process::exit(1);
     }
     if let Err(error) = runtime.block_on(openkache_cli::run(arguments)) {
-        eprintln!("ERR {error}");
+        openkache_cli::report_error(&error);
         std::process::exit(1);
     }
 }
@@ -32,7 +38,7 @@ async fn main() {
     use clap::Parser;
 
     if let Err(error) = openkache_cli::run(openkache_cli::Arguments::parse()).await {
-        eprintln!("ERR {error}");
+        openkache_cli::report_error(&error);
         std::process::exit(1);
     }
 }
