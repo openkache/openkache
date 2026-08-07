@@ -9,12 +9,13 @@ use std::sync::Mutex;
 
 use openkache_protocol::{Opcode, Status};
 
+use super::super::types::StoredItemValue;
 use super::operation_handlers::OperationContext;
 use super::protocol::Response;
 use super::{
-    NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response_bytes,
+    NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists,
+    operation_codecs, response_bytes,
 };
-use super::super::types::StoredItemValue;
 
 /// Domain-level result returned by a server operation extension.
 ///
@@ -34,14 +35,7 @@ pub(super) enum ExtensionResponse {
 /// framing or client infrastructure about that behavior.
 pub(super) async fn execute(context: &OperationContext<'_, '_>) -> Option<ExtensionResponse> {
     match context.opcode {
-        Opcode::Get2 => {
-            execute_get2(
-                context.cache,
-                &context.input,
-                context.namespaces,
-            )
-            .await
-        }
+        Opcode::Get2 => execute_get2(context.cache, &context.input, context.namespaces).await,
         _ => None,
     }
 }
@@ -101,40 +95,20 @@ pub(super) fn handles(opcode: Opcode) -> bool {
 }
 
 fn echo_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
-    if std::str::from_utf8(&value).is_err() {
-        return Err(b"application value must be valid UTF-8");
-    }
+    operation_codecs::decode_utf8(&value)?;
     Ok(value)
 }
 
 fn reverse_utf8_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
-    let value = std::str::from_utf8(&value)
-        .map_err(|_| b"application value must be valid UTF-8" as &'static [u8])?;
-    Ok(value.chars().rev().collect::<String>().into_bytes())
+    let value = operation_codecs::decode_utf8(&value)?;
+    let reversed = value.chars().rev().collect::<String>();
+    Ok(operation_codecs::encode_utf8(&reversed))
 }
 
 fn square_array_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
-    const F64_BYTES: usize = std::mem::size_of::<f64>();
-    if value.len() % F64_BYTES != 0 {
-        return Err(b"square_array payload length must be a multiple of eight");
-    }
-    let mut squared = Vec::with_capacity(value.len());
-    for chunk in value.chunks_exact(F64_BYTES) {
-        let input = f64::from_be_bytes(
-            chunk
-                .try_into()
-                .expect("chunks_exact returned a fixed-width chunk"),
-        );
-        if !input.is_finite() {
-            return Err(b"square_array input must contain finite values");
-        }
-        let output = input * input;
-        if !output.is_finite() {
-            return Err(b"square_array result must contain finite values");
-        }
-        squared.extend_from_slice(&output.to_be_bytes());
-    }
-    Ok(squared)
+    operation_codecs::transform_packed_f64_be(&value, |input| {
+        input.is_finite().then_some(input * input)
+    })
 }
 
 /// Executes the experimental two-item read without teaching the shared
