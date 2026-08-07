@@ -28,6 +28,7 @@ export {
   render_rust_server_contract,
   render_rust_wire,
   render_protocol_spec_operation_table,
+  smithy_wire_ast,
 } from "./wire"
 export type {
   Wire_Contract,

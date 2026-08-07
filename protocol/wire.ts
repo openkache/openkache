@@ -1380,6 +1380,17 @@ function rust_request_layout(contract: Wire_Contract): string {
     } = operation.contract
     const has_role = (role: string): boolean =>
       request_fields.some((field) => field.role === role && field.count > 0)
+    // Preserve the modeled namespace-management layouts before applying the
+    // generic namespace-id role fallback. These operations carry revision,
+    // policy, or delete-flag bytes that are not represented by the generic
+    // scoped-namespace prefix.
+    if (
+      request_kind === "namespace_open" ||
+      request_kind === "namespace_update_policy" ||
+      request_kind === "namespace_delete"
+    ) {
+      return pascal_case(request_kind)
+    }
     // `request_value_count` is present for all production Smithy ASTs. Keep
     // the response-kind fallback only for old unit fixtures that predate the
     // role count; it is never used by generated production output.
