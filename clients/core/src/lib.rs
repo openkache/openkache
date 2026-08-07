@@ -31,7 +31,10 @@ pub use config::{
     ServerTrust, SetOptions,
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
-pub use key::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
+pub use key::{
+    CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
+    KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey, canonical_key_bytes,
+};
 pub use openkache_protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ITEM_ID_BYTES,
     NamespaceDescriptor, NamespacePolicy, OverridePolicy, SetCondition,
@@ -250,6 +253,9 @@ pub enum Error {
     /// Client-side value encoding or decoding failed.
     #[error("value transformation failed: {0}")]
     Value(#[from] value::Error),
+    /// Client-side key conversion or Item ID derivation failed.
+    #[error("key transformation failed: {0}")]
+    Key(#[from] key::KeyError),
     /// The client was explicitly and permanently closed.
     #[error("client is closed")]
     ClientClosed,
@@ -784,12 +790,13 @@ impl<C: ClientConnection> Core<C> {
                 ),
             });
         }
-        let expected_next_revision = expected_revision.checked_add(1).ok_or_else(|| {
-            Error::UnexpectedResponse {
-                operation: Operation::NamespaceUpdatePolicy,
-                message: "successful policy update cannot follow the maximum revision".into(),
-            }
-        })?;
+        let expected_next_revision =
+            expected_revision
+                .checked_add(1)
+                .ok_or_else(|| Error::UnexpectedResponse {
+                    operation: Operation::NamespaceUpdatePolicy,
+                    message: "successful policy update cannot follow the maximum revision".into(),
+                })?;
         if descriptor.revision != expected_next_revision {
             return Err(Error::UnexpectedResponse {
                 operation: Operation::NamespaceUpdatePolicy,
@@ -868,9 +875,7 @@ impl<C: ClientConnection> Core<C> {
         // violation; the lane must be discarded even when the QUIC connection remains
         // usable. This also prevents a malformed success from being mistaken for a
         // definitive mutation result.
-        if let Err(error) =
-            validate_response_contract(opcode, create_if_missing, &response)
-        {
+        if let Err(error) = validate_response_contract(opcode, create_if_missing, &response) {
             return Err(RequestFailure::after_response(error));
         }
         // Error responses may be emitted while the server is still parsing a request,
@@ -1209,6 +1214,14 @@ macro_rules! raw_client_methods {
             /// Returns the currently selected server-assigned namespace ID.
             pub fn namespace_id(&self) -> Option<u64> {
                 self.0.namespace_id()
+            }
+
+            /// Resolves and returns the namespace used by formatted operations.
+            ///
+            /// If no explicit namespace ID is configured, this opens the
+            /// configured namespace name with the builder's policy.
+            pub async fn ensure_namespace_id(&self) -> Result<u64> {
+                self.0.ensure_namespace().await
             }
 
             /// Resolves a namespace name and optionally creates it.
@@ -1658,7 +1671,10 @@ fn validate_response_contract(
             | Status::InternalError => true,
             Status::NoCapacity | Status::PolicyConflict => opcode == Opcode::Set,
             Status::Conflict => {
-                matches!(opcode, Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete)
+                matches!(
+                    opcode,
+                    Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete
+                )
             }
             Status::NamespaceNotFound => matches!(
                 opcode,
@@ -1700,12 +1716,12 @@ fn validate_response_contract(
         })
     };
     let descriptor_payload = || {
-        NamespaceDescriptor::decode(&response.payload).map(|_| ()).map_err(|error| {
-            Error::UnexpectedResponse {
+        NamespaceDescriptor::decode(&response.payload)
+            .map(|_| ())
+            .map_err(|error| Error::UnexpectedResponse {
                 operation,
                 message: format!("namespace descriptor is invalid: {error}"),
-            }
-        })
+            })
     };
     match (opcode, response.status) {
         (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
@@ -1726,9 +1742,7 @@ fn validate_response_contract(
             invalid_payload("SET success responses must have an empty payload")
         }
 
-        (Opcode::Delete, Status::Deleted | Status::NotFound)
-            if response.payload.is_empty() =>
-        {
+        (Opcode::Delete, Status::Deleted | Status::NotFound) if response.payload.is_empty() => {
             Ok(())
         }
         (Opcode::Delete, Status::Deleted | Status::NotFound) => {

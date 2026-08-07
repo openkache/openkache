@@ -146,13 +146,16 @@ typedef struct openkache_client_connect_options {
 uint32_t openkache_client_abi_version(void);
 
 /*
- * Connects a protected client.
+ * Connects a client. An empty data-protection-key buffer selects the
+ * unprotected formatted-value profile while retaining Item ID derivation.
  *
  * `address` is a UTF-8 host/port authority such as "127.0.0.1:4433" or
  * "cache.example.com:4433".
  * `server_name` is the TLS DNS name or IP identity.
  * `certificate` is one DER-encoded server trust certificate, a PEM chain,
  * or an empty buffer to use system trust roots.
+ * `data_protection_key` is optional; when supplied it must contain exactly
+ * 32 bytes.
  * All input buffers are copied before this call returns.
  */
 openkache_client_result_t *openkache_client_connect(
@@ -211,8 +214,10 @@ openkache_client_result_t *openkache_client_connect_with_options(
 
 /*
  * Executes one operation. The result payload is borrowed and must be copied
- * before freeing the result. Empty buffers are represented by a null pointer
- * or any pointer with length zero.
+ * before freeing the result. For protected GET, SET, and DELETE operations,
+ * `application_key` is exactly one canonical v1 key item as specified by
+ * `clients/KEY_FORMAT.md`; it is not raw application bytes. Empty buffers are
+ * represented by a null pointer or any pointer with length zero.
  */
 openkache_client_result_t *openkache_client_execute(
     const openkache_client_t *client,

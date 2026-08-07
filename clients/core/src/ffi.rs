@@ -77,7 +77,7 @@ pub struct FfiConnectOptions {
     pub client_private_key: *const u8,
     /// Byte length of [`Self::client_private_key`].
     pub client_private_key_length: usize,
-    /// Exact 32-byte application data-protection key.
+    /// Optional exact 32-byte application data-protection key. Empty selects unprotected values.
     pub data_protection_key: *const u8,
     /// Byte length of [`Self::data_protection_key`].
     pub data_protection_key_length: usize,
@@ -153,7 +153,7 @@ type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 struct WorkerOptions {
     endpoint: Endpoint,
     certificate: Vec<u8>,
-    data_protection_key: DataProtectionKey,
+    data_protection_key: Option<DataProtectionKey>,
     client_certificate_chain: Vec<u8>,
     client_private_key: Vec<u8>,
     compression: Compression,
@@ -195,7 +195,7 @@ impl FfiClient {
     fn connect(
         endpoint: Endpoint,
         certificate: Vec<u8>,
-        data_protection_key: DataProtectionKey,
+        data_protection_key: Option<DataProtectionKey>,
         client_certificate_chain: Vec<u8>,
         client_private_key: Vec<u8>,
         compression: Compression,
@@ -414,12 +414,18 @@ fn run_worker(
         ));
         return;
     }
-    let mut builder = LocalProtectedClient::builder(endpoint, data_protection_key)
-        .compression(compression)
-        .encryption(encryption)
-        .timeouts(timeouts)
-        .retry_policy(retry)
-        .max_in_flight(max_in_flight);
+    let protected = data_protection_key.is_some();
+    let mut builder = match data_protection_key {
+        Some(key) => LocalProtectedClient::builder(endpoint, key),
+        None => LocalProtectedClient::builder_unprotected(endpoint),
+    }
+    .compression(compression)
+    .timeouts(timeouts)
+    .retry_policy(retry)
+    .max_in_flight(max_in_flight);
+    if protected {
+        builder = builder.encryption(encryption);
+    }
     if !certificate.is_empty() {
         let certificates = match Certificate::from_der_or_pem_chain(&certificate) {
             Ok(certificates) => certificates,
@@ -607,32 +613,43 @@ async fn execute(
 async fn execute_protected(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    application_key: Vec<u8>,
+    canonical_key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
         FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
         FfiOperation::Get => client
-            .get(&application_key)
+            .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
-            .map(|value| get_result(value, bytes_result)),
+            .map(|value| get_result(value, raw_value_result)),
         FfiOperation::GetJson => client
-            .get_value(&application_key)
+            .get_canonical_key_unchecked(canonical_key.as_slice())
             .await
             .and_then(json_result),
         FfiOperation::Set => client
-            .set(&application_key, value, set_options)
+            .set_canonical_key_unchecked(
+                canonical_key.as_slice(),
+                Value::Raw(value),
+                set_options,
+            )
             .await
             .map(set_result),
         FfiOperation::SetJson => match parse_json(&value) {
             Ok(json) => client
-                .set_value(&application_key, Value::Json(json), set_options)
+                .set_canonical_key_unchecked(
+                    canonical_key.as_slice(),
+                    Value::Json(json),
+                    set_options,
+                )
                 .await
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
-        FfiOperation::Delete => client.delete(&application_key).await.map(delete_result),
+        FfiOperation::Delete => client
+            .delete_canonical_key_unchecked(canonical_key.as_slice())
+            .await
+            .map(delete_result),
         FfiOperation::Stats => client
             .stats()
             .await
@@ -851,6 +868,13 @@ fn value_result(value: ItemValue) -> FfiResult {
 
 fn bytes_result(payload: Vec<u8>) -> FfiResult {
     FfiResult::success(FfiResultKind::Value, payload)
+}
+
+fn raw_value_result(value: Value) -> FfiResult {
+    match value {
+        Value::Raw(payload) => bytes_result(payload),
+        Value::Json(_) => FfiResult::error("formatted value is not Raw serialization"),
+    }
 }
 
 fn delete_result(outcome: DeleteOutcome) -> FfiResult {
@@ -1137,9 +1161,12 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
 
 /// Executes one protected operation through an opaque native client.
 ///
-/// For `GET`, `SET`, and `DELETE`, `application_key` is the exact application key used by the
-/// shared data-protection layer. `SET` accepts an empty value and optional existence/TTL options.
-/// `PING`, `STATS`, and `SYNC` require empty key and value buffers.
+/// For `GET`, `SET`, and `DELETE`, `application_key` is exactly one canonical
+/// v1 key item from `KEY_FORMAT.md`. The CBOR item is the ABI's type
+/// discriminator (`Integer`, `Text`, or `Bytes`); it is not raw application
+/// bytes and is not a 32-byte Item ID. `SET` accepts an empty value and
+/// optional existence/TTL options. `PING`, `STATS`, and `SYNC` require empty
+/// key and value buffers.
 ///
 /// # Safety
 ///
@@ -1624,15 +1651,6 @@ fn execute_entry_inner(
             set_options
         };
         match operation {
-            FfiOperation::Get
-            | FfiOperation::Set
-            | FfiOperation::GetJson
-            | FfiOperation::SetJson
-            | FfiOperation::Delete
-                if !raw && application_key.is_empty() =>
-            {
-                Err("application key must not be empty".to_owned())
-            }
             FfiOperation::Ping
             | FfiOperation::Stats
             | FfiOperation::Sync
@@ -1782,9 +1800,9 @@ fn copy_utf8(pointer: *const u8, length: usize, name: &str) -> std::result::Resu
 fn copy_data_protection_key(
     pointer: *const u8,
     length: usize,
-) -> std::result::Result<DataProtectionKey, String> {
+) -> std::result::Result<Option<DataProtectionKey>, String> {
     if length == 0 {
-        return DataProtectionKey::from_slice(&[]).map_err(|error| error.to_string());
+        return Ok(None);
     }
     if pointer.is_null() {
         return Err(format!(
@@ -1792,7 +1810,9 @@ fn copy_data_protection_key(
         ));
     }
     let bytes = unsafe { std::slice::from_raw_parts(pointer, length) };
-    DataProtectionKey::from_slice(bytes).map_err(|error| error.to_string())
+    DataProtectionKey::from_slice(bytes)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn copy_bytes(

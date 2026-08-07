@@ -16,8 +16,8 @@ The main API layers are:
   opaque values;
 - `ProtectedClient` and `LocalProtectedClient`, which accept application keys
   and plaintext values;
-- `ValueCodec`, which will own Raw and CBOR value codecs, optional Zstandard
-  compression, and formatted-value encryption;
+- `ValueCodec`, which owns value serialization, optional Zstandard compression,
+  and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
@@ -53,7 +53,9 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. It requires the platform's io_uring driver and exports
+`LocalProtectedClient`. Protected FFI operations accept exactly one canonical
+v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
+discriminator), not raw application bytes. It requires the platform's io_uring driver and exports
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,
@@ -81,10 +83,9 @@ let outcome = client
 `ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
 and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
 v1 contract calls the root secret `client_root_key` and binds the selected
-namespace into both Item ID derivation and value AAD. The checked-in
-implementation still exposes the previous `DataProtectionKey` and
-`Compact`/`Robust` API names until that migration is completed; those names are
-not v1 wire identifiers.
+namespace into both Item ID derivation and value AAD. The Rust API retains
+`DataProtectionKey` as a source-compatible alias; it is not a separate wire
+concept.
 
 `ValueCodec` stores its metadata inside the opaque value:
 
@@ -109,9 +110,9 @@ Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
 
 ```rust
-use openkache_client_core::{DataProtectionKey, ProtectedClient};
+use openkache_client_core::{ClientRootKey, ProtectedClient};
 
-let key = DataProtectionKey::from_base64(&configured_base64_secret)?;
+let key = ClientRootKey::from_base64(&configured_base64_secret)?;
 let client = ProtectedClient::connect("cache.example.com:4433", key).await?;
 client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 ```

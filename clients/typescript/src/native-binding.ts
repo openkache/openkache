@@ -24,7 +24,7 @@ export interface Native_Client_Options {
   readonly server_name: string
   readonly certificate: Uint8Array
   readonly identity?: Native_Identity
-  readonly data_protection_key: Uint8Array
+  readonly data_protection_key?: Uint8Array
   readonly compression_enabled: boolean
   readonly compression_level?: number
   readonly minimum_input_size?: number
@@ -34,6 +34,7 @@ export interface Native_Client_Options {
   readonly retry_max_attempts?: number
   readonly max_in_flight?: number
   readonly encryption?: "compact" | "robust"
+  readonly key_spec?: "integer" | "text" | "bytes"
 }
 
 export type Native_Namespace_Policy = Smithy_Namespace_Policy

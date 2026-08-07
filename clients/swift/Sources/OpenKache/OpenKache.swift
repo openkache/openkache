@@ -297,7 +297,7 @@ public struct OpenKacheClientOptions: Sendable {
     public var certificate: Data?
     /// Optional mutual-TLS identity.
     public var identity: OpenKacheClientIdentity?
-    /// Persistent 32-byte application data-protection key.
+    /// Optional persistent 32-byte application data-protection key.
     public var dataProtectionKey: Data
     /// Value compression policy.
     public var compression: OpenKacheCompression
@@ -315,7 +315,7 @@ public struct OpenKacheClientOptions: Sendable {
     /// Creates a client configuration with shared-core defaults.
     public init(
         address: String,
-        dataProtectionKey: Data,
+        dataProtectionKey: Data = Data(),
         serverName: String? = nil,
         certificate: Data? = nil,
         identity: OpenKacheClientIdentity? = nil,
@@ -381,9 +381,11 @@ private enum NativeBridge {
         guard !options.address.isEmpty else {
             throw OpenKacheError("address must not be empty")
         }
-        guard options.dataProtectionKey.count == Smithy_Value_Format.dataProtectionKeyBytes else {
+        guard options.dataProtectionKey.isEmpty
+            || options.dataProtectionKey.count == Smithy_Value_Format.dataProtectionKeyBytes
+        else {
             throw OpenKacheError(
-                "dataProtectionKey must contain exactly \(Smithy_Value_Format.dataProtectionKeyBytes) bytes"
+                "dataProtectionKey must contain exactly \(Smithy_Value_Format.dataProtectionKeyBytes) bytes when supplied"
             )
         }
         let connectTimeout = try milliseconds(options.connectTimeout, named: "connectTimeout")
@@ -862,6 +864,40 @@ private func deleteOutcome(
     }
 }
 
+private let maxCanonicalKeyBytes = 1_048_576
+
+private func canonicalKey(_ payload: Data, major: UInt8) throws -> Data {
+    guard major == 2 || major == 3 else {
+        throw OpenKacheError("unsupported canonical key type")
+    }
+    let length = payload.count
+    let header: [UInt8]
+    switch length {
+    case 0...23:
+        header = [major << 5 | UInt8(length)]
+    case 24...255:
+        header = [major << 5 | 24, UInt8(length)]
+    case 256...65_535:
+        header = [major << 5 | 25, UInt8(length >> 8), UInt8(length)]
+    case 65_536...4_294_967_295:
+        header = [
+            major << 5 | 26,
+            UInt8(length >> 24),
+            UInt8(length >> 16),
+            UInt8(length >> 8),
+            UInt8(length)
+        ]
+    default:
+        throw OpenKacheError("canonical key length exceeds CBOR uint32")
+    }
+    guard header.count + length <= maxCanonicalKeyBytes else {
+        throw OpenKacheError(
+            "canonical key exceeds \(maxCanonicalKeyBytes) bytes"
+        )
+    }
+    return Data(header) + payload
+}
+
 /// Actor-isolated Swift client over the shared Rust core.
 public actor OpenKacheClient {
     private var native: NativeHandle?
@@ -895,12 +931,12 @@ public actor OpenKacheClient {
 
     /// Retrieves protected bytes, or nil when the key does not exist.
     public func get(_ key: Data) async throws -> Data? {
-        try validateKey(key)
+        let canonicalKey = try canonicalKey(key, major: 2)
         return try await perform { handle in
             let result = try NativeBridge.execute(
                 handle,
                 operation: UInt32(Smithy_Opcode.get.rawValue),
-                key: key
+                key: canonicalKey
             )
             return try consumeResult(result) { kind, payload in
                 try getOutcome(kind, payload: payload, operation: "GET")
@@ -910,7 +946,17 @@ public actor OpenKacheClient {
 
     /// Retrieves protected bytes for a UTF-8 string key.
     public func get(_ key: String) async throws -> Data? {
-        try await get(Data(key.utf8))
+        let canonicalKey = try canonicalKey(Data(key.utf8), major: 3)
+        return try await perform { handle in
+            let result = try NativeBridge.execute(
+                handle,
+                operation: UInt32(Smithy_Opcode.get.rawValue),
+                key: canonicalKey
+            )
+            return try consumeResult(result) { kind, payload in
+                try getOutcome(kind, payload: payload, operation: "GET")
+            }
+        }
     }
 
     /// Stores protected bytes with optional Smithy condition and TTL.
@@ -919,13 +965,13 @@ public actor OpenKacheClient {
         value: Data,
         options: OpenKacheSetOptions = .init()
     ) async throws -> OpenKacheSetOutcome {
-        try validateKey(key)
+        let canonicalKey = try canonicalKey(key, major: 2)
         let (setFlags, ttl) = try options.wireOptions()
         return try await perform { handle in
             let result = try NativeBridge.executeWithOptions(
                 handle,
                 operation: UInt32(Smithy_Opcode.set.rawValue),
-                key: key,
+                key: canonicalKey,
                 value: value,
                 setFlags: setFlags,
                 ttl: ttl
@@ -942,17 +988,31 @@ public actor OpenKacheClient {
         value: Data,
         options: OpenKacheSetOptions = .init()
     ) async throws -> OpenKacheSetOutcome {
-        try await set(Data(key.utf8), value: value, options: options)
+        let canonicalKey = try canonicalKey(Data(key.utf8), major: 3)
+        let (setFlags, ttl) = try options.wireOptions()
+        return try await perform { handle in
+            let result = try NativeBridge.executeWithOptions(
+                handle,
+                operation: UInt32(Smithy_Opcode.set.rawValue),
+                key: canonicalKey,
+                value: value,
+                setFlags: setFlags,
+                ttl: ttl
+            )
+            return try consumeResult(result) { kind, _ in
+                try setOutcome(kind, operation: "SET")
+            }
+        }
     }
 
     /// Deletes a key and reports whether it existed.
     public func delete(_ key: Data) async throws -> OpenKacheDeleteOutcome {
-        try validateKey(key)
+        let canonicalKey = try canonicalKey(key, major: 2)
         return try await perform { handle in
             let result = try NativeBridge.execute(
                 handle,
                 operation: UInt32(Smithy_Opcode.delete.rawValue),
-                key: key
+                key: canonicalKey
             )
             return try consumeResult(result) { kind, _ in
                 try deleteOutcome(kind, operation: "DELETE")
@@ -962,7 +1022,17 @@ public actor OpenKacheClient {
 
     /// Deletes a UTF-8 string key.
     public func delete(_ key: String) async throws -> OpenKacheDeleteOutcome {
-        try await delete(Data(key.utf8))
+        let canonicalKey = try canonicalKey(Data(key.utf8), major: 3)
+        return try await perform { handle in
+            let result = try NativeBridge.execute(
+                handle,
+                operation: UInt32(Smithy_Opcode.delete.rawValue),
+                key: canonicalKey
+            )
+            return try consumeResult(result) { kind, _ in
+                try deleteOutcome(kind, operation: "DELETE")
+            }
+        }
     }
 
     /// Returns the server's JSON statistics payload.
@@ -1053,11 +1123,6 @@ public actor OpenKacheClient {
         }.value
     }
 
-    private func validateKey(_ key: Data) throws {
-        guard !key.isEmpty else {
-            throw OpenKacheError("key must not be empty")
-        }
-    }
 }
 
 /// Actor-isolated exact-item-ID client implementing the generated Smithy API.

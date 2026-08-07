@@ -49,6 +49,13 @@ Key `Bytes` is a logical key type: it is CBOR-encoded and then included in the
 Item ID hash. It is not the `RawBytes` value codec and is not a raw 32-byte
 Item ID.
 
+The shared C ABI uses `canonical_key_bytes` as its protected-operation input.
+Its `application_key` buffer MUST contain exactly one complete canonical CBOR
+key item; the ABI does not guess whether arbitrary bytes mean `Text`, `Bytes`,
+or an integer. Language adapters convert their native key type before calling
+the ABI. The ABI's exact-item-ID functions remain separate and continue to
+accept only a 32-byte `ItemId`.
+
 ### 1.1 Language mapping
 
 | Binding | `Text` | `Bytes` | `Integer` | Floating-point |
@@ -56,13 +63,13 @@ Item ID.
 | JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §1.2; otherwise reject |
 | Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
 | Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
-| C | explicit UTF-8 `uint8_t* + length` | `uint8_t* + length` | exposed signed/unsigned integer types | binary float types rejected |
-| C++ | length-delimited UTF-8 string view | `span`/byte string view | standard integer types and exposed extensions | `float`, `double` rejected |
-| Go | `string` → UTF-8 | `[]byte` | `int`/`uint` and fixed-width integer types | `float32`, `float64` rejected |
-| Java / Kotlin | `String` → UTF-8 | `byte[]` / `ByteArray` | fixed-width types and exposed big-integer types | `Float`, `Double` rejected |
-| C# / .NET | `string` → UTF-8 | `byte[]`, `ReadOnlySpan<byte>` | integral types, `Int128`/`UInt128`, exposed `BigInteger` | `float`, `double` rejected |
-| Swift | `String` → UTF-8 | `Data`, `[UInt8]` | `Int`/`UInt` and fixed-width integer types | `Float`, `Double` rejected |
-| Dart | `String` → UTF-8 | `Uint8List` | `int` when represented exactly | `double` rejected |
+| C | caller supplies a canonical Text item | caller supplies a canonical Bytes item | caller supplies a canonical integer item | binary float types rejected |
+| C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the v1 convenience API | `float`, `double` rejected |
+| Go | not exposed by the v1 convenience API | `[]byte` → `Bytes` | not exposed by the v1 convenience API | `float32`, `float64` rejected |
+| Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
+| C# / .NET | raw Item ID API only | raw Item ID API only | raw Item ID API only | raw Item ID API only |
+| Swift | `String` → `Text` | `Data` → `Bytes` | not exposed by the v1 convenience API | `Float`, `Double` rejected |
+| Dart | package scaffold | package scaffold | package scaffold | package scaffold |
 
 All text bindings MUST reject strings that cannot encode to valid UTF-8,
 including unpaired surrogates. All byte bindings are length-delimited; C
@@ -144,6 +151,8 @@ formatted-value mode; it does not bypass key conversion or Item ID derivation.
 Item IDs are publicly derivable in this mode. Supplying a root key selects the
 protected value mode; changing the root changes Item IDs and requires
 migration or repopulation. See [Value Format](VALUE_FORMAT.md).
+An explicitly supplied all-zero root MUST be rejected for protected mode; an
+omitted root is the only way to select the unprotected default.
 
 ```text
 item_id_derivation_key =

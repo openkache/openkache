@@ -39,7 +39,9 @@ pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
 const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
 const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
+const NAMESPACE_ID_BYTES: usize = std::mem::size_of::<u64>();
 const AAD_BYTES: usize = VALUE_FORMAT_AAD_DOMAIN.len()
+    + NAMESPACE_ID_BYTES
     + ITEM_ID_BYTES
     + VERSION_BYTES.len()
     + VALUE_FORMAT_FORMAT_BYTE_BYTES;
@@ -536,6 +538,21 @@ impl ValueCodec {
     /// Returns an error for invalid logical values, size-limit violations, compression failures,
     /// entropy failures, or encryption failures.
     pub fn encode(&self, item_id: ItemId, value: Value) -> Result<ItemValue> {
+        self.encode_in_namespace(1, item_id, value)
+    }
+
+    /// Encodes a core logical value and binds it to a namespace and Item ID.
+    ///
+    /// Namespace zero is reserved and rejected.
+    pub fn encode_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Value,
+    ) -> Result<ItemValue> {
+        if namespace_id == 0 {
+            return Err(Error::InvalidNamespace);
+        }
         let serialized = serialize_value(value)?;
         if serialized.len() > MAX_VALUE_BYTES {
             return Err(Error::DecodedValueTooLarge {
@@ -552,7 +569,7 @@ impl ValueCodec {
         };
         let format =
             compression_id | (self.encryption.identifier() << VALUE_FORMAT_ENCRYPTION_SHIFT);
-        let aad = make_aad(item_id, format);
+        let aad = make_aad(namespace_id, item_id, format);
         let body = match self.encryption {
             Encryption::Unprotected => transformed,
             Encryption::Compact => self.encrypt_compact(item_id, &aad, transformed)?,
@@ -595,7 +612,17 @@ impl ValueCodec {
     /// Returns an error for size-limit violations, compression failures, entropy failures, or
     /// encryption failures.
     pub fn seal(&self, item_id: ItemId, plaintext: &[u8]) -> Result<ItemValue> {
-        self.seal_owned(item_id, plaintext.to_vec())
+        self.seal_in_namespace(1, item_id, plaintext)
+    }
+
+    /// Encodes exact application bytes and binds them to a namespace and Item ID.
+    pub fn seal_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        plaintext: &[u8],
+    ) -> Result<ItemValue> {
+        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext.to_vec()))
     }
 
     /// Encodes owned application bytes as the standard Raw serialization.
@@ -614,7 +641,17 @@ impl ValueCodec {
     /// Returns an error for size-limit violations, compression failures, entropy failures, or
     /// encryption failures.
     pub fn seal_owned(&self, item_id: ItemId, plaintext: Vec<u8>) -> Result<ItemValue> {
-        self.encode(item_id, Value::Raw(plaintext))
+        self.seal_owned_in_namespace(1, item_id, plaintext)
+    }
+
+    /// Encodes owned application bytes and binds them to a namespace and Item ID.
+    pub fn seal_owned_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        plaintext: Vec<u8>,
+    ) -> Result<ItemValue> {
+        self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext))
     }
 
     /// Authenticates and decodes a formatted value into the core logical model.
@@ -633,6 +670,19 @@ impl ValueCodec {
     /// Returns an error for malformed, unsupported, unauthenticated, non-canonical, or oversized
     /// input.
     pub fn decode(&self, item_id: ItemId, encoded: ItemValue) -> Result<Value> {
+        self.decode_in_namespace(1, item_id, encoded)
+    }
+
+    /// Authenticates and decodes a value bound to a namespace and Item ID.
+    pub fn decode_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<Value> {
+        if namespace_id == 0 {
+            return Err(Error::InvalidNamespace);
+        }
         let mut encoded = encoded.into_bytes();
         if encoded.len() > MAX_VALUE_BYTES {
             return Err(Error::EncodedValueTooLarge {
@@ -676,7 +726,7 @@ impl ValueCodec {
         let body_length = encoded.len() - body_offset;
         encoded.copy_within(body_offset.., 0);
         encoded.truncate(body_length);
-        let aad = make_aad(item_id, format);
+        let aad = make_aad(namespace_id, item_id, format);
         let transformed = match encryption {
             Encryption::Unprotected => {
                 if encoded.is_empty() {
@@ -729,7 +779,17 @@ impl ValueCodec {
     ///
     /// Returns an error for any value-format failure or a non-Raw serialization.
     pub fn open(&self, item_id: ItemId, encoded: ItemValue) -> Result<Vec<u8>> {
-        match self.decode(item_id, encoded)? {
+        self.open_in_namespace(1, item_id, encoded)
+    }
+
+    /// Authenticates and opens a Raw value bound to a namespace and Item ID.
+    pub fn open_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<Vec<u8>> {
+        match self.decode_in_namespace(namespace_id, item_id, encoded)? {
             Value::Raw(bytes) => Ok(bytes),
             Value::Json(_) => Err(Error::ExpectedRawValue),
         }
@@ -879,6 +939,9 @@ pub enum Error {
     /// The configured Zstandard level is unsupported.
     #[error("Zstandard level {0} is outside the configured compression-level range")]
     InvalidCompressionLevel(i32),
+    /// Namespace zero is reserved by the protocol.
+    #[error("namespace ID must be a positive server-assigned identity")]
+    InvalidNamespace,
     /// An unprotected profile was passed to a protected constructor.
     #[error("protected value codecs require Compact or Robust encryption")]
     InvalidEncryptionConfiguration,
@@ -1330,13 +1393,15 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(item_id: ItemId, format: u8) -> [u8; AAD_BYTES] {
+fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> [u8; AAD_BYTES] {
     let mut aad = [0_u8; AAD_BYTES];
     let item_id_offset = VALUE_FORMAT_AAD_DOMAIN.len();
-    let version_offset = item_id_offset + ITEM_ID_BYTES;
+    let namespace_end = item_id_offset + NAMESPACE_ID_BYTES;
+    let version_offset = namespace_end + ITEM_ID_BYTES;
     let version_end = version_offset + VERSION_BYTES.len();
     aad[..item_id_offset].copy_from_slice(VALUE_FORMAT_AAD_DOMAIN);
-    aad[item_id_offset..version_offset].copy_from_slice(item_id.as_bytes());
+    aad[item_id_offset..namespace_end].copy_from_slice(&namespace_id.to_be_bytes());
+    aad[namespace_end..version_offset].copy_from_slice(item_id.as_bytes());
     aad[version_offset..version_end].copy_from_slice(VERSION_BYTES);
     aad[version_end..version_end + VALUE_FORMAT_FORMAT_BYTE_BYTES]
         .copy_from_slice(std::slice::from_ref(&format));

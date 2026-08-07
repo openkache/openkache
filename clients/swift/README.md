@@ -5,7 +5,9 @@ core. It accepts Foundation `Data`, exposes async cache operations, and does
 not duplicate QUIC framing, TLS validation, retries, key derivation,
 compression, encryption, or value parsing.
 
-`OpenKacheClient` derives protected item IDs from application keys. Use
+`OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
+keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
+as canonical deterministic CBOR before crossing the native ABI. Use
 `OpenKacheRawClient` when an integration owns exact protocol item IDs and
 opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
@@ -98,8 +100,8 @@ let smithyOutput = try await raw.get(
 _ = (output, smithyOutput)
 ```
 
-Keys are exact UTF-8 or binary bytes and must not be empty. Empty values are
-valid for the protected adapter. Raw item IDs must contain exactly
+Keys are exact UTF-8 or binary bytes, including empty and NUL-containing keys.
+Empty values are valid for the protected adapter. Raw item IDs must contain exactly
 `Smithy_Value_Format.itemIdBytes` bytes. `dataProtectionKey` must contain
 exactly 32 persistent random bytes.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system

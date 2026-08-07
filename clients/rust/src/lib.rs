@@ -20,11 +20,12 @@ use std::time::Duration;
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
     AlpnPolicy, Backend, Certificate, ClientIdentity, ClientTimeouts, ConnectionState,
-    DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome, Endpoint, Error,
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES,
-    ItemId, ItemValue, NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PrivateKey,
-    Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome, value,
-    value_envelope,
+    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, ClientRootKey, DataProtection,
+    DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
+    ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, KeyError,
+    KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor, NamespacePolicy, Operation,
+    OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result, RetryPolicy, ServerErrorCode,
+    ServerTrust, SetCondition, SetOptions, SetOutcome, canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -178,9 +179,7 @@ fn smithy_namespace_descriptor(descriptor: NamespaceDescriptor) -> smithy::Names
             },
             default_eviction: match descriptor.policy.default_eviction {
                 EvictionDefault::Evictable => smithy::EvictionDefault::Evictable,
-                EvictionDefault::EvictionProtected => {
-                    smithy::EvictionDefault::EvictionProtected
-                }
+                EvictionDefault::EvictionProtected => smithy::EvictionDefault::EvictionProtected,
             },
             eviction_override: match descriptor.policy.eviction_override {
                 OverridePolicy::Allowed => smithy::OverridePolicy::Allowed,
@@ -208,10 +207,11 @@ macro_rules! impl_smithy_api {
                 input: smithy::GetInput,
             ) -> std::result::Result<smithy::GetOutput, Self::Error> {
                 let item_id = ItemId::from_slice(&input.item_id)?;
-                let value = match $client::get_in_namespace(self, input.namespace_id, item_id).await? {
-                    GetOutcome::Found(value) => Some(value.into_bytes()),
-                    GetOutcome::NotFound => None,
-                };
+                let value =
+                    match $client::get_in_namespace(self, input.namespace_id, item_id).await? {
+                        GetOutcome::Found(value) => Some(value.into_bytes()),
+                        GetOutcome::NotFound => None,
+                    };
                 Ok(smithy::GetOutput { value })
             }
 
@@ -226,15 +226,14 @@ macro_rules! impl_smithy_api {
                     input.ttl_milliseconds,
                     input.eviction_mode,
                 )?;
-                let outcome =
-                    $client::set_in_namespace(
-                        self,
-                        input.namespace_id,
-                        item_id,
-                        ItemValue::new(input.value),
-                        options,
-                    )
-                    .await?;
+                let outcome = $client::set_in_namespace(
+                    self,
+                    input.namespace_id,
+                    item_id,
+                    ItemValue::new(input.value),
+                    options,
+                )
+                .await?;
                 let outcome = match outcome {
                     SetOutcome::Created => smithy::SetOutcome::Created,
                     SetOutcome::Replaced => smithy::SetOutcome::Replaced,
@@ -274,13 +273,14 @@ macro_rules! impl_smithy_api {
                 &self,
                 input: smithy::NamespaceOpenInput,
             ) -> std::result::Result<smithy::NamespaceOpenOutput, Self::Error> {
-                let policy = input
-                    .policy
-                    .map(smithy_namespace_policy)
-                    .transpose()?;
-                let (descriptor, created) =
-                    $client::namespace_open_with_outcome(self, input.name.into_bytes(), input.create_if_missing, policy)
-                        .await?;
+                let policy = input.policy.map(smithy_namespace_policy).transpose()?;
+                let (descriptor, created) = $client::namespace_open_with_outcome(
+                    self,
+                    input.name.into_bytes(),
+                    input.create_if_missing,
+                    policy,
+                )
+                .await?;
                 Ok(smithy::NamespaceOpenOutput {
                     descriptor: smithy_namespace_descriptor(descriptor),
                     created,
@@ -404,6 +404,12 @@ macro_rules! builder_methods {
                 self.inner = self.inner.encryption(encryption);
                 self
             }
+
+            /// Selects the exact key type accepted by this formatted keyspace.
+            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
+                self.inner = self.inner.key_spec(key_spec);
+                self
+            }
         }
     };
 }
@@ -457,35 +463,32 @@ macro_rules! client_methods {
                     .await
             }
 
-            /// Retrieves and decodes a value for arbitrary application key bytes.
-            pub async fn get(
-                &self,
-                application_key: impl AsRef<[u8]>,
-            ) -> Result<GetOutcome<Vec<u8>>> {
-                self.inner.get(application_key).await
+            /// Retrieves and decodes a value for a portable key.
+            pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+                self.inner.get(key).await
             }
 
             /// Retrieves and decodes a value in the shared logical value model.
             pub async fn get_value(
                 &self,
-                application_key: impl AsRef<[u8]>,
+                key: impl Into<PortableKey>,
             ) -> Result<GetOutcome<value::Value>> {
-                self.inner.get_value(application_key).await
+                self.inner.get_value(key).await
             }
 
-            /// Deletes a value for arbitrary application key bytes.
-            pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
-                self.inner.delete(application_key).await
+            /// Deletes a value for a portable key.
+            pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
+                self.inner.delete(key).await
             }
 
             /// Serializes, protects, and stores a value in the shared logical value model.
             pub async fn set_value(
                 &self,
-                application_key: impl AsRef<[u8]>,
+                key: impl Into<PortableKey>,
                 value: value::Value,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
-                self.inner.set_value(application_key, value, options).await
+                self.inner.set_value(key, value, options).await
             }
 
             /// Returns server statistics as their JSON text.
@@ -516,22 +519,22 @@ macro_rules! client_methods {
             /// Starts an awaitable set request inheriting namespace policy defaults.
             pub fn set<'a>(
                 &'a self,
-                application_key: impl AsRef<[u8]>,
+                key: impl Into<PortableKey>,
                 value: impl IntoValue,
             ) -> $request<'a> {
-                self.set_with_options(application_key, value, SetOptions::new())
+                self.set_with_options(key, value, SetOptions::new())
             }
 
             /// Starts an awaitable set request with explicit wire-level options.
             pub fn set_with_options<'a>(
                 &'a self,
-                application_key: impl AsRef<[u8]>,
+                key: impl Into<PortableKey>,
                 value: impl IntoValue,
                 options: SetOptions,
             ) -> $request<'a> {
                 $request {
                     client: self,
-                    application_key: application_key.as_ref().to_vec(),
+                    application_key: key.into(),
                     value: value.into_value(),
                     options,
                 }
@@ -566,7 +569,7 @@ impl ClientBuilder {
 
 #[cfg(feature = "quic-quinn")]
 impl Client {
-    /// Connects with mandatory data protection, system trust, and default client behavior.
+    /// Connects with data protection, system trust, and default client behavior.
     pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, data_protection_key)
             .connect()
@@ -577,6 +580,13 @@ impl Client {
     pub fn builder(endpoint: Endpoint, data_protection_key: DataProtectionKey) -> ClientBuilder {
         ClientBuilder {
             inner: SharedClient::builder(endpoint, data_protection_key),
+        }
+    }
+
+    /// Starts an unprotected client with namespace-bound Item IDs.
+    pub fn builder_unprotected(endpoint: Endpoint) -> ClientBuilder {
+        ClientBuilder {
+            inner: SharedClient::builder_unprotected(endpoint),
         }
     }
 
@@ -618,7 +628,7 @@ impl LocalClientBuilder {
 
 #[cfg(feature = "quic-compio")]
 impl LocalClient {
-    /// Connects with mandatory data protection, system trust, and default Compio behavior.
+    /// Connects with data protection, system trust, and default Compio behavior.
     pub async fn connect(endpoint: &str, data_protection_key: DataProtectionKey) -> Result<Self> {
         Self::builder(endpoint.parse()?, data_protection_key)
             .connect()
@@ -632,6 +642,13 @@ impl LocalClient {
     ) -> LocalClientBuilder {
         LocalClientBuilder {
             inner: SharedLocalClient::builder(endpoint, data_protection_key),
+        }
+    }
+
+    /// Starts an unprotected client with namespace-bound Item IDs.
+    pub fn builder_unprotected(endpoint: Endpoint) -> LocalClientBuilder {
+        LocalClientBuilder {
+            inner: SharedLocalClient::builder_unprotected(endpoint),
         }
     }
 
@@ -714,7 +731,7 @@ impl IntoValue for Arc<Vec<u8>> {
 /// Awaitable Tokio set request with optional condition and TTL modifiers.
 pub struct SetRequest<'a> {
     client: &'a Client,
-    application_key: Vec<u8>,
+    application_key: PortableKey,
     value: Vec<u8>,
     options: SetOptions,
 }
@@ -723,7 +740,7 @@ pub struct SetRequest<'a> {
 /// Awaitable Compio set request with optional condition and TTL modifiers.
 pub struct LocalSetRequest<'a> {
     client: &'a LocalClient,
-    application_key: Vec<u8>,
+    application_key: PortableKey,
     value: Vec<u8>,
     options: SetOptions,
 }
