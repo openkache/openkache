@@ -11764,13 +11764,13 @@ function render_python_operation_method(
           )
           : undefined
         const invocation = generic_request === undefined
-          ? `_smithy_transport.invoke_scoped(
+          ? `self._smithy_transport.invoke_scoped(
             ${operation_value},
             namespace_id=input.${input_namespace_id},
             item_id=${input_item_id_expression},
 ${scoped_request_value}            expected_kinds=(${result_kinds},),
         )`
-          : `_smithy_transport.invoke(
+          : `self._smithy_transport.invoke(
             ${operation_value},
             value=${generic_request},
             expected_kinds=(${result_kinds},),
