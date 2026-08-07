@@ -231,6 +231,14 @@ impl<'a> OperationInputView<'a> {
         &self.fields[..self.field_len]
     }
 
+    /// Returns the generated plan entry at a numeric slot.
+    pub(super) fn field_plan_at_index(
+        &self,
+        index: usize,
+    ) -> Option<&'static crate::contract::OperationFieldPlan> {
+        self.fields.get(index)?.as_ref().map(|field| field.plan)
+    }
+
     /// Returns the modeled cardinality for one semantic role.
     pub(super) fn field_count(&self, role: &str) -> usize {
         self.field_role(role)
@@ -368,6 +376,14 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
+    /// Returns one unsigned-long field by its generated numeric slot.
+    pub(super) fn unsigned_long_at(&self, index: usize) -> Option<u64> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::UnsignedLong(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns one item ID field by generated role ordinal.
     pub(super) fn item_id_at(&self, index: usize) -> Option<ItemId> {
         self.item_id_at_role(crate::contract::OperationFieldRole::ItemId, index)
@@ -392,6 +408,14 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
+    /// Returns an item ID by its generated numeric slot.
+    pub(super) fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::ItemId(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns one borrowed byte field by generated role.
     pub(super) fn bytes(&self, role: &str) -> Option<&[u8]> {
         let role = self.field_role(role)?;
@@ -410,9 +434,25 @@ impl<'a> OperationInputView<'a> {
         }
     }
 
+    /// Returns borrowed bytes by their generated numeric slot.
+    pub(super) fn bytes_at(&self, index: usize) -> Option<&[u8]> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::Bytes(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Returns the modeled namespace policy field.
     pub(super) fn policy(&self) -> Option<NamespacePolicy> {
         match self.field_at_role(crate::contract::OperationFieldRole::Policy, 0) {
+            Some(OperationFieldValue::Policy(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns a namespace policy by its generated numeric slot.
+    pub(super) fn policy_at(&self, index: usize) -> Option<NamespacePolicy> {
+        match self.field_at_index(index) {
             Some(OperationFieldValue::Policy(value)) => Some(value),
             _ => None,
         }
@@ -505,6 +545,14 @@ impl<'a> OperationInputView<'a> {
         self.generic_payload.is_some()
     }
 
+    /// Returns a boolean field by its generated numeric slot.
+    pub(super) fn boolean_at(&self, index: usize) -> Option<bool> {
+        match self.field_at_index(index) {
+            Some(OperationFieldValue::Boolean(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Reconstructs the existing SET semantic options from independent fields.
     pub(super) fn set_options(&self) -> SetOptions {
         let condition = match self.field_at_role(crate::contract::OperationFieldRole::Condition, 0)
@@ -527,6 +575,30 @@ impl<'a> OperationInputView<'a> {
         SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
     }
 
+    /// Reconstructs SET options from generated field slots.
+    pub(super) fn set_options_at(
+        &self,
+        condition_index: usize,
+        expiration_mode_index: usize,
+        ttl_index: usize,
+        eviction_mode_index: usize,
+    ) -> SetOptions {
+        let condition = match self.field_at_index(condition_index) {
+            Some(OperationFieldValue::SetCondition(value)) => value,
+            _ => SetCondition::Any,
+        };
+        let expiration_mode = match self.field_at_index(expiration_mode_index) {
+            Some(OperationFieldValue::ExpirationMode(value)) => value,
+            _ => ExpirationMode::Inherit,
+        };
+        let ttl_ms = self.unsigned_long_at(ttl_index);
+        let eviction_mode = match self.field_at_index(eviction_mode_index) {
+            Some(OperationFieldValue::EvictionMode(value)) => value,
+            _ => EvictionMode::Inherit,
+        };
+        SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode)
+    }
+
     /// Moves an owned payload out of one generated value role without copying.
     pub(super) fn take_owned_bytes(&mut self, role: &str) -> Option<Vec<u8>> {
         let role = self.field_role(role)?;
@@ -544,6 +616,19 @@ impl<'a> OperationInputView<'a> {
             .take(self.field_len)
             .filter_map(Option::as_mut)
             .find(|field| field.plan.role_id == role)?;
+        let value = record.value.take()?;
+        match value {
+            OperationFieldStorage::OwnedBytes(value) => Some(value),
+            other => {
+                record.value = Some(other);
+                None
+            }
+        }
+    }
+
+    /// Moves an owned payload out of a generated numeric slot.
+    pub(super) fn take_owned_bytes_at(&mut self, index: usize) -> Option<Vec<u8>> {
+        let record = self.fields.get_mut(index)?.as_mut()?;
         let value = record.value.take()?;
         match value {
             OperationFieldStorage::OwnedBytes(value) => Some(value),
@@ -585,17 +670,7 @@ pub(super) struct OperationContext<'a, 'cache> {
 
 /// Returns whether an operation can be answered without touching storage.
 pub(super) fn is_immediate(opcode: Opcode) -> bool {
-    let contract = crate::contract::operation_contract(opcode);
-    matches!(
-        (contract.request_route, contract.response_route),
-        (
-            crate::contract::OperationRequestRoute::Empty,
-            crate::contract::OperationResponseRoute::Pong,
-        ) | (
-            crate::contract::OperationRequestRoute::ApplicationValue,
-            crate::contract::OperationResponseRoute::ApplicationValue,
-        )
-    )
+    crate::contract::operation_is_immediate(opcode)
 }
 
 fn is_builtin(opcode: Opcode) -> bool {
@@ -619,6 +694,7 @@ fn is_builtin(opcode: Opcode) -> bool {
 /// reach a panic or an accidental fallback response.
 pub(super) fn validate_handler_registry() -> Result<(), &'static str> {
     super::operation_extensions::validate_registry()?;
+    super::operation_codecs::validate_contract_codecs()?;
     for value in u8::MIN..=u8::MAX {
         let Ok(opcode) = Opcode::try_from(value) else {
             continue;
@@ -784,25 +860,24 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
         observability,
     } = context;
     let mut input = input;
-    let namespace_id =
-        input.unsigned_long_role(crate::contract::OperationFieldRole::NamespaceId, 0);
-    let expected_revision =
-        input.unsigned_long_role(crate::contract::OperationFieldRole::ExpectedRevision, 0);
-    let namespace_name = input.bytes_role(crate::contract::OperationFieldRole::Name, 0);
-    let namespace_policy = input.policy();
-    let create_if_missing = input
-        .boolean_role(crate::contract::OperationFieldRole::CreateIfMissing, 0)
-        .unwrap_or(false);
-    let set_options = input.set_options();
 
     match opcode {
         Opcode::Get => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::GET_NAMESPACE_ID_0);
             let item_id = input
-                .item_id_at(0)
+                .item_id_at_index(crate::contract::request_fields::GET_ITEM_ID_0)
                 .expect("GET requests have a validated item ID");
             execute_get(cache, namespace_id, item_id, namespaces).await
         }
         Opcode::NamespaceOpen => {
+            let namespace_name =
+                input.bytes_at(crate::contract::request_fields::NAMESPACE_OPEN_NAME_0);
+            let create_if_missing = input
+                .boolean_at(crate::contract::request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0)
+                .unwrap_or(false);
+            let namespace_policy =
+                input.policy_at(crate::contract::request_fields::NAMESPACE_OPEN_POLICY_0);
             let name = namespace_name.expect("namespace-open requests have a validated name");
             let result = namespaces
                 .lock()
@@ -816,6 +891,14 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             })
         }
         Opcode::NamespaceUpdatePolicy => {
+            let namespace_id = input.unsigned_long_at(
+                crate::contract::request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
+            );
+            let expected_revision = input.unsigned_long_at(
+                crate::contract::request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+            );
+            let namespace_policy =
+                input.policy_at(crate::contract::request_fields::NAMESPACE_UPDATE_POLICY_POLICY_0);
             let result = namespaces
                 .lock()
                 .map_err(|_| Status::InternalError)
@@ -832,6 +915,11 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             })
         }
         Opcode::NamespaceDelete => {
+            let namespace_id = input
+                .unsigned_long_at(crate::contract::request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0);
+            let expected_revision = input.unsigned_long_at(
+                crate::contract::request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+            );
             let namespace_id = namespace_id.expect("namespace delete has a validated ID");
             let tracked_items = match namespaces.lock() {
                 Ok(registry) => match registry.tracked_items(namespace_id) {
@@ -894,6 +982,14 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             })
         }
         Opcode::Set => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::SET_NAMESPACE_ID_0);
+            let set_options = input.set_options_at(
+                crate::contract::request_fields::SET_CONDITION_0,
+                crate::contract::request_fields::SET_EXPIRATION_MODE_0,
+                crate::contract::request_fields::SET_TTL_MILLISECONDS_0,
+                crate::contract::request_fields::SET_EVICTION_MODE_0,
+            );
             let namespace_id = namespace_id.expect("SET requests have a validated namespace ID");
             let policy = match namespaces
                 .lock()
@@ -915,10 +1011,10 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 }
             };
             let item_id = input
-                .item_id_at(0)
+                .item_id_at_index(crate::contract::request_fields::SET_ITEM_ID_0)
                 .expect("SET requests have a validated item ID");
             let value = input
-                .take_owned_bytes_role(crate::contract::OperationFieldRole::Value)
+                .take_owned_bytes_at(crate::contract::request_fields::SET_VALUE_0)
                 .expect("SET requests have a validated value");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             let reservation = match namespaces
@@ -982,6 +1078,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             }
         }
         Opcode::Delete => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::DELETE_NAMESPACE_ID_0);
             let namespace_id = namespace_id.expect("DELETE requests have a validated namespace ID");
             if !namespace_exists(namespaces, namespace_id) {
                 return Some(response_bytes(
@@ -990,7 +1088,7 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
                 ));
             }
             let item_id = input
-                .item_id_at(0)
+                .item_id_at_index(crate::contract::request_fields::DELETE_ITEM_ID_0)
                 .expect("DELETE requests have a validated item ID");
             let worker = cache.namespace_item_worker(namespace_id, item_id);
             if let Err(status) = namespaces
@@ -1030,6 +1128,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             }
         }
         Opcode::Stats => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::STATS_NAMESPACE_ID_0);
             if !administrator {
                 return Some(response_bytes(
                     Status::Forbidden,
@@ -1065,6 +1165,8 @@ pub(super) async fn execute(context: OperationContext<'_, '_>) -> Option<Respons
             }
         }
         Opcode::Sync => {
+            let namespace_id =
+                input.unsigned_long_at(crate::contract::request_fields::SYNC_NAMESPACE_ID_0);
             if !administrator {
                 return Some(response_bytes(
                     Status::Forbidden,

@@ -1467,6 +1467,15 @@ function wire_name(identifier: string): string {
     .toLowerCase()
 }
 
+function rust_const_identifier(identifier: string): string {
+  let value = wire_name(identifier)
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/^([0-9])/, "_$1")
+    .toUpperCase()
+  if (value.length === 0) value = "_FIELD"
+  return value
+}
+
 function rust_byte_string_literal(value: string): string {
   const bytes = new TextEncoder().encode(value)
   let literal = 'b"'
@@ -1704,6 +1713,41 @@ function rust_operation_contract(contract: Wire_Contract): string {
       (operation) => `    ${optional_value_count(operation)}`,
     )
     .join(",\n")
+  const operation_flag_metadata = (
+    predicate: (operation: Wire_Operation) => boolean,
+  ): string =>
+    operations
+      .map(
+        (operation) =>
+          `        Opcode::${operation.name} => ${predicate(operation)},`,
+      )
+      .join("\n")
+  const field_index_modules = (
+    direction: "request" | "response",
+  ): string => {
+    const constants = operations.flatMap((operation) => {
+      const plan = direction === "request"
+        ? operation.contract.request_plan ?? []
+        : operation.contract.response_plan ?? []
+      const ordinals = new Map<string, number>()
+      return plan.map((field, index) => {
+        const ordinal = ordinals.get(field.role) ?? 0
+        ordinals.set(field.role, ordinal + 1)
+        return `    /// ${direction} field ${field.path.join(".")} for ${operation.name}.
+    pub const ${rust_const_identifier(operation.name)}_${rust_const_identifier(field.role)}_${ordinal}: usize = ${index};`
+      })
+    })
+    return `/// Direct numeric indexes for generated operation fields.
+///
+/// These constants are derived from Smithy member order. Server behavior can
+/// use them with OperationInputView::field_at_index and avoid a hot-path
+/// string-role scan while keeping the role vocabulary open.
+#[allow(dead_code)]
+pub mod ${direction}_fields {
+${constants.join("\n")}
+}
+`
+  }
   return `/// Maximum number of ordered request fields in any modeled operation.
 ///
 /// Server operation views use this generated bound for a stack-resident field
@@ -1711,6 +1755,7 @@ function rust_operation_contract(contract: Wire_Contract): string {
 /// the Smithy model to grow the array when a new shape needs more fields.
 pub const MAX_OPERATION_REQUEST_FIELDS: usize = ${max_request_fields};
 
+${field_index_modules("request")}${field_index_modules("response")}
 /// Request scope declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationScope {
@@ -1876,6 +1921,42 @@ pub const fn operation_response_field_count(opcode: Opcode) -> usize {
     [
 ${optional_value_metadata}
     ][opcode.index()]
+}
+
+/// Returns whether the operation can be answered without storage access.
+pub const fn operation_is_immediate(opcode: Opcode) -> bool {
+    match opcode {
+${operation_flag_metadata((operation) => {
+  const request = request_layout(operation)
+  const response = response_route(operation)
+  return (request === "empty" && response === "pong") ||
+    (request === "application_value" && response === "application_value")
+})}
+    }
+}
+
+/// Returns whether namespace lifecycle identity must be serialized.
+pub const fn operation_requires_lifecycle_lock(opcode: Opcode) -> bool {
+    match opcode {
+${operation_flag_metadata((operation) => {
+  const request = request_layout(operation)
+  return request === "namespace_open" || request === "namespace_delete"
+})}
+    }
+}
+
+/// Returns whether a request uses a namespace operation lock.
+pub const fn operation_requires_namespace_lock(opcode: Opcode) -> bool {
+    match opcode {
+${operation_flag_metadata((operation) => {
+  const request = request_layout(operation)
+  return request === "item" ||
+    request === "set" ||
+    request === "namespace" ||
+    request === "namespace_update_policy" ||
+    request === "namespace_delete"
+})}
+    }
 }
 `
 }
