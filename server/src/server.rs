@@ -1876,10 +1876,17 @@ fn response_budget_bytes(
     request_value_bytes: usize,
     max_item_bytes: usize,
 ) -> Option<usize> {
-    match crate::contract::operation_contract(opcode).response_kind {
+    let contract = crate::contract::operation_contract(opcode);
+    let response_field_count = contract
+        .response_fields
+        .iter()
+        .map(|field| field.count)
+        .sum::<usize>()
+        .max(contract.response_value_count);
+    match contract.response_kind {
         OperationResponseKind::ApplicationValue => Some(request_value_bytes),
-        OperationResponseKind::Value => {
-            let value_count = crate::contract::operation_contract(opcode).response_value_count;
+        OperationResponseKind::Composite | OperationResponseKind::Value => {
+            let value_count = response_field_count;
             max_item_bytes
                 .checked_mul(value_count)
                 .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>() * value_count))

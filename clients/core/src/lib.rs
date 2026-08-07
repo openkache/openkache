@@ -365,6 +365,19 @@ fn parse_item_ids(bytes: &[u8], item_count: usize) -> Result<Vec<ItemId>> {
         .collect()
 }
 
+fn operation_response_field_count(contract: &contract::OperationContract) -> usize {
+    let field_count = contract
+        .response_fields
+        .iter()
+        .map(|field| field.count)
+        .sum();
+    if field_count == 0 {
+        contract.response_value_count
+    } else {
+        field_count
+    }
+}
+
 fn operation_values_result(
     operation: Opcode,
     response: Response,
@@ -1387,7 +1400,8 @@ macro_rules! raw_client_methods {
                     }
                     (
                         contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::Value,
+                        contract::OperationResponseKind::Value
+                        | contract::OperationResponseKind::Composite,
                     ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
@@ -1399,7 +1413,7 @@ macro_rules! raw_client_methods {
                         operation_values_result(
                             operation,
                             response,
-                            contract.response_value_count,
+                            operation_response_field_count(&contract),
                         )
                     }
                     (
@@ -1425,7 +1439,7 @@ macro_rules! raw_client_methods {
                         operation_scoped_value_result(
                             operation,
                             response,
-                            contract.response_value_count,
+                            operation_response_field_count(&contract),
                         )
                     }
                     (
@@ -1500,7 +1514,8 @@ macro_rules! raw_client_methods {
                 match (contract.request_kind, contract.response_kind) {
                     (
                         contract::OperationRequestKind::ScopedItem,
-                        contract::OperationResponseKind::Value,
+                        contract::OperationResponseKind::Value
+                        | contract::OperationResponseKind::Composite,
                     ) if contract.request_value_count == 0 => {
                         let item_ids =
                             parse_item_ids(item_id.as_ref(), contract.request_item_count)?;
@@ -1511,7 +1526,7 @@ macro_rules! raw_client_methods {
                         operation_values_result(
                             operation,
                             response,
-                            contract.response_value_count,
+                            operation_response_field_count(&contract),
                         )
                     }
                     (
@@ -1536,7 +1551,7 @@ macro_rules! raw_client_methods {
                         operation_scoped_value_result(
                             operation,
                             response,
-                            contract.response_value_count,
+                            operation_response_field_count(&contract),
                         )
                     }
                     (
@@ -2089,6 +2104,21 @@ fn validate_response_contract(
             }
         }
         contract::OperationResponseKind::ApplicationValue => Ok(()),
+        contract::OperationResponseKind::Composite => {
+            if response.status != Status::Ok {
+                invalid_payload("composite responses must have an OK status")
+            } else {
+                openkache_protocol::decode_optional_values(
+                    &response.payload,
+                    operation_response_field_count(&operation_contract),
+                )
+                .map(|_| ())
+                .map_err(|error| Error::UnexpectedResponse {
+                    operation,
+                    message: format!("composite payload is invalid: {error}"),
+                })
+            }
+        }
         contract::OperationResponseKind::Value => {
             if operation_contract.response_value_count > 1 {
                 if response.status != Status::Ok {

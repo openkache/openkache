@@ -2463,6 +2463,7 @@ pub enum OperationResponseKind {
     Empty,
     Pong,
     ApplicationValue,
+    Composite,
     Value,
     SetOutcome,
     DeleteOutcome,
@@ -4583,6 +4584,7 @@ interface Operation_Result_Plan {
 type Operation_Response_Route =
   | "pong"
   | "application_value"
+  | "composite"
   | "value"
   | "set_outcome"
   | "delete_outcome"
@@ -4603,6 +4605,9 @@ const OPERATION_RESULT_KINDS: Readonly<
   empty: ["ok"],
   pong: ["ok"],
   application_value: ["value"],
+  // Composite field sequences are returned as an opaque successful payload.
+  // The ordered field plan, not a named operation family, decodes the result.
+  composite: ["value"],
   value: ["value", "not_found"],
   set_outcome: ["created", "replaced", "not_stored"],
   delete_outcome: ["deleted", "not_deleted"],
@@ -4990,6 +4995,156 @@ function application_value_codec_for_type(type: Api_Type): Application_Value_Cod
   return registration.renderer
 }
 
+/** Returns the ordered top-level fields carried by a composite output. */
+function operation_composite_fields(
+  operation: Managed_Api_Operation,
+): readonly Operation_Field_Plan[] {
+  const fields = operation.plan.operation.output.fields.filter(
+    (field) => field.path.length === 1,
+  )
+  if (fields.length < 2) {
+    throw new Error(
+      `operation ${operation.name} composite output must define at least two top-level operation fields`,
+    )
+  }
+  return fields
+}
+
+/** Resolves each composite field through the shared payload codec registry. */
+function operation_composite_field_codec(
+  operation: Managed_Api_Operation,
+  field: Operation_Field_Plan,
+): Application_Value_Codec {
+  try {
+    return application_value_codec_for_type(field.type)
+  } catch (error) {
+    throw new Error(
+      `operation ${operation.name} composite field ${field.name} has no registered wire codec: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
+}
+
+function operation_composite_value_count(operation: Managed_Api_Operation): number {
+  return operation_composite_fields(operation).length
+}
+
+function operation_uses_optional_values(operation: Managed_Api_Operation): boolean {
+  return operation.plan.operation.request_item_count > 1 ||
+    operation.plan.result_plan.response_route === "composite" ||
+    (operation.plan.result_plan.response_route === "value" &&
+      operation.plan.operation.response_value_count > 1)
+}
+
+/**
+ * Renders a nullable decode for one field in the optional-value sequence.
+ * The sequence is always byte-oriented; the registered field codec supplies
+ * the language-specific conversion after the missing sentinel is handled.
+ */
+function render_composite_field_decode(
+  language: Application_Value_Language,
+  codec: Application_Value_Codec,
+  payload: string,
+  diagnostic: string,
+): string {
+  switch (language) {
+    case "java":
+      return `(${payload} == null ? null : ${
+        render_application_value_codec(language, codec, "", payload, diagnostic).decode
+      })`
+    case "kotlin":
+      return `${payload}?.let { ${
+        render_application_value_codec(language, codec, "it", "it", diagnostic).decode
+      } }`
+    case "dart":
+      return `${payload} == null ? null : ${
+        render_application_value_codec(language, codec, `${payload}!`, `${payload}!`, diagnostic).decode
+      }`
+    case "typescript":
+      return `${payload} === undefined ? undefined : ${
+        render_application_value_codec(language, codec, `${payload}!`, `${payload}!`, diagnostic).decode
+      }`
+    case "python":
+      return `${payload} if ${payload} is None else ${
+        render_application_value_codec(language, codec, payload, payload, diagnostic).decode
+      }`
+    case "csharp":
+      return `${payload} is null ? null : ${
+        render_application_value_codec(language, codec, `${payload}!`, `${payload}!`, diagnostic).decode
+      }`
+    case "swift":
+      if (codec === "raw_bytes") return payload
+      if (codec === "f64_array") {
+        return `try ${payload}.map { try smithyDecodeF64Array($0, operation: ${diagnostic}) }`
+      }
+      return `try ${payload}.map { data in
+      guard let value = String(data: data, encoding: .utf8) else {
+        throw OpenKacheError(${diagnostic} + " response is not valid UTF-8")
+      }
+      return value
+    }`
+    case "go":
+      if (codec === "raw_bytes") return payload
+      if (codec === "f64_array") {
+        return `smithyDecodeOptionalF64Array(${payload}, ${diagnostic})`
+      }
+      return `smithyDecodeOptionalUTF8(${payload})`
+    case "rust":
+      if (codec === "raw_bytes") return payload
+      if (codec === "f64_array") {
+        return `${payload}.map(|value| smithy_decode_f64_array(&value, ${diagnostic})).transpose()?`
+      }
+      return `${payload}.map(|value| String::from_utf8(value).map_err(|error| {
+                    Error::Protocol(format!("{} response is not UTF-8: {error}", ${diagnostic}))
+                })).transpose()?`
+  }
+}
+
+interface Rendered_Go_Composite_Field {
+  readonly expression: string
+  readonly statements: string
+}
+
+/**
+ * Renders one Go composite field through a statement boundary.
+ *
+ * Go decoders for non-opaque codecs return `(value, error)`, which cannot be
+ * embedded directly in a struct literal. Keeping that boundary here lets the
+ * operation renderer stay shape-driven while preserving normal error
+ * propagation for every registered codec.
+ */
+function render_go_composite_field(
+  operation: Managed_Api_Operation,
+  field: Operation_Field_Plan,
+  index: number,
+  diagnostic: string,
+): Rendered_Go_Composite_Field {
+  const codec = operation_composite_field_codec(operation, field)
+  const payload = `values[${index}]`
+  const decoded = `decodedValue${index}`
+  switch (codec) {
+    case "raw_bytes":
+      return {
+        expression: decoded,
+        statements: `		${decoded} := ${payload}`,
+      }
+    case "utf8":
+      return {
+        expression: decoded,
+        statements: `		${decoded} := smithyDecodeOptionalUTF8(${payload})`,
+      }
+    case "f64_array":
+      return {
+        expression: decoded,
+        statements: `		${decoded}, err := smithyDecodeOptionalF64Array(${payload}, ${diagnostic})
+		if err != nil {
+			return ${operation.output}{}, operationError(${diagnostic}, err)
+		}`,
+      }
+  }
+}
+
 function application_value_codec(
   contract: Client_Contract,
   operation: Api_Operation & { readonly contract: Api_Operation_Contract },
@@ -5155,7 +5310,7 @@ function operation_item_fields(
 }
 
 function operation_field_name(
-  member: Api_Member,
+  member: Pick<Api_Member, "name">,
   language: "csharp" | "dart" | "go" | "java" | "kotlin" | "python" | "rust" | "swift" | "typescript",
 ): string {
   switch (language) {
@@ -5468,6 +5623,36 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
         });
     }`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            render_composite_field_decode(
+              "java",
+              operation_composite_field_codec(operation, field),
+              `values[${index}]`,
+              `"${operation_label}"`,
+            ),
+          )
+          .join(", ")
+        return `    @Override
+    default CompletionStage<${operation.output}> ${method_name}(${operation.input} input) {
+        Objects.requireNonNull(input, "input");
+        return smithySubmit(() -> {
+            NativeResult result = smithyExecuteScoped(
+                ${operation_constant},
+                input.${input_namespace_id}(),
+                ${input_item_id_expression},
+                ${input_request_value},
+                0,
+                0);
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
+            byte[][] values = smithyDecodeOptionalValues(
+                result.payload(), ${operation_composite_value_count(operation)}, "${operation_label}");
+            return new ${operation.output}(${output_values});
+        });
+    }`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -5694,10 +5879,7 @@ export function render_java_operations(contract: Client_Contract): string {
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `    private static byte[] smithyConcatItemIds(byte[]... itemIds) {
         int total = 0;
@@ -6076,6 +6258,34 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
         }`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            `${operation_field_name(field, "kotlin")} = ${
+              render_composite_field_decode(
+                "kotlin",
+                operation_composite_field_codec(operation, field),
+                `values[${index}]`,
+                `"${operation_label}"`,
+              )
+            }`,
+          )
+          .join(",\n                ")
+        return `${prefix}            val result = smithyInvokeScoped(
+                ${operation_constant},
+                input.${input_namespace_id},
+                ${input_item_id_expression},
+                ${input_request_value},
+            )
+            smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
+            val values = smithyDecodeOptionalValues(
+                result.payload, ${operation_composite_value_count(operation)}, "${operation_label}")
+            ${operation.output}(
+                ${output_values},
+            )
+        }`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -6255,10 +6465,7 @@ export function render_kotlin_operations(contract: Client_Contract): string {
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `    private fun smithyConcatItemIds(vararg itemIds: ByteArray): ByteArray {
         itemIds.forEach { itemId ->
@@ -6594,6 +6801,34 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     );
   });`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            `${operation_field_name(field, "dart")}: ${
+              render_composite_field_decode(
+                "dart",
+                operation_composite_field_codec(operation, field),
+                `values[${index}]`,
+                `'${operation_label}'`,
+              )
+            }`,
+          )
+          .join(",\n      ")
+        return `${prefix}    final result = _invokeScoped(
+      ${operation_constant},
+      input.${input_namespace_id},
+      ${input_item_id_expression},
+      ${input_request_value},
+    );
+    _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
+    final values = _smithyDecodeOptionalValues(
+      result.payload, ${operation_composite_value_count(operation)}, '${operation_label}');
+    return ${operation.output}(
+      ${output_values},
+    );
+  });`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -6803,10 +7038,7 @@ List<double> _smithyDecodeF64Array(List<int> payload, String operation) {
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `List<int> _smithyConcatItemIds(List<List<int>> itemIds) {
   for (final itemId in itemIds) {
@@ -7807,6 +8039,39 @@ function render_typescript_operation_method(
     };
   }`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            `${operation_field_name(field, "typescript")}: ${
+              render_composite_field_decode(
+                "typescript",
+                operation_composite_field_codec(operation, field),
+                `values[${index}]`,
+                String(operation_value),
+              )
+            }`,
+          )
+          .join(",\n      ")
+        return `  async ${method_name}(
+    input: ${typescript_api_name(operation.input)},
+  ): Promise<${typescript_api_name(operation.output)}> {
+    this.#transport.assert_open();
+    const result = await this.#transport.invoke_scoped(
+      ${operation_value},
+      input.${input_namespace_id},
+      {
+        item_id: ${input_item_id_expression},
+${scoped_request_value}        expected_kinds: [${result_kinds}],
+      },
+    );
+    const values = smithy_decode_optional_values(
+      result.payload, ${operation_composite_value_count(operation)}, ${operation_value});
+    return {
+      ${output_values},
+    };
+  }`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -8034,10 +8299,7 @@ function smithy_decode_f64_array(payload: Uint8Array, operation: number): readon
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `function smithy_concat_item_ids(itemIds: readonly Uint8Array[]): Uint8Array {
   for (const itemId of itemIds) {
@@ -8681,6 +8943,53 @@ function render_go_operation_method(
 	${decoded_payload}
 }`
       }
+    case "composite":
+      {
+        const decoded_fields = operation_composite_fields(operation)
+          .map((field, index) =>
+            render_go_composite_field(operation, field, index, `"${label}"`),
+          )
+        const decode_statements = decoded_fields
+          .map((field) => field.statements)
+          .join("\n")
+        const output_values = operation_composite_fields(operation)
+          .map(
+            (field, index) =>
+              `${operation_field_name(field, "go")}: ${decoded_fields[index]!.expression}`,
+          )
+          .join(",\n\t\t")
+        return `func (s smithyClient) ${method}(
+	ctx context.Context,
+	input ${input},
+) (${output}, error) {
+		itemIDs, err := smithyConcatItemIDs(${input_item_ids.map((name) => `input.${name}`).join(", ")})
+		if err != nil {
+			return ${output}{}, err
+		}
+		result, err := s.client.invokeScopedBytes(
+			ctx,
+			${opcode},
+			input.${input_namespace_id},
+			itemIDs,
+			${input_request_value === "nil" ? "nil" : `input.${input_request_value}`},
+			SetOptions{},
+		)
+		if err != nil {
+			return ${output}{}, operationError("${label}", err)
+		}
+		if result.kind != ${result_constant("value")} {
+			return ${output}{}, unexpectedResult("${label}", result.kind)
+		}
+		values, err := smithyDecodeOptionalValues(result.data, ${operation_composite_value_count(operation)})
+		if err != nil {
+			return ${output}{}, operationError("${label}", err)
+		}
+${decode_statements}
+		return ${output}{
+			${output_values},
+		}, nil
+	}`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -8999,10 +9308,7 @@ func smithyDecodeF64Array(payload []byte) ([]float64, error) {
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `func smithyConcatItemIDs(itemIDs ...[]byte) ([]byte, error) {
 	for _, itemID := range itemIDs {
@@ -9043,6 +9349,25 @@ func smithyDecodeOptionalValues(payload []byte, valueCount int) ([]*[]byte, erro
 		return values, validationError("optional_values", "response contains trailing bytes")
 	}
 	return values, nil
+}
+
+func smithyDecodeOptionalF64Array(value *[]byte, operation string) (*[]float64, error) {
+	if value == nil {
+		return nil, nil
+	}
+	decoded, err := smithyDecodeF64Array(*value)
+	if err != nil {
+		return nil, operationError(operation, err)
+	}
+	return &decoded, nil
+}
+
+func smithyDecodeOptionalUTF8(value *[]byte) *string {
+	if value == nil {
+		return nil
+	}
+	decoded := string(*value)
+	return &decoded
 }
 `
     : ""
@@ -9418,6 +9743,34 @@ function render_python_operation_method(
             ${output_payload}=${decoded_payload}
         )`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            `${operation_field_name(field, "python")}=${
+              render_composite_field_decode(
+                "python",
+                operation_composite_field_codec(operation, field),
+                `values[${index}]`,
+                String(operation_value),
+              )
+            }`,
+          )
+          .join(",\n            ")
+        return `    async def ${method_name}(self, input: ${input}) -> ${output}:
+        self._smithy_transport.assert_open()
+        _, payload = await self._smithy_transport.invoke_scoped(
+            ${operation_value},
+            namespace_id=input.${input_namespace_id},
+            item_id=${input_item_id_expression},
+${scoped_request_value}            expected_kinds=(${result_kinds},),
+        )
+        values = _smithy_decode_optional_values(
+            payload, ${operation_composite_value_count(operation)}, ${operation_value})
+        return ${output}(
+            ${output_values}
+        )`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -9623,10 +9976,7 @@ def _smithy_decode_f64_array(payload: bytes, operation: int) -> list[float]:
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `def _smithy_concat_item_ids(item_ids: list[bytes]) -> bytes:
     if any(len(item_id) != ${contract.item_id_bytes} for item_id in item_ids):
@@ -10541,6 +10891,42 @@ function render_swift_operation_method(
     return ${output}(${output_payload}: value)
   }`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            `${operation_field_name(field, "swift")}: ${
+              render_composite_field_decode(
+                "swift",
+                operation_composite_field_codec(operation, field),
+                `values[${index}]`,
+                `"${operation_label}"`,
+              )
+            }`,
+          )
+          .join(",\n      ")
+        return `  public func ${method_name}(
+    _ input: ${input}
+  ) async throws -> ${output} {
+    let result = try await smithyInvokeScoped(
+      ${operation_constant},
+      namespaceID: input.${input_namespace_id},
+      itemID: ${input_item_id_expression},
+      value: ${input_request_value === "Data()" ? "Data()" : `input.${input_request_value}`}
+    )
+    guard result.kind == ${result_constant("value")} else {
+      throw OpenKacheError("${operation_label} returned unexpected native result \\(result.kind)")
+    }
+    let values = try smithyDecodeOptionalValues(
+      result.payload,
+      valueCount: ${operation_composite_value_count(operation)},
+      operation: "${operation_label}"
+    )
+    return ${output}(
+      ${output_values}
+    )
+  }`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -10778,10 +11164,7 @@ private func smithyDecodeF64Array(
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `private func smithyConcatItemIDs(_ itemIDs: [Data]) -> Data {
   var combined = Data(capacity: itemIDs.count * Smithy_Value_Format.itemIdBytes)
@@ -11335,6 +11718,42 @@ function render_csharp_operation_method_body(
         };
     }`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field, index) =>
+            `            ${operation_field_name(field, "csharp")} = ${
+              render_composite_field_decode(
+                "csharp",
+                operation_composite_field_codec(operation, field),
+                `values[${index}]`,
+                `"${label}"`,
+              )
+            },`,
+          )
+          .join("\n")
+        return `    public async ValueTask<Smithy.${operation.output}> ${method_name}(
+        Smithy.${operation.input} input,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        var result = await RequestScopedAsync(
+            Protocol.Opcode.${operation.name},
+            input.${input_namespace_id},
+            ${input_item_id_expression},
+            ${input_request_value === "ReadOnlyMemory<byte>.Empty" ? "ReadOnlyMemory<byte>.Empty" : `input.${input_request_value}`},
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        ExpectKind("${label}", result, ${result_constant("value")});
+        var values = DecodeOptionalValues(
+            result.Payload,
+            ${operation_composite_value_count(operation)},
+            "${label}");
+        return new Smithy.${operation.output}
+        {
+${output_values}
+        };
+    }`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -11667,10 +12086,7 @@ export function render_csharp_operations(contract: Client_Contract): string {
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `    private static byte[] ConcatItemIds(params byte[][] itemIds)
     {
@@ -12192,6 +12608,48 @@ function render_rust_operation_method(
                 Ok(smithy::${operation.output} { ${output_payload}: payload })
             }`
       }
+    case "composite":
+      {
+        const output_values = operation_composite_fields(operation)
+          .map((field) =>
+            `                    ${operation_field_name(field, "rust")}: ${
+              render_composite_field_decode(
+                "rust",
+                operation_composite_field_codec(operation, field),
+                "values.remove(0)",
+                `"${operation_label}"`,
+              )
+            },`,
+          )
+          .join("\n")
+        return `            async fn ${method_name}(
+                &self,
+                input: smithy::${operation.input},
+            ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
+                let result = $client::execute_scoped(
+                    self,
+                    openkache_client_core::Opcode::${operation.name},
+                    input.${input_namespace_id},
+                    ${input_item_id_expression},
+                    ${input_request_value === "Vec::new()" ? "Vec::new()" : `input.${input_request_value}`},
+                    SetOptions::new(),
+                )
+                    .await?;
+                smithy_require_kind(
+                    &result,
+                    &[${result_constant("value")}],
+                    "${operation_label}",
+                )?;
+                let mut values = smithy_decode_optional_values(
+                    &result.payload,
+                    ${operation_composite_value_count(operation)},
+                    "${operation_label}",
+                )?;
+                Ok(smithy::${operation.output} {
+${output_values}
+                })
+            }`
+      }
     case "value":
       if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
@@ -12493,10 +12951,7 @@ fn smithy_decode_f64_array(
 `
     : ""
   const optional_values_helpers = managed_operations.some(
-    (operation) =>
-      operation.plan.operation.request_item_count > 1 ||
-      (operation.plan.result_plan.response_route === "value"
-        && operation.plan.operation.response_value_count > 1),
+    operation_uses_optional_values,
   )
     ? `fn smithy_concat_item_ids(
     item_ids: &[&[u8]],

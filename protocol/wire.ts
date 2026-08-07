@@ -100,15 +100,18 @@ export type Wire_Request_Layout =
   | "namespace_delete"
 
 /**
- * The finite set of response routes understood by the shared adapters.
+ * The transport response routes understood by the shared adapters.
  *
  * Server behavior remains outside this route classification. The route only
- * identifies the wire payload framing that clients must decode.
+ * identifies the wire payload framing that clients must decode. `composite`
+ * is an ordered field sequence derived from the output shape; it is not a
+ * per-operation response family.
  */
 export type Wire_Response_Route =
   | "empty"
   | "pong"
   | "application_value"
+  | "composite"
   | "value"
   | "set_outcome"
   | "delete_outcome"
@@ -163,12 +166,15 @@ export function derive_wire_response_route(
 ): Wire_Response_Route {
   const { response_fields } = contract
   const has_role = (role: string): boolean => operation_has_role(response_fields, role)
-  if (has_role("payload")) return "application_value"
-  if (has_role("value")) return "value"
+  if (has_role("descriptor")) return "namespace_descriptor"
+  if (response_fields.length > 1) return "composite"
+  if (has_role("payload") && response_fields.length === 1) {
+    return "application_value"
+  }
+  if (has_role("value") && response_fields.length === 1) return "value"
   if (has_role("outcome")) return "set_outcome"
   if (has_role("deleted")) return "delete_outcome"
   if (has_role("json")) return "stats_json"
-  if (has_role("descriptor")) return "namespace_descriptor"
   if (response_fields.length === 0) {
     return contract.scope === "global" ? "pong" : "empty"
   }
@@ -1411,6 +1417,7 @@ pub enum OperationResponseKind {
     Empty,
     Pong,
     ApplicationValue,
+    Composite,
     Value,
     SetOutcome,
     DeleteOutcome,
@@ -1819,6 +1826,8 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
     switch (derive_wire_response_route(operation.contract)) {
       case "application_value":
         return "opaque payload"
+      case "composite":
+        return "ordered field sequence"
       case "value":
         return value_count === 1
           ? "optional value"
