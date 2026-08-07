@@ -976,7 +976,7 @@ export interface Operation_Plan {
 }
 
 function operation_shape_plan(
-  contract: Client_Contract,
+  contract: Pick<Client_Contract, "api">,
   operation: Api_Operation,
   direction: "input" | "output",
 ): Operation_Shape_Plan {
@@ -1030,7 +1030,7 @@ function operation_shape_plan(
  * branches.
  */
 export function derive_operation_plan(
-  contract: Client_Contract,
+  contract: Pick<Client_Contract, "api">,
   operation: Api_Operation,
 ): Operation_Plan {
   const input = operation_shape_plan(contract, operation, "input")
