@@ -3,11 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::key::{KeyBinding, KeyInput};
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeySpec, NamespaceDescriptor,
-    NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    NamespacePolicy, PortableKey, ResolvedKey, Result, RetryPolicy, ServerTrust, SetOptions,
+    SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -42,13 +44,14 @@ impl ProtectionSettings {
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
+        let key_spec = self.key_spec;
         match self.key {
             Some(key) => if self.encryption == Encryption::Unprotected {
-                DataProtection::unprotected(self.key_spec, self.compression)
+                DataProtection::unprotected(key_spec, self.compression)
             } else {
                 DataProtection::with_profile_and_key_spec(
                     key,
-                    self.key_spec,
+                    key_spec,
                     self.compression,
                     self.encryption,
                 )
@@ -61,10 +64,16 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(self.key_spec, self.compression).map(Arc::new)
+                DataProtection::unprotected(key_spec, self.compression).map(Arc::new)
             }
         }
     }
+}
+
+fn require_key_binding(key: Option<&KeyBinding>) -> Result<&KeyBinding> {
+    key.ok_or_else(|| {
+        crate::Error::configuration("application_key", "protected operation requires a key")
+    })
 }
 
 macro_rules! protected_builder_methods {
@@ -167,6 +176,27 @@ macro_rules! protected_client_methods {
             &self.raw
         }
 
+        /// Resolves neutral logical key bytes with this client's configured
+        /// [`KeySpec`]. Language adapters use this boundary instead of
+        /// carrying a second key-space implementation.
+        #[doc(hidden)]
+        pub fn resolve_logical_key(
+            &self,
+            logical_bytes: impl AsRef<[u8]>,
+        ) -> Result<ResolvedKey> {
+            self.protection
+                .resolve_key_input(KeyInput::logical(
+                    self.protection.key_spec(),
+                    logical_bytes.as_ref().to_owned(),
+                ))
+        }
+
+        /// Resolves one native logical/canonical key through the shared core.
+        #[cfg(feature = "ffi")]
+        pub(crate) fn resolve_key_input(&self, input: KeyInput) -> Result<ResolvedKey> {
+            self.protection.resolve_key_input(input)
+        }
+
         /// Verifies the connection and returns the complete request round-trip time.
         pub async fn ping(&self) -> Result<Duration> {
             self.raw.ping().await
@@ -199,6 +229,69 @@ macro_rules! protected_client_methods {
             value: impl AsRef<[u8]>,
             set_options: SetOptions,
         ) -> Result<crate::OperationResult> {
+            self.execute_operation_typed(
+                operation,
+                PortableKey::Bytes(application_key.as_ref().to_vec()),
+                value,
+                set_options,
+            )
+            .await
+        }
+
+        /// Executes a generated Smithy operation for one typed portable key.
+        ///
+        /// This is the generic key boundary used by native language adapters.
+        /// The key is converted, canonicalized, and bound to the namespace by
+        /// the shared core; adapters never serialize key CBOR themselves.
+        pub async fn execute_operation_typed(
+            &self,
+            operation: crate::Opcode,
+            application_key: impl Into<PortableKey>,
+            value: impl AsRef<[u8]>,
+            set_options: SetOptions,
+        ) -> Result<crate::OperationResult> {
+            let contract = crate::contract::operation_contract(operation);
+            let binding = if matches!(contract.request_kind, "item" | "set") {
+                Some(
+                    self.resolve_and_bind_key(KeyInput::portable(application_key))
+                        .await?,
+                )
+            } else {
+                None
+            };
+            self.execute_operation_with_binding(operation, binding, value, set_options)
+                .await
+        }
+
+        /// Executes an operation after its key has crossed the shared core
+        /// key boundary.
+        ///
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn execute_operation_resolved(
+            &self,
+            operation: crate::Opcode,
+            application_key: ResolvedKey,
+            value: impl AsRef<[u8]>,
+            set_options: SetOptions,
+        ) -> Result<crate::OperationResult> {
+            let contract = crate::contract::operation_contract(operation);
+            let binding = if matches!(contract.request_kind, "item" | "set") {
+                Some(self.bind_resolved_key(&application_key).await?)
+            } else {
+                None
+            };
+            self.execute_operation_with_binding(operation, binding, value, set_options)
+                .await
+        }
+
+        /// Dispatches a generated operation after key resolution.
+        async fn execute_operation_with_binding(
+            &self,
+            operation: crate::Opcode,
+            binding: Option<KeyBinding>,
+            value: impl AsRef<[u8]>,
+            set_options: SetOptions,
+        ) -> Result<crate::OperationResult> {
             let contract = crate::contract::operation_contract(operation);
             match (contract.request_kind, contract.response_kind) {
                 (
@@ -217,18 +310,31 @@ macro_rules! protected_client_methods {
                 (
                     "item" | "set",
                     "value",
-                ) => Ok(crate::operation_get_result(self.get(application_key).await?)),
+                ) => {
+                    let binding = require_key_binding(binding.as_ref())?;
+                    Ok(crate::operation_get_result(
+                        self.get_raw_at_item_id(binding.namespace_id, binding.item_id)
+                            .await?,
+                    ))
+                }
                 (
                     "item" | "set",
                     "set_outcome",
                 ) => Ok(crate::operation_set_result(
-                    self.set(application_key, value.as_ref().to_vec(), set_options)
-                        .await?,
+                    self.set_value_at_binding(
+                        *require_key_binding(binding.as_ref())?,
+                        Value::Raw(value.as_ref().to_vec()),
+                        set_options,
+                    )
+                    .await?,
                 )),
                 (
                     "item" | "set",
                     "delete_outcome",
-                ) => Ok(crate::operation_delete_result(self.delete(application_key).await?)),
+                ) => Ok(crate::operation_delete_result(
+                    self.delete_at_binding(*require_key_binding(binding.as_ref())?)
+                        .await?,
+                )),
                 (
                     "namespace",
                     "stats_json"
@@ -255,43 +361,66 @@ macro_rules! protected_client_methods {
             value: impl AsRef<[u8]>,
             set_options: SetOptions,
         ) -> Result<crate::OperationResult> {
+            self.execute_operation_scoped_typed(
+                operation,
+                namespace_id,
+                PortableKey::Bytes(application_key.as_ref().to_vec()),
+                value,
+                set_options,
+            )
+            .await
+        }
+
+        /// Executes a generated operation in an explicitly supplied namespace
+        /// for one portable logical key.
+        pub async fn execute_operation_scoped_typed(
+            &self,
+            operation: crate::Opcode,
+            namespace_id: u64,
+            application_key: impl Into<PortableKey>,
+            value: impl AsRef<[u8]>,
+            set_options: SetOptions,
+        ) -> Result<crate::OperationResult> {
             let contract = crate::contract::operation_contract(operation);
+            let binding = if matches!(contract.request_kind, "item" | "set") {
+                Some(
+                    self.protection
+                        .bind_key_input(namespace_id, KeyInput::portable(application_key))?,
+                )
+            } else {
+                None
+            };
             match (contract.request_kind, contract.response_kind) {
                 (
                     "item" | "set",
                     "value",
                 ) => {
-                    let item_id = self.protection.item_id(application_key);
-                    Ok(match self.raw.get_in_namespace(namespace_id, item_id).await? {
-                        GetOutcome::Found(value) => {
-                            let value = self.protection.open(item_id, value)?;
-                            crate::operation_result(crate::contract::FfiResultKind::Value, value)
-                        }
-                        GetOutcome::NotFound => crate::operation_result(
-                            crate::contract::FfiResultKind::NotFound,
-                            Vec::new(),
-                        ),
-                    })
+                    let binding = require_key_binding(binding.as_ref())?;
+                    Ok(crate::operation_get_result(
+                        self.get_raw_at_item_id(binding.namespace_id, binding.item_id)
+                            .await?,
+                    ))
                 }
                 (
                     "item" | "set",
                     "set_outcome",
                 ) => {
-                    let item_id = self.protection.item_id(application_key.as_ref());
-                    let value = self.protection.seal_owned(item_id, value.as_ref().to_vec())?;
                     Ok(crate::operation_set_result(
-                        self.raw
-                            .set_in_namespace(namespace_id, item_id, value, set_options)
-                            .await?,
+                        self.set_value_at_binding(
+                            *require_key_binding(binding.as_ref())?,
+                            Value::Raw(value.as_ref().to_vec()),
+                            set_options,
+                        )
+                        .await?,
                     ))
                 }
                 (
                     "item" | "set",
                     "delete_outcome",
                 ) => {
-                    let item_id = self.protection.item_id(application_key);
                     Ok(crate::operation_delete_result(
-                        self.raw.delete_in_namespace(namespace_id, item_id).await?,
+                        self.delete_at_binding(*require_key_binding(binding.as_ref())?)
+                            .await?,
                     ))
                 }
                 (
@@ -352,13 +481,9 @@ macro_rules! protected_client_methods {
 
         /// Retrieves, authenticates, and decodes a value for a portable key.
         pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
-            match self.get_value(key).await? {
-                GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
-                GetOutcome::Found(Value::Json(_)) => {
-                    Err(crate::value::Error::ExpectedRawValue.into())
-                }
-                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
-            }
+            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+            self.get_raw_at_item_id(binding.namespace_id, binding.item_id)
+                .await
         }
 
         /// Retrieves a formatted value in the core logical model.
@@ -376,9 +501,9 @@ macro_rules! protected_client_methods {
         /// Returns an error when transport, authentication, decompression, or deserialization
         /// fails.
         pub async fn get_value(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Value>> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
-            self.get_value_at_item_id(namespace_id, item_id).await
+            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+            self.get_value_at_item_id(binding.namespace_id, binding.item_id)
+                .await
         }
 
         /// Retrieves a value when the adapter already owns canonical key bytes.
@@ -386,29 +511,10 @@ macro_rules! protected_client_methods {
             &self,
             canonical_key: impl AsRef<[u8]>,
         ) -> Result<GetOutcome<Value>> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self
-                .protection
-                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
-            self.get_value_at_item_id(namespace_id, item_id).await
-        }
-
-        /// Retrieves a value for canonical key bytes supplied by a low-level
-        /// language adapter.
-        ///
-        /// The bytes must be exactly one canonical v1 key item. This method
-        /// intentionally does not apply the configured `KeySpec`; the CBOR
-        /// major type is the low-level ABI's explicit type discriminator.
-        #[cfg(feature = "ffi")]
-        pub(crate) async fn get_canonical_key_unchecked(
-            &self,
-            canonical_key: impl AsRef<[u8]>,
-        ) -> Result<GetOutcome<Value>> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self
-                .protection
-                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
-            self.get_value_at_item_id(namespace_id, item_id).await
+            let key = self.protection.resolve_key_input(KeyInput::canonical_in_space(
+                canonical_key.as_ref().to_owned(),
+            ))?;
+            self.get_value_with_key(&key).await
         }
 
         async fn get_value_at_item_id(
@@ -425,6 +531,62 @@ macro_rules! protected_client_methods {
             }
         }
 
+        async fn resolve_and_bind_key(
+            &self,
+            input: KeyInput,
+        ) -> Result<KeyBinding> {
+            let key = self.protection.resolve_key_input(input)?;
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            self.protection.bind_resolved_key(namespace_id, &key)
+        }
+
+        async fn bind_resolved_key(&self, key: &ResolvedKey) -> Result<KeyBinding> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            self.protection.bind_resolved_key(namespace_id, key)
+        }
+
+        async fn get_value_with_key(&self, key: &ResolvedKey) -> Result<GetOutcome<Value>> {
+            let binding = self.bind_resolved_key(key).await?;
+            self.get_value_at_item_id(binding.namespace_id, binding.item_id)
+                .await
+        }
+
+        async fn get_raw_at_item_id(
+            &self,
+            namespace_id: u64,
+            item_id: crate::ItemId,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            match self.get_value_at_item_id(namespace_id, item_id).await? {
+                GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
+                GetOutcome::Found(Value::Json(_)) => {
+                    Err(crate::value::Error::ExpectedRawValue.into())
+                }
+                GetOutcome::NotFound => Ok(GetOutcome::NotFound),
+            }
+        }
+
+        async fn get_raw_with_key(&self, key: &ResolvedKey) -> Result<GetOutcome<Vec<u8>>> {
+            let binding = self.bind_resolved_key(key).await?;
+            self.get_raw_at_item_id(binding.namespace_id, binding.item_id)
+                .await
+        }
+
+        #[doc(hidden)]
+        pub async fn get_resolved(
+            &self,
+            key: ResolvedKey,
+        ) -> Result<GetOutcome<Vec<u8>>> {
+            self.get_raw_with_key(&key).await
+        }
+
+        #[doc(hidden)]
+        pub async fn get_value_resolved(
+            &self,
+            key: ResolvedKey,
+        ) -> Result<GetOutcome<Value>> {
+            self.get_value_with_key(&key).await
+        }
+
         /// Protects and stores plaintext bytes for a portable key.
         pub async fn set(
             &self,
@@ -433,6 +595,17 @@ macro_rules! protected_client_methods {
             options: SetOptions,
         ) -> Result<SetOutcome> {
             self.set_value(key, Value::Raw(plaintext), options).await
+        }
+
+        #[doc(hidden)]
+        pub async fn set_resolved(
+            &self,
+            key: ResolvedKey,
+            plaintext: Vec<u8>,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            self.set_value_resolved(key, Value::Raw(plaintext), options)
+                .await
         }
 
         /// Serializes, protects, and stores a core logical value.
@@ -457,14 +630,42 @@ macro_rules! protected_client_methods {
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
+            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+            self.set_value_at_binding(binding, value, options).await
+        }
+
+        async fn set_value_with_key(
+            &self,
+            key: &ResolvedKey,
+            value: Value,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            let binding = self.bind_resolved_key(key).await?;
+            self.set_value_at_binding(binding, value, options).await
+        }
+
+        async fn set_value_at_binding(
+            &self,
+            binding: KeyBinding,
+            value: Value,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
             let value = self
                 .protection
-                .encode_in_namespace(namespace_id, item_id, value)?;
+                .encode_in_namespace(binding.namespace_id, binding.item_id, value)?;
             self.raw
-                .set_in_namespace(namespace_id, item_id, value, options)
+                .set_in_namespace(binding.namespace_id, binding.item_id, value, options)
                 .await
+        }
+
+        #[doc(hidden)]
+        pub async fn set_value_resolved(
+            &self,
+            key: ResolvedKey,
+            value: Value,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            self.set_value_with_key(&key, value, options).await
         }
 
         /// Stores a value when the adapter already owns canonical key bytes.
@@ -474,44 +675,32 @@ macro_rules! protected_client_methods {
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self
-                .protection
-                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
-            let value = self
-                .protection
-                .encode_in_namespace(namespace_id, item_id, value)?;
-            self.raw
-                .set_in_namespace(namespace_id, item_id, value, options)
-                .await
-        }
-
-        /// Stores a value for canonical key bytes supplied by a low-level
-        /// language adapter.
-        #[cfg(feature = "ffi")]
-        pub(crate) async fn set_canonical_key_unchecked(
-            &self,
-            canonical_key: impl AsRef<[u8]>,
-            value: Value,
-            options: SetOptions,
-        ) -> Result<SetOutcome> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self
-                .protection
-                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
-            let value = self
-                .protection
-                .encode_in_namespace(namespace_id, item_id, value)?;
-            self.raw
-                .set_in_namespace(namespace_id, item_id, value, options)
-                .await
+            let key = self.protection.resolve_key_input(KeyInput::canonical_in_space(
+                canonical_key.as_ref().to_owned(),
+            ))?;
+            self.set_value_with_key(&key, value, options).await
         }
 
         /// Deletes a value for a portable key.
         pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
-            self.raw.delete_in_namespace(namespace_id, item_id).await
+            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+            self.delete_at_binding(binding).await
+        }
+
+        async fn delete_with_key(&self, key: &ResolvedKey) -> Result<DeleteOutcome> {
+            let binding = self.bind_resolved_key(key).await?;
+            self.delete_at_binding(binding).await
+        }
+
+        async fn delete_at_binding(&self, binding: KeyBinding) -> Result<DeleteOutcome> {
+            self.raw
+                .delete_in_namespace(binding.namespace_id, binding.item_id)
+                .await
+        }
+
+        #[doc(hidden)]
+        pub async fn delete_resolved(&self, key: ResolvedKey) -> Result<DeleteOutcome> {
+            self.delete_with_key(&key).await
         }
 
         /// Deletes a value when the adapter already owns canonical key bytes.
@@ -519,25 +708,10 @@ macro_rules! protected_client_methods {
             &self,
             canonical_key: impl AsRef<[u8]>,
         ) -> Result<DeleteOutcome> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self
-                .protection
-                .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
-            self.raw.delete_in_namespace(namespace_id, item_id).await
-        }
-
-        /// Deletes a value for canonical key bytes supplied by a low-level
-        /// language adapter.
-        #[cfg(feature = "ffi")]
-        pub(crate) async fn delete_canonical_key_unchecked(
-            &self,
-            canonical_key: impl AsRef<[u8]>,
-        ) -> Result<DeleteOutcome> {
-            let namespace_id = self.raw.ensure_namespace_id().await?;
-            let item_id = self
-                .protection
-                .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
-            self.raw.delete_in_namespace(namespace_id, item_id).await
+            let key = self.protection.resolve_key_input(KeyInput::canonical_in_space(
+                canonical_key.as_ref().to_owned(),
+            ))?;
+            self.delete_with_key(&key).await
         }
 
         /// Returns server statistics as their JSON text.

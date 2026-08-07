@@ -20,6 +20,15 @@ The main API layers are:
   and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
+- `KeySpace`, the single logical/portable/canonical resolution policy, and
+  `ResolvedKey`, its validated hot-path result reused by Item ID hashing and
+  value protection;
+- the internal `KeyInput`/`KeyResolver` pipeline, which composes that policy
+  with the client root secret and is the only native request boundary that
+  produces a namespace-bound Item ID. Protected operations pass one of the
+  logical, portable, or canonical input variants through the same resolve/bind
+  path, so conversion and namespace binding cannot drift across GET, SET,
+  DELETE, and generated operations;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
   Python, ctypes, and other synchronous native adapters.
 
@@ -53,9 +62,14 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. Protected FFI operations accept exactly one canonical
-v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
-discriminator), not raw application bytes. It requires the platform's io_uring driver and exports
+`LocalProtectedClient`. Typed protected FFI operations accept neutral logical
+key bytes plus a generated `FfiKeySpec`; the Rust core's `KeyResolver` resolves
+one `ResolvedKey` and binds it once per operation before Item ID derivation and
+value protection. The FFI dispatcher only carries neutral input to that
+boundary; ABI-to-key-spec conversion lives in `src/key.rs`. The original
+protected entry point remains available for
+callers that already own one canonical v1 key item. It requires the platform's
+io_uring driver and exports
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,

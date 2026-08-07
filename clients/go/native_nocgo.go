@@ -16,6 +16,7 @@ func connectNative(context.Context, normalizedOptions) (nativeClient, error) {
 func (unavailableNativeClient) execute(
 	context.Context,
 	uint32,
+	uint32,
 	[]byte,
 	[]byte,
 	SetOptions,

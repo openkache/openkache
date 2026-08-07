@@ -250,6 +250,26 @@ class NativeClient:
             ttl_ms=ttl_ms,
         )
 
+    def execute_typed(
+        self,
+        operation: int,
+        key_spec: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        condition: int = SMITHY_FFI_SET_CONDITION_ANY,
+        ttl_ms: int | None = None,
+    ) -> tuple[int, bytes]:
+        return self._execute_typed(
+            self._api.execute_typed,
+            operation,
+            key_spec=key_spec,
+            key=key,
+            value=value,
+            condition=condition,
+            ttl_ms=ttl_ms,
+        )
+
     def execute_raw(
         self,
         operation: int,
@@ -280,6 +300,26 @@ class NativeClient:
         return self._execute_with_options(
             self._api.execute_with_options,
             operation,
+            key=key,
+            value=value,
+            set_flags=set_flags,
+            ttl_ms=ttl_ms,
+        )
+
+    def execute_typed_with_options(
+        self,
+        operation: int,
+        key_spec: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> tuple[int, bytes]:
+        return self._execute_typed_with_options(
+            self._api.execute_typed_with_options,
+            operation,
+            key_spec=key_spec,
             key=key,
             value=value,
             set_flags=set_flags,
@@ -517,6 +557,83 @@ class NativeClient:
             result = function(
                 handle,
                 operation,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                set_flags,
+                ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute_typed(
+        self,
+        function: object,
+        operation: int,
+        *,
+        key_spec: int,
+        key: bytes,
+        value: bytes,
+        condition: int,
+        ttl_ms: int | None,
+    ) -> tuple[int, bytes]:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(
+                handle,
+                operation,
+                key_spec,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                condition,
+                1 if ttl_ms is not None else 0,
+                0 if ttl_ms is None else ttl_ms,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute_typed_with_options(
+        self,
+        function: object,
+        operation: int,
+        *,
+        key_spec: int,
+        key: bytes,
+        value: bytes,
+        set_flags: int,
+        ttl_ms: int,
+    ) -> tuple[int, bytes]:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(
+                handle,
+                operation,
+                key_spec,
                 key_pointer,
                 len(key),
                 value_pointer,

@@ -19,13 +19,13 @@ use std::time::Duration;
 /// Client-only generated defaults, ABI discriminators, and value-format identifiers.
 pub use openkache_client_core::contract;
 pub use openkache_client_core::{
-    AlpnPolicy, Backend, Certificate, ClientIdentity, ClientRootKey, ClientTimeouts,
-    ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey, DeleteOutcome,
-    Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, GetOutcome, ITEM_ID_BYTES,
-    ItemId, ItemValue, KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor,
-    NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result,
-    RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions, SetOutcome,
-    canonical_key_bytes, value, value_envelope, CLIENT_ROOT_KEY_BYTES,
+    AlpnPolicy, Backend, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity, ClientRootKey,
+    ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey,
+    DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, GetOutcome,
+    ITEM_ID_BYTES, ItemId, ItemValue, KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES,
+    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
+    PrivateKey, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions,
+    SetOutcome, canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -335,7 +335,9 @@ macro_rules! client_methods {
                 &self,
                 application_key: impl AsRef<[u8]>,
             ) -> Result<GetOutcome<Vec<u8>>> {
-                self.inner.get(application_key).await
+                self.inner
+                    .get(PortableKey::bytes(application_key.as_ref().to_vec()))
+                    .await
             }
 
             /// Retrieves and decodes a value in the shared logical value model.
@@ -343,12 +345,16 @@ macro_rules! client_methods {
                 &self,
                 application_key: impl AsRef<[u8]>,
             ) -> Result<GetOutcome<value::Value>> {
-                self.inner.get_value(application_key).await
+                self.inner
+                    .get_value(PortableKey::bytes(application_key.as_ref().to_vec()))
+                    .await
             }
 
             /// Deletes a value for arbitrary application key bytes.
             pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
-                self.inner.delete(application_key).await
+                self.inner
+                    .delete(PortableKey::bytes(application_key.as_ref().to_vec()))
+                    .await
             }
 
             /// Serializes, protects, and stores a value in the shared logical value model.
@@ -358,7 +364,13 @@ macro_rules! client_methods {
                 value: value::Value,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
-                self.inner.set_value(application_key, value, options).await
+                self.inner
+                    .set_value(
+                        PortableKey::bytes(application_key.as_ref().to_vec()),
+                        value,
+                        options,
+                    )
+                    .await
             }
 
             /// Returns server statistics as their JSON text.

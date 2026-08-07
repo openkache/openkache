@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-const maxCanonicalKeyBytes = 1 << 20
-
 // ErrClosed is returned after a client has been permanently closed.
 var ErrClosed = errors.New("openkache: client is closed")
 
@@ -392,7 +390,7 @@ type nativeResult struct {
 type nativeNamespaceDescriptor = SmithyFFINamespaceDescriptor
 
 type nativeClient interface {
-	execute(context.Context, uint32, []byte, []byte, SetOptions) (nativeResult, error)
+	execute(context.Context, uint32, uint32, []byte, []byte, SetOptions) (nativeResult, error)
 	executeRaw(context.Context, uint32, ItemID, []byte, SetOptions) (nativeResult, error)
 	executeScoped(
 		context.Context,
@@ -470,8 +468,18 @@ func (c *Client) invoke(
 	key, value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	return c.invokeTyped(ctx, operation, SmithyFFIKeySpecBytes, key, value, options)
+}
+
+func (c *Client) invokeTyped(
+	ctx context.Context,
+	operation uint32,
+	keySpec uint32,
+	key, value []byte,
+	options SetOptions,
+) (nativeResult, error) {
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
-		return native.execute(ctx, operation, key, value, options)
+		return native.execute(ctx, operation, keySpec, key, value, options)
 	})
 }
 
@@ -606,11 +614,7 @@ func (c *Client) Ping(ctx context.Context) error {
 // Get retrieves decrypted and decompressed bytes for key. The found result is
 // distinguished from an empty stored value by the found boolean.
 func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
-	canonicalKey, err := canonicalBytesKey(key)
-	if err != nil {
-		return nil, false, err
-	}
-	result, err := c.invoke(ctx, SmithyOpcodeGet, canonicalKey, nil, SetOptions{})
+	result, err := c.invoke(ctx, SmithyOpcodeGet, key, nil, SetOptions{})
 	if err != nil {
 		return nil, false, operationError("get", err)
 	}
@@ -622,11 +626,7 @@ func (c *Client) Get(ctx context.Context, key []byte) ([]byte, bool, error) {
 // The returned bytes are canonical RFC 8785 JSON produced by the shared core.
 // The Go adapter does not parse or re-serialize the document.
 func (c *Client) GetJSON(ctx context.Context, key []byte) ([]byte, bool, error) {
-	canonicalKey, err := canonicalBytesKey(key)
-	if err != nil {
-		return nil, false, err
-	}
-	result, err := c.invoke(ctx, SmithyFFIOperationGetJson, canonicalKey, nil, SetOptions{})
+	result, err := c.invoke(ctx, SmithyFFIOperationGetJson, key, nil, SetOptions{})
 	if err != nil {
 		return nil, false, operationError("get json", err)
 	}
@@ -645,17 +645,13 @@ func (c *Client) GetItem(ctx context.Context, itemID ItemID) ([]byte, bool, erro
 
 // Set encrypts and stores value for key.
 func (c *Client) Set(ctx context.Context, key, value []byte, options SetOptions) (SetOutcome, error) {
-	canonicalKey, err := canonicalBytesKey(key)
-	if err != nil {
-		return "", err
-	}
 	if len(value) > SmithyMaxValueBytes {
 		return "", validationError("value", fmt.Sprintf("exceeds %d bytes", SmithyMaxValueBytes))
 	}
 	if err := validateSetOptions(options); err != nil {
 		return "", err
 	}
-	result, err := c.invoke(ctx, SmithyOpcodeSet, canonicalKey, value, options)
+	result, err := c.invoke(ctx, SmithyOpcodeSet, key, value, options)
 	if err != nil {
 		return "", operationError("set", err)
 	}
@@ -672,10 +668,6 @@ func (c *Client) SetJSON(
 	key, jsonBytes []byte,
 	options SetOptions,
 ) (SetOutcome, error) {
-	canonicalKey, err := canonicalBytesKey(key)
-	if err != nil {
-		return "", err
-	}
 	if len(jsonBytes) > SmithyMaxValueBytes {
 		return "", validationError(
 			"json",
@@ -685,7 +677,7 @@ func (c *Client) SetJSON(
 	if err := validateSetOptions(options); err != nil {
 		return "", err
 	}
-	result, err := c.invoke(ctx, SmithyFFIOperationSetJson, canonicalKey, jsonBytes, options)
+	result, err := c.invoke(ctx, SmithyFFIOperationSetJson, key, jsonBytes, options)
 	if err != nil {
 		return "", operationError("set json", err)
 	}
@@ -811,69 +803,11 @@ func (c *Client) SetItem(
 
 // Delete removes key and reports whether an item existed.
 func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
-	canonicalKey, err := canonicalBytesKey(key)
-	if err != nil {
-		return false, err
-	}
-	result, err := c.invoke(ctx, SmithyOpcodeDelete, canonicalKey, nil, SetOptions{})
+	result, err := c.invoke(ctx, SmithyOpcodeDelete, key, nil, SetOptions{})
 	if err != nil {
 		return false, operationError("delete", err)
 	}
 	return deleteResult("delete", result)
-}
-
-// canonicalBytesKey encodes a Go []byte key as the v1 Bytes PortableKey.
-// The native ABI accepts canonical key bytes, not the caller's raw bytes.
-func canonicalBytesKey(key []byte) ([]byte, error) {
-	header, err := cborArgument(2, uint64(len(key)))
-	if err != nil {
-		return nil, err
-	}
-	if len(header)+len(key) > maxCanonicalKeyBytes {
-		return nil, validationError(
-			"key",
-			fmt.Sprintf("canonical encoding exceeds %d bytes", maxCanonicalKeyBytes),
-		)
-	}
-	encoded := make([]byte, 0, len(header)+len(key))
-	encoded = append(encoded, header...)
-	encoded = append(encoded, key...)
-	return encoded, nil
-}
-
-func cborArgument(major byte, value uint64) ([]byte, error) {
-	if major > 7 {
-		return nil, validationError("key", "invalid CBOR major type")
-	}
-	prefix := major << 5
-	switch {
-	case value <= 23:
-		return []byte{prefix | byte(value)}, nil
-	case value <= 0xff:
-		return []byte{prefix | 24, byte(value)}, nil
-	case value <= 0xffff:
-		return []byte{prefix | 25, byte(value >> 8), byte(value)}, nil
-	case value <= 0xffff_ffff:
-		return []byte{
-			prefix | 26,
-			byte(value >> 24),
-			byte(value >> 16),
-			byte(value >> 8),
-			byte(value),
-		}, nil
-	default:
-		return []byte{
-			prefix | 27,
-			byte(value >> 56),
-			byte(value >> 48),
-			byte(value >> 40),
-			byte(value >> 32),
-			byte(value >> 24),
-			byte(value >> 16),
-			byte(value >> 8),
-			byte(value),
-		}, nil
-	}
 }
 
 // DeleteItem removes an exact wire item ID.

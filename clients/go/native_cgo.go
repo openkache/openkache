@@ -213,6 +213,20 @@ openkache_client_result *openkache_go_execute(
         value_length, set_condition, ttl_enabled, ttl_ms);
 }
 
+openkache_client_result *openkache_go_execute_typed(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation, uint32_t key_spec,
+    const uint8_t *application_key, size_t application_key_length,
+    const uint8_t *value, size_t value_length,
+    uint32_t set_condition, uint8_t ttl_enabled, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_typed == NULL) return NULL;
+    return library->execute_typed(
+        client, operation, key_spec, application_key, application_key_length,
+        value, value_length, set_condition, ttl_enabled, ttl_ms);
+}
+
 openkache_client_result *openkache_go_execute_raw(
     const openkache_go_library *library,
     const openkache_client_handle *client,
@@ -239,6 +253,20 @@ openkache_client_result *openkache_go_execute_with_options(
     return library->execute_with_options(
         client, operation, application_key, application_key_length, value,
         value_length, set_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_execute_typed_with_options(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation, uint32_t key_spec,
+    const uint8_t *application_key, size_t application_key_length,
+    const uint8_t *value, size_t value_length,
+    uint8_t set_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_typed_with_options == NULL) return NULL;
+    return library->execute_typed_with_options(
+        client, operation, key_spec, application_key, application_key_length,
+        value, value_length, set_flags, ttl_ms);
 }
 
 openkache_client_result *openkache_go_execute_raw_with_options(
@@ -615,10 +643,11 @@ func decodeConnectResult(
 func (h *nativeHandle) execute(
 	ctx context.Context,
 	operation uint32,
+	keySpec uint32,
 	key, value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
-	return h.executeNative(ctx, operation, key, value, options, false)
+	return h.executeNative(ctx, operation, keySpec, key, value, options, false)
 }
 
 func (h *nativeHandle) executeRaw(
@@ -634,7 +663,7 @@ func (h *nativeHandle) executeRaw(
 			Message:   "native library does not support exact-item-ID operations",
 		}
 	}
-	return h.executeNative(ctx, operation, itemID[:], value, options, true)
+	return h.executeNative(ctx, operation, 0, itemID[:], value, options, true)
 }
 
 func (h *nativeHandle) executeScoped(
@@ -849,6 +878,7 @@ func (h *nativeHandle) decodeNamespaceDescriptor(
 func (h *nativeHandle) executeNative(
 	ctx context.Context,
 	operation uint32,
+	keySpec uint32,
 	key, value []byte,
 	options SetOptions,
 	raw bool,
@@ -886,8 +916,9 @@ func (h *nativeHandle) executeNative(
 				C.uint8_t(flags), C.uint64_t(ttl),
 			)
 		} else {
-			result = C.openkache_go_execute_with_options(
+			result = C.openkache_go_execute_typed_with_options(
 				h.library.ptr, client, C.uint32_t(operation),
+				C.uint32_t(keySpec),
 				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
 				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
 				C.uint8_t(flags), C.uint64_t(ttl),

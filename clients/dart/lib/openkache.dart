@@ -131,9 +131,10 @@ final class Client with SmithyGeneratedOperations implements OpenKacheClient {
     try {
       return _readResult(
         _api,
-        _api.execute(
+        _api.executeTyped(
           _requireOpenHandle(),
           operation,
+          smithyKeySpecBytes,
           keyBuffer.pointer,
           keyBuffer.length,
           valueBuffer.pointer,

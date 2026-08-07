@@ -29,18 +29,19 @@ pub use crate::contract::{
     FFI_NAMESPACE_OVERRIDE_DISALLOWED,
 };
 pub use crate::contract::{
-    FfiInputKind, FfiOperation, FfiOperationContract, FfiResultKind, FfiSetCondition,
+    FfiInputKind, FfiKeySpec, FfiOperation, FfiOperationContract, FfiResultKind, FfiSetCondition,
 };
 use crate::contract::{
     NAMESPACE_NAME_MAX_BYTES, VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE,
     VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
+use crate::key::KeyInput;
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemValue, LocalProtectedClient,
-    NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust, SetCondition,
-    SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, Endpoint,
+    EvictionDefault, ExpirationDefault, GetOutcome, LocalProtectedClient, NamespacePolicy,
+    OverridePolicy, PrivateKey, ResolvedKey, RetryPolicy, ServerTrust, SetCondition, SetOptions,
+    SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
@@ -111,7 +112,7 @@ pub struct FfiClient {
 enum Command {
     Execute {
         operation: FfiOperation,
-        application_key: Vec<u8>,
+        key: Option<KeyInput>,
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
@@ -264,13 +265,48 @@ impl FfiClient {
         set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
+        self.execute_with_key(
+            operation,
+            Some(KeyInput::canonical(application_key)),
+            value,
+            set_options,
+            raw,
+        )
+    }
+
+    fn execute_typed(
+        &self,
+        operation: FfiOperation,
+        key_spec: FfiKeySpec,
+        application_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        raw: bool,
+    ) -> FfiResult {
+        self.execute_with_key(
+            operation,
+            Some(KeyInput::from_ffi(key_spec, application_key)),
+            value,
+            set_options,
+            raw,
+        )
+    }
+
+    fn execute_with_key(
+        &self,
+        operation: FfiOperation,
+        key: Option<KeyInput>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        raw: bool,
+    ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
             return FfiResult::error("client request timeout exceeds the platform clock range");
         };
         let command = Command::Execute {
             operation,
-            application_key,
+            key,
             value,
             set_options,
             raw,
@@ -481,21 +517,14 @@ fn run_worker(
         match command {
             Command::Execute {
                 operation,
-                application_key,
+                key,
                 value,
                 set_options,
                 raw,
                 response,
             } => {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.block_on(execute(
-                        &client,
-                        operation,
-                        application_key,
-                        value,
-                        set_options,
-                        raw,
-                    ))
+                    runtime.block_on(execute(&client, operation, key, value, set_options, raw))
                 }))
                 .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
                 state.store(
@@ -595,17 +624,60 @@ fn run_worker(
 async fn execute(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    application_key: Vec<u8>,
+    key: Option<KeyInput>,
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
 ) -> FfiResult {
     let result = if raw {
-        execute_raw(client, operation, application_key, value, set_options).await
+        match key {
+            Some(key) => match key.into_exact_bytes() {
+                Some(item_id) => execute_raw(client, operation, item_id, value, set_options).await,
+                None => Err(crate::Error::configuration(
+                    "item_id",
+                    "exact-item-ID operations require exact item-ID bytes",
+                )),
+            },
+            None => execute_raw(client, operation, Vec::new(), value, set_options).await,
+        }
+    } else if let Some(result) = execute_protocol_global(client, operation, value.clone()).await {
+        result
     } else {
-        execute_protected(client, operation, application_key, value, set_options).await
+        match key {
+            Some(key) => execute_protected(client, operation, key, value, set_options).await,
+            None => Err(crate::Error::configuration(
+                "application_key",
+                "protected operation requires a key",
+            )),
+        }
     };
     result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
+}
+
+async fn execute_protected(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    input: KeyInput,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> std::result::Result<FfiResult, crate::Error> {
+    if operation == FfiOperation::Reconnect {
+        return client.reconnect().await.map(|()| ok_result());
+    }
+    let key = client.resolve_key_input(input)?;
+    if operation == FfiOperation::GetJson {
+        return client.get_value_resolved(key).await.and_then(json_result);
+    }
+    if operation == FfiOperation::SetJson {
+        return match parse_json(&value) {
+            Ok(json) => client
+                .set_value_resolved(key, Value::Json(json), set_options)
+                .await
+                .map(set_result),
+            Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
+        };
+    }
+    execute_protected_data_plane(client, operation, key, value, set_options).await
 }
 
 async fn execute_protocol_global(
@@ -630,60 +702,10 @@ async fn execute_protocol_global(
     )
 }
 
-async fn execute_protected(
-    client: &LocalProtectedClient,
-    operation: FfiOperation,
-    canonical_key: Vec<u8>,
-    value: Vec<u8>,
-    set_options: SetOptions,
-) -> std::result::Result<FfiResult, crate::Error> {
-    if let Some(result) = execute_protocol_global(client, operation, value.clone()).await {
-        return result;
-    }
-    match operation {
-        FfiOperation::Get => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
-            .await
-            .map(|value| get_result(value, raw_value_result)),
-        FfiOperation::GetJson => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
-            .await
-            .and_then(json_result),
-        FfiOperation::Set => client
-            .set_canonical_key_unchecked(
-                canonical_key.as_slice(),
-                Value::Raw(value),
-                set_options,
-            )
-            .await
-            .map(set_result),
-        FfiOperation::SetJson => match parse_json(&value) {
-            Ok(json) => client
-                .set_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    Value::Json(json),
-                    set_options,
-                )
-                .await
-                .map(set_result),
-            Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
-        },
-        FfiOperation::Delete => client
-            .delete_canonical_key_unchecked(canonical_key.as_slice())
-            .await
-            .map(delete_result),
-        FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
-        _ => {
-            execute_protected_data_plane(client, operation, canonical_key, value, set_options)
-                .await
-        }
-    }
-}
-
 async fn execute_protected_data_plane(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    application_key: Vec<u8>,
+    key: ResolvedKey,
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
@@ -693,10 +715,18 @@ async fn execute_protected_data_plane(
             "operation is not available through the protected ABI",
         ));
     };
-    client
-        .execute_operation(opcode, application_key, value, set_options)
-        .await
-        .and_then(operation_result)
+    let contract = crate::contract::operation_contract(opcode);
+    if matches!(contract.request_kind, "item" | "set") {
+        client
+            .execute_operation_resolved(opcode, key, value, set_options)
+            .await
+            .and_then(operation_result)
+    } else {
+        Err(crate::Error::configuration(
+            "operation",
+            "protocol operation is not available through the protected ABI",
+        ))
+    }
 }
 
 async fn execute_raw(
@@ -756,6 +786,7 @@ enum FfiInvocation {
 fn validate_ffi_operation(
     operation_contract: FfiOperationContract,
     invocation: FfiInvocation,
+    typed_key: bool,
     input: &[u8],
     value: &[u8],
     set_options: &SetOptions,
@@ -787,7 +818,7 @@ fn validate_ffi_operation(
         }
         (FfiInvocation::Protected, FfiInputKind::ApplicationKey)
         | (FfiInvocation::Protected, FfiInputKind::ItemId)
-            if input.is_empty() =>
+            if input.is_empty() && !typed_key =>
         {
             return Err("application key must not be empty".to_owned());
         }
@@ -928,34 +959,6 @@ fn operation_result(
 
 fn not_found_result() -> FfiResult {
     FfiResult::success(FfiResultKind::NotFound, Vec::new())
-}
-
-fn get_result<T>(outcome: GetOutcome<T>, found: impl FnOnce(T) -> FfiResult) -> FfiResult {
-    match outcome {
-        GetOutcome::Found(value) => found(value),
-        GetOutcome::NotFound => not_found_result(),
-    }
-}
-
-fn value_result(value: ItemValue) -> FfiResult {
-    FfiResult::success(FfiResultKind::Value, value.into_bytes())
-}
-
-fn raw_value_result(value: Value) -> FfiResult {
-    match value {
-        Value::Raw(payload) => FfiResult::success(FfiResultKind::Value, payload),
-        Value::Json(_) => FfiResult::error("formatted value is not Raw serialization"),
-    }
-}
-
-fn delete_result(outcome: DeleteOutcome) -> FfiResult {
-    FfiResult::success(
-        match outcome {
-            DeleteOutcome::Deleted => FfiResultKind::Deleted,
-            DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-        },
-        Vec::new(),
-    )
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
@@ -1233,10 +1236,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
 
 /// Executes one protected operation through an opaque native client.
 ///
-/// For `GET`, `SET`, and `DELETE`, `application_key` is exactly one canonical
-/// v1 key item from `KEY_FORMAT.md`. `SET` accepts an empty value and optional
-/// existence/TTL options. `PING`, `STATS`, and `SYNC` require empty key and
-/// value buffers.
+/// This compatibility entry point accepts one canonical v1 key item.
 ///
 /// # Safety
 ///
@@ -1266,6 +1266,53 @@ pub unsafe extern "C" fn openkache_client_execute(
         ttl_enabled,
         ttl_ms,
         false,
+    )
+}
+
+/// Executes one protected operation from a logical key and a generated key specification.
+///
+/// `key_spec` selects Text, Bytes, or Integer. Text and Bytes receive their
+/// exact UTF-8/byte payload; Integer receives canonical signed decimal UTF-8.
+/// The shared Rust core performs PortableKey conversion, deterministic CBOR,
+/// namespace-bound Item ID derivation, and value protection in one worker
+/// operation. Global operations ignore the key input and require an empty
+/// value when their operation contract says so.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty input pointer must identify readable memory for this call, and the client must not
+/// be freed until this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    let key_spec = match parse_ffi_key_spec(key_spec) {
+        Ok(key_spec) => key_spec,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        None,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
     )
 }
 
@@ -1336,6 +1383,47 @@ pub unsafe extern "C" fn openkache_client_execute_with_options(
         set_flags,
         ttl_ms,
         false,
+    )
+}
+
+/// Executes one typed protected operation with the complete wire SET policy byte.
+///
+/// This is the options-bearing counterpart to [`openkache_client_execute_typed`].
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty input pointer must identify readable memory for this call, and the client must not
+/// be freed until this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed_with_options(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    let key_spec = match parse_ffi_key_spec(key_spec) {
+        Ok(key_spec) => key_spec,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        Some((set_flags, ttl_ms)),
+        FfiSetCondition::Any as u32,
+        0,
+        0,
     )
 }
 
@@ -1417,6 +1505,7 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
         validate_ffi_operation(
             operation_contract,
             FfiInvocation::Scoped,
+            false,
             &item_id,
             &value,
             &set_options,
@@ -1595,6 +1684,7 @@ fn execute_entry(
         value_length,
         raw,
         None,
+        None,
         set_condition,
         ttl_enabled,
         ttl_ms,
@@ -1620,6 +1710,7 @@ fn execute_entry_with_flags(
         value,
         value_length,
         raw,
+        None,
         Some((set_flags, ttl_ms)),
         FfiSetCondition::Any as u32,
         0,
@@ -1636,6 +1727,7 @@ fn execute_entry_inner(
     value: *const u8,
     value_length: usize,
     raw: bool,
+    key_spec: Option<FfiKeySpec>,
     complete_flags: Option<(u8, u64)>,
     set_condition: u32,
     ttl_enabled: u8,
@@ -1690,12 +1782,27 @@ fn execute_entry_inner(
             } else {
                 FfiInvocation::Protected
             },
+            key_spec.is_some(),
             &application_key,
             &value,
             &set_options,
         )?;
-        Ok(client.execute(operation, application_key, value, set_options, raw))
+        Ok(match key_spec {
+            Some(key_spec) => client.execute_typed(
+                operation,
+                key_spec,
+                application_key,
+                value,
+                set_options,
+                raw,
+            ),
+            None => client.execute(operation, application_key, value, set_options, raw),
+        })
     }))
+}
+
+fn parse_ffi_key_spec(value: u32) -> std::result::Result<FfiKeySpec, String> {
+    FfiKeySpec::try_from(value).map_err(|value| format!("unsupported key spec {value}"))
 }
 
 /// Returns a best-effort connection-state discriminator:

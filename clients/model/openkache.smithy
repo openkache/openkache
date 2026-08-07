@@ -281,7 +281,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 4,
+    abiVersion: 5,
     nativeFunctions: [
         {
             name: "openkache_client_abi_version",
@@ -346,6 +346,37 @@ structure valueEnvelope {
                     structureName: "FfiConnectOptions",
                     mutable: false
                 }
+            ]
+        },
+        {
+            name: "openkache_client_execute_typed",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "keySpec", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setCondition", type: "uint32", mutable: false },
+                { name: "ttlEnabled", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_typed_with_options",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "keySpec", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
             ]
         },
         {
@@ -693,6 +724,17 @@ enum FfiSetCondition {
 
     @ffiValue(value: 2)
     IF_PRESENT = "if_present"
+}
+
+enum FfiKeySpec {
+    @ffiValue(value: 0)
+    TEXT = "text"
+
+    @ffiValue(value: 1)
+    BYTES = "bytes"
+
+    @ffiValue(value: 2)
+    INTEGER = "integer"
 }
 
 enum FfiConnectionState {

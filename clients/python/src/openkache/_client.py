@@ -41,6 +41,9 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_CONNECTION_STATE_DISCONNECTED,
     SMITHY_FFI_CONNECTION_STATE_RECONNECTING,
     SMITHY_FFI_CONNECTION_STATE_UNKNOWN,
+    SMITHY_FFI_KEY_SPEC_BYTES,
+    SMITHY_FFI_KEY_SPEC_INTEGER,
+    SMITHY_FFI_KEY_SPEC_TEXT,
     SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
     SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
     SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
@@ -110,7 +113,6 @@ from ._native import NativeClient as _NativeClient, NativeError
 
 _UINT64_MAX: Final = (1 << 64) - 1
 _SIZE_T_MAX: Final = (sys.maxsize << 1) | 1
-_MAX_CANONICAL_KEY_BYTES: Final = 1_048_576
 _BINARY64_SIGNIFICAND_BITS: Final = 53
 _BINARY64_MAX_INTEGER_BITS: Final = 1024
 
@@ -576,8 +578,9 @@ class OpenKacheClient:
         selected = options or SetOptions()
         try:
             return await asyncio.to_thread(
-                self._native.execute_with_options,
+                self._native.execute_typed_with_options,
                 operation,
+                _key_spec_code(self._key_spec),
                 key=key,
                 value=value,
                 set_flags=selected._wire_flags,
@@ -1033,10 +1036,9 @@ def _key_bytes(
         if not isinstance(value, str):
             raise OpenKacheValueError("key must be a string for the text key spec")
         try:
-            payload = value.encode("utf-8")
+            return value.encode("utf-8")
         except UnicodeEncodeError as error:
             raise OpenKacheValueError("key must contain valid UTF-8 text") from error
-        return _canonical_cbor_string(3, payload)
     if key_spec is KeySpec.BYTES:
         if isinstance(value, (str, int)) or not isinstance(
             value, (bytes, bytearray, memoryview)
@@ -1044,66 +1046,20 @@ def _key_bytes(
             raise OpenKacheValueError(
                 "key must be bytes-like for the bytes key spec"
             )
-        return _canonical_cbor_string(2, _as_bytes(value, "key"))
+        return _as_bytes(value, "key")
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(
             "key must be an integer for the integer key spec"
         )
-    return _canonical_cbor_integer(value)
+    return str(value).encode("ascii")
 
 
-def _canonical_cbor_string(major: int, payload: bytes) -> bytes:
-    """Encode one v1 Text or Bytes key as deterministic preferred CBOR."""
-
-    header = _canonical_cbor_argument(major, len(payload))
-    total = len(header) + len(payload)
-    if total > _MAX_CANONICAL_KEY_BYTES:
-        raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
-        )
-    return header + payload
-
-
-def _canonical_cbor_argument(major: int, value: int) -> bytes:
-    if major not in (0, 1, 2, 3) or value < 0:
-        raise OpenKacheValueError("invalid canonical CBOR key argument")
-    prefix = major << 5
-    if value <= 23:
-        return bytes((prefix | value,))
-    if value <= 0xFF:
-        return bytes((prefix | 24, value))
-    if value <= 0xFFFF:
-        return bytes((prefix | 25,)) + value.to_bytes(2, "big")
-    if value <= 0xFFFF_FFFF:
-        return bytes((prefix | 26,)) + value.to_bytes(4, "big")
-    if value <= 0xFFFF_FFFF_FFFF_FFFF:
-        return bytes((prefix | 27,)) + value.to_bytes(8, "big")
-    raise OpenKacheValueError("canonical key length exceeds CBOR uint64")
-
-
-def _canonical_cbor_integer(value: int) -> bytes:
-    """Encode one arbitrary-precision integer as preferred deterministic CBOR."""
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise OpenKacheValueError("key must be an integer")
-    negative = value < 0
-    transformed = -value - 1 if negative else value
-    if transformed <= 0xFFFF_FFFF_FFFF_FFFF:
-        return _canonical_cbor_argument(1 if negative else 0, transformed)
-
-    magnitude_length = max(1, (transformed.bit_length() + 7) // 8)
-    if magnitude_length > _MAX_CANONICAL_KEY_BYTES:
-        raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
-        )
-    magnitude = transformed.to_bytes(magnitude_length, "big")
-    tag = b"\xc3" if negative else b"\xc2"
-    encoded = tag + _canonical_cbor_string(2, magnitude)
-    if len(encoded) > _MAX_CANONICAL_KEY_BYTES:
-        raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
-        )
-    return encoded
+def _key_spec_code(key_spec: KeySpec) -> int:
+    return {
+        KeySpec.TEXT: SMITHY_FFI_KEY_SPEC_TEXT,
+        KeySpec.BYTES: SMITHY_FFI_KEY_SPEC_BYTES,
+        KeySpec.INTEGER: SMITHY_FFI_KEY_SPEC_INTEGER,
+    }[key_spec]
 
 
 def _item_id(value: bytes | bytearray | memoryview) -> bytes:

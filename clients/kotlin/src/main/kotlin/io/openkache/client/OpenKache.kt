@@ -47,9 +47,10 @@ public class Client private constructor(
                 Buffer(value).use { payload ->
                     return readResult(
                         native,
-                        native.openkache_client_execute(
+                        native.openkache_client_execute_typed(
                             client,
                             operation,
+                            SmithyContract.KEY_SPEC_BYTES,
                             key.pointer,
                             key.length,
                             payload.pointer,

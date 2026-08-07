@@ -156,9 +156,10 @@ public final class Client implements OpenKacheClient, AutoCloseable {
             ) {
                 return readResult(
                     nativeApi,
-                    nativeApi.openkache_client_execute(
+                    nativeApi.openkache_client_execute_typed(
                         handle,
                         operation,
+                        SmithyContract.KEY_SPEC_BYTES,
                         key.pointer(),
                         key.length(),
                         payload.pointer(),

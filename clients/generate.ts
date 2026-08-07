@@ -216,6 +216,7 @@ export interface Ffi_Contract {
   readonly namespace_descriptor_layout: Namespace_Descriptor_Layout
   readonly namespace_override_policies: readonly Ffi_Entry[]
   readonly operations: readonly Ffi_Entry[]
+  readonly key_specs: readonly Ffi_Entry[]
   readonly result_kinds: readonly Ffi_Entry[]
   readonly set_conditions: readonly Ffi_Entry[]
 }
@@ -309,6 +310,7 @@ const FFI_ENUMS = {
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
   connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
   set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },
+  key_specs: { name: "FfiKeySpec", kind: "FFI key spec" },
   namespace_descriptor_decode_statuses: {
     name: "FfiNamespaceDescriptorDecodeStatus",
     kind: "FFI namespace descriptor decode status",
@@ -1548,6 +1550,12 @@ function ffi_contract(
       FFI_ENUMS.namespace_descriptor_decode_statuses.name,
       FFI_ENUMS.namespace_descriptor_decode_statuses.kind,
     ),
+    key_specs: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.key_specs.name,
+      FFI_ENUMS.key_specs.kind,
+    ),
     namespace_descriptor_fields: descriptor.fields,
     namespace_descriptor_layout: descriptor.layout,
     namespace_override_policies: ffi_enum_entries(
@@ -2749,6 +2757,13 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_key_specs = ffi.key_specs
+    .map(
+      (entry) =>
+        `/// Native FFI logical-key specification identifier for ${entry.name}.
+pub const FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_namespace_descriptor_decode_statuses =
     ffi.namespace_descriptor_decode_statuses
       .map(
@@ -2846,6 +2861,7 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${ffi_key_specs}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
 ${ffi_namespace_default_evictions}
@@ -2886,6 +2902,13 @@ ${rust_ffi_enum(
   "Native FFI SET-condition identifiers shared by every language adapter.",
   "Native FFI SET-condition",
   ffi.set_conditions,
+)}
+
+${rust_ffi_enum(
+  "FfiKeySpec",
+  "Native FFI logical-key specification identifiers shared by every language adapter.",
+  "Native FFI key spec",
+  ffi.key_specs,
 )}
 
 /// Current client-owned value-format version.
@@ -3113,6 +3136,10 @@ export function render_c_contract(contract: Client_Contract): string {
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
+    ...ffi.key_specs.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
     ...ffi.namespace_descriptor_decode_statuses.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
@@ -3326,6 +3353,9 @@ interface Adapter_Contract_Values {
   readonly set_condition_any: number
   readonly set_condition_if_absent: number
   readonly set_condition_if_present: number
+  readonly key_spec_text: number
+  readonly key_spec_bytes: number
+  readonly key_spec_integer: number
   readonly set_inherit_expiration: number
   readonly set_no_expiry: number
   readonly set_explicit_ttl: number
@@ -3400,6 +3430,12 @@ function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Va
       name,
       "FFI SET-condition contract",
     ).value
+  const key_spec = (name: string): number =>
+    required_contract_entry(
+      contract.ffi.key_specs,
+      name,
+      "FFI key-spec contract",
+    ).value
   const descriptor_decode = (name: string): number =>
     required_contract_entry(
       contract.ffi.namespace_descriptor_decode_statuses,
@@ -3448,6 +3484,9 @@ function adapter_contract_values(contract: Client_Contract): Adapter_Contract_Va
     set_condition_any: set_condition("Any"),
     set_condition_if_absent: set_condition("IfAbsent"),
     set_condition_if_present: set_condition("IfPresent"),
+    key_spec_text: key_spec("Text"),
+    key_spec_bytes: key_spec("Bytes"),
+    key_spec_integer: key_spec("Integer"),
     set_inherit_expiration: contract.v1.set_inherit_expiration_bits,
     set_no_expiry: contract.v1.set_no_expiry_bits,
     set_explicit_ttl: contract.v1.set_ttl_flag,
@@ -9265,6 +9304,9 @@ ${render_java_operation_metadata(values)}
     public static final int SET_CONDITION_ANY = ${values.set_condition_any};
     public static final int SET_CONDITION_IF_ABSENT = ${values.set_condition_if_absent};
     public static final int SET_CONDITION_IF_PRESENT = ${values.set_condition_if_present};
+    public static final int KEY_SPEC_TEXT = ${values.key_spec_text};
+    public static final int KEY_SPEC_BYTES = ${values.key_spec_bytes};
+    public static final int KEY_SPEC_INTEGER = ${values.key_spec_integer};
     public static final int SET_INHERIT_EXPIRATION_BITS = ${values.set_inherit_expiration};
     public static final int SET_NO_EXPIRY_BITS = ${values.set_no_expiry};
     public static final int SET_EXPLICIT_TTL_BITS = ${values.set_explicit_ttl};
@@ -9324,6 +9366,9 @@ ${render_kotlin_operation_metadata(values)}
     public const val SET_CONDITION_ANY: Int = ${values.set_condition_any}
     public const val SET_CONDITION_IF_ABSENT: Int = ${values.set_condition_if_absent}
     public const val SET_CONDITION_IF_PRESENT: Int = ${values.set_condition_if_present}
+    public const val KEY_SPEC_TEXT: Int = ${values.key_spec_text}
+    public const val KEY_SPEC_BYTES: Int = ${values.key_spec_bytes}
+    public const val KEY_SPEC_INTEGER: Int = ${values.key_spec_integer}
     public const val SET_INHERIT_EXPIRATION_BITS: Int = ${values.set_inherit_expiration}
     public const val SET_NO_EXPIRY_BITS: Int = ${values.set_no_expiry}
     public const val SET_EXPLICIT_TTL_BITS: Int = ${values.set_explicit_ttl}
@@ -9381,6 +9426,9 @@ const int smithyOverrideAllowed = ${values.override_allowed};
 const int smithySetConditionAny = ${values.set_condition_any};
 const int smithySetConditionIfAbsent = ${values.set_condition_if_absent};
 const int smithySetConditionIfPresent = ${values.set_condition_if_present};
+const int smithyKeySpecText = ${values.key_spec_text};
+const int smithyKeySpecBytes = ${values.key_spec_bytes};
+const int smithyKeySpecInteger = ${values.key_spec_integer};
 const int smithySetInheritExpirationBits = ${values.set_inherit_expiration};
 const int smithySetNoExpiryBits = ${values.set_no_expiry};
 const int smithySetExplicitTtlBits = ${values.set_explicit_ttl};
@@ -9449,6 +9497,7 @@ export function render_csharp(contract: Client_Contract): string {
     ["FfiResult", ffi.result_kinds],
     ["FfiConnection", ffi.connection_states],
     ["FfiSetCondition", ffi.set_conditions],
+    ["FfiKeySpec", ffi.key_specs],
     ["FfiNamespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
     ["FfiNamespaceDefaultExpiration", ffi.namespace_default_expirations],
     ["FfiNamespaceDefaultEviction", ffi.namespace_default_evictions],
@@ -9748,6 +9797,12 @@ ${contract.ffi.set_conditions
   .map(
     (entry) =>
       `export const SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.key_specs
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
   )
   .join("\n")}
 ${contract.ffi.namespace_descriptor_decode_statuses
@@ -10510,6 +10565,7 @@ ${operations.join("\n")}
 export function render_go_contract(contract: Client_Contract): string {
   const value = contract.value_format
   const defaults = contract.client_defaults
+  const adapter_values = adapter_contract_values(contract)
   const descriptor_layout = contract.ffi.namespace_descriptor_layout
   const descriptor_fields = contract.ffi.namespace_descriptor_fields
   const go_namespace_descriptor_fields = descriptor_fields.map(
@@ -10645,6 +10701,10 @@ ${contract.ffi.set_conditions
 \tSmithyFFISetCondition${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
+	// SmithyFFIKeySpecText/Bytes/Integer identify logical key encodings accepted by typed execute.
+	SmithyFFIKeySpecText uint32 = ${adapter_values.key_spec_text}
+	SmithyFFIKeySpecBytes uint32 = ${adapter_values.key_spec_bytes}
+	SmithyFFIKeySpecInteger uint32 = ${adapter_values.key_spec_integer}
 ${contract.ffi.connection_states
   .map(
     (entry) =>
@@ -12165,6 +12225,12 @@ SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSO
         `SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_key_specs = contract.ffi.key_specs
+    .map(
+      (entry) =>
+        `SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_namespace_descriptor_decode_statuses =
     contract.ffi.namespace_descriptor_decode_statuses
       .map(
@@ -12280,6 +12346,7 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${ffi_key_specs}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
 ${ffi_namespace_default_evictions}
@@ -12583,6 +12650,7 @@ ${assignments}
     ["operation", ffi.operations],
     ["result", ffi.result_kinds],
     ["setCondition", ffi.set_conditions],
+    ["keySpec", ffi.key_specs],
     ["namespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
     ["namespaceDefaultExpiration", ffi.namespace_default_expirations],
     ["namespaceDefaultEviction", ffi.namespace_default_evictions],
