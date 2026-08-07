@@ -82,9 +82,10 @@ pub(super) fn application_value_response(opcode: Opcode, value: Vec<u8>) -> Resp
 }
 
 fn echo_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
-    std::str::from_utf8(&value)
-        .map(|_| value)
-        .map_err(|_| b"application value must be valid UTF-8" as &'static [u8])
+    if std::str::from_utf8(&value).is_err() {
+        return Err(b"application value must be valid UTF-8");
+    }
+    Ok(value)
 }
 
 fn reverse_utf8_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
