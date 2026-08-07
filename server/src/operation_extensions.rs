@@ -14,6 +14,7 @@ use super::protocol::Response;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response_bytes,
 };
+use crate::types::StoredItemValue;
 
 /// Domain-level result returned by a server operation extension.
 ///
@@ -22,7 +23,7 @@ use super::{
 pub(super) enum ExtensionResponse {
     Response(Response),
     ApplicationValue(Vec<u8>),
-    OptionalValues(Vec<Option<Vec<u8>>>),
+    OptionalValues(Vec<Option<StoredItemValue>>),
 }
 
 /// Executes an operation whose behavior belongs to an API-owned extension.
