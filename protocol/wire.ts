@@ -227,6 +227,7 @@ export function derive_wire_request_layout(
     namespace_open: ["name", "create_if_missing", ...policy_roles],
     namespace_update_policy: ["namespace_id", "expected_revision", ...policy_roles],
     namespace_delete: ["namespace_id", "expected_revision"],
+    field_sequence: [],
   } satisfies Record<Wire_Request_Layout, readonly string[]>
   if (layout !== "field_sequence") {
     try {
