@@ -87,7 +87,9 @@ namespace into both Item ID derivation and value AAD. The Rust API retains
 `DataProtectionKey` as a source-compatible alias; it is not a separate wire
 concept.
 
-`ValueCodec` stores its metadata inside the opaque value:
+`ValueCodec` stores its current metadata inside the opaque value. The packed
+codec layout shown in the pre-freeze value-format specification is the target
+of a separate value-codec migration:
 
 ```text
 value_envelope_version:vu128 | flags:u8 | body

@@ -4,6 +4,10 @@
 >
 > This document defines OpenKache's default formatted client value profile. It
 > is a client-side convention, not a server-required value encoding.
+>
+> The packed codec layout below is the target v1 contract. The key-conversion
+> change in this branch is implemented; migration of the shared value codec
+> from its prior serialization-id body to this layout is a separate change.
 
 The server stores values as opaque bytes. It does not interpret serialization,
 compression, encryption, or client metadata. Applications MAY use the raw

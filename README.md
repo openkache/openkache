@@ -70,9 +70,10 @@ item IDs. The server observes
 deterministic item IDs and encoded sizes, but not application keys or value
 plaintext.
 
-The value-format design is pre-freeze; the checked-in SDKs still need the
-namespace-bound derivation and deterministic-CBOR migration described in
-[`clients/VALUE_FORMAT.md`](clients/VALUE_FORMAT.md).
+The value-format design is pre-freeze. This branch implements the
+namespace-bound key conversion and Item ID derivation; migration of the
+shared value codec to the packed layout described in
+[`clients/VALUE_FORMAT.md`](clients/VALUE_FORMAT.md) is separate.
 
 ### 📦 Transparent compression
 

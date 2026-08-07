@@ -43,10 +43,11 @@ layouts only. They do not connect to OpenKache or expose cache operations yet.
 The [key format](KEY_FORMAT.md) and [value format](VALUE_FORMAT.md) documents
 together form the pre-freeze v1 default client contract. The shared core and
 implemented adapters enforce the restricted key model, namespace-bound Item ID
-derivation, optional protection, and one-byte packed value flags. The server
-remains opaque to all of these client conventions. TypeScript's legacy metadata
-envelope remains a package-level compatibility detail; use its `set_json` /
-`get_json` or Raw methods for cross-language v1 values.
+derivation, and optional protection. The packed value flags in the value-format
+document are the target of a separate value-codec migration; the server
+remains opaque to all of these client conventions. TypeScript's legacy
+metadata envelope remains a package-level compatibility detail; use its
+`set_json` / `get_json` or Raw methods for cross-language values.
 
 ## Binding architecture
 
