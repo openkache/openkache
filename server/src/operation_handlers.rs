@@ -38,6 +38,7 @@ pub(super) struct OperationInputView<'a> {
 
 /// A typed, borrowed operation field exposed to server-owned behavior.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub(super) enum OperationFieldValue<'a> {
     UnsignedLong(u64),
     ItemIds(&'a [ItemId]),
@@ -51,6 +52,13 @@ impl OperationInputView<'_> {
     /// Returns the modeled value for a role without requiring a wire-family
     /// or operation-name match in the extension.
     pub(super) fn field(&self, role: &str) -> Option<OperationFieldValue<'_>> {
+        if !crate::contract::operation_contract(self.opcode)
+            .request_fields
+            .iter()
+            .any(|field| field.role == role && field.count > 0)
+        {
+            return None;
+        }
         match role {
             "namespace_id" => self.namespace_id.map(OperationFieldValue::UnsignedLong),
             "expected_revision" => self

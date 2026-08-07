@@ -12860,7 +12860,7 @@ ${output_values}
           .join("\n")
         return `            async fn ${method_name}(
                 &self,
-                mut input: smithy::${operation.input},
+                input: smithy::${operation.input},
             ) -> std::result::Result<smithy::${operation.output}, Self::Error> {
                 let result = $client::execute_scoped(
                     self,
