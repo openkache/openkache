@@ -67,6 +67,21 @@ impl OperationInputView<'_> {
             .count()
     }
 
+    /// Returns one ordered generated plan entry for a semantic role.
+    ///
+    /// The ordinal is based on the Smithy field order, so repeated roles do
+    /// not require an operation-specific accessor or a second central enum.
+    pub(super) fn field_plan_at(
+        &self,
+        role: &str,
+        index: usize,
+    ) -> Option<&'static crate::contract::OperationFieldPlan> {
+        self.fields()
+            .iter()
+            .filter(|field| field.role == role)
+            .nth(index)
+    }
+
     /// Returns the modeled value for a role without requiring a wire-family
     /// or operation-name match in the extension.
     pub(super) fn field(&self, role: &str) -> Option<OperationFieldValue<'_>> {
@@ -101,6 +116,7 @@ impl OperationInputView<'_> {
         role: &str,
         index: usize,
     ) -> Option<OperationFieldValue<'_>> {
+        self.field_plan_at(role, index)?;
         let value = self.field(role)?;
         match value {
             OperationFieldValue::ItemIds(item_ids) => item_ids
