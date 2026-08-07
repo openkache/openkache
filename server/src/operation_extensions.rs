@@ -7,14 +7,14 @@
 
 use std::sync::Mutex;
 
-use openkache_protocol::{ItemId, Opcode, Status};
+use openkache_protocol::{Opcode, Status};
 
 use super::operation_handlers::OperationContext;
 use super::protocol::Response;
 use super::{
     NamespaceRegistry, NetworkWorkerCache, cache_error_response, namespace_exists, response_bytes,
 };
-use crate::types::StoredItemValue;
+use super::super::types::StoredItemValue;
 
 /// Domain-level result returned by a server operation extension.
 ///
@@ -37,8 +37,7 @@ pub(super) async fn execute(context: &OperationContext<'_, '_>) -> Option<Extens
         Opcode::Get2 => {
             execute_get2(
                 context.cache,
-                context.namespace_id,
-                context.item_ids,
+                &context.input,
                 context.namespaces,
             )
             .await
@@ -94,11 +93,11 @@ pub(super) fn application_value(opcode: Opcode, value: Vec<u8>) -> Option<Extens
 
 /// Reports whether this extension owns an operation outside the built-in
 /// server handler match.
-pub(super) const fn handles(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::Get2 | Opcode::ExperimentalEcho | Opcode::ExperimentalReverse | Opcode::SquareArray
-    )
+pub(super) fn handles(opcode: Opcode) -> bool {
+    opcode == Opcode::Get2
+        || APPLICATION_VALUE_EXTENSIONS
+            .iter()
+            .any(|extension| extension.opcode == opcode)
 }
 
 fn echo_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>, &'static [u8]> {
@@ -142,11 +141,29 @@ fn square_array_application_value(value: Vec<u8>) -> std::result::Result<Vec<u8>
 /// protocol runtime about GET2.
 pub(super) async fn execute_get2(
     cache: &NetworkWorkerCache<'_>,
-    namespace_id: Option<u64>,
-    item_ids: &[ItemId],
+    input: &super::operation_handlers::OperationInputView<'_>,
     namespaces: &Mutex<NamespaceRegistry>,
 ) -> Option<ExtensionResponse> {
-    let namespace_id = namespace_id.expect("GET2 has a validated namespace ID");
+    let namespace_id = match input.field("namespace_id") {
+        Some(super::operation_handlers::OperationFieldValue::UnsignedLong(namespace_id)) => {
+            namespace_id
+        }
+        _ => {
+            return Some(ExtensionResponse::Response(response_bytes(
+                Status::InvalidRequest,
+                b"GET2 requires a namespace ID",
+            )));
+        }
+    };
+    let item_ids = match input.field("item_id") {
+        Some(super::operation_handlers::OperationFieldValue::ItemIds(item_ids)) => item_ids,
+        _ => {
+            return Some(ExtensionResponse::Response(response_bytes(
+                Status::InvalidRequest,
+                b"GET2 requires item IDs",
+            )));
+        }
+    };
     let [first_item, second_item] = item_ids else {
         return Some(ExtensionResponse::Response(response_bytes(
             Status::InvalidRequest,
