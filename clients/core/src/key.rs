@@ -141,15 +141,18 @@ impl KeyResolver {
     /// The compatibility `Canonical` variant deliberately accepts any valid
     /// canonical v1 key because the original native ABI did not carry a
     /// configured key-space discriminator. New callers should use
-    /// `CanonicalInSpace`, `Logical`, or `Portable`, which all carry an
-    /// explicit key-space policy.
+    /// `CanonicalInSpace`, `ConfiguredLogical`, `TypedLogical`, or `Portable`,
+    /// which all carry an explicit key-space policy.
     pub(crate) fn resolve_input(
         &self,
         input: KeyInput,
     ) -> std::result::Result<ResolvedKey, KeyError> {
         match input {
             KeyInput::Portable(key) => self.space.resolve(key),
-            KeyInput::Logical { spec, bytes } => KeySpace::new(spec).resolve_logical_bytes(&bytes),
+            KeyInput::ConfiguredLogical(bytes) => self.space.resolve_logical_bytes(&bytes),
+            KeyInput::TypedLogical { spec, bytes } => {
+                KeySpace::new(spec).resolve_logical_bytes(&bytes)
+            }
             #[cfg(feature = "ffi")]
             KeyInput::Canonical(bytes) => ResolvedKey::from_canonical(&bytes),
             KeyInput::CanonicalInSpace(bytes) => self.space.resolve_canonical(&bytes),
@@ -215,7 +218,10 @@ impl From<crate::contract::FfiKeySpec> for KeySpec {
 #[derive(Clone, Debug)]
 pub(crate) enum KeyInput {
     Portable(PortableKey),
-    Logical {
+    /// Logical bytes interpreted using the resolver's configured key space.
+    ConfiguredLogical(Vec<u8>),
+    /// Logical bytes carrying an explicit ABI key-space discriminator.
+    TypedLogical {
         spec: KeySpec,
         bytes: Vec<u8>,
     },
@@ -229,8 +235,12 @@ impl KeyInput {
         Self::Portable(key.into())
     }
 
-    pub(crate) fn logical(spec: KeySpec, bytes: Vec<u8>) -> Self {
-        Self::Logical { spec, bytes }
+    pub(crate) fn configured_logical(bytes: Vec<u8>) -> Self {
+        Self::ConfiguredLogical(bytes)
+    }
+
+    pub(crate) fn typed_logical(spec: KeySpec, bytes: Vec<u8>) -> Self {
+        Self::TypedLogical { spec, bytes }
     }
 
     #[cfg(feature = "ffi")]
@@ -249,7 +259,7 @@ impl KeyInput {
     /// only owner of the ABI-to-logical-key boundary.
     #[cfg(feature = "ffi")]
     pub(crate) fn from_ffi(spec: crate::contract::FfiKeySpec, bytes: Vec<u8>) -> Self {
-        Self::logical(spec.into(), bytes)
+        Self::typed_logical(spec.into(), bytes)
     }
 
     /// Returns bytes for an exact-item-ID invocation.
@@ -261,7 +271,10 @@ impl KeyInput {
     pub(crate) fn into_exact_bytes(self) -> Option<Vec<u8>> {
         match self {
             Self::Canonical(bytes) => Some(bytes),
-            Self::Portable(_) | Self::Logical { .. } | Self::CanonicalInSpace(_) => None,
+            Self::Portable(_)
+            | Self::ConfiguredLogical(_)
+            | Self::TypedLogical { .. }
+            | Self::CanonicalInSpace(_) => None,
         }
     }
 }

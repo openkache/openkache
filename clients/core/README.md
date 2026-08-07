@@ -26,9 +26,9 @@ The main API layers are:
 - the internal `KeyInput`/`KeyResolver` pipeline, which composes that policy
   with the client root secret and is the only native request boundary that
   produces a namespace-bound Item ID. Protected operations pass one of the
-  logical, portable, or canonical input variants through the same resolve/bind
-  path, so conversion and namespace binding cannot drift across GET, SET,
-  DELETE, and generated operations;
+  configured-logical, explicitly typed FFI, portable, or canonical input
+  variants through the same resolve/bind path, so conversion and namespace
+  binding cannot drift across GET, SET, DELETE, and generated operations;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
   Python, ctypes, and other synchronous native adapters.
 

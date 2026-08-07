@@ -185,8 +185,7 @@ macro_rules! protected_client_methods {
             logical_bytes: impl AsRef<[u8]>,
         ) -> Result<ResolvedKey> {
             self.protection
-                .resolve_key_input(KeyInput::logical(
-                    self.protection.key_spec(),
+                .resolve_key_input(KeyInput::configured_logical(
                     logical_bytes.as_ref().to_owned(),
                 ))
         }
