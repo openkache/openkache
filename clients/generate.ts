@@ -4620,6 +4620,11 @@ function operation_response_route(
     role,
     count: members?.length ?? 0,
   }))
+  if (response_fields.length === 0 && contract.response_kind in OPERATION_RESULT_KINDS) {
+    // Protocol-only fixtures predating operationField annotations remain
+    // renderable. Production Smithy shapes always take the role-derived path.
+    return contract.response_kind as Operation_Response_Route
+  }
   return derive_wire_response_route({
     ...contract,
     response_fields,
