@@ -1742,6 +1742,8 @@ pub enum ProtocolError {
     },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("optional-value payload is invalid: {0}")]
+    InvalidOptionalValues(&'static str),
     #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
     InvalidRequestShape {
         opcode: Opcode,
@@ -1794,6 +1796,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
+            }
+            openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
+                Self::InvalidOptionalValues(message)
             }
         }
     }

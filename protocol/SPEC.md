@@ -294,17 +294,19 @@ possible next frame; it MUST terminate the lane after the error response.
 
 ### Opcodes
 
-| Opcode | Name | Request layout | Value |
-|---:|---|---|---|
-| `01` | `PING` | opcode only | no Item ID, no value |
-| `02` | `GET` | opcode + namespace ID + Item ID | no value |
-| `03` | `SET` | opcode + namespace ID + flags + Item ID + optional TTL + value length + value | value is `0..=64 MiB` |
-| `04` | `DELETE` | opcode + namespace ID + Item ID | no value |
-| `05` | `STATS` | opcode + namespace ID | no Item ID, no value |
-| `06` | `SYNC` | opcode + namespace ID | no Item ID, no value |
-| `07` | `NAMESPACE_OPEN` | opcode + flags + name length + name + optional policy | namespace descriptor |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + expected revision + policy | namespace descriptor |
-| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + expected revision | no value |
+<!-- BEGIN GENERATED OPCODE TABLE. Do not edit this block by hand. -->
+| Opcode | Name | Request layout | Response payload |
+|---|---|---|---|
+| `01` | `PING` | opcode only | PONG |
+| `02` | `GET` | opcode + namespace ID + 1 item ID | optional value |
+| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | set_outcome |
+| `04` | `DELETE` | opcode + namespace ID + 1 item ID | deleted |
+| `05` | `STATS` | opcode + namespace ID | opaque payload |
+| `06` | `SYNC` | opcode + namespace ID | empty |
+| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload |
+| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty |
+<!-- END GENERATED OPCODE TABLE. -->
 
 ### `SET` flags
 

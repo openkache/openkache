@@ -18,7 +18,6 @@ import {
   OPERATION_REQUEST_KINDS,
   OPERATION_REQUEST_SCOPES,
   OPERATION_RETRY_MODES,
-  OPERATION_RESPONSE_KINDS_BY_REQUEST,
   OPERATION_RESPONSE_KINDS,
   OPERATION_SCOPES,
   OPERATION_VALUE_TRANSFORMS,
@@ -142,6 +141,8 @@ export interface Api_Type {
   readonly kind: Api_Type_Kind
   readonly member?: Api_Type
   readonly name?: string
+  /** Optional model-declared codec name resolved by the shared registry. */
+  readonly wire_codec?: string
 }
 
 /** One field in a Smithy operation input or output structure. */
@@ -301,6 +302,7 @@ const FFI_CONTRACT_TRAIT_ID = "openkache.client#ffiContract"
 const CLIENT_DEFAULTS_TRAIT_ID = "openkache.client#clientDefaults"
 const OPERATION_CONTRACT_TRAIT_ID = "openkache.protocol#operationContract"
 const OPERATION_FIELD_TRAIT_ID = "openkache.protocol#operationField"
+const WIRE_CODEC_TRAIT_ID = "openkache.protocol#wireCodec"
 const FFI_OPERATION_CONTRACT_TRAIT_ID = "openkache.client#ffiOperationContract"
 const VALUE_FORMAT_TRAIT_ID = "openkache.client#valueFormat"
 const VALUE_ENVELOPE_TRAIT_ID = "openkache.client#valueEnvelope"
@@ -589,22 +591,44 @@ function api_type(
     target === "smithy.api#Long"
       ? "unsigned_long"
       : prelude_types[target]
-  if (prelude !== undefined) return { kind: prelude }
+  const codec_from_traits = (
+    traits: Json_Object | undefined,
+    location: string,
+  ): string | undefined => {
+    const value = traits?.[WIRE_CODEC_TRAIT_ID]
+    if (value === undefined) return undefined
+    const trait = object_value(value, `${location}.${WIRE_CODEC_TRAIT_ID}`)
+    return string_member(trait, "name", `${location}.${WIRE_CODEC_TRAIT_ID}`)
+  }
+  const member_codec = codec_from_traits(member_traits, target)
+  if (prelude !== undefined) {
+    return {
+      kind: prelude,
+      ...(member_codec === undefined ? {} : { wire_codec: member_codec }),
+    }
+  }
 
   const shape = object_member(shapes, target, "Smithy AST.shapes")
   const kind = shape_type(shape, `Smithy AST.shapes.${target}`)
+  const shape_codec = codec_from_traits(
+    optional_object_member(shape, "traits", `Smithy AST.shapes.${target}`),
+    `Smithy AST.shapes.${target}`,
+  )
+  const wire_codec = member_codec ?? shape_codec
+  const with_codec = (type: Api_Type): Api_Type =>
+    wire_codec === undefined ? type : { ...type, wire_codec: wire_codec }
   switch (kind) {
     case "blob":
-      return { kind: "blob" }
+      return with_codec({ kind: "blob" })
     case "list": {
       const member = object_member(shape, "member", target)
       const member_target = string_member(member, "target", `${target}.member`)
-      return { kind: "list", member: api_type(shapes, member_target) }
+      return with_codec({ kind: "list", member: api_type(shapes, member_target) })
     }
     case "enum":
-      return { kind: "enum", name: shape_name(target) }
+      return with_codec({ kind: "enum", name: shape_name(target) })
     case "structure":
-      return { kind: "structure", name: shape_name(target) }
+      return with_codec({ kind: "structure", name: shape_name(target) })
     default:
       throw new Error(`unsupported API member target ${target} with shape type ${kind}`)
   }
@@ -722,12 +746,9 @@ function operation_contract(
     "requestKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (!OPERATION_REQUEST_KINDS.includes(request_kind as Api_Operation_Request_Kind)) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind is not a supported request kind`,
-    )
-  }
-  if (OPERATION_REQUEST_SCOPES[request_kind as Api_Operation_Request_Kind] !== scope) {
+  const known_request_scope =
+    OPERATION_REQUEST_SCOPES[request_kind as Api_Operation_Request_Kind]
+  if (known_request_scope !== undefined && known_request_scope !== scope) {
     throw new Error(
       `${target}.${OPERATION_CONTRACT_TRAIT_ID}.requestKind ${request_kind} is incompatible with scope ${scope}`,
     )
@@ -737,20 +758,6 @@ function operation_contract(
     "responseKind",
     `${target}.${OPERATION_CONTRACT_TRAIT_ID}`,
   )
-  if (!OPERATION_RESPONSE_KINDS.includes(response_kind as Api_Operation_Response_Kind)) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID}.responseKind is not a supported response kind`,
-    )
-  }
-  const allowed_response_kinds =
-    OPERATION_RESPONSE_KINDS_BY_REQUEST[
-      request_kind as Api_Operation_Request_Kind
-    ]
-  if (!allowed_response_kinds.includes(response_kind as Api_Operation_Response_Kind)) {
-    throw new Error(
-      `${target}.${OPERATION_CONTRACT_TRAIT_ID} responseKind ${response_kind} is incompatible with requestKind ${request_kind}`,
-    )
-  }
   const retry_mode = string_member(
     contract,
     "retryMode",
@@ -810,8 +817,10 @@ function operation_contract(
   }
   return {
     error_statuses,
+    request_fields: [],
     request_kind: request_kind as Api_Operation_Request_Kind,
     request_item_count: 0,
+    response_fields: [],
     response_value_count: 0,
     response_kind: response_kind as Api_Operation_Response_Kind,
     retry_mode: retry_mode as Api_Operation_Retry_Mode,
@@ -963,101 +972,121 @@ function api_contract(
 
 interface Operation_Field_Requirement {
   readonly direction: "input" | "output"
-  readonly parent?: Known_Operation_Field_Role
-  readonly role: Known_Operation_Field_Role
+  readonly parent?: Operation_Field_Role
+  readonly role: Operation_Field_Role
 }
 
-const NAMESPACE_POLICY_FIELD_ROLES: readonly Known_Operation_Field_Role[] = [
-  "default_expiration",
-  "default_ttl_milliseconds",
-  "expiration_override",
-  "default_eviction",
-  "eviction_override",
-]
+/** One field selected directly from an operation input/output shape. */
+export interface Operation_Field_Plan {
+  readonly direction: "input" | "output"
+  readonly name: string
+  readonly path: readonly string[]
+  readonly required: boolean
+  readonly role: Operation_Field_Role
+  readonly type: Api_Type
+}
 
-/**
- * Derives the complete semantic field surface required by one operation
- * shape. This is intentionally evaluated once at the model boundary so
- * renderers never need to infer required members from operation names.
- */
-function operation_field_requirements(
-  operation: Api_Operation & { readonly contract: Api_Operation_Contract },
-): readonly Operation_Field_Requirement[] {
-  const requirements: Operation_Field_Requirement[] = []
-  const input = (...roles: readonly Known_Operation_Field_Role[]): void => {
-    for (const role of roles) requirements.push({ direction: "input", role })
-  }
-  const output = (...roles: readonly Known_Operation_Field_Role[]): void => {
-    for (const role of roles) requirements.push({ direction: "output", role })
-  }
-  const policy = (): void => {
-    requirements.push({ direction: "input", role: "policy" })
-    for (const role of NAMESPACE_POLICY_FIELD_ROLES) {
-      requirements.push({ direction: "input", parent: "policy", role })
+/** Operation request/response shape projection shared by every renderer. */
+export interface Operation_Shape_Plan {
+  readonly fields: readonly Operation_Field_Plan[]
+  readonly name: string
+}
+
+/** Operation-agnostic plan derived from Smithy roles and shapes. */
+export interface Operation_Plan {
+  readonly input: Operation_Shape_Plan
+  readonly output: Operation_Shape_Plan
+  readonly request_item_count: number
+  readonly request_payload_count: number
+  readonly response_payload_count: number
+  readonly response_value_count: number
+}
+
+function operation_shape_plan(
+  contract: Client_Contract,
+  operation: Api_Operation,
+  direction: "input" | "output",
+): Operation_Shape_Plan {
+  const structure = operation_structure_for(contract.api, operation, direction)
+  const fields: Operation_Field_Plan[] = []
+  const visit = (
+    current: Api_Structure,
+    path: readonly string[],
+    ancestors: ReadonlySet<string>,
+  ): void => {
+    if (ancestors.has(current.name)) {
+      throw new Error(
+        `operation ${operation.name} ${direction} shape cycle through ${current.name}`,
+      )
+    }
+    const next_ancestors = new Set(ancestors).add(current.name)
+    for (const member of current.members) {
+      const member_path = [...path, member.name]
+      const role = member.operation_field_role
+      if (role !== undefined) {
+        fields.push({
+          direction,
+          name: member.name,
+          path: member_path,
+          required: member.required,
+          role,
+          type: member.type,
+        })
+      }
+      if (member.type.kind === "structure" && member.type.name !== undefined) {
+        const nested = contract.api.structures.find(
+          (candidate) => candidate.name === member.type.name,
+        )
+        if (nested === undefined) {
+          throw new Error(
+            `operation ${operation.name} ${direction} field ${member.name} targets missing structure ${member.type.name}`,
+          )
+        }
+        visit(nested, member_path, next_ancestors)
+      }
     }
   }
+  visit(structure, [], new Set())
+  return { fields, name: structure.name }
+}
 
-  switch (operation.contract.request_kind) {
-    case "empty":
-      break
-    case "application_value":
-      input("payload")
-      break
-    case "scoped_item":
-      input("namespace_id", "item_id")
-      if (operation.contract.response_kind === "set_outcome") {
-        input(
-          "value",
-          "condition",
-          "expiration_mode",
-          "ttl_milliseconds",
-          "eviction_mode",
-        )
-      }
-      break
-    case "scoped_namespace":
-      input("namespace_id")
-      break
-    case "namespace_open":
-      input("name", "create_if_missing")
-      policy()
-      break
-    case "namespace_update_policy":
-      input("namespace_id", "expected_revision")
-      policy()
-      break
-    case "namespace_delete":
-      input("namespace_id", "expected_revision")
-      break
+/**
+ * Derives the language-neutral operation plan from shape members. No request
+ * or response family table is consulted here; repeated roles are preserved in
+ * Smithy order so GET3/GETSET-like shapes remain data rather than generator
+ * branches.
+ */
+export function derive_operation_plan(
+  contract: Client_Contract,
+  operation: Api_Operation,
+): Operation_Plan {
+  const input = operation_shape_plan(contract, operation, "input")
+  const output = operation_shape_plan(contract, operation, "output")
+  const count = (fields: readonly Operation_Field_Plan[], role: string): number =>
+    fields.filter((field) => field.role === role).length
+  return {
+    input,
+    output,
+    request_item_count: count(input.fields, "item_id"),
+    request_payload_count: count(input.fields, "payload"),
+    response_payload_count: count(output.fields, "payload"),
+    response_value_count: count(output.fields, "value"),
   }
+}
 
-  switch (operation.contract.response_kind) {
-    case "empty":
-    case "pong":
-      break
-    case "application_value":
-      output("payload")
-      break
-    case "value":
-      output("value")
-      break
-    case "set_outcome":
-      output("outcome")
-      break
-    case "delete_outcome":
-      output("deleted")
-      break
-    case "stats_json":
-      output("json")
-      break
-    case "namespace_descriptor":
-      output("descriptor")
-      if (operation.contract.request_kind === "namespace_open") {
-        output("created")
-      }
-      break
-  }
-  return requirements
+/**
+ * Derives required role bindings from the actual Smithy structures. Required
+ * fields are the only generation obligations; optional and repeated roles are
+ * carried by the operation plan without a special-case operation matrix.
+ */
+function operation_field_requirements(
+  contract: Pick<Client_Contract, "api">,
+  operation: Api_Operation & { readonly contract: Api_Operation_Contract },
+): readonly Operation_Field_Requirement[] {
+  const plan = derive_operation_plan(contract, operation)
+  return [...plan.input.fields, ...plan.output.fields]
+    .filter((field) => field.required && field.path.length === 1)
+    .map(({ direction, role }) => ({ direction, role }))
 }
 
 function operation_structure_for(
@@ -1105,7 +1134,7 @@ function validate_operation_field_bindings(api: Api_Contract): void {
     const managed_operation = operation as Api_Operation & {
       readonly contract: Api_Operation_Contract
     }
-    const requirements = operation_field_requirements(managed_operation)
+    const requirements = operation_field_requirements({ api }, managed_operation)
     const structures = new Map<"input" | "output", Api_Structure>([
       ["input", operation_structure_for(api, operation, "input")],
       ["output", operation_structure_for(api, operation, "output")],
@@ -2376,16 +2405,28 @@ function render_rust_operation_contract(contract: Client_Contract): string {
       ? []
       : [...new Set(["identity", ...modeled_value_transforms])])
   const has_value_transforms = value_transforms.length > 0
-  const enum_variant = (
-    value: string,
-    allowed: readonly string[],
-    label: string,
-  ): string => {
-    if (!allowed.includes(value)) {
-      throw new Error(`operation metadata ${label} has unsupported value ${value}`)
-    }
-    return pascal_case(snake_case(value))
-  }
+  const request_kinds = [
+    ...new Set([
+      ...OPERATION_REQUEST_KINDS,
+      ...operations.map((operation) => operation.contract!.request_kind),
+    ]),
+  ]
+  const response_kinds = [
+    ...new Set([
+      ...OPERATION_RESPONSE_KINDS,
+      ...operations.map((operation) => operation.contract!.response_kind),
+    ]),
+  ]
+  const enum_variant = (value: string): string => pascal_case(snake_case(value))
+  const field_slice = (
+    fields: readonly { readonly role: string; readonly count: number }[],
+  ): string =>
+    `&[${fields
+      .map(
+        (field) =>
+          `OperationField { role: ${rust_string_literal(field.role)}, count: ${field.count} }`,
+      )
+      .join(", ")}]`
   const status_slice = (statuses: readonly string[]): string =>
     `&[${statuses
       .map(
@@ -2401,15 +2442,17 @@ function render_rust_operation_contract(contract: Client_Contract): string {
         throw new Error(`operation metadata has no matching opcode ${operation.name}`)
       }
       return `        openkache_protocol::Opcode::${operation.name} => OperationContract {
-            scope: OperationScope::${enum_variant(operation_contract.scope, OPERATION_SCOPES, `${operation.name}.scope`)},
-            request_kind: OperationRequestKind::${enum_variant(operation_contract.request_kind, OPERATION_REQUEST_KINDS, `${operation.name}.requestKind`)},
+            scope: OperationScope::${enum_variant(operation_contract.scope)},
+            request_kind: OperationRequestKind::${enum_variant(operation_contract.request_kind)},
             request_value_count: ${operation_contract.request_value_count ?? 0},
             request_item_count: ${operation_contract.request_item_count},
-            response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind, OPERATION_RESPONSE_KINDS, `${operation.name}.responseKind`)},
+            request_fields: ${field_slice(operation_contract.request_fields)},
+            response_kind: OperationResponseKind::${enum_variant(operation_contract.response_kind)},
             response_value_count: ${operation_contract.response_value_count},
-            retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode, OPERATION_RETRY_MODES, `${operation.name}.retryMode`)},
+            response_fields: ${field_slice(operation_contract.response_fields)},
+            retry_mode: OperationRetryMode::${enum_variant(operation_contract.retry_mode)},
 ${has_value_transforms
-  ? `            value_transform: OperationValueTransform::${enum_variant(operation_contract.value_transform ?? "identity", value_transforms, `${operation.name}.valueTransform`)},`
+  ? `            value_transform: OperationValueTransform::${enum_variant(operation_contract.value_transform ?? "identity")},`
   : ""}
             success_statuses: ${status_slice(operation_contract.success_statuses)},
             error_statuses: ${status_slice(operation_contract.error_statuses)},
@@ -2428,26 +2471,13 @@ pub enum OperationScope {
 /// Native request shape declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationRequestKind {
-    Empty,
-    ApplicationValue,
-    ScopedItem,
-    ScopedNamespace,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
+${request_kinds.map((value) => `    ${enum_variant(value)},`).join("\n")}
 }
 
 /// Response payload shape declared by the Smithy operation contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationResponseKind {
-    Empty,
-    Pong,
-    ApplicationValue,
-    Value,
-    SetOutcome,
-    DeleteOutcome,
-    StatsJson,
-    NamespaceDescriptor,
+${response_kinds.map((value) => `    ${enum_variant(value)},`).join("\n")}
 }
 
 /// Retry behavior declared by the Smithy operation contract.
@@ -2456,6 +2486,13 @@ pub enum OperationRetryMode {
     Always,
     Never,
     WhenNotCreating,
+}
+
+/// One Smithy operation-field role and its cardinality.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationField {
+    pub role: &'static str,
+    pub count: usize,
 }
 
 ${has_value_transforms
@@ -2474,8 +2511,10 @@ pub struct OperationContract {
     pub request_kind: OperationRequestKind,
     pub request_value_count: usize,
     pub request_item_count: usize,
+    pub request_fields: &'static [OperationField],
     pub response_kind: OperationResponseKind,
     pub response_value_count: usize,
+    pub response_fields: &'static [OperationField],
     pub retry_mode: OperationRetryMode,
 ${has_value_transforms ? "    pub value_transform: OperationValueTransform,\n" : ""}
     pub success_statuses: &'static [openkache_protocol::Status],
@@ -4522,7 +4561,7 @@ interface Operation_Result_Plan {
 }
 
 const OPERATION_REQUEST_ROUTES: Readonly<
-  Record<Api_Operation_Request_Kind, Operation_Request_Route>
+  Partial<Record<string, Operation_Request_Route>>
 > = {
   empty: "global_empty",
   application_value: "global_application_value",
@@ -4541,7 +4580,7 @@ const OPERATION_REQUEST_ROUTES: Readonly<
  * set of accepted result kinds in one language adapter.
  */
 const OPERATION_RESULT_KINDS: Readonly<
-  Record<Api_Operation_Response_Kind, readonly Operation_Result_Kind[]>
+  Partial<Record<string, readonly Operation_Result_Kind[]>>
 > = {
   empty: ["ok"],
   pong: ["ok"],
@@ -4559,6 +4598,12 @@ function operation_result_plan(
   contract: Api_Operation_Contract,
 ): Operation_Result_Plan {
   let result_kinds = OPERATION_RESULT_KINDS[contract.response_kind]
+  if (result_kinds === undefined) {
+    // Unknown response labels are intentionally accepted at the model
+    // boundary. A generic value result keeps adapters inspectable until a
+    // server extension supplies a richer result projection.
+    result_kinds = ["value"]
+  }
   if (contract.response_kind === "namespace_descriptor") {
     result_kinds = contract.request_kind === "namespace_open"
       ? ["ok", "created"]
@@ -4587,6 +4632,7 @@ interface Managed_Operation_Plan {
   readonly input: string
   readonly name: string
   readonly opcode: Wire_Entry
+  readonly operation: Operation_Plan
   readonly output: string
   readonly request_route: Operation_Request_Route
   readonly result_plan: Operation_Result_Plan
@@ -4601,7 +4647,37 @@ interface Managed_Api_Operation extends Api_Operation {
   readonly plan: Managed_Operation_Plan
 }
 
-type Application_Value_Codec = "f64_array" | "utf8"
+type Application_Value_Codec = "f64_array" | "utf8" | "raw_bytes"
+
+/** One codec registration shared by every generated language renderer. */
+export interface Wire_Codec_Registration {
+  readonly name: string
+  readonly renderer: Application_Value_Codec
+  readonly matches: (type: Api_Type) => boolean
+}
+
+/**
+ * Application payload codecs are registered by wire shape, not operation.
+ * Adding a new representation requires one registration and one set of
+ * language helper templates, never another operation-name branch.
+ */
+export const WIRE_CODEC_REGISTRY: readonly Wire_Codec_Registration[] = [
+  {
+    name: "utf8",
+    renderer: "utf8",
+    matches: (type) => type.kind === "string",
+  },
+  {
+    name: "packed_f64_be",
+    renderer: "f64_array",
+    matches: (type) => type.kind === "list" && type.member?.kind === "double",
+  },
+  {
+    name: "raw_bytes",
+    renderer: "raw_bytes",
+    matches: (type) => type.kind === "blob",
+  },
+]
 
 function operation_structure(
   contract: Client_Contract,
@@ -4680,19 +4756,26 @@ function operation_field_binding(
  * as it reuses a supported payload shape.
  */
 function application_value_codec_for_type(type: Api_Type): Application_Value_Codec {
-  switch (type.kind) {
-    case "string":
-      return "utf8"
-    case "list":
-      if (type.member?.kind === "double") return "f64_array"
+  const declared = type.wire_codec
+  const registration = declared === undefined
+    ? WIRE_CODEC_REGISTRY.find((candidate) => candidate.matches(type))
+    : WIRE_CODEC_REGISTRY.find((candidate) => candidate.name === declared)
+  if (registration === undefined) {
+    if (declared !== undefined) {
       throw new Error(
-        "application-value list payloads currently require a Double member",
+        `unsupported wire codec ${JSON.stringify(declared)}; register it before generating clients`,
       )
-    default:
-      throw new Error(
-        `unsupported application-value payload type ${type.kind}; add a codec mapping`,
-      )
+    }
+    throw new Error(
+      `unsupported application-value payload shape ${type.kind}; declare a wireCodec and register it before generating clients`,
+    )
   }
+  if (!registration.matches(type)) {
+    throw new Error(
+      `wire codec ${JSON.stringify(registration.name)} does not match payload shape ${type.kind}`,
+    )
+  }
+  return registration.renderer
 }
 
 function application_value_codec(
@@ -4718,6 +4801,38 @@ function application_value_codec(
   return input_codec
 }
 
+/**
+ * Selects only the transport invocation family from the derived field plan.
+ * This is a shape query, not a request-kind lookup: a new operation can
+ * compose existing roles without modifying a route table.
+ */
+function operation_request_route(
+  operation: Api_Operation & { readonly contract: Api_Operation_Contract },
+  plan: Operation_Plan,
+): Operation_Request_Route {
+  const input_roles = new Set(plan.input.fields.map((field) => field.role))
+  if (input_roles.has("payload")) return "global_application_value"
+  if (input_roles.has("name") && input_roles.has("create_if_missing")) {
+    return "namespace_open"
+  }
+  if (input_roles.has("expected_revision") && input_roles.has("policy")) {
+    return "namespace_update_policy"
+  }
+  if (input_roles.has("expected_revision") && input_roles.has("namespace_id")) {
+    return "namespace_delete"
+  }
+  if (input_roles.has("item_id")) return "scoped_item"
+  if (input_roles.has("namespace_id")) return "scoped_namespace"
+  if (plan.input.fields.length === 0) return "global_empty"
+  // Keep legacy labels useful for operation-specific server extensions while
+  // making the failure explicit instead of silently selecting global I/O.
+  const legacy_route = OPERATION_REQUEST_ROUTES[operation.contract.request_kind]
+  if (legacy_route !== undefined) return legacy_route
+  throw new Error(
+    `operation ${operation.name} has no transport route for its Smithy input roles`,
+  )
+}
+
 function managed_operation_entries(
   contract: Client_Contract,
 ): readonly Managed_Api_Operation[] {
@@ -4734,6 +4849,7 @@ function managed_operation_entries(
       contract: operation.contract,
     }
     const binding = operation_field_binding(contract, managed_operation)
+    const operation_plan = derive_operation_plan(contract, managed_operation)
     const plan: Managed_Operation_Plan = {
       application_value_codec: application_value_codec(
         contract,
@@ -4745,10 +4861,11 @@ function managed_operation_entries(
       input: managed_operation.input,
       name: managed_operation.name,
       opcode,
+      operation: operation_plan,
       output: managed_operation.output,
-      request_route: OPERATION_REQUEST_ROUTES[managed_operation.contract.request_kind],
+      request_route: operation_request_route(managed_operation, operation_plan),
       result_plan: operation_result_plan(managed_operation.contract),
-      required_fields: operation_field_requirements(managed_operation),
+      required_fields: operation_field_requirements(contract, managed_operation),
       strict_operation_bindings: contract.strict_operation_bindings,
     }
     return [{
@@ -5100,7 +5217,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
     }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member) => operation_field_name(member, "java"))
           .map((name, index) => `values[${index}]`)
@@ -5118,7 +5235,7 @@ function render_java_operation_method(operation: Managed_Api_Operation): string 
                 0);
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}");
             byte[][] values = smithyDecodeOptionalValues(
-                result.payload(), ${operation.contract.response_value_count}, "${operation_label}");
+                result.payload(), ${operation.plan.operation.response_value_count}, "${operation_label}");
             return new ${operation.output}(${output_values});
         });
     }`
@@ -5326,9 +5443,9 @@ export function render_java_operations(contract: Client_Contract): string {
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `    private static byte[] smithyConcatItemIds(byte[]... itemIds) {
         int total = 0;
@@ -5356,12 +5473,12 @@ export function render_java_operations(contract: Client_Contract): string {
         ByteBuffer buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN);
         byte[][] values = new byte[valueCount][];
         for (int index = 0; index < values.length; index++) {
-            if (buffer.remaining() < Integer.BYTES) {
+            if (buffer.remaining() < ${contract.v1.optional_value_length_bytes ?? 4}) {
                 throw new OpenKacheClientException(
                     operation + " response is missing an optional-value length");
             }
             long length = Integer.toUnsignedLong(buffer.getInt());
-            if (length == 0xffff_ffffL) {
+            if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}L) {
                 values[index] = null;
                 continue;
             }
@@ -5703,7 +5820,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
         }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((_member, index) => `values[${index}]`)
           .join(",\n                ")
@@ -5715,7 +5832,7 @@ function render_kotlin_operation_method(operation: Managed_Api_Operation): strin
             )
             smithyRequireKind(result, ${result_constant("value")}, "${operation_label}")
             val values = smithyDecodeOptionalValues(
-                result.payload, ${operation.contract.response_value_count}, "${operation_label}")
+                result.payload, ${operation.plan.operation.response_value_count}, "${operation_label}")
             ${operation.output}(
                 ${output_values},
             )
@@ -5882,9 +5999,9 @@ export function render_kotlin_operations(contract: Client_Contract): string {
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `    private fun smithyConcatItemIds(vararg itemIds: ByteArray): ByteArray {
         itemIds.forEach { itemId ->
@@ -5903,11 +6020,11 @@ export function render_kotlin_operations(contract: Client_Contract): string {
         val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
         val values = arrayOfNulls<ByteArray>(valueCount)
         for (index in values.indices) {
-            require(buffer.remaining() >= Integer.BYTES) {
+            require(buffer.remaining() >= ${contract.v1.optional_value_length_bytes ?? 4}) {
                 "\$operation response is missing an optional-value length"
             }
-            val length = buffer.int.toLong() and 0xffff_ffffL
-            if (length == 0xffff_ffffL) continue
+            val length = buffer.int.toLong() and ${contract.v1.optional_value_missing ?? 0xffff_ffff}L
+            if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}L) continue
             require(length <= buffer.remaining()) {
                 "\$operation response contains a truncated optional-value entry"
             }
@@ -6216,7 +6333,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
   });`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member, index) =>
             `${operation_field_name(member, "dart")}: values[${index}]`,
@@ -6230,7 +6347,7 @@ function render_dart_operation_method(operation: Managed_Api_Operation): string 
     );
     _smithyRequireKind(result, ${result_constant("value")}, '${operation_label}');
     final values = _smithyDecodeOptionalValues(
-      result.payload, ${operation.contract.response_value_count}, '${operation_label}');
+      result.payload, ${operation.plan.operation.response_value_count}, '${operation_label}');
     return ${operation.output}(
       ${output_values},
     );
@@ -6425,9 +6542,9 @@ List<double> _smithyDecodeF64Array(List<int> payload, String operation) {
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `List<int> _smithyConcatItemIds(List<List<int>> itemIds) {
   for (final itemId in itemIds) {
@@ -6447,14 +6564,14 @@ List<List<int>?> _smithyDecodeOptionalValues(
   final values = <List<int>?>[];
   var offset = 0;
   for (var index = 0; index < valueCount; index++) {
-    if (offset + 4 > payload.length) {
+    if (offset + ${contract.v1.optional_value_length_bytes ?? 4} > payload.length) {
       throw OpenKacheClientException(
         '\$operation response is missing an optional-value length',
       );
     }
     final length = data.getUint32(offset, Endian.big);
-    offset += 4;
-    if (length == 0xffffffff) {
+    offset += ${contract.v1.optional_value_length_bytes ?? 4};
+    if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
       values.add(null);
       continue;
     }
@@ -7422,7 +7539,7 @@ function render_typescript_operation_method(
   }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member) => operation_field_name(member, "typescript"))
           .map((name, index) => `${name}: values[${index}]`)
@@ -7440,7 +7557,7 @@ function render_typescript_operation_method(
       },
     );
     const values = smithy_decode_optional_values(
-      result.payload, ${operation.contract.response_value_count}, ${operation_value});
+      result.payload, ${operation.plan.operation.response_value_count}, ${operation_value});
     return {
       ${output_values},
     };
@@ -7649,9 +7766,9 @@ function smithy_decode_f64_array(payload: Uint8Array, operation: number): readon
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `function smithy_concat_item_ids(itemIds: readonly Uint8Array[]): Uint8Array {
   for (const itemId of itemIds) {
@@ -7677,12 +7794,12 @@ function smithy_decode_optional_values(
   const values: Array<Uint8Array | undefined> = [];
   let offset = 0;
   for (let index = 0; index < valueCount; index++) {
-    if (offset + 4 > payload.byteLength) {
+    if (offset + ${contract.v1.optional_value_length_bytes ?? 4} > payload.byteLength) {
       throw new Error(\`operation \${operation} response is missing an optional-value length\`);
     }
     const length = view.getUint32(offset, false);
-    offset += 4;
-    if (length === 0xffff_ffff) {
+    offset += ${contract.v1.optional_value_length_bytes ?? 4};
+    if (length === ${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
       values.push(undefined);
       continue;
     }
@@ -8296,7 +8413,7 @@ function render_go_operation_method(
 }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member) => operation_field_name(member, "go"))
           .map((name, index) => `${name}: values[${index}]`)
@@ -8323,7 +8440,7 @@ function render_go_operation_method(
 		if result.kind != ${result_constant("value")} {
 			return ${output}{}, unexpectedResult("${label}", result.kind)
 		}
-		values, err := smithyDecodeOptionalValues(result.data, ${operation.contract.response_value_count})
+		values, err := smithyDecodeOptionalValues(result.data, ${operation.plan.operation.response_value_count})
 		if err != nil {
 			return ${output}{}, operationError("${label}", err)
 		}
@@ -8614,9 +8731,9 @@ func smithyDecodeF64Array(payload []byte) ([]float64, error) {
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `func smithyConcatItemIDs(itemIDs ...[]byte) ([]byte, error) {
 	for _, itemID := range itemIDs {
@@ -8638,12 +8755,12 @@ func smithyDecodeOptionalValues(payload []byte, valueCount int) ([]*[]byte, erro
 	values := make([]*[]byte, valueCount)
 	offset := 0
 	for index := range values {
-		if len(payload)-offset < 4 {
+		if len(payload)-offset < ${contract.v1.optional_value_length_bytes ?? 4} {
 			return values, validationError("optional_values", "response is missing an entry length")
 		}
-		length := binary.BigEndian.Uint32(payload[offset : offset+4])
-		offset += 4
-		if length == ^uint32(0) {
+		length := binary.BigEndian.Uint32(payload[offset : offset+${contract.v1.optional_value_length_bytes ?? 4}])
+		offset += ${contract.v1.optional_value_length_bytes ?? 4}
+		if length == uint32(${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
 			continue
 		}
 		if uint64(length) > uint64(len(payload)-offset) {
@@ -9026,7 +9143,7 @@ function render_python_operation_method(
         )`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member) => operation_field_name(member, "python"))
           .map((name, index) => `${name}=values[${index}]`)
@@ -9040,7 +9157,7 @@ function render_python_operation_method(
             expected_kinds=(${result_kinds},),
         )
         values = _smithy_decode_optional_values(
-            payload, ${operation.contract.response_value_count}, ${operation_value})
+            payload, ${operation.plan.operation.response_value_count}, ${operation_value})
         return ${output}(
             ${output_values}
         )`
@@ -9231,9 +9348,9 @@ def _smithy_decode_f64_array(payload: bytes, operation: int) -> list[float]:
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `def _smithy_concat_item_ids(item_ids: list[bytes]) -> bytes:
     if any(len(item_id) != ${contract.item_id_bytes} for item_id in item_ids):
@@ -9249,11 +9366,11 @@ def _smithy_decode_optional_values(
     values: list[bytes | None] = []
     offset = 0
     for _ in range(value_count):
-        if len(payload) - offset < 4:
+        if len(payload) - offset < ${contract.v1.optional_value_length_bytes ?? 4}:
             raise ValueError(f"operation {operation} response is missing an optional-value length")
-        length = int.from_bytes(payload[offset:offset + 4], "big")
-        offset += 4
-        if length == 0xFFFF_FFFF:
+        length = int.from_bytes(payload[offset:offset + ${contract.v1.optional_value_length_bytes ?? 4}], "big")
+        offset += ${contract.v1.optional_value_length_bytes ?? 4}
+        if length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}:
             values.append(None)
             continue
         if length > len(payload) - offset:
@@ -10149,7 +10266,7 @@ function render_swift_operation_method(
   }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member, index) =>
             `${operation_field_name(member, "swift")}: values[${index}]`,
@@ -10168,7 +10285,7 @@ function render_swift_operation_method(
     }
     let values = try smithyDecodeOptionalValues(
       result.payload,
-      valueCount: ${operation.contract.response_value_count},
+      valueCount: ${operation.plan.operation.response_value_count},
       operation: "${operation_label}"
     )
     return ${output}(
@@ -10384,9 +10501,9 @@ private func smithyDecodeF64Array(
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `private func smithyConcatItemIDs(_ itemIDs: [Data]) -> Data {
   var combined = Data(capacity: itemIDs.count * Smithy_Value_Format.itemIdBytes)
@@ -10409,14 +10526,14 @@ private func smithyDecodeOptionalValues(
   var values: [Data?] = []
   values.reserveCapacity(valueCount)
   for _ in 0..<valueCount {
-    guard payload.count - offset >= 4 else {
+    guard payload.count - offset >= ${contract.v1.optional_value_length_bytes ?? 4} else {
       throw OpenKacheError("\(operation) response is missing an optional-value length")
     }
-    let length = payload[offset..<(offset + 4)].reduce(UInt32(0)) {
+    let length = payload[offset..<(offset + ${contract.v1.optional_value_length_bytes ?? 4})].reduce(UInt32(0)) {
       ($0 << 8) | UInt32($1)
     }
-    offset += 4
-    if length == UInt32.max {
+    offset += ${contract.v1.optional_value_length_bytes ?? 4}
+    if length == UInt32(${contract.v1.optional_value_missing ?? 0xffff_ffff}) {
       values.append(nil)
       continue
     }
@@ -10785,7 +10902,7 @@ function render_csharp_operation_method_body(
   )
   const input_item_id_expression = input_item_ids.length <= 1
     ? `ValidateItemId(input.${input_item_id})`
-    : `ValidateItemIds(ConcatItemIds(${input_item_ids.map((name) => `input.${name}`).join(", ")}), ${operation.contract.request_item_count})`
+    : `ValidateItemIds(ConcatItemIds(${input_item_ids.map((name) => `input.${name}`).join(", ")}), ${operation.plan.operation.request_item_count})`
   const input_value = operation_field_name_for(operation, "input", "value", "csharp")
   const input_condition = operation_field_name_for(
     operation,
@@ -10936,7 +11053,7 @@ function render_csharp_operation_method_body(
     }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member, index) =>
             `            ${operation_field_name(member, "csharp")} = values[${index}],`)
@@ -10955,7 +11072,7 @@ function render_csharp_operation_method_body(
         ExpectKind("${label}", result, ${result_constant("value")});
         var values = DecodeOptionalValues(
             result.Payload,
-            ${operation.contract.response_value_count},
+            ${operation.plan.operation.response_value_count},
             "${label}");
         return new Smithy.${operation.output}
         {
@@ -11268,9 +11385,9 @@ export function render_csharp_operations(contract: Client_Contract): string {
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `    private static byte[] ConcatItemIds(params byte[][] itemIds)
     {
@@ -11315,15 +11432,15 @@ export function render_csharp_operations(contract: Client_Contract): string {
         var offset = 0;
         for (var index = 0; index < values.Length; index++)
         {
-            if (payload.Length - offset < 4)
+            if (payload.Length - offset < ${contract.v1.optional_value_length_bytes ?? 4})
             {
                 throw new OpenKacheException(
                     "PROTOCOL_ERROR",
                     $"{operation} response is missing an optional-value length.");
             }
-            var length = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(offset, 4));
-            offset += 4;
-            if (length == uint.MaxValue)
+            var length = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(offset, ${contract.v1.optional_value_length_bytes ?? 4}));
+            offset += ${contract.v1.optional_value_length_bytes ?? 4};
+            if (length == ${contract.v1.optional_value_missing ?? 0xffff_ffff}u)
             {
                 continue;
             }
@@ -11790,7 +11907,7 @@ function render_rust_operation_method(
             }`
       }
     case "value":
-      if (operation.contract.response_value_count > 1) {
+      if (operation.plan.operation.response_value_count > 1) {
         const output_values = operation_fields(operation, "output", "value")
           .map((member, index) =>
             `                    ${operation_field_name(member, "rust")}: values.remove(0),`)
@@ -11815,7 +11932,7 @@ function render_rust_operation_method(
                 )?;
                 let mut values = smithy_decode_optional_values(
                     &result.payload,
-                    ${operation.contract.response_value_count},
+                    ${operation.plan.operation.response_value_count},
                     "${operation_label}",
                 )?;
                 Ok(smithy::${operation.output} {
@@ -12091,9 +12208,9 @@ fn smithy_decode_f64_array(
     : ""
   const optional_values_helpers = managed_operations.some(
     (operation) =>
-      operation.contract.request_item_count > 1 ||
+      operation.plan.operation.request_item_count > 1 ||
       (operation.plan.result_plan.response_kind === "value"
-        && operation.contract.response_value_count > 1),
+        && operation.plan.operation.response_value_count > 1),
   )
     ? `fn smithy_concat_item_ids(
     item_ids: &[&[u8]],
@@ -12116,48 +12233,10 @@ fn smithy_decode_f64_array(
 fn smithy_decode_optional_values(
     payload: &[u8],
     value_count: usize,
-    operation: &str,
+    _operation: &str,
 ) -> std::result::Result<Vec<Option<Vec<u8>>>, Error> {
-    let mut values = Vec::with_capacity(value_count);
-    let mut offset: usize = 0;
-    for _ in 0..value_count {
-        let end = offset.checked_add(4).ok_or_else(|| {
-            Error::Protocol(format!("{operation} response has an invalid optional-value length"))
-        })?;
-        let length_bytes: [u8; 4] = payload
-            .get(offset..end)
-            .ok_or_else(|| {
-                Error::Protocol(format!(
-                    "{operation} response is missing an optional-value length",
-                ))
-            })?
-            .try_into()
-            .expect("optional-value length has a fixed width");
-        let length = u32::from_be_bytes(length_bytes);
-        offset = end;
-        if length == u32::MAX {
-            values.push(None);
-            continue;
-        }
-        let length = usize::try_from(length).map_err(|_| {
-            Error::Protocol(format!("{operation} response has an oversized optional-value entry"))
-        })?;
-        let end = offset.checked_add(length).ok_or_else(|| {
-            Error::Protocol(format!("{operation} response has an oversized optional-value entry"))
-        })?;
-        values.push(Some(payload.get(offset..end).ok_or_else(|| {
-            Error::Protocol(format!(
-                "{operation} response contains a truncated optional-value entry",
-            ))
-        })?.to_vec()));
-        offset = end;
-    }
-    if offset != payload.len() {
-        return Err(Error::Protocol(format!(
-            "{operation} response contains trailing optional-value bytes",
-        )));
-    }
-    Ok(values)
+    openkache_client_core::decode_optional_values(payload, value_count)
+        .map_err(|error| Error::Protocol(error.to_string()))
 }
 `
     : ""

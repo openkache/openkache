@@ -17,6 +17,7 @@ import {
   render_rust_wire,
   render_rust_semantic_constants,
   render_rust_server_contract,
+  render_protocol_spec_operation_table,
   smithy_wire_ast,
   type Wire_Contract,
 } from "./wire"
@@ -26,8 +27,14 @@ export {
   render_rust_semantic_constants,
   render_rust_server_contract,
   render_rust_wire,
+  render_protocol_spec_operation_table,
 } from "./wire"
-export type { Wire_Contract, Wire_Entry, Wire_V1_Contract } from "./wire"
+export type {
+  Wire_Contract,
+  Wire_Entry,
+  Wire_Operation_Field,
+  Wire_V1_Contract,
+} from "./wire"
 
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_ROOT = dirname(PROTOCOL_DIRECTORY)

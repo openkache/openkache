@@ -237,6 +237,87 @@ impl Response {
     }
 }
 
+/// Encodes ordered optional values with one big-endian length per entry.
+///
+/// The framing is intentionally independent of any operation name. A value
+/// length of `u32::MAX` is reserved for `None`; every present value must be
+/// strictly smaller. The aggregate payload is bounded by the same wire value
+/// ceiling used by response frames.
+pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
+    let payload_len = values.iter().try_fold(0usize, |length, value| {
+        let value_len = value.map_or(0, <[u8]>::len);
+        if value_len >= OPTIONAL_VALUE_MISSING as usize {
+            return None;
+        }
+        length
+            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)?
+            .checked_add(value_len)
+    })
+    .ok_or(ProtocolError::FrameLengthOverflow)?;
+    validate_value_length(payload_len)?;
+    let mut payload = Vec::with_capacity(payload_len);
+    for value in values {
+        match value {
+            None => payload.extend_from_slice(&OPTIONAL_VALUE_MISSING.to_be_bytes()),
+            Some(value) => {
+                payload.extend_from_slice(&(value.len() as u32).to_be_bytes());
+                payload.extend_from_slice(value);
+            }
+        }
+    }
+    Ok(payload)
+}
+
+/// Decodes ordered optional opaque values from the shared response codec.
+pub fn decode_optional_values(
+    payload: &[u8],
+    value_count: usize,
+) -> Result<Vec<Option<Vec<u8>>>> {
+    validate_value_length(payload.len())?;
+    let minimum = value_count
+        .checked_mul(OPTIONAL_VALUE_LENGTH_BYTES)
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
+    if payload.len() < minimum {
+        return Err(ProtocolError::InvalidOptionalValues(
+            "optional-value payload is missing an entry length",
+        ));
+    }
+    let mut cursor = 0usize;
+    let mut values = Vec::with_capacity(value_count);
+    for _ in 0..value_count {
+        let end = cursor
+            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let length_bytes: [u8; OPTIONAL_VALUE_LENGTH_BYTES] = payload[cursor..end]
+            .try_into()
+            .expect("optional-value length has a fixed width");
+        cursor = end;
+        let length = u32::from_be_bytes(length_bytes);
+        if length == OPTIONAL_VALUE_MISSING {
+            values.push(None);
+            continue;
+        }
+        let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+        validate_value_length(length)?;
+        let end = cursor
+            .checked_add(length)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let bytes = payload
+            .get(cursor..end)
+            .ok_or(ProtocolError::InvalidOptionalValues(
+                "optional-value payload entry is truncated",
+            ))?;
+        values.push(Some(bytes.to_vec()));
+        cursor = end;
+    }
+    if cursor != payload.len() {
+        return Err(ProtocolError::InvalidOptionalValues(
+            "optional-value payload contains trailing bytes",
+        ));
+    }
+    Ok(values)
+}
+
 /// Encodes one canonical unsigned 64-bit `vu128`.
 pub fn encode_varuint(value: u64) -> ([u8; MAX_VARUINT_BYTES], usize) {
     let mut encoded = [0; MAX_VARUINT_BYTES];
@@ -303,6 +384,8 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("invalid optional-value payload: {0}")]
+    InvalidOptionalValues(&'static str),
 }
 
 /// Convenience result type for common wire operations.
