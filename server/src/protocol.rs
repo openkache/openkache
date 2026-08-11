@@ -18,12 +18,15 @@ mod compat_v1;
 mod generic;
 #[path = "protocol_policy.rs"]
 mod policy;
+#[path = "protocol_header.rs"]
+mod header;
 #[path = "protocol_frame.rs"]
 mod frame;
 #[path = "protocol_facade.rs"]
 mod facade;
 
-pub use facade::{Request, RequestHeader};
+pub use facade::Request;
+pub use header::RequestHeader;
 pub use frame::RequestFrame;
 pub(crate) use frame::ServerRequest;
 pub use policy::{
