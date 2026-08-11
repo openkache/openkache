@@ -426,9 +426,19 @@ impl OperationInputView {
         if start == usize::MAX || start > end {
             return None;
         }
-        let payload = self.generic_payload.take()?;
+        // A multi-field generic request keeps the shared `Bytes` allocation
+        // alive so each extracted field can move a zero-copy range. The
+        // single-field path still transfers the owner directly, avoiding an
+        // unnecessary reference-count increment for the common opaque case.
+        let payload = if self.plan.len() == 1 {
+            self.generic_payload.take()?
+        } else {
+            self.generic_payload.as_ref()?.clone()
+        };
         if end > payload.len() {
-            self.generic_payload = Some(payload);
+            if self.plan.len() == 1 {
+                self.generic_payload = Some(payload);
+            }
             return None;
         }
         payload.slice(start..end)
