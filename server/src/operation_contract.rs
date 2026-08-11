@@ -17,7 +17,7 @@ pub(super) use crate::contract::{
     OperationLayoutFraming, OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor, WireCodecKind,
     WireCodecLengthEncoding, WireCodecWidth, operation_registry, operation_wire_spec,
-    request_fields, wire_codec_kind, wire_request_layout,
+    request_fields, request_wire_plan, wire_codec_kind,
 };
 
 pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;

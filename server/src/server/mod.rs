@@ -75,9 +75,6 @@ mod operation_registry;
 mod operation_transport;
 #[path = "../storage_port.rs"]
 mod storage_port;
-#[path = "../v1_adapter.rs"]
-mod v1_adapter;
-
 pub use operation_api::CapabilityKey;
 pub use operation_capabilities::{
     CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry, EmptyCapabilityCatalog,

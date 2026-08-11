@@ -2711,6 +2711,7 @@ dependencies = [
 name = "openkache-protocol"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "smallvec",
  "thiserror",
  "vu128",

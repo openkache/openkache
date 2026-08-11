@@ -186,12 +186,9 @@ fn segmented_response_fields(
     let mut segments = SmallVec::<[ResponseSegment; 8]>::new();
     match layout {
         contract::OperationFieldLayout::Dense => {
-            segments.extend(
-                values
-                    .into_iter()
-                    .flatten()
-                    .map(operation_value_segment),
-            );
+            for value in values.into_iter().flatten() {
+                append_operation_value(&mut segments, value);
+            }
         }
         contract::OperationFieldLayout::Sequence => {
             let mut mask = SmallVec::<[u8; 32]>::new();
@@ -212,7 +209,7 @@ fn segmented_response_fields(
                     let (encoded, encoded_len) = openkache_protocol::encode_varuint(length);
                     segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
                 }
-                segments.push(operation_value_segment(value));
+                append_operation_value(&mut segments, value);
             }
         }
         contract::OperationFieldLayout::OptionalValues => {
@@ -229,7 +226,7 @@ fn segmented_response_fields(
                 };
                 segments.push(ResponseSegment::inline(&length.to_be_bytes()));
                 if let Some(value) = value {
-                    segments.push(operation_value_segment(value));
+                    append_operation_value(&mut segments, value);
                 }
             }
         }
@@ -237,18 +234,22 @@ fn segmented_response_fields(
             return Err(());
         }
     }
-    ResponseParts::segmented(status, segments).map_err(|_| ())
+    ResponseParts::from_segments(status, segments).map_err(|_| ())
 }
 
-fn operation_value_segment(value: OperationValue) -> ResponseSegment {
+fn append_operation_value(
+    segments: &mut SmallVec<[ResponseSegment; 8]>,
+    value: OperationValue,
+) {
     match value {
-        OperationValue::Inline(value) => ResponseSegment::Inline(value),
-        OperationValue::Owned(value) => ResponseSegment::Payload(value),
+        OperationValue::Inline(value) => segments.push(ResponseSegment::Inline(value)),
+        OperationValue::Owned(value) => segments.push(ResponseSegment::Payload(value)),
+        OperationValue::Segmented(value) => value.append_segments(segments),
     }
 }
 
-pub(super) fn validate_response_fields<T: AsRef<[u8]>>(
-    values: &[Option<T>],
+pub(super) fn validate_response_fields(
+    values: &[Option<OperationValue>],
     plan: &'static [contract::OperationFieldPlan],
 ) -> Result<(), &'static [u8]> {
     if values.len() != plan.len() {
@@ -265,7 +266,15 @@ pub(super) fn validate_response_fields<T: AsRef<[u8]>>(
         let Some(value) = value.as_ref() else {
             continue;
         };
-        if super::operation_fields::validate_field_bytes(field, value.as_ref()).is_err() {
+        let valid = match value {
+            OperationValue::Segmented(value) => {
+                super::operation_fields::validate_segmented_field(field, value).is_ok()
+            }
+            _ => value.contiguous().is_some_and(|bytes| {
+                super::operation_fields::validate_field_bytes(field, bytes).is_ok()
+            }),
+        };
+        if !valid {
             return Err(b"operation response field does not satisfy its generated codec");
         }
     }
@@ -320,7 +329,7 @@ pub(super) fn encode_operation_outcome(
                             b"operation response exceeds the protocol limit",
                         ));
                     }
-                    if !valid_opaque_response(opcode, value.as_ref()) {
+                    if !valid_opaque_response(opcode, &value) {
                         return Some(contract_error_response(
                             opcode,
                             Status::InternalError,
@@ -339,7 +348,7 @@ pub(super) fn encode_operation_outcome(
     }
 }
 
-fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &[u8]) -> bool {
+fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &OperationValue) -> bool {
     let wire = contract::spec(opcode);
     if wire.response.framing != contract::OperationLayoutFraming::Opaque {
         return false;
@@ -353,7 +362,14 @@ fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &[u8]) -> bo
     if wire.response.fields.len() != 1 {
         return wire.response.opaque_aggregate;
     }
-    super::operation_fields::validate_field_bytes(field, value).is_ok()
+    match value {
+        OperationValue::Segmented(value) => {
+            super::operation_fields::validate_segmented_field(field, value).is_ok()
+        }
+        _ => value.contiguous().is_some_and(|bytes| {
+            super::operation_fields::validate_field_bytes(field, bytes).is_ok()
+        }),
+    }
 }
 
 fn operation_success_status(
@@ -417,7 +433,9 @@ fn operation_response(
     status: Status,
     payload: impl Into<OperationValue>,
 ) -> OperationResponse {
-    match ResponseParts::segmented(status, [operation_value_segment(payload.into())]) {
+    let mut segments = SmallVec::<[ResponseSegment; 8]>::new();
+    append_operation_value(&mut segments, payload.into());
+    match ResponseParts::from_segments(status, segments) {
         Ok(parts) => OperationResponse { status, parts },
         Err(_) => contract_error_response(
             opcode,

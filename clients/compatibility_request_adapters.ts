@@ -5,7 +5,6 @@ import {
   type Wire_Operation_Field_Layout,
   type Wire_Operation_Contract,
 } from "../protocol/wire"
-import { derive_wire_compatibility_route } from "../protocol/compatibility_v1"
 
 /**
  * Protocol-v1 request routes retained for the handwritten client convenience
@@ -56,6 +55,9 @@ const COMPACT_REQUEST_ADAPTERS: Readonly<
   namespace_delete: { route: "namespace_delete" },
 }
 
+const COMPATIBILITY_REQUEST_PROJECTION =
+  "openkache.protocol#operationContract.compatibilityRequestProjection"
+
 /**
  * Resolves one operation's request transport boundary.
  *
@@ -67,7 +69,7 @@ export function request_transport_plan(
   contract: Wire_Operation_Contract,
 ): Request_Transport_Plan {
   const descriptor = derive_wire_operation_descriptor(contract)
-  const compact_route = derive_wire_compatibility_route(contract)
+  const compact_route = compatibility_api_route(contract)
   if (compact_route === undefined) {
     return {
       request_framing: descriptor.request_framing,
@@ -86,6 +88,34 @@ export function request_transport_plan(
     request_framing: descriptor.request_framing,
     compact_adapter,
   }
+}
+
+/**
+ * Selects only the explicitly declared handwritten public client surface.
+ *
+ * Wire framing never consumes this label. Requiring an explicit adapter-owned
+ * extension prevents a future exact-plan API from being mistaken for a legacy
+ * namespace/item call merely because it uses fields with familiar roles.
+ */
+function compatibility_api_route(
+  contract: Wire_Operation_Contract,
+): Compact_Request_Adapter_Route | undefined {
+  const route = contract.extensions?.[COMPATIBILITY_REQUEST_PROJECTION]
+  if (route === undefined) return undefined
+  if (
+    typeof route !== "string" ||
+    !Object.prototype.hasOwnProperty.call(COMPACT_REQUEST_ADAPTERS, route)
+  ) {
+    throw new Error(
+      "operation declares an unsupported protocol-v1 compatibility request projection",
+    )
+  }
+  if (contract.request_wire === undefined) {
+    throw new Error(
+      "protocol-v1 compatibility request projection requires an exact requestWire plan",
+    )
+  }
+  return route as Compact_Request_Adapter_Route
 }
 
 /**

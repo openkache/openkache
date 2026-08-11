@@ -35,7 +35,7 @@ should mention the new operation name.
 
 Handlers should consume borrowed field envelopes and return transport-neutral
 outcomes. They must not construct a `Response`, choose a wire status byte, or
-decode a compatibility route. The generic server adapter validates generated
+decode request framing. The generic server adapter validates generated
 response requiredness, widths, and nested codecs before encoding the outcome;
 client field views apply the same plan validation when they expose a response.
 
@@ -52,6 +52,13 @@ client field views apply the same plan validation when they expose a response.
 It is a layout optimization, not an operation family. A new operation must not
 select `optional_values` merely because it returns multiple values; use the
 generic sequence unless compatibility requires the historical table.
+
+Use `requestWire` only when an operation requires exact request bytes that the
+shape-selected generic layout cannot provide. Compose its fixed, packed,
+byte-length, varuint, conditional, constant, and trailing-field primitives;
+do not add a named route or a runtime operation branch. The generated frame
+layout and semantic field plan come from that one declaration, so transport
+can delimit bytes without constructing an API request type.
 
 ## Size and resource budget
 
@@ -88,11 +95,18 @@ calling a reusable primitive outside request framing.
 
 ## Compatibility adapters
 
-Protocol-v1 compact routes, namespace/item identity, SET flags, and legacy
+Historical namespace/item convenience types, SET option errors, and legacy
 result projections belong in `protocol/compatibility_v1.ts` and the matching
-server/client adapter modules. An adapter may validate its own namespaced
-operation-contract extensions, but generic extraction must preserve unknown
-extensions opaquely and must not learn that adapter's vocabulary.
+server/client API adapter modules. Their exact request bytes still use the
+generic `requestWire` plan. Compatibility code may translate modeled fields
+into existing public types and error variants, but transport, framing, and
+server dispatch must not learn that vocabulary.
+
+Only an operation that preserves an existing protocol-v1 client convenience
+surface should declare `compatibilityRequestProjection`. New operations omit
+it, even when their modeled fields resemble namespace, item, or value fields.
+The client adapter must never infer compatibility from field roles: doing so
+would silently specialize an unrelated future API.
 
 If a future API needs a different transport, add a new adapter at the
 composition boundary. Do not add a built-in handler enum or a transport branch

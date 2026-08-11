@@ -48,6 +48,96 @@ list OperationStatuses {
     member: String
 }
 
+/// One canonical field-to-bit mapping in a packed request byte.
+structure WirePackedValue {
+    @required
+    value: String
+
+    @required
+    bits: Integer
+}
+
+list WirePackedValues {
+    member: WirePackedValue
+}
+
+/// One modeled field projected into a packed request byte.
+structure WirePackedField {
+    @required
+    field: String
+
+    @required
+    mask: Integer
+
+    @required
+    values: WirePackedValues
+}
+
+list WirePackedFields {
+    member: WirePackedField
+}
+
+structure WireFixedField {
+    @required
+    field: String
+
+    @required
+    bytes: Integer
+}
+
+structure WirePacked {
+    @required
+    fields: WirePackedFields
+
+    reservedMask: Integer
+    constantBits: Integer
+}
+
+structure WireFieldReference {
+    @required
+    field: String
+}
+
+structure WireConditional {
+    @required
+    field: String
+
+    @required
+    equals: String
+
+    @required
+    steps: WireRequestSteps
+}
+
+structure WireConstant {
+    /// An even-length lowercase hexadecimal byte string.
+    @required
+    hex: String
+}
+
+structure WireTrailingField {
+    @required
+    field: String
+
+    /// Length prefix used immediately before the trailing application bytes.
+    @required
+    length: String
+}
+
+union WireRequestStep {
+    fixedField: WireFixedField
+    packed: WirePacked
+    byteLengthField: WireFieldReference
+    varuintField: WireFieldReference
+    conditional: WireConditional
+    constant: WireConstant
+    trailingField: WireTrailingField
+}
+
+list WireRequestSteps {
+    member: WireRequestStep
+}
+
 /// Operation framing and status contract shared by wire adapters.
 ///
 /// Client-only members (`scope`, `responseSemantics`, and `retryMode`) are
@@ -60,9 +150,19 @@ structure operationContract {
     /// may use an open value such as tenant, partition, or transaction.
     scope: String
 
-    /// Optional protocol-v1 compatibility route. Generic operations omit this
-    /// member and select only a reusable request framing primitive.
-    compactRoute: String
+    /// Optional protocol-v1 client convenience projection.
+    ///
+    /// Generic wire and server infrastructure preserve but never interpret
+    /// this value. It must be declared explicitly so a future operation is
+    /// not mistaken for a legacy API merely because it has familiar fields.
+    compatibilityRequestProjection: String
+
+    /// Optional declarative request plan for an exact compact byte contract.
+    ///
+    /// Operations without one use the reusable framing selected below. The
+    /// plan contains only field and byte primitives; it never names an
+    /// operation family or server behavior.
+    requestWire: WireRequestSteps
 
     /// Generic request framing shared by protocol adapters.
     @required
@@ -505,7 +605,11 @@ operation ExperimentalMultiResourceMutation {
 
 @operationContract(
     scope: "item",
-    compactRoute: "item",
+    compatibilityRequestProjection: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "itemId", bytes: 32 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     responseSemantics: "value",
@@ -520,7 +624,12 @@ operation Get {
 
 @operationContract(
     scope: "item",
-    compactRoute: "item",
+    compatibilityRequestProjection: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "itemIdA", bytes: 32 } },
+        { fixedField: { field: "itemIdB", bytes: 32 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "optional_values",
     responseSemantics: "values",
@@ -535,7 +644,60 @@ operation Get2 {
 
 @operationContract(
     scope: "item",
-    compactRoute: "set",
+    compatibilityRequestProjection: "set",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "condition",
+                        mask: 3,
+                        values: [
+                            { value: "any", bits: 0 },
+                            { value: "if_absent", bits: 1 },
+                            { value: "if_present", bits: 2 }
+                        ]
+                    },
+                    {
+                        field: "expirationMode",
+                        mask: 12,
+                        values: [
+                            { value: "inherit", bits: 0 },
+                            { value: "no_expiry", bits: 4 },
+                            { value: "explicit_ttl", bits: 8 }
+                        ]
+                    },
+                    {
+                        field: "evictionMode",
+                        mask: 48,
+                        values: [
+                            { value: "inherit", bits: 0 },
+                            { value: "evictable", bits: 16 },
+                            { value: "eviction_protected", bits: 32 }
+                        ]
+                    }
+                ],
+                reservedMask: 192
+            }
+        },
+        { fixedField: { field: "itemId", bytes: 32 } },
+        {
+            conditional: {
+                field: "expirationMode",
+                equals: "explicit_ttl",
+                steps: [
+                    { varuintField: { field: "ttlMilliseconds" } }
+                ]
+            }
+        },
+        {
+            trailingField: {
+                field: "value",
+                length: "varuint"
+            }
+        }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "set_outcome",
@@ -550,7 +712,11 @@ operation Set {
 
 @operationContract(
     scope: "item",
-    compactRoute: "item",
+    compatibilityRequestProjection: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "itemId", bytes: 32 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "delete_outcome",
@@ -565,7 +731,10 @@ operation Delete {
 
 @operationContract(
     scope: "namespace",
-    compactRoute: "namespace",
+    compatibilityRequestProjection: "namespace",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     responseSemantics: "stats_json",
@@ -580,7 +749,10 @@ operation Stats {
 
 @operationContract(
     scope: "namespace",
-    compactRoute: "namespace",
+    compatibilityRequestProjection: "namespace",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "empty",
@@ -595,7 +767,85 @@ operation Sync {
 
 @operationContract(
     scope: "namespace_management",
-    compactRoute: "namespace_open",
+    compatibilityRequestProjection: "namespace_open",
+    requestWire: [
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "createIfMissing",
+                        mask: 1,
+                        values: [
+                            { value: "false", bits: 0 },
+                            { value: "true", bits: 1 }
+                        ]
+                    }
+                ],
+                reservedMask: 254
+            }
+        },
+        { byteLengthField: { field: "name" } },
+        {
+            conditional: {
+                field: "createIfMissing",
+                equals: "true",
+                steps: [
+                    {
+                        packed: {
+                            fields: [
+                                {
+                                    field: "policy.defaultExpiration",
+                                    mask: 3,
+                                    values: [
+                                        { value: "no_expiry", bits: 0 },
+                                        { value: "fixed_ttl", bits: 1 }
+                                    ]
+                                },
+                                {
+                                    field: "policy.expirationOverride",
+                                    mask: 4,
+                                    values: [
+                                        { value: "disallowed", bits: 0 },
+                                        { value: "allowed", bits: 4 }
+                                    ]
+                                },
+                                {
+                                    field: "policy.defaultEviction",
+                                    mask: 8,
+                                    values: [
+                                        { value: "evictable", bits: 0 },
+                                        { value: "eviction_protected", bits: 8 }
+                                    ]
+                                },
+                                {
+                                    field: "policy.evictionOverride",
+                                    mask: 16,
+                                    values: [
+                                        { value: "disallowed", bits: 0 },
+                                        { value: "allowed", bits: 16 }
+                                    ]
+                                }
+                            ],
+                            reservedMask: 224
+                        }
+                    },
+                    {
+                        conditional: {
+                            field: "policy.defaultExpiration",
+                            equals: "fixed_ttl",
+                            steps: [
+                                {
+                                    varuintField: {
+                                        field: "policy.defaultTtlMilliseconds"
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     opaqueAggregate: true,
@@ -611,7 +861,63 @@ operation NamespaceOpen {
 
 @operationContract(
     scope: "namespace_management",
-    compactRoute: "namespace_update_policy",
+    compatibilityRequestProjection: "namespace_update_policy",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "expectedRevision", bytes: 8 } },
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "policy.defaultExpiration",
+                        mask: 3,
+                        values: [
+                            { value: "no_expiry", bits: 0 },
+                            { value: "fixed_ttl", bits: 1 }
+                        ]
+                    },
+                    {
+                        field: "policy.expirationOverride",
+                        mask: 4,
+                        values: [
+                            { value: "disallowed", bits: 0 },
+                            { value: "allowed", bits: 4 }
+                        ]
+                    },
+                    {
+                        field: "policy.defaultEviction",
+                        mask: 8,
+                        values: [
+                            { value: "evictable", bits: 0 },
+                            { value: "eviction_protected", bits: 8 }
+                        ]
+                    },
+                    {
+                        field: "policy.evictionOverride",
+                        mask: 16,
+                        values: [
+                            { value: "disallowed", bits: 0 },
+                            { value: "allowed", bits: 16 }
+                        ]
+                    }
+                ],
+                reservedMask: 224
+            }
+        },
+        {
+            conditional: {
+                field: "policy.defaultExpiration",
+                equals: "fixed_ttl",
+                steps: [
+                    {
+                        varuintField: {
+                            field: "policy.defaultTtlMilliseconds"
+                        }
+                    }
+                ]
+            }
+        }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     opaqueAggregate: true,
@@ -627,7 +933,12 @@ operation NamespaceUpdatePolicy {
 
 @operationContract(
     scope: "namespace_management",
-    compactRoute: "namespace_delete",
+    compatibilityRequestProjection: "namespace_delete",
+    requestWire: [
+        { constant: { hex: "00" } },
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { fixedField: { field: "expectedRevision", bytes: 8 } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "delete_outcome",

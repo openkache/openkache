@@ -10,7 +10,6 @@ import {
 import {
   derive_wire_compatibility_response_semantics,
   derive_wire_compatibility_retry_mode,
-  derive_wire_compatibility_route,
   derive_wire_compatibility_scope,
 } from "./compatibility_v1"
 
@@ -33,12 +32,11 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
     throw new Error("protocol operation metadata is required for the specification table")
   }
   const request_layout = (operation: Wire_Operation): string => {
-    const request_plan = operation.contract.request_plan ?? []
-    const plan_item_count = request_plan.filter((field) => field.role === "item_id").length
     const descriptor = derive_wire_operation_descriptor(operation.contract)
-    const layout = derive_wire_compatibility_route(operation.contract) ??
-      descriptor.request_framing
-    switch (layout) {
+    if (operation.contract.request_wire !== undefined) {
+      return "opcode + generated exact field plan"
+    }
+    switch (descriptor.request_framing) {
       case "empty":
         return "opcode only"
       case "opaque":
@@ -47,20 +45,6 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
         return descriptor.request_frame === "fixed_body"
           ? "opcode + fixed-width dense body"
           : "opcode + field_sequence_len + ordered field sequence"
-      case "item":
-        return `opcode + namespace ID + ${plan_item_count} item ID${plan_item_count === 1 ? "" : "s"}`
-      case "set":
-        return `opcode + namespace ID + flags + ${plan_item_count} item ID${plan_item_count === 1 ? "" : "s"} + value`
-      case "namespace":
-        return "opcode + namespace ID"
-      case "namespace_open":
-        return "opcode + flags + name + optional policy"
-      case "namespace_update_policy":
-        return "opcode + namespace ID + revision + policy"
-      case "namespace_delete":
-        return "opcode + flags + namespace ID + revision"
-      default:
-        return `opcode + ${descriptor.request_framing} request framing`
     }
   }
   const response_payload = (operation: Wire_Operation): string => {

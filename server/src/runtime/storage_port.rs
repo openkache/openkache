@@ -6,8 +6,9 @@
 use std::any::Any;
 use std::future::Future;
 use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use openkache_protocol::OwnedRange;
 
@@ -23,19 +24,13 @@ use super::storage_task::{StorageTask, StorageTaskMetadata};
 /// engine's internal key width or namespace.
 #[derive(Clone, Debug)]
 pub(crate) struct StorageAddress {
-    owner: Arc<Vec<u8>>,
-    start: usize,
-    end: usize,
+    owner: OwnedRange,
 }
 
 impl StorageAddress {
     pub(crate) fn new(bytes: impl AsRef<[u8]>) -> Self {
-        let owner = Arc::new(bytes.as_ref().to_vec());
-        let end = owner.len();
         Self {
-            owner,
-            start: 0,
-            end,
+            owner: OwnedRange::whole(bytes.as_ref().to_vec()),
         }
     }
 
@@ -45,11 +40,8 @@ impl StorageAddress {
     /// queued, so the buffer is moved into the shared address owner instead
     /// of borrowing transport memory.
     pub(crate) fn from_owned(bytes: Vec<u8>) -> Self {
-        let end = bytes.len();
         Self {
-            owner: Arc::new(bytes),
-            start: 0,
-            end,
+            owner: OwnedRange::whole(bytes),
         }
     }
 
@@ -60,14 +52,7 @@ impl StorageAddress {
     /// prefix. The returned address still compares and hashes by the visible
     /// range rather than by the hidden frame bytes.
     pub(crate) fn from_owned_range(bytes: OwnedRange) -> Self {
-        let (bytes, range) = bytes.into_parts();
-        let start = range.start;
-        let end = range.end;
-        if start == 0 && end == bytes.len() {
-            return Self::from_owned(bytes);
-        }
-        let owner = Arc::new(bytes);
-        Self { owner, start, end }
+        Self { owner: bytes }
     }
 
     /// Creates an address from a borrowed key without exposing ownership
@@ -101,9 +86,7 @@ impl StorageAddress {
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8] {
-        self.owner
-            .get(self.start..self.end)
-            .expect("storage address range must remain within its owner")
+        self.owner.as_slice()
     }
 }
 
@@ -189,9 +172,36 @@ pub(crate) type StorageTaskFuture<'a> =
 /// Future returned by a neutral storage context operation.
 pub(crate) type StorageContextFuture<'a, T> = Pin<Box<dyn Future<Output = StorageResult<T>> + 'a>>;
 
-/// Typed completion future for the storage-port convenience methods.
-pub(crate) type StorageTypedTaskFuture<'a, T> =
-    Pin<Box<dyn Future<Output = StorageResult<T>> + 'a>>;
+/// Typed completion view over the storage port's existing erased future.
+///
+/// The submission boundary already allocates one object-safe task future.
+/// Mapping its erased output back to `T` does not need a second boxed async
+/// block.
+pub(crate) struct StorageTypedTaskFuture<'a, T> {
+    inner: StorageTaskFuture<'a>,
+    output: PhantomData<fn() -> T>,
+}
+
+impl<'a, T> StorageTypedTaskFuture<'a, T> {
+    fn new(inner: StorageTaskFuture<'a>) -> Self {
+        Self {
+            inner,
+            output: PhantomData,
+        }
+    }
+}
+
+impl<T: Any + Send> Future for StorageTypedTaskFuture<'_, T> {
+    type Output = StorageResult<T>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut()
+            .inner
+            .as_mut()
+            .poll(context)
+            .map(|result| result.and_then(downcast_storage_output))
+    }
+}
 
 /// Recovers an API-owned result from the erased worker completion boundary.
 ///
@@ -567,15 +577,10 @@ impl<P: StoragePort + ?Sized> StoragePortExt for P {
             + Send
             + 'static,
     {
-        Box::pin(async move {
-            let output = self
-                .execute_for_key(
-                    storage_address,
-                    StorageTask::typed_with_metadata(metadata, run),
-                )
-                .await?;
-            downcast_storage_output(output)
-        })
+        StorageTypedTaskFuture::new(self.execute_for_key(
+            storage_address,
+            StorageTask::typed_with_metadata(metadata, run),
+        ))
     }
 
     fn execute_typed_for_keys<'a, T, F>(
@@ -626,15 +631,10 @@ impl<P: StoragePort + ?Sized> StoragePortExt for P {
             + Send
             + 'static,
     {
-        Box::pin(async move {
-            let output = self
-                .execute_for_keys(
-                    storage_addresses,
-                    StorageTask::typed_with_metadata(metadata, run),
-                )
-                .await?;
-            downcast_storage_output(output)
-        })
+        StorageTypedTaskFuture::new(self.execute_for_keys(
+            storage_addresses,
+            StorageTask::typed_with_metadata(metadata, run),
+        ))
     }
 
     fn execute_typed_unbound<'a, T, F>(&'a self, run: F) -> StorageTypedTaskFuture<'a, T>
@@ -658,11 +658,8 @@ impl<P: StoragePort + ?Sized> StoragePortExt for P {
             + Send
             + 'static,
     {
-        Box::pin(async move {
-            let output = self
-                .execute_unbound(StorageTask::typed_with_metadata(metadata, run))
-                .await?;
-            downcast_storage_output(output)
-        })
+        StorageTypedTaskFuture::new(
+            self.execute_unbound(StorageTask::typed_with_metadata(metadata, run)),
+        )
     }
 }

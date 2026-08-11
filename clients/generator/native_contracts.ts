@@ -216,7 +216,6 @@ pub use openkache_protocol::operation::{
     WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES,
 };
-pub use openkache_protocol::compat_v1::OperationFieldDirection;
 
 /// Generated replay policy owned by the client adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

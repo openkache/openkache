@@ -794,7 +794,9 @@ async fn execute_protocol_global(
 
 fn protocol_global_opcode(operation: FfiOperation) -> Option<Opcode> {
     let opcode = crate::contract::protocol_opcode(operation)?;
-    (!openkache_protocol::compat_v1::route_for_opcode(opcode).is_some()).then_some(opcode)
+    openkache_protocol::compat_v1::request_projection(opcode)
+        .is_none()
+        .then_some(opcode)
 }
 
 async fn execute_protected_data_plane(
@@ -1419,7 +1421,7 @@ pub unsafe extern "C" fn openkache_client_execute_unary(
         };
         let operation = parse_operation(operation)?;
         let body = copy_bytes(body, body_length, "body")?;
-        if openkache_protocol::compat_v1::route_for_opcode(operation).is_some() {
+        if openkache_protocol::compat_v1::request_projection(operation).is_some() {
             return Err("compact protocol-v1 operations require a compatibility ABI".to_owned());
         }
         Ok(client.execute_unary(operation, body))
@@ -1453,15 +1455,13 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
         let operation = parse_operation(operation)?;
-        if openkache_protocol::compat_v1::route_for_opcode(operation).is_some()
-            || !matches!(
-                crate::contract::operation_wire_spec(operation)
-                    .request
-                    .framing,
-                crate::contract::OperationLayoutFraming::OrderedFields
-                    | crate::contract::OperationLayoutFraming::FieldSequence
-            )
-        {
+        if !matches!(
+            crate::contract::operation_wire_spec(operation)
+                .request
+                .framing,
+            crate::contract::OperationLayoutFraming::OrderedFields
+                | crate::contract::OperationLayoutFraming::FieldSequence
+        ) {
             return Err("operation does not use ordered-field request framing".to_owned());
         }
         if field_count > crate::contract::MAX_OPERATION_REQUEST_FIELDS

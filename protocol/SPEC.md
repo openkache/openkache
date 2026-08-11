@@ -298,18 +298,18 @@ possible next frame; it MUST terminate the lane after the error response.
 | Opcode | Name | Request layout | Response payload | Request codecs | Response codecs |
 |---|---|---|---|---|---|
 | `01` | `PING` | opcode only | opaque payload | — | — |
-| `02` | `GET` | opcode + namespace ID + 1 item ID | opaque payload | `raw_bytes` | — |
-| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | empty | `raw_bytes` | — |
-| `04` | `DELETE` | opcode + namespace ID + 1 item ID | empty | `raw_bytes` | — |
-| `05` | `STATS` | opcode + namespace ID | opaque payload | — | — |
-| `06` | `SYNC` | opcode + namespace ID | empty | — | — |
-| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload | — | — |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload | — | — |
-| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — | — |
+| `02` | `GET` | opcode + generated exact field plan | opaque payload | `raw_bytes` | — |
+| `03` | `SET` | opcode + generated exact field plan | empty | `raw_bytes` | — |
+| `04` | `DELETE` | opcode + generated exact field plan | empty | `raw_bytes` | — |
+| `05` | `STATS` | opcode + generated exact field plan | opaque payload | — | — |
+| `06` | `SYNC` | opcode + generated exact field plan | empty | — | — |
+| `07` | `NAMESPACE_OPEN` | opcode + generated exact field plan | opaque payload | — | — |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + generated exact field plan | opaque payload | — | — |
+| `09` | `NAMESPACE_DELETE` | opcode + generated exact field plan | empty | — | — |
 | `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
 | `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
 | `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload | `packed_f64_be` | `packed_f64_be` |
-| `0D` | `GET2` | opcode + namespace ID + 2 item IDs | 2 ordered optional fields | `raw_bytes` | — |
+| `0D` | `GET2` | opcode + generated exact field plan | 2 ordered optional fields | `raw_bytes` | — |
 | `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | opcode + value_len + value | empty | `utf8` | — |
 | `0F` | `EXPERIMENTAL_DENSE` | opcode + fixed-width dense body | 2 compact ordered fields | `u64_be`, `bool_u8` | `u64_be`, `bool_u8` |
 | `20` | `EXPERIMENTAL_STORAGE_READ` | opcode + value_len + value | opaque payload | `raw_bytes` | `raw_bytes` |
@@ -898,13 +898,19 @@ sequence MUST remain within the protocol value limit. Requiredness and field
 codecs come from the generated operation descriptor; the generic codec does not
 interpret field role names.
 
-The historical namespace/item/SET operations also carry an adapter-owned
-`compactRoute` in the Smithy model, but their canonical descriptor still uses
-`ordered_fields`. The protocol-v1 compatibility adapter projects those fields
-into the fixed prefix bytes documented above. This keeps compactness as a
-reusable layout/codec capability without making the generic descriptor or
-dispatcher know the route vocabulary. The projection is byte-for-byte the v1
-layout; a new route-less operation does not opt into it.
+Operations that must preserve exact request bytes declare `requestWire` in the
+Smithy model. The plan composes operation-neutral fixed, packed,
+length-delimited, conditional, constant, and trailing-field primitives.
+Generated frame metadata uses the plan only to delimit prefix and payload;
+generated field metadata uses the same plan to encode and decode modeled field
+values. The transport, dispatcher, and plan interpreters do not classify the
+operation as a namespace, item, SET, or other domain family.
+
+The historical namespace/item/SET operations express the fixed prefixes
+documented above through `requestWire`, so their bytes remain unchanged. An
+unrelated future operation may compose the same primitives without adding a
+route enum or an operation-name branch. An `ordered_fields` operation without
+`requestWire` continues to use the generic sequence or dense layout.
 
 For two modeled fields, the following vectors are normative:
 

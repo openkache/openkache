@@ -5,6 +5,7 @@
 //! enums and response types remain in API-owned modules.
 
 use super::operation_contract as contract;
+use openkache_protocol::SegmentedValue;
 
 /// Descriptor-backed raw field envelope for API-owned generic behavior.
 ///
@@ -192,4 +193,27 @@ pub(crate) fn validate_field_bytes(
     bytes: &[u8],
 ) -> Result<(), &'static [u8]> {
     OperationFieldEnvelope::from_plan(plan, bytes).validate()
+}
+
+/// Validates a structural response value against the complete generated field
+/// codec plan without materializing its concatenated wire bytes.
+pub(crate) fn validate_segmented_field(
+    plan: &'static contract::OperationFieldPlan,
+    value: &SegmentedValue,
+) -> Result<(), &'static [u8]> {
+    if plan.encoded_width != 0 && value.len() != plan.encoded_width {
+        return Err(b"field does not match its declared fixed width");
+    }
+    openkache_protocol::codec::validate_segmented_field_codecs_with_nested_widths(
+        value,
+        plan.codecs,
+        plan.nested_codecs,
+        plan.nested_widths,
+        plan.nested_enum_values,
+        plan.nested_union_tags,
+        plan.enum_values,
+        plan.union_tags,
+        contract::wire_codec_kind,
+    )
+    .map_err(|error| error.message())
 }

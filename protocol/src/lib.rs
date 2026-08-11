@@ -56,7 +56,7 @@ pub use operation::{
     OperationLayoutPlan, OperationRequestFraming, OperationResponseFraming, OperationWireSpec,
     WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor,
     WireCodecKind, WireCodecLengthEncoding, WireCodecWidth, operation_registry,
-    operation_wire_spec, request_fields, response_fields, wire_codec_kind,
+    operation_wire_spec, request_fields, request_wire_plan, response_fields, wire_codec_kind,
 };
 
 /// Protocol-v1 compatibility projections.
@@ -81,11 +81,14 @@ pub use layout::{
 };
 pub use request::{
     OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFrameStep,
-    decode_request_frame_header,
+    RequestPackedField, RequestWirePackedField, RequestWirePackedValue, RequestWirePlan,
+    RequestWireStep, decode_request_wire_fields, decode_request_wire_prefix_fields,
+    encode_request_wire_fields, encode_request_wire_prefix,
+    decode_request_frame_header, request_frame_header_bytes_needed,
 };
 pub use response::{
     OwnedRange, OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseParts,
-    ResponseSegment,
+    ResponseSegment, SegmentedPayload, SegmentedValue,
 };
 
 /// The exact fixed-size item identifier carried by the wire protocol.
