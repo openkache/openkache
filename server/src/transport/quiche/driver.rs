@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 
 use super::*;
 use crate::channel::TrySendError;
+use crate::transport::request::RequestReadBuffer;
 
 struct PendingResponse {
     segments: SmallVec<[ResponseSegment; 8]>,
@@ -21,45 +22,6 @@ struct RequestState {
     read_capacity: usize,
     read_buffer: Option<RequestReadBuffer>,
     finished: bool,
-}
-
-/// Accumulates one demand-sized read directly into its final allocation.
-///
-/// QUIC may expose a request body over several readable events. Keeping the
-/// allocation in the driver lets each `stream_recv` call write at the next
-/// free offset; the consumer receives one complete `Vec` without a second
-/// coalescing copy in the backend-independent request reader.
-struct RequestReadBuffer {
-    bytes: Vec<u8>,
-    filled: usize,
-}
-
-impl RequestReadBuffer {
-    fn new(capacity: usize) -> Self {
-        Self {
-            bytes: vec![0; capacity],
-            filled: 0,
-        }
-    }
-
-    fn remaining(&self) -> usize {
-        self.bytes.len() - self.filled
-    }
-
-    fn remaining_slice(&mut self) -> &mut [u8] {
-        &mut self.bytes[self.filled..]
-    }
-
-    fn record_read(&mut self, read: usize) -> bool {
-        debug_assert!(read <= self.remaining());
-        self.filled += read;
-        self.filled == self.bytes.len()
-    }
-
-    fn into_bytes(mut self) -> Vec<u8> {
-        self.bytes.truncate(self.filled);
-        self.bytes
-    }
 }
 
 struct Client {

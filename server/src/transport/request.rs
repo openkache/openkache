@@ -56,6 +56,48 @@ impl RequestFrame {
     }
 }
 
+/// Accumulates one demand-sized request body without copying readable chunks.
+///
+/// A backend that can fill caller-owned memory (for example, Quiche's
+/// `stream_recv`) can retain this buffer between readiness notifications. The
+/// completed range is then transferred to the backend-independent request
+/// reader as one owned allocation. Backends that only return owned chunks keep
+/// using the generic coalescing fallback below.
+#[allow(dead_code)]
+pub(crate) struct RequestReadBuffer {
+    bytes: Vec<u8>,
+    filled: usize,
+}
+
+#[allow(dead_code)]
+impl RequestReadBuffer {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            bytes: vec![0; capacity],
+            filled: 0,
+        }
+    }
+
+    pub(crate) fn remaining(&self) -> usize {
+        self.bytes.len() - self.filled
+    }
+
+    pub(crate) fn remaining_slice(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.filled..]
+    }
+
+    pub(crate) fn record_read(&mut self, read: usize) -> bool {
+        debug_assert!(read <= self.remaining());
+        self.filled += read;
+        self.filled == self.bytes.len()
+    }
+
+    pub(crate) fn into_bytes(mut self) -> Vec<u8> {
+        self.bytes.truncate(self.filled);
+        self.bytes
+    }
+}
+
 /// Byte-weighted memory budget shared by every connection and network worker.
 #[derive(Clone)]
 pub(crate) struct RequestBudget {
