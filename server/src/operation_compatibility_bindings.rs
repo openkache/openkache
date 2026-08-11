@@ -3,12 +3,12 @@
 //! The shared dispatcher supplies a generated field view. This module turns
 //! protocol-v1 namespace and SET projections into the typed values expected by
 //! the storage behavior. Generic field-envelope examples live in
-//! [`super::operation_generic_bindings`] and do not depend on these adapters.
+//! [`super::operation_generic_handlers`] and do not depend on these adapters.
 
-use openkache_protocol::{ItemId, Opcode};
+use openkache_protocol::ItemId;
 
 use super::operation_api::{
-    ApiModule, PrepareContext, PrepareError, PreparePlan, RegistrationBuilder, ResourceLock,
+    PrepareContext, PrepareError, PreparePlan, ResourceLock,
 };
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
@@ -16,7 +16,7 @@ use super::operation_compatibility_services::{
     CompatibilityServices,
 };
 use super::operation_contract::OperationStatus;
-use super::operation_handlers::{self, OperationContext, OperationInputView};
+use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::OperationOutcome;
 use super::operation_registry::OperationFuture;
 // This file is included below `server`, so the contract facade lives two
@@ -316,7 +316,7 @@ fn compatibility_services<'a>(
 
 /// Computes an opaque resource handle from the typed namespace identity used
 /// by the API binding. The dispatcher never infers this identity from fields.
-pub(super) fn prepare_namespace(
+pub(crate) fn prepare_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -333,7 +333,7 @@ fn namespace_field_index(opcode: openkache_protocol::Opcode) -> Option<usize> {
         .map(|field| field.index)
 }
 
-pub(super) fn prepare_lifecycle(
+pub(crate) fn prepare_lifecycle(
     _input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -342,7 +342,7 @@ pub(super) fn prepare_lifecycle(
     ))
 }
 
-pub(super) fn prepare_lifecycle_and_namespace(
+pub(crate) fn prepare_lifecycle_and_namespace(
     input: &OperationInputView,
     context: PrepareContext<'_>,
 ) -> std::result::Result<PreparePlan, PrepareError> {
@@ -516,7 +516,7 @@ fn invalid_input<'a>(message: &'static [u8]) -> OperationFuture<'a> {
 /// place while leaving the decoder and behavior names API-owned.
 macro_rules! typed_handler {
     ($name:ident, mut $decode:ident, $behavior:path) => {
-        pub(super) fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
+        pub fn $name<'a>(context: OperationContext<'a>) -> OperationFuture<'a> {
             let Some(services) = compatibility_services(&context) else {
                 return invalid_input(b"compatibility services are unavailable");
             };
@@ -568,87 +568,3 @@ typed_handler!(
 typed_handler!(stats_handler, decode_stats, compatibility_behavior::stats);
 typed_handler!(sync_handler, decode_sync, compatibility_behavior::sync);
 typed_handler!(get2_handler, decode_get2, compatibility_behavior::get2);
-
-pub(super) const API: ApiModule = ApiModule::new(&[
-    RegistrationBuilder::with_decoder(
-        Opcode::Get,
-        operation_handlers::decode_request,
-        get_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .read_only()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Set,
-        operation_handlers::decode_request,
-        set_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Delete,
-        operation_handlers::decode_request,
-        delete_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Stats,
-        operation_handlers::decode_request,
-        stats_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_administrator)
-    .read_only()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Sync,
-        operation_handlers::decode_request,
-        sync_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_administrator)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::NamespaceOpen,
-        operation_handlers::decode_request,
-        namespace_open_handler,
-    )
-    .prepare(prepare_lifecycle)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::NamespaceUpdatePolicy,
-        operation_handlers::decode_request,
-        namespace_update_policy_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::NamespaceDelete,
-        operation_handlers::decode_request,
-        namespace_delete_handler,
-    )
-    .prepare(prepare_lifecycle_and_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .mutation()
-    .build(),
-    RegistrationBuilder::with_decoder(
-        Opcode::Get2,
-        operation_handlers::decode_request,
-        get2_handler,
-    )
-    .prepare(prepare_namespace)
-    .authorize(operation_handlers::authorization_none)
-    .read_only()
-    .build(),
-]);

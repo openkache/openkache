@@ -1,13 +1,11 @@
 //! QUIC server backed by the sharded SSD-first cache runtime.
 
-use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::Status;
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -19,7 +17,7 @@ use crate::observability::{
 use crate::platform::StorageDeviceKind;
 use crate::protocol::{
     FrameLayoutProvider, GeneratedFrameLayoutProvider, ItemId, NamespaceDescriptor,
-    NamespacePolicy, Request, Response, ServerRequest,
+    NamespacePolicy, Request, ServerRequest,
 };
 use crate::transport::{
     Connection as TransportConnection, Endpoint as TransportEndpoint,
@@ -55,14 +53,22 @@ pub(crate) mod operation_codecs;
 mod operation_compatibility_behavior;
 #[path = "../operation_compatibility_bindings.rs"]
 mod operation_compatibility_bindings;
+#[path = "../operation_compatibility_registrations.rs"]
+mod operation_compatibility_registrations;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
 #[path = "../operation_dispatch.rs"]
 pub(crate) mod operation_dispatch;
 #[path = "../operation_fields.rs"]
 mod operation_fields;
-#[path = "../operation_generic_bindings.rs"]
-mod operation_generic_bindings;
+#[path = "../operation_generic_behavior.rs"]
+mod operation_generic_behavior;
+#[path = "../operation_generic_handlers.rs"]
+mod operation_generic_handlers;
+#[path = "../operation_generic_resources.rs"]
+mod operation_generic_resources;
+#[path = "../operation_generic_registrations.rs"]
+mod operation_generic_registrations;
 #[path = "../operation_handlers.rs"]
 mod operation_handlers;
 #[path = "../operation_outcome.rs"]

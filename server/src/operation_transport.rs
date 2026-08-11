@@ -43,6 +43,46 @@ impl From<Response> for OperationResponse {
     }
 }
 
+/// Builds a bounded response for a request that timed out before its opcode
+/// could be decoded.
+pub(super) fn request_read_timeout_response() -> OperationResponse {
+    response_bytes(Status::Timeout, b"request read timed out")
+}
+
+/// Builds a bounded response for a request that exceeded the admission limit
+/// before an operation registration could be selected.
+pub(super) fn request_too_large_response() -> OperationResponse {
+    response_bytes(Status::TooLarge, b"request exceeds the protocol limit")
+}
+
+/// Projects a server protocol-adapter error into the wire status vocabulary.
+///
+/// Framing errors are discovered before an operation handler exists, so this
+/// adapter intentionally uses the common protocol status set instead of a
+/// generated operation contract.
+pub(super) fn protocol_error_response(
+    error: crate::protocol::ProtocolError,
+) -> OperationResponse {
+    let status = match error {
+        crate::protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
+        crate::protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        _ => Status::InvalidRequest,
+    };
+    response_display(status, error)
+}
+
+/// Projects a shared wire-parser error into the same bounded response shape.
+pub(super) fn wire_protocol_error_response(
+    error: openkache_protocol::ProtocolError,
+) -> OperationResponse {
+    let status = match error {
+        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
+        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
+        _ => Status::InvalidRequest,
+    };
+    response_display(status, error)
+}
+
 /// Returns the generated response admission budget for one operation.
 ///
 /// Generated wire metadata is consumed by the transport adapter. API
@@ -443,4 +483,25 @@ fn operation_response(
             b"operation response exceeds the protocol limit",
         ),
     }
+}
+
+fn response_display(status: Status, value: impl std::fmt::Display) -> OperationResponse {
+    let mut payload = String::with_capacity(
+        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
+    );
+    use std::fmt::Write as _;
+    write!(payload, "{value}").expect("writing to a String cannot fail");
+    response_bytes(status, payload.as_bytes())
+}
+
+fn response_bytes(status: Status, payload: &[u8]) -> OperationResponse {
+    let mut owned = Vec::with_capacity(
+        openkache_protocol::RESPONSE_FIXED_BYTES
+            + openkache_protocol::MAX_VARUINT_BYTES
+            + payload.len(),
+    );
+    owned.extend_from_slice(payload);
+    Response::new(status, owned)
+        .expect("server responses stay within protocol limits")
+        .into()
 }
