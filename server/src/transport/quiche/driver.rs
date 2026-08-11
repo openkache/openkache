@@ -19,7 +19,47 @@ struct RequestState {
     chunks: Sender<RequestChunk>,
     pending: Option<RequestChunk>,
     read_capacity: usize,
+    read_buffer: Option<RequestReadBuffer>,
     finished: bool,
+}
+
+/// Accumulates one demand-sized read directly into its final allocation.
+///
+/// QUIC may expose a request body over several readable events. Keeping the
+/// allocation in the driver lets each `stream_recv` call write at the next
+/// free offset; the consumer receives one complete `Vec` without a second
+/// coalescing copy in the backend-independent request reader.
+struct RequestReadBuffer {
+    bytes: Vec<u8>,
+    filled: usize,
+}
+
+impl RequestReadBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            bytes: vec![0; capacity],
+            filled: 0,
+        }
+    }
+
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.filled
+    }
+
+    fn remaining_slice(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.filled..]
+    }
+
+    fn record_read(&mut self, read: usize) -> bool {
+        debug_assert!(read <= self.remaining());
+        self.filled += read;
+        self.filled == self.bytes.len()
+    }
+
+    fn into_bytes(mut self) -> Vec<u8> {
+        self.bytes.truncate(self.filled);
+        self.bytes
+    }
 }
 
 struct Client {
@@ -223,7 +263,9 @@ impl Driver {
             } => {
                 if let Some(client) = self.clients.get_mut(&connection_id) {
                     if let Some(request) = client.requests.get_mut(&stream_id) {
-                        request.read_capacity = capacity.max(1);
+                        if request.read_buffer.is_none() {
+                            request.read_capacity = capacity.max(1);
+                        }
                     }
                     receive_stream(client, stream_id);
                 }
@@ -371,6 +413,7 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
             chunks,
             pending: None,
             read_capacity: 0,
+            read_buffer: None,
             finished: false,
         }
     });
@@ -398,14 +441,26 @@ fn receive_stream(client: &mut Client, stream_id: u64) {
         return;
     }
     let capacity = std::mem::take(&mut request.read_capacity);
-    let mut buffer = vec![0_u8; capacity];
-    match client
+    let read_buffer = request
+        .read_buffer
+        .get_or_insert_with(|| RequestReadBuffer::new(capacity));
+    let read_result = client
         .connection
-        .stream_recv(stream_id, buffer.as_mut_slice())
-    {
+        .stream_recv(stream_id, read_buffer.remaining_slice());
+    match read_result {
         Ok((read, finished)) => {
             request.finished = finished;
-            buffer.truncate(read);
+            let complete = read_buffer.record_read(read);
+            request.read_capacity = read_buffer.remaining();
+            if !finished && !complete {
+                return;
+            }
+            let buffer = request
+                .read_buffer
+                .take()
+                .expect("completed request read retains its buffer")
+                .into_bytes();
+            request.read_capacity = 0;
             let chunk = RequestChunk {
                 bytes: buffer,
                 finished,
