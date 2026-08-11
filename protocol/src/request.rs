@@ -6,8 +6,10 @@
 //! domain value.
 
 use crate::{MAX_VALUE_BYTES, OPCODE_BYTES, Opcode, OwnedRange, ProtocolError, Result};
+use smallvec::SmallVec;
 
 const MAX_REQUEST_WIRE_FIELDS: usize = 256;
+const INLINE_REQUEST_WIRE_FIELDS: usize = 8;
 
 /// One generated field selector inside a packed request byte.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,11 +116,15 @@ pub struct RequestWirePlan {
 }
 
 /// Decodes one generated compact request without operation-family knowledge.
+///
+/// The returned field table stores the common case inline for up to eight
+/// fields; larger generated plans spill to the same `SmallVec` allocation
+/// without changing the field ownership contract.
 pub fn decode_request_wire_fields(
     prefix: OwnedRange,
     payload: OwnedRange,
     plan: RequestWirePlan,
-) -> Result<Vec<Option<OwnedRange>>> {
+) -> Result<SmallVec<[Option<OwnedRange>; 8]>> {
     let trailing_len = payload.len();
     decode_request_wire_fields_inner(prefix, Some(payload), trailing_len, plan)
 }
@@ -128,11 +134,14 @@ pub fn decode_request_wire_fields(
 /// Header-only callers provide the already delimited trailing length. The
 /// trailing field remains absent from the result; every prefix-backed field
 /// is decoded and validated through the same plan as a complete request.
+///
+/// Field metadata uses the same inline-capacity table as
+/// [`decode_request_wire_fields`].
 pub fn decode_request_wire_prefix_fields(
     prefix: OwnedRange,
     trailing_len: usize,
     plan: RequestWirePlan,
-) -> Result<Vec<Option<OwnedRange>>> {
+) -> Result<SmallVec<[Option<OwnedRange>; 8]>> {
     decode_request_wire_fields_inner(prefix, None, trailing_len, plan)
 }
 
@@ -141,13 +150,17 @@ fn decode_request_wire_fields_inner(
     payload: Option<OwnedRange>,
     trailing_len: usize,
     plan: RequestWirePlan,
-) -> Result<Vec<Option<OwnedRange>>> {
+) -> Result<SmallVec<[Option<OwnedRange>; 8]>> {
     if plan.field_count > MAX_REQUEST_WIRE_FIELDS {
         return Err(ProtocolError::InvalidFieldSequence(
             "request wire plan exceeds the generated field bound",
         ));
     }
-    let mut fields = vec![None; plan.field_count];
+    let mut fields =
+        SmallVec::<[Option<OwnedRange>; INLINE_REQUEST_WIRE_FIELDS]>::with_capacity(
+            plan.field_count,
+        );
+    fields.resize(plan.field_count, None);
     let mut cursor = OPCODE_BYTES;
     let mut has_trailing_field = false;
     decode_wire_steps(

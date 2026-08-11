@@ -100,10 +100,15 @@ impl OperationInputView {
     }
 
     /// Builds a field view from one generated compact request plan.
-    pub(super) fn from_wire_fields(
+    pub(super) fn from_wire_fields<I>(
         opcode: Opcode,
-        values: Vec<Option<OwnedRange>>,
-    ) -> OperationInputView {
+        values: I,
+    ) -> OperationInputView
+    where
+        I: IntoIterator<Item = Option<OwnedRange>>,
+    {
+        let values: SmallVec<[Option<OwnedRange>; INLINE_OPERATION_FIELDS]> =
+            values.into_iter().collect();
         let plan = contract::spec(opcode).request.fields;
         if values.len() != plan.len() {
             return Self::invalid(opcode, "request wire field count is invalid");

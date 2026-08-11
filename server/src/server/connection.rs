@@ -242,7 +242,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 network_shard.request_read_timeout();
                 if !write_response(
                     &mut send,
-                    response_bytes(Status::Timeout, b"request read timed out"),
+                    operation_transport::request_read_timeout_response(),
                     request_timeout,
                 )
                 .await
@@ -255,7 +255,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 network_shard.protocol_error();
                 if !write_response(
                     &mut send,
-                    response_bytes(Status::TooLarge, b"request exceeds the protocol limit"),
+                    operation_transport::request_too_large_response(),
                     request_timeout,
                 )
                 .await
@@ -268,7 +268,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 network_shard.protocol_error();
                 if !write_response(
                     &mut send,
-                    wire_protocol_error_response(error),
+                    operation_transport::wire_protocol_error_response(error),
                     request_timeout,
                 )
                 .await
@@ -310,7 +310,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             );
                             network_shard.record_request(
                                 operation,
-                                Status::Timeout,
+                                response.status(),
                                 request_started.elapsed(),
                             );
                             if !write_response(&mut send, response, request_timeout).await {
@@ -320,14 +320,13 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                             continue;
                         }
                         Err(_) => {
-                            let response = operation_transport::contract_error_response(
+                            let response = operation_dispatch::overloaded_response(
                                 request_opcode,
-                                Status::Overloaded,
                                 b"response exceeds the server memory budget",
                             );
                             network_shard.record_request(
                                 operation,
-                                Status::Overloaded,
+                                response.status(),
                                 request_started.elapsed(),
                             );
                             if !write_response(&mut send, response, request_timeout).await {
@@ -374,16 +373,17 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                         return;
                     }
                     Err(_) => {
+                        let response = operation_dispatch::timeout_response(
+                            request_opcode,
+                            b"request execution timed out",
+                        );
                         network_shard.record_request(
                             operation,
-                            Status::Timeout,
+                            response.status(),
                             request_started.elapsed(),
                         );
                         (
-                            operation_dispatch::timeout_response(
-                                request_opcode,
-                                b"request execution timed out",
-                            ),
+                            response,
                             response_permit,
                         )
                     }
@@ -392,7 +392,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             Err(error) => {
                 network_shard.protocol_error();
                 terminal_after_response = true;
-                (protocol_error_response(error).into(), None)
+                (operation_transport::protocol_error_response(error), None)
             }
         };
         if !write_response(&mut send, response_result.0, request_timeout).await {
@@ -423,46 +423,4 @@ async fn write_response<S: SendStream>(
     send.write_response(response.into().into_parts(), request_timeout)
         .await
         .is_ok()
-}
-
-/// Maps framing and validation failures to stable protocol statuses.
-fn protocol_error_response(error: crate::protocol::ProtocolError) -> Response {
-    let status = match error {
-        crate::protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        crate::protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
-        _ => Status::InvalidRequest,
-    };
-    response_display(status, error)
-}
-
-fn wire_protocol_error_response(error: openkache_protocol::ProtocolError) -> Response {
-    let status = match error {
-        openkache_protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
-        openkache_protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
-        _ => Status::InvalidRequest,
-    };
-    response_display(status, error)
-}
-
-fn response_display(status: Status, value: impl std::fmt::Display) -> Response {
-    let mut payload = String::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES + openkache_protocol::MAX_VARUINT_BYTES + 64,
-    );
-    write!(payload, "{value}").expect("writing to a String cannot fail");
-    response(status, payload.into_bytes())
-}
-
-/// Constructs a protocol response whose payload is known to fit protocol limits.
-fn response(status: Status, payload: Vec<u8>) -> Response {
-    Response::new(status, payload).expect("server responses stay within protocol limits")
-}
-
-fn response_bytes(status: Status, payload: &[u8]) -> Response {
-    let mut owned = Vec::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES
-            + openkache_protocol::MAX_VARUINT_BYTES
-            + payload.len(),
-    );
-    owned.extend_from_slice(payload);
-    response(status, owned)
 }
