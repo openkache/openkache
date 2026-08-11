@@ -139,7 +139,7 @@ pub(super) fn validate_request(request: &super::Request) -> Result<()> {
 /// The adapter owns the body boundary. The shared protocol module only
 /// validates the frame length before calling this function.
 pub(super) fn decode_request(frame: &[u8], header: super::RequestHeader) -> Result<super::Request> {
-    super::Request::from_generic_parts(header.opcode, frame[header.encoded_len..].to_vec())
+    super::Request::from_generic_parts(header.opcode(), frame[header.encoded_len()..].to_vec())
 }
 
 /// Decodes a generic frame while reusing its allocation for the body.
@@ -147,9 +147,9 @@ pub(super) fn decode_owned_request(
     mut frame: Vec<u8>,
     header: super::RequestHeader,
 ) -> Result<super::Request> {
-    frame.copy_within(header.encoded_len.., 0);
-    frame.truncate(header.value_len);
-    super::Request::from_generic_parts(header.opcode, frame)
+    frame.copy_within(header.encoded_len().., 0);
+    frame.truncate(header.value_len());
+    super::Request::from_generic_parts(header.opcode(), frame)
 }
 
 /// Validates only generated shape metadata for a generic request.
