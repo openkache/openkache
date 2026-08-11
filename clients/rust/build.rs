@@ -6,16 +6,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var_os("CARGO_MANIFEST_DIR").ok_or("Cargo did not provide CARGO_MANIFEST_DIR")?,
     );
     let generator = client_directory.join("../generate.ts");
+    let generator_modules = client_directory.join("../generator");
+    let api_shape_renderers = client_directory.join("../api_shape_renderers.ts");
+    let operation_client_projection = client_directory.join("../operation_client_projection.ts");
     let protocol_wire_generator = client_directory.join("../../protocol/wire.ts");
+    let protocol_wire_modules = client_directory.join("../../protocol/wire");
+    let protocol_wire_descriptor = client_directory.join("../../protocol/wire_descriptor.ts");
+    let protocol_wire_layout = client_directory.join("../../protocol/wire_layout.ts");
+    let protocol_wire_types = client_directory.join("../../protocol/wire_types.ts");
+    let protocol_compatibility_renderer =
+        client_directory.join("../../protocol/compatibility_v1_renderer.ts");
+    let protocol_wire_spec_renderer = client_directory.join("../../protocol/wire_spec.ts");
     let model = client_directory.join("../model");
     let protocol_model = client_directory.join("../../protocol/model");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
         .join("smithy_api.rs");
+    let operations_output =
+        PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
+            .join("smithy_operations.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
+    println!("cargo:rerun-if-changed={}", generator_modules.display());
+    println!("cargo:rerun-if-changed={}", api_shape_renderers.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        operation_client_projection.display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         protocol_wire_generator.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        protocol_wire_modules.display()
+    );
+    for dependency in [
+        &protocol_wire_descriptor,
+        &protocol_wire_layout,
+        &protocol_wire_types,
+    ] {
+        println!("cargo:rerun-if-changed={}", dependency.display());
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        protocol_compatibility_renderer.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        protocol_wire_spec_renderer.display()
     );
     println!("cargo:rerun-if-changed={}", model.display());
     println!("cargo:rerun-if-changed={}", protocol_model.display());
@@ -27,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .arg(&generator)
         .env("OPENKACHE_GENERATION_TARGET", "rust-api")
         .env("OPENKACHE_RUST_API_OUTPUT", &output)
+        .env("OPENKACHE_RUST_OPERATIONS_OUTPUT", &operations_output)
         .status()
         .map_err(|error| {
             format!(

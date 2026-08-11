@@ -10,8 +10,10 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Condition
+from typing import Iterator
 
 from ._generated.smithy_contract import (
     SmithyFFINamespaceDescriptor,
@@ -30,18 +32,39 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_SET_CONDITION_ANY,
 )
+from ._generated.smithy_native_abi import SMITHY_NATIVE_FUNCTIONS
+from ._generated.smithy_native_abi import (
+    _CLIENT_POINTER,
+    _RESULT_POINTER,
+    _U8,
+    _U8_POINTER,
+)
 
 
 class NativeError(RuntimeError):
     """Failure reported by the Rust client-core ABI."""
 
 
-_U8 = ctypes.c_uint8
-_U8_POINTER = ctypes.POINTER(_U8)
-_RESULT_POINTER = ctypes.c_void_p
-_CLIENT_POINTER = ctypes.c_void_p
-
 _NamespaceDescriptor = SmithyFFINamespaceDescriptor
+
+
+@dataclass(frozen=True, slots=True)
+class NativeResult:
+    """One native result with both semantic and wire-level discriminators.
+
+    The iterator intentionally yields the historical ``(kind, payload)`` pair so generated
+    adapters written against the previous transport surface continue to work while generic
+    callers can inspect ``status`` without losing a newly modeled success token.
+    """
+
+    kind: int
+    status: int
+    payload: bytes
+    client: _CLIENT_POINTER | None = None
+
+    def __iter__(self) -> Iterator[int | bytes]:
+        yield self.kind
+        yield self.payload
 
 
 if ctypes.sizeof(_NamespaceDescriptor) != SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES:
@@ -117,175 +140,12 @@ class _NativeApi:
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         library = _load_library(path)
         self.library = library
-        self.abi_version = self._function(
-            "openkache_client_abi_version", (), ctypes.c_uint32
-        )
+        for attribute_name, (symbol_name, arguments, result) in SMITHY_NATIVE_FUNCTIONS.items():
+            setattr(self, attribute_name, self._function(symbol_name, arguments, result))
         if self.abi_version() != SMITHY_FFI_ABI_VERSION:
             raise NativeError(
                 f"unsupported OpenKache native ABI version {self.abi_version()}"
             )
-        self.connect = self._function(
-            "openkache_client_connect_ex",
-            (
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_int32,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                ctypes.c_size_t,
-                ctypes.c_size_t,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute = self._function(
-            "openkache_client_execute",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_raw = self._function(
-            "openkache_client_execute_raw",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                ctypes.c_uint32,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_with_options = self._function(
-            "openkache_client_execute_with_options",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_raw_with_options = self._function(
-            "openkache_client_execute_raw_with_options",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.execute_scoped = self._function(
-            "openkache_client_execute_scoped",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint32,
-                ctypes.c_uint64,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_open = self._function(
-            "openkache_client_namespace_open",
-            (
-                _CLIENT_POINTER,
-                _U8_POINTER,
-                ctypes.c_size_t,
-                _U8,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_update_policy = self._function(
-            "openkache_client_namespace_update_policy",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-                _U8,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_delete = self._function(
-            "openkache_client_namespace_delete",
-            (
-                _CLIENT_POINTER,
-                ctypes.c_uint64,
-                ctypes.c_uint64,
-            ),
-            _RESULT_POINTER,
-        )
-        self.namespace_descriptor_decode = self._function(
-            "openkache_client_namespace_descriptor_decode",
-            (_U8_POINTER, ctypes.c_size_t, ctypes.POINTER(_NamespaceDescriptor)),
-            ctypes.c_uint32,
-        )
-        self.connection_state = self._function(
-            "openkache_client_connection_state", (_CLIENT_POINTER,), ctypes.c_uint32
-        )
-        self.result_kind = self._function(
-            "openkache_client_result_kind", (_RESULT_POINTER,), ctypes.c_uint32
-        )
-        self.result_data = self._function(
-            "openkache_client_result_data", (_RESULT_POINTER,), _U8_POINTER
-        )
-        self.result_length = self._function(
-            "openkache_client_result_data_length",
-            (_RESULT_POINTER,),
-            ctypes.c_size_t,
-        )
-        self.result_take_client = self._function(
-            "openkache_client_result_take_client",
-            (_RESULT_POINTER,),
-            _CLIENT_POINTER,
-        )
-        self.result_free = self._function(
-            "openkache_client_result_free", (_RESULT_POINTER,), None
-        )
-        self.client_free = self._function(
-            "openkache_client_free", (_CLIENT_POINTER,), None
-        )
 
     def _function(
         self,
@@ -303,11 +163,12 @@ class _NativeApi:
 
     def read_result(
         self, result: _RESULT_POINTER, *, take_client: bool = False
-    ) -> tuple[int, bytes, _CLIENT_POINTER | None]:
+    ) -> NativeResult:
         if not result:
             raise NativeError("native client returned a null result")
         try:
             kind = int(self.result_kind(result))
+            status = int(self.result_status(result))
             length = int(self.result_length(result))
             pointer = self.result_data(result)
             if length and not pointer:
@@ -319,7 +180,7 @@ class _NativeApi:
         if kind == SMITHY_FFI_RESULT_ERROR:
             message = payload.decode("utf-8", errors="replace")
             raise NativeError(message or "native client operation failed")
-        return kind, payload, client
+        return NativeResult(kind=kind, status=status, payload=payload, client=client)
 
 
 class NativeClient:
@@ -388,10 +249,10 @@ class NativeClient:
             connect_timeout_ms,
             request_timeout_ms,
         )
-        kind, _, handle = api.read_result(result, take_client=True)
-        if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
+        native_result = api.read_result(result, take_client=True)
+        if native_result.kind != SMITHY_FFI_RESULT_CONNECTED or not native_result.client:
             raise NativeError("native client did not return a connected handle")
-        return cls(api, handle)
+        return cls(api, native_result.client)
 
     def execute(
         self,
@@ -401,10 +262,30 @@ class NativeClient:
         value: bytes = b"",
         condition: int = SMITHY_FFI_SET_CONDITION_ANY,
         ttl_ms: int | None = None,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         return self._execute(
             self._api.execute,
             operation,
+            key=key,
+            value=value,
+            condition=condition,
+            ttl_ms=ttl_ms,
+        )
+
+    def execute_typed(
+        self,
+        operation: int,
+        key_spec: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        condition: int = SMITHY_FFI_SET_CONDITION_ANY,
+        ttl_ms: int | None = None,
+    ) -> NativeResult:
+        return self._execute_typed(
+            self._api.execute_typed,
+            operation,
+            key_spec=key_spec,
             key=key,
             value=value,
             condition=condition,
@@ -419,7 +300,7 @@ class NativeClient:
         value: bytes = b"",
         condition: int = SMITHY_FFI_SET_CONDITION_ANY,
         ttl_ms: int | None = None,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         return self._execute(
             self._api.execute_raw,
             operation,
@@ -437,10 +318,30 @@ class NativeClient:
         value: bytes = b"",
         set_flags: int = 0,
         ttl_ms: int = 0,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         return self._execute_with_options(
             self._api.execute_with_options,
             operation,
+            key=key,
+            value=value,
+            set_flags=set_flags,
+            ttl_ms=ttl_ms,
+        )
+
+    def execute_typed_with_options(
+        self,
+        operation: int,
+        key_spec: int,
+        *,
+        key: bytes = b"",
+        value: bytes = b"",
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+    ) -> NativeResult:
+        return self._execute_typed_with_options(
+            self._api.execute_typed_with_options,
+            operation,
+            key_spec=key_spec,
             key=key,
             value=value,
             set_flags=set_flags,
@@ -455,7 +356,7 @@ class NativeClient:
         value: bytes = b"",
         set_flags: int = 0,
         ttl_ms: int = 0,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         return self._execute_with_options(
             self._api.execute_raw_with_options,
             operation,
@@ -474,7 +375,7 @@ class NativeClient:
         value: bytes = b"",
         set_flags: int = 0,
         ttl_ms: int = 0,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         item_buffer, item_pointer = _as_native_buffer(item_id)
         value_buffer, value_pointer = _as_native_buffer(value)
         with self._lifecycle:
@@ -494,9 +395,9 @@ class NativeClient:
                 set_flags,
                 ttl_ms,
             )
-            kind, payload, _ = self._api.read_result(result)
+            native_result = self._api.read_result(result)
             del item_buffer, value_buffer
-            return kind, payload
+            return native_result
         finally:
             with self._lifecycle:
                 self._active_calls -= 1
@@ -510,7 +411,7 @@ class NativeClient:
         create_if_missing: bool,
         policy_flags: int = 0,
         ttl_ms: int = 0,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         name_buffer, name_pointer = _as_native_buffer(name)
         with self._lifecycle:
             if not self._handle:
@@ -526,9 +427,9 @@ class NativeClient:
                 policy_flags,
                 ttl_ms,
             )
-            kind, payload, _ = self._api.read_result(result)
+            native_result = self._api.read_result(result)
             del name_buffer
-            return kind, payload
+            return native_result
         finally:
             with self._lifecycle:
                 self._active_calls -= 1
@@ -542,7 +443,7 @@ class NativeClient:
         expected_revision: int,
         policy_flags: int,
         ttl_ms: int,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         with self._lifecycle:
             if not self._handle:
                 raise NativeError("client is closed")
@@ -556,8 +457,7 @@ class NativeClient:
                 policy_flags,
                 ttl_ms,
             )
-            kind, payload, _ = self._api.read_result(result)
-            return kind, payload
+            return self._api.read_result(result)
         finally:
             with self._lifecycle:
                 self._active_calls -= 1
@@ -626,7 +526,7 @@ class NativeClient:
         value: bytes,
         condition: int,
         ttl_ms: int | None,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         key_buffer, key_pointer = _as_native_buffer(key)
         value_buffer, value_pointer = _as_native_buffer(value)
         # Keep ctypes buffers alive until the native call returns, while
@@ -649,8 +549,7 @@ class NativeClient:
                 1 if ttl_ms is not None else 0,
                 0 if ttl_ms is None else ttl_ms,
             )
-            kind, payload, _ = self._api.read_result(result)
-            return kind, payload
+            return self._api.read_result(result)
         finally:
             with self._lifecycle:
                 self._active_calls -= 1
@@ -666,7 +565,7 @@ class NativeClient:
         value: bytes,
         set_flags: int,
         ttl_ms: int,
-    ) -> tuple[int, bytes]:
+    ) -> NativeResult:
         key_buffer, key_pointer = _as_native_buffer(key)
         value_buffer, value_pointer = _as_native_buffer(value)
         with self._lifecycle:
@@ -685,8 +584,82 @@ class NativeClient:
                 set_flags,
                 ttl_ms,
             )
-            kind, payload, _ = self._api.read_result(result)
-            return kind, payload
+            return self._api.read_result(result)
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute_typed(
+        self,
+        function: object,
+        operation: int,
+        *,
+        key_spec: int,
+        key: bytes,
+        value: bytes,
+        condition: int,
+        ttl_ms: int | None,
+    ) -> NativeResult:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(
+                handle,
+                operation,
+                key_spec,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                condition,
+                1 if ttl_ms is not None else 0,
+                0 if ttl_ms is None else ttl_ms,
+            )
+            return self._api.read_result(result)
+        finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute_typed_with_options(
+        self,
+        function: object,
+        operation: int,
+        *,
+        key_spec: int,
+        key: bytes,
+        value: bytes,
+        set_flags: int,
+        ttl_ms: int,
+    ) -> NativeResult:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = function(
+                handle,
+                operation,
+                key_spec,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                set_flags,
+                ttl_ms,
+            )
+            return self._api.read_result(result)
         finally:
             with self._lifecycle:
                 self._active_calls -= 1

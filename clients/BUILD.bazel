@@ -4,7 +4,24 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "client_generator",
-    srcs = ["generate.ts"],
+    srcs = glob([
+        "generator/**",
+    ]) + [
+        "client_contract.ts",
+        "api_shape_renderers.ts",
+        "generate.ts",
+        "generator_names.ts",
+        "generator_values.ts",
+        "compatibility_ffi_adapters.ts",
+        "compatibility_request_adapters.ts",
+        "compatibility_response_adapters.ts",
+        "compatibility_result_projections.ts",
+        "native_abi_renderers.ts",
+        "operation_client_projection.ts",
+        "operation_models.ts",
+        "operation_plans.ts",
+        "operation_results.ts",
+    ],
 )
 
 filegroup(

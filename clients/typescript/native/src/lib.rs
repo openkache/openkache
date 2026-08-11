@@ -8,10 +8,10 @@ use napi::{Error, Result, Status};
 use napi_derive::napi;
 use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use openkache_client_core::{
-    Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DeleteOutcome, Endpoint,
-    EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpec,
-    NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RetryPolicy,
-    SetCondition, SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
+    DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
+    KeySpec, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy, PrivateKey,
+    ProtectedClient, ResolvedKey, RetryPolicy, SetCondition, SetOptions, SetOutcome,
     contract::{
         ConnectionState, SMITHY_EVICTION_DEFAULT_EVICTABLE,
         SMITHY_EVICTION_DEFAULT_EVICTION_PROTECTED, SMITHY_EVICTION_MODE_EVICTABLE,
@@ -46,7 +46,7 @@ pub struct NativeClientOptions {
     pub certificate: Uint8Array,
     pub identity: Option<NativeIdentity>,
     #[napi(js_name = "data_protection_key")]
-    pub data_protection_key: Option<Uint8Array>,
+    pub data_protection_key: Uint8Array,
     #[napi(js_name = "compression_enabled")]
     pub compression_enabled: bool,
     #[napi(js_name = "compression_level")]
@@ -108,6 +108,14 @@ pub struct NativeNamespaceOpenOutput {
     pub created: bool,
 }
 
+/// Result returned by a generated Smithy operation invocation.
+#[napi(object)]
+pub struct NativeOperationResult {
+    pub kind: u32,
+    pub status: u32,
+    pub payload: Uint8Array,
+}
+
 /// Closable Node-API handle shared by Node.js, Bun, and Deno.
 #[napi]
 pub struct NativeClient {
@@ -126,28 +134,84 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Retrieves exact decoded bytes or `null` when the canonical key is absent.
+    /// Executes a generated Smithy operation against exact item-ID storage.
+    #[napi(js_name = "execute_raw")]
+    pub async fn execute_raw(
+        &self,
+        operation: u32,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<NativeOperationResult> {
+        let opcode = parse_opcode(operation)?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .raw()
+            .execute_raw(opcode, item_id.as_ref(), value.as_ref(), options)
+            .await
+            .map(native_operation_result)
+            .map_err(native_error)
+    }
+
+    /// Executes a generated Smithy operation in an explicitly supplied namespace.
+    #[napi(js_name = "execute_scoped")]
+    pub async fn execute_scoped(
+        &self,
+        operation: u32,
+        namespace_id: BigInt,
+        item_id: Uint8Array,
+        value: Uint8Array,
+        condition: Option<String>,
+        expiration_mode: Option<String>,
+        eviction_mode: Option<String>,
+        ttl_ms: Option<BigInt>,
+    ) -> Result<NativeOperationResult> {
+        let opcode = parse_opcode(operation)?;
+        let namespace_id = parse_bigint_u64(namespace_id, "namespace_id", false)?;
+        let options = parse_wire_set_options(
+            condition.as_deref(),
+            expiration_mode.as_deref(),
+            eviction_mode.as_deref(),
+            ttl_ms,
+        )?;
+        self.active_client()?
+            .raw()
+            .execute_scoped(
+                opcode,
+                namespace_id,
+                item_id.as_ref(),
+                value.as_ref(),
+                options,
+            )
+            .await
+            .map(native_operation_result)
+            .map_err(native_error)
+    }
+
+    /// Retrieves exact decoded bytes or `null` when the key is absent.
     #[napi]
     pub async fn get(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
-        let outcome = self
-            .active_client()?
-            .get_canonical_key(key.as_ref())
+        let key = self.logical_key(key.as_ref())?;
+        self.active_client()?
+            .get_resolved(key)
             .await
-            .map_err(native_error)?;
-        match outcome {
-            GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Raw(bytes)) => Ok(Some(Uint8Array::new(bytes))),
-            GetOutcome::Found(Value::Json(_)) => Err(native_error(
-                "stored value uses canonical JSON serialization, expected raw bytes",
-            )),
-        }
+            .map(|value| value.into_option().map(Uint8Array::new))
+            .map_err(native_error)
     }
 
     /// Retrieves and decodes a canonical value envelope.
     ///
     /// # Arguments
     ///
-    /// * `key` - Exactly one canonical v1 key item.
+    /// * `key` - Exact application key bytes.
     ///
     /// # Returns
     ///
@@ -159,9 +223,10 @@ impl NativeClient {
     /// the stored bytes are not a supported value envelope.
     #[napi(js_name = "get_value")]
     pub async fn get_value(&self, key: Uint8Array) -> Result<Option<NativeValueEnvelope>> {
-        let GetOutcome::Found(Value::Raw(bytes)) = self
+        let key = self.logical_key(key.as_ref())?;
+        let GetOutcome::Found(bytes) = self
             .active_client()?
-            .get_canonical_key(key.as_ref())
+            .get_resolved(key)
             .await
             .map_err(native_error)?
         else {
@@ -180,9 +245,10 @@ impl NativeClient {
     /// Raw-formatted values are rejected instead of being silently coerced.
     #[napi(js_name = "get_json")]
     pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
+        let key = self.logical_key(key.as_ref())?;
         let outcome = self
             .active_client()?
-            .get_canonical_key(key.as_ref())
+            .get_value_resolved(key)
             .await
             .map_err(native_error)?;
         match outcome {
@@ -280,8 +346,9 @@ impl NativeClient {
             eviction_mode.as_deref(),
             ttl_ms,
         )?;
+        let key = self.logical_key(key.as_ref())?;
         self.active_client()?
-            .set_canonical_key(key.as_ref(), Value::Json(value), options)
+            .set_value_resolved(key, Value::Json(value), options)
             .await
             .map(map_set_outcome)
             .map_err(native_error)
@@ -290,8 +357,9 @@ impl NativeClient {
     /// Deletes a key and reports whether it existed.
     #[napi]
     pub async fn delete(&self, key: Uint8Array) -> Result<bool> {
+        let key = self.logical_key(key.as_ref())?;
         self.active_client()?
-            .delete_canonical_key(key.as_ref())
+            .delete_resolved(key)
             .await
             .map(|outcome| outcome == DeleteOutcome::Deleted)
             .map_err(native_error)
@@ -556,6 +624,12 @@ impl NativeClient {
 }
 
 impl NativeClient {
+    fn logical_key(&self, bytes: &[u8]) -> Result<ResolvedKey> {
+        self.active_client()?
+            .resolve_logical_key(bytes)
+            .map_err(native_error)
+    }
+
     async fn store(
         &self,
         key: &[u8],
@@ -572,8 +646,9 @@ impl NativeClient {
             ttl_ms,
         )?;
         let client = self.active_client()?;
+        let key = self.logical_key(key)?;
         client
-            .set_canonical_key(key, Value::Raw(value), options)
+            .set_resolved(key, value, options)
             .await
             .map(map_set_outcome)
             .map_err(native_error)
@@ -614,13 +689,8 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         )));
     }
 
-    let data_protection_key = options
-        .data_protection_key
-        .as_ref()
-        .map(|key| {
-            openkache_client_core::ClientRootKey::from_slice(key.as_ref()).map_err(native_error)
-        })
-        .transpose()?;
+    let data_protection_key = DataProtectionKey::from_slice(options.data_protection_key.as_ref())
+        .map_err(native_error)?;
     let compression = if options.compression_enabled {
         let defaults = ZstandardOptions::default();
         Compression::Zstandard(ZstandardOptions {
@@ -662,27 +732,18 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .map(|value| parse_usize(value, "max_in_flight", false))
         .transpose()?
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
-    let encryption = options
-        .encryption
-        .as_deref()
-        .map(parse_encryption)
-        .transpose()?;
+    let encryption = parse_encryption(options.encryption.as_deref())?;
     let key_spec = parse_key_spec(options.key_spec.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
-    let mut builder = match data_protection_key {
-        Some(key) => ProtectedClient::builder(endpoint, key),
-        None => ProtectedClient::builder_unprotected(endpoint),
-    }
-    .trust_certificate(trusted_certificate)
-    .compression(compression)
-    .timeouts(timeouts)
-    .retry_policy(retry)
-    .max_in_flight(max_in_flight)
-    .key_spec(key_spec);
-    if let Some(encryption) = encryption {
-        builder = builder.encryption(encryption);
-    }
+    let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
+        .trust_certificate(trusted_certificate)
+        .compression(compression)
+        .timeouts(timeouts)
+        .retry_policy(retry)
+        .max_in_flight(max_in_flight)
+        .encryption(encryption)
+        .key_spec(key_spec);
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
@@ -690,17 +751,6 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
     })
-}
-
-fn parse_key_spec(value: Option<&str>) -> Result<KeySpec> {
-    match value.unwrap_or("text") {
-        "integer" => Ok(KeySpec::Integer),
-        "text" => Ok(KeySpec::Text),
-        "bytes" => Ok(KeySpec::Bytes),
-        other => Err(invalid_argument(format!(
-            "key_spec must be integer, text, or bytes, got {other}"
-        ))),
-    }
 }
 
 fn parse_identity(identity: Option<NativeIdentity>) -> Result<Option<ClientIdentity>> {
@@ -736,6 +786,22 @@ fn parse_bigint_u64(value: BigInt, name: &str, allow_zero: bool) -> Result<u64> 
         )));
     }
     Ok(value)
+}
+
+fn parse_opcode(operation: u32) -> Result<Opcode> {
+    let operation =
+        u8::try_from(operation).map_err(|_| native_error("protocol opcode exceeds one byte"))?;
+    Opcode::try_from(operation).map_err(native_error)
+}
+
+fn native_operation_result(
+    result: openkache_client_core::OperationResult,
+) -> NativeOperationResult {
+    NativeOperationResult {
+        kind: result.kind,
+        status: result.status,
+        payload: Uint8Array::new(result.payload),
+    }
 }
 
 fn bigint_u64(value: u64) -> BigInt {
@@ -1004,13 +1070,24 @@ fn parse_endpoint(address: &str, server_name: &str) -> Result<Endpoint> {
     Endpoint::from_socket_addr(address, server_name).map_err(native_error)
 }
 
-fn parse_encryption(encryption: &str) -> Result<Encryption> {
+fn parse_encryption(encryption: Option<&str>) -> Result<Encryption> {
     match encryption {
-        "robust" => Ok(Encryption::Robust),
-        "compact" => Ok(Encryption::Compact),
-        value => Err(invalid_argument(format!(
+        None | Some("robust") => Ok(Encryption::Robust),
+        Some("compact") => Ok(Encryption::Compact),
+        Some(value) => Err(invalid_argument(format!(
             "encryption must be compact or robust, got {value}"
         ))),
+    }
+}
+
+fn parse_key_spec(key_spec: Option<&str>) -> Result<KeySpec> {
+    match key_spec {
+        None => Ok(KeySpec::Text),
+        Some(value) => KeySpec::from_name(value).ok_or_else(|| {
+            invalid_argument(format!(
+                "key_spec must be integer, text, or bytes, got {value}"
+            ))
+        }),
     }
 }
 

@@ -46,10 +46,6 @@ impl<'a> NetworkShard<'a> {
         self.worker
     }
 
-    pub(crate) const fn state(self) -> &'a ObservabilityState {
-        self.state
-    }
-
     pub(crate) fn connection_started(self) {
         self.state.connection_started_on(self.worker.index());
     }

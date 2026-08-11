@@ -348,9 +348,8 @@ fn storage_to_socket_addr(
                 ));
             }
             // SAFETY: family and length identify sockaddr_in6.
-            let address = unsafe {
-                *(storage as *const libc::sockaddr_storage as *const libc::sockaddr_in6)
-            };
+            let address =
+                unsafe { *(storage as *const libc::sockaddr_storage as *const libc::sockaddr_in6) };
             Ok(SocketAddr::from(std::net::SocketAddrV6::new(
                 std::net::Ipv6Addr::from(address.sin6_addr.s6_addr),
                 u16::from_be(address.sin6_port),

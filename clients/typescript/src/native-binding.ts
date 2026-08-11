@@ -43,6 +43,11 @@ export type Native_Namespace_Descriptor = Smithy_Namespace_Descriptor
 
 export type Native_Namespace_Open_Output = Smithy_Namespace_Open_Output
 
+export interface Native_Operation_Result {
+  readonly kind: number
+  readonly payload: Uint8Array
+}
+
 interface Native_Value_Envelope {
   readonly encoding: string
   readonly type_name: string
@@ -51,6 +56,25 @@ interface Native_Value_Envelope {
 
 export interface Native_Client {
   ping(): Promise<void>
+  execute_raw(
+    operation: number,
+    item_id: Uint8Array,
+    value: Uint8Array,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_milliseconds?: bigint,
+  ): Promise<Native_Operation_Result>
+  execute_scoped(
+    operation: number,
+    namespace_id: bigint,
+    item_id: Uint8Array,
+    value: Uint8Array,
+    condition?: Smithy_Set_Condition,
+    expiration_mode?: Smithy_Expiration_Mode,
+    eviction_mode?: Smithy_Eviction_Mode,
+    ttl_milliseconds?: bigint,
+  ): Promise<Native_Operation_Result>
   get(key: Uint8Array): Promise<Uint8Array | null>
   get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
   get_json(key: Uint8Array): Promise<string | null>

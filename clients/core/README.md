@@ -20,6 +20,17 @@ The main API layers are:
   and formatted-value encryption;
 - reusable configuration, key, protection, and value types for binding
   adapters;
+- `KeySpace`, the single logical/portable/canonical resolution policy, and
+  `ResolvedKey`, its validated hot-path result reused by Item ID hashing and
+  value protection;
+- the internal `KeyInput`/`KeyResolver` pipeline, which composes that policy
+  with the client root secret and is the only native request boundary that
+  produces a namespace-bound Item ID. Protected operations pass one of the
+  configured-logical, explicitly typed FFI, portable, or canonical-key input
+  variants through the same resolve/bind path, so conversion and namespace
+  binding cannot drift across GET, SET, DELETE, and generated operations.
+  Exact raw Item IDs are kept in the FFI transport input and never enter this
+  logical-key pipeline;
 - the optional `ffi` feature, which exports the stable C ABI used by C, C++,
   Python, ctypes, and other synchronous native adapters.
 
@@ -53,9 +64,14 @@ cargo fmt --check
 ```
 
 The `ffi` feature builds a dedicated Compio worker around
-`LocalProtectedClient`. Protected FFI operations accept exactly one canonical
-v1 key item (the CBOR major type is the explicit `Integer`, `Text`, or `Bytes`
-discriminator), not raw application bytes. It requires the platform's io_uring driver and exports
+`LocalProtectedClient`. Typed protected FFI operations accept neutral logical
+key bytes plus a generated `FfiKeySpec`; the Rust core's `KeyResolver` resolves
+one `ResolvedKey` and binds it once per operation before Item ID derivation and
+value protection. The FFI dispatcher only carries neutral input to that
+boundary; ABI-to-key-spec conversion lives in `src/key.rs`. The original
+protected entry point remains available for
+callers that already own one canonical v1 key item. It requires the platform's
+io_uring driver and exports
 `openkache_client_*` symbols from the native library crate outputs. The ABI
 supports protected application-key calls, exact-item-ID calls, mutual TLS,
 PEM/DER or system trust, compression, both value-encryption profiles, retries,
@@ -145,11 +161,13 @@ does not provide one.
 - `src/ffi.rs` owns the versioned worker-backed native ABI used by Swift, C,
   C++, Python, and other non-Rust bindings. It exposes both protected
   application-key operations and exact-item-ID raw operations, while the
-  worker owns one Compio runtime per native handle. The canonical declarations
-  are in [`include/openkache/client_abi.h`](include/openkache/client_abi.h),
-  with [`include/openkache_client.h`](include/openkache_client.h) retained as
-  a compatibility include. Generated ABI/protocol constants are emitted to
-  each package build directory from the client model
+  worker owns one Compio runtime per native handle. The compatibility header
+  [`include/openkache/client_abi.h`](include/openkache/client_abi.h) consumes
+  the generated ABI declarations and retains source-compatible aliases, with
+  [`include/openkache_client.h`](include/openkache_client.h) retained as a
+  compatibility include. The complete ABI (opaque handles, options layout,
+  function signatures, and function-pointer types) is emitted to each package
+  build directory from the client model
   [`../model/openkache.smithy`](../model/openkache.smithy) and the wire model
   [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy);
   no header is a hand-maintained constants source.

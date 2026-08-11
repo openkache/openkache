@@ -1,12 +1,12 @@
 //! Shared application-key hiding and value-protection composition.
 
+use crate::key::{KeyBinding, KeyInput, KeyResolver};
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
-use crate::{ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, Result};
+use crate::{ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, ResolvedKey, Result};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
-    key: ClientRootKey,
-    key_spec: KeySpec,
+    resolver: KeyResolver,
     codec: ValueCodec,
 }
 
@@ -41,12 +41,9 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected(&key, compression)?;
-        Ok(Self {
-            key,
-            key_spec,
-            codec,
-        })
+        let resolver = KeyResolver::new(key, key_spec);
+        let codec = ValueCodec::protected(resolver.root(), compression)?;
+        Ok(Self { resolver, codec })
     }
 
     /// Creates the default unprotected formatted client.
@@ -54,12 +51,9 @@ impl DataProtection {
     /// The all-zero root still participates in namespace-bound Item ID
     /// derivation. Only value protection is disabled.
     pub fn unprotected(key_spec: KeySpec, compression: Compression) -> Result<Self> {
+        let resolver = KeyResolver::new(ClientRootKey::zero(), key_spec);
         let codec = ValueCodec::compressed(compression)?;
-        Ok(Self {
-            key: ClientRootKey::zero(),
-            key_spec,
-            codec,
-        })
+        Ok(Self { resolver, codec })
     }
 
     /// Creates protection with an explicit authenticated-encryption profile.
@@ -98,17 +92,14 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
-        Ok(Self {
-            key,
-            key_spec,
-            codec,
-        })
+        let resolver = KeyResolver::new(key, key_spec);
+        let codec = ValueCodec::protected_with_profile(resolver.root(), compression, encryption)?;
+        Ok(Self { resolver, codec })
     }
 
     /// Returns the configured formatted key spec.
     pub const fn key_spec(&self) -> KeySpec {
-        self.key_spec
+        self.resolver.key_spec()
     }
 
     /// Derives a namespace-bound Item ID for a typed portable key.
@@ -117,16 +108,32 @@ impl DataProtection {
         namespace_id: u64,
         key: impl Into<PortableKey>,
     ) -> Result<ItemId> {
-        let key = key.into();
-        if key.spec() != self.key_spec {
-            return Err(crate::Error::Key(crate::KeyError::KeySpecMismatch {
-                expected: self.key_spec,
-                actual: key.spec(),
-            }));
-        }
-        self.key
-            .derive_item_id_in_namespace(namespace_id, key)
+        Ok(self
+            .resolver
+            .bind_input(namespace_id, KeyInput::portable(key))?
+            .item_id)
+    }
+
+    /// Resolves one internal key input at the shared core boundary.
+    pub(crate) fn resolve_key_input(&self, input: KeyInput) -> Result<ResolvedKey> {
+        self.resolver.resolve_input(input).map_err(Into::into)
+    }
+
+    /// Resolves and binds one internal key input without exposing the
+    /// canonical representation to client layers.
+    pub(crate) fn bind_key_input(&self, namespace_id: u64, input: KeyInput) -> Result<KeyBinding> {
+        self.resolver
+            .bind_input(namespace_id, input)
             .map_err(Into::into)
+    }
+
+    /// Resolves an already validated key and binds it to one namespace.
+    pub(crate) fn bind_resolved_key(
+        &self,
+        namespace_id: u64,
+        key: &ResolvedKey,
+    ) -> Result<KeyBinding> {
+        self.resolver.bind(namespace_id, key).map_err(Into::into)
     }
 
     /// Derives an Item ID from canonical key bytes after validating the spec.
@@ -135,39 +142,17 @@ impl DataProtection {
         namespace_id: u64,
         canonical_key: &[u8],
     ) -> Result<ItemId> {
-        let key = PortableKey::decode_canonical(canonical_key)?;
-        if key.spec() != self.key_spec {
-            return Err(crate::Error::Key(crate::KeyError::KeySpecMismatch {
-                expected: self.key_spec,
-                actual: key.spec(),
-            }));
-        }
-        self.key
-            .derive_item_id_from_canonical_key(namespace_id, canonical_key)
-            .map_err(Into::into)
-    }
-
-    /// Derives an Item ID from canonical key bytes without applying a configured
-    /// [`KeySpec`].
-    ///
-    /// This is the boundary for the low-level native ABI. The canonical CBOR
-    /// item carries its own `Integer`, `Text`, or `Bytes` discriminator; typed
-    /// high-level clients should use [`Self::item_id_from_canonical_key`]
-    /// instead so one keyspace cannot accidentally mix types.
-    #[cfg(feature = "ffi")]
-    pub(crate) fn item_id_from_canonical_key_unchecked(
-        &self,
-        namespace_id: u64,
-        canonical_key: &[u8],
-    ) -> Result<ItemId> {
-        self.key
-            .derive_item_id_from_canonical_key(namespace_id, canonical_key)
-            .map_err(Into::into)
+        Ok(self
+            .bind_key_input(
+                namespace_id,
+                KeyInput::canonical_in_space(canonical_key.to_owned()),
+            )?
+            .item_id)
     }
 
     /// Legacy byte-key convenience using namespace `1`.
     pub fn item_id(&self, application_key: impl AsRef<[u8]>) -> ItemId {
-        self.key.derive_item_id(application_key)
+        self.resolver.legacy_item_id(application_key)
     }
 
     /// Serializes and protects one core logical value.

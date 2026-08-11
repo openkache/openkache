@@ -6,5 +6,6 @@ description = "Wire protocol types and codecs for OpenKache"
 license = "Apache-2.0"
 
 [dependencies]
+smallvec = "*"
 thiserror = "*"
 vu128 = "*"

@@ -294,17 +294,51 @@ possible next frame; it MUST terminate the lane after the error response.
 
 ### Opcodes
 
-| Opcode | Name | Request layout | Value |
-|---:|---|---|---|
-| `01` | `PING` | opcode only | no Item ID, no value |
-| `02` | `GET` | opcode + namespace ID + Item ID | no value |
-| `03` | `SET` | opcode + namespace ID + flags + Item ID + optional TTL + value length + value | value is `0..=64 MiB` |
-| `04` | `DELETE` | opcode + namespace ID + Item ID | no value |
-| `05` | `STATS` | opcode + namespace ID | no Item ID, no value |
-| `06` | `SYNC` | opcode + namespace ID | no Item ID, no value |
-| `07` | `NAMESPACE_OPEN` | opcode + flags + name length + name + optional policy | namespace descriptor |
-| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + expected revision + policy | namespace descriptor |
-| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + expected revision | no value |
+<!-- openkache:generated-protocol-operation-table:start -->
+| Opcode | Name | Request layout | Response payload | Request codecs | Response codecs |
+|---|---|---|---|---|---|
+| `01` | `PING` | opcode only | opaque payload | — | — |
+| `02` | `GET` | opcode + namespace ID + 1 item ID | opaque payload | `raw_bytes` | — |
+| `03` | `SET` | opcode + namespace ID + flags + 1 item ID + value | empty | `raw_bytes` | — |
+| `04` | `DELETE` | opcode + namespace ID + 1 item ID | empty | `raw_bytes` | — |
+| `05` | `STATS` | opcode + namespace ID | opaque payload | — | — |
+| `06` | `SYNC` | opcode + namespace ID | empty | — | — |
+| `07` | `NAMESPACE_OPEN` | opcode + flags + name + optional policy | opaque payload | — | — |
+| `08` | `NAMESPACE_UPDATE_POLICY` | opcode + namespace ID + revision + policy | opaque payload | — | — |
+| `09` | `NAMESPACE_DELETE` | opcode + flags + namespace ID + revision | empty | — | — |
+| `0A` | `EXPERIMENTAL_ECHO` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
+| `0B` | `EXPERIMENTAL_REVERSE` | opcode + value_len + value | opaque payload | `utf8` | `utf8` |
+| `0C` | `SQUARE_ARRAY` | opcode + value_len + value | opaque payload | `packed_f64_be` | `packed_f64_be` |
+| `0D` | `GET2` | opcode + namespace ID + 2 item IDs | 2 ordered optional fields | `raw_bytes` | — |
+| `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | opcode + value_len + value | empty | `utf8` | — |
+| `0F` | `EXPERIMENTAL_DENSE` | opcode + fixed-width dense body | 2 compact ordered fields | `u64_be`, `bool_u8` | `u64_be`, `bool_u8` |
+| `20` | `EXPERIMENTAL_STORAGE_READ` | opcode + value_len + value | opaque payload | `raw_bytes` | `raw_bytes` |
+| `21` | `EXPERIMENTAL_PAGE` | opcode + field_sequence_len + ordered field sequence | 2 compact ordered fields | — | `list` |
+| `22` | `EXPERIMENTAL_MULTI_RESOURCE_MUTATION` | opcode + field_sequence_len + ordered field sequence | one compact ordered field | — | — |
+<!-- openkache:generated-protocol-operation-table:end -->
+
+<!-- openkache:generated-protocol-contract-snapshot:start -->
+| Opcode | Name | Scope | Retry | Semantics | Success statuses | Error statuses | Request plan | Response plan |
+|---|---|---|---|---|---|---|---|---|
+| `01` | `PING` | `global` | `always` | `pong` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `—` | `!payload@payload:PongPayload` |
+| `02` | `GET` | `item` | `always` | `value` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>` | `?value@value:Value` |
+| `03` | `SET` | `item` | `never` | `set_outcome` | `created,replaced,not_stored` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,no_capacity,policy_conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>; !value@value:Value; ?condition@condition:SetCondition; ?expiration_mode@expirationMode:ExpirationMode; ?eviction_mode@evictionMode:EvictionMode; ?ttl_milliseconds@ttlMilliseconds:Long` | `!outcome@outcome:SetOutcome` |
+| `04` | `DELETE` | `item` | `never` | `delete_outcome` | `deleted,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !item_id@itemId:ItemId<raw_bytes>` | `!deleted@deleted:Boolean` |
+| `05` | `STATS` | `namespace` | `always` | `stats_json` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long` | `!json@json:String` |
+| `06` | `SYNC` | `namespace` | `never` | `empty` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long` | `—` |
+| `07` | `NAMESPACE_OPEN` | `namespace_management` | `when_not_creating` | `namespace_descriptor` | `ok,created` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!name@name:String; !create_if_missing@createIfMissing:Boolean; ?policy@policy:NamespacePolicy; ?default_expiration@policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; ?expiration_override@policy.expirationOverride:OverridePolicy; ?default_eviction@policy.defaultEviction:EvictionDefault; ?eviction_override@policy.evictionOverride:OverridePolicy` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy; !created@created:Boolean` |
+| `08` | `NAMESPACE_UPDATE_POLICY` | `namespace_management` | `never` | `namespace_descriptor` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found` | `!namespace_id@namespaceId:Long; !expected_revision@expectedRevision:Long; !policy@policy:NamespacePolicy; !default_expiration@policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@policy.defaultTtlMilliseconds:Long; !expiration_override@policy.expirationOverride:OverridePolicy; !default_eviction@policy.defaultEviction:EvictionDefault; !eviction_override@policy.evictionOverride:OverridePolicy` | `!descriptor@descriptor:NamespaceDescriptor; !namespace_id@descriptor.namespaceId:Long; !revision@descriptor.revision:Long; !policy@descriptor.policy:NamespacePolicy; !default_expiration@descriptor.policy.defaultExpiration:ExpirationDefault; ?default_ttl_milliseconds@descriptor.policy.defaultTtlMilliseconds:Long; !expiration_override@descriptor.policy.expirationOverride:OverridePolicy; !default_eviction@descriptor.policy.defaultEviction:EvictionDefault; !eviction_override@descriptor.policy.evictionOverride:OverridePolicy` |
+| `09` | `NAMESPACE_DELETE` | `namespace_management` | `never` | `delete_outcome` | `deleted` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict,namespace_not_found,namespace_not_empty` | `!namespace_id@namespaceId:Long; !expected_revision@expectedRevision:Long` | `—` |
+| `0A` | `EXPERIMENTAL_ECHO` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@message:String<utf8>` | `!payload@message:String<utf8>` |
+| `0B` | `EXPERIMENTAL_REVERSE` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@message:String<utf8>` | `!payload@message:String<utf8>` |
+| `0C` | `SQUARE_ARRAY` | `global` | `always` | `application_value` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!payload@values:FloatingPointArray<packed_f64_be>` | `!payload@values:FloatingPointArray<packed_f64_be>` |
+| `0D` | `GET2` | `item` | `always` | `values` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,namespace_not_found` | `!namespace_id@namespaceId:Long; !item_id@itemIdA:ItemId<raw_bytes>; !item_id@itemIdB:ItemId<raw_bytes>` | `?value@valueA:Value; ?value@valueB:Value` |
+| `0E` | `EXPERIMENTAL_ACKNOWLEDGE` | `global` | `always` | `accepted` | `accepted` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!token@token:String<utf8>` | `—` |
+| `0F` | `EXPERIMENTAL_DENSE` | `global` | `always` | `values` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!counter@counter:Long<u64_be>; !enabled@enabled:Boolean<bool_u8>` | `!counter@counter:Long<u64_be>; !enabled@enabled:Boolean<bool_u8>` |
+| `20` | `EXPERIMENTAL_STORAGE_READ` | `global` | `always` | `-` | `ok,not_found` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `!key@key:Value<raw_bytes>` | `!value@value:Value<raw_bytes>` |
+| `21` | `EXPERIMENTAL_PAGE` | `global` | `always` | `page` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error` | `?cursor@cursor:Value` | `!items@items:ExperimentalPageItems<list>; ?next_cursor@nextCursor:Value` |
+| `22` | `EXPERIMENTAL_MULTI_RESOURCE_MUTATION` | `global` | `never` | `receipt` | `ok` | `invalid_request,too_large,overloaded,timeout,forbidden,internal_error,conflict` | `!source_resource@sourceResource:Value; !target_resource@targetResource:Value; !payload@payload:Value` | `!receipt@receipt:Value` |
+<!-- openkache:generated-protocol-contract-snapshot:end -->
 
 ### `SET` flags
 
@@ -635,6 +669,63 @@ its TTL is not applied.
 
 The success response is `Ok` with exactly the four ASCII octets `PONG`.
 
+### Experimental application-value operations
+
+`EXPERIMENTAL_ECHO` (`0A`) and `EXPERIMENTAL_REVERSE` (`0B`) use the
+application-value request layout:
+
+```text
+opcode | value_len:vu128 | value:value_len
+```
+
+The value length is bounded by the protocol's 64 MiB value ceiling. Both
+operations require the value to be valid UTF-8. `EXPERIMENTAL_ECHO` returns the
+same UTF-8 octets. `EXPERIMENTAL_REVERSE` reverses Unicode scalar values
+(equivalently, Rust `char`s) and returns the resulting UTF-8 encoding. A
+malformed UTF-8 input returns `InvalidRequest`.
+
+### `SQUARE_ARRAY`
+
+`SQUARE_ARRAY` (`0C`) uses the same application-value frame layout:
+
+```text
+0C | value_len:vu128 | value:value_len
+```
+
+The payload is a dense array of IEEE-754 binary64 values. Each element occupies
+exactly eight octets in big-endian (network) byte order. There is no count
+prefix; the element count is `value_len / 8`, so an empty array is valid. A
+receiver MUST reject a length that is not a multiple of eight, a non-finite
+input (`NaN` or either infinity), or a squared result that is not finite, with
+`InvalidRequest`. On success the server returns one big-endian binary64 value
+for each input element, equal to `input * input`.
+
+### `GET2`
+
+`GET2` (`0D`) reads two items in one namespace-scoped request. It uses the
+same generic scoped-item/value contract as `GET`; the Smithy shape happens to
+bind two `item_id` members and two `value` members:
+
+```text
+0D | namespace_id:u64be | item_id_a:32 | item_id_b:32
+```
+
+The server may issue the two storage reads concurrently, but the response
+always preserves the request order. An `Ok` response carries the explicit
+four-octet optional-value payload selected by the generated compatibility
+contract:
+
+```text
+value_0_len:u32be | value_0 |
+value_1_len:u32be | value_1
+```
+
+Each length is a big-endian `u32`; `FF FF FF FF` is the missing-value sentinel,
+and zero denotes a present empty value. The complete payload remains subject to
+the 64 MiB response limit. A missing namespace returns `NamespaceNotFound`; an
+existing namespace with either or both items missing still returns `Ok` with the
+corresponding sentinel.
+
 ### `GET`
 
 `GET` has the request layout `02 | namespace_id:u64be | item_id:32`.
@@ -782,6 +873,92 @@ response = status | payload_len | payload
 `payload_len` is present for every response, including responses with an empty
 payload. Responses have no version, request identifier, flags, Item ID, or TTL.
 
+### Generic ordered field sequences
+
+New operations that declare `ordered_fields` request framing use a
+transport-neutral presence-mask field sequence:
+
+```text
+presence_mask:ceil(field_count / 8) bytes
+[field_length:vu128 | field:value_bytes for each present field before the final present field]
+[final_present_field:remaining_bytes]
+```
+
+The mask is emitted first, with field `i` represented by bit `i % 8` in byte
+`floor(i / 8)` (least-significant bit first). Fields are then emitted in
+modeled order, but only when their mask bit is set. Every present field before
+the final present field carries its raw byte length as a canonical `vu128`
+followed by exactly that many bytes. The final present field consumes the
+remaining sequence bytes and therefore has no length prefix. A cleared bit
+represents a missing optional field. A set bit with a canonical zero length is
+a present-empty non-final field; a set final-present bit with no remaining
+bytes is a present-empty final field.
+The unused high bits of the final mask byte MUST be zero. The complete
+sequence MUST remain within the protocol value limit. Requiredness and field
+codecs come from the generated operation descriptor; the generic codec does not
+interpret field role names.
+
+The historical namespace/item/SET operations also carry an adapter-owned
+`compactRoute` in the Smithy model, but their canonical descriptor still uses
+`ordered_fields`. The protocol-v1 compatibility adapter projects those fields
+into the fixed prefix bytes documented above. This keeps compactness as a
+reusable layout/codec capability without making the generic descriptor or
+dispatcher know the route vocabulary. The projection is byte-for-byte the v1
+layout; a new route-less operation does not opt into it.
+
+For two modeled fields, the following vectors are normative:
+
+| Fields | Encoded octets |
+|---|---|
+| both missing | `00` |
+| field 0 present and empty; field 1 missing | `01` |
+| field 0 missing; field 1 = `AB` | `02 AB` |
+| field 0 = 127 octets; field 1 missing | `01 <127 octets>` |
+| field 0 = 128 octets; field 1 missing | `01 <128 octets>` |
+| field 0 empty; field 1 = `AB` | `03 00 AB` |
+| field 0 = `AB`; field 1 = `CD` | `03 02 AB CD` |
+
+The non-final length examples use canonical `vu128`; the payload bytes shown as
+`<n octets>` are arbitrary value bytes of that exact length. A receiver MUST
+reject an unused mask bit, a non-canonical or truncated non-final length, a
+truncated non-final value, or bytes after a mask with no present field.
+
+For a required fixed-width tuple, the generated descriptor MAY select the
+`dense` field layout. A dense payload is the concatenation of the declared
+field bytes with no presence mask or per-field length:
+
+```text
+field_0:value_bytes | field_1:value_bytes | ...
+```
+
+The dense layout is valid only when every modeled field is required and has an
+exact codec-declared width. A receiver MUST reject truncated, trailing, or
+width-mismatched payloads.
+
+### Optional-value sequences (explicit legacy layout)
+
+An operation MAY explicitly select `responseFraming: optional_values` when it
+needs the historical four-octet optional-value bytes. This layout is not the
+default for optional or composite outputs; new operations SHOULD use the
+generic field sequence above unless exact compatibility bytes are required.
+The sequence is a transport primitive; the operation model supplies its field
+count and each field's codec.
+
+Each field is encoded as a four-octet big-endian length followed by that many
+value octets. `FF FF FF FF` is the missing-value sentinel. A zero length is a
+present empty value. Fields retain their modeled order, and the complete
+sequence is bounded by the protocol's maximum value size. The generated
+layout discriminator MUST remain `optional_values`; an adapter MUST NOT
+decode these bytes as a generic presence-mask field sequence.
+
+For two optional values, the compatibility vectors are:
+
+| Values | Encoded octets |
+|---|---|
+| both missing | `FF FF FF FF FF FF FF FF` |
+| first present empty; second missing | `00 00 00 00 FF FF FF FF` |
+| first missing; second = `AB` | `FF FF FF FF 00 00 00 01 AB` |
+
 ### Status codes
 
 | Status | Name | Meaning |
@@ -836,6 +1013,10 @@ For a valid request, the following are the domain success and result statuses:
 | `NAMESPACE_OPEN` | `Ok`, `Created` | Namespace descriptor |
 | `NAMESPACE_UPDATE_POLICY` | `Ok` | Updated namespace descriptor |
 | `NAMESPACE_DELETE` | `Deleted` | Always empty |
+| `EXPERIMENTAL_ECHO` | `Ok` | The input UTF-8 bytes unchanged |
+| `EXPERIMENTAL_REVERSE` | `Ok` | The input UTF-8 string reversed by Unicode scalar value |
+| `SQUARE_ARRAY` | `Ok` | Squared binary64 array |
+| `GET2` | `Ok` | Ordered field sequence of two independently optional item values |
 
 Common error statuses MAY be returned when their stated condition applies. A
 client receiving a status that is neither an allowed domain status nor an
