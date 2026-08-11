@@ -19,98 +19,57 @@ pub(super) const HISTOGRAM_BUCKETS_US: [u64; 12] = [
     5_000_000, 10_000_000,
 ];
 
-pub(super) const OPERATION_NAMES: [&str; 10] = [
-    "ping",
-    "get",
-    "set",
-    "delete",
-    "stats",
-    "sync",
-    "namespace_open",
-    "namespace_update_policy",
-    "namespace_delete",
-    "unknown",
-];
-
-pub(super) const STATUS_NAMES: [&str; 18] = [
-    "ok",
-    "not_found",
-    "created",
-    "replaced",
-    "deleted",
-    "not_stored",
-    "invalid_request",
-    "unsupported_opcode",
-    "too_large",
-    "overloaded",
-    "timeout",
-    "forbidden",
-    "internal_error",
-    "no_capacity",
-    "policy_conflict",
-    "conflict",
-    "namespace_not_found",
-    "namespace_not_empty",
-];
-
-/// The operation names used by the wire protocol and the metrics registry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Operation {
-    Ping,
-    Get,
-    Set,
-    Delete,
-    Stats,
-    Sync,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
-    Unknown,
+const fn operation_names() -> [&'static str; Opcode::COUNT + 1] {
+    let mut names = ["unknown"; Opcode::COUNT + 1];
+    let mut index = 0;
+    while index < Opcode::COUNT {
+        names[index] = Opcode::NAMES[index];
+        index += 1;
+    }
+    names
 }
+
+pub(super) const OPERATION_NAMES: [&str; Opcode::COUNT + 1] = operation_names();
+
+pub(super) const STATUS_NAMES: [&str; Status::COUNT] = Status::NAMES;
+
+/// An operation metric key plus the transport-only unknown bucket used by
+/// adapters that cannot resolve a modeled opcode.
+///
+/// The key wraps the generated `Opcode` instead of duplicating its variants.
+/// Metrics arrays are indexed by `Opcode::index()`, so sparse wire assignments
+/// and Smithy enum reordering cannot silently corrupt telemetry. Built-in
+/// command names are deliberately not part of this generic observability
+/// primitive; protocol adapters resolve their own command vocabulary before
+/// creating a key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Operation(Option<Opcode>);
 
 impl Operation {
     const COUNT: usize = OPERATION_NAMES.len();
 
+    pub(crate) const fn unknown() -> Self {
+        Self(None)
+    }
+
     pub(crate) const fn name(self) -> &'static str {
-        OPERATION_NAMES[self as usize]
+        OPERATION_NAMES[self.index()]
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        match self.0 {
+            Some(opcode) => opcode.index(),
+            None => Opcode::COUNT,
+        }
     }
 
     pub(crate) const fn from_opcode(opcode: Opcode) -> Self {
-        match opcode {
-            Opcode::Ping => Self::Ping,
-            Opcode::Get => Self::Get,
-            Opcode::Set => Self::Set,
-            Opcode::Delete => Self::Delete,
-            Opcode::Stats => Self::Stats,
-            Opcode::Sync => Self::Sync,
-            Opcode::NamespaceOpen => Self::NamespaceOpen,
-            Opcode::NamespaceUpdatePolicy => Self::NamespaceUpdatePolicy,
-            Opcode::NamespaceDelete => Self::NamespaceDelete,
-        }
+        Self(Some(opcode))
     }
 }
 
-fn status_index(status: Status) -> usize {
-    match status {
-        Status::Ok => 0,
-        Status::NotFound => 1,
-        Status::Created => 2,
-        Status::Replaced => 3,
-        Status::Deleted => 4,
-        Status::NotStored => 5,
-        Status::InvalidRequest => 6,
-        Status::UnsupportedOpcode => 7,
-        Status::TooLarge => 8,
-        Status::Overloaded => 9,
-        Status::Timeout => 10,
-        Status::Forbidden => 11,
-        Status::InternalError => 12,
-        Status::NoCapacity => 13,
-        Status::PolicyConflict => 14,
-        Status::Conflict => 15,
-        Status::NamespaceNotFound => 16,
-        Status::NamespaceNotEmpty => 17,
-    }
+const fn status_index(status: Status) -> usize {
+    status.index()
 }
 
 pub(super) struct Histogram {
@@ -614,7 +573,7 @@ impl ObservabilityState {
         let Some(metrics) = self.network.get(worker) else {
             return;
         };
-        let operation_index = operation as usize;
+        let operation_index = operation.index();
         metrics.request.totals[operation_index][status_index(status)]
             .fetch_add(1, Ordering::Relaxed);
         metrics.request.durations[operation_index].observe(elapsed);
@@ -654,7 +613,7 @@ impl ObservabilityState {
         if let Some(metrics) = self.network.get(network_worker)
             && let Some(histograms) = metrics.storage_wait.get(storage_worker)
         {
-            histograms[operation as usize].observe(elapsed);
+            histograms[operation.index()].observe(elapsed);
         }
     }
 
@@ -668,7 +627,7 @@ impl ObservabilityState {
             return;
         }
         if let Some(metrics) = self.storage.get(worker) {
-            let index = operation as usize;
+            let index = operation.index();
             metrics.operations_total[index].fetch_add(1, Ordering::Relaxed);
             metrics.durations[index].observe(elapsed);
         }

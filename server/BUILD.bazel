@@ -1,5 +1,6 @@
 """Bazel targets for the public server crate and binaries."""
 
+load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
 load(
     "//bazel:openkache_defs.bzl",
@@ -140,7 +141,32 @@ filegroup(
     srcs = [
         "BUILD.bazel",
         "Cargo.toml",
+        "build.rs",
     ] + glob(["src/**"]),
+)
+
+filegroup(
+    name = "server_contract_inputs",
+    srcs = ["//protocol:generator_inputs"],
+)
+
+cargo_build_script(
+    name = "openkache_server_build_script",
+    srcs = ["build.rs"],
+    build_script_env = {
+        "OPENKACHE_BUN_EXECUTABLE": "$(execpath //bazel:bun)",
+        "OPENKACHE_SMITHY_EXECUTABLE": "$(execpath //bazel:smithy)",
+        "OPENKACHE_SMITHY_USE_SHELL": "1",
+    },
+    crate_name = "openkache_server_build_script",
+    crate_root = "build.rs",
+    data = [":server_contract_inputs"],
+    edition = RUST_EDITION,
+    tools = [
+        "//bazel:bun",
+        "//bazel:smithy",
+        "//bazel:smithy_tree",
+    ],
 )
 
 rust_library(
@@ -156,6 +182,7 @@ rust_library(
     edition = RUST_EDITION,
     rustc_env = rust_metadata("openkache"),
     deps = [
+        ":openkache_server_build_script",
         ":server_optional_event_listener",
         ":server_optional_kanal",
         "//protocol:openkache_protocol",

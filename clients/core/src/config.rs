@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::time::Duration;
 
-use openkache_protocol::{EvictionMode, ExpirationMode, SetCondition};
+use crate::protocol::{EvictionMode, ExpirationMode, SetCondition, SetWireOptions};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -540,7 +540,9 @@ impl AlpnPolicy {
             ));
         }
         let version = parse_alpn_version(protocol).map_err(|message| {
-            Error::Connection(format!("server negotiated an invalid ALPN protocol: {message}"))
+            Error::Connection(format!(
+                "server negotiated an invalid ALPN protocol: {message}"
+            ))
         })?;
         if version < self.minimum_version {
             return Err(Error::Connection(format!(
@@ -706,14 +708,14 @@ impl SetOptions {
         self.time_to_live_ms
     }
 
-    pub(crate) fn into_protocol(self) -> Result<openkache_protocol::SetOptions> {
+    pub(crate) fn into_protocol(self) -> Result<SetWireOptions> {
         if self.time_to_live_ms == Some(0) {
             return Err(Error::configuration(
                 "set.time_to_live_ms",
                 "must be greater than zero",
             ));
         }
-        Ok(openkache_protocol::SetOptions::with_policies(
+        Ok(SetWireOptions::with_policies(
             self.condition,
             self.expiration_mode,
             self.time_to_live_ms,
@@ -722,9 +724,7 @@ impl SetOptions {
     }
 
     #[cfg(feature = "ffi")]
-    pub(crate) fn from_protocol(
-        options: openkache_protocol::SetOptions,
-    ) -> Result<Self> {
+    pub(crate) fn from_protocol(options: SetWireOptions) -> Result<Self> {
         let mut converted = match options.condition {
             SetCondition::Any => Self::new(),
             SetCondition::IfAbsent => Self::new().if_absent(),
@@ -733,13 +733,14 @@ impl SetOptions {
         converted = match options.expiration_mode {
             ExpirationMode::Inherit => converted.inherit_expiration(),
             ExpirationMode::NoExpiry => converted.no_expiry(),
-            ExpirationMode::ExplicitTtl => converted
-                .expires_after_millis(options.ttl_ms.ok_or_else(|| {
+            ExpirationMode::ExplicitTtl => {
+                converted.expires_after_millis(options.ttl_ms.ok_or_else(|| {
                     Error::configuration(
                         "set.time_to_live_ms",
                         "must be present with explicit TTL mode",
                     )
-                })?),
+                })?)
+            }
         };
         Ok(match options.eviction_mode {
             EvictionMode::Inherit => converted.inherit_eviction(),

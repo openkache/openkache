@@ -17062,6 +17062,10 @@
               "target": "serde_json_canonicalizer"
             },
             {
+              "id": "smallvec 1.15.2",
+              "target": "smallvec"
+            },
+            {
               "id": "thiserror 2.0.19",
               "target": "thiserror"
             },
@@ -17229,6 +17233,10 @@
         ],
         "deps": {
           "common": [
+            {
+              "id": "smallvec 1.15.2",
+              "target": "smallvec"
+            },
             {
               "id": "thiserror 2.0.19",
               "target": "thiserror"

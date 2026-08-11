@@ -588,11 +588,7 @@ impl ResourceGuard {
     }
 }
 
-pub(crate) async fn reserve_file_range(
-    file: &File,
-    offset: u64,
-    len: u64,
-) -> std::io::Result<()> {
+pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
     storage_backend::reserve_file_range(file, offset, len).await
 }
 

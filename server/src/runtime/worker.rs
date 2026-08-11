@@ -1,22 +1,22 @@
 //! Per-worker request/response types, the rolling keyed event loop
-//! ([`worker_loop`]), and benchmark support types ([`BenchmarkOperation`],
-//! [`BenchmarkBatchStats`]).
+//! ([`worker_loop`]) and per-worker scheduler support types.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::{Future, poll_fn};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{ItemId, SetOptions};
-
 use crate::channel::{AsyncReceiver, TryRecvError};
 use crate::observability::{ObservabilityState, Operation, StorageWorkerId};
+use crate::protocol::SetOptions;
 use crate::types::StoredItemValue;
 use crate::*;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use openkache_protocol::Opcode;
 
 use super::CoreTask;
 use super::completion::CompletionSender;
+use super::worker_control::{execute_storage_task, process_worker_barrier};
 
 pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
     while let Ok(task) = receiver.recv_async_storage().await {
@@ -30,77 +30,69 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
 pub(super) type WorkerResponseSender = CompletionSender<Result<WorkerResponse>>;
 
 pub(super) enum WorkerRequest {
-    Get {
+    /// Keyed data-plane work routed through the per-key scheduler.
+    ///
+    /// The envelope keeps routing and completion generic at the worker
+    /// boundary. Core actions currently retain their optimized command
+    /// implementations inside [`StorageCommand`].
+    Keyed {
         storage_key: StorageKey,
-        response: WorkerResponseSender,
+        command: StorageCommand,
     },
-    Set {
-        storage_key: StorageKey,
-        value: StoredItemValue,
-        options: SetOptions,
-        response: WorkerResponseSender,
-    },
-    Delete {
-        storage_key: StorageKey,
-        response: WorkerResponseSender,
-    },
+    /// Control-plane work is kept separate from keyed data-plane commands.
+    ///
+    /// Stats, sync, extension tasks, and shutdown all require a quiescent
+    /// worker but do not participate in per-key scheduling or collapse.
+    Control(WorkerControlRequest),
+}
+
+pub(super) enum WorkerControlRequest {
     Stats {
         response: WorkerResponseSender,
     },
     Sync {
         response: WorkerResponseSender,
     },
+    /// Executes an API-owned storage task after all keyed work is quiescent.
+    ///
+    /// GET/SET/DELETE keep their keyed scheduler and collapse optimizations.
+    /// Extensions use this escape hatch for batch, CAS, or other storage
+    /// shapes without adding another cache-specific worker enum variant.
+    StorageTask {
+        task: super::StorageTask,
+        response: WorkerResponseSender,
+    },
     Shutdown,
 }
 
-#[derive(Debug)]
 pub(super) enum WorkerResponse {
     Value(Option<StoredItemValue>),
     Set(SetOutcome),
     Deleted(bool),
     Stats(String),
     Synced,
+    #[allow(dead_code)]
+    StorageResult(super::StorageTaskOutput),
+    #[allow(dead_code)]
+    StorageFailure(super::StorageError),
 }
 
-#[derive(Debug)]
-pub enum BenchmarkOperation {
-    Get(ItemId),
-    Set(ItemId, Vec<u8>),
-    Delete(ItemId),
-}
-
-impl BenchmarkOperation {
-    pub(crate) fn item_id(&self) -> ItemId {
+impl std::fmt::Debug for WorkerResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Get(item_id) | Self::Delete(item_id) | Self::Set(item_id, _) => *item_id,
+            Self::Value(value) => formatter.debug_tuple("Value").field(value).finish(),
+            Self::Set(outcome) => formatter.debug_tuple("Set").field(outcome).finish(),
+            Self::Deleted(deleted) => formatter.debug_tuple("Deleted").field(deleted).finish(),
+            Self::Stats(stats) => formatter.debug_tuple("Stats").field(stats).finish(),
+            Self::Synced => formatter.write_str("Synced"),
+            // API-owned task results are intentionally erased at the runtime
+            // boundary and are therefore only identified, never formatted.
+            Self::StorageResult(_) => formatter.write_str("StorageResult(..)"),
+            Self::StorageFailure(error) => formatter
+                .debug_tuple("StorageFailure")
+                .field(error)
+                .finish(),
         }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct BenchmarkBatchStats {
-    pub operations: usize,
-    pub gets: usize,
-    pub hits: usize,
-    pub sets: usize,
-    pub creates: usize,
-    pub replaces: usize,
-    pub deletes: usize,
-    pub deleted: usize,
-    pub latency_ns: Vec<u64>,
-}
-
-impl BenchmarkBatchStats {
-    pub fn merge(&mut self, mut other: Self) {
-        self.operations += other.operations;
-        self.gets += other.gets;
-        self.hits += other.hits;
-        self.sets += other.sets;
-        self.creates += other.creates;
-        self.replaces += other.replaces;
-        self.deletes += other.deletes;
-        self.deleted += other.deleted;
-        self.latency_ns.append(&mut other.latency_ns);
     }
 }
 
@@ -209,7 +201,13 @@ impl<T> WaitingSlab<T> {
     }
 }
 
-pub(super) enum KeyedCommand {
+pub(super) enum StorageCommand {
+    /// API-owned keyed work. It is ordered by the same key lane as the
+    /// core actions but is deliberately non-collapsible.
+    Custom {
+        task: super::StorageTask,
+        response: WorkerResponseSender,
+    },
     Get {
         response: WorkerResponseSender,
     },
@@ -223,9 +221,52 @@ pub(super) enum KeyedCommand {
     },
 }
 
-impl KeyedCommand {
+/// Runtime-facing action metadata.
+///
+/// The scheduler consumes this small descriptor instead of inferring
+/// scheduling policy from a protocol opcode or an API-specific result type.
+/// Core actions provide descriptors here for compatibility; new APIs can submit
+/// a `StorageTask` with the same metadata surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StorageActionMetadata {
+    operation: Operation,
+    collapsible: bool,
+}
+
+/// Compatibility alias for private scheduler tests and migration code.
+///
+/// New runtime code should use [`StorageCommand`]; keeping this alias avoids
+/// coupling the generic envelope migration to test fixture naming.
+#[allow(dead_code)]
+pub(super) type KeyedCommand = StorageCommand;
+
+impl StorageCommand {
+    fn metadata(&self, cache: &Kvkache) -> StorageActionMetadata {
+        match self {
+            Self::Custom { .. } => StorageActionMetadata {
+                operation: Operation::unknown(),
+                collapsible: false,
+            },
+            Self::Get { .. } => StorageActionMetadata {
+                operation: Operation::from_opcode(Opcode::Get),
+                collapsible: true,
+            },
+            Self::Set { value, options, .. } => StorageActionMetadata {
+                operation: Operation::from_opcode(Opcode::Set),
+                collapsible: *options == SetOptions::NONE && cache.can_collapse_set(value),
+            },
+            Self::Delete { .. } => StorageActionMetadata {
+                operation: Operation::from_opcode(Opcode::Delete),
+                collapsible: true,
+            },
+        }
+    }
+
     fn into_parts(self) -> (KeyedOperation, WorkerResponseSender) {
         match self {
+            Self::Custom { .. } => {
+                unreachable!("custom storage tasks are executed through the task path")
+            }
             Self::Get { response } => (KeyedOperation::Get, response),
             Self::Set {
                 value,
@@ -237,20 +278,7 @@ impl KeyedCommand {
     }
 
     fn is_collapsible(&self, cache: &Kvkache) -> bool {
-        match self {
-            Self::Get { .. } | Self::Delete { .. } => true,
-            Self::Set { value, options, .. } => {
-                *options == SetOptions::NONE && cache.can_collapse_set(value)
-            }
-        }
-    }
-}
-
-fn metric_operation(operation: &KeyedOperation) -> Operation {
-    match operation {
-        KeyedOperation::Get => Operation::Get,
-        KeyedOperation::Set { .. } => Operation::Set,
-        KeyedOperation::Delete => Operation::Delete,
+        self.metadata(cache).collapsible
     }
 }
 
@@ -268,7 +296,7 @@ pub(super) struct CollapsedLaneBatch {
 }
 
 impl CollapsedLaneBatch {
-    pub(super) fn reduce(base: KeyedVisibleState, commands: Vec<KeyedCommand>) -> Self {
+    pub(super) fn reduce(base: KeyedVisibleState, commands: Vec<StorageCommand>) -> Self {
         let base_present = matches!(base, KeyedVisibleState::Present(_));
         let mut current = base.clone();
         let mut responses = Vec::with_capacity(commands.len());
@@ -278,14 +306,17 @@ impl CollapsedLaneBatch {
         for command in commands {
             let response_index = responses.len();
             let (sender, value) = match command {
-                KeyedCommand::Get { response } => {
+                StorageCommand::Custom { .. } => {
+                    unreachable!("custom storage tasks are never included in collapse batches")
+                }
+                StorageCommand::Get { response } => {
                     let value = match &current {
                         KeyedVisibleState::Missing => None,
                         KeyedVisibleState::Present(value) => Some(value.clone()),
                     };
                     (response, WorkerResponse::Value(value))
                 }
-                KeyedCommand::Set {
+                StorageCommand::Set {
                     value,
                     options,
                     response,
@@ -300,7 +331,7 @@ impl CollapsedLaneBatch {
                     mutation_response_index = Some(response_index);
                     (response, WorkerResponse::Set(outcome))
                 }
-                KeyedCommand::Delete { response } => {
+                StorageCommand::Delete { response } => {
                     let deleted = matches!(current, KeyedVisibleState::Present(_));
                     current = KeyedVisibleState::Missing;
                     mutated = true;
@@ -366,7 +397,7 @@ struct KeyLane {
 struct KeyScheduler {
     lanes: HashMap<StorageKey, KeyLane>,
     ready: VecDeque<StorageKey>,
-    waiting: WaitingSlab<KeyedCommand>,
+    waiting: WaitingSlab<StorageCommand>,
 }
 
 impl KeyScheduler {
@@ -392,7 +423,46 @@ impl KeyScheduler {
             .is_some_and(|lane| lane.waiting_head.is_some())
     }
 
-    fn enqueue(&mut self, storage_key: StorageKey, command: KeyedCommand) -> Result<()> {
+    fn ready_is_custom(&self) -> bool {
+        let Some(storage_key) = self.ready.front() else {
+            return false;
+        };
+        let lane = self.lanes.get(storage_key).expect("ready key has a lane");
+        let head = lane.waiting_head.expect("ready lane has a waiting command");
+        matches!(self.waiting.get(head), StorageCommand::Custom { .. })
+    }
+
+    fn take_ready(&mut self) -> Option<(StorageKey, StorageCommand)> {
+        let storage_key = self.ready.pop_front()?;
+        let lane = self
+            .lanes
+            .get_mut(&storage_key)
+            .expect("ready key has a lane");
+        debug_assert_eq!(lane.state, LaneState::Ready);
+        let head = lane.waiting_head.expect("ready lane has a waiting command");
+        let (command, next) = self.waiting.take(head);
+        lane.waiting_head = next;
+        if next.is_none() {
+            lane.waiting_tail = None;
+        }
+        lane.state = LaneState::Running;
+        Some((storage_key, command))
+    }
+
+    fn take_ready_custom(
+        &mut self,
+    ) -> Option<(StorageKey, super::StorageTask, WorkerResponseSender)> {
+        if !self.ready_is_custom() {
+            return None;
+        }
+        let (storage_key, command) = self.take_ready()?;
+        match command {
+            StorageCommand::Custom { task, response } => Some((storage_key, task, response)),
+            _ => unreachable!("ready custom command changed while taking scheduler head"),
+        }
+    }
+
+    fn enqueue(&mut self, storage_key: StorageKey, command: StorageCommand) -> Result<()> {
         let slot = self
             .waiting
             .insert(command)
@@ -420,25 +490,14 @@ impl KeyScheduler {
     }
 
     fn start_ready(&mut self, cache: &mut Kvkache) -> Option<RunningKeyedCommand> {
-        let storage_key = self.ready.pop_front()?;
-        let lane = self
-            .lanes
-            .get_mut(&storage_key)
-            .expect("ready key has a lane");
-        debug_assert_eq!(lane.state, LaneState::Ready);
-        let head = lane.waiting_head.expect("ready lane has a waiting command");
-        let (command, next) = self.waiting.take(head);
-        lane.waiting_head = next;
-        if next.is_none() {
-            lane.waiting_tail = None;
-        }
-        lane.state = LaneState::Running;
+        debug_assert!(!self.ready_is_custom());
+        let (storage_key, command) = self.take_ready()?;
+        let metadata = command.metadata(cache);
         let (operation, response) = command.into_parts();
-        let telemetry_operation = metric_operation(&operation);
         Some(RunningKeyedCommand {
             storage_key,
             completion: RunningCompletion::Direct(response),
-            operation: telemetry_operation,
+            operation: metadata.operation,
             started_at: Instant::now(),
             job: cache.prepare_keyed(storage_key, operation),
         })
@@ -629,7 +688,7 @@ fn finish_scheduler_lane(
             failure_state,
         } = batch;
         let operation = operation.expect("collapsed storage batch has a final mutation");
-        let telemetry_operation = metric_operation(&operation);
+        let telemetry_operation = operation.telemetry_operation();
         RunningKeyedCommand {
             storage_key,
             completion: RunningCompletion::Collapsed {
@@ -804,7 +863,35 @@ pub(super) async fn worker_loop(
             }
         }
 
+        // A task borrows the worker-local cache for its full future lifetime,
+        // so it cannot overlap an owned keyed read/write job. It still lives
+        // in the keyed lane and therefore preserves per-key ordering; only
+        // this extension action is serialized at the worker boundary.
+        if inflight.is_empty()
+            && let Some((storage_key, task, response)) = scheduler.take_ready_custom()
+        {
+            let operation = Operation::unknown();
+            let started_at = Instant::now();
+            if task.metadata().cancellation()
+                == super::StorageTaskCancellation::CancelIfDisconnected
+                && response.is_disconnected()
+            {
+                scheduler.finish_running_lane(storage_key);
+                continue;
+            }
+            let result = execute_storage_task(&mut cache, task).await;
+            let _ = response.send(Ok(result));
+            if let Some(storage_shard) = storage_shard {
+                storage_shard.record_operation(operation, started_at.elapsed());
+            }
+            scheduler.finish_running_lane(storage_key);
+            continue;
+        }
+
         while inflight.len() < io_config.max_inflight_per_worker {
+            if scheduler.ready_is_custom() {
+                break;
+            }
             let Some(running) = scheduler.start_ready(&mut cache) else {
                 break;
             };
@@ -917,10 +1004,8 @@ pub(super) async fn worker_loop(
             },
             WorkerEvent::Completed(completed) => {
                 if let Some(storage_shard) = storage_shard {
-                    storage_shard.record_operation(
-                        completed.operation,
-                        completed.started_at.elapsed(),
-                    );
+                    storage_shard
+                        .record_operation(completed.operation, completed.started_at.elapsed());
                 }
                 let include_visible_state = scheduler.has_waiting(&completed.storage_key);
                 let KeyedFinish {
@@ -1083,62 +1168,13 @@ fn admit_worker_request(
     request: WorkerRequest,
 ) -> Result<()> {
     match request {
-        WorkerRequest::Get {
+        WorkerRequest::Keyed {
             storage_key,
-            response,
-        } => scheduler.enqueue(storage_key, KeyedCommand::Get { response }),
-        WorkerRequest::Set {
-            storage_key,
-            value,
-            options,
-            response,
-        } => scheduler.enqueue(
-            storage_key,
-            KeyedCommand::Set {
-                value,
-                options,
-                response,
-            },
-        ),
-        WorkerRequest::Delete {
-            storage_key,
-            response,
-        } => scheduler.enqueue(storage_key, KeyedCommand::Delete { response }),
+            command,
+        } => scheduler.enqueue(storage_key, command),
         request => {
             *barrier = Some(request);
             Ok(())
-        }
-    }
-}
-
-async fn process_worker_barrier(
-    cache: &mut Kvkache,
-    request: WorkerRequest,
-    affinity_id: usize,
-) -> Result<bool> {
-    match request {
-        WorkerRequest::Stats { response } => {
-            let _ = response.send(Ok(WorkerResponse::Stats(format!(
-                "{} {}",
-                crate::platform::cpu_diagnostic(affinity_id),
-                cache.stats()
-            ))));
-            Ok(false)
-        }
-        WorkerRequest::Sync { response } => {
-            let result = cache.sync().await.map(|()| WorkerResponse::Synced);
-            let _ = response.send(result);
-            Ok(false)
-        }
-        WorkerRequest::Shutdown => {
-            cache.sync().await?;
-            cache.checkpoint().await?;
-            Ok(true)
-        }
-        WorkerRequest::Get { .. } | WorkerRequest::Set { .. } | WorkerRequest::Delete { .. } => {
-            Err(KvError::Worker(
-                "keyed request reached the worker barrier path".into(),
-            ))
         }
     }
 }

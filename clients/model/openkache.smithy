@@ -2,13 +2,37 @@ $version: "2"
 
 namespace openkache.client
 
-/// Marks a Smithy Long member whose domain is the complete unsigned 64-bit range.
-///
-/// Smithy's built-in Long is signed, while OpenKache uses fixed-width unsigned
-/// integers for namespace identities, revisions, and TTLs. The custom
-/// generator maps this trait to each language's unsigned 64-bit type.
-@trait(selector: "member")
-structure unsignedLong {}
+/// Input buffer shape exposed by one native FFI operation.
+enum FfiInputKind {
+    NONE = "none"
+    APPLICATION_KEY = "application_key"
+    ITEM_ID = "item_id"
+}
+
+/// Dispatch and buffer contract for an operation that exists only in the native ABI.
+@trait(selector: "enum > member")
+structure ffiOperationContract {
+    @required
+    inputKind: FfiInputKind
+
+    @required
+    acceptsValue: Boolean
+
+    @required
+    acceptsSetOptions: Boolean
+
+    @required
+    supportsProtected: Boolean
+
+    @required
+    supportsRaw: Boolean
+
+    @required
+    supportsScoped: Boolean
+
+    @required
+    dedicatedAbi: Boolean
+}
 
 /// Assigns a numeric discriminator to a native FFI enum member.
 @trait(selector: "enum > member")
@@ -62,11 +86,98 @@ structure clientDefaults {
     zstandardLevelMax: Integer
 }
 
-/// Native binding ABI identifiers shared by language adapters.
+/// Native scalar and pointer kinds used by the stable C ABI.
+enum FfiNativeType {
+    VOID = "void"
+    CLIENT_POINTER = "client_pointer"
+    RESULT_POINTER = "result_pointer"
+    U8_POINTER = "u8_pointer"
+    STRUCT_POINTER = "struct_pointer"
+    SIZE = "size"
+    UINT8 = "uint8"
+    INT32 = "int32"
+    UINT32 = "uint32"
+    UINT64 = "uint64"
+}
+
+structure FfiNativeParameter {
+    @required
+    name: String
+
+    @required
+    type: FfiNativeType
+
+    /// The pointed-to value is writable when this flag is true.
+    @required
+    mutable: Boolean
+
+    /// Required for STRUCT_POINTER parameters.
+    structureName: String
+}
+
+list FfiNativeParameters {
+    member: FfiNativeParameter
+}
+
+structure FfiNativeFunction {
+    @required
+    name: String
+
+    @required
+    returnType: FfiNativeType
+
+    /// Optional extension symbols may be absent from older native libraries.
+    optional: Boolean
+
+    parameters: FfiNativeParameters
+}
+
+list FfiNativeFunctions {
+    member: FfiNativeFunction
+}
+
+structure FfiNativeField {
+    @required
+    name: String
+
+    @required
+    type: FfiNativeType
+
+    /// The pointed-to value is writable when this flag is true.
+    @required
+    mutable: Boolean
+
+    /// Required for STRUCT_POINTER fields.
+    structureName: String
+}
+
+list FfiNativeFields {
+    member: FfiNativeField
+}
+
+structure FfiNativeStructure {
+    @required
+    name: String
+
+    @required
+    fields: FfiNativeFields
+}
+
+list FfiNativeStructures {
+    member: FfiNativeStructure
+}
+
+/// Native binding ABI identifiers and declarations shared by language adapters.
 @trait(selector: "service")
 structure ffiContract {
     @required
     abiVersion: Integer
+
+    @required
+    nativeFunctions: FfiNativeFunctions
+
+    @required
+    nativeStructures: FfiNativeStructures
 }
 
 /// Client-owned v1 value container and protection contract.
@@ -170,7 +281,345 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 4
+    abiVersion: 5,
+    nativeFunctions: [
+        {
+            name: "openkache_client_abi_version",
+            returnType: "uint32",
+            parameters: []
+        },
+        {
+            name: "openkache_client_connect",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "address", type: "u8_pointer", mutable: false },
+                { name: "addressLength", type: "size", mutable: false },
+                { name: "serverName", type: "u8_pointer", mutable: false },
+                { name: "serverNameLength", type: "size", mutable: false },
+                { name: "certificate", type: "u8_pointer", mutable: false },
+                { name: "certificateLength", type: "size", mutable: false },
+                { name: "dataProtectionKey", type: "u8_pointer", mutable: false },
+                { name: "dataProtectionKeyLength", type: "size", mutable: false },
+                { name: "compressionEnabled", type: "uint8", mutable: false },
+                { name: "compressionLevel", type: "int32", mutable: false },
+                { name: "minimumInputSize", type: "size", mutable: false },
+                { name: "minimumSavings", type: "size", mutable: false },
+                { name: "connectTimeoutMilliseconds", type: "uint64", mutable: false },
+                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_connect_ex",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                { name: "address", type: "u8_pointer", mutable: false },
+                { name: "addressLength", type: "size", mutable: false },
+                { name: "serverName", type: "u8_pointer", mutable: false },
+                { name: "serverNameLength", type: "size", mutable: false },
+                { name: "certificate", type: "u8_pointer", mutable: false },
+                { name: "certificateLength", type: "size", mutable: false },
+                { name: "clientCertificateChain", type: "u8_pointer", mutable: false },
+                { name: "clientCertificateChainLength", type: "size", mutable: false },
+                { name: "clientPrivateKey", type: "u8_pointer", mutable: false },
+                { name: "clientPrivateKeyLength", type: "size", mutable: false },
+                { name: "dataProtectionKey", type: "u8_pointer", mutable: false },
+                { name: "dataProtectionKeyLength", type: "size", mutable: false },
+                { name: "compressionEnabled", type: "uint8", mutable: false },
+                { name: "compressionLevel", type: "int32", mutable: false },
+                { name: "minimumInputSize", type: "size", mutable: false },
+                { name: "minimumSavings", type: "size", mutable: false },
+                { name: "encryption", type: "uint32", mutable: false },
+                { name: "retryMaxAttempts", type: "size", mutable: false },
+                { name: "maxInFlight", type: "size", mutable: false },
+                { name: "connectTimeoutMilliseconds", type: "uint64", mutable: false },
+                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_connect_with_options",
+            returnType: "result_pointer",
+            parameters: [
+                {
+                    name: "options",
+                    type: "struct_pointer",
+                    structureName: "FfiConnectOptions",
+                    mutable: false
+                }
+            ]
+        },
+        {
+            name: "openkache_client_execute_typed",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "keySpec", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setCondition", type: "uint32", mutable: false },
+                { name: "ttlEnabled", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_typed_with_options",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "keySpec", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setCondition", type: "uint32", mutable: false },
+                { name: "ttlEnabled", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_unary",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "body", type: "u8_pointer", mutable: false },
+                { name: "bodyLength", type: "size", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_fields",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                {
+                    name: "fields",
+                    type: "struct_pointer",
+                    structureName: "FfiOperationField",
+                    mutable: false
+                },
+                { name: "fieldCount", type: "size", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_raw",
+            optional: true,
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "itemId", type: "u8_pointer", mutable: false },
+                { name: "itemIdLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setCondition", type: "uint32", mutable: false },
+                { name: "ttlEnabled", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_with_options",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "applicationKey", type: "u8_pointer", mutable: false },
+                { name: "applicationKeyLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_raw_with_options",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "itemId", type: "u8_pointer", mutable: false },
+                { name: "itemIdLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_execute_scoped",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "operation", type: "uint32", mutable: false },
+                { name: "namespaceId", type: "uint64", mutable: false },
+                { name: "itemId", type: "u8_pointer", mutable: false },
+                { name: "itemIdLength", type: "size", mutable: false },
+                { name: "value", type: "u8_pointer", mutable: false },
+                { name: "valueLength", type: "size", mutable: false },
+                { name: "setFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_namespace_open",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "name", type: "u8_pointer", mutable: false },
+                { name: "nameLength", type: "size", mutable: false },
+                { name: "createIfMissing", type: "uint8", mutable: false },
+                { name: "policyFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_namespace_update_policy",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "namespaceId", type: "uint64", mutable: false },
+                { name: "expectedRevision", type: "uint64", mutable: false },
+                { name: "policyFlags", type: "uint8", mutable: false },
+                { name: "ttlMilliseconds", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_namespace_delete",
+            returnType: "result_pointer",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false },
+                { name: "namespaceId", type: "uint64", mutable: false },
+                { name: "expectedRevision", type: "uint64", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_namespace_descriptor_decode",
+            returnType: "uint32",
+            parameters: [
+                { name: "payload", type: "u8_pointer", mutable: false },
+                { name: "payloadLength", type: "size", mutable: false },
+                {
+                    name: "output",
+                    type: "struct_pointer",
+                    structureName: "FfiNamespaceDescriptor",
+                    mutable: true
+                }
+            ]
+        },
+        {
+            name: "openkache_client_connection_state",
+            optional: true,
+            returnType: "uint32",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_result_kind",
+            returnType: "uint32",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_result_status",
+            returnType: "uint32",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_result_data",
+            returnType: "u8_pointer",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_result_data_length",
+            returnType: "size",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: false }
+            ]
+        },
+        {
+            name: "openkache_client_result_take_client",
+            returnType: "client_pointer",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: true }
+            ]
+        },
+        {
+            name: "openkache_client_result_free",
+            returnType: "void",
+            parameters: [
+                { name: "result", type: "result_pointer", mutable: true }
+            ]
+        },
+        {
+            name: "openkache_client_free",
+            returnType: "void",
+            parameters: [
+                { name: "client", type: "client_pointer", mutable: true }
+            ]
+        }
+    ],
+    nativeStructures: [
+        {
+            name: "FfiConnectOptions",
+            fields: [
+                { name: "address", type: "u8_pointer", mutable: false },
+                { name: "addressLength", type: "size", mutable: false },
+                { name: "serverName", type: "u8_pointer", mutable: false },
+                { name: "serverNameLength", type: "size", mutable: false },
+                { name: "certificate", type: "u8_pointer", mutable: false },
+                { name: "certificateLength", type: "size", mutable: false },
+                { name: "clientCertificateChain", type: "u8_pointer", mutable: false },
+                { name: "clientCertificateChainLength", type: "size", mutable: false },
+                { name: "clientPrivateKey", type: "u8_pointer", mutable: false },
+                { name: "clientPrivateKeyLength", type: "size", mutable: false },
+                { name: "dataProtectionKey", type: "u8_pointer", mutable: false },
+                { name: "dataProtectionKeyLength", type: "size", mutable: false },
+                { name: "compressionEnabled", type: "uint8", mutable: false },
+                { name: "compressionLevel", type: "int32", mutable: false },
+                { name: "minimumInputSize", type: "size", mutable: false },
+                { name: "minimumSavings", type: "size", mutable: false },
+                { name: "encryption", type: "uint32", mutable: false },
+                { name: "connectTimeoutMilliseconds", type: "uint64", mutable: false },
+                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false },
+                { name: "retryMaxAttempts", type: "size", mutable: false },
+                { name: "maxInFlight", type: "size", mutable: false }
+            ]
+        },
+        {
+            name: "FfiOperationField",
+            fields: [
+                { name: "data", type: "u8_pointer", mutable: false },
+                { name: "length", type: "size", mutable: false },
+                { name: "present", type: "uint8", mutable: false }
+            ]
+        }
+    ]
 )
 @valueFormat(
     version: 1,
@@ -204,201 +653,6 @@ structure valueEnvelope {
 )
 service OpenKacheClient {
     version: "1"
-    operations: [
-        Ping,
-        Get,
-        Set,
-        Delete,
-        Stats,
-        Sync,
-        NamespaceOpen,
-        NamespaceUpdatePolicy,
-        NamespaceDelete
-    ]
-}
-
-operation Ping {
-    input: PingInput
-    output: PingOutput
-}
-
-operation Get {
-    input: GetInput
-    output: GetOutput
-}
-
-operation Set {
-    input: SetInput
-    output: SetOutput
-}
-
-operation Delete {
-    input: DeleteInput
-    output: DeleteOutput
-}
-
-operation Stats {
-    input: StatsInput
-    output: StatsOutput
-}
-
-operation Sync {
-    input: SyncInput
-    output: SyncOutput
-}
-
-blob ItemId
-blob Value
-
-structure PingInput {}
-structure PingOutput {}
-
-structure GetInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-
-    @required
-    itemId: ItemId
-}
-
-structure GetOutput {
-    value: Value
-}
-
-structure SetInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-
-    @required
-    itemId: ItemId
-
-    @required
-    value: Value
-
-    condition: SetCondition
-
-    expirationMode: ExpirationMode
-
-    evictionMode: EvictionMode
-
-    @unsignedLong
-    ttlMilliseconds: Long
-}
-
-structure SetOutput {
-    @required
-    outcome: SetOutcome
-}
-
-structure DeleteInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-
-    @required
-    itemId: ItemId
-}
-
-structure DeleteOutput {
-    @required
-    deleted: Boolean
-}
-
-structure StatsOutput {
-    @required
-    json: String
-}
-
-structure StatsInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-}
-
-structure SyncInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-}
-
-structure SyncOutput {}
-
-operation NamespaceOpen {
-    input: NamespaceOpenInput
-    output: NamespaceOpenOutput
-}
-
-operation NamespaceUpdatePolicy {
-    input: NamespaceUpdatePolicyInput
-    output: NamespaceUpdatePolicyOutput
-}
-
-operation NamespaceDelete {
-    input: NamespaceDeleteInput
-    output: NamespaceDeleteOutput
-}
-
-structure NamespaceOpenInput {
-    @required
-    name: String
-
-    @required
-    createIfMissing: Boolean
-
-    policy: NamespacePolicy
-}
-
-structure NamespaceOpenOutput {
-    @required
-    descriptor: NamespaceDescriptor
-
-    @required
-    created: Boolean
-}
-
-structure NamespaceUpdatePolicyInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-
-    @required
-    @unsignedLong
-    expectedRevision: Long
-
-    @required
-    policy: NamespacePolicy
-}
-
-structure NamespaceUpdatePolicyOutput {
-    @required
-    descriptor: NamespaceDescriptor
-}
-
-structure NamespaceDeleteInput {
-    @required
-    @unsignedLong
-    namespaceId: Long
-
-    @required
-    @unsignedLong
-    expectedRevision: Long
-}
-
-structure NamespaceDeleteOutput {}
-
-structure NamespaceDescriptor {
-    @required
-    @unsignedLong
-    namespaceId: Long
-
-    @required
-    @unsignedLong
-    revision: Long
-
-    @required
-    policy: NamespacePolicy
 }
 
 /// Flattened C-compatible projection used by the native client ABI.
@@ -409,15 +663,15 @@ structure NamespaceDescriptor {
 /// determine the natural C-compatible layout.
 structure FfiNamespaceDescriptor {
     @required
-    @unsignedLong
+    @openkache.protocol#unsignedLong
     namespaceId: Long
 
     @required
-    @unsignedLong
+    @openkache.protocol#unsignedLong
     revision: Long
 
     @required
-    @unsignedLong
+    @openkache.protocol#unsignedLong
     defaultTtlMs: Long
 
     @required
@@ -435,12 +689,39 @@ structure FfiNamespaceDescriptor {
 
 enum FfiOperation {
     @ffiValue(value: 16)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: false,
+        acceptsSetOptions: false,
+        supportsProtected: true,
+        supportsRaw: false,
+        supportsScoped: false,
+        dedicatedAbi: false
+    )
     GET_JSON = "get_json"
 
     @ffiValue(value: 17)
+    @ffiOperationContract(
+        inputKind: "application_key",
+        acceptsValue: true,
+        acceptsSetOptions: true,
+        supportsProtected: true,
+        supportsRaw: false,
+        supportsScoped: false,
+        dedicatedAbi: false
+    )
     SET_JSON = "set_json"
 
     @ffiValue(value: 4294967041)
+    @ffiOperationContract(
+        inputKind: "none",
+        acceptsValue: false,
+        acceptsSetOptions: false,
+        supportsProtected: true,
+        supportsRaw: true,
+        supportsScoped: false,
+        dedicatedAbi: false
+    )
     RECONNECT = "reconnect"
 }
 
@@ -474,6 +755,13 @@ enum FfiResultKind {
 
     @ffiValue(value: 9)
     NOT_STORED = "not_stored"
+
+    /// Generic operation result carrying the declared status and raw payload.
+    ///
+    /// This discriminator is shape-neutral. API-specific convenience kinds
+    /// remain explicit projections instead of being inferred from framing.
+    @ffiValue(value: 10)
+    RAW = "raw"
 }
 
 enum FfiSetCondition {
@@ -485,6 +773,17 @@ enum FfiSetCondition {
 
     @ffiValue(value: 2)
     IF_PRESENT = "if_present"
+}
+
+enum FfiKeySpec {
+    @ffiValue(value: 0)
+    TEXT = "text"
+
+    @ffiValue(value: 1)
+    BYTES = "bytes"
+
+    @ffiValue(value: 2)
+    INTEGER = "integer"
 }
 
 enum FfiConnectionState {
@@ -534,60 +833,4 @@ enum FfiNamespaceOverridePolicy {
 
     @ffiValue(value: 1)
     ALLOWED = "allowed"
-}
-
-structure NamespacePolicy {
-    @required
-    defaultExpiration: ExpirationDefault
-
-    @unsignedLong
-    defaultTtlMilliseconds: Long
-
-    @required
-    expirationOverride: OverridePolicy
-
-    @required
-    defaultEviction: EvictionDefault
-
-    @required
-    evictionOverride: OverridePolicy
-}
-
-enum SetCondition {
-    ANY = "any"
-    IF_ABSENT = "if_absent"
-    IF_PRESENT = "if_present"
-}
-
-enum ExpirationMode {
-    INHERIT = "inherit"
-    NO_EXPIRY = "no_expiry"
-    EXPLICIT_TTL = "explicit_ttl"
-}
-
-enum EvictionMode {
-    INHERIT = "inherit"
-    EVICTABLE = "evictable"
-    EVICTION_PROTECTED = "eviction_protected"
-}
-
-enum OverridePolicy {
-    ALLOWED = "allowed"
-    DISALLOWED = "disallowed"
-}
-
-enum ExpirationDefault {
-    NO_EXPIRY = "no_expiry"
-    FIXED_TTL = "fixed_ttl"
-}
-
-enum EvictionDefault {
-    EVICTABLE = "evictable"
-    EVICTION_PROTECTED = "eviction_protected"
-}
-
-enum SetOutcome {
-    CREATED = "created"
-    REPLACED = "replaced"
-    NOT_STORED = "not_stored"
 }
