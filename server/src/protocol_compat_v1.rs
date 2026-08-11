@@ -33,6 +33,16 @@ pub(super) const fn namespace_name_max_bytes() -> usize {
     compatibility_contract::NAMESPACE_NAME_MAX_BYTES
 }
 
+/// Returns whether the public [`super::Request`] facade owns a typed
+/// protocol-v1 projection for this opcode.
+///
+/// Exact request plans are also used by generic operations. The explicit
+/// generated projection marker, rather than plan presence, is therefore the
+/// only valid selector for this compatibility decoder.
+pub(super) const fn is_compatibility_operation(opcode: Opcode) -> bool {
+    openkache_protocol::compat_v1::request_projection(opcode).is_some()
+}
+
 /// Encodes a compact request through its generated declarative plan.
 pub(super) fn encode_request(request: &super::Request) -> Result<Vec<u8>> {
     let plan = contract::request_wire_plan(request.opcode).ok_or(
