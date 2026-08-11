@@ -286,7 +286,12 @@ impl<'a> RequestFrame<'a> {
     }
 }
 
-/// A decoded OpenKache request.
+/// A decoded protocol-v1 compatibility request.
+///
+/// This facade preserves the historical namespace/item/SET convenience fields.
+/// Generic operations, including exact plans without an explicit
+/// `compatibilityRequestProjection`, must use [`RequestFrame`] and the
+/// generated operation field decoder instead.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Request {
     pub opcode: Opcode,
@@ -531,7 +536,7 @@ impl Request {
 
     /// Encodes this request into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if openkache_protocol::operation::request_wire_plan(self.opcode).is_some() {
+        if compat_v1::is_compatibility_operation(self.opcode) {
             self.validate()?;
             return compat_v1::encode_request(self);
         }
@@ -542,7 +547,7 @@ impl Request {
 
     /// Encodes this request while reusing its value allocation when practical.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
-        if openkache_protocol::operation::request_wire_plan(self.opcode).is_some() {
+        if compat_v1::is_compatibility_operation(self.opcode) {
             return self.encode();
         }
         let prefix = self.encode_prefix()?;
@@ -558,7 +563,7 @@ impl Request {
         self.validate()?;
         let mut output = Vec::new();
         output.push(self.opcode as u8);
-        let encoded = if crate::contract::request_wire_plan(self.opcode).is_some() {
+        let encoded = if compat_v1::is_compatibility_operation(self.opcode) {
             compat_v1::encode_request_prefix(self, &mut output)?
         } else {
             generic::encode_request_prefix(self, &mut output)?
@@ -583,7 +588,7 @@ impl Request {
         provider: &P,
     ) -> Result<Self> {
         let header = Self::validated_header_with(frame, provider)?;
-        if crate::contract::request_wire_plan(header.opcode).is_some() {
+        if compat_v1::is_compatibility_operation(header.opcode) {
             compat_v1::decode_request(frame, header)
         } else {
             generic::decode_request(frame, header)
@@ -628,7 +633,7 @@ impl Request {
         provider: &P,
     ) -> Result<Self> {
         let header = Self::validated_header_with(&frame, provider)?;
-        if crate::contract::request_wire_plan(header.opcode).is_some() {
+        if compat_v1::is_compatibility_operation(header.opcode) {
             let decode_owned_request: fn(Vec<u8>, RequestHeader) -> Result<Self> =
                 compat_v1::decode_owned_request;
             decode_owned_request(frame, header)
@@ -675,12 +680,17 @@ impl Request {
             return Ok(None);
         };
         let opcode = Opcode::try_from(opcode_byte)?;
-        if crate::contract::request_wire_plan(opcode).is_some() {
+        if compat_v1::is_compatibility_operation(opcode) {
             // Compact requests have a semantic adapter-owned header.  Let it
             // validate packed policy bits and project compatibility errors
             // before the operation-neutral parser is asked only to delimit a
             // generic frame.
             return compat_v1::decode_header(prefix, opcode);
+        }
+        if crate::contract::request_wire_plan(opcode).is_some() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "generic exact requests must use RequestFrame or generated operation decoding",
+            ));
         }
         let layout = provider.layout_for(opcode)?;
         let Some(frame) = openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)?
@@ -711,7 +721,14 @@ impl Request {
     }
 
     fn validate(&self) -> Result<()> {
-        if crate::contract::request_wire_plan(self.opcode).is_some() {
+        if !compat_v1::is_compatibility_operation(self.opcode)
+            && crate::contract::request_wire_plan(self.opcode).is_some()
+        {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "generic exact requests must use RequestFrame or generated operation decoding",
+            ));
+        }
+        if compat_v1::is_compatibility_operation(self.opcode) {
             compat_v1::validate_request(self)
         } else {
             generic::validate_request(self)
