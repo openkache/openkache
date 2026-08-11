@@ -9,6 +9,7 @@ import {
   type Wire_Operation,
   type Wire_Operation_Descriptor,
   type Wire_Operation_Field_Plan,
+  type Wire_Request_Step,
   type Wire_Response_Framing,
 } from "../wire_types"
 import {
@@ -303,6 +304,80 @@ ${operation_modules.join("\n")}
 }
 `
   }
+  const request_wire_value = (
+    operation: Wire_Operation,
+    field_index: number,
+    value: string,
+  ): string => {
+    const field = operation.contract.request_plan?.[field_index]
+    if (field === undefined) {
+      throw new Error(
+        `${operation.name} request wire references unknown field ${field_index}`,
+      )
+    }
+    if (field.shape === "Boolean") {
+      if (value === "false") return 'b"\\x00"'
+      if (value === "true") return 'b"\\x01"'
+      throw new Error(
+        `${operation.name} boolean request wire value must be false or true`,
+      )
+    }
+    return rust_byte_string_literal(value)
+  }
+  const request_wire_steps = (
+    operation: Wire_Operation,
+    steps: readonly Wire_Request_Step[],
+  ): string =>
+    `&[${steps.map((step): string => {
+      switch (step.kind) {
+        case "fixed_field":
+          return `super::request::RequestWireStep::FixedField { field: ${step.field}, bytes: ${formatted_decimal(step.bytes)} }`
+        case "packed":
+          return `super::request::RequestWireStep::Packed {
+            fields: &[${step.fields.map((field) =>
+              `super::request::RequestWirePackedField {
+                field: ${field.field},
+                mask: ${formatted_byte(field.mask)},
+                values: &[${field.values.map((mapping) =>
+                  `super::request::RequestWirePackedValue {
+                    value: ${request_wire_value(operation, field.field, mapping.value)},
+                    bits: ${formatted_byte(mapping.bits)},
+                }`
+                ).join(", ")}],
+            }`
+            ).join(", ")}],
+            reserved_mask: ${formatted_byte(step.reserved_mask)},
+            constant_bits: ${formatted_byte(step.constant_bits)},
+        }`
+        case "byte_length_field":
+          return `super::request::RequestWireStep::ByteLengthField { field: ${step.field} }`
+        case "varuint_field":
+          return `super::request::RequestWireStep::VarUIntField { field: ${step.field} }`
+        case "conditional":
+          return `super::request::RequestWireStep::Conditional {
+            field: ${step.field},
+            equals: ${request_wire_value(operation, step.field, step.equals)},
+            steps: ${request_wire_steps(operation, step.steps)},
+        }`
+        case "constant":
+          return `super::request::RequestWireStep::Bytes { expected: &[${step.bytes
+            .map(formatted_byte)
+            .join(", ")}] }`
+        case "trailing_field":
+          return `super::request::RequestWireStep::TrailingField { field: ${step.field} }`
+      }
+    }).join(", ")}]`
+  const request_wire_metadata = operations
+    .map((operation) => {
+      const steps = operation.contract.request_wire
+      return steps === undefined
+        ? "    None,"
+        : `    Some(super::request::RequestWirePlan {
+        field_count: ${operation.contract.request_plan?.length ?? 0},
+        steps: ${request_wire_steps(operation, steps)},
+    }),`
+    })
+    .join("\n")
   // Snapshot plans before evaluating any derived descriptors. Keeping the
   // renderer on immutable IR data avoids a helper accidentally replacing a
   // plan while the generated template is being assembled.
@@ -563,6 +638,19 @@ impl OperationWireSpec {
 pub const fn operation_wire_spec(opcode: Opcode) -> OperationWireSpec {
     OPERATION_WIRE_SPECS[opcode.index()]
 }
+
+/// Returns an exact declarative request plan when the operation preserves a
+/// compact byte contract.
+pub const fn request_wire_plan(
+    opcode: Opcode,
+) -> Option<super::request::RequestWirePlan> {
+    REQUEST_WIRE_PLANS[opcode.index()]
+}
+
+/// Exact compact request plans in opcode order.
+pub const REQUEST_WIRE_PLANS: [Option<super::request::RequestWirePlan>; Opcode::COUNT] = [
+${request_wire_metadata}
+];
 
 /// Generated operation registry entry used by server bind-time validation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

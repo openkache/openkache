@@ -4,6 +4,7 @@ export * from "../wire_types"
 export {
   derive_wire_operation_descriptor,
   request_payload_bound,
+  request_wire_frame_bound,
   response_payload_bound,
 } from "../wire_descriptor"
 export {

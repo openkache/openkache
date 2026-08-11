@@ -2,24 +2,12 @@
 
 import type {
   Wire_Contract,
-  Wire_Operation_Field_Plan,
   Wire_Operation,
+  Wire_Operation_Field_Plan,
 } from "./wire_types"
-import {
-  PROTOCOL_V1_COMPACT_ROUTE_EXTENSION,
-} from "./compat_v1_types"
 
-function pascal_case(identifier: string): string {
-  return identifier
-    .split("_")
-    .map((part) => {
-      const normalized = part.toLowerCase()
-      return normalized.length === 0
-        ? ""
-        : `${normalized[0]?.toUpperCase()}${normalized.slice(1)}`
-    })
-    .join("")
-}
+const PROTOCOL_V1_REQUEST_PROJECTION_EXTENSION =
+  "openkache.protocol#operationContract.compatibilityRequestProjection"
 
 function formatted_decimal(value: number): string {
   return value.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "_")
@@ -75,10 +63,10 @@ function rust_string_literal(value: string): string {
   return `${literal}"`
 }
 
-function compact_route(
+function compatibility_request_projection(
   operation: Wire_Operation,
 ): string | undefined {
-  const value = operation.contract.extensions?.[PROTOCOL_V1_COMPACT_ROUTE_EXTENSION]
+  const value = operation.contract.extensions?.[PROTOCOL_V1_REQUEST_PROJECTION_EXTENSION]
   return typeof value === "string" ? value : undefined
 }
 
@@ -95,7 +83,7 @@ export function compatibility_request_frame_bound(
   contract: Wire_Contract,
 ): number {
   const operations = contract.operations?.filter(
-    (operation) => compact_route(operation) !== undefined,
+    (operation) => compatibility_request_projection(operation) !== undefined,
   ) ?? []
   if (operations.length === 0) return 0
 
@@ -208,32 +196,17 @@ pub const MAX_COMPATIBILITY_REQUEST_FRAME_BYTES: usize = 0;
 `
   }
   const compatibility_operations = operations.filter(
-    (operation) => compact_route(operation) !== undefined,
+    (operation) =>
+      compatibility_request_projection(operation) !== undefined,
   )
-  const role_names = [
-    ...new Set(
-      compatibility_operations.flatMap((operation) => [
-        ...(operation.contract.request_plan ?? []),
-        ...(operation.contract.response_plan ?? []),
-      ]).map((field) => field.role),
-    ),
-  ]
-  const role_variant_names = new Map<string, string>()
-  const used_role_variants = new Set<string>()
-  for (const [index, role] of role_names.entries()) {
-    let variant = pascal_case(role.replace(/[^A-Za-z0-9_]+/g, "_"))
-    if (variant.length === 0 || /^[0-9]/.test(variant)) {
-      variant = `Role${index}${variant}`
-    }
-    if (["Self", "Super", "Crate", "Where", "Loop", "Match", "Ref", "Type"].includes(variant)) {
-      variant = `Role${variant}`
-    }
-    while (used_role_variants.has(variant)) {
-      variant = `${variant}${index}`
-    }
-    used_role_variants.add(variant)
-    role_variant_names.set(role, variant)
-  }
+  const request_projection_metadata = operations
+    .map((operation) => {
+      const projection = compatibility_request_projection(operation)
+      return projection === undefined
+        ? "    None,"
+        : `    Some(${rust_string_literal(projection)}),`
+    })
+    .join("\n")
   const field_index_modules = (
     direction: "request" | "response",
   ): string => {
@@ -261,153 +234,25 @@ ${constants.join("\n")}
 }
 `
   }
-  const field_index_lookup_arms = compatibility_operations.flatMap((operation) => {
-    const render_direction = (
-      direction: "request" | "response",
-      fields: readonly Wire_Operation_Field_Plan[] | undefined,
-    ): string[] => {
-      const ordinals = new Map<string, number>()
-      return (fields ?? []).map((field) => {
-        const ordinal = ordinals.get(field.role) ?? 0
-        ordinals.set(field.role, ordinal + 1)
-        const constant =
-          `${rust_const_identifier(operation.name)}_${rust_const_identifier(field.role)}_${ordinal}`
-        const direction_variant =
-          direction === "request" ? "Request" : "Response"
-        return `        (Opcode::${operation.name}, OperationFieldDirection::${direction_variant}, OperationFieldRole::${role_variant_names.get(field.role)}, ${ordinal}) => Some(${direction}_fields::${constant}),`
-      })
-    }
-    return [
-      ...render_direction("request", operation.contract.request_plan),
-      ...render_direction("response", operation.contract.response_plan),
-    ]
-  }).join("\n")
-  const field_count_lookup_arms = compatibility_operations.flatMap((operation) => {
-    const render_direction = (
-      direction: "request" | "response",
-      fields: readonly Wire_Operation_Field_Plan[] | undefined,
-    ): string[] => {
-      const counts = new Map<string, number>()
-      for (const field of fields ?? []) {
-        counts.set(field.role, (counts.get(field.role) ?? 0) + 1)
-      }
-      return [...counts].map(
-        ([role, count]) =>
-          `        (Opcode::${operation.name}, OperationFieldDirection::${direction === "request" ? "Request" : "Response"}, OperationFieldRole::${role_variant_names.get(role)}) => ${count},`,
-      )
-    }
-    return [
-      ...render_direction("request", operation.contract.request_plan),
-      ...render_direction("response", operation.contract.response_plan),
-    ]
-  }).join("\n")
-  const compatibility_routes = [
-    ...new Set(
-      operations
-        .map((operation) => compact_route(operation))
-        .filter((route): route is string => route !== undefined),
-    ),
-  ]
   return `${render_rust_semantic_constants(contract)}
+/// Explicit public request projections owned by this protocol-v1 adapter.
+///
+/// A missing projection means that an exact request plan, if present, is
+/// generic and must not enter the namespace/item/SET convenience facade.
+pub const REQUEST_PROJECTIONS: [Option<&'static str>; crate::Opcode::COUNT] = [
+${request_projection_metadata}
+];
+
+/// Returns the explicitly declared public request projection for one opcode.
+pub const fn request_projection(opcode: crate::Opcode) -> Option<&'static str> {
+    REQUEST_PROJECTIONS[opcode.index()]
+}
+
 /// Conservative maximum complete request frame size contributed by the
 /// protocol-v1 compatibility adapter.
 pub const MAX_COMPATIBILITY_REQUEST_FRAME_BYTES: usize =
     ${formatted_decimal(compatibility_request_frame_bound(contract))};
 
-/// Generated protocol-v1 compatibility projection metadata.
-///
-/// This table is emitted separately from the canonical wire descriptor. Generic
-/// operation dispatch never consumes it; the v1 adapter uses it only when an
-/// explicitly compatible operation is registered.
-use super::Opcode;
-
-/// Selects the request or response side of a protocol-v1 compatibility field
-/// plan. This direction is an adapter lookup concern and is intentionally not
-/// part of the canonical generic operation contract.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationFieldDirection {
-    Request,
-    Response,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationCompactV1Route {
-${compatibility_routes
-  .map((route) => `    ${pascal_case(route)},`)
-  .join("\n")}
-}
-
-pub const fn route_for_opcode(
-    opcode: Opcode,
-) -> Option<OperationCompactV1Route> {
-    match opcode {
-${operations
-  .filter((operation) => compact_route(operation) !== undefined)
-  .map(
-    (operation) =>
-      `        Opcode::${operation.name} => Some(OperationCompactV1Route::${pascal_case(compact_route(operation)!)}),`,
-  )
-  .join("\n")}
-        _ => None,
-    }
-}
-
-/// Generated numeric key for a protocol-v1 compatibility role.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(usize)]
-pub enum OperationFieldRole {
-${role_names
-  .map((role) => `    ${role_variant_names.get(role)},`)
-  .join("\n")}
-}
-
-impl OperationFieldRole {
-    pub const fn index(self) -> usize {
-        self as usize
-    }
-
-    pub const fn name(self) -> &'static str {
-        match self {
-${role_names
-  .map((role) => `            Self::${role_variant_names.get(role)} => ${rust_string_literal(role)},`)
-  .join("\n")}
-        }
-    }
-
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-${role_names
-  .map((role) => `            ${rust_string_literal(role)} => Some(Self::${role_variant_names.get(role)}),`)
-  .join("\n")}
-            _ => None,
-        }
-    }
-}
-
 ${field_index_modules("request")}${field_index_modules("response")}
-/// Counts one compatibility role in a generated operation plan.
-pub const fn operation_field_count(
-    opcode: Opcode,
-    direction: OperationFieldDirection,
-    role: OperationFieldRole,
-) -> usize {
-    match (opcode, direction, role) {
-${field_count_lookup_arms}
-        _ => 0,
-    }
-}
-
-/// Returns a generated numeric compatibility field index.
-pub const fn operation_field_index(
-    opcode: Opcode,
-    direction: OperationFieldDirection,
-    role: OperationFieldRole,
-    occurrence: usize,
-) -> Option<usize> {
-    match (opcode, direction, role, occurrence) {
-${field_index_lookup_arms}
-        _ => None,
-    }
-}
 `
 }

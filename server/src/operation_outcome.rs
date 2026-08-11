@@ -8,7 +8,7 @@
 use smallvec::SmallVec;
 
 use super::operation_contract::OperationStatus;
-use openkache_protocol::OwnedRange;
+use openkache_protocol::{OwnedRange, SegmentedValue};
 
 const INLINE_OPERATION_VALUE_BYTES: usize = 32;
 
@@ -21,6 +21,7 @@ const INLINE_OPERATION_VALUE_BYTES: usize = 32;
 pub(super) enum OperationValue {
     Inline(SmallVec<[u8; INLINE_OPERATION_VALUE_BYTES]>),
     Owned(OwnedRange),
+    Segmented(SegmentedValue),
 }
 
 impl OperationValue {
@@ -34,15 +35,18 @@ impl OperationValue {
     }
 
     pub(super) fn len(&self) -> usize {
-        self.as_ref().len()
-    }
-}
-
-impl AsRef<[u8]> for OperationValue {
-    fn as_ref(&self) -> &[u8] {
         match self {
-            Self::Inline(value) => value,
-            Self::Owned(value) => value.as_ref(),
+            Self::Inline(value) => value.len(),
+            Self::Owned(value) => value.len(),
+            Self::Segmented(value) => value.len(),
+        }
+    }
+
+    pub(super) fn contiguous(&self) -> Option<&[u8]> {
+        match self {
+            Self::Inline(value) => Some(value),
+            Self::Owned(value) => Some(value.as_ref()),
+            Self::Segmented(_) => None,
         }
     }
 }
@@ -56,6 +60,12 @@ impl From<Vec<u8>> for OperationValue {
 impl From<OwnedRange> for OperationValue {
     fn from(value: OwnedRange) -> Self {
         Self::Owned(value)
+    }
+}
+
+impl From<SegmentedValue> for OperationValue {
+    fn from(value: SegmentedValue) -> Self {
+        Self::Segmented(value)
     }
 }
 

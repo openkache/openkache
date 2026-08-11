@@ -7,6 +7,7 @@
 
 use std::ops::Range;
 
+use bytes::Bytes;
 use smallvec::SmallVec;
 
 use crate::{
@@ -20,23 +21,43 @@ use crate::{
 /// transfer payload ownership without shifting bytes to offset zero.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnedRange {
-    buffer: Vec<u8>,
+    buffer: Bytes,
     range: Range<usize>,
 }
 
 impl OwnedRange {
     /// Retains a validated logical range of an owned buffer.
     pub fn new(buffer: Vec<u8>, range: Range<usize>) -> Option<Self> {
-        (range.start <= range.end && range.end <= buffer.len()).then_some(Self { buffer, range })
+        Self::from_bytes(Bytes::from(buffer), range)
     }
 
     /// Owns one complete buffer.
     pub fn whole(buffer: Vec<u8>) -> Self {
         let end = buffer.len();
         Self {
+            buffer: Bytes::from(buffer),
+            range: 0..end,
+        }
+    }
+
+    /// Retains a logical range of a transport-neutral shared byte buffer.
+    pub fn from_bytes(buffer: Bytes, range: Range<usize>) -> Option<Self> {
+        (range.start <= range.end && range.end <= buffer.len())
+            .then_some(Self { buffer, range })
+    }
+
+    /// Retains one complete transport-neutral shared byte buffer.
+    pub fn whole_bytes(buffer: Bytes) -> Self {
+        let end = buffer.len();
+        Self {
             buffer,
             range: 0..end,
         }
+    }
+
+    /// Retains one complete static byte string without allocation.
+    pub fn from_static(buffer: &'static [u8]) -> Self {
+        Self::whole_bytes(Bytes::from_static(buffer))
     }
 
     /// Returns the visible bytes.
@@ -56,9 +77,37 @@ impl OwnedRange {
         self.range.is_empty()
     }
 
-    /// Recovers the buffer and logical range without copying.
+    /// Narrows this owner to a range relative to its currently visible bytes.
+    pub fn slice(self, range: Range<usize>) -> Option<Self> {
+        if range.start > range.end || range.end > self.range.len() {
+            return None;
+        }
+        let start = self.range.start.checked_add(range.start)?;
+        let end = self.range.start.checked_add(range.end)?;
+        Some(Self {
+            buffer: self.buffer,
+            range: start..end,
+        })
+    }
+
+    /// Recovers a vector and logical range.
+    ///
+    /// Vector-backed values retain their original allocation and range.
+    /// Erased shared buffers are materialized only at this explicit
+    /// vector-only compatibility boundary.
     pub fn into_parts(self) -> (Vec<u8>, Range<usize>) {
-        (self.buffer, self.range)
+        (self.buffer.into(), self.range)
+    }
+
+    /// Materializes only the visible bytes as a standalone vector.
+    pub fn into_vec(self) -> Vec<u8> {
+        let (mut buffer, range) = self.into_parts();
+        if range.start == 0 && range.end == buffer.len() {
+            return buffer;
+        }
+        buffer.copy_within(range.clone(), 0);
+        buffer.truncate(range.len());
+        buffer
     }
 }
 
@@ -260,6 +309,169 @@ pub enum ResponseSegment {
     Payload(OwnedRange),
 }
 
+/// One composite value that retains its owned child payloads.
+///
+/// The structural encoding is preserved until the transport asks for wire
+/// segments. Generated response plans can therefore validate every nested
+/// child without coalescing the complete value.
+#[derive(Debug, Eq, PartialEq)]
+pub struct SegmentedValue {
+    encoded_len: usize,
+    encoding: SegmentedEncoding,
+}
+
+/// One contiguous or already-segmented child of a composite codec value.
+#[derive(Debug, Eq, PartialEq)]
+pub enum SegmentedPayload {
+    /// A single owned payload range.
+    Contiguous(OwnedRange),
+    /// A nested list, map, union, or future composite value.
+    Nested(Box<SegmentedValue>),
+}
+
+/// Canonical structural encoding retained by a segmented value.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum SegmentedEncoding {
+    List(SmallVec<[SegmentedPayload; 8]>),
+    Map(SmallVec<[(SegmentedPayload, SegmentedPayload); 4]>),
+    Union {
+        tag: u8,
+        payload: SegmentedPayload,
+    },
+}
+
+impl SegmentedPayload {
+    /// Returns the exact encoded child length.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Contiguous(value) => value.len(),
+            Self::Nested(value) => value.len(),
+        }
+    }
+
+    /// Returns whether the encoded child is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub(crate) fn append_to(self, segments: &mut SmallVec<[ResponseSegment; 8]>) {
+        match self {
+            Self::Contiguous(value) => segments.push(ResponseSegment::Payload(value)),
+            Self::Nested(value) => value.append_segments(segments),
+        }
+    }
+}
+
+impl From<OwnedRange> for SegmentedPayload {
+    fn from(value: OwnedRange) -> Self {
+        Self::Contiguous(value)
+    }
+}
+
+impl From<Vec<u8>> for SegmentedPayload {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Contiguous(OwnedRange::whole(value))
+    }
+}
+
+impl From<SegmentedValue> for SegmentedPayload {
+    fn from(value: SegmentedValue) -> Self {
+        Self::Nested(Box::new(value))
+    }
+}
+
+impl SegmentedValue {
+    pub(crate) fn new(encoded_len: usize, encoding: SegmentedEncoding) -> Result<Self> {
+        validate_value_length(encoded_len)?;
+        Ok(Self {
+            encoded_len,
+            encoding,
+        })
+    }
+
+    /// Returns the generic codec that validated and framed this value.
+    pub const fn codec(&self) -> crate::codec::CodecKind {
+        match &self.encoding {
+            SegmentedEncoding::List(_) => crate::codec::CodecKind::List,
+            SegmentedEncoding::Map(_) => crate::codec::CodecKind::Map,
+            SegmentedEncoding::Union { .. } => crate::codec::CodecKind::Union,
+        }
+    }
+
+    pub(crate) const fn encoding(&self) -> &SegmentedEncoding {
+        &self.encoding
+    }
+
+    /// Returns the exact encoded byte count without coalescing the segments.
+    pub const fn len(&self) -> usize {
+        self.encoded_len
+    }
+
+    /// Returns whether the encoded value is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.encoded_len == 0
+    }
+
+    /// Moves the ordered wire segments into the outer response frame.
+    pub fn into_segments(self) -> SmallVec<[ResponseSegment; 8]> {
+        let mut segments = SmallVec::new();
+        self.append_segments(&mut segments);
+        segments
+    }
+
+    /// Appends this value directly to an existing response write plan.
+    ///
+    /// This avoids an intermediate segment collection when a generated field
+    /// is already being framed with sibling fields.
+    pub fn append_segments(self, segments: &mut SmallVec<[ResponseSegment; 8]>) {
+        let encoded_len = self.encoded_len;
+        let first_segment = segments.len();
+        match self.encoding {
+            SegmentedEncoding::List(values) => {
+                let (count, count_len) = encode_varuint(values.len() as u64);
+                segments.push(ResponseSegment::inline(&count[..count_len]));
+                for value in values {
+                    append_segmented_payload(segments, value);
+                }
+            }
+            SegmentedEncoding::Map(entries) => {
+                let (count, count_len) = encode_varuint(entries.len() as u64);
+                segments.push(ResponseSegment::inline(&count[..count_len]));
+                for (key, value) in entries {
+                    append_segmented_payload(segments, key);
+                    append_segmented_payload(segments, value);
+                }
+            }
+            SegmentedEncoding::Union { tag, payload } => {
+                let length = u32::try_from(payload.len())
+                    .expect("validated segmented union payload length fits u32");
+                let mut prefix = SmallVec::<[u8; 32]>::new();
+                prefix.push(tag);
+                prefix.extend_from_slice(&length.to_be_bytes());
+                segments.push(ResponseSegment::Inline(prefix));
+                payload.append_to(segments);
+            }
+        }
+        debug_assert_eq!(
+            segments[first_segment..]
+                .iter()
+                .map(ResponseSegment::len)
+                .sum::<usize>(),
+            encoded_len
+        );
+    }
+}
+
+fn append_segmented_payload(
+    segments: &mut SmallVec<[ResponseSegment; 8]>,
+    payload: SegmentedPayload,
+) {
+    let length =
+        u32::try_from(payload.len()).expect("validated segmented child payload length fits u32");
+    segments.push(ResponseSegment::inline(&length.to_be_bytes()));
+    payload.append_to(segments);
+}
+
 impl ResponseSegment {
     /// Returns the visible wire bytes.
     pub fn as_slice(&self) -> &[u8] {
@@ -300,6 +512,17 @@ impl ResponseParts {
     {
         let segments: SmallVec<[ResponseSegment; 8]> =
             segments.into_iter().map(Into::into).collect();
+        Self::from_segments(status, segments)
+    }
+
+    /// Encodes a response header over an already-owned segment collection.
+    ///
+    /// Callers that build generic framing segments incrementally can transfer
+    /// that collection without allocating and moving it into another buffer.
+    pub fn from_segments(
+        status: Status,
+        segments: SmallVec<[ResponseSegment; 8]>,
+    ) -> Result<Self> {
         let payload_len = segments.iter().try_fold(0usize, |total, segment| {
             total
                 .checked_add(segment.len())
@@ -358,17 +581,12 @@ impl ResponseParts {
     /// transport can therefore submit or advance one segment sequence without
     /// maintaining separate header, payload, and segmented-body paths.
     pub fn into_segments(self) -> SmallVec<[ResponseSegment; 8]> {
-        let segment_count = self
-            .segments
-            .len()
-            .saturating_add(1)
-            .saturating_add(usize::from(!self.payload.is_empty()));
-        let mut segments = SmallVec::with_capacity(segment_count);
-        segments.push(ResponseSegment::Inline(self.header));
+        let mut segments = self.segments;
+        segments.reserve(1 + usize::from(!self.payload.is_empty()));
+        segments.insert(0, ResponseSegment::Inline(self.header));
         if !self.payload.is_empty() {
-            segments.push(ResponseSegment::Payload(self.payload.into()));
+            segments.insert(1, ResponseSegment::Payload(self.payload.into()));
         }
-        segments.extend(self.segments);
         segments
     }
 

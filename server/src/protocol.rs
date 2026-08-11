@@ -6,7 +6,7 @@
 pub use crate::contract::{WireRequestLayout, WireRequestStep, wire_request_layout};
 use openkache_protocol::{
     ITEM_ID_BYTES, MAX_VALUE_BYTES, MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES, REQUEST_FIXED_BYTES,
-    RequestFrameHeader,
+    OwnedRange, RequestFrameHeader,
 };
 pub use openkache_protocol::{ItemId, Opcode, Response, Status};
 
@@ -37,9 +37,11 @@ pub(crate) const fn max_request_frame_bytes() -> usize {
     let generic = REQUEST_FIXED_BYTES
         .saturating_add(MAX_VARUINT_BYTES)
         .saturating_add(crate::contract::MAX_GENERIC_REQUEST_PAYLOAD_BYTES);
+    let exact = crate::contract::MAX_REQUEST_WIRE_FRAME_BYTES;
     let compatibility = openkache_protocol::compat_v1::MAX_COMPATIBILITY_REQUEST_FRAME_BYTES;
-    if generic > compatibility {
-        generic
+    let generic_or_exact = if generic > exact { generic } else { exact };
+    if generic_or_exact > compatibility {
+        generic_or_exact
     } else {
         compatibility
     }
@@ -48,7 +50,6 @@ pub(crate) const fn max_request_frame_bytes() -> usize {
 /// A validated variable-length request header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestHeader {
-    adapter: RequestAdapter,
     opcode: Opcode,
     encoded_len: usize,
     value_len: usize,
@@ -64,145 +65,26 @@ pub struct RequestHeader {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CompatibilityHeaderMetadata {
     namespace_id: Option<u64>,
-    item_id_start: Option<usize>,
     item_id_count: usize,
-    set_options: SetOptions,
     has_ttl: bool,
 }
 
-/// The selected parser boundary for a request frame.
+/// Supplies operation-neutral request framing at the composition boundary.
 ///
-/// The header carries this decision so the server hot path does not classify
-/// the opcode a second time after frame admission.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RequestAdapter {
-    name: &'static str,
-    request_frame_layout: fn(Opcode) -> WireResult<WireRequestLayout>,
-    decode_header: fn(&[u8], Opcode, RequestAdapter) -> Result<Option<RequestHeader>>,
-    encode_request_prefix: fn(&Request, &mut Vec<u8>) -> Result<bool>,
-    validate_request: fn(&Request) -> Result<()>,
-    decode_request: fn(&[u8], RequestHeader) -> Result<Request>,
-    decode_owned_request: fn(Vec<u8>, RequestHeader) -> Result<Request>,
-    decode_server_request: fn(Vec<u8>, RequestHeader) -> Result<ServerRequest>,
-}
-
-impl RequestAdapter {
-    /// Generic generated framing. The adapter owns no domain route metadata.
-    #[allow(non_upper_case_globals)]
-    pub(crate) const Generic: Self = Self {
-        name: "generic",
-        request_frame_layout: generic::request_frame_layout,
-        decode_header: generic::decode_header,
-        encode_request_prefix: generic::encode_request_prefix,
-        validate_request: generic::validate_request,
-        decode_request: generic::decode_request,
-        decode_owned_request: generic::decode_owned_request,
-        decode_server_request: generic::decode_server_request,
-    };
-
-    /// Historical protocol-v1 compact framing.
-    ///
-    /// This remains a compatibility adapter rather than a generic operation
-    /// variant. A future wire family can add another descriptor without
-    /// changing the request parser's control flow.
-    #[allow(non_upper_case_globals)]
-    pub(crate) const Compatibility: Self = Self {
-        name: "compatibility-v1",
-        request_frame_layout: compat_v1::request_frame_layout,
-        decode_header: compat_v1::decode_header,
-        encode_request_prefix: compat_v1::encode_request_prefix,
-        validate_request: compat_v1::validate_request,
-        decode_request: compat_v1::decode_request,
-        decode_owned_request: compat_v1::decode_owned_request,
-        decode_server_request: compat_v1::decode_server_request,
-    };
-
-    fn request_frame_layout(self, opcode: Opcode) -> WireResult<WireRequestLayout> {
-        (self.request_frame_layout)(opcode)
-    }
-
-    fn decode_header(self, prefix: &[u8], opcode: Opcode) -> Result<Option<RequestHeader>> {
-        (self.decode_header)(prefix, opcode, self)
-    }
-
-    fn encode_request_prefix(self, request: &Request, output: &mut Vec<u8>) -> Result<bool> {
-        (self.encode_request_prefix)(request, output)
-    }
-
-    fn validate_request(self, request: &Request) -> Result<()> {
-        (self.validate_request)(request)
-    }
-
-    fn decode_request(self, frame: &[u8], header: RequestHeader) -> Result<Request> {
-        (self.decode_request)(frame, header)
-    }
-
-    fn decode_owned_request(self, frame: Vec<u8>, header: RequestHeader) -> Result<Request> {
-        (self.decode_owned_request)(frame, header)
-    }
-
-    fn decode_server_request(self, frame: Vec<u8>, header: RequestHeader) -> Result<ServerRequest> {
-        (self.decode_server_request)(frame, header)
-    }
-}
-
-impl PartialEq for RequestAdapter {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
-impl Eq for RequestAdapter {}
-
-/// Supplies the request adapter selected at the composition boundary.
-///
-/// The parser consumes this provider result and never needs to know how a
-/// route was classified. The default implementation is generated from the
-/// Smithy compatibility projection; tests and future protocol versions can
-/// supply another provider without changing generic framing code.
+/// Transport code receives only byte-consumption metadata. It never selects a
+/// semantic adapter or learns whether an opcode has a historical public
+/// convenience projection.
 pub(crate) trait FrameLayoutProvider: Send + Sync {
-    fn adapter_for(&self, opcode: Opcode) -> RequestAdapter;
+    fn layout_for(&self, opcode: Opcode) -> WireResult<WireRequestLayout>;
 }
-
-#[derive(Clone, Copy)]
-struct FrameAdapterRegistration {
-    adapter: RequestAdapter,
-    accepts: fn(Opcode) -> bool,
-}
-
-impl FrameAdapterRegistration {
-    const fn new(adapter: RequestAdapter, accepts: fn(Opcode) -> bool) -> Self {
-        Self { adapter, accepts }
-    }
-}
-
-fn accepts_any_opcode(_opcode: Opcode) -> bool {
-    true
-}
-
-/// Generated adapter registry ordered from the most specific projection to
-/// the generic fallback. The parser consumes this table through the provider;
-/// adding another wire family adds one registration and leaves framing logic
-/// unchanged.
-const FRAME_ADAPTER_REGISTRY: &[FrameAdapterRegistration] = &[
-    FrameAdapterRegistration::new(
-        RequestAdapter::Compatibility,
-        compat_v1::compatibility_route_for_opcode,
-    ),
-    FrameAdapterRegistration::new(RequestAdapter::Generic, accepts_any_opcode),
-];
 
 /// Generated provider used by the public server protocol facade.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct GeneratedFrameLayoutProvider;
 
 impl FrameLayoutProvider for GeneratedFrameLayoutProvider {
-    fn adapter_for(&self, opcode: Opcode) -> RequestAdapter {
-        FRAME_ADAPTER_REGISTRY
-            .iter()
-            .find(|registration| (registration.accepts)(opcode))
-            .map(|registration| registration.adapter)
-            .expect("generated frame adapter registry must have a fallback")
+    fn layout_for(&self, opcode: Opcode) -> WireResult<WireRequestLayout> {
+        Ok(wire_request_layout(opcode))
     }
 }
 
@@ -210,13 +92,11 @@ const DEFAULT_FRAME_LAYOUT_PROVIDER: GeneratedFrameLayoutProvider = GeneratedFra
 
 impl RequestHeader {
     pub(super) const fn generic(
-        adapter: RequestAdapter,
         opcode: Opcode,
         encoded_len: usize,
         value_len: usize,
     ) -> Self {
         Self {
-            adapter,
             opcode,
             encoded_len,
             value_len,
@@ -225,26 +105,20 @@ impl RequestHeader {
     }
 
     pub(super) const fn compatibility(
-        adapter: RequestAdapter,
         opcode: Opcode,
         encoded_len: usize,
         value_len: usize,
         namespace_id: Option<u64>,
-        item_id_start: Option<usize>,
         item_id_count: usize,
-        set_options: SetOptions,
         has_ttl: bool,
     ) -> Self {
         Self {
-            adapter,
             opcode,
             encoded_len,
             value_len,
             compatibility: Some(CompatibilityHeaderMetadata {
                 namespace_id,
-                item_id_start,
                 item_id_count,
-                set_options,
                 has_ttl,
             }),
         }
@@ -294,20 +168,6 @@ impl RequestHeader {
         }
     }
 
-    pub(super) const fn item_id_start(self) -> Option<usize> {
-        match self.compatibility {
-            Some(metadata) => metadata.item_id_start,
-            None => None,
-        }
-    }
-
-    pub(super) const fn set_options(self) -> SetOptions {
-        match self.compatibility {
-            Some(metadata) => metadata.set_options,
-            None => SetOptions::NONE,
-        }
-    }
-
     /// Reports the complete frame length once all metadata is available.
     pub fn frame_len(self, _prefix: &[u8]) -> Result<Option<usize>> {
         self.encoded_len
@@ -336,7 +196,7 @@ impl<'a> RequestFrame<'a> {
             return Ok(None);
         };
         let opcode = Opcode::try_from(opcode_byte)?;
-        let layout = provider.adapter_for(opcode).request_frame_layout(opcode)?;
+        let layout = provider.layout_for(opcode)?;
         Ok(Some(layout))
     }
 
@@ -354,6 +214,18 @@ impl<'a> RequestFrame<'a> {
             return Ok(None);
         };
         openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)
+    }
+
+    /// Returns the exact additional metadata bound for an explicitly selected
+    /// layout provider.
+    pub(crate) fn header_bytes_needed_with<P: FrameLayoutProvider + ?Sized>(
+        prefix: &[u8],
+        provider: &P,
+    ) -> WireResult<usize> {
+        let Some(layout) = Self::layout_with(prefix, provider)? else {
+            return Ok(1);
+        };
+        openkache_protocol::OpaqueRequestFrame::header_bytes_needed(prefix, layout)
     }
 
     /// Reports the complete frame length once enough metadata is available.
@@ -428,73 +300,42 @@ pub struct Request {
     pub create_if_missing: bool,
 }
 
-/// Server-only request envelope.
+/// One transport-owned request passed to every API decoder.
 ///
-/// Generic opaque/ordered requests retain their original frame allocation and
-/// expose the payload range to the generated operation view. Compact v1
-/// requests are materialized into [`Request`] by the compatibility adapter.
-/// Keeping this distinction here avoids forcing the public semantic request
-/// type to own a second payload copy on the generic hot path.
-pub(crate) enum ServerRequest {
-    Generic {
-        opcode: Opcode,
-        frame: Vec<u8>,
-        payload_range: (usize, usize),
-    },
-    Compatibility(Request),
+/// Prefix and payload ownership are retained independently. The envelope does
+/// not classify the operation by wire family or materialize a semantic
+/// request; generated or API-owned field projection happens only after
+/// registration selects the decoder.
+pub(crate) struct ServerRequest {
+    opcode: Opcode,
+    prefix: Vec<u8>,
+    payload: OwnedRange,
 }
 
 impl ServerRequest {
-    pub(crate) fn from_request(request: Request) -> Self {
-        Self::Compatibility(request)
-    }
-
-    pub(crate) fn opcode(&self) -> Opcode {
-        match self {
-            Self::Generic { opcode, .. } => *opcode,
-            Self::Compatibility(request) => request.opcode,
+    fn new(opcode: Opcode, prefix: Vec<u8>, payload: OwnedRange) -> Self {
+        Self {
+            opcode,
+            prefix,
+            payload,
         }
     }
 
-    pub(crate) fn into_request(self) -> Request {
-        match self {
-            Self::Compatibility(request) => request,
-            Self::Generic { .. } => {
-                unreachable!("generic requests never enter the compatibility adapter")
-            }
-        }
+    pub(crate) const fn opcode(&self) -> Opcode {
+        self.opcode
     }
 
-    /// Returns the operation discriminator and an owned body.
-    ///
-    /// The normal generic hot path consumes [`Self::into_generic_frame`]
-    /// without copying. This fallback is retained for small adapter/test
-    /// callers that already own a semantic request.
-    pub(crate) fn into_generic_parts(self) -> (Opcode, Vec<u8>) {
-        match self {
-            Self::Compatibility(request) => (request.opcode, request.value),
-            Self::Generic {
-                opcode,
-                frame,
-                payload_range: (start, end),
-            } => (opcode, frame[start..end].to_vec()),
-        }
+    /// Moves the retained payload into a generated field view.
+    pub(crate) fn into_payload(self) -> (Opcode, OwnedRange) {
+        (self.opcode, self.payload)
     }
 
-    pub(crate) fn has_generic_frame(&self) -> bool {
-        matches!(self, Self::Generic { .. })
+    /// Moves the complete retained wire parts into the generated request-plan
+    /// decoder.
+    pub(crate) fn into_wire_parts(self) -> (Opcode, Vec<u8>, OwnedRange) {
+        (self.opcode, self.prefix, self.payload)
     }
 
-    pub(crate) fn into_generic_frame(self) -> Option<(Opcode, Vec<u8>, usize, usize)> {
-        match self {
-            Self::Generic {
-                opcode,
-                frame,
-                payload_range: (start, end),
-            } => Some((opcode, frame, start, end)),
-            Self::Compatibility(_) => None,
-        }
-    }
 }
 
 impl Request {
@@ -505,7 +346,7 @@ impl Request {
     /// facade fields. The operation contract still validates the framing and
     /// generated field shape before the request is returned.
     pub fn new_generic(opcode: Opcode, value: Vec<u8>) -> Result<Self> {
-        if DEFAULT_FRAME_LAYOUT_PROVIDER.adapter_for(opcode) != RequestAdapter::Generic {
+        if crate::contract::request_wire_plan(opcode).is_some() {
             return Err(ProtocolError::InvalidRequestShape {
                 opcode,
                 expected_item_id: 0,
@@ -534,7 +375,7 @@ impl Request {
     /// bytes in plan order; compatibility operations intentionally reject this
     /// constructor and use their typed adapter instead.
     pub fn new_generic_fields(opcode: Opcode, fields: Vec<Option<Vec<u8>>>) -> Result<Self> {
-        if DEFAULT_FRAME_LAYOUT_PROVIDER.adapter_for(opcode) != RequestAdapter::Generic {
+        if crate::contract::request_wire_plan(opcode).is_some() {
             return Err(ProtocolError::InvalidRequestShape {
                 opcode,
                 expected_item_id: 0,
@@ -690,6 +531,10 @@ impl Request {
 
     /// Encodes this request into one complete stream frame.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        if openkache_protocol::operation::request_wire_plan(self.opcode).is_some() {
+            self.validate()?;
+            return compat_v1::encode_request(self);
+        }
         let mut frame = self.encode_prefix()?;
         frame.extend_from_slice(&self.value);
         Ok(frame)
@@ -697,6 +542,9 @@ impl Request {
 
     /// Encodes this request while reusing its value allocation when practical.
     pub fn into_encoded(mut self) -> Result<Vec<u8>> {
+        if openkache_protocol::operation::request_wire_plan(self.opcode).is_some() {
+            return self.encode();
+        }
         let prefix = self.encode_prefix()?;
         let value_len = self.value.len();
         self.value.reserve(prefix.len());
@@ -710,10 +558,14 @@ impl Request {
         self.validate()?;
         let mut output = Vec::new();
         output.push(self.opcode as u8);
-        let adapter = DEFAULT_FRAME_LAYOUT_PROVIDER.adapter_for(self.opcode);
-        if !adapter.encode_request_prefix(self, &mut output)? {
+        let encoded = if crate::contract::request_wire_plan(self.opcode).is_some() {
+            compat_v1::encode_request_prefix(self, &mut output)?
+        } else {
+            generic::encode_request_prefix(self, &mut output)?
+        };
+        if !encoded {
             return Err(ProtocolError::InvalidFieldSequence(
-                "request adapter did not encode the modeled operation",
+                "generated request plan did not encode the modeled operation",
             ));
         }
         Ok(output)
@@ -731,7 +583,11 @@ impl Request {
         provider: &P,
     ) -> Result<Self> {
         let header = Self::validated_header_with(frame, provider)?;
-        header.adapter.decode_request(frame, header)
+        if crate::contract::request_wire_plan(header.opcode).is_some() {
+            compat_v1::decode_request(frame, header)
+        } else {
+            generic::decode_request(frame, header)
+        }
     }
 
     /// Decodes a request while reusing the frame allocation for its value.
@@ -739,24 +595,32 @@ impl Request {
         Self::decode_owned_impl(frame, &DEFAULT_FRAME_LAYOUT_PROVIDER)
     }
 
-    /// Decodes a server request after the frame boundary has been checked.
+    /// Decodes independently owned request-prefix and payload buffers.
     ///
-    /// The server's generated operation view performs the single generic
-    /// ordered-field validation/decode pass. Keeping this internal entry point
-    /// separate preserves the public `decode_owned` validation contract while
-    /// avoiding a second scan on the request hot path.
-    #[allow(dead_code)]
-    pub(crate) fn decode_owned_for_server(frame: Vec<u8>) -> Result<ServerRequest> {
-        Self::decode_owned_for_server_with(frame, &DEFAULT_FRAME_LAYOUT_PROVIDER)
-    }
-
-    /// Decodes a server request with an explicitly selected layout provider.
-    pub(crate) fn decode_owned_for_server_with<P: FrameLayoutProvider + ?Sized>(
-        frame: Vec<u8>,
+    /// Network backends use this entry point so a contiguous receive chunk can
+    /// remain reference-counted through generic execution. Compatibility
+    /// adapters may materialize the payload only at their own semantic
+    /// boundary.
+    pub(crate) fn decode_received_for_server_with<P: FrameLayoutProvider + ?Sized>(
+        prefix: Vec<u8>,
+        payload: OwnedRange,
         provider: &P,
     ) -> Result<ServerRequest> {
-        let header = Self::validated_header_with(&frame, provider)?;
-        header.adapter.decode_server_request(frame, header)
+        let header = RequestFrame::decode_header_with(&prefix, provider)?.ok_or(
+            ProtocolError::FrameTooShort {
+                expected: REQUEST_FIXED_BYTES,
+                actual: prefix.len(),
+            },
+        )?;
+        let actual = prefix
+            .len()
+            .checked_add(payload.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let expected = header.frame_len()?;
+        if prefix.len() != header.encoded_len() || payload.len() != header.value_len() {
+            return Err(ProtocolError::FrameLength { expected, actual });
+        }
+        Ok(ServerRequest::new(header.opcode(), prefix, payload))
     }
 
     fn decode_owned_impl<P: FrameLayoutProvider + ?Sized>(
@@ -764,7 +628,13 @@ impl Request {
         provider: &P,
     ) -> Result<Self> {
         let header = Self::validated_header_with(&frame, provider)?;
-        header.adapter.decode_owned_request(frame, header)
+        if crate::contract::request_wire_plan(header.opcode).is_some() {
+            let decode_owned_request: fn(Vec<u8>, RequestHeader) -> Result<Self> =
+                compat_v1::decode_owned_request;
+            decode_owned_request(frame, header)
+        } else {
+            generic::decode_owned_request(frame, header)
+        }
     }
 
     fn validated_header_with<P: FrameLayoutProvider + ?Sized>(
@@ -805,7 +675,23 @@ impl Request {
             return Ok(None);
         };
         let opcode = Opcode::try_from(opcode_byte)?;
-        provider.adapter_for(opcode).decode_header(prefix, opcode)
+        if crate::contract::request_wire_plan(opcode).is_some() {
+            // Compact requests have a semantic adapter-owned header.  Let it
+            // validate packed policy bits and project compatibility errors
+            // before the operation-neutral parser is asked only to delimit a
+            // generic frame.
+            return compat_v1::decode_header(prefix, opcode);
+        }
+        let layout = provider.layout_for(opcode)?;
+        let Some(frame) = openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(RequestHeader::generic(
+            opcode,
+            frame.encoded_len(),
+            frame.value_len(),
+        )))
     }
 
     /// Reports the complete request frame length once metadata is available.
@@ -825,9 +711,11 @@ impl Request {
     }
 
     fn validate(&self) -> Result<()> {
-        DEFAULT_FRAME_LAYOUT_PROVIDER
-            .adapter_for(self.opcode)
-            .validate_request(self)
+        if crate::contract::request_wire_plan(self.opcode).is_some() {
+            compat_v1::validate_request(self)
+        } else {
+            generic::validate_request(self)
+        }
     }
 }
 

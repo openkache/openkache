@@ -269,16 +269,16 @@ pub(super) fn page_handler(input: OperationInputView) -> Result<OperationOutcome
     let page = behavior::page(
         input.bytes_at_index(request_fields::op_experimental_page::CURSOR),
     );
-    let item_refs = page
-        .items
-        .iter()
-        .map(Vec::as_slice)
-        .collect::<Vec<_>>();
-    let items = openkache_protocol::codec::encode_list(&item_refs)
+    let items = openkache_protocol::codec::encode_list_segmented(
+        page.items.into_iter().map(OwnedRange::whole),
+    )
         .map_err(|error| OperationError::InvalidRequest(error.message()))?;
     Ok(OperationOutcome::field_sequence(
         OperationStatus::Ok,
-        [Some(items), page.next_cursor],
+        [
+            Some(OperationValue::from(items)),
+            page.next_cursor.map(OperationValue::from),
+        ],
     ))
 }
 

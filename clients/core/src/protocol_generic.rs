@@ -117,13 +117,55 @@ fn ordered_request(operation: Opcode, value: Vec<u8>) -> crate::Result<Request> 
             validate_operation_field(field, field_value).map_err(crate::Error::protocol)?;
         }
     }
+    if openkache_protocol::operation::request_wire_plan(operation).is_some() {
+        let mut fields = offsets
+            .into_iter()
+            .map(|(start, end)| (start != usize::MAX).then(|| value[start..end].to_vec()))
+            .collect::<Vec<_>>();
+        return exact_request(operation, &mut fields)?.ok_or_else(|| {
+            crate::Error::configuration(
+                "operation",
+                "exact request plan disappeared after field validation",
+            )
+        });
+    }
     Ok(Request::new_ordered_unchecked(operation, value))
+}
+
+fn exact_request(
+    operation: Opcode,
+    fields: &mut [Option<Vec<u8>>],
+) -> crate::Result<Option<Request>> {
+    let Some(wire_plan) = openkache_protocol::operation::request_wire_plan(operation) else {
+        return Ok(None);
+    };
+    let borrowed: SmallVec<[Option<&[u8]>; INLINE_OPERATION_FIELDS]> =
+        fields.iter().map(|value| value.as_deref()).collect();
+    let prefix = openkache_protocol::encode_request_wire_prefix(operation, &borrowed, wire_plan)
+        .map_err(|error| crate::Error::protocol(error.to_string()))?;
+    drop(borrowed);
+    let trailing_field = wire_plan.steps.last().and_then(|step| match *step {
+        openkache_protocol::RequestWireStep::TrailingField { field } => Some(field),
+        _ => None,
+    });
+    let payload = match trailing_field {
+        Some(index) => fields
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or_else(|| {
+                crate::Error::configuration("fields", "generated trailing request field is missing")
+            })?,
+        None => Vec::new(),
+    };
+    Ok(Some(Request::new_exact_unchecked(
+        operation, prefix, payload,
+    )))
 }
 
 /// Builds an ordered-field request from generated field values.
 pub(crate) fn request_from_fields(
     operation: Opcode,
-    fields: Vec<Option<Vec<u8>>>,
+    mut fields: Vec<Option<Vec<u8>>>,
 ) -> crate::Result<Request> {
     let contract = crate::contract::operation_wire_spec(operation);
     let plan = contract.request.fields;
@@ -163,6 +205,10 @@ pub(crate) fn request_from_fields(
         if let Some(value) = value.as_deref() {
             validate_operation_field(field, value).map_err(crate::Error::protocol)?;
         }
+    }
+
+    if let Some(request) = exact_request(operation, &mut fields)? {
+        return Ok(request);
     }
 
     let borrowed: SmallVec<[Option<&[u8]>; INLINE_OPERATION_FIELDS]> =

@@ -6,76 +6,11 @@
 //! not select or interpret a compatibility route.
 
 use super::super::operation_contract as contract;
-use super::{
-    ProtocolError, Result, WireRequestLayout, WireResult, decode_varuint, validate_value_length,
-};
-use openkache_protocol::{OPCODE_BYTES, Opcode, decode_planned_fields};
+use super::{ProtocolError, Result, validate_value_length};
+use openkache_protocol::{Opcode, decode_planned_fields};
 use smallvec::SmallVec;
 
 const INLINE_OPERATION_FIELDS: usize = 8;
-
-pub(super) fn request_frame_layout(opcode: Opcode) -> WireResult<WireRequestLayout> {
-    Ok(contract::wire_request_layout(opcode))
-}
-
-pub(super) fn decode_header(
-    prefix: &[u8],
-    opcode: Opcode,
-    adapter: super::RequestAdapter,
-) -> Result<Option<super::RequestHeader>> {
-    let plan = contract::operation_wire_spec(opcode).request;
-    if plan.frame == contract::OperationFramePolicy::FixedBody {
-        let body_len = plan.exact_width;
-        validate_value_length(body_len)?;
-        let encoded_end = OPCODE_BYTES
-            .checked_add(body_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        if prefix.len() < encoded_end {
-            return Ok(None);
-        }
-        return Ok(Some(super::RequestHeader::generic(
-            adapter,
-            opcode,
-            OPCODE_BYTES,
-            body_len,
-        )));
-    }
-    let framing = plan.framing;
-    match framing {
-        contract::OperationLayoutFraming::Empty => Ok(Some(super::RequestHeader::generic(
-            adapter,
-            opcode,
-            OPCODE_BYTES,
-            0,
-        ))),
-        contract::OperationLayoutFraming::Opaque
-        | contract::OperationLayoutFraming::OrderedFields
-        | contract::OperationLayoutFraming::FieldSequence
-        | contract::OperationLayoutFraming::OptionalValues => {
-            let context = match framing {
-                contract::OperationLayoutFraming::Opaque => "application value length",
-                contract::OperationLayoutFraming::OrderedFields
-                | contract::OperationLayoutFraming::FieldSequence
-                | contract::OperationLayoutFraming::OptionalValues => "field sequence length",
-                contract::OperationLayoutFraming::Empty => unreachable!(),
-            };
-            let Some((value_len, value_len_bytes)) =
-                decode_varuint(&prefix[OPCODE_BYTES..], context)?
-            else {
-                return Ok(None);
-            };
-            let value_len =
-                usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-            validate_value_length(value_len)?;
-            Ok(Some(super::RequestHeader::generic(
-                adapter,
-                opcode,
-                OPCODE_BYTES + value_len_bytes,
-                value_len,
-            )))
-        }
-    }
-}
 
 pub(super) fn encode_request_prefix(
     request: &super::Request,
@@ -215,19 +150,6 @@ pub(super) fn decode_owned_request(
     frame.copy_within(header.encoded_len.., 0);
     frame.truncate(header.value_len);
     super::Request::from_generic_parts(header.opcode, frame)
-}
-
-/// Keeps a generic request frame owned until the generated operation view has
-/// decoded its fields. No semantic compatibility projection is materialized.
-pub(super) fn decode_server_request(
-    frame: Vec<u8>,
-    header: super::RequestHeader,
-) -> Result<super::ServerRequest> {
-    Ok(super::ServerRequest::Generic {
-        opcode: header.opcode,
-        frame,
-        payload_range: (header.encoded_len, header.encoded_len + header.value_len),
-    })
 }
 
 /// Validates only generated shape metadata for a generic request.

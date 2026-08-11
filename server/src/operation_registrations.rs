@@ -64,6 +64,5 @@ pub(super) fn install_runtime_capabilities(
 /// registration catalog makes adding another adapter a local composition
 /// change.
 pub(super) fn validate() -> Result<(), &'static str> {
-    super::operation_handlers::validate_handler_registry()?;
-    super::v1_adapter::validate_compatibility_routes()
+    super::operation_handlers::validate_handler_registry()
 }
