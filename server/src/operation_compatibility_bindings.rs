@@ -85,28 +85,82 @@ fn required_namespace_id(
     input: &OperationInputView,
     field_index: usize,
 ) -> Result<u64, &'static [u8]> {
-    input
-        .unsigned_long_at_index(field_index)
-        .ok_or(b"operation requires namespace identity")
+    match unsigned_long_at_index(input, field_index) {
+        Some(value @ 1..) => Ok(value),
+        Some(0) => Err(b"namespace identity must be positive"),
+        None => Err(b"operation requires namespace identity"),
+    }
 }
 
 fn required_item_id_at(
     input: &OperationInputView,
     field_index: usize,
 ) -> Result<ItemId, &'static [u8]> {
-    input
-        .item_id_at_index(field_index)
-        .ok_or(b"operation requires a valid item ID")
+    let value = input
+        .field_at_index(field_index)
+        .ok_or(&b"operation requires a valid item ID"[..])?;
+    let bytes = value
+        .try_into()
+        .map_err(|_| &b"operation requires a valid item ID"[..])?;
+    Ok(ItemId::new(bytes))
 }
 
 fn required_item_id_at_role(
     input: &OperationInputView,
     occurrence: usize,
 ) -> Result<ItemId, &'static [u8]> {
-    input
-        .field_index_at_role(contract::OperationFieldRole::ItemId, occurrence)
+    field_index_at_role(input, "item_id", occurrence)
         .and_then(|index| required_item_id_at(input, index).ok())
         .ok_or(b"operation requires valid item IDs")
+}
+
+fn field_index_at_role(
+    input: &OperationInputView,
+    role: &str,
+    occurrence: usize,
+) -> Option<usize> {
+    crate::contract::operation_wire_spec(input.opcode())
+        .request
+        .fields
+        .iter()
+        .filter(|field| field.role == role)
+        .nth(occurrence)
+        .map(|field| field.index)
+}
+
+fn field_count(input: &OperationInputView, role: &str) -> usize {
+    crate::contract::operation_wire_spec(input.opcode())
+        .request
+        .fields
+        .iter()
+        .filter(|field| field.role == role)
+        .count()
+}
+
+fn unsigned_long_at_index(input: &OperationInputView, index: usize) -> Option<u64> {
+    input
+        .encoded_field_at_index(index)
+        .and_then(|field| field.decode_u64().ok())
+}
+
+fn optional_unsigned_long_at_index(
+    input: &OperationInputView,
+    index: usize,
+) -> Result<Option<u64>, &'static [u8]> {
+    input
+        .encoded_field_at_index(index)
+        .map(|field| field.decode_u64())
+        .transpose()
+}
+
+fn optional_boolean_at_index(
+    input: &OperationInputView,
+    index: usize,
+) -> Result<Option<bool>, &'static [u8]> {
+    input
+        .encoded_field_at_index(index)
+        .map(|field| field.decode_bool())
+        .transpose()
 }
 
 pub(super) fn decode_get(input: &OperationInputView) -> Result<GetInput, &'static [u8]> {
@@ -120,8 +174,7 @@ pub(super) fn decode_set(input: &mut OperationInputView) -> Result<SetInput, &'s
     let condition = decode_set_condition(input, request_fields::SET_CONDITION_0)?;
     let expiration_mode = decode_expiration_mode(input, request_fields::SET_EXPIRATION_MODE_0)?;
     let eviction_mode = decode_eviction_mode(input, request_fields::SET_EVICTION_MODE_0)?;
-    let ttl_ms = input
-        .unsigned_long_at_index_result(Some(request_fields::SET_TTL_MILLISECONDS_0))
+    let ttl_ms = optional_unsigned_long_at_index(input, request_fields::SET_TTL_MILLISECONDS_0)
         .map_err(|_| &b"SET TTL is malformed"[..])?;
     if expiration_mode == ExpirationMode::ExplicitTtl {
         if ttl_ms.is_none() {
@@ -145,10 +198,9 @@ pub(super) fn decode_delete(input: &OperationInputView) -> Result<GetInput, &'st
 }
 
 pub(super) fn decode_get2(input: &OperationInputView) -> Result<Get2Input, &'static [u8]> {
-    let namespace_index = input
-        .field_index_at_role(contract::OperationFieldRole::NamespaceId, 0)
+    let namespace_index = field_index_at_role(input, "namespace_id", 0)
         .ok_or(&b"operation requires namespace identity"[..])?;
-    let item_count = input.field_count_role(contract::OperationFieldRole::ItemId);
+    let item_count = field_count(input, "item_id");
     if item_count != 2 {
         return Err(b"get2 requires exactly two item IDs");
     }
@@ -188,8 +240,10 @@ pub(super) fn decode_namespace_open(
         name: input
             .take_owned_bytes_at_index(request_fields::NAMESPACE_OPEN_NAME_0)
             .ok_or(&b"namespace-open requires a name"[..])?,
-        create_if_missing: input
-            .boolean_at_index(Some(request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0))
+        create_if_missing: optional_boolean_at_index(
+            input,
+            request_fields::NAMESPACE_OPEN_CREATE_IF_MISSING_0,
+        )
             .map_err(|_| &b"namespace-open create flag is malformed"[..])?
             .unwrap_or(false),
         policy: decode_namespace_open_policy(input)?,
@@ -204,8 +258,10 @@ pub(super) fn decode_namespace_revision(
             input,
             request_fields::NAMESPACE_UPDATE_POLICY_NAMESPACE_ID_0,
         )?,
-        expected_revision: input
-            .unsigned_long_at_index(request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0)
+        expected_revision: unsigned_long_at_index(
+            input,
+            request_fields::NAMESPACE_UPDATE_POLICY_EXPECTED_REVISION_0,
+        )
             .ok_or(&b"operation requires an expected revision"[..])?,
         policy: decode_namespace_update_policy(input)?
             .ok_or(&b"namespace policy is required"[..])?,
@@ -220,8 +276,10 @@ pub(super) fn decode_namespace_delete(
             input,
             request_fields::NAMESPACE_DELETE_NAMESPACE_ID_0,
         )?,
-        expected_revision: input
-            .unsigned_long_at_index(request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0)
+        expected_revision: unsigned_long_at_index(
+            input,
+            request_fields::NAMESPACE_DELETE_EXPECTED_REVISION_0,
+        )
             .ok_or(&b"operation requires an expected revision"[..])?,
     })
 }
@@ -267,12 +325,12 @@ pub(super) fn prepare_namespace(
 }
 
 fn namespace_field_index(opcode: openkache_protocol::Opcode) -> Option<usize> {
-    contract::operation_field_index(
-        opcode,
-        contract::OperationFieldDirection::Request,
-        contract::OperationFieldRole::NamespaceId,
-        0,
-    )
+    crate::contract::operation_wire_spec(opcode)
+        .request
+        .fields
+        .iter()
+        .find(|field| field.role == "namespace_id")
+        .map(|field| field.index)
 }
 
 pub(super) fn prepare_lifecycle(
@@ -389,9 +447,7 @@ fn decode_namespace_policy(
         || input.bytes_at_index(fields.expiration_override).is_some()
         || input.bytes_at_index(fields.default_eviction).is_some()
         || input.bytes_at_index(fields.eviction_override).is_some()
-        || input
-            .unsigned_long_at_index(fields.default_ttl_milliseconds)
-            .is_some();
+        || unsigned_long_at_index(input, fields.default_ttl_milliseconds).is_some();
     let Some(default_expiration) = input.bytes_at_index(fields.default_expiration) else {
         if has_nested_value {
             return Err(b"namespace policy is incomplete");
@@ -400,16 +456,14 @@ fn decode_namespace_policy(
     };
     let default_expiration = match default_expiration {
         b"no_expiry" => {
-            if input
-                .unsigned_long_at_index(fields.default_ttl_milliseconds)
-                .is_some()
+            if unsigned_long_at_index(input, fields.default_ttl_milliseconds).is_some()
             {
                 return Err(b"namespace TTL is invalid for no-expiry policy");
             }
             ExpirationDefault::NoExpiry
         }
         b"fixed_ttl" => {
-            let Some(ttl_ms) = input.unsigned_long_at_index(fields.default_ttl_milliseconds) else {
+            let Some(ttl_ms) = unsigned_long_at_index(input, fields.default_ttl_milliseconds) else {
                 return Err(b"fixed namespace TTL is missing");
             };
             if ttl_ms == 0 {
@@ -515,19 +569,10 @@ typed_handler!(stats_handler, decode_stats, compatibility_behavior::stats);
 typed_handler!(sync_handler, decode_sync, compatibility_behavior::sync);
 typed_handler!(get2_handler, decode_get2, compatibility_behavior::get2);
 
-/// Returns whether this API module owns the historical v1 projection for an
-/// opcode. The compatibility validator uses this module-local catalog rather
-/// than placing a compatibility marker in every generic server registration.
-pub(super) fn handles(opcode: Opcode) -> bool {
-    API.operations()
-        .iter()
-        .any(|registration| registration.opcode == opcode)
-}
-
 pub(super) const API: ApiModule = ApiModule::new(&[
     RegistrationBuilder::with_decoder(
         Opcode::Get,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         get_handler,
     )
     .prepare(prepare_namespace)
@@ -536,7 +581,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::Set,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         set_handler,
     )
     .prepare(prepare_namespace)
@@ -545,7 +590,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::Delete,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         delete_handler,
     )
     .prepare(prepare_namespace)
@@ -554,7 +599,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::Stats,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         stats_handler,
     )
     .prepare(prepare_namespace)
@@ -563,7 +608,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::Sync,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         sync_handler,
     )
     .prepare(prepare_namespace)
@@ -572,7 +617,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::NamespaceOpen,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         namespace_open_handler,
     )
     .prepare(prepare_lifecycle)
@@ -581,7 +626,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::NamespaceUpdatePolicy,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         namespace_update_policy_handler,
     )
     .prepare(prepare_namespace)
@@ -590,7 +635,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::NamespaceDelete,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         namespace_delete_handler,
     )
     .prepare(prepare_lifecycle_and_namespace)
@@ -599,7 +644,7 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .build(),
     RegistrationBuilder::with_decoder(
         Opcode::Get2,
-        super::v1_adapter::adapt_request,
+        operation_handlers::decode_request,
         get2_handler,
     )
     .prepare(prepare_namespace)

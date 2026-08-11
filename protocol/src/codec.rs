@@ -5,7 +5,12 @@
 //! Server and client adapters provide the generated codec-name lookup and map
 //! [`CodecError`] to their local error boundary.
 
-use crate::{OPTIONAL_VALUE_MISSING, decode_varuint, encode_varuint};
+use smallvec::SmallVec;
+
+use crate::{
+    OPTIONAL_VALUE_MISSING, SegmentedPayload, SegmentedValue, decode_varuint, encode_varuint,
+    response::SegmentedEncoding,
+};
 
 const INVALID_ENUM: CodecError = CodecError(b"enum value is not declared by its shape");
 const INVALID_LIST: CodecError = CodecError(b"list payload is malformed");
@@ -166,22 +171,13 @@ pub fn validate_field_codecs_with_nested_widths(
     union_tags: &[u8],
     resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
 ) -> Result<(), CodecError> {
-    if (!nested_widths.is_empty() && nested_codecs.len() != nested_widths.len())
-        || nested_codecs.len() != nested_enum_values.len()
-        || nested_codecs.len() != nested_union_tags.len()
-    {
-        return Err(CodecError(
-            b"nested codec metadata does not have matching width/enum/tag entries",
-        ));
-    }
-    // Validate the complete metadata path even when the container has zero
-    // entries. Otherwise an empty list/map could make an unknown child codec
-    // appear valid simply because no element happened to exercise it.
-    for codec in nested_codecs {
-        resolve(codec).ok_or(CodecError(
-            b"operation contract names an unknown nested codec",
-        ))?;
-    }
+    let nested = NestedCodecPlan::new(
+        nested_codecs,
+        nested_widths,
+        nested_enum_values,
+        nested_union_tags,
+        resolve,
+    )?;
     for codec in codecs {
         let kind =
             resolve(codec).ok_or(CodecError(b"operation contract names an unknown codec"))?;
@@ -196,24 +192,9 @@ pub fn validate_field_codecs_with_nested_widths(
     if nested_codecs.is_empty() {
         return Ok(());
     }
-    let (remaining_codecs, remaining_widths, remaining_enums, remaining_tags) =
-        validate_nested_value(
-            codec,
-            payload,
-            0,
-            0,
-            enum_values,
-            union_tags,
-            nested_codecs,
-            nested_widths,
-            nested_enum_values,
-            nested_union_tags,
-            resolve,
-        )?;
-    if remaining_codecs.is_empty()
-        && remaining_widths.is_empty()
-        && remaining_enums.is_empty()
-        && remaining_tags.is_empty()
+    let kind = resolve(codec).ok_or(CodecError(b"operation contract names an unknown codec"))?;
+    if validate_contiguous_root(kind, payload, union_tags, &nested, resolve)?
+        == nested_codecs.len()
     {
         Ok(())
     } else {
@@ -223,32 +204,259 @@ pub fn validate_field_codecs_with_nested_widths(
     }
 }
 
-type NestedMetadata<'a> = (
-    &'a [&'a str],
-    &'a [usize],
-    &'a [&'a [&'a str]],
-    &'a [&'a [u8]],
-);
-
-fn validate_nested_value<'a>(
-    codec: &str,
-    payload: &[u8],
-    width: usize,
-    depth: usize,
-    own_enum_values: &'a [&'a str],
-    own_union_tags: &'a [u8],
-    nested_codecs: &'a [&str],
-    nested_widths: &'a [usize],
-    nested_enum_values: &'a [&'a [&'a str]],
-    nested_union_tags: &'a [&'a [u8]],
+/// Validates a segmented value against the same complete generated codec plan
+/// used for contiguous values.
+///
+/// The composite tree is traversed directly, so nested values retain their
+/// original allocations and no complete-value buffer is materialized merely
+/// for validation.
+pub fn validate_segmented_field_codecs_with_nested_widths(
+    value: &SegmentedValue,
+    codecs: &[&str],
+    nested_codecs: &[&str],
+    nested_widths: &[usize],
+    nested_enum_values: &[&[&str]],
+    nested_union_tags: &[&[u8]],
+    _enum_values: &[&str],
+    union_tags: &[u8],
     resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
-) -> Result<NestedMetadata<'a>, CodecError> {
-    if depth > MAX_NESTED_CODEC_DEPTH {
+) -> Result<(), CodecError> {
+    let nested = NestedCodecPlan::new(
+        nested_codecs,
+        nested_widths,
+        nested_enum_values,
+        nested_union_tags,
+        resolve,
+    )?;
+    for codec in codecs {
+        let kind =
+            resolve(codec).ok_or(CodecError(b"operation contract names an unknown codec"))?;
+        match kind {
+            CodecKind::RawBytes => {}
+            CodecKind::List | CodecKind::Map | CodecKind::Union if kind == value.codec() => {}
+            _ => {
+                return Err(CodecError(
+                    b"segmented value does not satisfy its declared top-level codec",
+                ));
+            }
+        }
+    }
+    let Some(codec) = codecs.first() else {
+        return Err(CodecError(
+            b"segmented value requires a generated composite codec",
+        ));
+    };
+    let kind = resolve(codec).ok_or(CodecError(b"operation contract names an unknown codec"))?;
+    if value.codec() != kind {
+        return Err(CodecError(
+            b"segmented value does not match its generated composite codec",
+        ));
+    }
+    let consumed = validate_segmented_root(value, kind, union_tags, &nested, resolve)?;
+    if consumed == nested_codecs.len() {
+        Ok(())
+    } else {
+        Err(CodecError(
+            b"nested codec metadata does not match the segmented container shape",
+        ))
+    }
+}
+
+struct NestedCodecPlan<'a> {
+    codecs: &'a [&'a str],
+    widths: &'a [usize],
+    enum_values: &'a [&'a [&'a str]],
+    union_tags: &'a [&'a [u8]],
+}
+
+impl<'a> NestedCodecPlan<'a> {
+    fn new(
+        codecs: &'a [&'a str],
+        widths: &'a [usize],
+        enum_values: &'a [&'a [&'a str]],
+        union_tags: &'a [&'a [u8]],
+        resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+    ) -> Result<Self, CodecError> {
+        if (!widths.is_empty() && codecs.len() != widths.len())
+            || codecs.len() != enum_values.len()
+            || codecs.len() != union_tags.len()
+        {
+            return Err(CodecError(
+                b"nested codec metadata does not have matching width/enum/tag entries",
+            ));
+        }
+        for codec in codecs {
+            resolve(codec).ok_or(CodecError(
+                b"operation contract names an unknown nested codec",
+            ))?;
+        }
+        let plan = Self {
+            codecs,
+            widths,
+            enum_values,
+            union_tags,
+        };
+        if !codecs.is_empty() {
+            let mut cursor = 0;
+            while cursor < codecs.len() {
+                cursor = plan.node_end(cursor, 0, resolve)?;
+            }
+        }
+        Ok(plan)
+    }
+
+    fn kind(
+        &self,
+        index: usize,
+        resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+    ) -> Result<CodecKind, CodecError> {
+        let codec = self.codecs.get(index).copied().ok_or(CodecError(
+            b"nested composite codec metadata is incomplete",
+        ))?;
+        resolve(codec).ok_or(CodecError(
+            b"operation contract names an unknown nested codec",
+        ))
+    }
+
+    fn width(&self, index: usize) -> usize {
+        self.widths.get(index).copied().unwrap_or(0)
+    }
+
+    fn enum_values(&self, index: usize) -> &[&str] {
+        self.enum_values.get(index).copied().unwrap_or(&[])
+    }
+
+    fn union_tags(&self, index: usize) -> &[u8] {
+        self.union_tags.get(index).copied().unwrap_or(&[])
+    }
+
+    fn node_end(
+        &self,
+        index: usize,
+        depth: usize,
+        resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+    ) -> Result<usize, CodecError> {
+        if depth >= MAX_NESTED_CODEC_DEPTH {
+            return Err(CodecError(
+                b"nested codec metadata exceeds the supported recursion depth",
+            ));
+        }
+        let kind = self.kind(index, resolve)?;
+        let mut cursor = index.checked_add(1).ok_or(CodecError(
+            b"nested codec metadata exceeds the supported size",
+        ))?;
+        let child_count = match kind {
+            CodecKind::List => 1,
+            CodecKind::Map => 2,
+            CodecKind::Union => self.union_tags(index).len(),
+            _ => 0,
+        };
+        for _ in 0..child_count {
+            cursor = self.node_end(cursor, depth + 1, resolve)?;
+        }
+        Ok(cursor)
+    }
+
+    fn union_variant_bounds(
+        &self,
+        first_variant: usize,
+        depth: usize,
+        tag: u8,
+        tags: &[u8],
+        resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+    ) -> Result<(usize, usize, usize), CodecError> {
+        let selected = tags
+            .iter()
+            .position(|candidate| *candidate == tag)
+            .ok_or(INVALID_UNION)?;
+        let mut cursor = first_variant;
+        let mut selected_bounds = None;
+        for variant in 0..tags.len() {
+            let end = self.node_end(cursor, depth, resolve)?;
+            if variant == selected {
+                selected_bounds = Some((cursor, end));
+            }
+            cursor = end;
+        }
+        let (start, end) = selected_bounds.ok_or(INVALID_UNION)?;
+        Ok((start, end, cursor))
+    }
+}
+
+fn validate_contiguous_root(
+    kind: CodecKind,
+    payload: &[u8],
+    union_tags: &[u8],
+    plan: &NestedCodecPlan<'_>,
+    resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+) -> Result<usize, CodecError> {
+    match kind {
+        CodecKind::List => {
+            let mut values = ListCursor::new(payload, DEFAULT_MAX_CONTAINER_ENTRIES)?;
+            let end = plan.node_end(0, 1, resolve)?;
+            for value in &mut values {
+                if validate_contiguous_node(plan, 0, value, 1, resolve)? != end {
+                    return Err(CodecError(
+                        b"nested list elements use inconsistent codec metadata",
+                    ));
+                }
+            }
+            Ok(end)
+        }
+        CodecKind::Map => {
+            let mut entries = MapCursor::new(payload, DEFAULT_MAX_CONTAINER_ENTRIES)?;
+            let key_end = plan.node_end(0, 1, resolve)?;
+            let value_end = plan.node_end(key_end, 1, resolve)?;
+            for (key, value) in &mut entries {
+                if validate_contiguous_node(plan, 0, key, 1, resolve)? != key_end
+                    || validate_contiguous_node(plan, key_end, value, 1, resolve)? != value_end
+                {
+                    return Err(CodecError(
+                        b"nested map entries use inconsistent codec metadata",
+                    ));
+                }
+            }
+            Ok(value_end)
+        }
+        CodecKind::Union => {
+            let tag = validate_union(payload, union_tags)?;
+            let union_value = payload.get(1..).ok_or(INVALID_UNION)?;
+            let (value, cursor) = read_length_delimited(union_value, 0, INVALID_UNION)?;
+            if cursor != union_value.len() {
+                return Err(INVALID_UNION);
+            }
+            if plan.codecs.is_empty() {
+                return Ok(0);
+            }
+            let (variant, variant_end, all_variants_end) =
+                plan.union_variant_bounds(0, 1, tag, union_tags, resolve)?;
+            if validate_contiguous_node(plan, variant, value, 1, resolve)? != variant_end {
+                return Err(CodecError(
+                    b"union payload does not match its selected variant codec",
+                ));
+            }
+            Ok(all_variants_end)
+        }
+        _ => Err(CodecError(
+            b"scalar codec cannot declare nested codec metadata",
+        )),
+    }
+}
+
+fn validate_contiguous_node(
+    plan: &NestedCodecPlan<'_>,
+    index: usize,
+    payload: &[u8],
+    depth: usize,
+    resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+) -> Result<usize, CodecError> {
+    if depth >= MAX_NESTED_CODEC_DEPTH {
         return Err(CodecError(
             b"nested codec metadata exceeds the supported recursion depth",
         ));
     }
-    let kind = resolve(codec).ok_or(CodecError(b"operation contract names an unknown codec"))?;
+    let kind = plan.kind(index, resolve)?;
+    let width = plan.width(index);
     if width != 0 && payload.len() != width {
         return Err(CodecError(
             b"nested field does not match its declared fixed width",
@@ -256,128 +464,224 @@ fn validate_nested_value<'a>(
     }
     match kind {
         CodecKind::List => {
+            let child = index + 1;
+            let end = plan.node_end(child, depth + 1, resolve)?;
             let mut values = ListCursor::new(payload, DEFAULT_MAX_CONTAINER_ENTRIES)?;
-            let Some(next) = nested_codecs.first().copied() else {
-                return Err(CodecError(b"nested list codec metadata is incomplete"));
-            };
-            let mut after_first: Option<NestedMetadata<'_>> = None;
             for value in &mut values {
-                let after = validate_nested_value(
-                    next,
-                    value,
-                    nested_widths.first().copied().unwrap_or(0),
-                    depth + 1,
-                    nested_enum_values.first().copied().unwrap_or(&[]),
-                    nested_union_tags.first().copied().unwrap_or(&[]),
-                    nested_codecs.get(1..).unwrap_or(&[]),
-                    nested_widths.get(1..).unwrap_or(&[]),
-                    nested_enum_values.get(1..).unwrap_or(&[]),
-                    nested_union_tags.get(1..).unwrap_or(&[]),
-                    resolve,
-                )?;
-                if let Some(previous) = after_first
-                    && (previous.0.len() != after.0.len()
-                        || previous.1.len() != after.1.len()
-                        || previous.2.len() != after.2.len()
-                        || previous.3.len() != after.3.len())
-                {
+                if validate_contiguous_node(plan, child, value, depth + 1, resolve)? != end {
                     return Err(CodecError(
                         b"nested list elements use inconsistent codec metadata",
                     ));
                 }
-                after_first = Some(after);
             }
-            // Empty lists have no child bytes to inspect. The declared child
-            // sequence is still structurally valid.
-            Ok(after_first.unwrap_or((&[], &[], &[], &[])))
+            Ok(end)
         }
         CodecKind::Map => {
+            let key = index + 1;
+            let key_end = plan.node_end(key, depth + 1, resolve)?;
+            let value = key_end;
+            let value_end = plan.node_end(value, depth + 1, resolve)?;
             let mut entries = MapCursor::new(payload, DEFAULT_MAX_CONTAINER_ENTRIES)?;
-            let key_codec = nested_codecs
-                .first()
-                .copied()
-                .ok_or(CodecError(b"nested map key codec metadata is incomplete"))?;
-            let mut after_first: Option<NestedMetadata<'_>> = None;
-            for (key, value) in &mut entries {
-                let after_key = validate_nested_value(
-                    key_codec,
-                    key,
-                    nested_widths.first().copied().unwrap_or(0),
-                    depth + 1,
-                    nested_enum_values.first().copied().unwrap_or(&[]),
-                    nested_union_tags.first().copied().unwrap_or(&[]),
-                    nested_codecs.get(1..).unwrap_or(&[]),
-                    nested_widths.get(1..).unwrap_or(&[]),
-                    nested_enum_values.get(1..).unwrap_or(&[]),
-                    nested_union_tags.get(1..).unwrap_or(&[]),
-                    resolve,
-                )?;
-                let value_codec = after_key
-                    .0
-                    .first()
-                    .copied()
-                    .ok_or(CodecError(b"nested map value codec metadata is incomplete"))?;
-                let after = validate_nested_value(
-                    value_codec,
-                    value,
-                    after_key.1.first().copied().unwrap_or(0),
-                    depth + 1,
-                    after_key.2.first().copied().unwrap_or(&[]),
-                    after_key.3.first().copied().unwrap_or(&[]),
-                    after_key.0.get(1..).unwrap_or(&[]),
-                    after_key.1.get(1..).unwrap_or(&[]),
-                    after_key.2.get(1..).unwrap_or(&[]),
-                    after_key.3.get(1..).unwrap_or(&[]),
-                    resolve,
-                )?;
-                if let Some(previous) = after_first
-                    && (previous.0.len() != after.0.len()
-                        || previous.1.len() != after.1.len()
-                        || previous.2.len() != after.2.len()
-                        || previous.3.len() != after.3.len())
+            for (key_bytes, value_bytes) in &mut entries {
+                if validate_contiguous_node(plan, key, key_bytes, depth + 1, resolve)? != key_end
+                    || validate_contiguous_node(
+                        plan,
+                        value,
+                        value_bytes,
+                        depth + 1,
+                        resolve,
+                    )? != value_end
                 {
                     return Err(CodecError(
                         b"nested map entries use inconsistent codec metadata",
                     ));
                 }
-                after_first = Some(after);
             }
-            Ok(after_first.unwrap_or((&[], &[], &[], &[])))
+            Ok(value_end)
         }
         CodecKind::Union => {
-            validate_union(payload, own_union_tags)?;
+            let tags = plan.union_tags(index);
+            let tag = validate_union(payload, tags)?;
             let union_value = payload.get(1..).ok_or(INVALID_UNION)?;
             let (value, cursor) = read_length_delimited(union_value, 0, INVALID_UNION)?;
             if cursor != union_value.len() {
                 return Err(INVALID_UNION);
             }
-            let child_codec = nested_codecs
-                .first()
-                .copied()
-                .ok_or(CodecError(b"nested union codec metadata is incomplete"))?;
-            validate_nested_value(
-                child_codec,
-                value,
-                nested_widths.first().copied().unwrap_or(0),
-                depth + 1,
-                nested_enum_values.first().copied().unwrap_or(&[]),
-                nested_union_tags.first().copied().unwrap_or(&[]),
-                nested_codecs.get(1..).unwrap_or(&[]),
-                nested_widths.get(1..).unwrap_or(&[]),
-                nested_enum_values.get(1..).unwrap_or(&[]),
-                nested_union_tags.get(1..).unwrap_or(&[]),
-                resolve,
-            )
+            let (variant, variant_end, all_variants_end) =
+                plan.union_variant_bounds(index + 1, depth + 1, tag, tags, resolve)?;
+            if validate_contiguous_node(plan, variant, value, depth + 1, resolve)? != variant_end {
+                return Err(CodecError(
+                    b"union payload does not match its selected variant codec",
+                ));
+            }
+            Ok(all_variants_end)
         }
         _ => {
-            validate_kind(kind, payload, own_enum_values, own_union_tags)?;
-            Ok((
-                nested_codecs,
-                nested_widths,
-                nested_enum_values,
-                nested_union_tags,
-            ))
+            validate_kind(
+                kind,
+                payload,
+                plan.enum_values(index),
+                plan.union_tags(index),
+            )?;
+            Ok(index + 1)
         }
+    }
+}
+
+fn validate_segmented_root(
+    value: &SegmentedValue,
+    kind: CodecKind,
+    union_tags: &[u8],
+    plan: &NestedCodecPlan<'_>,
+    resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+) -> Result<usize, CodecError> {
+    match (kind, value.encoding()) {
+        (CodecKind::List, SegmentedEncoding::List(values)) => {
+            if plan.codecs.is_empty() {
+                return Ok(0);
+            }
+            let end = plan.node_end(0, 1, resolve)?;
+            for value in values {
+                if validate_segmented_payload(plan, 0, value, 1, resolve)? != end {
+                    return Err(CodecError(
+                        b"nested list elements use inconsistent codec metadata",
+                    ));
+                }
+            }
+            Ok(end)
+        }
+        (CodecKind::Map, SegmentedEncoding::Map(entries)) => {
+            if plan.codecs.is_empty() {
+                return Ok(0);
+            }
+            let key_end = plan.node_end(0, 1, resolve)?;
+            let value_end = plan.node_end(key_end, 1, resolve)?;
+            for (key, value) in entries {
+                if validate_segmented_payload(plan, 0, key, 1, resolve)? != key_end
+                    || validate_segmented_payload(plan, key_end, value, 1, resolve)? != value_end
+                {
+                    return Err(CodecError(
+                        b"nested map entries use inconsistent codec metadata",
+                    ));
+                }
+            }
+            Ok(value_end)
+        }
+        (CodecKind::Union, SegmentedEncoding::Union { tag, payload }) => {
+            if !union_tags.is_empty() && !union_tags.contains(tag) {
+                return Err(INVALID_UNION);
+            }
+            if plan.codecs.is_empty() {
+                return Ok(0);
+            }
+            let (variant, variant_end, all_variants_end) =
+                plan.union_variant_bounds(0, 1, *tag, union_tags, resolve)?;
+            if validate_segmented_payload(plan, variant, payload, 1, resolve)? != variant_end {
+                return Err(CodecError(
+                    b"union payload does not match its selected variant codec",
+                ));
+            }
+            Ok(all_variants_end)
+        }
+        _ => Err(CodecError(
+            b"segmented value does not match its generated composite codec",
+        )),
+    }
+}
+
+fn validate_segmented_payload(
+    plan: &NestedCodecPlan<'_>,
+    index: usize,
+    payload: &SegmentedPayload,
+    depth: usize,
+    resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+) -> Result<usize, CodecError> {
+    if plan.width(index) != 0 && payload.len() != plan.width(index) {
+        return Err(CodecError(
+            b"nested field does not match its declared fixed width",
+        ));
+    }
+    match payload {
+        SegmentedPayload::Contiguous(payload) => {
+            validate_contiguous_node(plan, index, payload.as_slice(), depth, resolve)
+        }
+        SegmentedPayload::Nested(payload) => {
+            validate_segmented_node(plan, index, payload, depth, resolve)
+        }
+    }
+}
+
+fn validate_segmented_node(
+    plan: &NestedCodecPlan<'_>,
+    index: usize,
+    value: &SegmentedValue,
+    depth: usize,
+    resolve: impl Fn(&str) -> Option<CodecKind> + Copy,
+) -> Result<usize, CodecError> {
+    if depth >= MAX_NESTED_CODEC_DEPTH {
+        return Err(CodecError(
+            b"nested codec metadata exceeds the supported recursion depth",
+        ));
+    }
+    let kind = plan.kind(index, resolve)?;
+    if value.codec() != kind {
+        return Err(CodecError(
+            b"nested segmented value does not match its generated codec",
+        ));
+    }
+    match (kind, value.encoding()) {
+        (CodecKind::List, SegmentedEncoding::List(values)) => {
+            let child = index + 1;
+            let end = plan.node_end(child, depth + 1, resolve)?;
+            for value in values {
+                if validate_segmented_payload(plan, child, value, depth + 1, resolve)? != end {
+                    return Err(CodecError(
+                        b"nested list elements use inconsistent codec metadata",
+                    ));
+                }
+            }
+            Ok(end)
+        }
+        (CodecKind::Map, SegmentedEncoding::Map(entries)) => {
+            let key = index + 1;
+            let key_end = plan.node_end(key, depth + 1, resolve)?;
+            let value_index = key_end;
+            let value_end = plan.node_end(value_index, depth + 1, resolve)?;
+            for (key_value, value) in entries {
+                if validate_segmented_payload(plan, key, key_value, depth + 1, resolve)? != key_end
+                    || validate_segmented_payload(
+                        plan,
+                        value_index,
+                        value,
+                        depth + 1,
+                        resolve,
+                    )? != value_end
+                {
+                    return Err(CodecError(
+                        b"nested map entries use inconsistent codec metadata",
+                    ));
+                }
+            }
+            Ok(value_end)
+        }
+        (CodecKind::Union, SegmentedEncoding::Union { tag, payload }) => {
+            let tags = plan.union_tags(index);
+            if !tags.is_empty() && !tags.contains(tag) {
+                return Err(INVALID_UNION);
+            }
+            let (variant, variant_end, all_variants_end) =
+                plan.union_variant_bounds(index + 1, depth + 1, *tag, tags, resolve)?;
+            if validate_segmented_payload(plan, variant, payload, depth + 1, resolve)? != variant_end
+            {
+                return Err(CodecError(
+                    b"union payload does not match its selected variant codec",
+                ));
+            }
+            Ok(all_variants_end)
+        }
+        _ => Err(CodecError(
+            b"scalar codec cannot be represented as a segmented composite",
+        )),
     }
 }
 
@@ -497,6 +801,27 @@ pub fn encode_list(values: &[&[u8]]) -> Result<Vec<u8>, CodecError> {
     Ok(output)
 }
 
+/// Encodes a list while retaining every already-owned element allocation.
+///
+/// Count and element-length metadata stay inline. The returned value can be
+/// nested directly in a segmented response, avoiding both an intermediate
+/// slice collection and one complete-list allocation.
+pub fn encode_list_segmented<I>(values: I) -> Result<SegmentedValue, CodecError>
+where
+    I: IntoIterator,
+    I::Item: Into<SegmentedPayload>,
+{
+    let values = values
+        .into_iter()
+        .map(Into::into)
+        .collect::<SmallVec<[SegmentedPayload; 8]>>();
+    let count = u64::try_from(values.len()).map_err(|_| TOO_MANY_ENTRIES)?;
+    let (_, count_len) = encode_varuint(count);
+    let encoded_len = segmented_children_len(count_len, values.iter())?;
+    SegmentedValue::new(encoded_len, SegmentedEncoding::List(values))
+        .map_err(|_| VALUE_TOO_LARGE)
+}
+
 /// Validates a list and returns its element count without allocating.
 pub fn validate_list(payload: &[u8], max_entries: usize) -> Result<usize, CodecError> {
     Ok(ListCursor::new(payload, max_entries)?.len())
@@ -579,6 +904,27 @@ pub fn encode_map(entries: &[(&[u8], &[u8])]) -> Result<Vec<u8>, CodecError> {
         append_length_delimited(&mut output, value)?;
     }
     Ok(output)
+}
+
+/// Encodes a map without coalescing owned or nested key/value payloads.
+pub fn encode_map_segmented<I, K, V>(entries: I) -> Result<SegmentedValue, CodecError>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<SegmentedPayload>,
+    V: Into<SegmentedPayload>,
+{
+    let entries = entries
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect::<SmallVec<[(SegmentedPayload, SegmentedPayload); 4]>>();
+    let count = u64::try_from(entries.len()).map_err(|_| TOO_MANY_ENTRIES)?;
+    let (_, count_len) = encode_varuint(count);
+    let encoded_len = segmented_children_len(
+        count_len,
+        entries.iter().flat_map(|(key, value)| [key, value]),
+    )?;
+    SegmentedValue::new(encoded_len, SegmentedEncoding::Map(entries))
+        .map_err(|_| VALUE_TOO_LARGE)
 }
 
 /// Validates a map and returns its entry count without allocating.
@@ -670,6 +1016,28 @@ pub fn encode_union(tag: u8, payload: &[u8], allowed_tags: &[u8]) -> Result<Vec<
     Ok(output)
 }
 
+/// Encodes a tagged union while retaining its owned or nested member payload.
+pub fn encode_union_segmented(
+    tag: u8,
+    payload: impl Into<SegmentedPayload>,
+    allowed_tags: &[u8],
+) -> Result<SegmentedValue, CodecError> {
+    if !allowed_tags.is_empty() && !allowed_tags.contains(&tag) {
+        return Err(INVALID_UNION);
+    }
+    let payload = payload.into();
+    let length = u32::try_from(payload.len()).map_err(|_| TOO_MANY_ENTRIES)?;
+    if length >= OPTIONAL_VALUE_MISSING {
+        return Err(TOO_MANY_ENTRIES);
+    }
+    let encoded_len = 1usize
+        .checked_add(std::mem::size_of::<u32>())
+        .and_then(|length| length.checked_add(payload.len()))
+        .ok_or(VALUE_TOO_LARGE)?;
+    SegmentedValue::new(encoded_len, SegmentedEncoding::Union { tag, payload })
+        .map_err(|_| VALUE_TOO_LARGE)
+}
+
 /// Validates a tagged union and returns its active tag.
 pub fn validate_union(payload: &[u8], allowed_tags: &[u8]) -> Result<u8, CodecError> {
     if payload.len() > crate::MAX_VALUE_BYTES {
@@ -731,6 +1099,23 @@ fn append_length_delimited(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Cod
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(value);
     Ok(())
+}
+
+fn segmented_children_len<'a>(
+    prefix_len: usize,
+    values: impl IntoIterator<Item = &'a SegmentedPayload>,
+) -> Result<usize, CodecError> {
+    values.into_iter().try_fold(prefix_len, |total, value| {
+        let length = u32::try_from(value.len()).map_err(|_| TOO_MANY_ENTRIES)?;
+        if length >= OPTIONAL_VALUE_MISSING {
+            return Err(TOO_MANY_ENTRIES);
+        }
+        total
+            .checked_add(std::mem::size_of::<u32>())
+            .and_then(|total| total.checked_add(value.len()))
+            .filter(|total| *total <= crate::MAX_VALUE_BYTES)
+            .ok_or(VALUE_TOO_LARGE)
+    })
 }
 
 fn decode_container_count(payload: &[u8]) -> Result<(u64, usize), CodecError> {

@@ -233,6 +233,7 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
                 max_item_bytes,
                 request_timeout,
                 &request_budget,
+                frame_layout_provider.as_ref(),
             )
             .await
         {
@@ -278,10 +279,15 @@ async fn serve_stream<S: SendStream, R: ReceiveStream>(
             }
             Err(StreamReadError::Transport(_)) => break,
         };
-        let request_bytes = std::mem::take(&mut frame.bytes);
+        let request_prefix = std::mem::take(&mut frame.prefix);
+        let request_payload = std::mem::replace(
+            &mut frame.payload,
+            openkache_protocol::OwnedRange::whole(Vec::new()),
+        );
         let mut terminal_after_response = frame.has_trailing_bytes;
-        let response_result = match Request::decode_owned_for_server_with(
-            request_bytes,
+        let response_result = match Request::decode_received_for_server_with(
+            request_prefix,
+            request_payload,
             frame_layout_provider.as_ref(),
         ) {
             Ok(request) => {

@@ -1,5 +1,5 @@
 {
-  "checksum": "79453d341f482c6a3427543cc32f3cb17091691d5bb290d8c0013b8810ed0801",
+  "checksum": "309137fa0df20e07243c0d1cebc65fbf103b9b3d399cfe6709d5681e51cd4621",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -16639,6 +16639,18 @@
               ]
             }
           }
+        },
+        {
+          "BuildScript": {
+            "crate_name": "build_script_build",
+            "crate_root": "build.rs",
+            "srcs": {
+              "allow_empty": true,
+              "include": [
+                "**/*.rs"
+              ]
+            }
+          }
         }
       ],
       "library_target_name": "openkache",
@@ -16762,8 +16774,25 @@
           ],
           "selects": {}
         },
+        "extra_deps": {
+          "common": [
+            ":build_script_build"
+          ],
+          "selects": {}
+        },
         "edition": "2024",
         "version": "0.1.0"
+      },
+      "build_script_attrs": {
+        "compile_data_glob": [
+          "**"
+        ],
+        "compile_data_glob_excludes": [
+          "**/*.rs"
+        ],
+        "data_glob": [
+          "**"
+        ]
       },
       "license": "AGPL-3.0-or-later",
       "license_ids": [
@@ -17233,6 +17262,10 @@
         ],
         "deps": {
           "common": [
+            {
+              "id": "bytes 1.12.1",
+              "target": "bytes"
+            },
             {
               "id": "smallvec 1.15.2",
               "target": "smallvec"
@@ -31591,6 +31624,7 @@
     "base64 0.22.1",
     "blake3 1.8.5",
     "boring 4.22.0",
+    "bytes 1.12.1",
     "clap 4.6.4",
     "cmac 0.8.0",
     "comfy-table 7.2.1",

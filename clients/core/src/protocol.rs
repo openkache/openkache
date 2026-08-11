@@ -142,14 +142,13 @@ pub(crate) fn request_from_contract(
 /// This is the neutral client boundary: callers provide only the opcode and
 /// the operation body. Namespace IDs, item IDs, and SET options belong to the
 /// protocol-v1 compatibility adapter and are intentionally unavailable here;
-/// a compatibility opcode reports that generic unary requests cannot use the
-/// compact protocol-v1 projection.
+/// an exact-plan opcode requires modeled fields instead of one opaque body.
 pub(crate) fn request_from_unary(operation: Opcode, body: Vec<u8>) -> crate::Result<Request> {
     adapters::request_from_unary(operation, body)
 }
 
-/// Builds an ordered-field request from values already validated by the
-/// generated descriptor.
+/// Builds a generic or exact request from modeled values in generated field
+/// order.
 pub(crate) fn request_from_fields(
     operation: Opcode,
     fields: Vec<Option<Vec<u8>>>,
@@ -440,6 +439,7 @@ impl RequestRetryPolicy {
 #[derive(Clone, Debug)]
 pub(crate) struct Request {
     pub(crate) opcode: Opcode,
+    encoded_prefix: Option<Vec<u8>>,
     pub(crate) namespace_id: Option<u64>,
     pub(crate) item_ids: Vec<ItemId>,
     pub(crate) set_options: SetWireOptions,
@@ -464,6 +464,7 @@ pub(crate) struct RequestParts {
 impl PartialEq for Request {
     fn eq(&self, other: &Self) -> bool {
         self.opcode == other.opcode
+            && self.encoded_prefix == other.encoded_prefix
             && self.namespace_id == other.namespace_id
             && self.item_ids == other.item_ids
             && self.set_options == other.set_options
@@ -504,6 +505,7 @@ impl Request {
     ) -> Result<Self> {
         let request = Self {
             opcode,
+            encoded_prefix: None,
             namespace_id: None,
             item_ids: Vec::new(),
             set_options: SetWireOptions::NONE,
@@ -529,6 +531,7 @@ impl Request {
         }
         let request = Self {
             opcode,
+            encoded_prefix: None,
             namespace_id: None,
             item_ids: item_id.into_iter().collect(),
             set_options: SetWireOptions::NONE,
@@ -549,10 +552,32 @@ impl Request {
     fn new_ordered_unchecked(opcode: Opcode, value: Vec<u8>) -> Self {
         Self {
             opcode,
+            encoded_prefix: None,
             namespace_id: None,
             item_ids: Vec::new(),
             set_options: SetWireOptions::NONE,
             value,
+            namespace_name: None,
+            namespace_policy: None,
+            expected_revision: None,
+            create_if_missing: false,
+            retry_policy: generated_retry_policy(opcode, false),
+        }
+    }
+
+    /// Constructs an exact-plan request from generic modeled field values.
+    ///
+    /// The caller has already validated every field and encoded the generated
+    /// metadata prefix. Keeping the trailing payload separate preserves the
+    /// same two-buffer transport path used by the typed compatibility facade.
+    fn new_exact_unchecked(opcode: Opcode, prefix: Vec<u8>, payload: Vec<u8>) -> Self {
+        Self {
+            opcode,
+            encoded_prefix: Some(prefix),
+            namespace_id: None,
+            item_ids: Vec::new(),
+            set_options: SetWireOptions::NONE,
+            value: payload,
             namespace_name: None,
             namespace_policy: None,
             expected_revision: None,
@@ -652,6 +677,7 @@ impl Request {
     ) -> Result<Self> {
         let request = Self {
             opcode,
+            encoded_prefix: None,
             namespace_id: Some(namespace_id),
             item_ids,
             set_options,
@@ -673,6 +699,7 @@ impl Request {
     ) -> Result<Self> {
         let request = Self {
             opcode: Opcode::NamespaceOpen,
+            encoded_prefix: None,
             namespace_id: None,
             item_ids: Vec::new(),
             set_options: SetWireOptions::NONE,
@@ -697,6 +724,7 @@ impl Request {
     ) -> Result<Self> {
         let request = Self {
             opcode: Opcode::NamespaceUpdatePolicy,
+            encoded_prefix: None,
             namespace_id: Some(namespace_id),
             item_ids: Vec::new(),
             set_options: SetWireOptions::NONE,
@@ -714,6 +742,7 @@ impl Request {
     pub(crate) fn namespace_delete(namespace_id: u64, expected_revision: u64) -> Result<Self> {
         let request = Self {
             opcode: Opcode::NamespaceDelete,
+            encoded_prefix: None,
             namespace_id: Some(namespace_id),
             item_ids: Vec::new(),
             set_options: SetWireOptions::NONE,
@@ -728,10 +757,12 @@ impl Request {
         Ok(request)
     }
 
-    pub(crate) fn into_parts(self) -> Result<RequestParts> {
+    pub(crate) fn into_parts(mut self) -> Result<RequestParts> {
         // Every constructor validates its generated framing before returning.
         // Avoid replaying the ordered-field decoder at the transport boundary.
-        let prefix = if let Some(prefix) = compat_v1::encode_prefix(&self)? {
+        let prefix = if let Some(prefix) = self.encoded_prefix.take() {
+            prefix
+        } else if let Some(prefix) = compat_v1::encode_prefix(&self)? {
             prefix
         } else {
             let mut prefix = vec![self.opcode as u8];

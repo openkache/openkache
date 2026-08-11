@@ -10,6 +10,7 @@ import type {
   Wire_Operation_Contract,
   Wire_Operation_Descriptor,
   Wire_Request_Framing,
+  Wire_Request_Step,
 } from "./wire_types"
 
 function response_framing_for(
@@ -116,4 +117,83 @@ export function request_payload_bound(
     descriptor.request_layout,
     operation.contract.request_plan ?? [],
   )
+}
+
+function request_wire_step_bound(
+  contract: Pick<Wire_Contract, "max_value_bytes" | "v1">,
+  steps: readonly Wire_Request_Step[],
+): number {
+  let bound = 0
+  const add = (value: number): void => {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error("request-wire frame size requires safe non-negative integers")
+    }
+    if (bound > Number.MAX_SAFE_INTEGER - value) {
+      throw new Error("request-wire frame size exceeds the safe integer range")
+    }
+    bound += value
+  }
+
+  for (const step of steps) {
+    switch (step.kind) {
+      case "fixed_field":
+        add(step.bytes)
+        break
+      case "packed":
+        // Every packed primitive occupies one byte regardless of the number
+        // of modeled fields it projects.
+        add(1)
+        break
+      case "byte_length_field":
+        // The primitive stores an unsigned byte length, so 255 is the
+        // largest possible field body even when the modeled shape is open.
+        add(1 + Math.min(contract.max_value_bytes, 0xff))
+        break
+      case "varuint_field":
+        add(contract.v1.max_varuint_bytes)
+        break
+      case "conditional":
+        // A condition selects at most one nested branch. Taking the largest
+        // branch gives a safe admission bound without interpreting its field
+        // or operation semantics.
+        add(request_wire_step_bound(contract, step.steps))
+        break
+      case "constant":
+        add(step.bytes.length)
+        break
+      case "trailing_field":
+        // The trailing value is retained as the independently owned body;
+        // its canonical length prefix remains in the generated prefix.
+        add(contract.v1.max_varuint_bytes)
+        add(contract.max_value_bytes)
+        break
+    }
+  }
+  return bound
+}
+
+/**
+ * Returns the maximum complete frame size for an exact declarative request
+ * plan.
+ *
+ * The result is generic admission metadata. It does not infer a compatibility
+ * route or inspect field roles: every fixed, packed, conditional, length, and
+ * trailing primitive contributes only its operation-neutral byte cost.
+ *
+ * @param contract - Contract-wide wire ceilings and varuint width.
+ * @param operation - Operation whose exact request plan is being budgeted.
+ * @returns The maximum complete frame size, including the opcode.
+ * @throws {Error} If size arithmetic exceeds JavaScript's safe integer range.
+ */
+export function request_wire_frame_bound(
+  contract: Pick<Wire_Contract, "max_value_bytes" | "v1">,
+  operation: Pick<Wire_Operation, "contract">,
+): number {
+  const plan = operation.contract.request_wire
+  if (plan === undefined) return 0
+  const bound = contract.v1.opcode_bytes + request_wire_step_bound(contract, plan)
+  if (!Number.isSafeInteger(bound) || bound < 0) {
+    throw new Error("request-wire frame size exceeds the safe integer range")
+  }
+  return bound
 }

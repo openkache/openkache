@@ -4,22 +4,20 @@
 //! historical namespace/item/SET route vocabulary and the small semantic
 //! helpers needed by typed compatibility methods.
 
-use openkache_protocol::compat_v1::OperationFieldDirection;
-pub(crate) use openkache_protocol::compat_v1::route_for_opcode;
+use std::borrow::Cow;
+
 use openkache_protocol::compat_v1::{
-    DELETE_IF_EMPTY, NAMESPACE_NAME_MAX_BYTES, OPEN_CREATE_IF_MISSING, OperationCompactV1Route,
-    OperationFieldRole, POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE,
+    NAMESPACE_NAME_MAX_BYTES, POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE,
     POLICY_EVICTION_PROTECTED, POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_FLAGS_BYTES,
     POLICY_NO_EXPIRY, POLICY_RESERVED_MASK, SET_CONDITION_ANY_BITS, SET_CONDITION_MASK,
     SET_EVICTABLE_BITS, SET_EVICTION_MASK, SET_EVICTION_PROTECTED_BITS, SET_EXPIRATION_MASK,
     SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
-    SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK, operation_field_count,
+    SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK,
 };
 use openkache_protocol::{ITEM_ID_BYTES, ItemId};
 
 use super::{
-    Opcode, ProtocolError, Request, Result, SetWireOptions, append_varuint, invalid_shape,
-    validate_value_length,
+    Opcode, ProtocolError, Request, Result, SetWireOptions, invalid_shape, validate_value_length,
 };
 
 impl SetWireOptions {
@@ -187,7 +185,7 @@ pub(crate) fn request_from_contract(
 
 /// Returns whether generic ABI entry points must reject this opcode.
 pub(crate) fn is_compatibility_operation(operation: Opcode) -> bool {
-    route_for_opcode(operation).is_some()
+    openkache_protocol::compat_v1::request_projection(operation).is_some()
 }
 
 /// Encodes the historical prefix for a compatibility request.
@@ -195,79 +193,130 @@ pub(crate) fn is_compatibility_operation(operation: Opcode) -> bool {
 /// `None` means the request is generic and should use the plan-driven prefix
 /// in `protocol.rs`.
 pub(crate) fn encode_prefix(request: &Request) -> Result<Option<Vec<u8>>> {
-    if route_for_opcode(request.opcode).is_none() {
+    let Some(plan) = openkache_protocol::operation::request_wire_plan(request.opcode) else {
         return Ok(None);
-    }
-    let mut output = Vec::new();
-    output.push(request.opcode as u8);
-    match compact_request_route(request.opcode)? {
-        CompactV1RequestRoute::Item | CompactV1RequestRoute::Set => {
-            append_namespace_id(&mut output, request.namespace_id)?;
-            if compact_request_field_count(request.opcode, OperationFieldRole::Value) > 0 {
-                output.push(request.set_options.flags()?);
-            }
-            for item_id in &request.item_ids {
-                output.extend_from_slice(item_id.as_ref());
-            }
-            if compact_request_field_count(request.opcode, OperationFieldRole::Value) > 0 {
-                if let Some(ttl_ms) = request.set_options.ttl_ms {
-                    append_varuint(&mut output, ttl_ms);
-                }
-                append_varuint(&mut output, request.value.len() as u64);
-            }
-        }
-        CompactV1RequestRoute::Namespace => {
-            append_namespace_id(&mut output, request.namespace_id)?;
-        }
-        CompactV1RequestRoute::NamespaceOpen => {
-            output.push(if request.create_if_missing {
-                OPEN_CREATE_IF_MISSING
-            } else {
-                0
-            });
-            let name =
+    };
+    let values = request_wire_values(request);
+    let borrowed: Vec<Option<&[u8]>> = values.iter().map(|field| field.as_deref()).collect();
+    openkache_protocol::encode_request_wire_prefix(request.opcode, &borrowed, plan)
+        .map(Some)
+        .map_err(Into::into)
+}
+
+fn request_wire_values(request: &Request) -> Vec<Option<Cow<'_, [u8]>>> {
+    let plan = crate::contract::operation_wire_spec(request.opcode).request.fields;
+    let mut item_ids = request.item_ids.iter();
+    plan
+        .iter()
+        .map(|field| match field.role {
+            "namespace_id" => request
+                .namespace_id
+                .map(|value| Cow::Owned(value.to_be_bytes().to_vec())),
+            "item_id" => item_ids
+                .next()
+                .map(|item_id| Cow::Borrowed(item_id.as_ref())),
+            "value" => Some(Cow::Borrowed(request.value.as_slice())),
+            "name" => request.namespace_name.as_deref().map(Cow::Borrowed),
+            "expected_revision" => request
+                .expected_revision
+                .map(|value| Cow::Owned(value.to_be_bytes().to_vec())),
+            "condition" => Some(Cow::Borrowed(set_condition_value(
+                request.set_options.condition,
+            ))),
+            "expiration_mode" => Some(Cow::Borrowed(expiration_mode_value(
+                request.set_options.expiration_mode,
+            ))),
+            "eviction_mode" => Some(Cow::Borrowed(eviction_mode_value(
+                request.set_options.eviction_mode,
+            ))),
+            "ttl_milliseconds" => request
+                .set_options
+                .ttl_ms
+                .map(|value| Cow::Owned(value.to_be_bytes().to_vec())),
+            "create_if_missing" => Some(Cow::Borrowed(boolean_value(
+                request.create_if_missing,
+            ))),
+            "policy" => None,
+            "default_expiration" => request.namespace_policy.map(|policy| {
+                Cow::Borrowed(default_expiration_value(policy.default_expiration))
+            }),
+            "default_ttl_milliseconds" => {
                 request
-                    .namespace_name
-                    .as_deref()
-                    .ok_or(ProtocolError::InvalidNamespaceName(
-                        "namespace-open name is missing",
-                    ))?;
-            output.push(u8::try_from(name.len()).map_err(|_| {
-                ProtocolError::InvalidNamespaceName("namespace name exceeds 255 octets")
-            })?);
-            output.extend_from_slice(name);
-            if request.create_if_missing {
-                output.extend_from_slice(
-                    &request
-                        .namespace_policy
-                        .ok_or(ProtocolError::MissingNamespacePolicy)?
-                        .encode()?,
-                );
-            }
-        }
-        CompactV1RequestRoute::NamespaceUpdatePolicy => {
-            append_namespace_id(&mut output, request.namespace_id)?;
-            append_revision(&mut output, request.expected_revision)?;
-            output.extend_from_slice(
-                &request
                     .namespace_policy
-                    .ok_or(ProtocolError::MissingNamespacePolicy)?
-                    .encode()?,
-            );
-        }
-        CompactV1RequestRoute::NamespaceDelete => {
-            output.push(DELETE_IF_EMPTY);
-            append_namespace_id(&mut output, request.namespace_id)?;
-            append_revision(&mut output, request.expected_revision)?;
-        }
+                    .and_then(|policy| match policy.default_expiration {
+                        super::ExpirationDefault::FixedTtl { ttl_ms } => {
+                            Some(Cow::Owned(ttl_ms.to_be_bytes().to_vec()))
+                        }
+                        super::ExpirationDefault::NoExpiry => None,
+                    })
+            }
+            "expiration_override" => request.namespace_policy.map(|policy| {
+                Cow::Borrowed(override_policy_value(policy.expiration_override))
+            }),
+            "default_eviction" => request.namespace_policy.map(|policy| {
+                Cow::Borrowed(default_eviction_value(policy.default_eviction))
+            }),
+            "eviction_override" => request.namespace_policy.map(|policy| {
+                Cow::Borrowed(override_policy_value(policy.eviction_override))
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+const fn set_condition_value(value: super::SetCondition) -> &'static [u8] {
+    match value {
+        super::SetCondition::Any => b"any",
+        super::SetCondition::IfAbsent => b"if_absent",
+        super::SetCondition::IfPresent => b"if_present",
     }
-    Ok(Some(output))
+}
+
+const fn boolean_value(value: bool) -> &'static [u8] {
+    if value { b"\x01" } else { b"\x00" }
+}
+
+const fn expiration_mode_value(value: super::ExpirationMode) -> &'static [u8] {
+    match value {
+        super::ExpirationMode::Inherit => b"inherit",
+        super::ExpirationMode::NoExpiry => b"no_expiry",
+        super::ExpirationMode::ExplicitTtl => b"explicit_ttl",
+    }
+}
+
+const fn eviction_mode_value(value: super::EvictionMode) -> &'static [u8] {
+    match value {
+        super::EvictionMode::Inherit => b"inherit",
+        super::EvictionMode::Evictable => b"evictable",
+        super::EvictionMode::EvictionProtected => b"eviction_protected",
+    }
+}
+
+const fn override_policy_value(value: super::OverridePolicy) -> &'static [u8] {
+    match value {
+        super::OverridePolicy::Allowed => b"allowed",
+        super::OverridePolicy::Disallowed => b"disallowed",
+    }
+}
+
+const fn default_expiration_value(value: super::ExpirationDefault) -> &'static [u8] {
+    match value {
+        super::ExpirationDefault::NoExpiry => b"no_expiry",
+        super::ExpirationDefault::FixedTtl { .. } => b"fixed_ttl",
+    }
+}
+
+const fn default_eviction_value(value: super::EvictionDefault) -> &'static [u8] {
+    match value {
+        super::EvictionDefault::Evictable => b"evictable",
+        super::EvictionDefault::EvictionProtected => b"eviction_protected",
+    }
 }
 
 /// Validates a compatibility request. `false` means generic validation should
 /// run in the plan-driven request core.
 pub(crate) fn validate_request(request: &Request) -> Result<bool> {
-    if route_for_opcode(request.opcode).is_none() {
+    if !is_compatibility_operation(request.opcode) {
         return Ok(false);
     }
     validate_compact_request(request)?;
@@ -281,108 +330,104 @@ fn compact_request(
     value: Vec<u8>,
     set_options: super::super::SetOptions,
 ) -> crate::Result<Request> {
-    match compact_request_route(operation).map_err(crate::Error::protocol)? {
-        CompactV1RequestRoute::Item
-        | CompactV1RequestRoute::Set
-        | CompactV1RequestRoute::Namespace => {
-            let items = parse_compact_item_ids(
-                item_id,
-                compact_request_field_count(operation, OperationFieldRole::ItemId),
-            )
-            .map_err(|message| crate::Error::configuration("item_id", message))?;
-            let namespace_id = namespace_id.ok_or_else(|| {
-                crate::Error::configuration(
-                    "namespace_id",
-                    "scoped operation requires a namespace ID",
-                )
-            })?;
-            if !value.is_empty() {
-                validate_compact_value(operation, &value).map_err(crate::Error::protocol)?;
-            }
-            Request::new_scoped_items_with_options(
-                operation,
-                namespace_id,
-                items,
-                set_options.into_protocol()?,
-                value,
-            )
-            .map_err(crate::Error::protocol)
-        }
-        CompactV1RequestRoute::NamespaceOpen
-        | CompactV1RequestRoute::NamespaceUpdatePolicy
-        | CompactV1RequestRoute::NamespaceDelete => Err(crate::Error::configuration(
+    if !is_compatibility_operation(operation) {
+        return Err(crate::Error::configuration(
+            "operation",
+            "operation has no exact generated request plan",
+        ));
+    }
+    if compact_request_field_count(operation, "name") > 0
+        || compact_request_field_count(operation, "expected_revision") > 0
+    {
+        return Err(crate::Error::configuration(
             "operation",
             "namespace-management operations use their typed request builders",
-        )),
+        ));
     }
+    let items = parse_compact_item_ids(
+        item_id,
+        compact_request_field_count(operation, "item_id"),
+    )
+    .map_err(|message| crate::Error::configuration("item_id", message))?;
+    let namespace_id = namespace_id.ok_or_else(|| {
+        crate::Error::configuration(
+            "namespace_id",
+            "scoped operation requires a namespace ID",
+        )
+    })?;
+    if !value.is_empty() {
+        validate_compact_value(operation, &value).map_err(crate::Error::protocol)?;
+    }
+    Request::new_scoped_items_with_options(
+        operation,
+        namespace_id,
+        items,
+        set_options.into_protocol()?,
+        value,
+    )
+    .map_err(crate::Error::protocol)
 }
 
 fn validate_compact_request(request: &Request) -> Result<()> {
     validate_value_length(request.value.len())?;
-    match compact_request_route(request.opcode)? {
-        CompactV1RequestRoute::Item | CompactV1RequestRoute::Set => {
-            validate_namespace_id(request.namespace_id)?;
-            let item_count =
-                compact_request_field_count(request.opcode, OperationFieldRole::ItemId);
-            let value_count =
-                compact_request_field_count(request.opcode, OperationFieldRole::Value);
-            if request.item_ids.len() != item_count
-                || request.namespace_name.is_some()
-                || request.namespace_policy.is_some()
-                || request.expected_revision.is_some()
-                || request.create_if_missing
-            {
-                return Err(invalid_shape(
-                    request.opcode,
-                    ITEM_ID_BYTES * item_count,
-                    if value_count == 0 { "0" } else { "any" },
-                ));
+    let item_count = compact_request_field_count(request.opcode, "item_id");
+    let value_count = compact_request_field_count(request.opcode, "value");
+    let has_name = compact_request_field_count(request.opcode, "name") > 0;
+    let has_revision = compact_request_field_count(request.opcode, "expected_revision") > 0;
+    let has_policy = compact_request_field_count(request.opcode, "policy") > 0;
+    if item_count > 0 {
+        validate_namespace_id(request.namespace_id)?;
+        if request.item_ids.len() != item_count
+            || request.namespace_name.is_some()
+            || request.namespace_policy.is_some()
+            || request.expected_revision.is_some()
+            || request.create_if_missing
+        {
+            return Err(invalid_shape(
+                request.opcode,
+                ITEM_ID_BYTES * item_count,
+                if value_count == 0 { "0" } else { "any" },
+            ));
+        }
+        if value_count == 0 {
+            if request.set_options != SetWireOptions::NONE || !request.value.is_empty() {
+                return Err(invalid_shape(request.opcode, ITEM_ID_BYTES, "0"));
             }
-            if value_count == 0 {
-                if request.set_options != SetWireOptions::NONE || !request.value.is_empty() {
-                    return Err(invalid_shape(request.opcode, ITEM_ID_BYTES, "0"));
-                }
+        } else {
+            request.set_options.flags()?;
+        }
+        return Ok(());
+    }
+    if has_name {
+        let name = request
+            .namespace_name
+            .as_deref()
+            .ok_or(ProtocolError::InvalidNamespaceName("namespace name missing"))?;
+        validate_namespace_name(name)?;
+        if request.create_if_missing != request.namespace_policy.is_some() {
+            return Err(if request.create_if_missing {
+                ProtocolError::MissingNamespacePolicy
             } else {
-                request.set_options.flags()?;
-            }
+                ProtocolError::UnexpectedNamespacePolicy
+            });
         }
-        CompactV1RequestRoute::Namespace => {
-            validate_namespace_id(request.namespace_id)?;
-            if request.has_non_empty_fields_except_namespace() {
-                return Err(invalid_shape(request.opcode, 0, "0"));
-            }
+        if request.namespace_id.is_some()
+            || !request.item_ids.is_empty()
+            || request.set_options != SetWireOptions::NONE
+            || !request.value.is_empty()
+            || request.expected_revision.is_some()
+        {
+            return Err(invalid_shape(request.opcode, 0, "0"));
         }
-        CompactV1RequestRoute::NamespaceOpen => {
-            let name =
-                request
-                    .namespace_name
-                    .as_deref()
-                    .ok_or(ProtocolError::InvalidNamespaceName(
-                        "namespace name missing",
-                    ))?;
-            validate_namespace_name(name)?;
-            if request.create_if_missing != request.namespace_policy.is_some() {
-                return Err(if request.create_if_missing {
-                    ProtocolError::MissingNamespacePolicy
-                } else {
-                    ProtocolError::UnexpectedNamespacePolicy
-                });
-            }
-            if request.namespace_id.is_some()
-                || !request.item_ids.is_empty()
-                || request.set_options != SetWireOptions::NONE
-                || !request.value.is_empty()
-                || request.expected_revision.is_some()
-            {
-                return Err(invalid_shape(request.opcode, 0, "0"));
-            }
-            if let Some(policy) = request.namespace_policy {
-                policy.encode()?;
-            }
+        if let Some(policy) = request.namespace_policy {
+            policy.encode()?;
         }
-        CompactV1RequestRoute::NamespaceUpdatePolicy => {
-            validate_namespace_id(request.namespace_id)?;
-            validate_revision(request.expected_revision)?;
+        return Ok(());
+    }
+    if has_revision {
+        validate_namespace_id(request.namespace_id)?;
+        validate_revision(request.expected_revision)?;
+        if has_policy {
             request
                 .namespace_policy
                 .ok_or(ProtocolError::MissingNamespacePolicy)?
@@ -395,25 +440,15 @@ fn validate_compact_request(request: &Request) -> Result<()> {
             {
                 return Err(invalid_shape(request.opcode, 0, "0"));
             }
+        } else if request.has_non_empty_fields_except_namespace_revision() {
+            return Err(invalid_shape(request.opcode, 0, "0"));
         }
-        CompactV1RequestRoute::NamespaceDelete => {
-            validate_namespace_id(request.namespace_id)?;
-            validate_revision(request.expected_revision)?;
-            if request.has_non_empty_fields_except_namespace_revision() {
-                return Err(invalid_shape(request.opcode, 0, "0"));
-            }
-        }
+        return Ok(());
     }
-    Ok(())
-}
-
-fn append_namespace_id(output: &mut Vec<u8>, namespace_id: Option<u64>) -> Result<()> {
-    output.extend_from_slice(&validate_namespace_id(namespace_id)?.to_be_bytes());
-    Ok(())
-}
-
-fn append_revision(output: &mut Vec<u8>, revision: Option<u64>) -> Result<()> {
-    output.extend_from_slice(&validate_revision(revision)?.to_be_bytes());
+    validate_namespace_id(request.namespace_id)?;
+    if request.has_non_empty_fields_except_namespace() {
+        return Err(invalid_shape(request.opcode, 0, "0"));
+    }
     Ok(())
 }
 
@@ -448,8 +483,13 @@ fn validate_namespace_name(name: &[u8]) -> Result<()> {
 }
 
 /// Looks up a compact protocol-v1 field cardinality at the adapter boundary.
-pub(super) fn compact_request_field_count(opcode: Opcode, role: OperationFieldRole) -> usize {
-    operation_field_count(opcode, OperationFieldDirection::Request, role)
+pub(super) fn compact_request_field_count(opcode: Opcode, role: &str) -> usize {
+    crate::contract::operation_wire_spec(opcode)
+        .request
+        .fields
+        .iter()
+        .filter(|field| field.role == role)
+        .count()
 }
 
 /// Returns the number of item identities carried by a compact route.
@@ -457,56 +497,17 @@ pub(super) fn compact_request_field_count(opcode: Opcode, role: OperationFieldRo
 /// This keeps the generated role enum inside the protocol-v1 adapter. Client
 /// convenience layers only need the adapter's cardinality decision.
 pub(crate) fn compact_item_count(opcode: Opcode) -> usize {
-    compact_request_field_count(opcode, OperationFieldRole::ItemId)
-}
-
-/// Compact request layouts owned by the protocol-v1 compatibility adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CompactV1RequestRoute {
-    Item,
-    Set,
-    Namespace,
-    NamespaceOpen,
-    NamespaceUpdatePolicy,
-    NamespaceDelete,
-}
-
-pub(crate) fn compact_request_route(operation: Opcode) -> Result<CompactV1RequestRoute> {
-    route_for_opcode(operation)
-        .map(|route| match route {
-            OperationCompactV1Route::Item => CompactV1RequestRoute::Item,
-            OperationCompactV1Route::Set => CompactV1RequestRoute::Set,
-            OperationCompactV1Route::Namespace => CompactV1RequestRoute::Namespace,
-            OperationCompactV1Route::NamespaceOpen => CompactV1RequestRoute::NamespaceOpen,
-            OperationCompactV1Route::NamespaceUpdatePolicy => {
-                CompactV1RequestRoute::NamespaceUpdatePolicy
-            }
-            OperationCompactV1Route::NamespaceDelete => CompactV1RequestRoute::NamespaceDelete,
-        })
-        .ok_or(ProtocolError::InvalidFieldSequence(
-            "operation has no protocol-v1 compact route",
-        ))
+    compact_request_field_count(opcode, "item_id")
 }
 
 pub(crate) fn uses_compact_item_route(operation: Opcode) -> bool {
-    matches!(
-        route_for_opcode(operation),
-        Some(OperationCompactV1Route::Item | OperationCompactV1Route::Set)
-    )
+    is_compatibility_operation(operation) && compact_item_count(operation) > 0
 }
 
 /// Returns whether the protocol-v1 adapter must supply a namespace prefix.
 pub(crate) fn uses_compact_namespace_route(operation: Opcode) -> bool {
-    matches!(
-        route_for_opcode(operation),
-        Some(
-            OperationCompactV1Route::Item
-                | OperationCompactV1Route::Set
-                | OperationCompactV1Route::Namespace
-                | OperationCompactV1Route::NamespaceUpdatePolicy
-                | OperationCompactV1Route::NamespaceDelete
-        )
-    )
+    is_compatibility_operation(operation)
+        && compact_request_field_count(operation, "namespace_id") > 0
 }
 
 pub(crate) fn parse_compact_item_ids(
