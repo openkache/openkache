@@ -9,13 +9,14 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use futures_util::future::FutureExt;
-use futures_util::stream::{FuturesUnordered, StreamExt};
-use openkache_protocol::{EvictionMode, SetCondition, SetOptions};
-
 use super::*;
+use crate::observability::Operation;
+use crate::protocol::{EvictionMode, SetCondition, SetOptions};
 use crate::storage_backend;
 use crate::types::StoredItemValue;
+use futures_util::future::FutureExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use openkache_protocol::Opcode;
 
 const MAX_LEASED_SSD_VALUE_READ_BYTES: usize = 6 * BUCKET_BYTES;
 
@@ -61,6 +62,16 @@ pub(crate) enum KeyedOperation {
         options: SetOptions,
     },
     Delete,
+}
+
+impl KeyedOperation {
+    pub(crate) const fn telemetry_operation(&self) -> Operation {
+        match self {
+            Self::Get => Operation::from_opcode(Opcode::Get),
+            Self::Set { .. } => Operation::from_opcode(Opcode::Set),
+            Self::Delete => Operation::from_opcode(Opcode::Delete),
+        }
+    }
 }
 
 pub(crate) enum KeyedOutcome {
@@ -805,52 +816,56 @@ impl Kvkache {
         };
         let (outcome, visible_state, flush_required, pending) =
             match (completed.operation, observation) {
-            (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
-                let visible_state = include_visible_state.then(|| match &mut value {
-                    Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
-                    None => KeyedVisibleState::Missing,
-                });
-                (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
-            }
-            (PreparedKeyedOperation::Set { value, options }, KeyedObservation::State(previous)) => {
-                let evaluated_at_ms = unix_time_ms();
-                match self.finish_keyed_set(
-                    completed.storage_key,
-                    value,
-                    options,
-                    evaluated_at_ms,
-                    previous,
-                    include_visible_state,
-                ) {
-                    Ok((outcome, visible_state, flush_required, pending)) => (
-                        Ok(KeyedOutcome::Set(outcome)),
-                        visible_state,
-                        flush_required,
-                        pending,
-                    ),
-                    Err(error) => (Err(error), None, false, false),
+                (PreparedKeyedOperation::Get, KeyedObservation::Value(mut value)) => {
+                    let visible_state = include_visible_state.then(|| match &mut value {
+                        Some(value) => KeyedVisibleState::Present(value.clone_for_visible_state()),
+                        None => KeyedVisibleState::Missing,
+                    });
+                    (Ok(KeyedOutcome::Value(value)), visible_state, false, false)
                 }
-            }
-            (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
-                match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous) {
-                    Ok((deleted, flush_required)) => (
-                        Ok(KeyedOutcome::Deleted(deleted)),
-                        Some(KeyedVisibleState::Missing),
-                        flush_required,
-                        false,
-                    ),
-                    Err(error) => (Err(error), None, false, false),
+                (
+                    PreparedKeyedOperation::Set { value, options },
+                    KeyedObservation::State(previous),
+                ) => {
+                    let evaluated_at_ms = unix_time_ms();
+                    match self.finish_keyed_set(
+                        completed.storage_key,
+                        value,
+                        options,
+                        evaluated_at_ms,
+                        previous,
+                        include_visible_state,
+                    ) {
+                        Ok((outcome, visible_state, flush_required, pending)) => (
+                            Ok(KeyedOutcome::Set(outcome)),
+                            visible_state,
+                            flush_required,
+                            pending,
+                        ),
+                        Err(error) => (Err(error), None, false, false),
+                    }
                 }
-            }
-            _ => (
-                Err(KvError::Worker(
-                    "keyed operation completed with an incompatible observation".into(),
-                )),
-                None,
-                false,
-                false,
-            ),
-        };
+                (PreparedKeyedOperation::Delete, KeyedObservation::State(previous)) => {
+                    match self.finish_keyed_delete(completed.storage_key, unix_time_ms(), previous)
+                    {
+                        Ok((deleted, flush_required)) => (
+                            Ok(KeyedOutcome::Deleted(deleted)),
+                            Some(KeyedVisibleState::Missing),
+                            flush_required,
+                            false,
+                        ),
+                        Err(error) => (Err(error), None, false, false),
+                    }
+                }
+                _ => (
+                    Err(KvError::Worker(
+                        "keyed operation completed with an incompatible observation".into(),
+                    )),
+                    None,
+                    false,
+                    false,
+                ),
+            };
         KeyedFinish {
             outcome,
             visible_state,
@@ -1202,6 +1217,39 @@ impl Kvkache {
         } else {
             SetOutcome::Created
         })
+    }
+
+    /// Compares the live value and applies the replacement while the store is
+    /// exclusively borrowed by one worker lane.
+    ///
+    /// This is the storage adapter's atomicity boundary for API-owned CAS
+    /// tasks. The capability layer does not expose a read-then-write sequence
+    /// that another worker could interleave; both phases execute under this
+    /// mutable store borrow.
+    pub(crate) async fn compare_and_set_encoded_with_options(
+        &mut self,
+        storage_key: StorageKey,
+        expected: Option<&[u8]>,
+        replacement: Option<StoredItemValue>,
+        options: SetOptions,
+    ) -> Result<bool> {
+        let current = self.get_encoded(&storage_key).await?;
+        let matches = match (expected, current.as_ref()) {
+            (None, None) => true,
+            (Some(expected), Some(current)) => expected == current.as_ref(),
+            _ => false,
+        };
+        if !matches {
+            return Ok(false);
+        }
+        match replacement {
+            Some(value) => Ok(matches!(
+                self.set_encoded_with_options(storage_key, value, options)
+                    .await?,
+                SetOutcome::Created | SetOutcome::Replaced
+            )),
+            None => Ok(self.delete(&storage_key).await?),
+        }
     }
 
     #[allow(dead_code)]

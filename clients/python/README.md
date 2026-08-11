@@ -58,8 +58,9 @@ finally:
 v1 `Text` PortableKey by default. Select `key_spec=KeySpec.BYTES` or
 `key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
 precision integers. The selected spec is enforced for every formatted
-operation and the key is converted to canonical deterministic CBOR before the
-native ABI. Empty and NUL-containing keys are valid. JSON numbers
+operation and the adapter passes neutral logical bytes plus the generated key
+spec to the typed native ABI; the Rust core owns canonical deterministic CBOR.
+Empty and NUL-containing keys are valid. JSON numbers
 are finite, and integers
 must be exactly representable as IEEE-754 binary64 values. Python converts a
 native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the

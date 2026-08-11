@@ -7,21 +7,34 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes::{
-    Aes256,
-    cipher::{Block, BlockCipherEncrypt, KeyInit},
-};
-use openkache_protocol::{ItemId, NAMESPACE_ID_BYTES, SetOptions};
+use aes::{Aes256, cipher::KeyInit};
+use openkache_protocol::Opcode;
 
 use crate::channel::{self, Sender};
 use crate::config::DEFAULT_BUCKET_CHOICE_COUNT;
 use crate::observability::{NetworkWorkerId, ObservabilityState, Operation};
+use crate::protocol::{ItemId, SetOptions};
 use crate::types::StoredItemValue;
 use crate::*;
 
+mod benchmark;
 pub(crate) mod completion;
+mod network_cache;
+pub(crate) mod storage_backend;
+mod storage_context;
+mod storage_keys;
+mod storage_port;
+mod storage_task;
 mod worker;
-pub use worker::*;
+mod worker_control;
+pub use benchmark::*;
+pub(crate) use network_cache::NetworkWorkerCache;
+#[allow(unused_imports)]
+pub(crate) use storage_keys::{derive_scoped_storage_key, derive_storage_key};
+pub(crate) use storage_port::*;
+pub(crate) use storage_task::*;
+#[allow(unused_imports)]
+pub(crate) use worker::*;
 
 use self::completion::{CompletionReceiver, CompletionSlab};
 
@@ -52,172 +65,12 @@ struct PendingBenchmarkRequest<'a> {
     started: std::time::Instant,
 }
 
-pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> StorageKey {
-    let mut bytes = item_id.into_bytes();
-
-    // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks exactly cover
-    // the 32-byte digest buffer while preserving its alignment and exclusive borrow.
-    let blocks = unsafe { &mut *(bytes.as_mut_ptr() as *mut [Block<Aes256>; 2]) };
-
-    // AES-MDS-AES keeps this fixed-size derivation in place and on the AES hardware path: two
-    // parallel AES passes surround an invertible MDS layer so each digest half influences both
-    // output blocks. Keyed BLAKE3 is the simpler non-permutation alternative when portability
-    // and a conventional keyed hash matter more than minimizing AES-backed latency.
-    server_cipher.encrypt_blocks(blocks);
-
-    let [first_block, second_block] = blocks;
-    for (first, second) in first_block.iter_mut().zip(second_block.iter_mut()) {
-        let first_byte = *first;
-        let second_byte = *second;
-        *first = first_byte ^ second_byte;
-        *second = first_byte ^ gf_double(second_byte);
-    }
-
-    server_cipher.encrypt_blocks(blocks);
-
-    StorageKey::new(bytes)
-}
-
-/// Derives a storage key for the `(namespace_id, item_id)` wire identity.
-///
-/// The legacy unscoped helper remains available to benchmark and RESP callers;
-/// network requests must use this scoped derivation so equal item IDs in two
-/// namespaces cannot address the same storage record.
-pub(crate) fn derive_scoped_storage_key(
-    server_cipher: &Aes256,
-    namespace_id: u64,
-    item_id: ItemId,
-) -> StorageKey {
-    // Derive a namespace-specific AES key before applying the existing fixed-size
-    // AES-MDS-AES permutation. Mixing the namespace into the item input with XOR
-    // would permit deterministic cross-namespace collisions for related item IDs.
-    // A separate key makes each namespace an independent permutation, so equal
-    // item IDs remain distinct and cross-namespace collisions are computationally
-    // negligible.
-    let mut scope_material = [0u8; 32];
-    scope_material[..NAMESPACE_ID_BYTES].copy_from_slice(&namespace_id.to_be_bytes());
-    scope_material[NAMESPACE_ID_BYTES..].copy_from_slice(b"OpenKache namespace v1!!");
-    let namespace_key = derive_storage_key(server_cipher, ItemId::new(scope_material)).into_bytes();
-    let namespace_cipher = Aes256::new_from_slice(&namespace_key)
-        .expect("AES-256 namespace derivation always produces a 32-byte key");
-    derive_storage_key(&namespace_cipher, item_id)
-}
-
-fn gf_double(byte: u8) -> u8 {
-    (byte << 1) ^ (0x1b & 0u8.wrapping_sub(byte >> 7))
-}
-
 pub struct ThreadedKvkache {
     config: crate::config::AppConfig,
     workers: Vec<WorkerHandle>,
     server_cipher: Aes256,
     storage_device_kind: crate::platform::StorageDeviceKind,
     observability: Option<Arc<ObservabilityState>>,
-}
-
-/// A network-worker-owned view of the storage runtime and its request shard.
-///
-/// The wrapper carries the caller shard explicitly so queue and wait telemetry
-/// is recorded by the network worker that issued the request. The storage
-/// runtime remains shared only for request routing and response delivery.
-pub(crate) struct NetworkWorkerCache<'a> {
-    cache: &'a ThreadedKvkache,
-    network_worker: NetworkWorkerId,
-}
-
-impl<'a> NetworkWorkerCache<'a> {
-    pub(crate) fn new(cache: &'a ThreadedKvkache, network_worker: NetworkWorkerId) -> Self {
-        Self {
-            cache,
-            network_worker,
-        }
-    }
-
-    pub(crate) async fn get_in_namespace(
-        &self,
-        namespace_id: u64,
-        item_id: ItemId,
-    ) -> Result<Option<StoredItemValue>> {
-        self.cache
-            .get_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
-                Some(self.network_worker),
-            )
-            .await
-    }
-
-    pub(crate) async fn set_in_namespace(
-        &self,
-        namespace_id: u64,
-        item_id: ItemId,
-        value: StoredItemValue,
-        options: SetOptions,
-    ) -> Result<SetOutcome> {
-        self.cache
-            .set_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
-                value,
-                options,
-                Some(self.network_worker),
-            )
-            .await
-    }
-
-    pub(crate) async fn delete_in_namespace(
-        &self,
-        namespace_id: u64,
-        item_id: ItemId,
-    ) -> Result<bool> {
-        self.cache
-            .delete_async_in_namespace_with_requester(
-                namespace_id,
-                item_id,
-                Some(self.network_worker),
-            )
-            .await
-    }
-
-    pub(crate) async fn get_stored(&self, item_id: ItemId) -> Result<Option<StoredItemValue>> {
-        self.cache
-            .get_async_with_requester(item_id, Some(self.network_worker))
-            .await
-    }
-
-    pub(crate) async fn set_with_options(
-        &self,
-        item_id: ItemId,
-        value: StoredItemValue,
-        options: SetOptions,
-    ) -> Result<SetOutcome> {
-        self.cache
-            .set_async_with_options_requester(
-                item_id,
-                value,
-                options,
-                Some(self.network_worker),
-            )
-            .await
-    }
-
-    pub(crate) async fn delete(&self, item_id: ItemId) -> Result<bool> {
-        self.cache
-            .delete_async_with_requester(item_id, Some(self.network_worker))
-            .await
-    }
-
-    pub(crate) async fn stats(&self) -> Result<Vec<String>> {
-        self.cache
-            .stats_async_with_requester(Some(self.network_worker))
-            .await
-    }
-
-    pub(crate) async fn sync(&self) -> Result<()> {
-        self.cache
-            .sync_async_with_requester(Some(self.network_worker))
-            .await
-    }
 }
 
 impl ThreadedKvkache {
@@ -231,6 +84,7 @@ impl ThreadedKvkache {
     }
 
     /// Starts storage workers and attaches overlapping server network tasks when supported.
+    #[allow(dead_code)]
     pub(crate) fn start_validated_for_server(config: crate::config::AppConfig) -> Result<Self> {
         Self::start_validated_with_network_roles(config, true, None)
     }
@@ -469,7 +323,9 @@ impl ThreadedKvkache {
                 }
                 Err(message) => {
                     for worker in &workers {
-                        let _ = worker.sender.send(WorkerRequest::Shutdown);
+                        let _ = worker
+                            .sender
+                            .send(WorkerRequest::Control(WorkerControlRequest::Shutdown));
                     }
                     for worker in &mut workers {
                         if let Some(thread) = worker.thread.take() {
@@ -542,11 +398,17 @@ impl ThreadedKvkache {
     }
 
     fn storage_key(&self, item_id: ItemId) -> StorageKey {
-        derive_storage_key(&self.server_cipher, item_id)
+        storage_keys::derive_storage_key(&self.server_cipher, item_id)
     }
 
     fn scoped_storage_key(&self, namespace_id: u64, item_id: ItemId) -> StorageKey {
-        derive_scoped_storage_key(&self.server_cipher, namespace_id, item_id)
+        storage_keys::derive_scoped_storage_key(&self.server_cipher, namespace_id, item_id)
+    }
+
+    /// Returns the storage worker that owns one namespace-scoped item.
+    pub(crate) fn namespace_item_worker(&self, namespace_id: u64, item_id: ItemId) -> usize {
+        let storage_key = self.scoped_storage_key(namespace_id, item_id);
+        self.owner(&storage_key)
     }
 
     /// Sends one worker request using a reusable completion slot and bounded timeouts.
@@ -618,6 +480,57 @@ impl ThreadedKvkache {
         result
     }
 
+    /// Runs API-owned storage work without adding an operation-specific worker
+    /// command or response variant.
+    #[allow(dead_code)]
+    async fn execute_storage_task_with_requester(
+        &self,
+        worker: usize,
+        requester: Option<NetworkWorkerId>,
+        task: StorageTask,
+    ) -> StorageResult<StorageTaskOutput> {
+        let operation = Operation::unknown();
+        let response = self
+            .request(worker, operation, requester, |response| {
+                WorkerRequest::Control(WorkerControlRequest::StorageTask { task, response })
+            })
+            .await
+            .map_err(StorageError::from)?;
+        match response {
+            WorkerResponse::StorageResult(result) => Ok(result),
+            WorkerResponse::StorageFailure(error) => Err(error),
+            response => Err(StorageError::Worker(format!(
+                "unexpected storage task response: {response:?}"
+            ))),
+        }
+    }
+
+    async fn execute_storage_task_for_key_with_requester(
+        &self,
+        worker: usize,
+        storage_key: StorageKey,
+        requester: Option<NetworkWorkerId>,
+        task: StorageTask,
+    ) -> StorageResult<StorageTaskOutput> {
+        let operation = Operation::unknown();
+        let response = self
+            .request(worker, operation, requester, |response| {
+                WorkerRequest::Keyed {
+                    storage_key,
+                    command: StorageCommand::Custom { task, response },
+                }
+            })
+            .await
+            .map_err(StorageError::from)?;
+        match response {
+            WorkerResponse::StorageResult(result) => Ok(result),
+            WorkerResponse::StorageFailure(error) => Err(error),
+            response => Err(StorageError::Worker(format!(
+                "unexpected keyed storage task response: {response:?}"
+            ))),
+        }
+    }
+
     pub async fn get(&self, item_id: ItemId) -> Result<Option<Vec<u8>>> {
         self.get_stored(item_id)
             .await
@@ -639,11 +552,11 @@ impl ThreadedKvkache {
         match self
             .request(
                 worker,
-                Operation::Get,
+                Operation::from_opcode(Opcode::Get),
                 requester,
-                |response| WorkerRequest::Get {
+                |response| WorkerRequest::Keyed {
                     storage_key,
-                    response,
+                    command: StorageCommand::Get { response },
                 },
             )
             .await?
@@ -656,6 +569,7 @@ impl ThreadedKvkache {
     }
 
     /// Retrieves an item from a namespace-scoped wire identity.
+    #[allow(dead_code)]
     pub(crate) async fn get_in_namespace(
         &self,
         namespace_id: u64,
@@ -676,11 +590,11 @@ impl ThreadedKvkache {
         match self
             .request(
                 worker,
-                Operation::Get,
+                Operation::from_opcode(Opcode::Get),
                 requester,
-                |response| WorkerRequest::Get {
+                |response| WorkerRequest::Keyed {
                     storage_key,
-                    response,
+                    command: StorageCommand::Get { response },
                 },
             )
             .await?
@@ -719,13 +633,15 @@ impl ThreadedKvkache {
         match self
             .request(
                 worker,
-                Operation::Set,
+                Operation::from_opcode(Opcode::Set),
                 requester,
-                |response| WorkerRequest::Set {
+                |response| WorkerRequest::Keyed {
                     storage_key,
-                    value,
-                    options,
-                    response,
+                    command: StorageCommand::Set {
+                        value,
+                        options,
+                        response,
+                    },
                 },
             )
             .await?
@@ -738,6 +654,7 @@ impl ThreadedKvkache {
     }
 
     /// Stores an item under a namespace-scoped wire identity.
+    #[allow(dead_code)]
     pub(crate) async fn set_in_namespace(
         &self,
         namespace_id: u64,
@@ -762,13 +679,15 @@ impl ThreadedKvkache {
         match self
             .request(
                 worker,
-                Operation::Set,
+                Operation::from_opcode(Opcode::Set),
                 requester,
-                |response| WorkerRequest::Set {
+                |response| WorkerRequest::Keyed {
                     storage_key,
-                    value,
-                    options,
-                    response,
+                    command: StorageCommand::Set {
+                        value,
+                        options,
+                        response,
+                    },
                 },
             )
             .await?
@@ -794,11 +713,11 @@ impl ThreadedKvkache {
         match self
             .request(
                 worker,
-                Operation::Delete,
+                Operation::from_opcode(Opcode::Delete),
                 requester,
-                |response| WorkerRequest::Delete {
+                |response| WorkerRequest::Keyed {
                     storage_key,
-                    response,
+                    command: StorageCommand::Delete { response },
                 },
             )
             .await?
@@ -811,6 +730,7 @@ impl ThreadedKvkache {
     }
 
     /// Deletes an item under a namespace-scoped wire identity.
+    #[allow(dead_code)]
     pub(crate) async fn delete_in_namespace(
         &self,
         namespace_id: u64,
@@ -831,11 +751,11 @@ impl ThreadedKvkache {
         match self
             .request(
                 worker,
-                Operation::Delete,
+                Operation::from_opcode(Opcode::Delete),
                 requester,
-                |response| WorkerRequest::Delete {
+                |response| WorkerRequest::Keyed {
                     storage_key,
-                    response,
+                    command: StorageCommand::Delete { response },
                 },
             )
             .await?
@@ -1122,25 +1042,31 @@ impl ThreadedKvkache {
             let (response_tx, response_rx) = self.workers[worker].completions.register();
             let (request, kind) = match operation {
                 BenchmarkOperation::Get(_) => (
-                    WorkerRequest::Get {
+                    WorkerRequest::Keyed {
                         storage_key,
-                        response: response_tx,
+                        command: StorageCommand::Get {
+                            response: response_tx,
+                        },
                     },
                     BenchmarkResponseKind::Get,
                 ),
                 BenchmarkOperation::Set(_, value) => (
-                    WorkerRequest::Set {
+                    WorkerRequest::Keyed {
                         storage_key,
-                        value: StoredItemValue::new(value),
-                        options: SetOptions::NONE,
-                        response: response_tx,
+                        command: StorageCommand::Set {
+                            value: StoredItemValue::new(value),
+                            options: SetOptions::NONE,
+                            response: response_tx,
+                        },
                     },
                     BenchmarkResponseKind::Set,
                 ),
                 BenchmarkOperation::Delete(_) => (
-                    WorkerRequest::Delete {
+                    WorkerRequest::Keyed {
                         storage_key,
-                        response: response_tx,
+                        command: StorageCommand::Delete {
+                            response: response_tx,
+                        },
                     },
                     BenchmarkResponseKind::Delete,
                 ),
@@ -1223,9 +1149,9 @@ impl ThreadedKvkache {
             match self
                 .request(
                     thread_id,
-                    Operation::Stats,
+                    Operation::from_opcode(Opcode::Stats),
                     requester,
-                    |response| WorkerRequest::Stats { response },
+                    |response| WorkerRequest::Control(WorkerControlRequest::Stats { response }),
                 )
                 .await?
             {
@@ -1251,9 +1177,46 @@ impl ThreadedKvkache {
             match self
                 .request(
                     thread_id,
-                    Operation::Sync,
+                    Operation::from_opcode(Opcode::Sync),
                     requester,
-                    |response| WorkerRequest::Sync { response },
+                    |response| WorkerRequest::Control(WorkerControlRequest::Sync { response }),
+                )
+                .await?
+            {
+                WorkerResponse::Synced => {}
+                response => {
+                    return Err(KvError::Worker(format!(
+                        "unexpected sync response: {response:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes exactly the storage workers that have observed mutations for a namespace.
+    #[allow(dead_code)]
+    pub(crate) async fn sync_workers(&self, workers: &[usize]) -> Result<()> {
+        self.sync_workers_async_with_requester(workers, None).await
+    }
+
+    async fn sync_workers_async_with_requester(
+        &self,
+        workers: &[usize],
+        requester: Option<NetworkWorkerId>,
+    ) -> Result<()> {
+        for &worker in workers {
+            if worker >= self.workers.len() {
+                return Err(KvError::Worker(format!(
+                    "namespace references unknown storage worker {worker}"
+                )));
+            }
+            match self
+                .request(
+                    worker,
+                    Operation::from_opcode(Opcode::Sync),
+                    requester,
+                    |response| WorkerRequest::Control(WorkerControlRequest::Sync { response }),
                 )
                 .await?
             {
@@ -1276,7 +1239,12 @@ impl ThreadedKvkache {
         }
         let mut shutdown_error = None;
         for worker in &self.workers {
-            if worker.sender.send(WorkerRequest::Shutdown).is_err() && shutdown_error.is_none() {
+            if worker
+                .sender
+                .send(WorkerRequest::Control(WorkerControlRequest::Shutdown))
+                .is_err()
+                && shutdown_error.is_none()
+            {
                 shutdown_error = Some(KvError::Worker(
                     "worker request queue disconnected during shutdown".into(),
                 ));

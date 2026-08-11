@@ -2,6 +2,7 @@ import {
   load_native_module,
   type Native_Client,
   type Native_Client_Options,
+  type Native_Namespace_Policy,
 } from "./native-binding.js"
 import {
   assert_json_value,
@@ -10,6 +11,10 @@ import {
   type Value_Codec,
   type Value_Envelope,
 } from "./value-codec.js"
+import {
+  Smithy_Generated_Operations,
+  type Smithy_Operation_Transport,
+} from "./generated_local/smithy-operations.js"
 
 export type {
   Encoded_Value,
@@ -51,39 +56,15 @@ import {
   SMITHY_SET_OUTCOME_CREATED,
   SMITHY_SET_OUTCOME_NOT_STORED,
   SMITHY_SET_OUTCOME_REPLACED,
-  type Smithy_Delete_Input,
-  type Smithy_Delete_Output,
-  type Smithy_Get_Input,
-  type Smithy_Get_Output,
   type Smithy_Eviction_Mode,
   type Smithy_Expiration_Mode,
-  type Smithy_Namespace_Delete_Input,
-  type Smithy_Namespace_Delete_Output,
-  type Smithy_Namespace_Descriptor,
-  type Smithy_Namespace_Open_Input,
-  type Smithy_Namespace_Open_Output,
-  type Smithy_Namespace_Policy,
-  type Smithy_Namespace_Update_Policy_Input,
-  type Smithy_Namespace_Update_Policy_Output,
   type Smithy_OpenKache_Api,
-  type Smithy_Ping_Input,
-  type Smithy_Ping_Output,
   type Smithy_Set_Condition,
-  type Smithy_Set_Input,
   type Smithy_Set_Outcome,
-  type Smithy_Set_Output,
-  type Smithy_Stats_Input,
-  type Smithy_Stats_Output,
-  type Smithy_Sync_Input,
-  type Smithy_Sync_Output,
 } from "./generated_local/smithy-api.js"
 import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
 const TEXT_ENCODER = new TextEncoder()
-export const MAX_CANONICAL_KEY_BYTES = 1_048_576
-
-export type Key_Spec = "integer" | "text" | "bytes"
-export type Client_Key = string | Uint8Array | number | bigint
 
 interface Client_Lifecycle {
   closed: boolean
@@ -150,10 +131,8 @@ export interface Client_Options {
   readonly address: string
   /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
   readonly certificate: Uint8Array
-  /** Optional exact 32-byte root secret; omitted means unprotected values. */
-  readonly data_protection_key?: Uint8Array
-  /** Exact key type selected for this formatted keyspace. Defaults to `text`. */
-  readonly key_spec?: Key_Spec
+  /** Exact 32-byte master secret used to derive key-hiding and value-encryption subkeys. */
+  readonly data_protection_key: Uint8Array
   /** TLS server name. Defaults to the shared contract value. */
   readonly server_name?: string
   /** Client certificate and private key required by production mutual TLS. */
@@ -166,13 +145,21 @@ export interface Client_Options {
   readonly retry?: Retry_Options
   /** Maximum concurrent request lanes on one connection. */
   readonly max_in_flight?: number
-  /** Authenticated value-encryption profile; requires `data_protection_key`. */
+  /** Authenticated value-encryption profile. Defaults to `robust`. */
   readonly encryption?: "compact" | "robust"
+  /** Logical key representation used by every protected operation. Defaults to `text`. */
+  readonly key_spec?: Key_Spec
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
   readonly native_path?: string
 }
+
+/** Logical key representation selected by a formatted client. */
+export type Key_Spec = "integer" | "text" | "bytes"
+
+/** Native values accepted by a formatted client's logical-key boundary. */
+export type Client_Key = string | Uint8Array | number | bigint
 
 /**
  * Outcome of a successful `set` operation.
@@ -244,13 +231,13 @@ export class OpenKache_Client {
   private constructor(
     native_client: Native_Client,
     value_codecs: Value_Codec_Registry,
-    key_spec: Key_Spec,
     lifecycle: Client_Lifecycle,
+    key_spec: Key_Spec,
   ) {
     this.#native_client = native_client
     this.#value_codecs = value_codecs
-    this.#key_spec = key_spec
     this.#lifecycle = lifecycle
+    this.#key_spec = key_spec
     this.#raw_client = new Raw_Client(native_client, lifecycle)
     CLIENT_FINALIZER.register(this.#raw_client, native_client, this.#raw_client)
   }
@@ -276,12 +263,13 @@ export class OpenKache_Client {
     const compression = options.compression ?? {}
     const timeouts = options.timeouts ?? {}
     const retry = options.retry ?? {}
+    const key_spec = options.key_spec ?? "text"
     const native_options: Native_Client_Options = {
       address: options.address,
       server_name: options.server_name ?? SMITHY_CLIENT_DEFAULT_SERVER_NAME,
       certificate: options.certificate.slice(),
       identity: owned_identity(options.identity),
-      data_protection_key: options.data_protection_key?.slice(),
+      data_protection_key: options.data_protection_key.slice(),
       compression_enabled: compression.enabled !== false,
       compression_level: compression.level ?? SMITHY_DEFAULT_ZSTANDARD_LEVEL,
       minimum_input_size:
@@ -296,7 +284,7 @@ export class OpenKache_Client {
         retry.max_attempts ?? SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
-      key_spec: options.key_spec ?? "text",
+      key_spec,
     }
     try {
       const native_module = load_native_module(options.native_path)
@@ -304,8 +292,8 @@ export class OpenKache_Client {
       const client = new OpenKache_Client(
         native_client,
         value_codecs,
-        options.key_spec ?? "text",
         { closed: false },
+        key_spec,
       )
       return client
     } catch (error) {
@@ -373,7 +361,7 @@ export class OpenKache_Client {
    * Retrieves and codec-decodes a JSON value or custom codec object.
    *
    * @typeParam Value - Expected object shape selected by the caller.
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @returns The decoded value, or `undefined` when the key does not exist.
    * @throws {OpenKache_Error} When transport, decryption, or decoding fails.
    */
@@ -383,9 +371,7 @@ export class OpenKache_Client {
     this.#assert_open()
     let envelope: Value_Envelope | null
     try {
-      envelope = await this.#native_client.get_value(
-        owned_key_bytes(key, this.#key_spec),
-      )
+      envelope = await this.#native_client.get_value(owned_key_bytes(key, this.#key_spec))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -401,7 +387,7 @@ export class OpenKache_Client {
    * Codec-encodes and stores a JSON value.
    *
    * @typeParam Value - JSON value shape to store.
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @param value - JSON value accepted by the built-in envelope or a registered
    * custom object codec.
    * @param options - Optional TTL and `if_absent` or `if_present` condition.
@@ -441,16 +427,14 @@ export class OpenKache_Client {
   /**
    * Retrieves exact decrypted and decompressed bytes without envelope decoding.
    *
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @returns Stored bytes, or `undefined` when the key does not exist.
    * @throws {OpenKache_Error} When the client is closed or the operation fails.
    */
   async get_raw(key: Client_Key): Promise<Uint8Array | undefined> {
     this.#assert_open()
     try {
-      const value = await this.#native_client.get(
-        owned_key_bytes(key, this.#key_spec),
-      )
+      const value = await this.#native_client.get(owned_key_bytes(key, this.#key_spec))
       return value === null ? undefined : value
     } catch (error) {
       throw as_openkache_error(error)
@@ -460,7 +444,7 @@ export class OpenKache_Client {
   /**
    * Stores exact bytes without value-envelope encoding.
    *
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @param value - Bytes to compress, encrypt, and store; empty values are supported.
    * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
@@ -485,7 +469,7 @@ export class OpenKache_Client {
    * This method is the cross-language value API. Use `get` when reading the
    * backwards-compatible TypeScript metadata envelope or a custom codec.
    *
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @returns The canonical JSON value, or `undefined` when absent.
    * @throws {OpenKache_Error} When transport, value validation, or decoding fails.
    */
@@ -493,9 +477,7 @@ export class OpenKache_Client {
     this.#assert_open()
     let result: string | null
     try {
-      result = await this.#native_client.get_json(
-        owned_key_bytes(key, this.#key_spec),
-      )
+      result = await this.#native_client.get_json(owned_key_bytes(key, this.#key_spec))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -510,7 +492,7 @@ export class OpenKache_Client {
   /**
    * Stores a value through the shared core's canonical JSON format.
    *
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @param value - Dense, finite JSON value.
    * @param options - Optional TTL and atomic existence condition.
    * @returns Whether the operation created, replaced, or did not store the key.
@@ -542,16 +524,14 @@ export class OpenKache_Client {
   /**
    * Deletes a key.
    *
-   * @param key - A key matching the configured `key_spec`.
+   * @param key - Exact non-empty string or binary cache key.
    * @returns `true` when the key existed and was deleted.
    * @throws {OpenKache_Error} When the client is closed or the operation fails.
    */
   async delete(key: Client_Key): Promise<boolean> {
     this.#assert_open()
     try {
-      return await this.#native_client.delete(
-        owned_key_bytes(key, this.#key_spec),
-      )
+      return await this.#native_client.delete(owned_key_bytes(key, this.#key_spec))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -722,7 +702,7 @@ export interface OpenKache_Raw_Client extends Smithy_OpenKache_Api {
   connection_state(): Connection_State
 }
 
-class Raw_Client implements OpenKache_Raw_Client {
+class Raw_Client extends Smithy_Generated_Operations implements OpenKache_Raw_Client {
   readonly #native_client: Native_Client
   readonly #lifecycle: Client_Lifecycle
 
@@ -730,183 +710,9 @@ class Raw_Client implements OpenKache_Raw_Client {
     native_client: Native_Client,
     lifecycle: Client_Lifecycle = { closed: false },
   ) {
+    super(raw_operation_transport(native_client, lifecycle))
     this.#native_client = native_client
     this.#lifecycle = lifecycle
-  }
-
-  /**
-   * Invokes the Smithy PING operation.
-   *
-   * @param _input - Empty Smithy operation input.
-   * @returns An empty Smithy operation output.
-   * @throws {OpenKache_Error} When the operation fails.
-   */
-  async ping(_input: Smithy_Ping_Input): Promise<Smithy_Ping_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      await this.#native_client.ping()
-      return {}
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy GET operation for an exact item ID.
-   *
-   * @param input - Exact protocol item ID.
-   * @returns Opaque stored bytes, or an absent value.
-   * @throws {OpenKache_Error} When the operation fails.
-   */
-  async get(input: Smithy_Get_Input): Promise<Smithy_Get_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      const value = await this.#native_client.raw_get_in_namespace(
-        input.namespace_id,
-        owned_item_id(input.item_id),
-      )
-      return value === null ? {} : { value }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy SET operation for an exact item ID.
-   *
-   * @param input - Exact item ID, opaque bytes, and optional set behavior.
-   * @returns The Smithy set outcome.
-   * @throws {OpenKache_Error} When validation or the operation fails.
-   */
-  async set(input: Smithy_Set_Input): Promise<Smithy_Set_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      const outcome = await this.#native_client.raw_set_in_namespace(
-        input.namespace_id,
-        owned_item_id(input.item_id),
-        owned_raw_value(input.value),
-        input.condition,
-        input.expiration_mode,
-        input.eviction_mode,
-        input.ttl_milliseconds,
-      )
-      return { outcome: parse_set_outcome(outcome) }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy DELETE operation for an exact item ID.
-   *
-   * @param input - Exact protocol item ID.
-   * @returns Whether the item was deleted.
-   * @throws {OpenKache_Error} When the operation fails.
-   */
-  async delete(input: Smithy_Delete_Input): Promise<Smithy_Delete_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return {
-        deleted: await this.#native_client.raw_delete_in_namespace(
-          input.namespace_id,
-          owned_item_id(input.item_id),
-        ),
-      }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy STATS operation.
-   *
-   * @param _input - Empty Smithy operation input.
-   * @returns The server's JSON statistics string.
-   * @throws {OpenKache_Error} When authorization or transport fails.
-   */
-  async stats(input: Smithy_Stats_Input): Promise<Smithy_Stats_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return { json: await this.#native_client.stats_in_namespace(input.namespace_id) }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy SYNC operation.
-   *
-   * @param _input - Empty Smithy operation input.
-   * @returns An empty Smithy operation output.
-   * @throws {OpenKache_Error} When authorization or synchronization fails.
-   */
-  async sync(input: Smithy_Sync_Input): Promise<Smithy_Sync_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      await this.#native_client.sync_in_namespace(input.namespace_id)
-      return {}
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy NAMESPACE_OPEN operation.
-   *
-   * @param input - Namespace name, creation flag, and optional policy.
-   * @returns The server-assigned descriptor and creation result.
-   */
-  async namespace_open(
-    input: Smithy_Namespace_Open_Input,
-  ): Promise<Smithy_Namespace_Open_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return await this.#native_client.namespace_open(
-        input.name,
-        input.create_if_missing,
-        input.policy,
-      )
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy NAMESPACE_UPDATE_POLICY operation.
-   */
-  async namespace_update_policy(
-    input: Smithy_Namespace_Update_Policy_Input,
-  ): Promise<Smithy_Namespace_Update_Policy_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      return {
-        descriptor: await this.#native_client.namespace_update_policy(
-          input.namespace_id,
-          input.expected_revision,
-          input.policy,
-        ),
-      }
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
-  }
-
-  /**
-   * Invokes the Smithy NAMESPACE_DELETE operation.
-   */
-  async namespace_delete(
-    input: Smithy_Namespace_Delete_Input,
-  ): Promise<Smithy_Namespace_Delete_Output> {
-    assert_lifecycle_open(this.#lifecycle)
-    try {
-      await this.#native_client.namespace_delete(
-        input.namespace_id,
-        input.expected_revision,
-      )
-      return {}
-    } catch (error) {
-      throw as_openkache_error(error)
-    }
   }
 
   /**
@@ -955,170 +761,186 @@ class Raw_Client implements OpenKache_Raw_Client {
   }
 }
 
+function raw_operation_transport(
+  native_client: Native_Client,
+  lifecycle: Client_Lifecycle,
+): Smithy_Operation_Transport {
+  return {
+    assert_open: (): void => assert_lifecycle_open(lifecycle),
+    invoke: async (operation, request) => {
+      try {
+        const result = await native_client.execute_raw(
+          operation,
+          request.item_id?.slice() ?? new Uint8Array(),
+          request.value?.slice() ?? new Uint8Array(),
+          request.condition,
+          request.expiration_mode,
+          request.eviction_mode,
+          request.ttl_milliseconds,
+        )
+        assert_expected_result(operation, result.kind, request.expected_kinds)
+        return result
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    invoke_scoped: async (operation, namespace_id, request) => {
+      try {
+        const result = await native_client.execute_scoped(
+          operation,
+          namespace_id,
+          request.item_id?.slice() ?? new Uint8Array(),
+          request.value?.slice() ?? new Uint8Array(),
+          request.condition,
+          request.expiration_mode,
+          request.eviction_mode,
+          request.ttl_milliseconds,
+        )
+        assert_expected_result(operation, result.kind, request.expected_kinds)
+        return result
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    decode_utf8: (payload, operation): string => {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(payload)
+      } catch (error) {
+        throw new OpenKache_Error(
+          `operation ${operation} response is not valid UTF-8`,
+        )
+      }
+    },
+    namespace_open: async (
+      name,
+      create_if_missing,
+      policy_default_expiration,
+      policy_expiration_override,
+      policy_default_eviction,
+      policy_eviction_override,
+      policy_default_ttl_milliseconds,
+    ) => {
+      try {
+        const policy: Native_Namespace_Policy | undefined =
+          policy_default_expiration === undefined
+            ? undefined
+            : policy_expiration_override === undefined ||
+                policy_default_eviction === undefined ||
+                policy_eviction_override === undefined
+              ? (() => {
+                  throw new OpenKache_Error(
+                    "namespace policy is missing a required field",
+                  )
+                })()
+              : {
+                  default_expiration: policy_default_expiration,
+                  default_ttl_milliseconds: policy_default_ttl_milliseconds,
+                  expiration_override: policy_expiration_override,
+                  default_eviction: policy_default_eviction,
+                  eviction_override: policy_eviction_override,
+                }
+        return await native_client.namespace_open(
+          name,
+          create_if_missing,
+          policy,
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    namespace_update_policy: async (
+      namespace_id,
+      expected_revision,
+      default_expiration,
+      expiration_override,
+      default_eviction,
+      eviction_override,
+      default_ttl_milliseconds,
+    ) => {
+      try {
+        return await native_client.namespace_update_policy(
+          namespace_id,
+          expected_revision,
+          {
+            default_expiration,
+            default_ttl_milliseconds,
+            expiration_override,
+            default_eviction,
+            eviction_override,
+          },
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+    namespace_delete: async (namespace_id, expected_revision) => {
+      try {
+        await native_client.namespace_delete(
+          namespace_id,
+          expected_revision,
+        )
+      } catch (error) {
+        throw as_openkache_error(error)
+      }
+    },
+  }
+}
+
+function assert_expected_result(
+  operation: number,
+  kind: number,
+  expected_kinds: readonly number[],
+): void {
+  if (!expected_kinds.includes(kind)) {
+    throw new OpenKache_Error(
+      `operation ${operation} returned unexpected native result ${kind}`,
+    )
+  }
+}
+
 function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
   if (key_spec === "text") {
     if (typeof key !== "string") {
       throw new OpenKache_Error("key must be a string for the text key spec")
     }
-    assert_valid_unicode_string(key)
-    const bytes = TEXT_ENCODER.encode(key)
-    return encode_cbor_bytes_or_text(3, bytes)
+    if (!is_well_formed_utf16(key)) {
+      throw new OpenKache_Error("key must contain valid UTF-8 text")
+    }
+    return TEXT_ENCODER.encode(key)
   }
   if (key_spec === "bytes") {
     if (!(key instanceof Uint8Array)) {
-      throw new OpenKache_Error(
-        "key must be a Uint8Array for the bytes key spec",
-      )
+      throw new OpenKache_Error("key must be a Uint8Array for the bytes key spec")
     }
-    return encode_cbor_bytes_or_text(2, key)
-  }
-  if (typeof key === "number") {
-    if (!Number.isSafeInteger(key) || Object.is(key, -0)) {
-      throw new OpenKache_Error(
-        "number keys must be finite safe integers and must not be negative zero",
-      )
-    }
-    return encode_cbor_integer(BigInt(key))
+    return key.slice()
   }
   if (typeof key === "bigint") {
-    return encode_cbor_integer(key)
+    return TEXT_ENCODER.encode(key.toString(10))
   }
-  throw new OpenKache_Error(
-    "key must be a safe integer number or bigint for the integer key spec",
-  )
-}
-
-function encode_cbor_bytes_or_text(
-  major: 2 | 3,
-  bytes: Uint8Array,
-): Uint8Array {
-  const header = encode_cbor_argument(major, bytes.byteLength)
-  const total_length = header.byteLength + bytes.byteLength
-  if (total_length > MAX_CANONICAL_KEY_BYTES) {
+  if (
+    typeof key !== "number" ||
+    Object.is(key, -0) ||
+    !Number.isSafeInteger(key)
+  ) {
     throw new OpenKache_Error(
-      `canonical key exceeds ${MAX_CANONICAL_KEY_BYTES} bytes`,
+      "key must be a safe integer number or bigint for the integer key spec",
     )
   }
-  const output = new Uint8Array(total_length)
-  output.set(header)
-  output.set(bytes, header.byteLength)
-  return output
+  return TEXT_ENCODER.encode(String(key))
 }
 
-function encode_cbor_integer(value: bigint): Uint8Array {
-  const negative = value < 0n
-  const transformed = negative ? -value - 1n : value
-  if (transformed <= 0xffff_ffff_ffff_ffffn) {
-    return encode_cbor_bigint_argument(negative ? 1 : 0, transformed)
-  }
-
-  const magnitude = bigint_magnitude(transformed)
-  const tag = new Uint8Array([negative ? 0xc3 : 0xc2])
-  const byte_string = encode_cbor_bytes_or_text(2, magnitude)
-  const total_length = tag.byteLength + byte_string.byteLength
-  if (total_length > MAX_CANONICAL_KEY_BYTES) {
-    throw new OpenKache_Error(
-      `canonical key exceeds ${MAX_CANONICAL_KEY_BYTES} bytes`,
-    )
-  }
-  const output = new Uint8Array(total_length)
-  output.set(tag)
-  output.set(byte_string, tag.byteLength)
-  return output
-}
-
-function bigint_magnitude(value: bigint): Uint8Array {
-  const hexadecimal = value.toString(16)
-  const padded_hexadecimal =
-    hexadecimal.length % 2 === 0 ? hexadecimal : `0${hexadecimal}`
-  const output = new Uint8Array(padded_hexadecimal.length / 2)
-  for (let index = 0; index < output.length; index += 1) {
-    output[index] = Number.parseInt(
-      padded_hexadecimal.slice(index * 2, index * 2 + 2),
-      16,
-    )
-  }
-  return output
-}
-
-function encode_cbor_argument(major: number, value: number): Uint8Array {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new OpenKache_Error("CBOR argument is outside the supported range")
-  }
-  const prefix = major << 5
-  if (value <= 23) return Uint8Array.of(prefix | value)
-  if (value <= 0xff) return Uint8Array.of(prefix | 24, value)
-  if (value <= 0xffff) {
-    return Uint8Array.of(prefix | 25, value >>> 8, value & 0xff)
-  }
-  if (value <= 0xffff_ffff) {
-    return Uint8Array.of(
-      prefix | 26,
-      (value >>> 24) & 0xff,
-      (value >>> 16) & 0xff,
-      (value >>> 8) & 0xff,
-      value & 0xff,
-    )
-  }
-  const output = new Uint8Array(9)
-  output[0] = prefix | 27
-  let remaining = BigInt(value)
-  for (let index = 8; index >= 1; index -= 1) {
-    output[index] = Number(remaining & 0xffn)
-    remaining >>= 8n
-  }
-  return output
-}
-
-function encode_cbor_bigint_argument(major: number, value: bigint): Uint8Array {
-  if (value < 0n || value > 0xffff_ffff_ffff_ffffn) {
-    throw new OpenKache_Error("CBOR integer argument is outside the supported range")
-  }
-  const output = new Uint8Array(value <= 0xffff_ffffn ? 5 : 9)
-  if (value <= 23n) {
-    return Uint8Array.of((major << 5) | Number(value))
-  }
-  if (value <= 0xffn) {
-    return Uint8Array.of((major << 5) | 24, Number(value))
-  }
-  if (value <= 0xffffn) {
-    return Uint8Array.of(
-      (major << 5) | 25,
-      Number((value >> 8n) & 0xffn),
-      Number(value & 0xffn),
-    )
-  }
-  if (value <= 0xffff_ffffn) {
-    return Uint8Array.of(
-      (major << 5) | 26,
-      Number((value >> 24n) & 0xffn),
-      Number((value >> 16n) & 0xffn),
-      Number((value >> 8n) & 0xffn),
-      Number(value & 0xffn),
-    )
-  }
-  output[0] = (major << 5) | 27
-  let remaining = value
-  for (let index = 8; index >= 1; index -= 1) {
-    output[index] = Number(remaining & 0xffn)
-    remaining >>= 8n
-  }
-  return output
-}
-
-function assert_valid_unicode_string(value: string): void {
+function is_well_formed_utf16(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code_unit = value.charCodeAt(index)
     if (code_unit >= 0xd800 && code_unit <= 0xdbff) {
-      const next_code_unit = value.charCodeAt(index + 1)
-      if (next_code_unit < 0xdc00 || next_code_unit > 0xdfff) {
-        throw new OpenKache_Error("text keys must not contain unpaired surrogates")
-      }
+      const next = value.charCodeAt(index + 1)
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false
       index += 1
     } else if (code_unit >= 0xdc00 && code_unit <= 0xdfff) {
-      throw new OpenKache_Error("text keys must not contain unpaired surrogates")
+      return false
     }
   }
+  return true
 }
 
 function owned_item_id(item_id: Uint8Array): Uint8Array {
@@ -1167,22 +989,11 @@ function validate_options(options: Client_Options): void {
     throw new OpenKache_Error("certificate must be a non-empty Uint8Array")
   }
   if (
-    options.data_protection_key !== undefined &&
-    (!(options.data_protection_key instanceof Uint8Array) ||
-      options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES)
+    !(options.data_protection_key instanceof Uint8Array) ||
+    options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
   ) {
     throw new OpenKache_Error(
-      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes when supplied`,
-    )
-  }
-  if (
-    options.key_spec !== undefined &&
-    options.key_spec !== "integer" &&
-    options.key_spec !== "text" &&
-    options.key_spec !== "bytes"
-  ) {
-    throw new OpenKache_Error(
-      `key_spec must be integer, text, or bytes, got ${String(options.key_spec)}`,
+      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
     )
   }
   if (

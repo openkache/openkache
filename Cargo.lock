@@ -2688,6 +2688,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_json_canonicalizer",
+ "smallvec",
  "thiserror",
  "tokio",
  "vu128",
@@ -2710,6 +2711,7 @@ dependencies = [
 name = "openkache-protocol"
 version = "0.1.0"
 dependencies = [
+ "smallvec",
  "thiserror",
  "vu128",
 ]

@@ -151,8 +151,19 @@ compile_error!(
 
 pub mod allocators;
 pub mod breadcrumb_filter;
+// The generated contract contains compatibility constants used by adapters
+// and client build targets that are not all referenced by the server crate.
+// Keep those generated details out of server lint noise without weakening
+// warnings for handwritten production code.
+#[allow(dead_code)]
+pub(crate) mod contract {
+    include!(concat!(env!("OUT_DIR"), "/server_contract.rs"));
+}
 pub(crate) mod network_runtime;
+pub(crate) mod operation_compatibility_contract;
+pub(crate) mod operation_contract;
 pub mod platform;
+pub mod protocol;
 pub mod resp;
 pub mod server;
 mod transport;
@@ -163,6 +174,10 @@ pub(crate) mod observability;
 pub(crate) mod storage_backend;
 pub(crate) mod storage_runtime;
 
+pub use protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ItemId, NamespaceDescriptor,
+    NamespacePolicy, OverridePolicy, SetCondition, SetOptions,
+};
 pub use types::{ItemValue, StorageKey};
 
 mod error;

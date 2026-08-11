@@ -5,11 +5,11 @@ mod lifecycle;
 #[cfg(feature = "opentelemetry")]
 mod otlp;
 mod prometheus;
-mod shard;
 #[path = "observability/service.rs"]
 mod service;
+mod shard;
 
 #[allow(unused_imports)]
 pub(crate) use http::MetricsEndpoint;
-pub(crate) use shard::{NetworkShard, NetworkWorkerId, StorageWorkerId};
 pub(crate) use service::{ObservabilityService, ObservabilityState, Operation};
+pub(crate) use shard::{NetworkShard, NetworkWorkerId, StorageWorkerId};

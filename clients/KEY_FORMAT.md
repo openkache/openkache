@@ -36,7 +36,7 @@ before hashing. `KeySpec` adds no wire field and has no fixed-width integer
 variants.
 
 ```text
-native key -> PortableKey -> deterministic CBOR -> canonical_key_bytes
+native key -> logical bytes -> KeySpace.resolve -> ResolvedKey -> Item ID
 ```
 
 `Text` is exact valid UTF-8, `Bytes` is exact bytes, and `Integer` is an exact
@@ -49,12 +49,16 @@ Key `Bytes` is a logical key type: it is CBOR-encoded and then included in the
 Item ID hash. It is not the `RawBytes` value codec and is not a raw 32-byte
 Item ID.
 
-The shared C ABI uses `canonical_key_bytes` as its protected-operation input.
-Its `application_key` buffer MUST contain exactly one complete canonical CBOR
-key item; the ABI does not guess whether arbitrary bytes mean `Text`, `Bytes`,
-or an integer. Language adapters convert their native key type before calling
-the ABI. The ABI's exact-item-ID functions remain separate and continue to
-accept only a 32-byte `ItemId`.
+The preferred shared C ABI accepts logical key bytes together with a generated
+`FfiKeySpec` discriminator through `openkache_client_execute_typed*`. The Rust
+core's `KeySpace` resolves them into one `ResolvedKey`, which owns the
+key-space discriminator and canonical deterministic-CBOR bytes for the whole
+request. Language adapters only validate their native value and copy its
+neutral bytes.
+The original
+`openkache_client_execute*` entry points remain a compatibility path for callers
+that already own one complete canonical CBOR key item. The ABI's exact-item-ID
+functions remain separate and continue to accept only a 32-byte `ItemId`.
 
 ### 1.1 Language mapping
 
@@ -63,13 +67,13 @@ accept only a 32-byte `ItemId`.
 | JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §1.2; otherwise reject |
 | Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
 | Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
-| C | caller supplies a canonical Text item | caller supplies a canonical Bytes item | caller supplies a canonical integer item | binary float types rejected |
+| C | logical UTF-8 bytes + `FfiKeySpec::Text` | logical bytes + `FfiKeySpec::Bytes` | canonical decimal bytes + `FfiKeySpec::Integer` | binary float types rejected |
 | C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the v1 convenience API | `float`, `double` rejected |
 | Go | not exposed by the v1 convenience API | `[]byte` → `Bytes` | not exposed by the v1 convenience API | `float32`, `float64` rejected |
-| Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
+| Java / Kotlin | not exposed by the v1 convenience API | `byte[]`/`ByteArray` → `Bytes` | not exposed by the v1 convenience API | floating-point types rejected |
 | C# / .NET | raw Item ID API only | raw Item ID API only | raw Item ID API only | raw Item ID API only |
 | Swift | `String` → `Text` | `Data` → `Bytes` | not exposed by the v1 convenience API | `Float`, `Double` rejected |
-| Dart | package scaffold | package scaffold | package scaffold | package scaffold |
+| Dart | not exposed by the v1 convenience API | `List<int>` → `Bytes` | not exposed by the v1 convenience API | floating-point types rejected |
 
 All text bindings MUST reject strings that cannot encode to valid UTF-8,
 including unpaired surrogates. All byte bindings are length-delimited; C

@@ -7,7 +7,7 @@ using System.Text;
 
 namespace OpenKache;
 
-internal readonly record struct NativeResult(uint Kind, byte[] Payload, IntPtr Client);
+internal readonly record struct NativeResult(uint Kind, uint Status, byte[] Payload, IntPtr Client);
 
 internal sealed class NativeException : Exception
 {
@@ -15,7 +15,7 @@ internal sealed class NativeException : Exception
         : base(message) {}
 }
 
-internal static class NativeMethods
+internal static partial class NativeMethods
 {
     private const string LibraryName = "openkache_client_core";
 
@@ -56,126 +56,6 @@ internal static class NativeMethods
         }
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct ConnectOptions
-    {
-        internal IntPtr Address;
-        internal nuint AddressLength;
-        internal IntPtr ServerName;
-        internal nuint ServerNameLength;
-        internal IntPtr Certificate;
-        internal nuint CertificateLength;
-        internal IntPtr ClientCertificateChain;
-        internal nuint ClientCertificateChainLength;
-        internal IntPtr ClientPrivateKey;
-        internal nuint ClientPrivateKeyLength;
-        internal IntPtr DataProtectionKey;
-        internal nuint DataProtectionKeyLength;
-        internal byte CompressionEnabled;
-        internal int CompressionLevel;
-        internal nuint MinimumInputSize;
-        internal nuint MinimumSavings;
-        internal uint Encryption;
-        internal ulong ConnectTimeoutMilliseconds;
-        internal ulong RequestTimeoutMilliseconds;
-        internal nuint RetryMaxAttempts;
-        internal nuint MaxInFlight;
-    }
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.U4)]
-    internal static extern uint openkache_client_abi_version();
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_connect_with_options(
-        ref ConnectOptions options);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_execute_raw(
-        IntPtr client,
-        uint operation,
-        IntPtr itemId,
-        nuint itemIdLength,
-        IntPtr value,
-        nuint valueLength,
-        uint setCondition,
-        byte ttlEnabled,
-        ulong ttlMilliseconds);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_execute_raw_with_options(
-        IntPtr client,
-        uint operation,
-        IntPtr itemId,
-        nuint itemIdLength,
-        IntPtr value,
-        nuint valueLength,
-        byte setFlags,
-        ulong ttlMilliseconds);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_execute_scoped(
-        IntPtr client,
-        uint operation,
-        ulong namespaceId,
-        IntPtr itemId,
-        nuint itemIdLength,
-        IntPtr value,
-        nuint valueLength,
-        byte setFlags,
-        ulong ttlMilliseconds);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_namespace_open(
-        IntPtr client,
-        IntPtr name,
-        nuint nameLength,
-        byte createIfMissing,
-        byte policyFlags,
-        ulong ttlMilliseconds);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_namespace_update_policy(
-        IntPtr client,
-        ulong namespaceId,
-        ulong expectedRevision,
-        byte policyFlags,
-        ulong ttlMilliseconds);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_namespace_delete(
-        IntPtr client,
-        ulong namespaceId,
-        ulong expectedRevision);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    [return: MarshalAs(UnmanagedType.U4)]
-    internal static extern uint openkache_client_namespace_descriptor_decode(
-        IntPtr payload,
-        nuint payloadLength,
-        out Protocol.FfiNamespaceDescriptor output);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern uint openkache_client_connection_state(IntPtr client);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern uint openkache_client_result_kind(IntPtr result);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_result_data(IntPtr result);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern nuint openkache_client_result_data_length(IntPtr result);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr openkache_client_result_take_client(IntPtr result);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void openkache_client_result_free(IntPtr result);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void openkache_client_free(IntPtr client);
-
     internal static NativeResult ReadResult(IntPtr result, bool takeClient = false)
     {
         if (result == IntPtr.Zero)
@@ -186,6 +66,7 @@ internal static class NativeMethods
         try
         {
             var kind = openkache_client_result_kind(result);
+            var status = openkache_client_result_status(result);
             var length = openkache_client_result_data_length(result);
             if (length > int.MaxValue)
             {
@@ -222,7 +103,7 @@ internal static class NativeMethods
                 }
             }
 
-            return new NativeResult(kind, payload, client);
+            return new NativeResult(kind, status, payload, client);
         }
         finally
         {
