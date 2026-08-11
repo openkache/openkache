@@ -45,6 +45,19 @@ pub(super) fn timeout_response(
     )
 }
 
+/// Builds the contract-valid response used when the response budget cannot be
+/// acquired before dispatch.
+pub(super) fn overloaded_response(
+    opcode: Opcode,
+    message: &'static [u8],
+) -> operation_transport::OperationResponse {
+    operation_transport::contract_error_response_status(
+        opcode,
+        super::operation_contract::OperationStatus::Overloaded,
+        message,
+    )
+}
+
 /// Returns the generated response-memory reservation for one operation.
 ///
 /// The stream loop uses this opaque budget before dispatch. Wire payload

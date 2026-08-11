@@ -21,9 +21,10 @@ transport and generated clients own framing and codec mechanics.
    nix develop -c just generate-protocol-contract
    ```
 
-6. Add one API-owned binding in `server/src/operation_generic_bindings.rs`
-   (or a separate API module), then register it with the shared
-   `RegistrationBuilder`. The binding should receive an
+6. Add one API-owned behavior/field binding module next to
+   `server/src/operation_generic_handlers.rs`, then add its registration slice
+   next to `server/src/operation_generic_registrations.rs`. Register it with
+   the shared `RegistrationBuilder`. The binding should receive an
    `OperationInputView`/`OperationFieldEnvelope` and return an
    `OperationOutcome`; it must not receive a wire frame, RESP value, or client
    ABI object.

@@ -127,20 +127,6 @@ impl OperationFieldEnvelope<'_> {
         openkache_protocol::codec::decode_bool(self.bytes)
     }
 
-    /// Applies one API-owned transform to a packed floating-point field.
-    ///
-    /// The envelope retains codec validation and byte traversal so behavior
-    /// modules do not depend on protocol codec implementation details.
-    pub(super) fn transform_packed_f64(
-        &self,
-        transform: impl FnMut(f64) -> Option<f64>,
-    ) -> Result<Vec<u8>, &'static [u8]> {
-        if !self.has_codec("packed_f64_be") {
-            return Err(b"field does not declare packed_f64_be");
-        }
-        openkache_protocol::codec::transform_packed_f64_be(self.bytes, transform)
-    }
-
     /// Decodes container values as borrowed slices. The shared codec has
     /// already validated bounds before an API binding asks for this view.
     pub(super) fn decode_list(&self) -> Result<Vec<&[u8]>, &'static [u8]> {

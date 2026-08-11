@@ -14,7 +14,10 @@ use super::operation_api::{OperationCatalog, ServerOperationRegistration};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityRegistry},
-    operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
+    operation_compatibility_bindings as compatibility_bindings,
+    operation_compatibility_registrations as compatibility,
+    operation_generic_resources as generic_resources,
+    operation_generic_registrations as generic,
 };
 
 /// Composition-root operation catalog assembled from API-owned modules.
@@ -45,9 +48,9 @@ pub(super) fn install_runtime_capabilities(
 ) -> Arc<dyn CapabilityCatalog> {
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
     let mut registry = CapabilityRegistry::overlay(base);
-    generic::install_storage_port(&mut registry, storage_port);
-    generic::install_resource_store(&mut registry);
-    compatibility::install_compatibility_services(
+    generic_resources::install_storage_port(&mut registry, storage_port);
+    generic_resources::install_resource_store(&mut registry);
+    compatibility_bindings::install_compatibility_services(
         &mut registry,
         cache,
         namespaces,

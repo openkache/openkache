@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use futures_util::FutureExt;
-use openkache_protocol::OwnedRange;
+use openkache_protocol::{OwnedRange, RequestFrameHeader};
 
 use super::TransportError;
 use crate::network_runtime;
@@ -325,52 +325,8 @@ pub(crate) async fn read_buffered_request<S: RequestByteStream>(
     frame_layout_provider: &dyn FrameLayoutProvider,
 ) -> Result<RequestFrame, StreamReadError> {
     let (prefix, payload, permit) = network_runtime::timeout(timeout, async {
-        let mut prefix = Vec::new();
-        let header = loop {
-            let needed = ProtocolRequestFrame::header_bytes_needed_with(
-                &prefix,
-                frame_layout_provider,
-            )?;
-            if needed == 0 {
-                break ProtocolRequestFrame::decode_header_with(
-                    &prefix,
-                    frame_layout_provider,
-                )?
-                .ok_or_else(|| {
-                    StreamReadError::Transport(TransportError::backend(
-                        backend,
-                        "stream header read",
-                        "completed request metadata did not produce a header",
-                    ))
-                })?;
-            }
-            if prefix
-                .len()
-                .checked_add(needed)
-                .is_none_or(|header_len| header_len > maximum)
-            {
-                return Err(StreamReadError::TooLarge);
-            }
-            let next = stream
-                .read_chunk(needed, backend)
-                .await
-                .map_err(StreamReadError::Transport)?;
-            let Some(next) = next else {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream header read",
-                    "stream ended before a request frame header completed",
-                )));
-            };
-            if next.len() > needed {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream header read",
-                    "request reader returned bytes beyond the requested capacity",
-                )));
-            }
-            prefix.extend_from_slice(next.as_slice());
-        };
+        let (prefix, header) =
+            read_request_prefix(stream, backend, maximum, frame_layout_provider).await?;
         if header.value_len() > maximum_value {
             return Err(StreamReadError::TooLarge);
         }
@@ -381,68 +337,8 @@ pub(crate) async fn read_buffered_request<S: RequestByteStream>(
         let permit = budget
             .acquire_without_timeout(header.value_len())
             .await?;
-        let mut payload = if header.value_len() == 0 {
-            OwnedRange::whole(Vec::new())
-        } else {
-            let payload = stream
-                .read_chunk(header.value_len(), backend)
-                .await
-                .map_err(StreamReadError::Transport)?;
-            payload.ok_or_else(|| {
-                StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream body read",
-                    "stream ended before request body completed",
-                ))
-            })?
-        };
-        if payload.len() < header.value_len() {
-            let mut coalesced = Vec::new();
-            coalesced.try_reserve(header.value_len()).map_err(|error| {
-                StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "request buffer reserve",
-                    error,
-                ))
-            })?;
-            coalesced.extend_from_slice(payload.as_slice());
-            while coalesced.len() < header.value_len() {
-                let remaining = header.value_len() - coalesced.len();
-                let next = stream
-                    .read_chunk(remaining, backend)
-                    .await
-                    .map_err(StreamReadError::Transport)?;
-                let Some(next) = next else {
-                    return Err(StreamReadError::Transport(TransportError::backend(
-                        backend,
-                        "stream body read",
-                        "stream ended before request body completed",
-                    )));
-                };
-                coalesced.extend_from_slice(next.as_slice());
-            }
-            payload = OwnedRange::whole(coalesced);
-        }
-        if payload.len() != header.value_len() {
-            return Err(StreamReadError::Transport(TransportError::backend(
-                backend,
-                "stream body read",
-                "request reader returned bytes beyond the requested capacity",
-            )));
-        }
-        if prefix
-            .len()
-            .checked_add(payload.len())
-            .ok_or(StreamReadError::TooLarge)?
-            != frame_len
-        {
-            return Err(StreamReadError::Protocol(
-                openkache_protocol::ProtocolError::FrameLength {
-                    expected: frame_len,
-                    actual: prefix.len() + payload.len(),
-                },
-            ));
-        }
+        let payload = read_request_payload(stream, backend, header.value_len()).await?;
+        validate_request_frame_length(&prefix, &payload, frame_len)?;
         Ok::<_, StreamReadError>((prefix, payload, permit))
     })
     .await
@@ -457,5 +353,159 @@ pub(crate) async fn read_buffered_request<S: RequestByteStream>(
         payload,
         permit,
         has_trailing_bytes,
+    ))
+}
+
+async fn read_request_prefix<S: RequestByteStream>(
+    stream: &mut S,
+    backend: &'static str,
+    maximum: usize,
+    frame_layout_provider: &dyn FrameLayoutProvider,
+) -> Result<(Vec<u8>, RequestFrameHeader), StreamReadError> {
+    let mut prefix = Vec::new();
+    loop {
+        let needed =
+            ProtocolRequestFrame::header_bytes_needed_with(&prefix, frame_layout_provider)?;
+        if needed == 0 {
+            let header = ProtocolRequestFrame::decode_header_with(&prefix, frame_layout_provider)?
+                .ok_or_else(|| {
+                    StreamReadError::Transport(TransportError::backend(
+                        backend,
+                        "stream header read",
+                        "completed request metadata did not produce a header",
+                    ))
+                })?;
+            return Ok((prefix, header));
+        }
+        if prefix
+            .len()
+            .checked_add(needed)
+            .is_none_or(|header_len| header_len > maximum)
+        {
+            return Err(StreamReadError::TooLarge);
+        }
+        let next = stream
+            .read_chunk(needed, backend)
+            .await
+            .map_err(StreamReadError::Transport)?;
+        let Some(next) = next else {
+            return Err(StreamReadError::Transport(TransportError::backend(
+                backend,
+                "stream header read",
+                "stream ended before a request frame header completed",
+            )));
+        };
+        if next.len() == 0 {
+            return Err(StreamReadError::Transport(TransportError::backend(
+                backend,
+                "stream header read",
+                "request reader returned an empty chunk",
+            )));
+        }
+        if next.len() > needed {
+            return Err(StreamReadError::Transport(TransportError::backend(
+                backend,
+                "stream header read",
+                "request reader returned bytes beyond the requested capacity",
+            )));
+        }
+        prefix.extend_from_slice(next.as_slice());
+    }
+}
+
+async fn read_request_payload<S: RequestByteStream>(
+    stream: &mut S,
+    backend: &'static str,
+    value_len: usize,
+) -> Result<OwnedRange, StreamReadError> {
+    if value_len == 0 {
+        return Ok(OwnedRange::whole(Vec::new()));
+    }
+    let first = stream
+        .read_chunk(value_len, backend)
+        .await
+        .map_err(StreamReadError::Transport)?
+        .ok_or_else(|| {
+            StreamReadError::Transport(TransportError::backend(
+                backend,
+                "stream body read",
+                "stream ended before request body completed",
+            ))
+        })?;
+    if first.len() == 0 {
+        return Err(StreamReadError::Transport(TransportError::backend(
+            backend,
+            "stream body read",
+            "request reader returned an empty chunk",
+        )));
+    }
+    if first.len() > value_len {
+        return Err(StreamReadError::Transport(TransportError::backend(
+            backend,
+            "stream body read",
+            "request reader returned bytes beyond the requested capacity",
+        )));
+    }
+    if first.len() == value_len {
+        return Ok(first);
+    }
+
+    let mut coalesced = Vec::new();
+    coalesced
+        .try_reserve(value_len)
+        .map_err(|error| {
+            StreamReadError::Transport(TransportError::backend(
+                backend,
+                "request buffer reserve",
+                error,
+            ))
+        })?;
+    coalesced.extend_from_slice(first.as_slice());
+    while coalesced.len() < value_len {
+        let remaining = value_len - coalesced.len();
+        let next = stream
+            .read_chunk(remaining, backend)
+            .await
+            .map_err(StreamReadError::Transport)?
+            .ok_or_else(|| {
+                StreamReadError::Transport(TransportError::backend(
+                    backend,
+                    "stream body read",
+                    "stream ended before request body completed",
+                ))
+            })?;
+        if next.len() == 0 {
+            return Err(StreamReadError::Transport(TransportError::backend(
+                backend,
+                "stream body read",
+                "request reader returned an empty chunk",
+            )));
+        }
+        if next.len() > remaining {
+            return Err(StreamReadError::Transport(TransportError::backend(
+                backend,
+                "stream body read",
+                "request reader returned bytes beyond the requested capacity",
+            )));
+        }
+        coalesced.extend_from_slice(next.as_slice());
+    }
+    Ok(OwnedRange::whole(coalesced))
+}
+
+fn validate_request_frame_length(
+    prefix: &[u8],
+    payload: &OwnedRange,
+    expected: usize,
+) -> Result<(), StreamReadError> {
+    let actual = prefix
+        .len()
+        .checked_add(payload.len())
+        .ok_or(StreamReadError::TooLarge)?;
+    if actual == expected {
+        return Ok(());
+    }
+    Err(StreamReadError::Protocol(
+        openkache_protocol::ProtocolError::FrameLength { expected, actual },
     ))
 }
