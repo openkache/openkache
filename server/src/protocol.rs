@@ -146,8 +146,6 @@ pub enum ProtocolError {
         expected_item_id: usize,
         expected_value: &'static str,
     },
-    #[error("unsupported compact protocol-v1 request route {0}")]
-    UnsupportedCompactV1Route(&'static str),
     #[error("if-absent and if-present conditions cannot be combined")]
     ConflictingSetConditions,
     #[error("SET TTL must be greater than zero milliseconds")]
