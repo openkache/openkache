@@ -104,25 +104,27 @@ namespace into both Item ID derivation and value AAD. The Rust API retains
 concept.
 
 `ValueCodec` stores its current metadata inside the opaque value. The packed
-codec layout shown in the pre-freeze value-format specification is the target
-of a separate value-codec migration:
+v1 codec layout shown in the pre-freeze value-format specification is the
+target of a separate value-codec migration:
 
 ```text
-value_envelope_version:vu128 | flags:u8 | body
+value_envelope = value_envelope_version:vu128 | version_specific_suffix
+value_envelope_v1 = value_envelope_version:vu128(1) | flags:u8 | body_v1
 
 flags bits 0..1 = encryption identifier
 flags bits 2..3 = compression identifier
 flags bits 4..5 = codec identifier
 flags bits 6..7 = reserved (zero in v1)
 
-body = protect(compress(selected codec payload))
+body_v1 = protect(compress(selected codec payload))
 AES-256-SIV-CMAC body = synthetic_iv[16] | ciphertext
 AES-256-GCM-SIV body = nonce[12] | ciphertext | tag[16]
 ```
 
-For protected profiles, the packed flags and body are authenticated with the
-exact item ID and container header. Neither the wire protocol nor the server
-parses this format.
+For protected v1 profiles, the packed flags and body are authenticated with
+the exact namespace, Item ID, and v1 header. A future value-envelope version
+may define a different suffix grammar, transform order, or AAD. Neither the
+wire protocol nor the server parses this format.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:

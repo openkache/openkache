@@ -40,17 +40,23 @@ Formatted key conversion and Item ID derivation are defined separately in
 have their own value model and conversion rules. The key input restrictions do
 not apply to values.
 
-V1 provides two value codecs:
+V1 provides three codec selectors:
 
 | Codec | Meaning |
 |---|---|
 | `RawBytes` | Exact application bytes, including empty input and embedded `00` octets. |
 | `OpenKache CBOR Value v1` | One CBOR value subject to the v1 rules in §3.4. |
+| `Custom` | An application-defined format identified inside the codec payload. |
 
 `RawBytes` describes a value payload, not a key type or an Item ID.
+Use `RawBytes` when the format is fixed or identified out of band. Use
+`Custom` when one keyspace must carry multiple application formats and the
+format identity must travel with each value.
 
 There is no separate client-only metadata envelope. Applications that need
-custom metadata MAY place it inside `RawBytes`, or use the raw client API.
+custom metadata MAY use the `Custom` codec, `RawBytes`, or the raw client
+API. A client that does not register the referenced custom format MUST reject
+the value.
 
 ## 2. Client protection mode
 
@@ -73,12 +79,12 @@ raw values.
 
 With `Unprotected`, no value-encryption key is derived.
 
-The client selects one immutable complete client profile at initialization.
-All formatted operations use that profile; protection cannot vary per value.
-The profile determines both the key rules in [Key Format](KEY_FORMAT.md) and
-this value format. `value_envelope_version` identifies the value side of that
-profile; it does not perform key conversion or Item ID derivation and is not an
-additional Item ID input.
+The client selects immutable key-conversion and protection rules at
+initialization. Protection cannot vary per value. The default formatted client
+uses value-envelope version `1`; a compatibility-capable client MAY select an
+older supported value version when that version can represent the value and
+policy. The version is not an additional Item ID input and does not perform
+key conversion or Item ID derivation.
 
 The no-key profile still writes a complete `ValueEnvelope`. Its
 `encryption_id` is `0`, while the codec and compression IDs continue to
@@ -90,22 +96,34 @@ only the raw client API bypasses the envelope.
 ### 3.1 Layout
 
 ```text
-value_envelope = value_envelope_version:vu128 | format_flags:u8 | body
+value_envelope = value_envelope_version:vu128 | version_specific_suffix
+```
+
+For v1, the version-specific suffix is:
+
+```text
+value_envelope_v1 = value_envelope_version:vu128(1) | format_flags:u8 | body_v1
 ```
 
 | Field | Size | Meaning |
 |---|---:|---|
-| `value_envelope_version` | 1–9 bytes | Canonical profile selector; v1 is `01`. |
-| `format_flags` | 1 byte | Packed encryption, compression, and codec IDs. |
-| `body` | remaining bytes | Codec payload after the selected transforms. |
+| `value_envelope_version` | 1–9 bytes | Common canonical version discriminator; v1 is `01`. |
+| `version_specific_suffix` | version-dependent | Complete suffix grammar selected by the version. |
 
 The envelope has no magic prefix and no body-length field. The enclosing
 protocol frame supplies the exact value boundary; `value_len` is the canonical
 [`vu128`](../protocol/SPEC.md#unsigned-vu128) length of the complete envelope.
 
-`value_envelope_version` MUST use the shortest canonical `vu128`. Decoders
-MUST reject truncation, overflow, reserved prefixes, and overlong encodings.
-The v1 maximum encoded width is nine bytes.
+The common `value_envelope_version` field MUST use the shortest canonical
+`vu128`. Decoders MUST reject truncation, overflow, reserved prefixes, and
+overlong encodings before interpreting the version-specific suffix. The v1
+maximum encoded width is nine bytes.
+
+`format_flags` and `body` are v1 fields; they are not version-independent
+envelope fields. A future value-envelope version MAY change their width,
+encoding, assigned identifiers, framing, transform order, authentication
+inputs, or body grammar. A decoder MUST select the version-specific grammar
+before parsing any suffix bytes.
 
 ### 3.2 Packed flags
 
@@ -149,6 +167,8 @@ profile. Numeric IDs are wire assignments, not a security ranking.
 |---:|---|
 | `0` | `RawBytes` |
 | `1` | CBOR |
+| `2` | `Custom` (application-defined format) |
+| `3` | Unassigned; reject |
 
 ### 3.3 Body
 
@@ -156,6 +176,10 @@ profile. Numeric IDs are wire assignments, not a security ranking.
 codec_payload =
     exact_application_bytes
   | openkache_cbor_value_v1
+  | custom_codec_payload
+
+custom_codec_payload =
+    custom_format_id:vu128 | custom_payload
 
 transformed_body = protect(compress(codec_payload))
 ```
@@ -167,6 +191,24 @@ uncompressed, unprotected `RawBytes` value is exactly:
 ```text
 01 00
 ```
+
+For `codec_id = 2` (`Custom`), `custom_format_id` MUST be the shortest canonical
+`vu128`. It identifies a codec in the client/application's configured
+registry; it is not a globally assigned OpenKache format number. The registry
+maps the ID to the custom payload grammar and decoder. The remaining
+`custom_payload` bytes belong to that codec and MAY be empty. Participants
+that exchange custom values MUST configure the same ID-to-codec mapping.
+Unknown IDs, malformed `vu128` encodings, and payloads rejected by the
+selected custom codec MUST be rejected.
+
+An ID-to-codec mapping MUST remain stable for the lifetime of values that use
+it. A change to the custom payload grammar MUST use a new `custom_format_id`;
+reassigning an existing ID is not a migration mechanism.
+
+The custom format ID is part of `codec_payload`, so selected compression and
+authenticated protection cover it without changing the v1 envelope grammar or
+AAD. A custom format that needs different flags, framing, transforms, or AAD
+requires a new value-envelope version rather than a new custom format ID.
 
 The value codec is independent from the key codec. Its native conversion rules
 are not inherited from [Key Format](KEY_FORMAT.md).
@@ -205,7 +247,7 @@ byte strings, with their interpretation defined by the application.
 
 The base v1 profile assigns no application-specific CBOR tags. Unknown or
 unassigned tags MUST be rejected. Applications that need custom typed payloads
-MUST use `RawBytes` or another explicitly negotiated codec.
+MUST use the `Custom` codec, `RawBytes`, or the raw client API.
 
 ## 4. Compression
 
@@ -218,7 +260,8 @@ the decoded-value limit.
 
 The initial SDK policy is Zstandard level 1, no compression below 1,024
 codec-payload bytes, and no compression unless it saves at least 64 bytes. An
-encoder MAY retain the uncompressed body when compression is not beneficial.
+encoder MAY select compression ID `0` when compression is not beneficial; it
+MUST NOT label an uncompressed body as compression ID `1`.
 
 When a value combines secret or otherwise sensitive material with
 attacker-controlled or probeable bytes, compression SHOULD be disabled or the
@@ -334,7 +377,8 @@ An encoder MUST:
 
 1. Convert a structured native value using the selected value codec, or accept
    exact `RawBytes`.
-2. Encode the selected codec and enforce the decoded-payload limit.
+2. Encode the selected codec (including the `custom_format_id` prefix for the
+   `Custom` codec) and enforce the decoded-payload limit.
 3. Apply compression only when policy permits.
 4. Encode version `1` and the packed `format_flags`.
 5. Construct AAD from the exact namespace, Item ID, and header bytes.
@@ -357,8 +401,11 @@ A decoder MUST:
 6. Check version-specific minimum body sizes before slicing.
 7. Authenticate and decrypt before decompression or codec parsing.
 8. Validate and bounded-decompress one Zstandard frame when selected.
-9. For a structured codec, decode exactly one complete payload item and reject
-   codec-invalid or trailing bytes. For `RawBytes`, return the exact payload.
+9. For `Custom`, parse `custom_format_id`, resolve the configured codec,
+   and pass the remaining bytes to it. For the CBOR codec, decode exactly one
+   complete payload item. Reject unknown custom IDs, codec-invalid payloads,
+   and trailing bytes where the selected codec disallows them. For `RawBytes`,
+   return the exact payload.
 
 Authentication failures MUST use one generic error. Unauthenticated plaintext
 MUST be zeroized before returning that error.
@@ -373,20 +420,30 @@ windows, produced output, and all arithmetic before allocation.
 
 ## 7. Versioning and compatibility
 
-`value_envelope_version` is the value-side selector for an immutable complete
-client profile. V1 readers accept only `1`, reject unknown versions and IDs,
-and never guess. The old magic-prefixed envelope `4F 4B 56 01` is not v1.
+`value_envelope_version` selects the complete value-envelope grammar. It is
+not a version of `format_flags` or `body`: each version defines its own suffix
+grammar, flag layout and assignments, body framing, transform order,
+authentication inputs, and applicable limits. V1 readers accept only `1`,
+reject unknown versions (including `0`), and never guess a v1 suffix. The old
+magic-prefixed envelope `4F 4B 56 01` is not v1.
+
+The `Custom` codec is an extension point inside v1. Its
+`custom_format_id` selects a registered payload grammar, but does not change
+the v1 envelope grammar. A custom format that needs a different envelope
+grammar MUST use a new, explicitly assigned `value_envelope_version`; version
+`0` is not a wildcard or an arbitrary application namespace.
+
+Value-envelope versioning is independent from key conversion and Item ID
+derivation. The version is not an Item ID input. A client MAY store a different
+value-envelope version under the same Item ID when the key profile is
+unchanged and the client can read the selected versions. Changing the key
+contract or root key remains a separate migration that changes Item IDs.
 
 Future profiles are capability extensions: newer profiles add values or
 policies that older profiles cannot represent. A newer client SHOULD use the
-oldest supported complete profile that represents the key, value, and required
-security policy at initialization. A v1-representable client therefore uses
-the v1 key rules and v1 ValueEnvelope together.
-
-The client MUST NOT calculate a v1 Item ID and store a newer-profile value
-under it, or combine a newer key contract with a v1 value envelope. Migration
-to a newer profile is an explicit read/decode/write operation and MUST account
-for a changed Item ID.
+oldest supported complete value profile that represents the selected value and
+security policy at initialization. A reader MUST reject a version it does not
+support rather than interpreting it as v1.
 
 | Policy | Meaning |
 |---|---|
