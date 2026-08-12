@@ -6,32 +6,34 @@
 > clients. It is not a server-required key encoding.
 
 The server receives only an opaque `0..=32`-byte Item ID. Applications MAY
-bypass this format with a raw client API and supply an Item ID directly.
+use an exact-item-ID client API to supply an Item ID directly; that API is
+separate from the key-contract policies below.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
-## 1. Client Item ID modes
+## 1. Client Item ID policies
 
-Key mode is a client-only policy; it has no wire or server field. The client
+Key policy is a client-only choice; it has no wire or server field. The client
 MUST send only the resulting opaque Item ID defined by the wire protocol.
 
-For byte-oriented application keys, a client MAY expose these modes:
+For a formatted keyspace, a client MAY expose these policies:
 
-| Mode | Client behavior |
+| Policy | Client behavior |
 |---|---|
-| `Raw` | Send `0..=32` application-key octets unchanged as the Item ID. Empty and exactly 32-byte keys are valid. |
-| `Hash` | Hash the application key to a 32-byte Item ID using the selected client key profile. |
-| `RawOrHash` | Send keys of `0..=32` octets unchanged; hash keys longer than 32 octets to a 32-byte Item ID. |
+| `Hash` | Convert the key-contract value to canonical key bytes and derive a 32-byte Item ID using the selected client key profile. |
+| `BytesOrHash` | For a `KeySpec::Bytes` keyspace, send `0..=32` application-key octets unchanged; hash keys longer than 32 octets to a 32-byte Item ID. Empty and exactly 32-byte keys are valid. |
 
 The digest, key derivation, namespace binding, and application-level
 encryption are client-profile decisions. They MUST be stable within a profile;
-none of these modes adds a wire mode marker. `RawOrHash` is separate from the
-typed `PortableKey` conversion below and from the `RawBytes` value codec.
+neither policy adds a wire mode marker. `BytesOrHash` is a byte-key policy, not
+a second `KeySpec`, and MUST be used only with `KeySpec::Bytes`. Its preserved
+branch intentionally omits the canonical CBOR wrapper to keep short Item IDs
+compact; its hash branch MUST document the hash input and key material it
+selects. `BytesOrHash` is separate from the `RawBytes` value codec.
 For typed `PortableKey` inputs, `Hash` uses the namespace-bound derivation in
-§3. A byte-oriented `RawOrHash` profile MUST document the hash input and key
-material it selects.
+§3.
 
 ## 2. Key contract
 
@@ -258,6 +260,7 @@ item_id =
   fc 52 2a 8d 33 0e 7b 4e 9e 30 9a 7d b5 cf b4 80
 ```
 
-Raw and `RawOrHash` APIs bypass the typed-key conversion and derivation above
-for the raw branch. The client still MUST enforce the protocol's `0..=32`
-Item ID limit after applying its selected mode.
+The exact-item-ID API bypasses typed-key conversion and derivation entirely.
+`BytesOrHash` bypasses canonical key conversion only for its preserved byte
+branch; its hash branch follows the selected profile. Every client path MUST
+enforce the protocol's `0..=32` Item ID limit.
