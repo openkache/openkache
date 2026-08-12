@@ -19,6 +19,7 @@ use crate::*;
 
 mod benchmark;
 pub(crate) mod completion;
+mod keyed_compatibility;
 mod network_cache;
 pub(crate) mod storage_backend;
 mod storage_context;
@@ -517,7 +518,7 @@ impl ThreadedKvkache {
             .request(worker, operation, requester, |response| {
                 WorkerRequest::Keyed {
                     storage_key,
-                    command: StorageCommand::Custom { task, response },
+                    command: keyed_compatibility::storage_task(task, response),
                 }
             })
             .await
@@ -549,23 +550,17 @@ impl ThreadedKvkache {
     ) -> Result<Option<StoredItemValue>> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
-        match self
-            .request(
-                worker,
-                Operation::from_opcode(Opcode::Get),
-                requester,
-                |response| WorkerRequest::Keyed {
-                    storage_key,
-                    command: StorageCommand::Get { response },
-                },
-            )
-            .await?
-        {
-            WorkerResponse::Value(value) => Ok(value),
-            response => Err(KvError::Worker(format!(
-                "unexpected get response: {response:?}"
-            ))),
-        }
+        self.request(
+            worker,
+            Operation::from_opcode(Opcode::Get),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::get(response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::value_response(response, "get"))
     }
 
     /// Retrieves an item from a namespace-scoped wire identity.
@@ -587,23 +582,17 @@ impl ThreadedKvkache {
     ) -> Result<Option<StoredItemValue>> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
-        match self
-            .request(
-                worker,
-                Operation::from_opcode(Opcode::Get),
-                requester,
-                |response| WorkerRequest::Keyed {
-                    storage_key,
-                    command: StorageCommand::Get { response },
-                },
-            )
-            .await?
-        {
-            WorkerResponse::Value(value) => Ok(value),
-            response => Err(KvError::Worker(format!(
-                "unexpected namespace get response: {response:?}"
-            ))),
-        }
+        self.request(
+            worker,
+            Operation::from_opcode(Opcode::Get),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::get(response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::value_response(response, "namespace get"))
     }
 
     pub async fn set(&self, item_id: ItemId, value: Vec<u8>) -> Result<SetOutcome> {
@@ -630,27 +619,17 @@ impl ThreadedKvkache {
     ) -> Result<SetOutcome> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
-        match self
-            .request(
-                worker,
-                Operation::from_opcode(Opcode::Set),
-                requester,
-                |response| WorkerRequest::Keyed {
-                    storage_key,
-                    command: StorageCommand::Set {
-                        value,
-                        options,
-                        response,
-                    },
-                },
-            )
-            .await?
-        {
-            WorkerResponse::Set(outcome) => Ok(outcome),
-            response => Err(KvError::Worker(format!(
-                "unexpected set response: {response:?}"
-            ))),
-        }
+        self.request(
+            worker,
+            Operation::from_opcode(Opcode::Set),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::set(value, options, response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::set_response(response, "set"))
     }
 
     /// Stores an item under a namespace-scoped wire identity.
@@ -676,27 +655,17 @@ impl ThreadedKvkache {
     ) -> Result<SetOutcome> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
-        match self
-            .request(
-                worker,
-                Operation::from_opcode(Opcode::Set),
-                requester,
-                |response| WorkerRequest::Keyed {
-                    storage_key,
-                    command: StorageCommand::Set {
-                        value,
-                        options,
-                        response,
-                    },
-                },
-            )
-            .await?
-        {
-            WorkerResponse::Set(outcome) => Ok(outcome),
-            response => Err(KvError::Worker(format!(
-                "unexpected namespace set response: {response:?}"
-            ))),
-        }
+        self.request(
+            worker,
+            Operation::from_opcode(Opcode::Set),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::set(value, options, response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::set_response(response, "namespace set"))
     }
 
     pub async fn delete(&self, item_id: ItemId) -> Result<bool> {
@@ -710,23 +679,17 @@ impl ThreadedKvkache {
     ) -> Result<bool> {
         let storage_key = self.storage_key(item_id);
         let worker = self.owner(&storage_key);
-        match self
-            .request(
-                worker,
-                Operation::from_opcode(Opcode::Delete),
-                requester,
-                |response| WorkerRequest::Keyed {
-                    storage_key,
-                    command: StorageCommand::Delete { response },
-                },
-            )
-            .await?
-        {
-            WorkerResponse::Deleted(deleted) => Ok(deleted),
-            response => Err(KvError::Worker(format!(
-                "unexpected delete response: {response:?}"
-            ))),
-        }
+        self.request(
+            worker,
+            Operation::from_opcode(Opcode::Delete),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::delete(response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::delete_response(response, "delete"))
     }
 
     /// Deletes an item under a namespace-scoped wire identity.
@@ -748,23 +711,17 @@ impl ThreadedKvkache {
     ) -> Result<bool> {
         let storage_key = self.scoped_storage_key(namespace_id, item_id);
         let worker = self.owner(&storage_key);
-        match self
-            .request(
-                worker,
-                Operation::from_opcode(Opcode::Delete),
-                requester,
-                |response| WorkerRequest::Keyed {
-                    storage_key,
-                    command: StorageCommand::Delete { response },
-                },
-            )
-            .await?
-        {
-            WorkerResponse::Deleted(deleted) => Ok(deleted),
-            response => Err(KvError::Worker(format!(
-                "unexpected namespace delete response: {response:?}"
-            ))),
-        }
+        self.request(
+            worker,
+            Operation::from_opcode(Opcode::Delete),
+            requester,
+            |response| WorkerRequest::Keyed {
+                storage_key,
+                command: keyed_compatibility::delete(response),
+            },
+        )
+        .await
+        .and_then(|response| keyed_compatibility::delete_response(response, "namespace delete"))
     }
 
     pub fn for_trace_benchmark(
@@ -1044,29 +1001,25 @@ impl ThreadedKvkache {
                 BenchmarkOperation::Get(_) => (
                     WorkerRequest::Keyed {
                         storage_key,
-                        command: StorageCommand::Get {
-                            response: response_tx,
-                        },
+                        command: keyed_compatibility::get(response_tx),
                     },
                     BenchmarkResponseKind::Get,
                 ),
                 BenchmarkOperation::Set(_, value) => (
                     WorkerRequest::Keyed {
                         storage_key,
-                        command: StorageCommand::Set {
-                            value: StoredItemValue::new(value),
-                            options: SetOptions::NONE,
-                            response: response_tx,
-                        },
+                        command: keyed_compatibility::set(
+                            StoredItemValue::new(value),
+                            SetOptions::NONE,
+                            response_tx,
+                        ),
                     },
                     BenchmarkResponseKind::Set,
                 ),
                 BenchmarkOperation::Delete(_) => (
                     WorkerRequest::Keyed {
                         storage_key,
-                        command: StorageCommand::Delete {
-                            response: response_tx,
-                        },
+                        command: keyed_compatibility::delete(response_tx),
                     },
                     BenchmarkResponseKind::Delete,
                 ),
@@ -1111,11 +1064,17 @@ impl ThreadedKvkache {
             .latency_ns
             .push(pending.started.elapsed().as_nanos() as u64);
         match (pending.kind, response) {
-            (BenchmarkResponseKind::Get, WorkerResponse::Value(value)) => {
+            (
+                BenchmarkResponseKind::Get,
+                WorkerResponse::Keyed(keyed_compatibility::KeyedResponse::Value(value)),
+            ) => {
                 stats.gets += 1;
                 stats.hits += value.is_some() as usize;
             }
-            (BenchmarkResponseKind::Set, WorkerResponse::Set(outcome)) => {
+            (
+                BenchmarkResponseKind::Set,
+                WorkerResponse::Keyed(keyed_compatibility::KeyedResponse::Set(outcome)),
+            ) => {
                 stats.sets += 1;
                 match outcome {
                     SetOutcome::Created => stats.creates += 1,
@@ -1123,7 +1082,10 @@ impl ThreadedKvkache {
                     SetOutcome::NotStored => {}
                 }
             }
-            (BenchmarkResponseKind::Delete, WorkerResponse::Deleted(deleted)) => {
+            (
+                BenchmarkResponseKind::Delete,
+                WorkerResponse::Keyed(keyed_compatibility::KeyedResponse::Deleted(deleted)),
+            ) => {
                 stats.deletes += 1;
                 stats.deleted += deleted as usize;
             }
