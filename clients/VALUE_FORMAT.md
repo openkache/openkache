@@ -55,20 +55,31 @@ application metadata MAY use the `ApplicationDefined` payload format,
 `OpaqueBytes`, or the opaque client API. A client that does not register the
 referenced application format MUST reject the value.
 
-## 2. Client protection mode
+## 2. Protection profile selection
 
-The managed client selects one protection mode when it is initialized. The
-mode applies to every managed value operation; protection cannot be enabled or
-disabled for an individual value.
+The managed client has an instance-wide
+`default_protection_profile`. Each managed operation MAY provide a
+`protection_profile` override. When an operation does not provide an override,
+it uses the instance default. The selected profile applies to that operation
+only; changing a per-operation selection MUST NOT mutate the instance default.
 
-| Initialization | Managed writes and reads |
-|---|---|
-| No `client_root_key` | Use `Unprotected` for every value. The default root is 32 zero bytes and affects only the managed Item ID. |
-| Explicit `client_root_key` | Protect every value. `AES-256-GCM-SIV` is the default; `AES-256-SIV-CMAC` is an explicit client-wide alternative. |
+| Initialization | Default protection profile | Permitted per-operation profiles |
+|---|---|---|
+| No `client_root_key` | `Unprotected` | `Unprotected` only |
+| Explicit `client_root_key` | `AES-256-GCM-SIV` | `Unprotected`, `AES-256-GCM-SIV`, or `AES-256-SIV-CMAC` |
 
-When protection is enabled, the client MUST require an explicitly supplied
-32-byte key and MUST reject the all-zero key. A client MUST reject a managed
-value whose protection ID conflicts with its configured mode.
+An explicit initialization profile MAY replace the default, subject to the
+same key requirements. When protection is selected, the client MUST require an
+explicitly supplied 32-byte key and MUST reject the all-zero key. A client
+MUST reject a per-operation protection selection that is incompatible with its
+configured key material.
+
+On writes, the selected operation profile determines the `protection_id`
+emitted in the ValueEnvelope. On reads, the selected operation profile is the
+expected `protection_id`; a stored value with a different ID MUST be rejected.
+Callers that intentionally mix profiles in one keyspace MUST select the
+matching profile when reading each value. A client MUST NOT silently downgrade
+or fall back to another profile after a mismatch.
 
 This policy applies only to the managed client path. Opaque APIs continue to
 accept exact Item IDs and opaque value bytes; callers own any protection for
@@ -76,12 +87,11 @@ opaque values.
 
 With `Unprotected`, no value-protection key is derived.
 
-The client selects immutable key-conversion and protection rules at
-initialization. Protection cannot vary per value. The default managed client
-uses value-envelope version `1`; a compatibility-capable client MAY select an
-older supported value version when that version can represent the value and
-policy. The version is not an additional Item ID input and does not perform
-key conversion or Item ID derivation.
+The client selects immutable key-conversion rules, available protection
+profiles, and the instance-wide default at initialization. The value-envelope
+version is also selected per operation from the client's configured version
+policy; it is not an additional Item ID input and does not perform key
+conversion or Item ID derivation.
 
 The no-key profile still writes a complete `ValueEnvelope`. Its
 `protection_id` is `0`, while the payload-format and compression IDs continue
