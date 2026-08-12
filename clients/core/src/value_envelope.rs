@@ -1,6 +1,6 @@
 //! Canonical framing for self-describing, cross-language values.
 
-/// Legacy metadata-envelope magic and version.
+/// Compatibility metadata-envelope magic and version.
 pub const MAGIC_AND_VERSION: [u8; crate::contract::VALUE_ENVELOPE_MAGIC_AND_VERSION.len()] =
     crate::contract::VALUE_ENVELOPE_MAGIC_AND_VERSION;
 
