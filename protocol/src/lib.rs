@@ -1,11 +1,8 @@
 //! Primitive wire values and framing shared by clients and servers.
 //!
-//! Request bodies remain outside this crate. Version 1 has no common request
-//! length field: the generated layout selects operation-specific byte steps.
-//! The [`request`] module consumes those steps without assigning them domain
-//! meaning, while protocol-v1 adapters own compact request semantics. The
-//! shared [`codec`] module provides operation-neutral value validation and
-//! container primitives.
+//! Request and response bodies remain outside this crate. API modules choose
+//! their own wire layout and use these operation-neutral framing and value
+//! primitives to implement it.
 
 macro_rules! wire_enum {
     (
@@ -37,47 +34,25 @@ macro_rules! wire_enum {
 
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
-/// Canonical operation framing, field, and codec metadata generated from the
-/// protocol model. Server and client adapters re-export this artifact instead
-/// of rendering their own operation contract copies.
-pub mod operation {
-    use super::{Opcode, Status};
-
-    include!(concat!(env!("OUT_DIR"), "/operation_contract.rs"));
-}
-
-// Keep the crate root limited to generic operation metadata. Client retry/result
-// projections and server execution metadata remain available through the
-// explicit `operation` module so adapters cannot acquire them through a broad
-// root import.
-pub use operation::{
-    MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS, OPERATION_CODEC_NAMES,
-    OperationFieldLayout, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
-    OperationLayoutPlan, OperationRequestFraming, OperationResponseFraming, OperationWireSpec,
-    WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor,
-    WireCodecKind, WireCodecLengthEncoding, WireCodecWidth, operation_registry,
-    operation_wire_spec, request_fields, response_fields, wire_codec_kind,
-};
-
-/// Protocol-v1 compatibility projections.
-///
-/// Generic operation metadata does not contain these routes. The v1 server and
-/// client adapters opt into this module explicitly, keeping the route
-/// vocabulary out of shared request/response infrastructure.
-pub mod compat_v1;
-
 /// Generic value-shape codecs shared by server and client adapters.
 pub mod codec;
-/// Generic generated field-layout dispatch.
+/// Generic field-layout helpers shared by API-owned codecs.
 pub mod layout;
+/// Configurable fixed-width optional-value codec.
+pub mod optional_values;
 /// Operation-neutral request frame delimiting.
 pub mod request;
 /// Operation-neutral response framing and owned response buffers.
 pub mod response;
 
 pub use layout::{
-    DenseFields, decode_layout_fields, decode_planned_fields, encode_dense_fields,
-    encode_layout_fields, encode_planned_fields,
+    DenseFields, LayoutValue, encode_dense_fields, encode_field_sequence_segments,
+    encode_optional_value_segments,
+};
+pub use optional_values::{
+    OptionalValueCodec, OptionalValues, OptionalValuesEncoder, decode_optional_values,
+    encode_optional_values, optional_values_encoded_len, optional_values_encoded_len_from_lengths,
+    optional_values_max_encoded_len,
 };
 pub use request::{
     OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFrameStep,
@@ -116,301 +91,13 @@ impl AsRef<[u8]> for ItemId {
     }
 }
 
-impl Status {
-    /// Returns whether this status represents a server-side error.
-    pub const fn is_error(self) -> bool {
-        (self as u8) >= ERROR_STATUS_MINIMUM
-    }
-}
-
-/// Encodes ordered optional values with one big-endian length per entry.
-///
-/// The framing is intentionally independent of any operation name. A value
-/// length of `u32::MAX` is reserved for `None`; every present value must be
-/// strictly smaller. The aggregate payload is bounded by the same wire value
-/// ceiling used by response frames.
-pub fn encode_optional_values(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
-    let mut encoder = OptionalValuesEncoder::new(values.len());
-    for value in values {
-        encoder.push(*value)?;
-    }
-    encoder.finish()
-}
-
-/// Returns the encoded length of the fixed-width optional-value layout
-/// without allocating the payload.
-///
-/// This is useful to a transport planner that wants to compare the fixed
-/// four-byte length table with a generic field sequence before reserving an
-/// output buffer. The calculation validates the same per-value and aggregate
-/// limits as [`encode_optional_values`].
-pub fn optional_values_encoded_len(values: &[Option<&[u8]>]) -> Result<usize> {
-    optional_values_encoded_len_iter(values.iter().map(|value| value.map(<[u8]>::len)))
-}
-
-/// Computes an optional-value payload size from lengths alone.
-///
-/// The fixed-width table is selected explicitly by generated layout metadata;
-/// it is never inferred from an operation's semantic name.
-pub fn optional_values_encoded_len_from_lengths(lengths: &[Option<usize>]) -> Result<usize> {
-    optional_values_encoded_len_iter(lengths.iter().copied())
-}
-
-fn optional_values_encoded_len_iter(lengths: impl Iterator<Item = Option<usize>>) -> Result<usize> {
-    let mut encoded_len = 0usize;
-    let mut field_count = 0usize;
-    for length in lengths {
-        field_count = field_count
-            .checked_add(1)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        let value_len = length.unwrap_or(0);
-        if value_len >= OPTIONAL_VALUE_MISSING as usize {
-            return Err(ProtocolError::ValueTooLarge {
-                size: value_len,
-                maximum: (OPTIONAL_VALUE_MISSING - 1) as usize,
-            });
-        }
-        encoded_len = encoded_len
-            .checked_add(value_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-    }
-    encoded_len = encoded_len
-        .checked_add(
-            field_count
-                .checked_mul(OPTIONAL_VALUE_LENGTH_BYTES)
-                .ok_or(ProtocolError::FrameLengthOverflow)?,
-        )
-        .ok_or(ProtocolError::FrameLengthOverflow)?;
-    validate_value_length(encoded_len)?;
-    Ok(encoded_len)
-}
-
-/// Incremental encoder for an ordered optional-value field sequence.
-///
-/// Server behaviors can append already-decoded domain values directly without
-/// first constructing a temporary `Vec<Option<&[u8]>>`.  The encoder owns only
-/// the aggregate framing buffer; it does not interpret operation roles,
-/// requiredness, or response semantics.
-#[derive(Debug)]
-pub struct OptionalValuesEncoder {
-    payload: Vec<u8>,
-    expected_fields: usize,
-    written_fields: usize,
-}
-
-impl OptionalValuesEncoder {
-    /// Creates an encoder for exactly `field_count` ordered fields.
-    pub fn new(field_count: usize) -> Self {
-        Self {
-            payload: Vec::with_capacity(
-                field_count
-                    .saturating_mul(OPTIONAL_VALUE_LENGTH_BYTES)
-                    .min(MAX_VALUE_BYTES),
-            ),
-            expected_fields: field_count,
-            written_fields: 0,
-        }
-    }
-
-    /// Appends one present field or the canonical missing sentinel.
-    pub fn push(&mut self, value: Option<&[u8]>) -> Result<()> {
-        if self.written_fields >= self.expected_fields {
-            return Err(ProtocolError::InvalidOptionalValues(
-                "optional-value encoder received too many fields",
-            ));
-        }
-        let value_len = value.map_or(0, <[u8]>::len);
-        if value_len >= OPTIONAL_VALUE_MISSING as usize {
-            return Err(ProtocolError::ValueTooLarge {
-                size: value_len,
-                maximum: (OPTIONAL_VALUE_MISSING - 1) as usize,
-            });
-        }
-        let next_len = self
-            .payload
-            .len()
-            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
-            .and_then(|length| length.checked_add(value_len))
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        validate_value_length(next_len)?;
-        match value {
-            None => self
-                .payload
-                .extend_from_slice(&OPTIONAL_VALUE_MISSING.to_be_bytes()),
-            Some(value) => {
-                self.payload
-                    .extend_from_slice(&(value_len as u32).to_be_bytes());
-                self.payload.extend_from_slice(value);
-            }
-        }
-        self.written_fields += 1;
-        Ok(())
-    }
-
-    /// Completes the sequence after all declared fields have been appended.
-    pub fn finish(self) -> Result<Vec<u8>> {
-        if self.written_fields != self.expected_fields {
-            return Err(ProtocolError::InvalidOptionalValues(
-                "optional-value encoder received too few fields",
-            ));
-        }
-        Ok(self.payload)
-    }
-}
-
-/// Returns an upper bound for an optional-value payload.
-///
-/// The bound includes one shared length/sentinel prefix for every field and
-/// `max_value_bytes` bytes for each present field. It intentionally does not
-/// clamp the result to the aggregate response ceiling: callers use the bound
-/// to reserve memory before an operation-specific response is encoded and the
-/// encoder still enforces the aggregate ceiling on the actual payload.
-pub fn optional_values_max_encoded_len(
-    value_count: usize,
-    max_value_bytes: usize,
-) -> Option<usize> {
-    value_count.checked_mul(OPTIONAL_VALUE_LENGTH_BYTES.checked_add(max_value_bytes)?)
-}
-
-/// A zero-copy view over the fixed-width optional-value response layout.
-///
-/// Callers provide bounded offset storage, allowing response adapters to
-/// borrow every present value from the original frame without allocating one
-/// buffer per field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OptionalValues<'a, 'b> {
-    payload: &'a [u8],
-    offsets: &'b [(usize, usize)],
-    field_count: usize,
-}
-
-impl<'a, 'b> OptionalValues<'a, 'b> {
-    /// Decodes exactly `value_count` optional values into caller-owned offsets.
-    pub fn decode(
-        payload: &'a [u8],
-        value_count: usize,
-        offsets: &'b mut [(usize, usize)],
-    ) -> Result<Self> {
-        if offsets.len() < value_count {
-            return Err(ProtocolError::InvalidOptionalValues(
-                "optional-value offset storage is smaller than the modeled field count",
-            ));
-        }
-        validate_value_length(payload.len())?;
-        let minimum = value_count
-            .checked_mul(OPTIONAL_VALUE_LENGTH_BYTES)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        if payload.len() < minimum {
-            return Err(ProtocolError::InvalidOptionalValues(
-                "optional-value payload is missing an entry length",
-            ));
-        }
-        let mut cursor = 0usize;
-        for index in 0..value_count {
-            let prefix_end = cursor
-                .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            let length = u32::from_be_bytes(
-                payload[cursor..prefix_end]
-                    .try_into()
-                    .expect("optional-value length prefix has fixed width"),
-            );
-            cursor = prefix_end;
-            if length == OPTIONAL_VALUE_MISSING {
-                offsets[index] = (usize::MAX, usize::MAX);
-                continue;
-            }
-            let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-            validate_value_length(length)?;
-            let end = cursor
-                .checked_add(length)
-                .ok_or(ProtocolError::FrameLengthOverflow)?;
-            if end > payload.len() {
-                return Err(ProtocolError::InvalidOptionalValues(
-                    "optional-value payload entry is truncated",
-                ));
-            }
-            offsets[index] = (cursor, end);
-            cursor = end;
-        }
-        if cursor != payload.len() {
-            return Err(ProtocolError::InvalidOptionalValues(
-                "optional-value payload contains trailing bytes",
-            ));
-        }
-        Ok(Self {
-            payload,
-            offsets: &offsets[..value_count],
-            field_count: value_count,
-        })
-    }
-
-    /// Returns the number of modeled values.
-    pub const fn len(self) -> usize {
-        self.field_count
-    }
-
-    /// Returns one present value, preserving present-empty as `Some(&[])`.
-    pub fn get(self, index: usize) -> Option<&'a [u8]> {
-        let (start, end) = *self.offsets.get(index)?;
-        (start != usize::MAX).then(|| &self.payload[start..end])
-    }
-}
-
-/// Decodes ordered optional opaque values from the shared response codec.
-pub fn decode_optional_values(payload: &[u8], value_count: usize) -> Result<Vec<Option<Vec<u8>>>> {
-    validate_value_length(payload.len())?;
-    let minimum = value_count
-        .checked_mul(OPTIONAL_VALUE_LENGTH_BYTES)
-        .ok_or(ProtocolError::FrameLengthOverflow)?;
-    if payload.len() < minimum {
-        return Err(ProtocolError::InvalidOptionalValues(
-            "optional-value payload is missing an entry length",
-        ));
-    }
-    let mut cursor = 0usize;
-    let mut values = Vec::with_capacity(value_count);
-    for _ in 0..value_count {
-        let end = cursor
-            .checked_add(OPTIONAL_VALUE_LENGTH_BYTES)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        let length_bytes: [u8; OPTIONAL_VALUE_LENGTH_BYTES] = payload[cursor..end]
-            .try_into()
-            .expect("optional-value length has a fixed width");
-        cursor = end;
-        let length = u32::from_be_bytes(length_bytes);
-        if length == OPTIONAL_VALUE_MISSING {
-            values.push(None);
-            continue;
-        }
-        let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-        validate_value_length(length)?;
-        let end = cursor
-            .checked_add(length)
-            .ok_or(ProtocolError::FrameLengthOverflow)?;
-        let bytes = payload
-            .get(cursor..end)
-            .ok_or(ProtocolError::InvalidOptionalValues(
-                "optional-value payload entry is truncated",
-            ))?;
-        values.push(Some(bytes.to_vec()));
-        cursor = end;
-    }
-    if cursor != payload.len() {
-        return Err(ProtocolError::InvalidOptionalValues(
-            "optional-value payload contains trailing bytes",
-        ));
-    }
-    Ok(values)
-}
-
-/// Encodes an ordered operation field sequence.
+/// Encodes an ordered field sequence.
 ///
 /// The payload starts with a compact presence mask, followed by canonical
 /// `vu128` lengths and bytes for every present field before the final present
-/// field. The final present field consumes the remaining bytes. The operation
-/// plan supplies field order, cardinality, requiredness, and codecs; this
-/// primitive only carries bounded opaque field bytes.
+/// field. The final present field consumes the remaining bytes. The caller
+/// supplies field order, cardinality, requiredness, and codecs; this primitive
+/// only carries bounded opaque field bytes.
 pub fn encode_field_sequence(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
     let mask_bytes = values.len().saturating_add(7) / 8;
     if mask_bytes > MAX_VALUE_BYTES {
@@ -465,16 +152,16 @@ fn append_field_sequence(values: &[Option<&[u8]>], payload: &mut Vec<u8>) -> Res
 /// The returned value is the exact body size for the supplied fields. Every
 /// present field before the final present field pays a canonical `vu128`
 /// length prefix; the final present field consumes the remainder. It is
-/// deliberately independent of operation names and semantic roles so
-/// generated adapters can use it as a shared size-cost primitive.
+/// deliberately independent of operation names and semantic roles so API
+/// modules can use it as a shared size-cost primitive.
 pub fn field_sequence_encoded_len(values: &[Option<&[u8]>]) -> Result<usize> {
     field_sequence_encoded_len_iter(values.iter().map(|value| value.map(<[u8]>::len)))
 }
 
 /// Computes a field-sequence payload size from lengths alone.
 ///
-/// This is the allocation-free cost primitive used by generated size
-/// planners. `None` is a missing field; `Some(0)` is a present-empty field.
+/// This is the allocation-free cost primitive used by API size planners.
+/// `None` is a missing field; `Some(0)` is a present-empty field.
 pub fn field_sequence_encoded_len_from_lengths(lengths: &[Option<usize>]) -> Result<usize> {
     field_sequence_encoded_len_iter(lengths.iter().copied())
 }
@@ -523,7 +210,7 @@ fn field_sequence_encoded_len_iter(lengths: impl Iterator<Item = Option<usize>>)
     Ok(total)
 }
 
-/// A zero-copy view over an ordered operation field sequence.
+/// A zero-copy view over an ordered field sequence.
 ///
 /// The cursor validates the presence mask and every present length/entry
 /// boundary once, then returns borrowed field slices without allocating one
@@ -651,7 +338,7 @@ impl<'a, 'b> FieldSequence<'a, 'b> {
         Self::validate_entries(payload, field_count, None, None)
     }
 
-    /// Validates an ordered field sequence and its generated requiredness
+    /// Validates an ordered field sequence and caller-supplied requiredness
     /// without allocating offset storage.
     pub fn validate_with_required(payload: &[u8], required: &[bool]) -> Result<()> {
         Self::validate_entries(payload, required.len(), Some(required), None)
@@ -676,8 +363,8 @@ impl<'a, 'b> FieldSequence<'a, 'b> {
 
     /// Decodes a field sequence and rejects missing required fields.
     ///
-    /// Requiredness is supplied by generated model metadata rather than
-    /// inferred from the route. Optional fields retain their cleared mask bit
+    /// Requiredness is supplied by the API rather than inferred from a route.
+    /// Optional fields retain their cleared mask bit
     /// and remain addressable through [`Self::get`].
     pub fn decode_with_required(
         payload: &'a [u8],
@@ -714,9 +401,8 @@ impl<'a, 'b> FieldSequence<'a, 'b> {
 /// Encodes aligned groups of fields as nested field sequences.
 ///
 /// The outer sequence preserves group order; each group is itself an ordered
-/// field sequence. This gives batch operations a generic item/value alignment
-/// primitive and lets a future CAS request carry expected and replacement
-/// values without teaching v1 about either operation name.
+/// field sequence. This gives batch APIs a generic alignment primitive without
+/// teaching the transport about any operation name.
 pub fn encode_field_groups(groups: &[&[Option<&[u8]>]]) -> Result<Vec<u8>> {
     // Size the complete nested payload before allocating. The previous
     // implementation encoded every group into a temporary Vec, collected a

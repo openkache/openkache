@@ -5,7 +5,14 @@
 //! Server and client adapters provide the generated codec-name lookup and map
 //! [`CodecError`] to their local error boundary.
 
-use crate::{OPTIONAL_VALUE_MISSING, decode_varuint, encode_varuint};
+use crate::{decode_varuint, encode_varuint};
+
+/// Reserved length value for required length-delimited container entries.
+///
+/// Optional application fields use [`crate::OptionalValueCodec`] and supply
+/// their own sentinel. This local value is only a fail-closed marker for the
+/// required list/map/union container primitive.
+const LENGTH_DELIMITED_MAX: u32 = u32::MAX;
 
 const INVALID_ENUM: CodecError = CodecError(b"enum value is not declared by its shape");
 const INVALID_LIST: CodecError = CodecError(b"list payload is malformed");
@@ -717,7 +724,7 @@ pub fn transform_packed_f64_be(
 
 fn append_length_delimited(output: &mut Vec<u8>, value: &[u8]) -> Result<(), CodecError> {
     let length = u32::try_from(value.len()).map_err(|_| TOO_MANY_ENTRIES)?;
-    if length >= OPTIONAL_VALUE_MISSING {
+    if length >= LENGTH_DELIMITED_MAX {
         return Err(TOO_MANY_ENTRIES);
     }
     let next_len = output
@@ -749,7 +756,7 @@ fn read_length_delimited(
     let length_end = cursor.checked_add(4).ok_or(error)?;
     let bytes = payload.get(cursor..length_end).ok_or(error)?;
     let length = u32::from_be_bytes(bytes.try_into().expect("length width is fixed"));
-    if length == OPTIONAL_VALUE_MISSING {
+    if length == LENGTH_DELIMITED_MAX {
         return Err(error);
     }
     let value_start = length_end;

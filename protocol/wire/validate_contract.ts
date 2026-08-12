@@ -1,24 +1,8 @@
-/** Shared structural validation for Smithy wire-contract extraction. */
+/** Shared structural validation for transport-contract extraction. */
 
-import {
-  WIRE_CODEC_NAMES,
-  type Wire_Codec_Name,
-  type Wire_Entry,
-} from "../wire_types"
+import type { Wire_Entry } from "../wire_types"
 
 export type Json_Object = Readonly<Record<string, unknown>>
-
-export function ensure_wire_codec_name(
-  codec_name: string,
-  location: string,
-): void {
-  if (!WIRE_CODEC_NAMES.includes(codec_name as Wire_Codec_Name)) {
-    throw new Error(
-      `${location} names unsupported wire codec ${JSON.stringify(codec_name)}; ` +
-        `supported codecs: ${WIRE_CODEC_NAMES.join(", ")}`,
-    )
-  }
-}
 
 export function object_value(value: unknown, location: string): Json_Object {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -33,15 +17,6 @@ export function object_member(
   location: string,
 ): Json_Object {
   return object_value(object[member], `${location}.${member}`)
-}
-
-export function optional_object_member(
-  object: Json_Object,
-  member: string,
-  location: string,
-): Json_Object | undefined {
-  const value = object[member]
-  return value === undefined ? undefined : object_value(value, `${location}.${member}`)
 }
 
 export function array_member(
@@ -66,33 +41,6 @@ export function string_member(
   return value
 }
 
-export function optional_string_member(
-  object: Json_Object,
-  member: string,
-  location: string,
-): string | undefined {
-  return object[member] === undefined
-    ? undefined
-    : string_member(object, member, location)
-}
-
-export function optional_boolean_member(
-  object: Json_Object,
-  member: string,
-  location: string,
-): boolean | undefined {
-  const value = object[member]
-  if (value === undefined) return undefined
-  if (typeof value !== "boolean") {
-    throw new Error(`${location}.${member} must be a boolean`)
-  }
-  return value
-}
-
-export function shape_type(shape: Json_Object, location: string): string {
-  return string_member(shape, "type", location)
-}
-
 export function integer_member(
   object: Json_Object,
   member: string,
@@ -114,18 +62,6 @@ export function integer_member(
   return value
 }
 
-export function optional_integer_member(
-  object: Json_Object,
-  member: string,
-  location: string,
-  minimum = 0,
-  maximum = Number.MAX_SAFE_INTEGER,
-): number | undefined {
-  return object[member] === undefined
-    ? undefined
-    : integer_member(object, member, location, minimum, maximum)
-}
-
 export function trait_value(
   shape: Json_Object,
   trait_id: string,
@@ -141,9 +77,8 @@ export function optional_enum_value(
 ): string | undefined {
   const traits = object_member(shape, "traits", location)
   const value = traits["smithy.api#enumValue"]
-  return value === undefined
-    ? undefined
-    : string_member(traits, "smithy.api#enumValue", `${location}.traits`)
+  if (value === undefined) return undefined
+  return string_member(traits, "smithy.api#enumValue", `${location}.traits`)
 }
 
 export function unique_wire_values(

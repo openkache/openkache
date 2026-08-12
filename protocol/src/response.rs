@@ -2,8 +2,8 @@
 //!
 //! Response status and payload framing are shared by clients and servers.
 //! This module intentionally does not decode operation-specific field
-//! semantics; callers can pass the borrowed payload to the generated layout
-//! or compatibility adapter that owns those semantics.
+//! semantics; callers pass the borrowed payload to the API codec that owns
+//! those semantics.
 
 use std::ops::Range;
 
@@ -178,8 +178,8 @@ impl<'a> ResponseFrame<'a> {
 /// The frame allocation stays intact while callers inspect the payload. This
 /// is the allocation-free counterpart to [`Response::decode_owned`], whose
 /// conventional `Response { payload: Vec<u8> }` shape must move the payload
-/// over the status/length prefix. Use this type when a generated field view
-/// can retain the received frame for its lifetime.
+    /// over the status/length prefix. Use this type when an API field view can
+    /// retain the received frame for its lifetime.
 #[derive(Debug, Eq, PartialEq)]
 pub struct OwnedResponseFrame {
     header: ResponseHeader,
