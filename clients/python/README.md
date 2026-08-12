@@ -57,9 +57,10 @@ finally:
 `get_raw` for exact bytes; empty raw values are supported. A `str` key is the
 typed `Text` key by default. Select `key_type=KeyType.BYTES` or
 `key_type=KeyType.INTEGER` when the keyspace uses exact bytes or arbitrary
-precision integers. The selected spec is enforced for every formatted
-operation and the adapter passes neutral logical bytes plus the generated key
-spec to the typed native ABI; the Rust core owns canonical deterministic CBOR.
+precision integers. The selected key type is enforced for every formatted
+operation and the adapter passes neutral logical bytes plus the generated FFI
+key discriminator to the typed native ABI; the Rust core owns canonical
+deterministic CBOR.
 Empty and NUL-containing keys are valid. JSON numbers
 are finite, and integers
 must be exactly representable as IEEE-754 binary64 values. Python converts a

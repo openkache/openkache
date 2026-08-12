@@ -5,7 +5,7 @@ core. It accepts Foundation `Data`, exposes async cache operations, and does
 not duplicate QUIC framing, TLS validation, retries, key derivation,
 compression, encryption, or value parsing.
 
-`OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
+`OpenKacheClient` derives protected item IDs from v1 TypedKey values. `String`
 keys use the `Text` type and `Data` keys use the `Bytes` type; the typed native
 ABI carries their logical bytes and the Rust core owns canonical deterministic
 CBOR. Use

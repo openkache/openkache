@@ -148,7 +148,7 @@ export interface Client_Options {
   /** Authenticated value-encryption profile. Defaults to `robust`. */
   readonly encryption?: "compact" | "robust"
   /** Logical key representation used by every protected operation. Defaults to `text`. */
-  readonly key_spec?: Key_Spec
+  readonly key_type?: Key_Type
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
@@ -156,7 +156,7 @@ export interface Client_Options {
 }
 
 /** Logical key representation selected by a formatted client. */
-export type Key_Spec = "integer" | "text" | "bytes"
+export type Key_Type = "integer" | "text" | "bytes"
 
 /** Native values accepted by a formatted client's logical-key boundary. */
 export type Client_Key = string | Uint8Array | number | bigint
@@ -226,18 +226,18 @@ export class OpenKache_Client {
   readonly #value_codecs: Value_Codec_Registry
   readonly #raw_client: OpenKache_Raw_Client
   readonly #lifecycle: Client_Lifecycle
-  readonly #key_spec: Key_Spec
+  readonly #key_type: Key_Type
 
   private constructor(
     native_client: Native_Client,
     value_codecs: Value_Codec_Registry,
     lifecycle: Client_Lifecycle,
-    key_spec: Key_Spec,
+    key_type: Key_Type,
   ) {
     this.#native_client = native_client
     this.#value_codecs = value_codecs
     this.#lifecycle = lifecycle
-    this.#key_spec = key_spec
+    this.#key_type = key_type
     this.#raw_client = new Raw_Client(native_client, lifecycle)
     CLIENT_FINALIZER.register(this.#raw_client, native_client, this.#raw_client)
   }
@@ -263,7 +263,7 @@ export class OpenKache_Client {
     const compression = options.compression ?? {}
     const timeouts = options.timeouts ?? {}
     const retry = options.retry ?? {}
-    const key_spec = options.key_spec ?? "text"
+    const key_type = options.key_type ?? "text"
     const native_options: Native_Client_Options = {
       address: options.address,
       server_name: options.server_name ?? SMITHY_CLIENT_DEFAULT_SERVER_NAME,
@@ -284,7 +284,7 @@ export class OpenKache_Client {
         retry.max_attempts ?? SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
-      key_spec,
+      key_type,
     }
     try {
       const native_module = load_native_module(options.native_path)
@@ -293,7 +293,7 @@ export class OpenKache_Client {
         native_client,
         value_codecs,
         { closed: false },
-        key_spec,
+        key_type,
       )
       return client
     } catch (error) {
@@ -371,7 +371,7 @@ export class OpenKache_Client {
     this.#assert_open()
     let envelope: Value_Envelope | null
     try {
-      envelope = await this.#native_client.get_value(owned_key_bytes(key, this.#key_spec))
+      envelope = await this.#native_client.get_value(owned_key_bytes(key, this.#key_type))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -409,7 +409,7 @@ export class OpenKache_Client {
     }
     try {
       const outcome = await this.#native_client.set_value(
-        owned_key_bytes(key, this.#key_spec),
+        owned_key_bytes(key, this.#key_type),
         envelope.encoding,
         envelope.type_name,
         envelope.payload,
@@ -434,7 +434,7 @@ export class OpenKache_Client {
   async get_raw(key: Client_Key): Promise<Uint8Array | undefined> {
     this.#assert_open()
     try {
-      const value = await this.#native_client.get(owned_key_bytes(key, this.#key_spec))
+      const value = await this.#native_client.get(owned_key_bytes(key, this.#key_type))
       return value === null ? undefined : value
     } catch (error) {
       throw as_openkache_error(error)
@@ -477,7 +477,7 @@ export class OpenKache_Client {
     this.#assert_open()
     let result: string | null
     try {
-      result = await this.#native_client.get_json(owned_key_bytes(key, this.#key_spec))
+      result = await this.#native_client.get_json(owned_key_bytes(key, this.#key_type))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -508,7 +508,7 @@ export class OpenKache_Client {
     try {
       assert_json_value(value)
       const outcome = await this.#native_client.set_json(
-        owned_key_bytes(key, this.#key_spec),
+        owned_key_bytes(key, this.#key_type),
         value,
         options.condition,
         options.expiration_mode,
@@ -531,7 +531,7 @@ export class OpenKache_Client {
   async delete(key: Client_Key): Promise<boolean> {
     this.#assert_open()
     try {
-      return await this.#native_client.delete(owned_key_bytes(key, this.#key_spec))
+      return await this.#native_client.delete(owned_key_bytes(key, this.#key_type))
     } catch (error) {
       throw as_openkache_error(error)
     }
@@ -590,7 +590,7 @@ export class OpenKache_Client {
     this.#assert_open()
     try {
       const outcome = await this.#native_client.set(
-        owned_key_bytes(key, this.#key_spec),
+        owned_key_bytes(key, this.#key_type),
         bytes,
         options.condition,
         options.expiration_mode,
@@ -898,19 +898,19 @@ function assert_expected_result(
   }
 }
 
-function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
-  if (key_spec === "text") {
+function owned_key_bytes(key: Client_Key, key_type: Key_Type): Uint8Array {
+  if (key_type === "text") {
     if (typeof key !== "string") {
-      throw new OpenKache_Error("key must be a string for the text key spec")
+      throw new OpenKache_Error("key must be a string for the text key type")
     }
     if (!is_well_formed_utf16(key)) {
       throw new OpenKache_Error("key must contain valid UTF-8 text")
     }
     return TEXT_ENCODER.encode(key)
   }
-  if (key_spec === "bytes") {
+  if (key_type === "bytes") {
     if (!(key instanceof Uint8Array)) {
-      throw new OpenKache_Error("key must be a Uint8Array for the bytes key spec")
+      throw new OpenKache_Error("key must be a Uint8Array for the bytes key type")
     }
     return key.slice()
   }
@@ -923,7 +923,7 @@ function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
     !Number.isSafeInteger(key)
   ) {
     throw new OpenKache_Error(
-      "key must be a safe integer number or bigint for the integer key spec",
+      "key must be a safe integer number or bigint for the integer key type",
     )
   }
   return TEXT_ENCODER.encode(String(key))

@@ -33,7 +33,7 @@ enum class Set_Condition : std::uint32_t {
 };
 
 /// Logical key representation accepted by the shared Rust key boundary.
-enum class Key_Spec : std::uint32_t {
+enum class Key_Type : std::uint32_t {
     Text = OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
     Bytes = OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
     Integer = OPENKACHE_SMITHY_FFI_KEY_SPEC_INTEGER,
@@ -310,7 +310,7 @@ public:
         std::span<const Byte> key = {},
         std::span<const Byte> value = {},
         Set_Options options = {}) const {
-        return execute_typed(operation, Key_Spec::Bytes, key, value, options);
+        return execute_typed(operation, Key_Type::Bytes, key, value, options);
     }
 
     /// Executes a generated operation with one logical key specification.
@@ -319,11 +319,11 @@ public:
     /// this method accepts only the logical key bytes.
     Operation_Result execute_operation_typed(
         std::uint32_t operation,
-        Key_Spec key_spec,
+        Key_Type key_type,
         std::span<const Byte> key,
         std::span<const Byte> value = {},
         Set_Options options = {}) const {
-        return execute_typed(operation, key_spec, key, value, options);
+        return execute_typed(operation, key_type, key, value, options);
     }
 
     /// Executes a generated operation through the exact-item-ID Smithy ABI boundary.
@@ -338,31 +338,31 @@ public:
         return execute(operation, item_id, value, options, true);
     }
 
-    /// Retrieves a Bytes PortableKey value, or `std::nullopt` when absent.
+    /// Retrieves a Bytes TypedKey value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
         return get_outcome(
             execute_typed(
                 OPENKACHE_SMITHY_OPCODE_GET,
-                Key_Spec::Bytes,
+                Key_Type::Bytes,
                 key,
                 {},
                 Set_Options{}),
             "GET");
     }
 
-    /// Convenience overload for a Text PortableKey.
+    /// Convenience overload for a Text TypedKey.
     std::optional<Bytes> get(std::string_view key) const {
         return get_outcome(
             execute_typed(
                 OPENKACHE_SMITHY_OPCODE_GET,
-                Key_Spec::Text,
+                Key_Type::Text,
                 as_bytes(key),
                 {},
                 Set_Options{}),
             "GET");
     }
 
-    /// Stores a Bytes PortableKey value and returns the server outcome.
+    /// Stores a Bytes TypedKey value and returns the server outcome.
     Set_Outcome set(
         std::span<const Byte> key,
         std::span<const Byte> value,
@@ -370,14 +370,14 @@ public:
         return set_outcome(
             execute_typed(
                 OPENKACHE_SMITHY_OPCODE_SET,
-                Key_Spec::Bytes,
+                Key_Type::Bytes,
                 key,
                 value,
                 options),
             "SET");
     }
 
-    /// Convenience overload for a Text PortableKey and textual value bytes.
+    /// Convenience overload for a Text TypedKey and textual value bytes.
     Set_Outcome set(
         std::string_view key,
         std::string_view value,
@@ -385,30 +385,30 @@ public:
         return set_outcome(
             execute_typed(
                 OPENKACHE_SMITHY_OPCODE_SET,
-                Key_Spec::Text,
+                Key_Type::Text,
                 as_bytes(key),
                 as_bytes(value),
                 options),
             "SET");
     }
 
-    /// Deletes a Bytes PortableKey value and reports whether it existed.
+    /// Deletes a Bytes TypedKey value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
         return delete_outcome(
             execute_typed(
                 OPENKACHE_SMITHY_OPCODE_DELETE,
-                Key_Spec::Bytes,
+                Key_Type::Bytes,
                 key,
                 {},
                 Set_Options{}));
     }
 
-    /// Convenience overload for a Text PortableKey.
+    /// Convenience overload for a Text TypedKey.
     bool remove(std::string_view key) const {
         return delete_outcome(
             execute_typed(
                 OPENKACHE_SMITHY_OPCODE_DELETE,
-                Key_Spec::Text,
+                Key_Type::Text,
                 as_bytes(key),
                 {},
                 Set_Options{}));
@@ -719,7 +719,7 @@ private:
 
     Operation_Result execute_typed(
         std::uint32_t operation,
-        Key_Spec key_spec,
+        Key_Type key_type,
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options) const {
@@ -732,7 +732,7 @@ private:
         auto* result = openkache_client_execute_typed_with_options(
             client_,
             operation,
-            static_cast<std::uint32_t>(key_spec),
+            static_cast<std::uint32_t>(key_type),
             key_data,
             key.size(),
             value_data,

@@ -10,7 +10,7 @@ use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, Zs
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
     DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
-    KeySpec, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy, PrivateKey,
+    KeyType, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy, PrivateKey,
     ProtectedClient, ResolvedKey, RetryPolicy, SetCondition, SetOptions, SetOutcome,
     contract::{
         ConnectionState, SMITHY_EVICTION_DEFAULT_EVICTABLE,
@@ -64,8 +64,8 @@ pub struct NativeClientOptions {
     #[napi(js_name = "max_in_flight")]
     pub max_in_flight: Option<f64>,
     pub encryption: Option<String>,
-    #[napi(js_name = "key_spec")]
-    pub key_spec: Option<String>,
+    #[napi(js_name = "key_type")]
+    pub key_type: Option<String>,
 }
 
 /// Decoded components of a canonical OpenKache value envelope.
@@ -733,7 +733,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .transpose()?
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
     let encryption = parse_encryption(options.encryption.as_deref())?;
-    let key_spec = parse_key_spec(options.key_spec.as_deref())?;
+    let key_type = parse_key_type(options.key_type.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
@@ -743,7 +743,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .retry_policy(retry)
         .max_in_flight(max_in_flight)
         .encryption(encryption)
-        .key_spec(key_spec);
+        .key_type(key_type);
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
@@ -1080,12 +1080,12 @@ fn parse_encryption(encryption: Option<&str>) -> Result<Encryption> {
     }
 }
 
-fn parse_key_spec(key_spec: Option<&str>) -> Result<KeySpec> {
-    match key_spec {
-        None => Ok(KeySpec::Text),
-        Some(value) => KeySpec::from_name(value).ok_or_else(|| {
+fn parse_key_type(key_type: Option<&str>) -> Result<KeyType> {
+    match key_type {
+        None => Ok(KeyType::Text),
+        Some(value) => KeyType::from_name(value).ok_or_else(|| {
             invalid_argument(format!(
-                "key_spec must be integer, text, or bytes, got {value}"
+                "key_type must be integer, text, or bytes, got {value}"
             ))
         }),
     }

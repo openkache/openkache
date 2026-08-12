@@ -1516,7 +1516,7 @@ pub unsafe extern "C" fn openkache_client_execute_fields(
 ///
 /// `key_spec` selects Text, Bytes, or Integer. Text and Bytes receive their
 /// exact UTF-8/byte payload; Integer receives canonical signed decimal UTF-8.
-/// The shared Rust core performs PortableKey conversion, deterministic CBOR,
+/// The shared Rust core performs TypedKey conversion, deterministic CBOR,
 /// namespace-bound Item ID derivation, and value protection in one worker
 /// operation. Global operations ignore the key input and require an empty
 /// value when their operation contract says so.

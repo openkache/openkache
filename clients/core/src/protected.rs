@@ -7,9 +7,9 @@ use crate::key::{KeyBinding, KeyInput};
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeySpec, NamespaceDescriptor,
-    NamespacePolicy, PortableKey, ResolvedKey, Result, RetryPolicy, ServerTrust, SetOptions,
-    SetOutcome,
+    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyType, NamespaceDescriptor,
+    NamespacePolicy, ResolvedKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    TypedKey,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -21,7 +21,7 @@ struct ProtectionSettings {
     encryption: Encryption,
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
-    key_spec: KeySpec,
+    key_type: KeyType,
 }
 
 impl ProtectionSettings {
@@ -39,19 +39,19 @@ impl ProtectionSettings {
             encryption: Encryption::Robust,
             encryption_explicit: false,
             key,
-            key_spec: KeySpec::Bytes,
+            key_type: KeyType::Bytes,
         }
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
-        let key_spec = self.key_spec;
+        let key_type = self.key_type;
         match self.key {
             Some(key) => if self.encryption == Encryption::Unprotected {
-                DataProtection::unprotected(key_spec, self.compression)
+                DataProtection::unprotected(key_type, self.compression)
             } else {
-                DataProtection::with_profile_and_key_spec(
+                DataProtection::with_profile_and_key_type(
                     key,
-                    key_spec,
+                    key_type,
                     self.compression,
                     self.encryption,
                 )
@@ -64,7 +64,7 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(key_spec, self.compression).map(Arc::new)
+                DataProtection::unprotected(key_type, self.compression).map(Arc::new)
             }
         }
     }
@@ -161,8 +161,8 @@ macro_rules! protected_builder_methods {
             }
 
             /// Selects the exact key type accepted by this formatted keyspace.
-            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
-                self.protection.key_spec = key_spec;
+            pub fn key_type(mut self, key_type: KeyType) -> Self {
+                self.protection.key_type = key_type;
                 self
             }
         }
@@ -177,7 +177,7 @@ macro_rules! protected_client_methods {
         }
 
         /// Resolves neutral logical key bytes with this client's configured
-        /// [`KeySpec`]. Language adapters use this boundary instead of
+        /// [`KeyType`]. Language adapters use this boundary instead of
         /// carrying a second key-space implementation.
         #[doc(hidden)]
         pub fn resolve_logical_key(
@@ -224,14 +224,14 @@ macro_rules! protected_client_methods {
         ) -> Result<crate::OperationResult> {
             self.execute_operation_typed(
                 operation,
-                PortableKey::Bytes(application_key.as_ref().to_vec()),
+                TypedKey::Bytes(application_key.as_ref().to_vec()),
                 value,
                 set_options,
             )
             .await
         }
 
-        /// Executes a generated Smithy operation for one typed portable key.
+        /// Executes a generated Smithy operation for one typed key.
         ///
         /// This is the generic key boundary used by native language adapters.
         /// The key is converted, canonicalized, and bound to the namespace by
@@ -239,13 +239,13 @@ macro_rules! protected_client_methods {
         pub async fn execute_operation_typed(
             &self,
             operation: crate::Opcode,
-            application_key: impl Into<PortableKey>,
+            application_key: impl Into<TypedKey>,
             value: impl AsRef<[u8]>,
             set_options: SetOptions,
         ) -> Result<crate::OperationResult> {
             self.execute_operation_key_input(
                 operation,
-                KeyInput::portable(application_key),
+                KeyInput::typed(application_key),
                 value,
                 set_options,
             )
@@ -338,7 +338,7 @@ macro_rules! protected_client_methods {
             self.execute_operation_scoped_typed(
                 operation,
                 namespace_id,
-                PortableKey::Bytes(application_key.as_ref().to_vec()),
+                TypedKey::Bytes(application_key.as_ref().to_vec()),
                 value,
                 set_options,
             )
@@ -346,19 +346,19 @@ macro_rules! protected_client_methods {
         }
 
         /// Executes a generated operation in an explicitly supplied namespace
-        /// for one portable logical key.
+        /// for one typed logical key.
         pub async fn execute_operation_scoped_typed(
             &self,
             operation: crate::Opcode,
             namespace_id: u64,
-            application_key: impl Into<PortableKey>,
+            application_key: impl Into<TypedKey>,
             value: impl AsRef<[u8]>,
             set_options: SetOptions,
         ) -> Result<crate::OperationResult> {
             let binding = if crate::protocol::uses_compact_item_route(operation) {
                 Some(
                     self.protection
-                        .bind_key_input(namespace_id, KeyInput::portable(application_key))?,
+                        .bind_key_input(namespace_id, KeyInput::typed(application_key))?,
                 )
             } else {
                 None
@@ -427,9 +427,9 @@ macro_rules! protected_client_methods {
                 .await
         }
 
-        /// Retrieves, authenticates, and decodes a value for a portable key.
-        pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
-            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+        /// Retrieves, authenticates, and decodes a value for a typed key.
+        pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
+            let binding = self.resolve_and_bind_key(KeyInput::typed(key)).await?;
             self.get_raw_at_item_id(binding.namespace_id, binding.item_id)
                 .await
         }
@@ -448,8 +448,8 @@ macro_rules! protected_client_methods {
         ///
         /// Returns an error when transport, authentication, decompression, or deserialization
         /// fails.
-        pub async fn get_value(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Value>> {
-            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+        pub async fn get_value(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Value>> {
+            let binding = self.resolve_and_bind_key(KeyInput::typed(key)).await?;
             self.get_value_at_item_id(binding.namespace_id, binding.item_id)
                 .await
         }
@@ -569,10 +569,10 @@ macro_rules! protected_client_methods {
             self.get_value_with_key(&key).await
         }
 
-        /// Protects and stores plaintext bytes for a portable key.
+        /// Protects and stores plaintext bytes for a typed key.
         pub async fn set(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             plaintext: Vec<u8>,
             options: SetOptions,
         ) -> Result<SetOutcome> {
@@ -594,7 +594,7 @@ macro_rules! protected_client_methods {
         ///
         /// # Arguments
         ///
-        /// * `key` - Portable key value used for Item ID derivation.
+        /// * `key` - Typed key value used for Item ID derivation.
         /// * `value` - Raw or logical JSON value to encode.
         /// * `options` - Existence condition and optional expiration.
         ///
@@ -608,11 +608,11 @@ macro_rules! protected_client_methods {
         /// fails.
         pub async fn set_value(
             &self,
-            key: impl Into<PortableKey>,
+            key: impl Into<TypedKey>,
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
-            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+            let binding = self.resolve_and_bind_key(KeyInput::typed(key)).await?;
             self.set_value_at_binding(binding, value, options).await
         }
 
@@ -665,9 +665,9 @@ macro_rules! protected_client_methods {
             .await
         }
 
-        /// Deletes a value for a portable key.
-        pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
-            let binding = self.resolve_and_bind_key(KeyInput::portable(key)).await?;
+        /// Deletes a value for a typed key.
+        pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
+            let binding = self.resolve_and_bind_key(KeyInput::typed(key)).await?;
             self.delete_at_binding(binding).await
         }
 

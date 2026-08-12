@@ -73,7 +73,7 @@ value, found, err := client.Get(ctx, []byte("profile"))
 
 `Get` and `Set` treat the `[]byte` key as logical v1 `Bytes` input. The typed
 native ABI carries that byte slice and its generated key specification to the
-Rust core, which owns `PortableKey` conversion and canonical deterministic
+Rust core, which owns `TypedKey` conversion and canonical deterministic
 CBOR. `Get` returns `found` separately so an empty stored value is not confused
 with a cache miss. `Close` is idempotent and waits for in-flight native
 operations.

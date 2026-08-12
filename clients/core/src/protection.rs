@@ -2,7 +2,7 @@
 
 use crate::key::{KeyBinding, KeyInput, KeyResolver};
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
-use crate::{ClientRootKey, DataProtectionKey, ItemId, KeySpec, PortableKey, ResolvedKey, Result};
+use crate::{ClientRootKey, DataProtectionKey, ItemId, KeyType, ResolvedKey, Result, TypedKey};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -26,13 +26,13 @@ impl DataProtection {
     ///
     /// Returns an error when the compression settings are invalid.
     pub fn new(key: DataProtectionKey, compression: Compression) -> Result<Self> {
-        Self::with_key_spec(key, KeySpec::Bytes, compression)
+        Self::with_key_type(key, KeyType::Bytes, compression)
     }
 
-    /// Creates mandatory protection with an explicit formatted key spec.
-    pub fn with_key_spec(
+    /// Creates mandatory protection with an explicit key type.
+    pub fn with_key_type(
         key: ClientRootKey,
-        key_spec: KeySpec,
+        key_type: KeyType,
         compression: Compression,
     ) -> Result<Self> {
         if key.is_zero() {
@@ -41,7 +41,7 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let resolver = KeyResolver::new(key, key_spec);
+        let resolver = KeyResolver::new(key, key_type);
         let codec = ValueCodec::protected(resolver.root(), compression)?;
         Ok(Self { resolver, codec })
     }
@@ -50,8 +50,8 @@ impl DataProtection {
     ///
     /// The all-zero root still participates in namespace-bound Item ID
     /// derivation. Only value protection is disabled.
-    pub fn unprotected(key_spec: KeySpec, compression: Compression) -> Result<Self> {
-        let resolver = KeyResolver::new(ClientRootKey::zero(), key_spec);
+    pub fn unprotected(key_type: KeyType, compression: Compression) -> Result<Self> {
+        let resolver = KeyResolver::new(ClientRootKey::zero(), key_type);
         let codec = ValueCodec::compressed(compression)?;
         Ok(Self { resolver, codec })
     }
@@ -76,13 +76,13 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        Self::with_profile_and_key_spec(key, KeySpec::Bytes, compression, encryption)
+        Self::with_profile_and_key_type(key, KeyType::Bytes, compression, encryption)
     }
 
-    /// Creates protection with an explicit key spec and encryption profile.
-    pub fn with_profile_and_key_spec(
+    /// Creates protection with an explicit key type and encryption profile.
+    pub fn with_profile_and_key_type(
         key: ClientRootKey,
-        key_spec: KeySpec,
+        key_type: KeyType,
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
@@ -92,25 +92,25 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let resolver = KeyResolver::new(key, key_spec);
+        let resolver = KeyResolver::new(key, key_type);
         let codec = ValueCodec::protected_with_profile(resolver.root(), compression, encryption)?;
         Ok(Self { resolver, codec })
     }
 
-    /// Returns the configured formatted key spec.
-    pub const fn key_spec(&self) -> KeySpec {
-        self.resolver.key_spec()
+    /// Returns the configured key type.
+    pub const fn key_type(&self) -> KeyType {
+        self.resolver.key_type()
     }
 
-    /// Derives a namespace-bound Item ID for a typed portable key.
+    /// Derives a namespace-bound Item ID for a typed key.
     pub fn item_id_in_namespace(
         &self,
         namespace_id: u64,
-        key: impl Into<PortableKey>,
+        key: impl Into<TypedKey>,
     ) -> Result<ItemId> {
         Ok(self
             .resolver
-            .bind_input(namespace_id, KeyInput::portable(key))?
+            .bind_input(namespace_id, KeyInput::typed(key))?
             .item_id)
     }
 
@@ -136,7 +136,7 @@ impl DataProtection {
         self.resolver.bind(namespace_id, key).map_err(Into::into)
     }
 
-    /// Derives an Item ID from canonical key bytes after validating the spec.
+    /// Derives an Item ID from canonical key bytes after validating the key type.
     pub fn item_id_from_canonical_key(
         &self,
         namespace_id: u64,

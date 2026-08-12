@@ -142,7 +142,7 @@ class Encryption(IntEnum):
     ROBUST = SMITHY_VALUE_ENCRYPTION_ROBUST
 
 
-class KeySpec(StrEnum):
+class KeyType(StrEnum):
     """The one native key type accepted by a formatted keyspace."""
 
     INTEGER = "integer"
@@ -392,9 +392,9 @@ class OpenKacheClient:
     schedules blocking ctypes calls on worker threads.
     """
 
-    def __init__(self, native: _NativeClient, key_spec: KeySpec) -> None:
+    def __init__(self, native: _NativeClient, key_type: KeyType) -> None:
         self._native = native
-        self._key_spec = key_spec
+        self._key_type = key_type
         self._closed = False
         self._raw: RawClient | None = None
 
@@ -405,7 +405,7 @@ class OpenKacheClient:
         *,
         certificate: bytes | bytearray | memoryview | str | PathLike[str],
         data_protection_key: bytes | bytearray | memoryview | None = None,
-        key_spec: KeySpec | str = KeySpec.TEXT,
+        key_type: KeyType | str = KeyType.TEXT,
         server_name: str | None = None,
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
@@ -415,7 +415,7 @@ class OpenKacheClient:
         retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
-        selected_key_spec = _normalize_key_spec(key_spec)
+        selected_key_type = _normalize_key_type(key_type)
         try:
             settings = await asyncio.to_thread(
                 _connection_settings,
@@ -434,7 +434,7 @@ class OpenKacheClient:
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
         except (NativeError, OSError) as error:
             raise OpenKacheError(str(error)) from error
-        return cls(native, selected_key_spec)
+        return cls(native, selected_key_type)
 
     @classmethod
     def connect_sync(cls, address: str, **kwargs: Any) -> OpenKacheClient:
@@ -501,7 +501,7 @@ class OpenKacheClient:
         self._assert_open()
         kind, _ = await self._execute(
             SMITHY_OPCODE_DELETE,
-            key=_key_bytes(key, self._key_spec),
+            key=_key_bytes(key, self._key_type),
         )
         return _delete_outcome(kind)
 
@@ -580,7 +580,7 @@ class OpenKacheClient:
             return await asyncio.to_thread(
                 self._native.execute_typed_with_options,
                 operation,
-                _key_spec_code(self._key_spec),
+                _key_type_code(self._key_type),
                 key=key,
                 value=value,
                 set_flags=selected._wire_flags,
@@ -597,7 +597,7 @@ class OpenKacheClient:
     ) -> bytes | None:
         kind, payload = await self._execute(
             operation,
-            key=_key_bytes(key, self._key_spec),
+            key=_key_bytes(key, self._key_type),
         )
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return None
@@ -666,7 +666,7 @@ class OpenKacheClient:
     ) -> SmithySetOutcome:
         kind, _ = await self._execute(
             operation,
-            key=_key_bytes(key, self._key_spec),
+            key=_key_bytes(key, self._key_type),
             value=value,
             options=options,
         )
@@ -1011,55 +1011,55 @@ def _value_bytes(value: bytes | bytearray | memoryview) -> bytes:
     return payload
 
 
-def _normalize_key_spec(value: KeySpec | str) -> KeySpec:
-    if isinstance(value, KeySpec):
+def _normalize_key_type(value: KeyType | str) -> KeyType:
+    if isinstance(value, KeyType):
         return value
     if isinstance(value, str):
         try:
-            return KeySpec(value)
+            return KeyType(value)
         except ValueError as error:
             raise OpenKacheValueError(
-                "key_spec must be "
-                + ", ".join(f"'{member.value}'" for member in KeySpec)
+                "key_type must be "
+                + ", ".join(f"'{member.value}'" for member in KeyType)
             ) from error
     raise OpenKacheValueError(
-        "key_spec must be "
-        + ", ".join(f"'{member.value}'" for member in KeySpec)
+        "key_type must be "
+        + ", ".join(f"'{member.value}'" for member in KeyType)
     )
 
 
 def _key_bytes(
     value: str | int | bytes | bytearray | memoryview,
-    key_spec: KeySpec,
+    key_type: KeyType,
 ) -> bytes:
-    if key_spec is KeySpec.TEXT:
+    if key_type is KeyType.TEXT:
         if not isinstance(value, str):
-            raise OpenKacheValueError("key must be a string for the text key spec")
+            raise OpenKacheValueError("key must be a string for the text key type")
         try:
             return value.encode("utf-8")
         except UnicodeEncodeError as error:
             raise OpenKacheValueError("key must contain valid UTF-8 text") from error
-    if key_spec is KeySpec.BYTES:
+    if key_type is KeyType.BYTES:
         if isinstance(value, (str, int)) or not isinstance(
             value, (bytes, bytearray, memoryview)
         ):
             raise OpenKacheValueError(
-                "key must be bytes-like for the bytes key spec"
+                "key must be bytes-like for the bytes key type"
             )
         return _as_bytes(value, "key")
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(
-            "key must be an integer for the integer key spec"
+            "key must be an integer for the integer key type"
         )
     return str(value).encode("ascii")
 
 
-def _key_spec_code(key_spec: KeySpec) -> int:
+def _key_type_code(key_type: KeyType) -> int:
     return {
-        KeySpec.TEXT: SMITHY_FFI_KEY_SPEC_TEXT,
-        KeySpec.BYTES: SMITHY_FFI_KEY_SPEC_BYTES,
-        KeySpec.INTEGER: SMITHY_FFI_KEY_SPEC_INTEGER,
-    }[key_spec]
+        KeyType.TEXT: SMITHY_FFI_KEY_SPEC_TEXT,
+        KeyType.BYTES: SMITHY_FFI_KEY_SPEC_BYTES,
+        KeyType.INTEGER: SMITHY_FFI_KEY_SPEC_INTEGER,
+    }[key_type]
 
 
 def _item_id(value: bytes | bytearray | memoryview) -> bytes:

@@ -35,8 +35,8 @@ pub use config::{
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{
     CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
-    KeyError, KeySpace, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey,
-    ResolvedKey, canonical_key_bytes,
+    KeyError, KeySpace, KeyType, MAX_KEY_INPUT_BYTES, ResolvedKey, TypedInteger, TypedKey,
+    canonical_key_bytes,
 };
 pub use openkache_protocol::{
     FieldSequence, ITEM_ID_BYTES, NAMESPACE_ID_BYTES, Opcode, decode_varuint,

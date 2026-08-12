@@ -133,7 +133,7 @@ The runtime-neutral codec layer is available from
 - `max_in_flight` bounds concurrent request lanes on one connection.
 - `encryption` selects the shared core's `compact` or recommended `robust`
   authenticated-encryption profile.
-- `key_spec` selects `text` (the default), `bytes`, or `integer` for formatted
+- `key_type` selects `text` (the default), `bytes`, or `integer` for formatted
   keys. The adapter sends neutral key bytes; the Rust core owns canonical key
   encoding and Item ID derivation.
 - `value_codecs` registers current package codecs.

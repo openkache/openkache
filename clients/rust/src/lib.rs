@@ -22,10 +22,10 @@ pub use openkache_client_core::{
     AlpnPolicy, Backend, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity, ClientRootKey,
     ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey,
     DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, GetOutcome,
-    ITEM_ID_BYTES, ItemId, ItemValue, KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES,
-    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
-    PrivateKey, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition, SetOptions,
-    SetOutcome, canonical_key_bytes, value, value_envelope,
+    ITEM_ID_BYTES, ItemId, ItemValue, KeyError, KeyType, MAX_KEY_INPUT_BYTES, NamespaceDescriptor,
+    NamespacePolicy, Operation, OverridePolicy, PrivateKey, Result, RetryPolicy, ServerErrorCode,
+    ServerTrust, SetCondition, SetOptions, SetOutcome, TypedInteger, TypedKey, canonical_key_bytes,
+    value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -260,8 +260,8 @@ macro_rules! builder_methods {
 
             /// Selects the exact application-key representation accepted by
             /// this client.
-            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
-                self.inner = self.inner.key_spec(key_spec);
+            pub fn key_type(mut self, key_type: KeyType) -> Self {
+                self.inner = self.inner.key_type(key_type);
                 self
             }
 
@@ -343,7 +343,7 @@ macro_rules! client_methods {
                 application_key: impl AsRef<[u8]>,
             ) -> Result<GetOutcome<Vec<u8>>> {
                 self.inner
-                    .get(PortableKey::bytes(application_key.as_ref().to_vec()))
+                    .get(TypedKey::bytes(application_key.as_ref().to_vec()))
                     .await
             }
 
@@ -353,14 +353,14 @@ macro_rules! client_methods {
                 application_key: impl AsRef<[u8]>,
             ) -> Result<GetOutcome<value::Value>> {
                 self.inner
-                    .get_value(PortableKey::bytes(application_key.as_ref().to_vec()))
+                    .get_value(TypedKey::bytes(application_key.as_ref().to_vec()))
                     .await
             }
 
             /// Deletes a value for arbitrary application key bytes.
             pub async fn delete(&self, application_key: impl AsRef<[u8]>) -> Result<DeleteOutcome> {
                 self.inner
-                    .delete(PortableKey::bytes(application_key.as_ref().to_vec()))
+                    .delete(TypedKey::bytes(application_key.as_ref().to_vec()))
                     .await
             }
 
@@ -373,7 +373,7 @@ macro_rules! client_methods {
             ) -> Result<SetOutcome> {
                 self.inner
                     .set_value(
-                        PortableKey::bytes(application_key.as_ref().to_vec()),
+                        TypedKey::bytes(application_key.as_ref().to_vec()),
                         value,
                         options,
                     )
