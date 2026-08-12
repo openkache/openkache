@@ -19,7 +19,7 @@ use openkache_client::Client;
 use openkache_client::LocalClient;
 use openkache_client::{
     Certificate, ClientIdentity, DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome,
-    KeySpec, PrivateKey, ServerTrust, SetOptions, SetOutcome,
+    KeyType, PrivateKey, ServerTrust, SetOptions, SetOutcome,
 };
 use owo_colors::OwoColorize;
 use reedline::{
@@ -354,7 +354,7 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
             None => LocalClient::builder_unprotected(endpoint),
         }
         .server_trust(trust)
-        .key_spec(KeySpec::Text);
+        .key_type(KeyType::Text);
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }
@@ -372,7 +372,7 @@ async fn connect(arguments: &Arguments) -> Result<ConnectedClient> {
             None => Client::builder_unprotected(endpoint),
         }
         .server_trust(trust)
-        .key_spec(KeySpec::Text);
+        .key_type(KeyType::Text);
         if let Some(identity) = identity {
             builder = builder.client_identity(identity);
         }

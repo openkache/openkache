@@ -34,7 +34,7 @@ export interface Native_Client_Options {
   readonly retry_max_attempts?: number
   readonly max_in_flight?: number
   readonly encryption?: "compact" | "robust"
-  readonly key_spec?: "integer" | "text" | "bytes"
+  readonly key_type?: "integer" | "text" | "bytes"
 }
 
 export type Native_Namespace_Policy = Smithy_Namespace_Policy

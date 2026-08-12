@@ -34,7 +34,7 @@ the reproducible development shell supplies all of these tools.
 ```python
 from pathlib import Path
 
-from openkache import Client, KeySpec, SetOptions
+from openkache import Client, KeyType, SetOptions
 
 client = await Client.connect(
     "cache.example.com:4433",
@@ -55,8 +55,8 @@ finally:
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
 `get_raw` for exact bytes; empty raw values are supported. A `str` key is the
-v1 `Text` PortableKey by default. Select `key_spec=KeySpec.BYTES` or
-`key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
+typed `Text` key by default. Select `key_type=KeyType.BYTES` or
+`key_type=KeyType.INTEGER` when the keyspace uses exact bytes or arbitrary
 precision integers. The selected spec is enforced for every formatted
 operation and the adapter passes neutral logical bytes plus the generated key
 spec to the typed native ABI; the Rust core owns canonical deterministic CBOR.
@@ -109,8 +109,8 @@ result = await client.raw.get(
 - `data_protection_key` is optional. When supplied it is an
   application-managed 32-byte secret shared by clients that must address the
   same protected entries. When omitted, values are unprotected.
-- `key_spec` selects `KeySpec.TEXT` (the default), `KeySpec.BYTES`, or
-  `KeySpec.INTEGER`. Use the same spec and logical key type in every language
+- `key_type` selects `KeyType.TEXT` (the default), `KeyType.BYTES`, or
+  `KeyType.INTEGER`. Use the same key type in every language
   client that must share entries.
 - `server_name` defaults to the hostname from `address` and is used for TLS
   verification after DNS resolution.

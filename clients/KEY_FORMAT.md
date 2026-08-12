@@ -1,10 +1,9 @@
 # OpenKache Client Key Contract — Version 1 Draft
 
-> **Status:** Draft; version 1 has not been released or finalized.
+> **Status:** Draft; this contract has not been released or finalized.
 >
 > This document specifies client-owned key validation and Item ID mapping. It
-> is not a server-required key encoding, and it may change before the version 1
-> freeze.
+> is not a server-required key encoding, and it may change before finalization.
 
 For item identity, the wire protocol carries only an opaque Item ID of
 `0..=32` bytes. An application MAY invoke the Exact Item ID API to supply that
@@ -28,25 +27,25 @@ Item ID. It uses the following terms:
 - **Application key:** The key value supplied by the application before client
   conversion.
 - **Typed key:** A language-neutral key value of type `Integer`, `Text`, or
-  `Bytes`. `PortableKey` is the API type that represents a typed key.
+  `Bytes`. `TypedKey` is the API type that represents it.
 - **Direct byte key:** A byte-valued application key supplied to
   `ByteKeyOrHash`. Both mapping paths use this byte sequence directly, without
   a CBOR wrapper.
 - **Canonical key encoding:** The deterministic encoding rule for a typed key.
-  Version 1 uses deterministic CBOR.
+  This contract uses deterministic CBOR.
 - **Canonical key bytes:** The byte sequence produced by the canonical key
-  encoding. In version 1, it is exactly one complete canonical CBOR item.
+  encoding. It is exactly one complete canonical CBOR item.
   `canonical_key_bytes` is the API and ABI identifier for these bytes.
 - **Item ID:** The final opaque identifier carried by the protocol.
 
-`KeySpec` selects the one typed-key type accepted by a client-side typed-key
+`KeyType` selects the one typed-key variant accepted by a client-side
 configuration. It is not a wire-protocol namespace.
 
 The specification defines three distinct client-side conversion paths:
 
 ```text
 application key (typed input)
-  -> typed key (PortableKey)
+  -> typed key (TypedKey)
   -> canonical key encoding
   -> canonical key bytes (canonical_key_bytes)
   -> Hash profile (Hash)
@@ -62,20 +61,20 @@ exact Item ID
 ```
 
 These paths are not interchangeable. In particular, the typed key
-`PortableKey::Bytes` is CBOR-encoded before hashing, whereas the preservation
+`TypedKey::Bytes` is CBOR-encoded before hashing, whereas the preservation
 path of `ByteKeyOrHash` uses the direct byte key without a CBOR wrapper.
 Identical application bytes may therefore produce different Item IDs under
 the two profiles.
 
 ## 2. Typed key
 
-### 2.1 Typed-key types (`PortableKey`)
+### 2.1 Typed-key variants (`TypedKey`)
 
-`PortableKey` is the API type for a version 1 typed key. Its allowed values are
-`Integer`, `Text`, and `Bytes`:
+`TypedKey` is the API type for a typed key defined by this contract. Its
+variants are `Integer`, `Text`, and `Bytes`:
 
 ```text
-PortableKey = Integer | Text | Bytes
+TypedKey = Integer | Text | Bytes
 ```
 
 `Text` is a length-delimited sequence of valid UTF-8 bytes. It is not
@@ -98,19 +97,19 @@ is not the `RawBytes` value codec and is not a direct byte key or an Item ID.
 
 ### 2.2 Typed-key type selection
 
-Every typed-key configuration MUST declare exactly one `KeySpec`:
+Every typed-key configuration MUST declare exactly one `KeyType`:
 
 ```text
-KeySpec::Integer
-KeySpec::Text
-KeySpec::Bytes
+KeyType::Integer
+KeyType::Text
+KeyType::Bytes
 ```
 
-Every typed key MUST match the configured `KeySpec`. A type mismatch MUST be
-rejected before encoding or hashing. `KeySpec` adds no wire field and has no
+Every typed key MUST match the configured `KeyType`. A type mismatch MUST be
+rejected before encoding or hashing. `KeyType` adds no wire field and has no
 fixed-width integer variants.
 
-`ByteKeyOrHash` is permitted only when the configured type is `KeySpec::Bytes`.
+`ByteKeyOrHash` is permitted only when the configured type is `KeyType::Bytes`.
 It is a mapping policy, not a fourth typed-key type.
 
 ### 2.3 Language binding requirements
@@ -121,11 +120,11 @@ It is a mapping policy, not a fourth typed-key type.
 | Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
 | Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
 | C | caller supplies a canonical Text item | caller supplies a canonical Bytes item | caller supplies a canonical integer item | binary float types rejected |
-| C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the v1 convenience API | `float`, `double` rejected |
-| Go | not exposed by the v1 convenience API | `[]byte` → `Bytes` | not exposed by the v1 convenience API | `float32`, `float64` rejected |
+| C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the convenience API | `float`, `double` rejected |
+| Go | not exposed by the convenience API | `[]byte` → `Bytes` | not exposed by the convenience API | `float32`, `float64` rejected |
 | Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
 | C# / .NET | exact Item ID API only | exact Item ID API only | exact Item ID API only | exact Item ID API only |
-| Swift | `String` → `Text` | `Data` → `Bytes` | not exposed by the v1 convenience API | `Float`, `Double` rejected |
+| Swift | `String` → `Text` | `Data` → `Bytes` | not exposed by the convenience API | `Float`, `Double` rejected |
 | Dart | package scaffold | package scaffold | package scaffold | package scaffold |
 
 All text bindings MUST reject strings that cannot encode to valid UTF-8,
@@ -166,8 +165,8 @@ with the received bytes before accepting them.
 
 ### 3.2 JavaScript number normalization
 
-JavaScript `number` is the one v1 binding type that represents both integers
-and floating-point values. This algorithm is normative:
+JavaScript `number` is the binding type that represents both integers and
+floating-point values. This algorithm is normative:
 
 ```js
 function normalizeJavaScriptNumber(x) {
@@ -216,7 +215,7 @@ Every profile MUST produce an Item ID accepted by the wire protocol.
 ### 4.1 Hash profile (`Hash`)
 
 Under `Hash`, the client accepts an application key that matches the configured
-`KeySpec`, encodes it as a typed key, and derives a 32-byte Item ID from its
+`KeyType`, encodes it as a typed key, and derives a 32-byte Item ID from its
 canonical key bytes. The namespace is bound into the hash input; equal typed
 keys in different namespaces therefore produce different Item IDs.
 
@@ -231,7 +230,7 @@ item_id =
 ### 4.2 Byte-key preserve-or-hash profile (`ByteKeyOrHash`)
 
 `ByteKeyOrHash` applies to direct byte keys when the configured type is
-`KeySpec::Bytes`:
+`KeyType::Bytes`:
 
 - A direct byte key whose length is `0..=32` bytes, including empty and
   exactly 32 bytes, follows the preservation path and becomes the Item ID
@@ -251,7 +250,7 @@ hash_fallback_item_id =
   )
 ```
 
-The profile MUST document the hash input and derivation key. The default v1
+The profile MUST document the hash input and derivation key. The default
 profile uses the same namespace-bound input and derivation key as the `Hash`
 profile, but does not prepend a CBOR type or length marker to
 `direct_byte_key`. A future profile that changes this input MUST use a distinct
@@ -319,15 +318,15 @@ requires non-public Item IDs.
 
 ### 5.3 Hash algorithm and profile compatibility
 
-The v1 derivation algorithm is BLAKE3 keyed hashing with a 32-byte derived key.
-The v1 Item ID has no separate version field. A profile that changes key
-identity, namespace input, hash context, or derivation material MUST use a
-distinct profile identifier and MUST NOT reinterpret v1 Item IDs. There is no
-v1 key-rotation protocol.
+The derivation algorithm is BLAKE3 keyed hashing with a 32-byte derived key.
+The Item ID has no separate version field. A profile that changes key identity,
+namespace input, hash context, or derivation material MUST use a distinct
+profile identifier and MUST NOT reinterpret Item IDs from this contract. There
+is no key-rotation protocol.
 
 ## 6. Limits and validation
 
-Every v1 SDK MUST enforce:
+Every conforming SDK MUST enforce:
 
 ```text
 MAX_KEY_INPUT_BYTES = 1,048,576  // 1 MiB
@@ -419,7 +418,7 @@ item_id =
 
 Clients MUST reject:
 
-- a typed key whose `KeySpec` does not match the typed-key configuration;
+- a typed key whose `KeyType` does not match the typed-key configuration;
 - a non-canonical CBOR key, including trailing bytes or an unsupported type;
 - a key input larger than `MAX_KEY_INPUT_BYTES`;
 - an Item ID longer than 32 bytes.
