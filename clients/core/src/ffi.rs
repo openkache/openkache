@@ -13,45 +13,50 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use openkache_protocol::Opcode;
+
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
-pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::{
-    FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE,
-    FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
-    FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
-    FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
-    FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID,
-    FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
+    FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE, FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
+    FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL, FFI_NAMESPACE_DEFAULT_EXPIRATION_NO_EXPIRY,
+    FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID, FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
     FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EVICTION_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EXPIRATION_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_DEFAULT_TTL_MS_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_EVICTION_OVERRIDE_OFFSET,
     FFI_NAMESPACE_DESCRIPTOR_EXPIRATION_OVERRIDE_OFFSET,
-    FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET,
-    FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
-    FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES,
-    FFI_NAMESPACE_OVERRIDE_ALLOWED,
+    FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET, FFI_NAMESPACE_DESCRIPTOR_REVISION_OFFSET,
+    FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES, FFI_NAMESPACE_OVERRIDE_ALLOWED,
     FFI_NAMESPACE_OVERRIDE_DISALLOWED,
 };
-use crate::contract::{
-    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
+pub use crate::contract::{
+    FfiInputKind, FfiKeySpec, FfiOperation, FfiOperationContract, FfiResultKind, FfiSetCondition,
 };
+use crate::contract::{
+    NAMESPACE_NAME_MAX_BYTES, VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE,
+    VALUE_FORMAT_ENCRYPTION_ROBUST,
+};
+use crate::key::KeyInput;
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
-    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
-    Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
-    LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
-    SetCondition, SetOptions, SetOutcome,
+    Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, Endpoint,
+    EvictionDefault, ExpirationDefault, GetOutcome, LocalProtectedClient, NamespacePolicy,
+    OverridePolicy, PrivateKey, RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
     kind: FfiResultKind,
+    status: u32,
     payload: Vec<u8>,
     client: Option<Box<FfiClient>>,
 }
+
+/// Sentinel returned by the native result-status accessor when a result was produced locally
+/// without a protocol response.
+pub const FFI_RESULT_STATUS_NONE: u32 = crate::OPERATION_STATUS_NONE;
 
 /// Native connection options passed by C and C++ bindings.
 #[repr(C)]
@@ -101,6 +106,19 @@ pub struct FfiConnectOptions {
     pub max_in_flight: usize,
 }
 
+/// One borrowed field span for the generic ordered-field native call.
+///
+/// `present == 0` encodes a missing optional field; a present field with
+/// `length == 0` is a valid empty value. The call encodes the spans into one
+/// owned request body before enqueueing it on the client worker, so the caller
+/// may release its buffers once the function returns.
+#[repr(C)]
+pub struct FfiOperationField {
+    pub data: *const u8,
+    pub length: usize,
+    pub present: u8,
+}
+
 /// Opaque native handle to a dedicated Rust client worker.
 pub struct FfiClient {
     commands: CommandSender,
@@ -113,10 +131,15 @@ pub struct FfiClient {
 enum Command {
     Execute {
         operation: FfiOperation,
-        application_key: Vec<u8>,
+        input: Option<FfiOperationInput>,
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
+        response: SyncSender<FfiResult>,
+    },
+    ExecuteUnary {
+        operation: Opcode,
+        body: Vec<u8>,
         response: SyncSender<FfiResult>,
     },
     ExecuteScoped {
@@ -147,6 +170,17 @@ enum Command {
     Shutdown,
 }
 
+/// Key material carried by one native operation before it reaches the protected
+/// client.
+///
+/// Logical keys stay inside [`KeyInput`], where canonicalization and key-space
+/// validation live. Exact item IDs are a different raw-transport concern and
+/// therefore never enter the logical key resolver.
+enum FfiOperationInput {
+    Logical(KeyInput),
+    ExactItemId(Vec<u8>),
+}
+
 type CommandSender = crossfire::MTx<crossfire::mpsc::Array<Command>>;
 type CommandReceiver = crossfire::Rx<crossfire::mpsc::Array<Command>>;
 
@@ -167,6 +201,7 @@ impl FfiResult {
     fn error(message: impl Into<String>) -> Self {
         Self {
             kind: FfiResultKind::Error,
+            status: FFI_RESULT_STATUS_NONE,
             payload: message.into().into_bytes(),
             client: None,
         }
@@ -175,6 +210,16 @@ impl FfiResult {
     fn success(kind: FfiResultKind, payload: Vec<u8>) -> Self {
         Self {
             kind,
+            status: FFI_RESULT_STATUS_NONE,
+            payload,
+            client: None,
+        }
+    }
+
+    fn success_with_status(kind: FfiResultKind, status: u32, payload: Vec<u8>) -> Self {
+        Self {
+            kind,
+            status,
             payload,
             client: None,
         }
@@ -183,10 +228,18 @@ impl FfiResult {
     fn connected(client: FfiClient) -> Self {
         Self {
             kind: FfiResultKind::Connected,
+            status: FFI_RESULT_STATUS_NONE,
             payload: Vec::new(),
             client: Some(Box::new(client)),
         }
     }
+}
+
+fn parse_operation(operation: u32) -> std::result::Result<Opcode, String> {
+    let operation_byte = u8::try_from(operation)
+        .map_err(|_| format!("unsupported protocol operation {operation}"))?;
+    Opcode::try_from(operation_byte)
+        .map_err(|_| format!("unsupported protocol operation {operation}"))
 }
 
 impl FfiClient {
@@ -266,13 +319,55 @@ impl FfiClient {
         set_options: SetOptions,
         raw: bool,
     ) -> FfiResult {
+        self.execute_with_input(
+            operation,
+            Some(if raw {
+                FfiOperationInput::ExactItemId(application_key)
+            } else {
+                FfiOperationInput::Logical(KeyInput::canonical_key(application_key))
+            }),
+            value,
+            set_options,
+            raw,
+        )
+    }
+
+    fn execute_typed(
+        &self,
+        operation: FfiOperation,
+        key_spec: FfiKeySpec,
+        application_key: Vec<u8>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        raw: bool,
+    ) -> FfiResult {
+        self.execute_with_input(
+            operation,
+            Some(FfiOperationInput::Logical(KeyInput::from_ffi(
+                key_spec,
+                application_key,
+            ))),
+            value,
+            set_options,
+            raw,
+        )
+    }
+
+    fn execute_with_input(
+        &self,
+        operation: FfiOperation,
+        input: Option<FfiOperationInput>,
+        value: Vec<u8>,
+        set_options: SetOptions,
+        raw: bool,
+    ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
             return FfiResult::error("client request timeout exceeds the platform clock range");
         };
         let command = Command::Execute {
             operation,
-            application_key,
+            input,
             value,
             set_options,
             raw,
@@ -285,6 +380,14 @@ impl FfiClient {
         let remaining = deadline.saturating_duration_since(Instant::now());
         receiver.recv_timeout(remaining).unwrap_or_else(|error| {
             FfiResult::error(format!("client operation timed out: {error}"))
+        })
+    }
+
+    fn execute_unary(&self, operation: Opcode, body: Vec<u8>) -> FfiResult {
+        self.send_command_with_response(|response| Command::ExecuteUnary {
+            operation,
+            body,
+            response,
         })
     }
 
@@ -483,23 +586,39 @@ fn run_worker(
         match command {
             Command::Execute {
                 operation,
-                application_key,
+                input,
                 value,
                 set_options,
                 raw,
                 response,
             } => {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    runtime.block_on(execute(
-                        &client,
-                        operation,
-                        application_key,
-                        value,
-                        set_options,
-                        raw,
-                    ))
+                    runtime.block_on(execute(&client, operation, input, value, set_options, raw))
                 }))
                 .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
+                state.store(
+                    connection_state_value(client.connection_state()),
+                    Ordering::Release,
+                );
+                let _ = response.send(result);
+            }
+            Command::ExecuteUnary {
+                operation,
+                body,
+                response,
+            } => {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    runtime
+                        .block_on(client.raw().execute_unary(operation, body))
+                        .and_then(operation_result)
+                }))
+                .unwrap_or_else(|_| {
+                    Err(crate::Error::configuration(
+                        "operation",
+                        "native client worker panicked",
+                    ))
+                })
+                .unwrap_or_else(|error| FfiResult::error(error.to_string()));
                 state.store(
                     connection_state_value(client.connection_state()),
                     Ordering::Release,
@@ -597,15 +716,38 @@ fn run_worker(
 async fn execute(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    application_key: Vec<u8>,
+    input: Option<FfiOperationInput>,
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
 ) -> FfiResult {
     let result = if raw {
-        execute_raw(client, operation, application_key, value, set_options).await
+        match input {
+            Some(FfiOperationInput::ExactItemId(item_id)) => {
+                execute_raw(client, operation, item_id, value, set_options).await
+            }
+            Some(FfiOperationInput::Logical(_)) => Err(crate::Error::configuration(
+                "item_id",
+                "exact-item-ID operations require exact item-ID bytes",
+            )),
+            None => execute_raw(client, operation, Vec::new(), value, set_options).await,
+        }
+    } else if let Some(opcode) = protocol_global_opcode(operation) {
+        execute_protocol_global(client, opcode, value).await
     } else {
-        execute_protected(client, operation, application_key, value, set_options).await
+        match input {
+            Some(FfiOperationInput::Logical(key)) => {
+                execute_protected(client, operation, key, value, set_options).await
+            }
+            Some(FfiOperationInput::ExactItemId(_)) => Err(crate::Error::configuration(
+                "application_key",
+                "protected operations require a logical application key",
+            )),
+            None => Err(crate::Error::configuration(
+                "application_key",
+                "protected operation requires a key",
+            )),
+        }
     };
     result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
 }
@@ -613,53 +755,71 @@ async fn execute(
 async fn execute_protected(
     client: &LocalProtectedClient,
     operation: FfiOperation,
-    canonical_key: Vec<u8>,
+    input: KeyInput,
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
-    match operation {
-        FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
-        FfiOperation::Get => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
+    if operation == FfiOperation::Reconnect {
+        return client.reconnect().await.map(|()| ok_result());
+    }
+    if operation == FfiOperation::GetJson {
+        return client
+            .get_value_key_input(input)
             .await
-            .map(|value| get_result(value, raw_value_result)),
-        FfiOperation::GetJson => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
-            .await
-            .and_then(json_result),
-        FfiOperation::Set => client
-            .set_canonical_key_unchecked(
-                canonical_key.as_slice(),
-                Value::Raw(value),
-                set_options,
-            )
-            .await
-            .map(set_result),
-        FfiOperation::SetJson => match parse_json(&value) {
+            .and_then(json_result);
+    }
+    if operation == FfiOperation::SetJson {
+        return match parse_json(&value) {
             Ok(json) => client
-                .set_canonical_key_unchecked(
-                    canonical_key.as_slice(),
-                    Value::Json(json),
-                    set_options,
-                )
+                .set_value_key_input(input, Value::Json(json), set_options)
                 .await
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
-        },
-        FfiOperation::Delete => client
-            .delete_canonical_key_unchecked(canonical_key.as_slice())
-            .await
-            .map(delete_result),
-        FfiOperation::Stats => client
-            .stats()
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.sync().await.map(|()| ok_result()),
-        FfiOperation::Reconnect => client.reconnect().await.map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
+        };
+    }
+    execute_protected_data_plane(client, operation, input, value, set_options).await
+}
+
+async fn execute_protocol_global(
+    client: &LocalProtectedClient,
+    opcode: Opcode,
+    value: Vec<u8>,
+) -> std::result::Result<FfiResult, crate::Error> {
+    client
+        .raw()
+        .execute_unary(opcode, value)
+        .await
+        .and_then(operation_result)
+}
+
+fn protocol_global_opcode(operation: FfiOperation) -> Option<Opcode> {
+    let opcode = crate::contract::protocol_opcode(operation)?;
+    (!openkache_protocol::compat_v1::route_for_opcode(opcode).is_some()).then_some(opcode)
+}
+
+async fn execute_protected_data_plane(
+    client: &LocalProtectedClient,
+    operation: FfiOperation,
+    input: KeyInput,
+    value: Vec<u8>,
+    set_options: SetOptions,
+) -> std::result::Result<FfiResult, crate::Error> {
+    let Some(opcode) = crate::contract::protocol_opcode(operation) else {
+        return Err(crate::Error::configuration(
             "operation",
-            "unsupported operation from the generated Smithy contract",
-        )),
+            "operation is not available through the protected ABI",
+        ));
+    };
+    if crate::protocol::uses_compact_item_route(opcode) {
+        client
+            .execute_operation_key_input(opcode, input, value, set_options)
+            .await
+            .and_then(operation_result)
+    } else {
+        Err(crate::Error::configuration(
+            "operation",
+            "protocol operation is not available through the protected ABI",
+        ))
     }
 }
 
@@ -670,44 +830,23 @@ async fn execute_raw(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
-    match operation {
-        FfiOperation::Ping => client.raw().ping().await.map(|_| ok_result()),
-        FfiOperation::Get => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .get(item_id)
-                .await
-                .map(|value| get_result(value, value_result))
-        }
-        FfiOperation::Set => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .set(item_id, ItemValue::new(value), set_options)
-                .await
-                .map(set_result)
-        }
-        FfiOperation::Delete => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client.raw().delete(item_id).await.map(delete_result)
-        }
-        FfiOperation::Stats => client
-            .raw()
-            .stats()
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client.raw().sync().await.map(|()| ok_result()),
-        FfiOperation::Reconnect => client.raw().reconnect().await.map(|()| ok_result()),
-        FfiOperation::GetJson | FfiOperation::SetJson => Err(crate::Error::configuration(
-            "operation",
-            "exact item-ID calls do not support formatted JSON operations",
-        )),
-        _ => Err(crate::Error::configuration(
-            "operation",
-            "unsupported operation from the generated Smithy contract",
-        )),
+    if let Some(opcode) = protocol_global_opcode(operation) {
+        return execute_protocol_global(client, opcode, value).await;
     }
+    if operation == FfiOperation::Reconnect {
+        return client.raw().reconnect().await.map(|()| ok_result());
+    }
+    let Some(opcode) = crate::contract::protocol_opcode(operation) else {
+        return Err(crate::Error::configuration(
+            "operation",
+            "operation is not available through the exact item-ID ABI",
+        ));
+    };
+    client
+        .raw()
+        .execute_raw(opcode, item_id, value, set_options)
+        .await
+        .and_then(operation_result)
 }
 
 async fn execute_scoped(
@@ -718,46 +857,95 @@ async fn execute_scoped(
     value: Vec<u8>,
     set_options: SetOptions,
 ) -> std::result::Result<FfiResult, crate::Error> {
-    match operation {
-        FfiOperation::Get => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .get_in_namespace(namespace_id, item_id)
-                .await
-                .map(|value| get_result(value, value_result))
-        }
-        FfiOperation::Set => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .set_in_namespace(namespace_id, item_id, ItemValue::new(value), set_options)
-                .await
-                .map(set_result)
-        }
-        FfiOperation::Delete => {
-            let item_id = ItemId::from_slice(&item_id)?;
-            client
-                .raw()
-                .delete_in_namespace(namespace_id, item_id)
-                .await
-                .map(delete_result)
-        }
-        FfiOperation::Stats => client
-            .raw()
-            .stats_in_namespace(namespace_id)
-            .await
-            .map(|stats| FfiResult::success(FfiResultKind::Value, stats.into_bytes())),
-        FfiOperation::Sync => client
-            .raw()
-            .sync_in_namespace(namespace_id)
-            .await
-            .map(|()| ok_result()),
-        _ => Err(crate::Error::configuration(
+    let Some(opcode) = crate::contract::protocol_opcode(operation) else {
+        return Err(crate::Error::configuration(
             "operation",
-            "unsupported namespace-scoped operation from the generated Smithy contract",
-        )),
+            "operation is not available through the namespace-scoped exact-ID ABI",
+        ));
+    };
+    client
+        .raw()
+        .execute_scoped(opcode, namespace_id, item_id, value, set_options)
+        .await
+        .and_then(operation_result)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FfiInvocation {
+    Protected,
+    Raw,
+    Scoped,
+}
+
+fn validate_ffi_operation(
+    operation_contract: FfiOperationContract,
+    invocation: FfiInvocation,
+    typed_key: bool,
+    input: &[u8],
+    value: &[u8],
+    set_options: &SetOptions,
+) -> std::result::Result<(), String> {
+    if operation_contract.dedicated_abi {
+        return Err("namespace management uses dedicated native ABI calls".to_owned());
     }
+    let supported = match invocation {
+        FfiInvocation::Protected => operation_contract.supports_protected,
+        FfiInvocation::Raw => operation_contract.supports_raw,
+        FfiInvocation::Scoped => operation_contract.supports_scoped,
+    };
+    if !supported {
+        return Err(match invocation {
+            FfiInvocation::Protected => {
+                "operation is not available through the protected ABI".to_owned()
+            }
+            FfiInvocation::Raw => {
+                "operation is not available through the exact item-ID ABI".to_owned()
+            }
+            FfiInvocation::Scoped => {
+                "operation is not available through the namespace-scoped exact-ID ABI".to_owned()
+            }
+        });
+    }
+    match (invocation, operation_contract.input_kind) {
+        (FfiInvocation::Protected, FfiInputKind::None) if !input.is_empty() => {
+            return Err("operation does not accept an application key".to_owned());
+        }
+        (FfiInvocation::Protected, FfiInputKind::ApplicationKey)
+        | (FfiInvocation::Protected, FfiInputKind::ItemId)
+            if input.is_empty() && !typed_key =>
+        {
+            return Err("application key must not be empty".to_owned());
+        }
+        (FfiInvocation::Raw, FfiInputKind::None) if !input.is_empty() => {
+            return Err("operation does not accept an item_id".to_owned());
+        }
+        (FfiInvocation::Raw, FfiInputKind::ItemId)
+        | (FfiInvocation::Scoped, FfiInputKind::ItemId)
+            if input.len()
+                != crate::ITEM_ID_BYTES * operation_contract.request_item_count as usize =>
+        {
+            return Err(format!(
+                "item_id must contain exactly {} bytes for {} item IDs, got {}",
+                crate::ITEM_ID_BYTES * operation_contract.request_item_count as usize,
+                operation_contract.request_item_count,
+                input.len()
+            ));
+        }
+        (FfiInvocation::Scoped, FfiInputKind::None) if !input.is_empty() => {
+            return Err("operation does not accept an item_id".to_owned());
+        }
+        _ => {}
+    }
+    if !operation_contract.accepts_value && !value.is_empty() {
+        return Err("operation does not accept a value".to_owned());
+    }
+    if !operation_contract.accepts_set_options
+        && (set_options.condition() != SetCondition::Any
+            || set_options.time_to_live_millis().is_some())
+    {
+        return Err("SET options require a SET operation".to_owned());
+    }
+    Ok(())
 }
 
 async fn namespace_open(
@@ -772,12 +960,17 @@ async fn namespace_open(
         .await
     {
         Ok((descriptor, created)) => match ffi_namespace_descriptor(descriptor) {
-            Ok(payload) => FfiResult::success(
+            Ok(payload) => FfiResult::success_with_status(
                 if created {
                     FfiResultKind::Created
                 } else {
                     FfiResultKind::Ok
                 },
+                u32::from(if created {
+                    openkache_protocol::Status::Created
+                } else {
+                    openkache_protocol::Status::Ok
+                } as u8),
                 payload,
             ),
             Err(error) => FfiResult::error(error.to_string()),
@@ -798,7 +991,11 @@ async fn namespace_update_policy(
         .await
     {
         Ok(descriptor) => match ffi_namespace_descriptor(descriptor) {
-            Ok(payload) => FfiResult::success(FfiResultKind::Value, payload),
+            Ok(payload) => FfiResult::success_with_status(
+                FfiResultKind::Value,
+                u32::from(openkache_protocol::Status::Ok as u8),
+                payload,
+            ),
             Err(error) => FfiResult::error(error.to_string()),
         },
         Err(error) => FfiResult::error(error.to_string()),
@@ -815,14 +1012,18 @@ async fn namespace_delete(
         .namespace_delete(namespace_id, expected_revision)
         .await
     {
-        Ok(()) => ok_result(),
+        Ok(()) => FfiResult::success_with_status(
+            FfiResultKind::Ok,
+            u32::from(openkache_protocol::Status::Deleted as u8),
+            Vec::new(),
+        ),
         Err(error) => FfiResult::error(error.to_string()),
     }
 }
 
 fn set_options_from_flags(flags: u8, ttl_ms: u64) -> std::result::Result<SetOptions, String> {
     let ttl_ms = (ttl_ms != 0).then_some(ttl_ms);
-    openkache_protocol::SetOptions::from_wire_parts(flags, ttl_ms)
+    crate::protocol::SetWireOptions::from_wire_parts(flags, ttl_ms)
         .map_err(|error| error.to_string())
         .and_then(|options| SetOptions::from_protocol(options).map_err(|error| error.to_string()))
 }
@@ -851,60 +1052,54 @@ fn ok_result() -> FfiResult {
     FfiResult::success(FfiResultKind::Ok, Vec::new())
 }
 
-fn not_found_result() -> FfiResult {
-    FfiResult::success(FfiResultKind::NotFound, Vec::new())
-}
-
-fn get_result<T>(outcome: GetOutcome<T>, found: impl FnOnce(T) -> FfiResult) -> FfiResult {
-    match outcome {
-        GetOutcome::Found(value) => found(value),
-        GetOutcome::NotFound => not_found_result(),
-    }
-}
-
-fn value_result(value: ItemValue) -> FfiResult {
-    bytes_result(value.into_bytes())
-}
-
-fn bytes_result(payload: Vec<u8>) -> FfiResult {
-    FfiResult::success(FfiResultKind::Value, payload)
-}
-
-fn raw_value_result(value: Value) -> FfiResult {
-    match value {
-        Value::Raw(payload) => bytes_result(payload),
-        Value::Json(_) => FfiResult::error("formatted value is not Raw serialization"),
-    }
-}
-
-fn delete_result(outcome: DeleteOutcome) -> FfiResult {
-    FfiResult::success(
-        match outcome {
-            DeleteOutcome::Deleted => FfiResultKind::Deleted,
-            DeleteOutcome::NotFound => FfiResultKind::NotDeleted,
-        },
-        Vec::new(),
-    )
+fn operation_result(
+    result: crate::OperationResult,
+) -> std::result::Result<FfiResult, crate::Error> {
+    let kind = FfiResultKind::try_from(result.kind).map_err(|kind| {
+        crate::Error::configuration(
+            "operation result",
+            format!("unsupported native result kind {kind}"),
+        )
+    })?;
+    Ok(FfiResult::success_with_status(
+        kind,
+        result.status,
+        result.payload,
+    ))
 }
 
 fn set_result(outcome: SetOutcome) -> FfiResult {
-    FfiResult::success(
-        match outcome {
-            SetOutcome::Created => FfiResultKind::Created,
-            SetOutcome::Replaced => FfiResultKind::Replaced,
-            SetOutcome::NotStored => FfiResultKind::NotStored,
-        },
-        Vec::new(),
-    )
+    let (status, kind) = match outcome {
+        SetOutcome::Created => (openkache_protocol::Status::Created, FfiResultKind::Created),
+        SetOutcome::Replaced => (
+            openkache_protocol::Status::Replaced,
+            FfiResultKind::Replaced,
+        ),
+        SetOutcome::NotStored => (
+            openkache_protocol::Status::NotStored,
+            FfiResultKind::NotStored,
+        ),
+    };
+    FfiResult::success_with_status(kind, u32::from(status as u8), Vec::new())
 }
 
 fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
     match outcome {
         GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
-            .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+            .map(|payload| {
+                FfiResult::success_with_status(
+                    FfiResultKind::Value,
+                    u32::from(openkache_protocol::Status::Ok as u8),
+                    payload,
+                )
+            })
             .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
-        GetOutcome::NotFound => Ok(not_found_result()),
+        GetOutcome::NotFound => Ok(FfiResult::success_with_status(
+            FfiResultKind::NotFound,
+            u32::from(openkache_protocol::Status::NotFound as u8),
+            Vec::new(),
+        )),
     }
 }
 
@@ -922,7 +1117,8 @@ pub extern "C" fn openkache_client_abi_version() -> u32 {
 ///
 /// The address is a UTF-8 host/port authority such as `127.0.0.1:4433` or
 /// `cache.example.com:4433`. The certificate may be one DER certificate, a
-/// PEM chain, or empty to use system trust roots. The data-protection key is
+/// PEM chain, or empty to use system trust roots. An empty data-protection key
+/// selects the unprotected formatted-value profile; a non-empty key must be
 /// exactly 32 bytes. All input buffers are copied before this function returns.
 ///
 /// # Safety
@@ -1161,12 +1357,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
 
 /// Executes one protected operation through an opaque native client.
 ///
-/// For `GET`, `SET`, and `DELETE`, `application_key` is exactly one canonical
-/// v1 key item from `KEY_FORMAT.md`. The CBOR item is the ABI's type
-/// discriminator (`Integer`, `Text`, or `Bytes`); it is not raw application
-/// bytes and is not a 32-byte Item ID. `SET` accepts an empty value and
-/// optional existence/TTL options. `PING`, `STATS`, and `SYNC` require empty
-/// key and value buffers.
+/// This compatibility entry point accepts one canonical v1 key item.
 ///
 /// # Safety
 ///
@@ -1196,6 +1387,175 @@ pub unsafe extern "C" fn openkache_client_execute(
         ttl_enabled,
         ttl_ms,
         false,
+    )
+}
+
+/// Executes a generic operation from an already encoded request body.
+///
+/// This ABI is intentionally independent from application keys, item IDs,
+/// namespace scope, and SET options. The operation's generated wire contract
+/// validates the body and selects empty, opaque, or ordered-field framing.
+/// Compact protocol-v1 operations are rejected here and remain available
+/// through the compatibility entry points below.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by
+/// [`openkache_client_result_take_client`]. `body` must identify readable
+/// memory for `body_length` bytes (unless the length is zero), and the client
+/// must not be freed until the call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_unary(
+    client: *const FfiClient,
+    operation: u32,
+    body: *const u8,
+    body_length: usize,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let operation = parse_operation(operation)?;
+        let body = copy_bytes(body, body_length, "body")?;
+        if openkache_protocol::compat_v1::route_for_opcode(operation).is_some() {
+            return Err("compact protocol-v1 operations require a compatibility ABI".to_owned());
+        }
+        Ok(client.execute_unary(operation, body))
+    }))
+}
+
+/// Executes a generic ordered-field operation from borrowed field spans.
+///
+/// `present == 0` represents a missing optional field. A present field with a
+/// zero length is valid and is not treated as missing. The generated operation
+/// contract validates field count, requiredness, and codecs before sending.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by
+/// [`openkache_client_result_take_client`]. When `field_count` is non-zero,
+/// `fields` must point to an array of [`FfiOperationField`] values that remain
+/// readable for the duration of this call, and every present span must point
+/// to readable memory for its declared length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_fields(
+    client: *const FfiClient,
+    operation: u32,
+    fields: *const FfiOperationField,
+    field_count: usize,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let client = unsafe {
+            client
+                .as_ref()
+                .ok_or_else(|| "client pointer must not be null".to_owned())?
+        };
+        let operation = parse_operation(operation)?;
+        if openkache_protocol::compat_v1::route_for_opcode(operation).is_some()
+            || !matches!(
+                crate::contract::operation_wire_spec(operation)
+                    .request
+                    .framing,
+                crate::contract::OperationLayoutFraming::OrderedFields
+                    | crate::contract::OperationLayoutFraming::FieldSequence
+            )
+        {
+            return Err("operation does not use ordered-field request framing".to_owned());
+        }
+        if field_count > crate::contract::MAX_OPERATION_REQUEST_FIELDS
+            || field_count > crate::contract::MAX_OPERATION_FIELDS
+        {
+            return Err("field count exceeds the generated operation bound".to_owned());
+        }
+        let fields = if field_count == 0 {
+            &[][..]
+        } else if fields.is_null() {
+            return Err("fields pointer must not be null for a non-empty field list".to_owned());
+        } else {
+            unsafe { std::slice::from_raw_parts(fields, field_count) }
+        };
+        let mut borrowed = [None; crate::contract::MAX_OPERATION_FIELDS];
+        for (index, field) in fields.iter().enumerate() {
+            match field.present {
+                0 => {
+                    if field.length != 0 {
+                        return Err("missing field must have zero length".to_owned());
+                    }
+                }
+                1 => {
+                    let value = if field.length == 0 {
+                        &[][..]
+                    } else {
+                        if field.data.is_null() {
+                            return Err(format!(
+                                "field pointer is null for {} bytes",
+                                field.length
+                            ));
+                        }
+                        unsafe { std::slice::from_raw_parts(field.data, field.length) }
+                    };
+                    borrowed[index] = Some(value);
+                }
+                _ => return Err("field presence must be zero or one".to_owned()),
+            }
+        }
+        let contract = crate::contract::operation_wire_spec(operation);
+        let body = openkache_protocol::encode_planned_fields(
+            &borrowed[..fields.len()],
+            contract.request.fields,
+            contract.request.layout,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(client.execute_unary(operation, body))
+    }))
+}
+
+/// Executes one protected operation from a logical key and a generated key specification.
+///
+/// `key_spec` selects Text, Bytes, or Integer. Text and Bytes receive their
+/// exact UTF-8/byte payload; Integer receives canonical signed decimal UTF-8.
+/// The shared Rust core performs PortableKey conversion, deterministic CBOR,
+/// namespace-bound Item ID derivation, and value protection in one worker
+/// operation. Global operations ignore the key input and require an empty
+/// value when their operation contract says so.
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty input pointer must identify readable memory for this call, and the client must not
+/// be freed until this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    let key_spec = match parse_ffi_key_spec(key_spec) {
+        Ok(key_spec) => key_spec,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        None,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
     )
 }
 
@@ -1269,6 +1629,47 @@ pub unsafe extern "C" fn openkache_client_execute_with_options(
     )
 }
 
+/// Executes one typed protected operation with the complete wire SET policy byte.
+///
+/// This is the options-bearing counterpart to [`openkache_client_execute_typed`].
+///
+/// # Safety
+///
+/// `client` must be a live pointer returned by [`openkache_client_result_take_client`]. Every
+/// non-empty input pointer must identify readable memory for this call, and the client must not
+/// be freed until this call returns.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed_with_options(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    let key_spec = match parse_ffi_key_spec(key_spec) {
+        Ok(key_spec) => key_spec,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        Some((set_flags, ttl_ms)),
+        FfiSetCondition::Any as u32,
+        0,
+        0,
+    )
+}
+
 /// Executes one exact-item-ID operation with the complete wire SET policy byte.
 ///
 /// # Safety
@@ -1335,7 +1736,8 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        let set_options = if operation == FfiOperation::Set {
+        let operation_contract = crate::contract::ffi_operation_contract(operation);
+        let set_options = if operation_contract.accepts_set_options {
             set_options_from_flags(set_flags, ttl_ms)?
         } else {
             if set_flags != 0 || ttl_ms != 0 {
@@ -1343,36 +1745,15 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
             }
             SetOptions::new()
         };
-        match operation {
-            FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-                if item_id.len() != crate::ITEM_ID_BYTES =>
-            {
-                Err(format!(
-                    "item_id must contain exactly {} bytes, got {}",
-                    crate::ITEM_ID_BYTES,
-                    item_id.len()
-                ))
-            }
-            FfiOperation::Get | FfiOperation::Delete if !value.is_empty() => {
-                Err("operation does not accept a value".to_owned())
-            }
-            FfiOperation::Stats | FfiOperation::Sync if !item_id.is_empty() => {
-                Err("operation does not accept an item_id".to_owned())
-            }
-            FfiOperation::Stats | FfiOperation::Sync if !value.is_empty() => {
-                Err("operation does not accept a value".to_owned())
-            }
-            FfiOperation::GetJson | FfiOperation::SetJson | FfiOperation::Ping => Err(
-                "operation is not available through the namespace-scoped exact-ID ABI".to_owned(),
-            ),
-            FfiOperation::NamespaceOpen
-            | FfiOperation::NamespaceUpdatePolicy
-            | FfiOperation::NamespaceDelete
-            | FfiOperation::Reconnect => {
-                Err("namespace management and reconnect use dedicated native ABI calls".to_owned())
-            }
-            _ => Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options)),
-        }
+        validate_ffi_operation(
+            operation_contract,
+            FfiInvocation::Scoped,
+            false,
+            &item_id,
+            &value,
+            &set_options,
+        )?;
+        Ok(client.execute_scoped(operation, namespace_id, item_id, value, set_options))
     }))
 }
 
@@ -1401,10 +1782,10 @@ pub unsafe extern "C" fn openkache_client_namespace_open(
                 .ok_or_else(|| "client pointer must not be null".to_owned())?
         };
         let name = copy_bytes(name, name_length, "namespace name")?;
-        if name.len() > openkache_protocol::NAMESPACE_NAME_MAX_BYTES {
+        if name.len() > NAMESPACE_NAME_MAX_BYTES {
             return Err(format!(
                 "namespace name exceeds {} octets",
-                openkache_protocol::NAMESPACE_NAME_MAX_BYTES
+                NAMESPACE_NAME_MAX_BYTES
             ));
         }
         let create_if_missing = create_if_missing != 0;
@@ -1487,7 +1868,7 @@ pub unsafe extern "C" fn openkache_client_namespace_descriptor_decode(
     } else {
         unsafe { std::slice::from_raw_parts(payload, payload_length) }
     };
-    let Ok(descriptor) = openkache_protocol::NamespaceDescriptor::decode(payload) else {
+    let Ok(descriptor) = crate::protocol::NamespaceDescriptor::decode(payload) else {
         return FFI_NAMESPACE_DESCRIPTOR_DECODE_INVALID;
     };
     let (default_expiration, default_ttl_ms) = match descriptor.policy.default_expiration {
@@ -1501,8 +1882,7 @@ pub unsafe extern "C" fn openkache_client_namespace_descriptor_decode(
         revision: descriptor.revision,
         default_ttl_ms,
         default_expiration,
-        expiration_override: if descriptor.policy.expiration_override == OverridePolicy::Allowed
-        {
+        expiration_override: if descriptor.policy.expiration_override == OverridePolicy::Allowed {
             FFI_NAMESPACE_OVERRIDE_ALLOWED
         } else {
             FFI_NAMESPACE_OVERRIDE_DISALLOWED
@@ -1547,6 +1927,7 @@ fn execute_entry(
         value_length,
         raw,
         None,
+        None,
         set_condition,
         ttl_enabled,
         ttl_ms,
@@ -1572,6 +1953,7 @@ fn execute_entry_with_flags(
         value,
         value_length,
         raw,
+        None,
         Some((set_flags, ttl_ms)),
         FfiSetCondition::Any as u32,
         0,
@@ -1588,6 +1970,7 @@ fn execute_entry_inner(
     value: *const u8,
     value_length: usize,
     raw: bool,
+    key_spec: Option<FfiKeySpec>,
     complete_flags: Option<(u8, u64)>,
     set_condition: u32,
     ttl_enabled: u8,
@@ -1604,24 +1987,9 @@ fn execute_entry_inner(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
-        if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
-            return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
-        }
-        if raw
-            && matches!(
-                operation,
-                FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-            )
-            && application_key.len() != crate::ITEM_ID_BYTES
-        {
-            return Err(format!(
-                "item_id must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES,
-                application_key.len()
-            ));
-        }
+        let operation_contract = crate::contract::ffi_operation_contract(operation);
         let set_options = if let Some((flags, ttl_ms)) = complete_flags {
-            if matches!(operation, FfiOperation::Set | FfiOperation::SetJson) {
+            if operation_contract.accepts_set_options {
                 set_options_from_flags(flags, ttl_ms)?
             } else {
                 if flags != 0 || ttl_ms != 0 {
@@ -1650,36 +2018,34 @@ fn execute_entry_inner(
             }
             set_options
         };
-        match operation {
-            FfiOperation::Ping
-            | FfiOperation::Stats
-            | FfiOperation::Sync
-            | FfiOperation::Reconnect
-                if !application_key.is_empty() =>
-            {
-                Err("operation does not accept an application key".to_owned())
-            }
-            FfiOperation::Ping
-            | FfiOperation::Get
-            | FfiOperation::GetJson
-            | FfiOperation::Delete
-            | FfiOperation::Stats
-            | FfiOperation::Sync
-            | FfiOperation::Reconnect
-                if !value.is_empty() =>
-            {
-                Err("operation does not accept a value".to_owned())
-            }
-            operation
-                if !matches!(operation, FfiOperation::Set | FfiOperation::SetJson)
-                    && (set_options.condition() != SetCondition::Any
-                        || set_options.time_to_live_millis().is_some()) =>
-            {
-                Err("SET options require a SET operation".to_owned())
-            }
-            _ => Ok(client.execute(operation, application_key, value, set_options, raw)),
-        }
+        validate_ffi_operation(
+            operation_contract,
+            if raw {
+                FfiInvocation::Raw
+            } else {
+                FfiInvocation::Protected
+            },
+            key_spec.is_some(),
+            &application_key,
+            &value,
+            &set_options,
+        )?;
+        Ok(match key_spec {
+            Some(key_spec) => client.execute_typed(
+                operation,
+                key_spec,
+                application_key,
+                value,
+                set_options,
+                raw,
+            ),
+            None => client.execute(operation, application_key, value, set_options, raw),
+        })
     }))
+}
+
+fn parse_ffi_key_spec(value: u32) -> std::result::Result<FfiKeySpec, String> {
+    FfiKeySpec::try_from(value).map_err(|value| format!("unsupported key spec {value}"))
 }
 
 /// Returns a best-effort connection-state discriminator:
@@ -1705,6 +2071,19 @@ pub unsafe extern "C" fn openkache_client_connection_state(client: *const FfiCli
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn openkache_client_result_kind(result: *const FfiResult) -> u32 {
     unsafe { result.as_ref() }.map_or(FfiResultKind::Error.code(), |result| result.kind.code())
+}
+
+/// Returns the protocol status discriminator carried by an FFI result.
+///
+/// The value is the wire status byte widened to `u32`.  Results created locally, such as
+/// connection errors and reconnect acknowledgements, return [`FFI_RESULT_STATUS_NONE`].
+///
+/// # Safety
+///
+/// `result` must be null or a live pointer returned by this library.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_result_status(result: *const FfiResult) -> u32 {
+    unsafe { result.as_ref() }.map_or(FFI_RESULT_STATUS_NONE, |result| result.status)
 }
 
 /// Returns a borrowed pointer to an FFI result payload.

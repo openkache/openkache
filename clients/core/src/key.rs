@@ -38,6 +38,244 @@ impl KeySpec {
             Self::Bytes => "bytes",
         }
     }
+
+    /// Parses the stable lower-case name used by language adapter options.
+    pub fn from_name(value: &str) -> Option<Self> {
+        match value {
+            "integer" => Some(Self::Integer),
+            "text" => Some(Self::Text),
+            "bytes" => Some(Self::Bytes),
+            _ => None,
+        }
+    }
+}
+
+/// Configured logical key space shared by protection, FFI, and language adapters.
+///
+/// `KeySpace` owns the policy that turns a logical or portable key into one
+/// validated [`ResolvedKey`]. Keeping that policy here means callers never
+/// need to repeat type checks or canonical CBOR serialization.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct KeySpace {
+    spec: KeySpec,
+}
+
+impl KeySpace {
+    /// Creates a resolver for one logical key specification.
+    pub const fn new(spec: KeySpec) -> Self {
+        Self { spec }
+    }
+
+    /// Returns the logical key specification enforced by this resolver.
+    pub const fn spec(self) -> KeySpec {
+        self.spec
+    }
+
+    /// Resolves one portable logical key and owns its canonical representation.
+    pub fn resolve(
+        self,
+        key: impl Into<PortableKey>,
+    ) -> std::result::Result<ResolvedKey, KeyError> {
+        let key = key.into();
+        ensure_spec(self.spec, key.spec())?;
+        ResolvedKey::from_portable(key)
+    }
+
+    /// Resolves logical bytes using the configured key specification.
+    pub fn resolve_logical_bytes(self, value: &[u8]) -> std::result::Result<ResolvedKey, KeyError> {
+        let key = portable_from_logical_bytes(self.spec, value)?;
+        ResolvedKey::from_portable(key)
+    }
+
+    /// Resolves one complete canonical key after enforcing this key space.
+    pub fn resolve_canonical(
+        self,
+        canonical_key: &[u8],
+    ) -> std::result::Result<ResolvedKey, KeyError> {
+        let key = ResolvedKey::from_canonical(canonical_key)?;
+        ensure_spec(self.spec, key.spec())?;
+        Ok(key)
+    }
+}
+
+/// Namespace and Item ID produced from one validated key.
+///
+/// The binding is kept next to key resolution so callers cannot accidentally
+/// derive an Item ID with one namespace and protect the corresponding value
+/// with another.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct KeyBinding {
+    pub(crate) namespace_id: u64,
+    pub(crate) item_id: ItemId,
+}
+
+/// Core-owned key policy used by protected clients.
+///
+/// `KeyResolver` is the only object that combines the configured logical
+/// [`KeySpace`] with the client root secret. It keeps conversion, canonical
+/// bytes, namespace binding, and Item ID derivation in the key module instead
+/// of making the value-protection layer reimplement those steps.
+pub(crate) struct KeyResolver {
+    root: ClientRootKey,
+    space: KeySpace,
+}
+
+impl KeyResolver {
+    pub(crate) fn new(root: ClientRootKey, spec: KeySpec) -> Self {
+        Self {
+            root,
+            space: KeySpace::new(spec),
+        }
+    }
+
+    pub(crate) const fn key_spec(&self) -> KeySpec {
+        self.space.spec()
+    }
+
+    pub(crate) fn root(&self) -> &ClientRootKey {
+        &self.root
+    }
+
+    /// Converts one internal key input through the single core-owned boundary.
+    ///
+    /// The compatibility `CanonicalKey` variant deliberately accepts any valid
+    /// canonical v1 key because the original native ABI did not carry a
+    /// configured key-space discriminator. New callers should use
+    /// `CanonicalInSpace`, `ConfiguredLogical`, `TypedLogical`, or `Portable`,
+    /// which all carry an explicit key-space policy.
+    pub(crate) fn resolve_input(
+        &self,
+        input: KeyInput,
+    ) -> std::result::Result<ResolvedKey, KeyError> {
+        match input {
+            KeyInput::Portable(key) => self.space.resolve(key),
+            KeyInput::ConfiguredLogical(bytes) => self.space.resolve_logical_bytes(&bytes),
+            #[cfg(feature = "ffi")]
+            KeyInput::TypedLogical { spec, bytes } => {
+                KeySpace::new(spec).resolve_logical_bytes(&bytes)
+            }
+            #[cfg(feature = "ffi")]
+            KeyInput::CanonicalKey(bytes) => ResolvedKey::from_canonical(&bytes),
+            KeyInput::CanonicalInSpace(bytes) => self.space.resolve_canonical(&bytes),
+        }
+    }
+
+    /// Resolves one key input and binds the exact resolved representation to
+    /// one namespace.
+    ///
+    /// This is the only operation-facing key path. Keeping conversion,
+    /// canonicalization, and Item ID derivation together prevents a caller
+    /// from resolving one representation and protecting another.
+    pub(crate) fn bind_input(
+        &self,
+        namespace_id: u64,
+        input: KeyInput,
+    ) -> std::result::Result<KeyBinding, KeyError> {
+        let key = self.resolve_input(input)?;
+        self.bind(namespace_id, &key)
+    }
+
+    pub(crate) fn bind(
+        &self,
+        namespace_id: u64,
+        key: &ResolvedKey,
+    ) -> std::result::Result<KeyBinding, KeyError> {
+        Ok(KeyBinding {
+            namespace_id,
+            item_id: self
+                .root
+                .derive_item_id_for_resolved_key(namespace_id, key)?,
+        })
+    }
+
+    /// Legacy byte-key convenience using namespace `1`.
+    pub(crate) fn legacy_item_id(&self, application_key: impl AsRef<[u8]>) -> ItemId {
+        self.root.derive_item_id(application_key)
+    }
+}
+
+/// Converts an FFI key discriminator into the core key specification.
+///
+/// The generated discriminator is an ABI concern, but the mapping belongs
+/// next to the key model so FFI dispatchers do not grow a second key policy.
+impl From<crate::contract::FfiKeySpec> for KeySpec {
+    fn from(value: crate::contract::FfiKeySpec) -> Self {
+        match value {
+            crate::contract::FfiKeySpec::Integer => Self::Integer,
+            crate::contract::FfiKeySpec::Text => Self::Text,
+            crate::contract::FfiKeySpec::Bytes => Self::Bytes,
+        }
+    }
+}
+
+/// Native and client request input before it crosses the core-owned
+/// [`ResolvedKey`] boundary.
+///
+/// Every operation-facing key path uses this enum. Language adapters provide
+/// neutral logical bytes, high-level Rust callers provide a [`PortableKey`],
+/// compatibility callers provide a complete canonical key item. Operations
+/// that already hold a [`ResolvedKey`] use the adjacent resolved-key methods
+/// without another parse or allocation.
+#[derive(Clone, Debug)]
+pub(crate) enum KeyInput {
+    Portable(PortableKey),
+    /// Logical bytes interpreted using the resolver's configured key space.
+    ConfiguredLogical(Vec<u8>),
+    /// Logical bytes carrying an explicit ABI key-space discriminator.
+    #[cfg(feature = "ffi")]
+    TypedLogical {
+        spec: KeySpec,
+        bytes: Vec<u8>,
+    },
+    /// A complete canonical key item supplied through the compatibility FFI.
+    ///
+    /// This is distinct from [`CanonicalInSpace`](Self::CanonicalInSpace):
+    /// compatibility callers carry no configured key-space discriminator, so
+    /// the canonical item is validated but not compared with the resolver's
+    /// configured [`KeySpec`].
+    #[cfg(feature = "ffi")]
+    CanonicalKey(Vec<u8>),
+    CanonicalInSpace(Vec<u8>),
+}
+
+impl KeyInput {
+    pub(crate) fn portable(key: impl Into<PortableKey>) -> Self {
+        Self::Portable(key.into())
+    }
+
+    pub(crate) fn configured_logical(bytes: Vec<u8>) -> Self {
+        Self::ConfiguredLogical(bytes)
+    }
+
+    #[cfg(feature = "ffi")]
+    pub(crate) fn typed_logical(spec: KeySpec, bytes: Vec<u8>) -> Self {
+        Self::TypedLogical { spec, bytes }
+    }
+
+    #[cfg(feature = "ffi")]
+    pub(crate) fn canonical_key(bytes: Vec<u8>) -> Self {
+        Self::CanonicalKey(bytes)
+    }
+
+    pub(crate) fn canonical_in_space(bytes: Vec<u8>) -> Self {
+        Self::CanonicalInSpace(bytes)
+    }
+
+    /// Creates a logical native input from the generated ABI discriminator.
+    ///
+    /// The FFI dispatcher must not translate ABI enum values into the key
+    /// model itself. Keeping that translation here makes the key module the
+    /// only owner of the ABI-to-logical-key boundary.
+    #[cfg(feature = "ffi")]
+    pub(crate) fn from_ffi(spec: crate::contract::FfiKeySpec, bytes: Vec<u8>) -> Self {
+        Self::typed_logical(spec.into(), bytes)
+    }
+}
+
+impl From<PortableKey> for KeyInput {
+    fn from(key: PortableKey) -> Self {
+        Self::Portable(key)
+    }
 }
 
 impl fmt::Display for KeySpec {
@@ -100,6 +338,52 @@ impl PortableInteger {
             negative: negative && !magnitude.is_empty(),
             magnitude,
         })
+    }
+
+    /// Parses an arbitrary-precision signed decimal integer.
+    ///
+    /// Decimal text is the neutral representation used by the typed native
+    /// ABI so bindings do not need to implement bignum CBOR serialization.
+    pub fn from_decimal(value: &str) -> std::result::Result<Self, KeyError> {
+        let bytes = value.as_bytes();
+        let (negative, digits) = match bytes.first().copied() {
+            Some(b'-') => (true, &bytes[1..]),
+            _ => (false, bytes),
+        };
+        if digits.is_empty()
+            || digits.iter().any(|digit| !digit.is_ascii_digit())
+            || (digits.len() > 1 && digits[0] == b'0')
+        {
+            return Err(KeyError::InvalidInteger);
+        }
+        if negative && digits == b"0" {
+            return Err(KeyError::InvalidInteger);
+        }
+        if digits.len() > MAX_CANONICAL_KEY_BYTES {
+            return Err(KeyError::TooLarge {
+                size: digits.len(),
+                maximum: MAX_CANONICAL_KEY_BYTES,
+            });
+        }
+        let mut magnitude = Vec::new();
+        for digit in digits {
+            let mut carry = u16::from(*digit - b'0');
+            for byte in magnitude.iter_mut().rev() {
+                let product = u16::from(*byte) * 10 + carry;
+                *byte = product as u8;
+                carry = product >> 8;
+            }
+            if carry != 0 {
+                magnitude.insert(0, carry as u8);
+            }
+            if magnitude.len() > MAX_CANONICAL_KEY_BYTES {
+                return Err(KeyError::TooLarge {
+                    size: magnitude.len(),
+                    maximum: MAX_CANONICAL_KEY_BYTES,
+                });
+            }
+        }
+        Self::from_parts(negative, &magnitude)
     }
 
     /// Returns whether this integer is negative.
@@ -245,6 +529,79 @@ impl PortableKey {
             Self::Text(value) => value.len().saturating_add(9),
             Self::Bytes(value) => value.len().saturating_add(9),
         }
+    }
+}
+
+fn portable_from_logical_bytes(
+    spec: KeySpec,
+    value: &[u8],
+) -> std::result::Result<PortableKey, KeyError> {
+    match spec {
+        KeySpec::Text => String::from_utf8(value.to_owned())
+            .map(PortableKey::Text)
+            .map_err(|_| KeyError::InvalidUtf8),
+        KeySpec::Bytes => Ok(PortableKey::Bytes(value.to_owned())),
+        KeySpec::Integer => {
+            let value = std::str::from_utf8(value).map_err(|_| KeyError::InvalidInteger)?;
+            PortableInteger::from_decimal(value).map(PortableKey::Integer)
+        }
+    }
+}
+
+fn ensure_spec(expected: KeySpec, actual: KeySpec) -> std::result::Result<(), KeyError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(KeyError::KeySpecMismatch { expected, actual })
+    }
+}
+
+/// A validated key at the boundary between language adapters and the core.
+///
+/// `ResolvedKey` is deliberately the only representation accepted by the
+/// protection hot path. It keeps the key-space discriminator and exact
+/// canonical bytes used for Item ID hashing, so a request never re-encodes or
+/// re-parses a key as it moves through the client layers.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ResolvedKey {
+    spec: KeySpec,
+    canonical: Vec<u8>,
+}
+
+impl ResolvedKey {
+    /// Converts one portable logical key and stores its canonical bytes.
+    pub fn from_portable(key: impl Into<PortableKey>) -> std::result::Result<Self, KeyError> {
+        let portable = key.into();
+        let canonical = portable.canonical_bytes()?;
+        Ok(Self {
+            spec: portable.spec(),
+            canonical,
+        })
+    }
+
+    /// Validates and adopts one complete canonical v1 key item.
+    pub fn from_canonical(bytes: &[u8]) -> std::result::Result<Self, KeyError> {
+        let portable = PortableKey::decode_canonical(bytes)?;
+        Ok(Self {
+            spec: portable.spec(),
+            canonical: bytes.to_owned(),
+        })
+    }
+
+    /// Returns the logical key's key-space type.
+    pub const fn spec(&self) -> KeySpec {
+        self.spec
+    }
+
+    /// Borrows the deterministic-CBOR key bytes used by the wire-independent
+    /// Item ID derivation algorithm.
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+
+    /// Consumes this key and returns its canonical bytes.
+    pub fn into_canonical_bytes(self) -> Vec<u8> {
+        self.canonical
     }
 }
 
@@ -547,6 +904,9 @@ pub enum KeyError {
     /// A key contained invalid UTF-8 text.
     #[error("text key is not valid UTF-8")]
     InvalidUtf8,
+    /// An integer key was not canonical signed decimal text.
+    #[error("integer key is not canonical signed decimal text")]
+    InvalidInteger,
     /// A key's CBOR bytes ended before the complete item was read.
     #[error("canonical key is truncated")]
     Truncated,
@@ -563,14 +923,9 @@ pub fn canonical_key_bytes(
     spec: KeySpec,
     key: impl Into<PortableKey>,
 ) -> std::result::Result<Vec<u8>, KeyError> {
-    let key = key.into();
-    if key.spec() != spec {
-        return Err(KeyError::KeySpecMismatch {
-            expected: spec,
-            actual: key.spec(),
-        });
-    }
-    key.canonical_bytes()
+    KeySpace::new(spec)
+        .resolve(key)
+        .map(ResolvedKey::into_canonical_bytes)
 }
 
 /// Exact fixed-size item ID sent through the OpenKache protocol.
@@ -760,11 +1115,8 @@ impl ClientRootKey {
         namespace_id: u64,
         key: impl Into<PortableKey>,
     ) -> std::result::Result<ItemId, KeyError> {
-        if namespace_id == 0 {
-            return Err(KeyError::InvalidNamespace);
-        }
-        let canonical_key = key.into().canonical_bytes()?;
-        self.derive_item_id_from_canonical_key(namespace_id, &canonical_key)
+        let key = ResolvedKey::from_portable(key)?;
+        self.derive_item_id_for_resolved_key(namespace_id, &key)
     }
 
     /// Derives an Item ID from already canonical deterministic-CBOR key bytes.
@@ -777,17 +1129,28 @@ impl ClientRootKey {
         namespace_id: u64,
         canonical_key: &[u8],
     ) -> std::result::Result<ItemId, KeyError> {
+        let key = ResolvedKey::from_canonical(canonical_key)?;
+        self.derive_item_id_for_resolved_key(namespace_id, &key)
+    }
+
+    /// Derives an Item ID from a key that has already crossed the validated
+    /// logical/canonical boundary.
+    pub(crate) fn derive_item_id_for_resolved_key(
+        &self,
+        namespace_id: u64,
+        key: &ResolvedKey,
+    ) -> std::result::Result<ItemId, KeyError> {
         if namespace_id == 0 {
             return Err(KeyError::InvalidNamespace);
         }
-        let key = PortableKey::decode_canonical(canonical_key)?;
-        let canonical_key = key.canonical_bytes()?;
-        let mut input = Vec::with_capacity(8 + canonical_key.len());
-        input.extend_from_slice(&namespace_id.to_be_bytes());
-        input.extend_from_slice(&canonical_key);
-        Ok(ItemId::from_bytes(
-            *blake3::keyed_hash(&self.item_id_root, &input).as_bytes(),
-        ))
+        Ok(self.hash_canonical_key(namespace_id, key.canonical_bytes()))
+    }
+
+    fn hash_canonical_key(&self, namespace_id: u64, canonical_key: &[u8]) -> ItemId {
+        let mut hasher = blake3::Hasher::new_keyed(&self.item_id_root);
+        hasher.update(&namespace_id.to_be_bytes());
+        hasher.update(canonical_key);
+        ItemId::from_bytes(*hasher.finalize().as_bytes())
     }
 
     /// Legacy byte-key convenience using namespace `1`.

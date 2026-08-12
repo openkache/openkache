@@ -12,6 +12,7 @@ pub mod ffi;
 mod key;
 mod protected;
 mod protection;
+mod protocol;
 mod transport;
 pub mod value;
 pub mod value_envelope;
@@ -23,7 +24,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(feature = "quic-compio")]
 use compio::net::ToSocketAddrsAsync;
-use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Opcode, Request, Response, Status};
+use openkache_protocol::{MAX_RESPONSE_FRAME_BYTES, Response, Status};
+use protocol::{Request, RequestRetryPolicy};
 use transport::{ClientConnection, ClientLane};
 
 pub use config::{
@@ -33,17 +35,23 @@ pub use config::{
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{
     CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
-    KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey, canonical_key_bytes,
+    KeyError, KeySpace, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey,
+    ResolvedKey, canonical_key_bytes,
 };
 pub use openkache_protocol::{
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, ITEM_ID_BYTES,
-    NamespaceDescriptor, NamespacePolicy, OverridePolicy, SetCondition,
+    FieldSequence, ITEM_ID_BYTES, NAMESPACE_ID_BYTES, OPTIONAL_VALUE_LENGTH_BYTES,
+    OPTIONAL_VALUE_MISSING, Opcode, decode_optional_values, decode_varuint, encode_field_sequence,
+    encode_optional_values, encode_varuint,
 };
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
 pub use protected::{ProtectedClient, ProtectedClientBuilder};
 pub use protection::DataProtection;
+pub use protocol::{
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
+    NamespacePolicy, OperationFields, OverridePolicy, ProtocolError, SetCondition,
+};
 pub use value::ItemValue;
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
@@ -69,27 +77,16 @@ impl std::fmt::Display for Backend {
 }
 
 /// Stable client operation or operation phase used by structured errors.
+///
+/// Protocol operations intentionally wrap the generated [`Opcode`] instead of
+/// duplicating one enum variant per operation. The associated constants retain
+/// source-compatible labels for the long-lived convenience APIs, while a new
+/// Smithy opcode automatically receives the generated operation label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum Operation {
-    /// `PING` request.
-    Ping,
-    /// `GET` request.
-    Get,
-    /// `SET` request.
-    Set,
-    /// `DELETE` request.
-    Delete,
-    /// `STATS` request.
-    Stats,
-    /// `SYNC` request.
-    Sync,
-    /// `NAMESPACE_OPEN` request.
-    NamespaceOpen,
-    /// `NAMESPACE_UPDATE_POLICY` request.
-    NamespaceUpdatePolicy,
-    /// `NAMESPACE_DELETE` request.
-    NamespaceDelete,
+    /// A protocol request whose operation-specific client label is generated from Smithy.
+    Protocol(Opcode),
     /// DNS lookup.
     DnsResolution,
     /// Initial QUIC and TLS connection establishment.
@@ -120,18 +117,19 @@ pub enum Operation {
     StreamRead,
 }
 
+include!(concat!(env!("OUT_DIR"), "/operation_constants.rs"));
+
+impl Operation {
+    /// Wraps any generated protocol opcode for structured error reporting.
+    pub const fn from_opcode(opcode: Opcode) -> Self {
+        Self::Protocol(opcode)
+    }
+}
+
 impl std::fmt::Display for Operation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::Ping => "PING",
-            Self::Get => "GET",
-            Self::Set => "SET",
-            Self::Delete => "DELETE",
-            Self::Stats => "STATS",
-            Self::Sync => "SYNC",
-            Self::NamespaceOpen => "NAMESPACE_OPEN",
-            Self::NamespaceUpdatePolicy => "NAMESPACE_UPDATE_POLICY",
-            Self::NamespaceDelete => "NAMESPACE_DELETE",
+            Self::Protocol(opcode) => return formatter.write_str(opcode.name()),
             Self::DnsResolution => "DNS resolution",
             Self::ConnectionSetup => "connection setup",
             Self::ConnectionRetry => "connection retry",
@@ -176,8 +174,13 @@ pub enum ServerErrorCode {
     Conflict,
     /// The requested namespace does not exist.
     NamespaceNotFound,
-    /// Namespace deletion raced an in-flight namespace operation.
+    /// Namespace deletion requires an empty namespace.
     NamespaceNotEmpty,
+    /// A modeled protocol error status that has no built-in client category.
+    ///
+    /// The raw wire value is preserved so adding an API-specific error status
+    /// does not require extending the shared client core first.
+    Unknown(u8),
 }
 
 /// All client-level failures.
@@ -296,7 +299,7 @@ impl Error {
         Self::Tls(error.to_string())
     }
 
-    fn protocol(error: openkache_protocol::ProtocolError) -> Self {
+    fn protocol(error: impl std::fmt::Display) -> Self {
         Self::Protocol(error.to_string())
     }
 
@@ -307,6 +310,93 @@ impl Error {
 
 /// Convenience alias for client results.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Result of a generated Smithy operation executed through the native adapter boundary.
+///
+/// The numeric kind, wire status, and payload use the shared client FFI contract so language
+/// adapters can decode response semantics without maintaining an operation-name dispatch table.
+///
+/// `status` is the protocol status byte widened to `u32`.  It is deliberately independent from
+/// `kind`: a modeled operation may add a successful status before a dedicated ergonomic result
+/// discriminator exists.  [`OPERATION_STATUS_NONE`] is used only by local compatibility helpers
+/// that do not represent a protocol response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationResult {
+    /// Smithy-generated native result-kind discriminator.
+    pub kind: u32,
+    /// Wire status discriminator returned by the server, or [`OPERATION_STATUS_NONE`] when the
+    /// result was produced locally without a protocol response.
+    pub status: u32,
+    /// Operation response payload, if the semantic contract carries one.
+    pub payload: Vec<u8>,
+}
+
+impl OperationResult {
+    /// Decodes an ordered response field sequence using the generated plan.
+    ///
+    /// This is the generic result path for batch, pagination, and other
+    /// modeled outputs with repeated or optional fields. It intentionally
+    /// knows only the operation's generated framing metadata; semantic
+    /// adapters such as SET outcomes or namespace descriptors remain outside
+    /// this type.
+    pub fn decode_fields(&self, operation: Opcode) -> Result<Vec<Option<Vec<u8>>>> {
+        let view = self.fields_view(operation)?;
+        Ok(view.to_owned())
+    }
+
+    /// Decodes an ordered response into a bounded offset view borrowing this
+    /// result payload. Use [`OperationFields::to_owned`] only when ownership
+    /// is required by the caller.
+    pub fn fields_view(&self, operation: Opcode) -> Result<OperationFields<'_>> {
+        let contract = contract::operation_wire_spec(operation);
+        protocol::decode_response_fields_view(&self.payload, &contract.response)
+            .map_err(Error::protocol)
+    }
+
+    /// Returns one decoded ordered response field by generated index.
+    pub fn decode_field(&self, operation: Opcode, index: usize) -> Result<Option<Vec<u8>>> {
+        let fields = self.fields_view(operation)?;
+        if index >= fields.len() {
+            return Err(Error::configuration(
+                "field",
+                "response field index is outside the generated plan",
+            ));
+        }
+        Ok(fields.get(index).map(ToOwned::to_owned))
+    }
+}
+
+/// Sentinel used by local native results that do not correspond to a wire response.
+pub const OPERATION_STATUS_NONE: u32 = u32::MAX;
+
+pub(crate) fn operation_result_with_status(
+    status: Status,
+    kind: contract::FfiResultKind,
+    payload: Vec<u8>,
+) -> OperationResult {
+    OperationResult {
+        kind: kind.code(),
+        status: u32::from(status as u8),
+        payload,
+    }
+}
+
+/// Converts a validated protocol response into the generic native result
+/// representation. The generated contract maps an accepted status to the
+/// native discriminator; framing alone decides whether the payload is kept.
+fn generated_response_result(operation: Opcode, response: Response) -> Result<OperationResult> {
+    let contract = contract::operation_wire_spec(operation);
+    let kind = contract::operation_result_kind(operation, response.status)
+        .ok_or_else(|| unexpected_status(Operation::from_opcode(operation), response.status))?;
+    let payload = match contract.response.framing {
+        contract::OperationLayoutFraming::Empty => Vec::new(),
+        contract::OperationLayoutFraming::Opaque
+        | contract::OperationLayoutFraming::OptionalValues
+        | contract::OperationLayoutFraming::FieldSequence
+        | contract::OperationLayoutFraming::OrderedFields => response.payload,
+    };
+    Ok(operation_result_with_status(response.status, kind, payload))
+}
 
 /// Successful lookup result, separate from transport or protocol failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -468,7 +558,15 @@ impl<C: ClientConnection> Core<C> {
     async fn ping(&self) -> Result<Duration> {
         let started = Instant::now();
         let response = self
-            .request(Request::new(Opcode::Ping, None, Vec::new()).map_err(Error::protocol)?)
+            .request(
+                Request::new_with_retry_policy(
+                    Opcode::Ping,
+                    None,
+                    Vec::new(),
+                    RequestRetryPolicy::Always,
+                )
+                .map_err(Error::protocol)?,
+            )
             .await?;
         expect_status(Operation::Ping, response.status, &[Status::Ok])?;
         if response.payload != b"PONG" {
@@ -493,7 +591,7 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new_scoped(
+                Request::new_scoped_retryable(
                     Opcode::Get,
                     namespace_id,
                     Some(item_id.into_protocol()),
@@ -597,7 +695,7 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new_scoped(Opcode::Stats, namespace_id, None, Vec::new())
+                Request::new_scoped_retryable(Opcode::Stats, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -639,8 +737,7 @@ impl<C: ClientConnection> Core<C> {
         if self.connection_state() == ConnectionState::Disconnected {
             self.reconnect_before(deadline).await?;
         }
-        let response_safe = matches!(request.opcode, Opcode::Ping | Opcode::Get | Opcode::Stats)
-            || (request.opcode == Opcode::NamespaceOpen && !request.create_if_missing);
+        let response_safe = request.retry_policy.is_safe();
         let max_attempts = if response_safe {
             self.retry.max_attempts
         } else {
@@ -757,7 +854,18 @@ impl<C: ClientConnection> Core<C> {
         if !matches!(status, Status::Ok | Status::Created) {
             return Err(unexpected_status(operation, status));
         }
-        let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(Error::protocol)?;
+        // Namespace-open's create/resolve distinction is an API-owned
+        // semantic rule. Keep it in this typed adapter rather than teaching
+        // the generic response validator about the `created` status token.
+        if status == Status::Created && !create_if_missing {
+            return Err(unexpected_status(operation, status));
+        }
+        let descriptor = NamespaceDescriptor::decode(&response.payload).map_err(|error| {
+            Error::UnexpectedResponse {
+                operation,
+                message: format!("namespace descriptor payload is invalid: {error}"),
+            }
+        })?;
         self.namespace_id
             .store(descriptor.namespace_id, Ordering::Release);
         Ok((descriptor, status == Status::Created))
@@ -852,22 +960,23 @@ impl<C: ClientConnection> Core<C> {
             .acquire_lane(deadline)
             .await
             .map_err(RequestFailure::before_send)?;
-        let frame = request
-            .into_encoded()
+        let parts = request
+            .into_parts()
             .map_err(Error::protocol)
             .map_err(RequestFailure::before_send)?;
         let write_timeout = deadline
             .remaining(Operation::RequestWrite)
             .map_err(RequestFailure::before_send)?;
         stream
-            .write_request(frame, write_timeout)
+            .write_request_parts(parts, write_timeout)
             .await
             .map_err(RequestFailure::after_send)?;
-        let frame = stream
+        let parts = stream
             .read_response(MAX_RESPONSE_FRAME_BYTES, deadline)
             .await
             .map_err(RequestFailure::after_send)?;
-        let response = Response::decode_owned(frame)
+        let response = parts
+            .into_response()
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
         // Validate the operation/status/payload contract before returning the lane to
@@ -1206,22 +1315,149 @@ macro_rules! builder_methods {
 macro_rules! raw_client_methods {
     ($client:ident) => {
         impl $client {
-            /// Verifies the connection and returns the complete request round-trip time.
-            pub async fn ping(&self) -> Result<Duration> {
-                self.0.ping().await
-            }
-
-            /// Returns the currently selected server-assigned namespace ID.
-            pub fn namespace_id(&self) -> Option<u64> {
-                self.0.namespace_id()
-            }
-
             /// Resolves and returns the namespace used by formatted operations.
             ///
             /// If no explicit namespace ID is configured, this opens the
             /// configured namespace name with the builder's policy.
             pub async fn ensure_namespace_id(&self) -> Result<u64> {
                 self.0.ensure_namespace().await
+            }
+
+            /// Verifies the connection and returns the complete request round-trip time.
+            pub async fn ping(&self) -> Result<Duration> {
+                self.0.ping().await
+            }
+
+            /// Executes one generated Smithy operation against exact item-ID storage.
+            ///
+            /// The operation contract, rather than its name, selects the request path and
+            /// converts the typed core outcome into the shared native result representation.
+            ///
+            /// # Arguments
+            ///
+            /// * `operation` - Smithy protocol operation to execute.
+            /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
+            /// * `value` - Raw operation payload, including a storage value or an application
+            ///   payload when the generated request shape carries one.
+            /// * `set_options` - Conditional and expiration options used by SET.
+            ///
+            /// # Returns
+            ///
+            /// The contract-defined result discriminator and response payload.
+            ///
+            /// # Errors
+            ///
+            /// Returns a protocol, transport, validation, or configuration error when the
+            /// operation cannot be executed through the exact item-ID boundary.
+            pub async fn execute_raw(
+                &self,
+                operation: Opcode,
+                item_id: impl AsRef<[u8]>,
+                value: impl AsRef<[u8]>,
+                set_options: SetOptions,
+            ) -> Result<OperationResult> {
+                let namespace_id = if protocol::uses_compact_namespace_route(operation) {
+                    Some(self.0.ensure_namespace().await?)
+                } else {
+                    None
+                };
+                let request = protocol::request_from_contract(
+                    operation,
+                    namespace_id,
+                    item_id.as_ref(),
+                    value.as_ref().to_vec(),
+                    set_options,
+                )?;
+                let response = self.0.request(request).await?;
+                generated_response_result(operation, response)
+            }
+
+            /// Executes one generic unary operation from an already encoded body.
+            ///
+            /// Unlike the protocol-v1 compatibility methods, this boundary has
+            /// no item ID, namespace ID, or SET-options vocabulary. The
+            /// operation's canonical Smithy wire plan validates and frames the
+            /// body before it is sent.
+            pub async fn execute_unary(
+                &self,
+                operation: Opcode,
+                body: impl Into<Vec<u8>>,
+            ) -> Result<OperationResult> {
+                let request = protocol::request_from_unary(operation, body.into())?;
+                let response = self.0.request(request).await?;
+                generated_response_result(operation, response)
+            }
+
+            /// Executes one generated Smithy operation in an explicitly supplied namespace.
+            ///
+            /// This is the namespace-scoped counterpart to [`Self::execute_raw`].
+            ///
+            /// # Arguments
+            ///
+            /// * `operation` - Smithy protocol operation to execute.
+            /// * `namespace_id` - Positive server-assigned namespace ID.
+            /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
+            /// * `value` - Raw value or application payload for the operation.
+            /// * `set_options` - Conditional and expiration options used by SET.
+            ///
+            /// # Returns
+            ///
+            /// The contract-defined result discriminator and response payload.
+            ///
+            /// # Errors
+            ///
+            /// Returns a protocol, transport, validation, or configuration error when the
+            /// operation cannot be executed through the namespace-scoped boundary.
+            pub async fn execute_scoped(
+                &self,
+                operation: Opcode,
+                namespace_id: u64,
+                item_id: impl AsRef<[u8]>,
+                value: impl AsRef<[u8]>,
+                set_options: SetOptions,
+            ) -> Result<OperationResult> {
+                let request = protocol::request_from_contract(
+                    operation,
+                    Some(namespace_id),
+                    item_id.as_ref(),
+                    value.as_ref().to_vec(),
+                    set_options,
+                )?;
+                let response = self.0.request(request).await?;
+                generated_response_result(operation, response)
+            }
+
+            /// Executes an operation from its canonical ordered request field
+            /// plan. This supports batch/CAS and other modeled shapes that
+            /// intentionally use generic field-sequence framing.
+            pub async fn execute_fields(
+                &self,
+                operation: Opcode,
+                fields: Vec<Option<Vec<u8>>>,
+            ) -> Result<OperationResult> {
+                let request = protocol::request_from_fields(operation, fields)?;
+                let response = self.0.request(request).await?;
+                generated_response_result(operation, response)
+            }
+
+            /// Sends an application payload through the generic Smithy operation boundary.
+            ///
+            /// This compatibility helper is deprecated; generated adapters should call
+            /// [`Self::execute_raw`] so the result discriminator remains available.
+            #[deprecated(note = "use execute_raw for generated Smithy operations")]
+            pub async fn execute_application(
+                &self,
+                operation: Opcode,
+                value: impl AsRef<[u8]>,
+            ) -> Result<Vec<u8>> {
+                self.execute_raw(operation, [], value, SetOptions::new())
+                    .await
+                    .map(|result| result.payload)
+            }
+
+            /// Returns the currently selected server-assigned namespace ID.
+            pub fn namespace_id(&self) -> Option<u64> {
+                self.0.namespace_id()
             }
 
             /// Resolves a namespace name and optionally creates it.
@@ -1657,47 +1893,13 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
 
 fn validate_response_contract(
     opcode: Opcode,
-    create_if_missing: bool,
+    _create_if_missing: bool,
     response: &Response,
 ) -> Result<()> {
     let operation = operation(opcode);
+    let operation_contract = contract::operation_wire_spec(opcode);
     if response.status.is_error() {
-        let applicable = match response.status {
-            Status::InvalidRequest
-            | Status::TooLarge
-            | Status::Overloaded
-            | Status::Timeout
-            | Status::Forbidden
-            | Status::InternalError => true,
-            Status::NoCapacity | Status::PolicyConflict => opcode == Opcode::Set,
-            Status::Conflict => {
-                matches!(
-                    opcode,
-                    Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete
-                )
-            }
-            Status::NamespaceNotFound => matches!(
-                opcode,
-                Opcode::Get
-                    | Opcode::Set
-                    | Opcode::Delete
-                    | Opcode::Stats
-                    | Opcode::Sync
-                    | Opcode::NamespaceOpen
-                    | Opcode::NamespaceUpdatePolicy
-                    | Opcode::NamespaceDelete
-            ),
-            Status::NamespaceNotEmpty => opcode == Opcode::NamespaceDelete,
-            Status::UnsupportedOpcode => false,
-            // `Status::try_from` rejects unassigned values before this helper runs.
-            Status::Ok
-            | Status::NotFound
-            | Status::Created
-            | Status::Replaced
-            | Status::Deleted
-            | Status::NotStored => false,
-        };
-        if !applicable {
+        if !operation_contract.error_statuses.contains(&response.status) {
             return Err(Error::UnexpectedResponse {
                 operation,
                 message: format!(
@@ -1709,60 +1911,64 @@ fn validate_response_contract(
         return Ok(());
     }
 
+    if !operation_contract
+        .success_statuses
+        .contains(&response.status)
+    {
+        return Err(unexpected_status(operation, response.status));
+    }
     let invalid_payload = |message: &'static str| {
         Err(Error::UnexpectedResponse {
             operation,
             message: message.into(),
         })
     };
-    let descriptor_payload = || {
-        NamespaceDescriptor::decode(&response.payload)
-            .map(|_| ())
-            .map_err(|error| Error::UnexpectedResponse {
-                operation,
-                message: format!("namespace descriptor is invalid: {error}"),
-            })
-    };
-    match (opcode, response.status) {
-        (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
-        (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
-
-        (Opcode::Get, Status::Ok) => Ok(()),
-        (Opcode::Get, Status::NotFound) if response.payload.is_empty() => Ok(()),
-        (Opcode::Get, Status::NotFound) => {
-            invalid_payload("GET NotFound responses must have an empty payload")
+    match operation_contract.response.framing {
+        contract::OperationLayoutFraming::Empty => {
+            if response.payload.is_empty() {
+                Ok(())
+            } else {
+                invalid_payload("empty-response operations must have an empty payload")
+            }
         }
-
-        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored)
-            if response.payload.is_empty() =>
-        {
+        contract::OperationLayoutFraming::Opaque => {
+            let response_plan = operation_contract.response.fields;
+            if response_plan.len() > 1 {
+                return if operation_contract.response.opaque_aggregate {
+                    Ok(())
+                } else {
+                    invalid_payload("composite opaque responses require an adapter-owned aggregate")
+                };
+            }
+            let Some(field) = response_plan.first() else {
+                return if response.payload.is_empty() {
+                    Ok(())
+                } else {
+                    invalid_payload("opaque responses without a field must be empty")
+                };
+            };
+            // Opaque framing carries exactly one modeled field. Its presence
+            // is established by the successful frame decode, not by the
+            // payload length: an empty byte sequence is a valid value for
+            // codecs such as UTF-8 and packed arrays.
+            protocol::validate_operation_field(field, &response.payload).map_err(|error| {
+                Error::UnexpectedResponse {
+                    operation,
+                    message: error.to_string(),
+                }
+            })?;
             Ok(())
         }
-        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored) => {
-            invalid_payload("SET success responses must have an empty payload")
-        }
-
-        (Opcode::Delete, Status::Deleted | Status::NotFound) if response.payload.is_empty() => {
+        contract::OperationLayoutFraming::OptionalValues
+        | contract::OperationLayoutFraming::FieldSequence
+        | contract::OperationLayoutFraming::OrderedFields => {
+            protocol::decode_response_fields_view(&response.payload, &operation_contract.response)
+                .map_err(|error| Error::UnexpectedResponse {
+                    operation,
+                    message: format!("ordered response payload is invalid: {error}"),
+                })?;
             Ok(())
         }
-        (Opcode::Delete, Status::Deleted | Status::NotFound) => {
-            invalid_payload("DELETE domain responses must have an empty payload")
-        }
-
-        (Opcode::Stats, Status::Ok) => validate_stats_payload(&response.payload),
-        (Opcode::Sync, Status::Ok) if response.payload.is_empty() => Ok(()),
-        (Opcode::Sync, Status::Ok) => {
-            invalid_payload("SYNC success responses must have an empty payload")
-        }
-
-        (Opcode::NamespaceOpen, Status::Ok) => descriptor_payload(),
-        (Opcode::NamespaceOpen, Status::Created) if create_if_missing => descriptor_payload(),
-        (Opcode::NamespaceUpdatePolicy, Status::Ok) => descriptor_payload(),
-        (Opcode::NamespaceDelete, Status::Deleted) if response.payload.is_empty() => Ok(()),
-        (Opcode::NamespaceDelete, Status::Deleted) => {
-            invalid_payload("NAMESPACE_DELETE success responses must have an empty payload")
-        }
-        (_, status) => Err(unexpected_status(operation, status)),
     }
 }
 
@@ -1787,20 +1993,10 @@ fn server_error_code(status: Status) -> ServerErrorCode {
         Status::Conflict => ServerErrorCode::Conflict,
         Status::NamespaceNotFound => ServerErrorCode::NamespaceNotFound,
         Status::NamespaceNotEmpty => ServerErrorCode::NamespaceNotEmpty,
-        _ => ServerErrorCode::Internal,
+        status => ServerErrorCode::Unknown(status as u8),
     }
 }
 
 fn operation(opcode: Opcode) -> Operation {
-    match opcode {
-        Opcode::Ping => Operation::Ping,
-        Opcode::Get => Operation::Get,
-        Opcode::Set => Operation::Set,
-        Opcode::Delete => Operation::Delete,
-        Opcode::Stats => Operation::Stats,
-        Opcode::Sync => Operation::Sync,
-        Opcode::NamespaceOpen => Operation::NamespaceOpen,
-        Opcode::NamespaceUpdatePolicy => Operation::NamespaceUpdatePolicy,
-        Opcode::NamespaceDelete => Operation::NamespaceDelete,
-    }
+    Operation::from_opcode(opcode)
 }

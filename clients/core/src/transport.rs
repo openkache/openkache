@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use crossfire::{MAsyncRx, MAsyncTx};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{RESPONSE_FIXED_BYTES, Response};
+use openkache_protocol::{RESPONSE_FIXED_BYTES, Response, ResponseParts};
 
+use crate::protocol::RequestParts;
 use crate::{Backend, Error, Operation, Result};
 
 #[cfg(feature = "quic-compio")]
@@ -48,11 +49,33 @@ pub(crate) trait ClientLane {
         timeout: Duration,
     ) -> impl Future<Output = Result<()>>;
 
+    fn write_request_parts(
+        &mut self,
+        parts: RequestParts,
+        timeout: Duration,
+    ) -> impl Future<Output = Result<()>> {
+        async move {
+            // A request may be represented by two owned buffers, but it is
+            // still one transport operation.  Consume one timeout budget
+            // across both writes so a large payload cannot silently double
+            // the caller's deadline.
+            let deadline = Deadline::after(timeout)?;
+            self.write_request(parts.prefix, deadline.remaining(Operation::RequestWrite)?)
+                .await?;
+            if parts.payload.is_empty() {
+                Ok(())
+            } else {
+                self.write_request(parts.payload, deadline.remaining(Operation::RequestWrite)?)
+                    .await
+            }
+        }
+    }
+
     fn read_response(
         &mut self,
         maximum: usize,
         deadline: Deadline,
-    ) -> impl Future<Output = Result<Vec<u8>>>;
+    ) -> impl Future<Output = Result<ResponseParts>>;
 
     fn release(self);
 }
@@ -110,11 +133,19 @@ macro_rules! connection_backend {
                 self.0.write_request(frame, timeout).await
             }
 
+            async fn write_request_parts(
+                &mut self,
+                parts: RequestParts,
+                timeout: Duration,
+            ) -> Result<()> {
+                self.0.write_request_parts(parts, timeout).await
+            }
+
             async fn read_response(
                 &mut self,
                 maximum: usize,
                 deadline: Deadline,
-            ) -> Result<Vec<u8>> {
+            ) -> Result<ResponseParts> {
                 self.0.read_response(maximum, deadline).await
             }
 
@@ -304,38 +335,56 @@ impl<'a, B: BackendConnection> PooledLane<'a, B> {
         Ok(())
     }
 
-    async fn read_response(&mut self, maximum: usize, deadline: Deadline) -> Result<Vec<u8>> {
+    async fn write_request_parts(&mut self, parts: RequestParts, timeout: Duration) -> Result<()> {
         let stream = self
             .stream
             .as_mut()
             .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
-        let mut frame = stream
+        let deadline = Deadline::after(timeout)?;
+        stream
+            .write_all(parts.prefix, deadline.remaining(Operation::RequestWrite)?)
+            .await?;
+        if !parts.payload.is_empty() {
+            stream
+                .write_all(parts.payload, deadline.remaining(Operation::RequestWrite)?)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn read_response(&mut self, maximum: usize, deadline: Deadline) -> Result<ResponseParts> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| Error::Connection("stream lane has already been released".into()))?;
+        let mut header_bytes = stream
             .read_exact(
                 RESPONSE_FIXED_BYTES,
                 deadline.remaining(Operation::ResponseHeaderRead)?,
             )
             .await?;
         let header = loop {
-            if let Some(header) = Response::decode_header(&frame).map_err(Error::protocol)? {
+            if let Some(header) = Response::decode_header(&header_bytes).map_err(Error::protocol)? {
                 break header;
             }
             let next = stream
                 .read_exact(1, deadline.remaining(Operation::ResponseHeaderRead)?)
                 .await?;
-            frame.extend_from_slice(&next);
+            header_bytes.extend_from_slice(&next);
         };
         let frame_len = header.frame_len().map_err(Error::protocol)?;
         if frame_len > maximum {
             return Err(Error::ResponseTooLarge { maximum });
         }
         let body_len = header.payload_len();
-        if body_len > 0 {
-            let body = stream
+        let payload = if body_len == 0 {
+            Vec::new()
+        } else {
+            stream
                 .read_exact(body_len, deadline.remaining(Operation::ResponseBodyRead)?)
-                .await?;
-            frame.extend_from_slice(&body);
-        }
-        Ok(frame)
+                .await?
+        };
+        ResponseParts::decode(header_bytes, payload).map_err(Error::protocol)
     }
 
     fn release(mut self) {
