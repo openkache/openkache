@@ -45,7 +45,7 @@ V1 provides three codec selectors:
 | Codec | Meaning |
 |---|---|
 | `RawBytes` | Exact application bytes, including empty input and embedded `00` octets. |
-| `OpenKache CBOR Value v1` | One CBOR value subject to the v1 rules in §3.4. |
+| `OpenKache CBOR Value v1` | One CBOR value subject to the v1 rules in §3.5. |
 | `Custom` | An application-defined format identified inside the codec payload. |
 
 `RawBytes` describes a value payload, not a key type or an Item ID.
@@ -110,6 +110,13 @@ value_envelope_v1 = value_envelope_version:vu128(1) | format_flags:u8 | body_v1
 | `value_envelope_version` | 1–9 bytes | Common canonical version discriminator; v1 is `01`. |
 | `version_specific_suffix` | version-dependent | Complete suffix grammar selected by the version. |
 
+### 3.2 Version assignments
+
+| Version | Assignment | Interpretation |
+|---:|---|---|
+| `0` | Application-private | Complete private envelope profile configured out of band; OpenKache does not define or interpret it. |
+| `1` | OpenKache Value Envelope v1 | The flags, body, transforms, and limits defined in this document. |
+
 The envelope has no magic prefix and no body-length field. The enclosing
 protocol frame supplies the exact value boundary; `value_len` is the canonical
 [`vu128`](../protocol/SPEC.md#unsigned-vu128) length of the complete envelope.
@@ -125,7 +132,16 @@ encoding, assigned identifiers, framing, transform order, authentication
 inputs, or body grammar. A decoder MUST select the version-specific grammar
 before parsing any suffix bytes.
 
-### 3.2 Packed flags
+Version `0` is the **application-private envelope version**. OpenKache does
+not define, assign, or interpret its suffix grammar. An application MAY use
+version `0` for a complete private envelope profile, including its flags,
+body framing, transform order, authentication inputs, and limits, when all
+communicating parties configure that profile out of band. Version `0` has no
+OpenKache interoperability or compatibility guarantee. A client without the
+matching private profile MUST reject version `0` and MUST NOT interpret it as
+the v1 grammar.
+
+### 3.3 Packed flags
 
 ```text
 bits 0..1 = encryption_id
@@ -170,7 +186,7 @@ profile. Numeric IDs are wire assignments, not a security ranking.
 | `2` | `Custom` (application-defined format) |
 | `3` | Unassigned; reject |
 
-### 3.3 Body
+### 3.4 Body
 
 ```text
 codec_payload =
@@ -213,7 +229,7 @@ requires a new value-envelope version rather than a new custom format ID.
 The value codec is independent from the key codec. Its native conversion rules
 are not inherited from [Key Format](KEY_FORMAT.md).
 
-### 3.4 OpenKache CBOR Value v1
+### 3.5 OpenKache CBOR Value v1
 
 This is a value profile, not a deterministic or canonical CBOR profile. It
 defines which CBOR structures a decoder accepts; it does not require one
@@ -380,13 +396,15 @@ An encoder MUST:
 2. Encode the selected codec (including the `custom_format_id` prefix for the
    `Custom` codec) and enforce the decoded-payload limit.
 3. Apply compression only when policy permits.
-4. Encode version `1` and the packed `format_flags`.
+4. Encode the selected value-envelope version and its version-specific suffix.
+   For v1, encode version `1` and the packed `format_flags`.
 5. Construct AAD from the exact namespace, Item ID, and header bytes.
 6. Apply the selected protection profile.
 7. Enforce the complete ValueEnvelope limit before sending.
 
-It MUST NOT emit a magic prefix, body length, unassigned ID, non-canonical
-`vu128`, or an algorithm inconsistent with the flags.
+For v1, the encoder MUST NOT emit a magic prefix, body length, unassigned ID,
+non-canonical `vu128`, or an algorithm inconsistent with the flags. An
+application-private encoder owns the corresponding rules for version `0`.
 
 ### 6.2 Decoding
 
@@ -394,18 +412,22 @@ A decoder MUST:
 
 1. Parse one canonical `value_envelope_version:vu128` from the exact envelope
    slice.
-2. Require version `1`.
-3. Parse and validate `format_flags`.
-4. Enforce the configured protection policy.
-5. Construct AAD from the supplied namespace, Item ID, and exact header.
-6. Check version-specific minimum body sizes before slicing.
+2. Dispatch version `1` to the OpenKache v1 grammar. Dispatch version `0`
+   only when a matching application-private profile is explicitly configured;
+   otherwise reject it.
+3. Apply the selected version's suffix grammar. For v1, parse and validate
+   `format_flags`; a private version uses the configured private grammar.
+4. Enforce the selected profile's protection policy.
+5. Construct AAD from the selected profile's rules.
+6. Check the selected profile's minimum body sizes before slicing.
 7. Authenticate and decrypt before decompression or codec parsing.
 8. Validate and bounded-decompress one Zstandard frame when selected.
-9. For `Custom`, parse `custom_format_id`, resolve the configured codec,
-   and pass the remaining bytes to it. For the CBOR codec, decode exactly one
+9. For v1 `Custom`, parse `custom_format_id`, resolve the configured codec,
+   and pass the remaining bytes to it. For v1 CBOR, decode exactly one
    complete payload item. Reject unknown custom IDs, codec-invalid payloads,
-   and trailing bytes where the selected codec disallows them. For `RawBytes`,
-   return the exact payload.
+   and trailing bytes where the selected codec disallows them. For v1
+   `RawBytes`, return the exact payload. A private profile owns the equivalent
+   payload parsing rules.
 
 Authentication failures MUST use one generic error. Unauthenticated plaintext
 MUST be zeroized before returning that error.
@@ -424,14 +446,19 @@ windows, produced output, and all arithmetic before allocation.
 not a version of `format_flags` or `body`: each version defines its own suffix
 grammar, flag layout and assignments, body framing, transform order,
 authentication inputs, and applicable limits. V1 readers accept only `1`,
-reject unknown versions (including `0`), and never guess a v1 suffix. The old
-magic-prefixed envelope `4F 4B 56 01` is not v1.
+reject unsupported versions, and never guess a suffix grammar. The old
+magic-prefixed envelope `4F 4B 56 01` is not v1. A default v1 reader treats
+version `0` as unsupported; a reader with a matching application-private
+profile may dispatch it before applying the v1 grammar.
 
 The `Custom` codec is an extension point inside v1. Its
 `custom_format_id` selects a registered payload grammar, but does not change
 the v1 envelope grammar. A custom format that needs a different envelope
-grammar MUST use a new, explicitly assigned `value_envelope_version`; version
-`0` is not a wildcard or an arbitrary application namespace.
+grammar MAY use the application-private version `0` with an out-of-band
+private profile, or MUST use a future OpenKache-assigned version when
+cross-application interoperability is required. Version `0` is a complete
+private profile selector, not a wildcard or a partially specified extension
+slot.
 
 Value-envelope versioning is independent from key conversion and Item ID
 derivation. The version is not an Item ID input. A client MAY store a different
@@ -439,11 +466,13 @@ value-envelope version under the same Item ID when the key profile is
 unchanged and the client can read the selected versions. Changing the key
 contract or root key remains a separate migration that changes Item IDs.
 
-Future profiles are capability extensions: newer profiles add values or
-policies that older profiles cannot represent. A newer client SHOULD use the
-oldest supported complete value profile that represents the selected value and
+Future OpenKache profiles are capability extensions: newer profiles add values
+or policies that older profiles cannot represent. A newer client SHOULD use
+the oldest supported OpenKache profile that represents the selected value and
 security policy at initialization. A reader MUST reject a version it does not
-support rather than interpreting it as v1.
+support rather than guessing its grammar. A default OpenKache v1 reader
+supports version `1`; it supports version `0` only when a matching private
+profile is explicitly configured.
 
 | Policy | Meaning |
 |---|---|

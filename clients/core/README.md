@@ -126,6 +126,10 @@ the exact namespace, Item ID, and v1 header. A future value-envelope version
 may define a different suffix grammar, transform order, or AAD. Neither the
 wire protocol nor the server parses this format.
 
+Version `0` is available only to an explicitly configured application-private
+envelope profile. OpenKache does not define its suffix grammar; a default v1
+reader rejects it rather than interpreting it as v1.
+
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:
 
