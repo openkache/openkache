@@ -671,6 +671,14 @@ fn send_failure(responses: Vec<DeferredWorkerResponse>, message: &str) {
     }
 }
 
+fn telemetry_operation(operation: &KeyedOperation) -> Operation {
+    match operation {
+        KeyedOperation::Get => Operation::from_opcode(Opcode::Get),
+        KeyedOperation::Set { .. } => Operation::from_opcode(Opcode::Set),
+        KeyedOperation::Delete => Operation::from_opcode(Opcode::Delete),
+    }
+}
+
 fn finish_scheduler_lane(
     cache: &mut Kvkache,
     scheduler: &mut KeyScheduler,
@@ -688,7 +696,7 @@ fn finish_scheduler_lane(
             failure_state,
         } = batch;
         let operation = operation.expect("collapsed storage batch has a final mutation");
-        let telemetry_operation = operation.telemetry_operation();
+        let telemetry_operation = telemetry_operation(&operation);
         RunningKeyedCommand {
             storage_key,
             completion: RunningCompletion::Collapsed {
