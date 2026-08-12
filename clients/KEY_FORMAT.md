@@ -1,29 +1,37 @@
-# OpenKache v1 Client Key Contract (Draft)
+# OpenKache Client Key Contract — Version 1 Draft
 
-> **Status: Draft — v1 pre-freeze**
+> **Status:** Draft; version 1 has not been released or finalized.
 >
-> This document defines client-owned key validation and Item ID mapping. It
-> is not a server-required key encoding. Version 1 has not been released or
-> finalized; the contract may change before the v1 freeze.
+> This document specifies client-owned key validation and Item ID mapping. It
+> is not a server-required key encoding, and it may change before the version 1
+> freeze.
 
-The server receives only an opaque `0..=32`-byte Item ID. An application MAY
-use the exact-item-ID API to supply that final identifier directly. That API is
-separate from the key-contract mappings below.
+For item identity, the wire protocol carries only an opaque Item ID of
+`0..=32` octets. An application MAY invoke the Exact Item ID API to supply that
+identifier directly. That API is separate from the key-mapping profiles
+specified below.
 
-The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
-and **MAY** are to be interpreted as described by
+In this document, `octet` denotes an 8-bit unit in an encoded or protocol
+representation. `byte` is used for application-facing APIs and profile names;
+both terms refer to the same 8-bit unit.
+
+The normative terms **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**,
+**SHOULD NOT**, and **MAY** have the meanings specified by
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119) and
-[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when they appear in
-uppercase.
+[RFC 8174](https://www.rfc-editor.org/rfc/rfc8174) when, and only when, they
+appear in uppercase.
 
-## 1. Concepts and conversion paths
+## 1. Scope and terminology
 
-`PortableKey` is the logical application-key model. `KeySpec` selects the one
-logical type accepted by a typed keyspace. `canonical_key_bytes` is the
-deterministic representation used by the normal typed-key path. `ItemId` is
-the final opaque identifier sent to the server.
+This specification separates a logical application key, its canonical
+representation, and the final Item ID. `PortableKey` is the logical
+application-key model. `KeySpec` selects the one logical type accepted by a
+typed keyspace. Here, a keyspace is a client-side key configuration; it is not a
+wire-protocol namespace. `canonical_key_bytes` is the deterministic
+representation used by the typed-key path. `ItemId` is the final opaque
+identifier sent to the server.
 
-The client offers three distinct paths:
+The specification defines three distinct client-side conversion paths:
 
 ```text
 typed application key
@@ -32,47 +40,53 @@ typed application key
   -> Hash mapping
   -> ItemId
 
-byte application key
+byte-oriented application key
   -> ByteKeyOrHash mapping
-  -> preserved bytes (0..=32) or hashed ItemId (>32)
-  -> ItemId
+  -> ItemId (preserved for 0..=32 octets; hashed otherwise)
 
 exact ItemId
   -> Exact Item ID API
   -> wire
 ```
 
-These paths are not interchangeable. In particular, a `Bytes` `PortableKey`
-is CBOR-encoded before hashing, while the preserved branch of
-`ByteKeyOrHash` sends application bytes without that CBOR wrapper. The same
-application bytes can therefore produce different Item IDs in the two paths.
+These paths are not interchangeable. In particular, `PortableKey::Bytes` is
+CBOR-encoded before hashing, whereas the preserved branch of `ByteKeyOrHash`
+uses the application bytes without a CBOR wrapper. Identical application bytes
+may therefore produce different Item IDs under the two profiles.
 
-## 2. Logical key contract
+## 2. Logical key model
 
 ### 2.1 PortableKey types
 
-`PortableKey` is the v1 key-only subset of deterministic CBOR:
+`PortableKey` denotes the version 1 key-only subset of deterministic CBOR:
 `Integer`, `Text`, or `Bytes`.
 
 ```text
 PortableKey = Integer | Text | Bytes
 ```
 
-`Text` is exact valid UTF-8, `Bytes` is exact bytes, including empty and
-NUL-containing values, and `Integer` is an exact mathematical value. Native
-integer width and signedness are not identity.
+`Text` is a length-delimited sequence of valid UTF-8 octets. It is not
+NUL-terminated; an embedded U+0000 is ordinary text content. `Bytes` is an
+exact sequence of octets, including empty and NUL-containing values.
+`Integer` is an exact mathematical value. Native integer width and signedness
+are not part of key identity.
+
+For example, `Text("abc")` contains exactly the three UTF-8 octets
+`61 62 63`; it does not contain a trailing `00`. Its canonical CBOR
+representation is `63 61 62 63`. A C or C++ binding MUST pass the text buffer
+together with its explicit length.
 
 Objects, arrays, maps, booleans, nulls, decimal values, and custom objects are
 not key types. JSON, reflection, stringification, and implicit coercion MUST
 NOT be used.
 
-Key `Bytes` is a logical key type. It is CBOR-encoded and then included in the
-`Hash` input; it is not the `RawBytes` value codec and is not a preserved wire
-Item ID.
+`PortableKey::Bytes` is a logical key type. It is CBOR-encoded and then
+included in the `Hash` input. It is not the `RawBytes` value codec and is not a
+preserved wire Item ID.
 
 ### 2.2 KeySpec and mismatch rules
 
-Every typed keyspace MUST select exactly one `KeySpec`:
+Every typed keyspace MUST declare exactly one `KeySpec`:
 
 ```text
 KeySpec::Integer
@@ -80,14 +94,14 @@ KeySpec::Text
 KeySpec::Bytes
 ```
 
-Every typed key MUST match its keyspace's `KeySpec`; a mismatch MUST be
+Every typed key MUST match its keyspace's `KeySpec`. A type mismatch MUST be
 rejected before canonicalization or hashing. `KeySpec` adds no wire field and
 has no fixed-width integer variants.
 
 `ByteKeyOrHash` is permitted only for a `KeySpec::Bytes` keyspace. It is a
 mapping policy, not a fourth `KeySpec`.
 
-### 2.3 Language input mapping
+### 2.3 Language binding requirements
 
 | Binding | `Text` | `Bytes` | `Integer` | Floating-point |
 |---|---|---|---|---|
@@ -103,15 +117,17 @@ mapping policy, not a fourth `KeySpec`.
 | Dart | package scaffold | package scaffold | package scaffold | package scaffold |
 
 All text bindings MUST reject strings that cannot encode to valid UTF-8,
-including unpaired surrogates. All byte bindings are length-delimited; C
-strings MUST NOT be used as a key representation.
+including unpaired surrogates. Text and byte inputs are length-delimited;
+neither representation is NUL-terminated. In particular, C bindings MUST pass
+an explicit buffer length and MUST NOT use a NUL-terminated C string as the key
+representation.
 
 The shared native ABI uses `canonical_key_bytes` as its formatted-operation
 input. Its `application_key` buffer MUST contain exactly one complete
-canonical CBOR key item; the ABI does not guess whether arbitrary bytes mean
-`Text`, `Bytes`, or an integer. Language adapters convert their native key
-type before calling the ABI. Exact Item ID operations remain separate and
-accept opaque protocol Item IDs directly.
+canonical CBOR key item; the ABI does not infer whether arbitrary bytes
+represent `Text`, `Bytes`, or an integer. Language adapters convert their
+native key type before calling the ABI. Exact Item ID operations remain
+separate and accept opaque protocol Item IDs directly.
 
 ## 3. Canonical representation
 
@@ -182,15 +198,15 @@ f6                            // null
 
 ## 4. Item ID mapping profiles
 
-Mapping profile names are client-only choices. They have no wire or server
-field. Every profile MUST produce an Item ID accepted by the wire protocol.
+Mapping profiles are client-local choices. They have no wire or server field.
+Every profile MUST produce an Item ID accepted by the wire protocol.
 
 ### 4.1 Hash
 
-`Hash` accepts a `PortableKey` matching the configured `KeySpec`, canonicalizes
-it, and derives a 32-byte Item ID. The namespace is bound into the hash input;
-equal logical keys in different namespaces therefore produce different Item
-IDs.
+Under `Hash`, the client accepts a `PortableKey` matching the configured
+`KeySpec`, canonicalizes it, and derives a 32-byte Item ID. The namespace is
+bound into the hash input; equal logical keys in different namespaces
+therefore produce different Item IDs.
 
 ```text
 item_id =
@@ -202,10 +218,10 @@ item_id =
 
 ### 4.2 ByteKeyOrHash
 
-`ByteKeyOrHash` is for byte-oriented `KeySpec::Bytes` keyspaces:
+`ByteKeyOrHash` applies to byte-oriented `KeySpec::Bytes` keyspaces:
 
-- An input of `0..=32` octets, including empty and exactly 32 octets, is
-  preserved byte-for-byte as the Item ID.
+- An input whose length is `0..=32` octets, including empty and exactly
+  32 octets, is preserved byte-for-byte as the Item ID.
 - An input longer than 32 octets is hashed to a 32-byte Item ID.
 
 The preserved branch intentionally omits the CBOR `Bytes` wrapper to keep short
@@ -228,7 +244,7 @@ reinterpret existing Item IDs.
 
 ### 4.3 Exact Item ID API
 
-The Exact Item ID API accepts the final opaque `0..=32`-byte Item ID directly.
+The Exact Item ID API accepts the final opaque `0..=32`-octet Item ID directly.
 It performs no `PortableKey` conversion, canonicalization, hashing, or
 namespace derivation. It still enforces the protocol Item ID length limit.
 
@@ -248,11 +264,10 @@ namespace_id:u64be | key_material
 ```
 
 Including the namespace prevents equal keys in different namespaces from
-colliding. The tradeoff is that the same application key maps to different
-Item IDs when used in different namespaces; clients must know the resolved
-namespace ID before deriving an Item ID. Omitting the namespace would make
-cross-namespace IDs stable and simpler to precompute, but would weaken domain
-separation and make accidental cross-namespace reuse easier.
+colliding. Consequently, the client MUST resolve the namespace ID before
+deriving an Item ID. Omitting the namespace would make cross-namespace IDs
+stable and simpler to precompute, but would weaken domain separation and make
+accidental cross-namespace reuse easier.
 
 ### 5.2 Root key and derivation visibility
 
