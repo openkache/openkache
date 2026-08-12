@@ -32,6 +32,7 @@ pub(crate) struct Item {
 }
 
 impl Item {
+    #[allow(dead_code)]
     pub(crate) fn live(storage_key: StorageKey, value: Vec<u8>) -> Self {
         Self::live_with_eviction(storage_key, value, false)
     }
@@ -50,6 +51,7 @@ impl Item {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn live_expiring(
         storage_key: StorageKey,
         value: Vec<u8>,

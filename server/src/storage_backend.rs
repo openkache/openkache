@@ -11,17 +11,17 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::platform::StorageDeviceKind;
-#[cfg(not(feature = "storage-runtime-simulated"))]
-use crate::platform;
-use crate::runtime::ServerSecret;
-use crate::sizing;
-use crate::storage_runtime::File;
-#[cfg(not(feature = "storage-runtime-simulated"))]
-use crate::storage_runtime;
-use crate::{AppConfig, Config, KvError, Result};
 #[cfg(not(feature = "storage-runtime-simulated"))]
 use crate::BUCKET_BYTES;
+#[cfg(not(feature = "storage-runtime-simulated"))]
+use crate::platform;
+use crate::platform::StorageDeviceKind;
+use crate::runtime::ServerSecret;
+use crate::sizing;
+#[cfg(not(feature = "storage-runtime-simulated"))]
+use crate::storage_runtime;
+use crate::storage_runtime::File;
+use crate::{AppConfig, Config, KvError, Result};
 
 #[allow(dead_code)]
 pub(crate) const SERVER_KEY_FILE: &str = ".openkache-key";
@@ -202,11 +202,7 @@ pub(crate) const fn direct_io_open_flag() -> i32 {
 
 /// Reserves a physical file range, or completes immediately for an ephemeral
 /// backend.
-pub(crate) async fn reserve_file_range(
-    file: &File,
-    offset: u64,
-    len: u64,
-) -> std::io::Result<()> {
+pub(crate) async fn reserve_file_range(file: &File, offset: u64, len: u64) -> std::io::Result<()> {
     backend::reserve_file_range(file, offset, len).await
 }
 
@@ -461,9 +457,8 @@ mod backend {
     }
 
     pub(crate) fn existing_storage(config: &AppConfig) -> bool {
-        (0..config.runtime.thread_count).any(|thread_id| {
-            config.worker_config(thread_id).data_path.exists()
-        })
+        (0..config.runtime.thread_count)
+            .any(|thread_id| config.worker_config(thread_id).data_path.exists())
     }
 
     pub(crate) fn namespace_persistence(directory: &Path) -> NamespacePersistence {
@@ -488,7 +483,9 @@ mod backend {
                 .checked_add(worker.blob_segment_size as u64)
                 .and_then(|value| value.checked_add(worker.max_item_bytes as u64))
                 .and_then(|value| value.checked_add(2 * super::BUCKET_BYTES as u64))
-                .ok_or_else(|| KvError::InvalidConfig("storage generation size overflowed".into()))?;
+                .ok_or_else(|| {
+                    KvError::InvalidConfig("storage generation size overflowed".into())
+                })?;
             total.checked_add(worker_generation).ok_or_else(|| {
                 KvError::InvalidConfig("host storage generation size overflowed".into())
             })
@@ -623,9 +620,9 @@ mod backend {
 
     #[allow(dead_code)]
     fn is_transient_io_error(error: &std::io::Error) -> bool {
-        error.raw_os_error().is_some_and(|code| {
-            code == libc::EAGAIN || code == libc::EINTR
-        })
+        error
+            .raw_os_error()
+            .is_some_and(|code| code == libc::EAGAIN || code == libc::EINTR)
     }
 
     pub(crate) fn begin_storage_run(directory: &Path) -> Result<bool> {
