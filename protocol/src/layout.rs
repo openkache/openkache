@@ -7,8 +7,8 @@
 
 use crate::{
     MAX_OPERATION_FIELDS, OperationFieldLayout, OperationFieldPlan, ProtocolError, ResponseSegment,
-    Result, encode_field_sequence, encode_varuint,
-    validate_value_length,
+    Result, encode_field_sequence, encode_varuint, optional_value_prefix,
+    optional_values_encoded_len, validate_value_length,
 };
 use smallvec::SmallVec;
 
@@ -70,6 +70,15 @@ where
                     segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
                 }
                 append_value(&mut segments, value);
+            }
+        }
+        OperationFieldLayout::OptionalValues => {
+            for value in values {
+                let prefix = optional_value_prefix(value.as_ref().map(LayoutValue::encoded_len))?;
+                segments.push(ResponseSegment::inline(&prefix));
+                if let Some(value) = value {
+                    append_value(&mut segments, value);
+                }
             }
         }
         OperationFieldLayout::Empty
@@ -193,6 +202,18 @@ pub fn encode_layout_fields(
     }
     match layout {
         OperationFieldLayout::Sequence => encode_field_sequence(values),
+        OperationFieldLayout::OptionalValues => optional_values_encoded_len(values)
+            .and_then(|encoded_len| {
+                let mut output = Vec::with_capacity(encoded_len);
+                for value in values {
+                    let prefix = optional_value_prefix(value.map(<[u8]>::len))?;
+                    output.extend_from_slice(&prefix);
+                    if let Some(value) = value {
+                        output.extend_from_slice(value);
+                    }
+                }
+                Ok(output)
+            }),
         OperationFieldLayout::Dense => encode_dense_fields(values, widths),
         OperationFieldLayout::Empty => {
             if values.is_empty() {
@@ -233,6 +254,19 @@ pub fn decode_layout_fields(
     match layout {
         OperationFieldLayout::Sequence => {
             crate::FieldSequence::decode_with_required(payload, required, offsets).map(|_| ())
+        }
+        OperationFieldLayout::OptionalValues => {
+            let decoded = crate::OptionalValues::decode(payload, required.len(), offsets)?;
+            if required
+                .iter()
+                .enumerate()
+                .any(|(index, is_required)| *is_required && decoded.get(index).is_none())
+            {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "optional-value layout is missing a required field",
+                ));
+            }
+            Ok(())
         }
         OperationFieldLayout::Dense => {
             if required.iter().any(|is_required| !is_required) {

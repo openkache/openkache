@@ -47,6 +47,7 @@ function rust_field_layout(identifier: string): string {
     case "empty":
     case "opaque":
     case "sequence":
+    case "optional_values":
     case "dense":
       return pascal_case(identifier)
     default:
@@ -62,6 +63,7 @@ function rust_layout_framing(identifier: string): string {
     case "opaque":
     case "ordered_fields":
     case "field_sequence":
+    case "optional_values":
       return pascal_case(identifier)
     default:
       return "AdapterOwned"
@@ -527,6 +529,7 @@ pub enum OperationResponseFraming {
     Empty,
     Opaque,
     FieldSequence,
+    OptionalValues,
 }
 
 /// Generic request framing consumed by transport-neutral executors.
@@ -551,6 +554,7 @@ pub enum OperationFieldLayout {
     Empty,
     Opaque,
     Sequence,
+    OptionalValues,
     Dense,
     /// The concrete representation is supplied by an API-owned extension.
     AdapterOwned,
@@ -587,6 +591,7 @@ pub enum OperationLayoutFraming {
     Opaque,
     OrderedFields,
     FieldSequence,
+    OptionalValues,
     /// The concrete representation is supplied by an API-owned adapter. The
     /// generic contract deliberately does not name that representation.
     AdapterOwned,
@@ -629,6 +634,7 @@ impl OperationWireSpec {
         match self.request.framing {
             OperationLayoutFraming::Empty => Some(OperationRequestFraming::Empty),
             OperationLayoutFraming::Opaque => Some(OperationRequestFraming::Opaque),
+            OperationLayoutFraming::OptionalValues => None,
             OperationLayoutFraming::OrderedFields
             | OperationLayoutFraming::FieldSequence => Some(OperationRequestFraming::OrderedFields),
             OperationLayoutFraming::AdapterOwned => None,
@@ -644,6 +650,7 @@ impl OperationWireSpec {
             OperationLayoutFraming::AdapterOwned => None,
             OperationLayoutFraming::FieldSequence
             | OperationLayoutFraming::OrderedFields => Some(OperationResponseFraming::FieldSequence),
+            OperationLayoutFraming::OptionalValues => Some(OperationResponseFraming::OptionalValues),
         }
     }
 
@@ -652,6 +659,7 @@ impl OperationWireSpec {
         match self.request.framing {
             OperationLayoutFraming::Empty => Some(OperationRequestFraming::Empty),
             OperationLayoutFraming::Opaque => Some(OperationRequestFraming::Opaque),
+            OperationLayoutFraming::OptionalValues => None,
             OperationLayoutFraming::OrderedFields
             | OperationLayoutFraming::FieldSequence => Some(OperationRequestFraming::OrderedFields),
             OperationLayoutFraming::AdapterOwned => None,

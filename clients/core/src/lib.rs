@@ -1993,6 +1993,14 @@ fn validate_response_contract(
                 })?;
             Ok(())
         }
+        Some(contract::OperationResponseFraming::OptionalValues) => {
+            protocol::decode_operation_response_fields(opcode, &response.payload)
+                .map_err(|error| Error::UnexpectedResponse {
+                    operation,
+                    message: format!("optional-value response payload is invalid: {error}"),
+                })?;
+            Ok(())
+        }
         None => invalid_payload("operation response framing requires an adapter-owned decoder"),
     }
 }

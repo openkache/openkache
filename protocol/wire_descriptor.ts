@@ -19,9 +19,6 @@ function response_framing_for(
   contract: Wire_Operation_Contract,
 ): Wire_Response_Framing {
   if (contract.response_framing !== undefined) {
-    if (contract.response_framing === "optional_values") {
-      return "adapter_owned"
-    }
     return WIRE_RESPONSE_FRAMINGS.includes(
       contract.response_framing as (typeof WIRE_RESPONSE_FRAMINGS)[number],
     )

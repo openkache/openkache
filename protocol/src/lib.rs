@@ -68,7 +68,8 @@ pub mod compat_v1;
 
 /// Generic value-shape codecs shared by server and client adapters.
 pub mod codec;
-mod optional_values;
+/// Compact optional-value field codec shared by descriptor-selected layouts.
+pub mod optional_values;
 /// Generic generated field-layout dispatch.
 pub mod layout;
 /// Operation-neutral request frame delimiting.
@@ -79,6 +80,12 @@ pub mod response;
 pub use layout::{
     DenseFields, LayoutValue, decode_layout_fields, decode_planned_fields, encode_dense_fields,
     encode_layout_fields, encode_layout_segments, encode_planned_fields,
+};
+pub use optional_values::{
+    OptionalValues, OptionalValuesEncoder, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
+    decode_optional_values, encode_optional_values, optional_value_prefix,
+    optional_values_encoded_len, optional_values_encoded_len_from_lengths,
+    optional_values_max_encoded_len,
 };
 pub use request::{
     OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFrameStep,

@@ -247,6 +247,7 @@ fn planned_fields_response(
     if !matches!(
         wire.generic_response_framing(),
         Some(contract::OperationResponseFraming::FieldSequence)
+        | Some(contract::OperationResponseFraming::OptionalValues)
     ) || values.len() != wire.response.fields.len()
     {
         return contract_error_response(
@@ -316,6 +317,9 @@ pub(super) fn validate_response_fields(
         let Some(value) = value.as_ref() else {
             continue;
         };
+        if field.codecs.is_empty() {
+            continue;
+        }
         let valid = match value {
             OperationValue::Segmented(value) => {
                 super::operation_fields::validate_segmented_field(field, value).is_ok()
