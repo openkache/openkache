@@ -38,6 +38,7 @@ rustls-native-certs = "*"
 serde = "*"
 serde_json = "*"
 serde_json_canonicalizer = "*"
+smallvec = "*"
 thiserror = "*"
 tokio = { version = "*", features = ["io-util", "net", "rt", "time"], optional = true }
 tokio-rustls = { version = "*", default-features = false, optional = true }
