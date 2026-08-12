@@ -22,8 +22,6 @@ pub(super) use openkache_protocol::{OperationRequestFraming, OperationResponseFr
 #[allow(unused_imports)]
 pub(super) use openkache_protocol::OperationLayoutFraming;
 
-pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;
-
 #[inline]
 pub(super) const fn spec(opcode: Opcode) -> OperationWireSpec {
     crate::contract::operation_wire_spec(opcode)

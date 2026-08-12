@@ -227,16 +227,6 @@ pub(super) fn encode_operation_outcome(
     }
 }
 
-/// Encodes a generated ordered-field response through its descriptor-selected
-/// shared layout.
-pub(super) fn operation_fields_response(
-    opcode: Opcode,
-    status: Status,
-    values: SmallVec<[Option<OperationValue>; 8]>,
-) -> OperationResponse {
-    planned_fields_response(opcode, status, values)
-}
-
 /// Encodes any descriptor-planned field response.
 fn planned_fields_response(
     opcode: Opcode,
