@@ -4,7 +4,13 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "client_generator",
-    srcs = ["generate.ts"],
+    srcs = [
+        "generate.ts",
+        "operation_client_projection.ts",
+        "operation_models.ts",
+        "operation_plans.ts",
+        "operation_results.ts",
+    ],
 )
 
 filegroup(
