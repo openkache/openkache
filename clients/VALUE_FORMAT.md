@@ -1,4 +1,4 @@
-# OpenKache v1 Client Value Format
+# OpenKache v1 Client Value Format (Draft)
 
 > **Status: Draft — v1 pre-freeze**
 >
@@ -11,9 +11,11 @@
 
 The server stores values as opaque bytes. It does not interpret serialization,
 compression, encryption, or client metadata. Applications MAY use the raw
-client API with an exact 32-byte Item ID and opaque value bytes instead. Raw
-operations bypass this document's formatted value path but still obey protocol
-framing, namespace scoping, and size limits.
+client API with an opaque `0..=32`-byte Item ID and opaque value bytes instead.
+Raw operations bypass this document's formatted value path but still obey
+protocol framing, namespace scoping, and size limits.
+The protected formatted path uses the 32-byte Item ID produced by the client
+hash profile; variable-length raw Item IDs are outside this envelope.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by

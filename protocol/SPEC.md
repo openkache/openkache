@@ -1,4 +1,4 @@
-# OpenKache Wire Protocol Version 1
+# OpenKache Wire Protocol v1 (Draft)
 
 ## Status
 
@@ -35,13 +35,12 @@ Version 1 specifies:
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
-and belong to the value-format specification. The physical storage layout and
-the namespace eviction algorithm are outside the wire encoding. The identity
-boundary between the wire Item ID, internal routing, and the persisted record
-key is specified below because it constrains observable cache semantics. Item
-expiration and eviction eligibility are part of the `SET` contract below.
-Namespace lifecycle and policy administration are carried by the
-namespace-management requests defined below.
+and belong to the [client key](../clients/KEY_FORMAT.md) and
+[value-format](../clients/VALUE_FORMAT.md) specifications. The physical
+storage layout and the namespace eviction algorithm are outside this wire
+protocol. Item expiration and eviction eligibility are part of the `SET`
+contract below. Namespace lifecycle and policy administration are carried by
+the namespace-management requests defined below.
 
 ## Terminology
 
@@ -50,9 +49,6 @@ namespace-management requests defined below.
 - **Lane**: One client-initiated bidirectional QUIC stream.
 - **Frame**: One complete request or response encoded as specified below.
 - **Item ID**: An opaque `0..=32`-octet identifier used for cache equality.
-- **RouteFingerprint**: A server-internal routing token derived from a
-  namespace ID and an Item ID. It is not a wire field, cache identity, or
-  persisted record key.
 - **Account**: A deployment-defined authenticated identity. Version 1 does not
   make an account the owner or scope of a namespace.
 - **Namespace**: A named server-wide collection of Item IDs with default
@@ -378,15 +374,9 @@ described in [Namespace policy](#namespace-policy).
 
 ### Namespace
 
-The public API addresses a namespace by its server-wide name. Namespace
+The wire protocol addresses a namespace by its server-wide name. Namespace
 management uses the same request/response protocol as data operations; it does
-not require a separate control-plane transport. A client MAY obtain a namespace
-handle and use it for all operations:
-
-```text
-cache = client.namespace("cache")       # resolves or opens by name
-cache.set(item_id, value, options)
-```
+not require a separate control-plane transport.
 
 `namespace_id` is a fixed eight-octet `u64be` in the numeric range
 `1..=2^64 - 1`. The server assigns it; it is an opaque, stable server-wide
@@ -398,10 +388,8 @@ lane may be reused for different namespaces and retries can be encoded
 deterministically. Clients do not allocate namespace IDs; they treat the
 server-returned ID as opaque and MUST NOT synthesize or recycle one.
 
-The wire protocol has no default namespace concept. An SDK MAY expose
-`client.set(item_id, value, options)` as a convenience shorthand, but it MUST
-resolve a configured namespace name through `NAMESPACE_OPEN` and then send the
-returned non-zero ID. A namespace ID of zero is never a selector.
+The wire protocol has no default namespace concept. A namespace ID of zero is
+never a selector.
 
 The `NAMESPACE_OPEN` name field has a one-octet length:
 
@@ -427,10 +415,8 @@ namespace, the same name resolves to the same server-wide namespace ID and the
 same `(namespace_id, item_id)` data. Sharing access never creates an
 account-local namespace or changes the namespace name or ID.
 
-These rules are protocol rules, not cloud-provider resource-name rules. An SDK
-MAY offer an additional cloud-portable validator (for example, lowercase ASCII
-`a-z0-9-` with a 3–63 octet limit), but the wire protocol does not require that
-narrower profile.
+These rules are protocol rules, not cloud-provider resource-name rules. The
+wire protocol does not require a narrower cloud-portable naming profile.
 
 `GET`, `SET`, `DELETE`, `STATS`, and `SYNC` are namespace-scoped and carry a
 `namespace_id`. `PING` is connection-scoped and carries none. `NAMESPACE_OPEN`
@@ -467,13 +453,11 @@ existing policy. A newly created namespace starts at revision `1`.
 | 0–1 | `03` | `00` = `IfEmpty`; `01`–`11` = reserved |
 | 2–7 | `FC` | Reserved; MUST be zero |
 
-Version 1 accepts only the `IfEmpty` wire value for compatibility. The server
-does not retain or scan a namespace-wide Item ID index. Deletion therefore
-linearizes after in-flight namespace requests drain and removes only the
-namespace identity; storage records from the retired namespace remain
-unreachable because namespace IDs are never reused. A concurrent request may
-receive `NamespaceNotEmpty` and retry the deletion. Physical purge of those
-records is not part of v1; they may remain until ordinary storage eviction.
+Version 1 accepts only the `IfEmpty` wire value for compatibility. Deletion
+linearizes after in-flight namespace requests drain and removes the namespace
+identity. A concurrent request may receive `NamespaceNotEmpty` and retry the
+deletion. Namespace IDs are never reused, and physical purge of records from a
+retired namespace is outside this protocol.
 
 `revision` and `expected_revision` are fixed eight-octet `u64be` values, not
 `vu128` fields. A namespace revision is positive, starts at `1`, and increases
@@ -482,22 +466,6 @@ and `NAMESPACE_DELETE` require a non-zero `expected_revision` equal to the
 current revision. A mismatch returns `Conflict` and makes no change. Revision
 values MUST NOT wrap; an update that would overflow the revision range fails
 without changing the policy.
-
-The public operations map to the wire requests as follows:
-
-```text
-namespace.resolve(name)
-    -> NAMESPACE_OPEN with CreateIfMissing clear
-
-namespace.open_or_create(name, policy)
-    -> NAMESPACE_OPEN with CreateIfMissing set (empty name is allowed)
-
-namespace.update_policy(id, expected_revision, policy)
-    -> NAMESPACE_UPDATE_POLICY
-
-namespace.delete_if_empty(id, expected_revision)
-    -> NAMESPACE_DELETE with delete mode IfEmpty
-```
 
 `NAMESPACE_OPEN` returns `Ok` with the existing namespace descriptor, or
 `Created` with the newly created descriptor. A missing namespace without
@@ -608,10 +576,9 @@ items that were stored with an explicit policy. It only rejects future `SET`
 requests that select that explicit override. An inherited policy is resolved
 against the namespace policy current at the `SET` linearization point.
 
-At the public API, `ttl_ms` MUST be present exactly when
+On the wire, `ttl_ms` MUST be present exactly when
 `expiration_mode == ExplicitTtl` and MUST be positive. It MUST be absent for
-`Inherit` and `NoExpiry`; a client MUST reject that invalid combination before
-encoding a frame.
+`Inherit` and `NoExpiry`. A receiver MUST reject any other combination.
 
 `EvictionProtected` protects an item from capacity eviction only. It does not
 prevent expiration, explicit `DELETE`, or replacement. The namespace's
@@ -620,8 +587,8 @@ cannot be admitted without evicting a protected item, the server returns
 `NoCapacity` and makes no mutation.
 
 Each successful replacement applies the policies resolved from that `SET`.
-Thus, `Inherit` on a replacement uses the current namespace defaults; a client
-that must retain protection MUST request `EvictionProtected` explicitly.
+Thus, `Inherit` on a replacement uses the current namespace defaults; retaining
+protection requires the request to select `EvictionProtected` explicitly.
 
 ### Item ID
 
@@ -635,38 +602,9 @@ Servers MUST compare Item IDs by their complete byte sequence and length.
 `PING`, `STATS`, and `SYNC` carry no Item ID. The namespace and Item ID pair is
 the cache identity; an Item ID is not a server-generated identifier.
 
-Key mode is a client concept and has no wire or server field. A client MAY
-offer a `RawOrHash` policy for application keys:
-
-- an application key of `0..=32` octets, including exactly 32 octets, is sent
-  as the same raw Item ID;
-- an application key longer than 32 octets is hashed to a 32-octet Item ID.
-
-The digest choice, key derivation, and any application-level encryption remain
-client policy. The server sees only the resulting opaque Item ID and MUST NOT
-infer which client policy produced it.
-
-### Routing and storage identity
-
-The wire Item ID is also the persisted record identity within the storage
-scope for its namespace. A record is conceptually encoded as:
-
-```text
-key_len:u8 | item_id:key_len | metadata | value_or_reference
-```
-
-`metadata` contains the resolved item policy and any storage metadata required
-by the implementation. `value_or_reference` is either the value bytes or an
-implementation-defined reference to them. The record key is the
-length-prefixed Item ID; no additional derived storage key is introduced.
-
-For worker, table, or bucket selection, a server MAY derive a
-`RouteFingerprint` from the namespace ID and the complete Item ID. The
-fingerprint is internal routing state only: it MUST NOT appear on the wire or
-be persisted in an SSD record. Its algorithm and width are implementation
-choices. A fingerprint collision MUST be resolved by comparing the complete
-namespace ID and Item ID, so a collision can never make two distinct items
-equal.
+The mapping from an application key to an Item ID is client-owned and is
+specified in the [Client Key Format](../clients/KEY_FORMAT.md). It does not add
+a wire field or change the opaque Item ID contract above.
 
 ### Value
 
@@ -835,11 +773,9 @@ namespace ID exists. An authorized request for a missing namespace returns
 
 `SYNC` has the request layout `06 | namespace_id:u64be`.
 
-`SYNC` is a storage persistence barrier scoped by namespace authorization. The
-server does not retain a namespace-wide mutation index, so the implementation
-may flush all storage workers. A successful response is sent only after the
-configured persistence operation completes. Mutations submitted after the
-barrier begins need not be included.
+`SYNC` is a storage persistence barrier scoped by namespace authorization. A
+successful response is sent only after the configured persistence operation
+completes. Mutations submitted after the barrier begins need not be included.
 
 - Authorized success: `Ok` with an empty payload, sent only after the barrier
   completes.
@@ -1373,9 +1309,6 @@ A protocol v1 implementation is not complete unless it:
   specified in the `SET` flags;
 - rejects non-canonical, truncated, wider-than-`u64`, and overflowing `vu128`;
 - compares complete Item ID byte sequences and lengths;
-- persists the length-prefixed Item ID as the record key;
-- keeps `RouteFingerprint` internal, does not persist it, and resolves
-  fingerprint collisions by comparing the complete namespace ID and Item ID;
 - validates expiration-mode/TTL correspondence before reading a large
   value;
 - computes TTL from the mutation linearization point using a monotonic clock;

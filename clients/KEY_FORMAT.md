@@ -1,23 +1,44 @@
-# OpenKache v1 Client Key Format
+# OpenKache v1 Client Key Format (Draft)
 
 > **Status: Draft — v1 pre-freeze**
 >
 > This is the default formatted-key implementation shipped by OpenKache
 > clients. It is not a server-required key encoding.
 
-The server receives only a 32-byte Item ID. Applications MAY bypass this
-format with the raw client API and supply an exact Item ID directly.
+The server receives only an opaque `0..=32`-byte Item ID. Applications MAY
+bypass this format with a raw client API and supply an Item ID directly.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
 [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119).
 
-## 1. Key contract
+## 1. Client Item ID modes
+
+Key mode is a client-only policy; it has no wire or server field. The client
+MUST send only the resulting opaque Item ID defined by the wire protocol.
+
+For byte-oriented application keys, a client MAY expose these modes:
+
+| Mode | Client behavior |
+|---|---|
+| `Raw` | Send `0..=32` application-key octets unchanged as the Item ID. Empty and exactly 32-byte keys are valid. |
+| `Hash` | Hash the application key to a 32-byte Item ID using the selected client key profile. |
+| `RawOrHash` | Send keys of `0..=32` octets unchanged; hash keys longer than 32 octets to a 32-byte Item ID. |
+
+The digest, key derivation, namespace binding, and application-level
+encryption are client-profile decisions. They MUST be stable within a profile;
+none of these modes adds a wire mode marker. `RawOrHash` is separate from the
+typed `PortableKey` conversion below and from the `RawBytes` value codec.
+For typed `PortableKey` inputs, `Hash` uses the namespace-bound derivation in
+§3. A byte-oriented `RawOrHash` profile MUST document the hash input and key
+material it selects.
+
+## 2. Key contract
 
 `PortableKey` is the v1 key-only subset of deterministic CBOR:
 `Integer`, `Text`, or `Bytes`. Native integers and safe integer-valued
 JavaScript `number` values map to `Integer`; all other types are rejected. This
-logical value is not the 32-byte Item ID and does not restrict value codecs.
+logical value is not the wire Item ID and does not restrict value codecs.
 
 ```text
 PortableKey = Integer | Text | Bytes
@@ -46,8 +67,8 @@ not key types. JSON, reflection, stringification, and implicit coercion MUST
 NOT be used.
 
 Key `Bytes` is a logical key type: it is CBOR-encoded and then included in the
-Item ID hash. It is not the `RawBytes` value codec and is not a raw 32-byte
-Item ID.
+Item ID hash. It is not the `RawBytes` value codec and is not a raw wire Item
+ID.
 
 The preferred shared C ABI accepts logical key bytes together with a generated
 `FfiKeySpec` discriminator through `openkache_client_execute_typed*`. The Rust
@@ -58,13 +79,14 @@ neutral bytes.
 The original
 `openkache_client_execute*` entry points remain a compatibility path for callers
 that already own one complete canonical CBOR key item. The ABI's exact-item-ID
-functions remain separate and continue to accept only a 32-byte `ItemId`.
+functions remain separate and continue to accept opaque protocol Item IDs
+directly.
 
-### 1.1 Language mapping
+### 2.1 Language mapping
 
 | Binding | `Text` | `Bytes` | `Integer` | Floating-point |
 |---|---|---|---|---|
-| JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §1.2; otherwise reject |
+| JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §2.2; otherwise reject |
 | Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
 | Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
 | C | logical UTF-8 bytes + `FfiKeySpec::Text` | logical bytes + `FfiKeySpec::Bytes` | canonical decimal bytes + `FfiKeySpec::Integer` | binary float types rejected |
@@ -79,7 +101,7 @@ All text bindings MUST reject strings that cannot encode to valid UTF-8,
 including unpaired surrogates. All byte bindings are length-delimited; C
 strings MUST NOT be used as a key representation.
 
-### 1.2 JavaScript number normalization
+### 2.2 JavaScript number normalization
 
 JavaScript `number` is the one v1 binding type that represents both integers
 and floating-point values. This algorithm is normative:
@@ -101,7 +123,7 @@ JavaScript number 1, JavaScript 1n -> Integer(1)
 JavaScript number 1.5, -0, NaN, Infinity, unsafe number -> rejected
 ```
 
-### 1.3 Canonical key bytes
+### 2.3 Canonical key bytes
 
 ```text
 canonical_key_bytes = deterministic_cbor(PortableKey)
@@ -144,7 +166,7 @@ f6                            // null
 60 00                         // trailing bytes
 ```
 
-## 2. Item ID derivation
+## 3. Item ID derivation
 
 `client_root_key` is an application-selected key of exactly 32 octets. It MAY
 be generated randomly or supplied directly. No text-to-key conversion is
@@ -180,7 +202,7 @@ The v1 Item ID has no separate version field. A profile that changes key
 identity or derivation material MUST use a distinct context and MUST NOT
 reinterpret v1 Item IDs. There is no v1 key-rotation protocol.
 
-## 3. Resource policy
+## 4. Resource policy
 
 Every v1 SDK MUST enforce:
 
@@ -193,7 +215,7 @@ The limit includes the CBOR header and bignum magnitude and excludes the
 Bindings MAY use a lower local limit, but all conforming SDKs share the 1 MiB
 interoperability limit.
 
-## 4. Item ID conformance vectors
+## 5. Item ID conformance vectors
 
 All values below are octets separated by spaces. Unless noted:
 
@@ -236,4 +258,6 @@ item_id =
   fc 52 2a 8d 33 0e 7b 4e 9e 30 9a 7d b5 cf b4 80
 ```
 
-The raw API bypasses this conversion and derivation entirely.
+Raw and `RawOrHash` APIs bypass the typed-key conversion and derivation above
+for the raw branch. The client still MUST enforce the protocol's `0..=32`
+Item ID limit after applying its selected mode.
