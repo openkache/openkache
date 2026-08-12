@@ -456,8 +456,7 @@ existing policy. A newly created namespace starts at revision `1`.
 Version 1 accepts only the `IfEmpty` wire value for compatibility. Deletion
 linearizes after in-flight namespace requests drain and removes the namespace
 identity. A concurrent request may receive `NamespaceNotEmpty` and retry the
-deletion. Namespace IDs are never reused, and physical purge of records from a
-retired namespace is outside this protocol.
+deletion. Namespace IDs are never reused.
 
 `revision` and `expected_revision` are fixed eight-octet `u64be` values, not
 `vu128` fields. A namespace revision is positive, starts at `1`, and increases
