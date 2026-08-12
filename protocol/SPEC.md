@@ -711,8 +711,8 @@ bind two `item_id` members and two `value` members:
 ```
 
 The server may issue the two storage reads concurrently, but the response
-always preserves the request order. The descriptor selects the shared
-`optional_values` layout, preserving the historical four-octet optional-value
+always preserves the request order. The descriptor selects an adapter-owned
+response projection, preserving the historical four-octet optional-value
 payload byte-for-byte:
 
 ```text

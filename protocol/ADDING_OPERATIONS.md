@@ -109,8 +109,8 @@ generic `requestWire` plan. Compatibility code may translate modeled fields
 into existing public types and error variants, but transport, framing, and
 server dispatch must not learn that vocabulary. The protocol-v1 four-byte
 big-endian length and `0xffffffff` missing sentinel are implemented once in
-the shared `optional_values` codec; the v1 module only re-exports it and adds
-typed convenience projections.
+the compatibility-only `optional_values` codec; the v1 module re-exports it
+and adds typed convenience projections.
 
 Only an operation that preserves an existing protocol-v1 client convenience
 surface should declare `compatibilityRequestProjection`. New operations omit
