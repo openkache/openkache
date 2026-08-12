@@ -4,8 +4,19 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "client_generator",
-    srcs = [
+    srcs = glob([
+        "generator/**",
+    ]) + [
+        "client_contract.ts",
+        "api_shape_renderers.ts",
         "generate.ts",
+        "generator_names.ts",
+        "generator_values.ts",
+        "compatibility_ffi_adapters.ts",
+        "compatibility_request_adapters.ts",
+        "compatibility_response_adapters.ts",
+        "compatibility_result_projections.ts",
+        "native_abi_renderers.ts",
         "operation_client_projection.ts",
         "operation_models.ts",
         "operation_plans.ts",
@@ -117,6 +128,7 @@ filegroup(
             "**/_generated/**",
             "**/smithy_api.go",
             "**/smithy_contract.go",
+            "**/smithy_operations.go",
         ],
     ) + [
         # This package facade is handwritten; generated Smithy modules in the
@@ -129,7 +141,7 @@ filegroup(
 # language-facing source surface without depending on package internals.
 alias(
     name = "client_language_sources",
-    actual = ":client_source_tree",
+    actual = ":language_client_sources",
 )
 
 filegroup(
