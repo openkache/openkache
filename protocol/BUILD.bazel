@@ -15,9 +15,23 @@ package(default_visibility = ["//visibility:public"])
 filegroup(
     name = "generator_inputs",
     srcs = [
+        "compat_v1_types.ts",
+        "compatibility_v1_renderer.ts",
         "generate.ts",
+        "compatibility_v1.ts",
+        "wire_descriptor.ts",
+        "wire/extract_contract.ts",
+        "wire/index.ts",
+        "wire/render_rust_contract.ts",
+        "wire/render_rust_server.ts",
+        "wire/validate_contract.ts",
         "wire.ts",
-    ] + glob(["model/**"]),
+        "wire_layout.ts",
+        "wire_spec.ts",
+        "wire_types.ts",
+    ] + glob([
+        "model/**",
+    ]),
 )
 
 filegroup(
@@ -26,8 +40,20 @@ filegroup(
         "Cargo.toml",
         "README.md",
         "build.rs",
+        "compat_v1_types.ts",
+        "compatibility_v1_renderer.ts",
         "generate.ts",
+        "compatibility_v1.ts",
+        "wire_descriptor.ts",
+        "wire/extract_contract.ts",
+        "wire/index.ts",
+        "wire/render_rust_contract.ts",
+        "wire/render_rust_server.ts",
+        "wire/validate_contract.ts",
         "wire.ts",
+        "wire_layout.ts",
+        "wire_spec.ts",
+        "wire_types.ts",
     ] + glob([
         "model/**",
         "src/**",
@@ -55,7 +81,14 @@ cargo_build_script(
 
 rust_library(
     name = "openkache_protocol",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/compat_v1.rs",
+        "src/codec.rs",
+        "src/lib.rs",
+        "src/layout.rs",
+        "src/request.rs",
+        "src/response.rs",
+    ],
     aliases = crate_aliases("protocol"),
     crate_name = "openkache_protocol",
     crate_root = "src/lib.rs",
