@@ -45,7 +45,7 @@ V1 provides two value codecs:
 | Codec | Meaning |
 |---|---|
 | `RawBytes` | Exact application bytes, including empty input and embedded `00` octets. |
-| CBOR | A CBOR value encoded under the selected v1 value-CBOR profile. |
+| `OpenKache CBOR Value v1` | One CBOR value subject to the v1 rules in §3.4. |
 
 `RawBytes` describes a value payload, not a key type or an Item ID.
 
@@ -155,7 +155,7 @@ profile. Numeric IDs are wire assignments, not a security ranking.
 ```text
 codec_payload =
     exact_application_bytes
-  | cbor_value
+  | openkache_cbor_value_v1
 
 transformed_body = protect(compress(codec_payload))
 ```
@@ -168,11 +168,44 @@ uncompressed, unprotected `RawBytes` value is exactly:
 01 00
 ```
 
-The CBOR codec is independent from the key codec. It MAY support CBOR values
-that are not valid keys, including containers, booleans, null, floating-point
-values, and application-approved tags. Its supported value types, canonicality
-requirements, and native conversion rules are value-codec requirements; they
+The value codec is independent from the key codec. Its native conversion rules
 are not inherited from [Key Format](KEY_FORMAT.md).
+
+### 3.4 OpenKache CBOR Value v1
+
+This is a value profile, not a deterministic or canonical CBOR profile. It
+defines which CBOR structures a decoder accepts; it does not require one
+byte representation for one logical value. Applications that require exact
+byte-for-byte reproducibility MUST use `RawBytes` or another explicitly
+defined codec.
+
+The CBOR codec payload MUST contain exactly one complete CBOR data item. A
+decoder MUST consume the entire payload. A CBOR sequence, a second item after
+the first item, or any other trailing bytes MUST be rejected.
+
+Only definite-length encodings are supported. Indefinite-length arrays and
+maps, and chunked indefinite-length byte strings and text strings, MUST be
+rejected. This keeps the value boundary explicit and permits bounded parsing
+without streaming or chunk-count rules.
+
+Integer values MAY use any valid CBOR integer encoding supported by the
+profile. Preferred integer serialization is not required, and a decoder MUST
+NOT reject a valid non-preferred integer encoding solely because it is
+non-preferred. Encoders SHOULD use compact preferred encodings when practical.
+Malformed encodings and reserved additional-information values remain invalid.
+
+Map order has no semantic meaning. Encoders MAY emit entries in any order, and
+decoders MUST accept any order. A map MUST NOT contain duplicate keys as
+determined by the decoded key values; a decoder that cannot determine key
+uniqueness MUST reject the map.
+
+CBOR text strings MUST contain well-formed UTF-8. Other character encodings
+are not text-string encodings in this profile and MUST be represented as CBOR
+byte strings, with their interpretation defined by the application.
+
+The base v1 profile assigns no application-specific CBOR tags. Unknown or
+unassigned tags MUST be rejected. Applications that need custom typed payloads
+MUST use `RawBytes` or another explicitly negotiated codec.
 
 ## 4. Compression
 
