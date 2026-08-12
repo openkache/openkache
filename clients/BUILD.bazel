@@ -140,7 +140,7 @@ filegroup(
 # language-facing source surface without depending on package internals.
 alias(
     name = "client_language_sources",
-    actual = ":client_source_tree",
+    actual = ":language_client_sources",
 )
 
 filegroup(
