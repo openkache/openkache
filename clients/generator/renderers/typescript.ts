@@ -592,6 +592,7 @@ export interface Smithy_Operation_Request {
 
 export interface Smithy_Operation_Result {
   readonly kind: number
+  readonly status: number
   readonly payload: Uint8Array
 }
 

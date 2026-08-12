@@ -45,6 +45,7 @@ export type Native_Namespace_Open_Output = Smithy_Namespace_Open_Output
 
 export interface Native_Operation_Result {
   readonly kind: number
+  readonly status: number
   readonly payload: Uint8Array
 }
 
