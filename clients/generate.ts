@@ -355,6 +355,7 @@ type Generation_Target =
   | "dart"
   | "dotnet"
   | "go"
+  | "go-contract"
   | "java"
   | "kotlin"
   | "python"
@@ -378,6 +379,8 @@ function generation_target(value: string | undefined): Generation_Target {
       return "dotnet"
     case "go":
       return "go"
+    case "go-contract":
+      return "go-contract"
     case "java":
       return "java"
     case "kotlin":
@@ -506,6 +509,11 @@ function expected_outputs(
         [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
         [GENERATED_OUTPUTS.go_operations]: format_go_source(render_go_operations(contract)),
         [GENERATED_OUTPUTS.go_native_abi]: render_go_native_abi(contract),
+      }
+    case "go-contract":
+      return {
+        [GENERATED_OUTPUTS.go_api]: format_go_source(render_go_api(contract)),
+        [GENERATED_OUTPUTS.go_contract]: format_go_source(render_go_contract(contract)),
       }
     case "java":
       return {

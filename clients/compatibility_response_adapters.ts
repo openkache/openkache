@@ -23,6 +23,7 @@ export type Compatibility_Response_Adapter_Route =
   | "value"
   | "set_outcome"
   | "delete_outcome"
+  | "namespace_delete"
   | "stats_json"
   | "namespace_descriptor"
 
@@ -158,12 +159,19 @@ export const COMPATIBILITY_RESPONSE_ADAPTERS: Readonly<
         ? "not_deleted"
         : undefined,
     route: "delete_outcome",
-    // Namespace delete uses a dedicated protocol-v1 call and only accepts
-    // the generic `ok` result in generated clients.
     supports: (context) =>
       context.response_framing === "empty" &&
       context.request_adapter_route !== undefined &&
       context.request_adapter_route !== "namespace_delete",
+  },
+  namespace_delete: {
+    projection: "empty",
+    result_kinds: ["ok"],
+    result_kind_for_status: (status) => status === "deleted" ? "ok" : undefined,
+    route: "namespace_delete",
+    supports: (context) =>
+      context.response_framing === "empty" &&
+      context.request_adapter_route === "namespace_delete",
   },
   stats_json: {
     projection: "text_payload",
@@ -204,6 +212,10 @@ export function compatibility_response_adapter(
   response_semantics: string | undefined,
   context: Compatibility_Response_Adapter_Context,
 ): Compatibility_Response_Adapter | undefined {
+  if (context.request_adapter_route === "namespace_delete") {
+    const adapter = COMPATIBILITY_RESPONSE_ADAPTERS.namespace_delete
+    return adapter.supports(context) ? adapter : undefined
+  }
   if (response_semantics === undefined) return undefined
   const adapter = COMPATIBILITY_RESPONSE_ADAPTERS[response_semantics]
   return adapter !== undefined && adapter.supports(context) ? adapter : undefined
