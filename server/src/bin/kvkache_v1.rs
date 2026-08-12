@@ -4,8 +4,8 @@
 
 use std::error::Error;
 
+use openkache::ItemId;
 use openkache::{AppConfig, Command, KvError, ThreadedKvkache};
-use openkache_protocol::ItemId;
 use sha2::{Digest, Sha256};
 
 fn item_id(application_key: &[u8]) -> ItemId {

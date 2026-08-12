@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::{FutureExt, pin_mut, select};
-use openkache_protocol::{ItemId, SetOptions};
+use openkache_protocol::Opcode;
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -19,6 +19,7 @@ use crate::observability::{
     NetworkShard, NetworkWorkerId, ObservabilityService, ObservabilityState, Operation,
 };
 use crate::platform::StorageDeviceKind;
+use crate::protocol::{ItemId, SetOptions};
 use crate::server::{
     NetworkRolePlacement, NetworkWorkerCompletion, NetworkWorkerReporter, Result, ServerError,
     launch_network_role, shutdown_network_workers_and_cache,
@@ -299,7 +300,7 @@ async fn run_resp_role(
     Some(
         run_resp_worker(
             listener,
-            &cache,
+            Arc::clone(&cache),
             worker_id,
             observability,
             request_timeout,
@@ -337,7 +338,7 @@ fn bind_reuse_port_tcp_listeners(
 
 async fn run_resp_worker(
     listener: TcpListener,
-    cache: &ThreadedKvkache,
+    cache: Arc<ThreadedKvkache>,
     worker_id: usize,
     observability: Arc<ObservabilityState>,
     request_timeout: Duration,
@@ -392,7 +393,7 @@ async fn run_resp_worker(
 
 async fn serve_resp_connection(
     mut stream: TcpStream,
-    cache: &NetworkWorkerCache<'_>,
+    cache: &NetworkWorkerCache,
     network_shard: NetworkShard<'_>,
     request_timeout: Duration,
 ) -> std::io::Result<()> {
@@ -503,14 +504,63 @@ async fn write_with_timeout(
 }
 
 pub(crate) fn operation_for_command(command: &[&[u8]]) -> Operation {
-    match command.first() {
-        Some(name) if name.eq_ignore_ascii_case(b"PING") => Operation::Ping,
-        Some(name) if name.eq_ignore_ascii_case(b"GET") => Operation::Get,
-        Some(name) if name.eq_ignore_ascii_case(b"SET") => Operation::Set,
-        Some(name) if name.eq_ignore_ascii_case(b"DEL") => Operation::Delete,
-        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") => Operation::Stats,
-        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") => Operation::Sync,
-        _ => Operation::Unknown,
+    match classify_command(command) {
+        RespCommandKind::Ping => Operation::from_opcode(Opcode::Ping),
+        RespCommandKind::Get => Operation::from_opcode(Opcode::Get),
+        RespCommandKind::Set => Operation::from_opcode(Opcode::Set),
+        RespCommandKind::Delete => Operation::from_opcode(Opcode::Delete),
+        RespCommandKind::Stats => Operation::from_opcode(Opcode::Stats),
+        RespCommandKind::Sync => Operation::from_opcode(Opcode::Sync),
+        RespCommandKind::Select
+        | RespCommandKind::Client
+        | RespCommandKind::Quit
+        | RespCommandKind::Unknown
+        | RespCommandKind::Empty => Operation::unknown(),
+    }
+}
+
+/// RESP command names are a compatibility adapter concern. Classifying them
+/// once keeps telemetry and execution on the same small registry instead of
+/// repeating case-insensitive command branches in both paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RespCommandKind {
+    Ping,
+    Get,
+    Set,
+    Delete,
+    Stats,
+    Sync,
+    Select,
+    Client,
+    Quit,
+    Unknown,
+    Empty,
+}
+
+fn classify_command(command: &[&[u8]]) -> RespCommandKind {
+    let Some(name) = command.first() else {
+        return RespCommandKind::Empty;
+    };
+    if name.eq_ignore_ascii_case(b"PING") {
+        RespCommandKind::Ping
+    } else if name.eq_ignore_ascii_case(b"GET") {
+        RespCommandKind::Get
+    } else if name.eq_ignore_ascii_case(b"SET") {
+        RespCommandKind::Set
+    } else if name.eq_ignore_ascii_case(b"DEL") {
+        RespCommandKind::Delete
+    } else if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") {
+        RespCommandKind::Stats
+    } else if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") {
+        RespCommandKind::Sync
+    } else if name.eq_ignore_ascii_case(b"SELECT") {
+        RespCommandKind::Select
+    } else if name.eq_ignore_ascii_case(b"CLIENT") {
+        RespCommandKind::Client
+    } else if name.eq_ignore_ascii_case(b"QUIT") {
+        RespCommandKind::Quit
+    } else {
+        RespCommandKind::Unknown
     }
 }
 
@@ -522,7 +572,7 @@ pub(crate) fn status_for_resp_response(
         return openkache_protocol::Status::Ok;
     }
     if response.starts_with(b"$-1\r\n") {
-        return if operation == Operation::Set {
+        return if operation == Operation::from_opcode(Opcode::Set) {
             openkache_protocol::Status::NotStored
         } else {
             openkache_protocol::Status::NotFound
@@ -532,7 +582,7 @@ pub(crate) fn status_for_resp_response(
         return openkache_protocol::Status::Ok;
     }
     if response.starts_with(b":") {
-        return if operation == Operation::Delete {
+        return if operation == Operation::from_opcode(Opcode::Delete) {
             if response.starts_with(b":0\r\n") {
                 openkache_protocol::Status::NotFound
             } else {
@@ -543,7 +593,7 @@ pub(crate) fn status_for_resp_response(
         };
     }
     if response.starts_with(b"-ERR") {
-        return if operation == Operation::Unknown {
+        return if operation == Operation::unknown() {
             openkache_protocol::Status::UnsupportedOpcode
         } else {
             openkache_protocol::Status::InternalError
@@ -553,13 +603,13 @@ pub(crate) fn status_for_resp_response(
 }
 
 async fn execute_command(
-    cache: &NetworkWorkerCache<'_>,
+    cache: &NetworkWorkerCache,
     command: &[&[u8]],
     response: &mut Vec<u8>,
 ) -> bool {
-    match command.first() {
-        Some(name) if name.eq_ignore_ascii_case(b"PING") => simple(response, "PONG"),
-        Some(name) if name.eq_ignore_ascii_case(b"GET") => match command {
+    match classify_command(command) {
+        RespCommandKind::Ping => simple(response, "PONG"),
+        RespCommandKind::Get => match command {
             [_, application_key] => match cache.get_stored(resp_item_id(application_key)).await {
                 Ok(Some(value)) => bulk(response, Some(&value.bytes)),
                 Ok(None) => bulk(response, None),
@@ -567,7 +617,7 @@ async fn execute_command(
             },
             _ => error(response, "wrong number of arguments for GET"),
         },
-        Some(name) if name.eq_ignore_ascii_case(b"SET") => match command {
+        RespCommandKind::Set => match command {
             [_, application_key, value] => match cache
                 .set_with_options(
                     resp_item_id(application_key),
@@ -582,7 +632,7 @@ async fn execute_command(
             },
             _ => error(response, "SET options are not supported"),
         },
-        Some(name) if name.eq_ignore_ascii_case(b"DEL") => {
+        RespCommandKind::Delete => {
             if command.len() < 2 {
                 error(response, "wrong number of arguments for DEL");
             } else {
@@ -600,7 +650,7 @@ async fn execute_command(
                 integer(response, deleted);
             }
         }
-        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.STATS") => match command {
+        RespCommandKind::Stats => match command {
             [_] => match cache.stats().await {
                 Ok(stats) => {
                     let stats = stats.join("\n");
@@ -610,24 +660,22 @@ async fn execute_command(
             },
             _ => error(response, "wrong number of arguments for OPENKACHE.STATS"),
         },
-        Some(name) if name.eq_ignore_ascii_case(b"OPENKACHE.SYNC") => match command {
+        RespCommandKind::Sync => match command {
             [_] => match cache.sync().await {
                 Ok(()) => simple(response, "OK"),
                 Err(cache_error) => resp_cache_error(response, cache_error),
             },
             _ => error(response, "wrong number of arguments for OPENKACHE.SYNC"),
         },
-        Some(name)
-            if name.eq_ignore_ascii_case(b"SELECT") || name.eq_ignore_ascii_case(b"CLIENT") =>
-        {
+        RespCommandKind::Select | RespCommandKind::Client => {
             simple(response, "OK");
         }
-        Some(name) if name.eq_ignore_ascii_case(b"QUIT") => {
+        RespCommandKind::Quit => {
             simple(response, "OK");
             return true;
         }
-        Some(_) => error(response, "unsupported command"),
-        None => error(response, "empty command"),
+        RespCommandKind::Unknown => error(response, "unsupported command"),
+        RespCommandKind::Empty => error(response, "empty command"),
     }
     false
 }
