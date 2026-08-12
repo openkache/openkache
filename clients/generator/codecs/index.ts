@@ -1,0 +1,16 @@
+/** Stable public surface for shared codec planning and rendering. */
+
+export * from "./contract"
+export * from "./registry"
+export * from "./shapes"
+export * from "./framing"
+export * from "./composite"
+export * from "./renderers/java"
+export * from "./renderers/kotlin"
+export * from "./renderers/dart"
+export * from "./renderers/typescript"
+export * from "./renderers/python"
+export * from "./renderers/swift"
+export * from "./renderers/dotnet"
+export * from "./renderers/go"
+export * from "./renderers/rust"
