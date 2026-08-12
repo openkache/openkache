@@ -2,10 +2,12 @@
 
 ## Status
 
-This document is the normative specification for OpenKache wire protocol
-version 1. An implementation conforms to version 1 only when its transport,
-framing, validation, operation behavior, and outcome rules satisfy this
-document.
+This document is the draft design specification for OpenKache wire protocol
+version 1. Version 1 has not been released or finalized. The requirements
+below describe the current intended wire contract and may change before
+finalization. Within this draft, an implementation conforms only when its
+transport, framing, validation, operation behavior, and outcome rules satisfy
+this document.
 
 Client-owned formatted values are specified separately by the
 [OpenKache value format](../clients/VALUE_FORMAT.md).
@@ -33,11 +35,13 @@ Version 1 specifies:
 
 Client-side application-key derivation, serialization, compression,
 application-level encryption, and value containers are outside this protocol
-and belong to the value-format specification. Storage layout and the namespace
-eviction algorithm are outside this protocol. Item expiration and eviction
-eligibility are part of the `SET` contract below. Namespace lifecycle and
-policy administration are carried by the namespace-management requests defined
-below.
+and belong to the value-format specification. The physical storage layout and
+the namespace eviction algorithm are outside the wire encoding. The identity
+boundary between the wire Item ID, internal routing, and the persisted record
+key is specified below because it constrains observable cache semantics. Item
+expiration and eviction eligibility are part of the `SET` contract below.
+Namespace lifecycle and policy administration are carried by the
+namespace-management requests defined below.
 
 ## Terminology
 
@@ -45,7 +49,10 @@ below.
 - **Connection**: One QUIC connection negotiated for OpenKache protocol v1.
 - **Lane**: One client-initiated bidirectional QUIC stream.
 - **Frame**: One complete request or response encoded as specified below.
-- **Item ID**: The exact 32-octet identifier used for cache equality.
+- **Item ID**: An opaque `0..=32`-octet identifier used for cache equality.
+- **RouteFingerprint**: A server-internal routing token derived from a
+  namespace ID and an Item ID. It is not a wire field, cache identity, or
+  persisted record key.
 - **Account**: A deployment-defined authenticated identity. Version 1 does not
   make an account the owner or scope of a namespace.
 - **Namespace**: A named server-wide collection of Item IDs with default
@@ -229,7 +236,7 @@ the canonical encoding.
 |---|---:|
 | Namespace ID | exactly 8 octets; numeric value `1..=2^64 - 1` |
 | Namespace name | `0..=255` UTF-8 octets; zero is a valid empty name |
-| Item ID | exactly 32 octets when present |
+| Item ID | `0..=32` octets when present |
 | `SET` request value | `0..=67,108,864` octets |
 | Response payload | `0..=67,108,864` octets |
 | `vu128` integer | `0..=2^64 - 1` |
@@ -240,11 +247,12 @@ smaller operational item limit. A request within the wire ceiling but above
 the server limit receives `TooLarge`, and the server MUST reject it before
 applying a mutation.
 
-The largest valid `SET` request is 67,108,924 octets: an opcode, an
-eight-octet `namespace_id`, one flags octet, a 32-octet Item ID, a nine-octet
-TTL, a nine-octet maximum `value_len`, and a 64 MiB value. The largest valid
-`NAMESPACE_OPEN` request is 268 octets: an opcode, two flag/length octets, a
-255-octet name, and a ten-octet maximum namespace policy. The
+The largest valid `SET` request is 67,108,925 octets: an opcode, an
+eight-octet `namespace_id`, one flags octet, one `key_len` octet, up to
+32 Item ID octets, a nine-octet maximum `value_len`, a nine-octet TTL, and a
+64 MiB value. The largest valid `NAMESPACE_OPEN` request is 268 octets: an
+opcode, two flag/length octets, a 255-octet name, and a ten-octet maximum
+namespace policy. The
 `MAX_REQUEST_FRAME_BYTES` receive limit is the larger of those operation
 limits. The largest valid response is 67,108,874 octets: one status octet, a
 nine-octet maximum `payload_len`, and a 64 MiB payload.
@@ -252,18 +260,22 @@ nine-octet maximum `payload_len`, and a 64 MiB payload.
 ## Request frames
 
 The request layout is selected by `opcode`. There is no common request
-`flags`, `item_id_len`, or `value_len` field.
+`flags` or `value_len` field. Operations that carry an Item ID include a
+one-octet `key_len` that determines the Item ID byte count.
 
 ```text
 request = ping | get | set | delete | stats | sync |
           namespace_open | namespace_update_policy | namespace_delete
 
 ping                     = opcode:01
-get                      = opcode:02 | namespace_id:u64be | item_id:32
+get                      = opcode:02 | namespace_id:u64be |
+                           key_len:u8 | item_id:key_len
 set                      = opcode:03 | namespace_id:u64be | set_flags:u8 |
-                           item_id:32 | [ttl_ms:vu128] |
-                           value_len:vu128 | value:value_len
-delete                   = opcode:04 | namespace_id:u64be | item_id:32
+                           key_len:u8 | value_len:vu128 |
+                           [ttl_ms:vu128] | item_id:key_len |
+                           value:value_len
+delete                   = opcode:04 | namespace_id:u64be |
+                           key_len:u8 | item_id:key_len
 stats                    = opcode:05 | namespace_id:u64be
 sync                     = opcode:06 | namespace_id:u64be
 namespace_open           = opcode:07 | open_flags:u8 | name_len:u8 |
@@ -274,14 +286,18 @@ namespace_delete         = opcode:09 | delete_flags:u8 | namespace_id:u64be |
                            expected_revision:u64be
 ```
 
+`key_len` appears in `GET`, `SET`, and `DELETE`. It is one fixed octet with a
+value from `0` through `32`, including zero for the valid empty Item ID.
 `value_len` appears only in `SET`, including when the value is empty. It is
-encoded immediately before the value, after the fixed Item ID and optional TTL.
-A receiver can therefore reject an oversized value before allocating or
-reading any value body after reading only the bounded request metadata.
+encoded immediately after `key_len`; the optional TTL follows `value_len`, and
+the Item ID bytes follow the optional TTL. A receiver can therefore reject an
+oversized value before allocating or reading any Item ID or value body after
+reading only the bounded request metadata.
 `namespace_id` is present in every namespace-scoped request and is always
-encoded before the operation-specific fields. The Item ID is always exactly 32
-octets for operations that carry one. Namespace-management requests use the
-fixed-width `name_len:u8` and `expected_revision:u64be` fields defined below.
+encoded before the operation-specific fields. Operations that carry an Item ID
+encode its `key_len` and then exactly that many Item ID octets. Namespace-
+management requests use the fixed-width `name_len:u8` and
+`expected_revision:u64be` fields defined below.
 
 `u64be` means one fixed eight-octet unsigned integer in network byte order
 (most-significant octet first). It is not a `vu128` field and has no alternate
@@ -426,8 +442,8 @@ empty-name namespace, may be deleted once no request is using it.
 Recreating a deleted name, if allowed by the deployment, creates a new
 namespace identity and therefore receives a new `namespace_id`.
 
-An item is identified by the pair `(namespace_id, item_id)`. The same 32-octet
-Item ID in two namespaces denotes two independent items.
+An item is identified by the pair `(namespace_id, item_id)`. The same Item ID
+bytes and length in two namespaces denote two independent items.
 
 ### Namespace management flags and revisions
 
@@ -609,15 +625,48 @@ that must retain protection MUST request `EvictionProtected` explicitly.
 
 ### Item ID
 
-An Item ID is exactly 32 opaque octets. Every 32-octet sequence is a valid Item
-ID, including an all-zero sequence. The wire protocol does not define an
-application key, an application-key validity rule, or how an application key
-becomes an Item ID. Clients may use raw 32-octet identifiers, a digest, a keyed
-derivation, or another application policy.
+An Item ID is `0..=32` opaque octets. Every length in that range is valid,
+including the empty Item ID and an all-zero Item ID. The wire protocol does not
+define an application key, an application-key validity rule, or a hash
+algorithm. The `key_len:u8` field carries the Item ID length in `GET`, `SET`,
+and `DELETE`, and the following bytes are the complete Item ID.
 
-Servers MUST compare Item IDs by their complete 32-octet identity. `PING`,
-`STATS`, and `SYNC` carry no Item ID. `GET`, `SET`, and `DELETE` carry exactly
-32 Item ID octets after their namespace ID.
+Servers MUST compare Item IDs by their complete byte sequence and length.
+`PING`, `STATS`, and `SYNC` carry no Item ID. The namespace and Item ID pair is
+the cache identity; an Item ID is not a server-generated identifier.
+
+Key mode is a client concept and has no wire or server field. A client MAY
+offer a `RawOrHash` policy for application keys:
+
+- an application key of `0..=32` octets, including exactly 32 octets, is sent
+  as the same raw Item ID;
+- an application key longer than 32 octets is hashed to a 32-octet Item ID.
+
+The digest choice, key derivation, and any application-level encryption remain
+client policy. The server sees only the resulting opaque Item ID and MUST NOT
+infer which client policy produced it.
+
+### Routing and storage identity
+
+The wire Item ID is also the persisted record identity within the storage
+scope for its namespace. A record is conceptually encoded as:
+
+```text
+key_len:u8 | item_id:key_len | metadata | value_or_reference
+```
+
+`metadata` contains the resolved item policy and any storage metadata required
+by the implementation. `value_or_reference` is either the value bytes or an
+implementation-defined reference to them. The record key is the
+length-prefixed Item ID; no additional derived storage key is introduced.
+
+For worker, table, or bucket selection, a server MAY derive a
+`RouteFingerprint` from the namespace ID and the complete Item ID. The
+fingerprint is internal routing state only: it MUST NOT appear on the wire or
+be persisted in an SSD record. Its algorithm and width are implementation
+choices. A fingerprint collision MUST be resolved by comparing the complete
+namespace ID and Item ID, so a collision can never make two distinct items
+equal.
 
 ### Value
 
@@ -636,10 +685,10 @@ the item was subsequently replaced, deleted, expired, or evicted.
 ### TTL
 
 `ttl_ms` exists only when the `SET` expiration-policy bits select
-`ExplicitTtl`. It follows the complete 32-octet Item ID and precedes
-`value_len`. It is a canonical unsigned `vu128` count of milliseconds. A
-`NoExpiry` or `Inherit` selection has no TTL field; an inherited fixed TTL comes
-from the namespace policy.
+`ExplicitTtl`. It follows `value_len` and precedes the Item ID bytes. It is a
+canonical unsigned `vu128` count of milliseconds. A `NoExpiry` or `Inherit`
+selection has no TTL field; an inherited fixed TTL comes from the namespace
+policy.
 
 Zero is invalid. A server MUST reject a TTL that cannot be converted into its
 supported monotonic absolute-time range. For `ExplicitTtl`, the TTL deadline is
@@ -728,7 +777,8 @@ corresponding sentinel.
 
 ### `GET`
 
-`GET` has the request layout `02 | namespace_id:u64be | item_id:32`.
+`GET` has the request layout
+`02 | namespace_id:u64be | key_len:u8 | item_id:key_len`.
 
 - Found: `Ok` with the exact opaque value as payload.
 - Missing, expired, deleted, or evicted: `NotFound` with an empty payload.
@@ -736,7 +786,8 @@ corresponding sentinel.
 ### `SET`
 
 `SET` has the request layout
-`03 | namespace_id:u64be | set_flags | item_id | [ttl_ms] | value_len | value`.
+`03 | namespace_id:u64be | set_flags | key_len | value_len | [ttl_ms] |
+item_id | value`.
 
 - Stored over no live item: `Created` with an empty payload.
 - Stored over a live item: `Replaced` with an empty payload.
@@ -750,7 +801,8 @@ Item ID.
 
 ### `DELETE`
 
-`DELETE` has the request layout `04 | namespace_id:u64be | item_id:32`.
+`DELETE` has the request layout
+`04 | namespace_id:u64be | key_len:u8 | item_id:key_len`.
 
 - Live item removed: `Deleted` with an empty payload.
 - Missing, expired, already deleted, or evicted: `NotFound` with an empty
@@ -1044,15 +1096,16 @@ A conforming receiver MUST validate, in order where practical:
    namespace-scoped requests;
 3. the numeric namespace ID range;
 4. fixed-width namespace flags, name length, and revision fields;
-5. complete and canonical `vu128` fields;
-6. the presence and value of operation flags;
-7. field-specific length and UTF-8 limits;
-8. the operation-specific fixed layout;
-9. the complete 32-octet Item ID when present;
-10. TTL presence, canonical encoding, and positive value;
-11. namespace-policy encoding and item-policy override rules;
-12. the exact remaining `SET` value length;
-13. the response status/payload combination.
+5. `key_len` presence and the `0..=32` Item ID length limit;
+6. complete and canonical `vu128` fields;
+7. the presence and value of operation flags;
+8. field-specific length and UTF-8 limits;
+9. the operation-specific layout;
+10. exactly `key_len` Item ID octets when present;
+11. TTL presence, canonical encoding, and positive value;
+12. namespace-policy encoding and item-policy override rules;
+13. the exact remaining `SET` value length;
+14. the response status/payload combination.
 
 For a request, a receiver parses the following prefix before reading a `SET`
 value body:
@@ -1061,9 +1114,10 @@ value body:
 opcode
 [namespace_id:u64be]
 [set_flags]
-[item_id]
+[key_len]
+value_len
 [ttl_ms]
-[value_len]
+item_id:key_len
 ```
 
 For namespace-management requests, the bounded prefix is:
@@ -1077,10 +1131,12 @@ NAMESPACE_DELETE:
     opcode | delete_flags | namespace_id | expected_revision
 ```
 
-The brackets indicate fields present only for `SET` or
-`NAMESPACE_OPEN` with `CreateIfMissing`. The namespace ID and revision occupy
-eight octets whenever present. `name_len = 0` is a valid empty name; every
-name must satisfy the UTF-8 and name rules above.
+The first prefix is the `SET` prefix; `GET` and `DELETE` use
+`opcode | namespace_id | key_len | item_id:key_len` and have no value body.
+The brackets indicate fields present only for `SET` or `NAMESPACE_OPEN` with
+`CreateIfMissing`. The namespace ID and revision occupy eight octets whenever
+present. `name_len = 0` is a valid empty name; every name must satisfy the
+UTF-8 and name rules above.
 
 A receiver MUST enforce the 64 MiB value ceiling and any smaller server limit
 before allocating or reading the value body. A declared value above either
@@ -1197,7 +1253,7 @@ This is `Ok`, `payload_len = 4`, and ASCII `PONG`.
 For namespace ID `7` and an Item ID containing 32 `AA` octets:
 
 ```text
-02 00 00 00 00 00 00 00 07 [AA × 32]
+02 00 00 00 00 00 00 00 07 20 [AA × 32]
 ```
 
 A miss response is:
@@ -1208,20 +1264,20 @@ A miss response is:
 
 ### Conditional `SET` with TTL
 
-For namespace ID `7`, an Item ID containing 32 `11` octets, `IfAbsent`, an
-explicit 5,000 millisecond TTL, `EvictionProtected`, and the ASCII value
-`value`:
+For namespace ID `7`, a three-octet Item ID `11 22 33`, `IfAbsent`, an explicit
+5,000 millisecond TTL, `EvictionProtected`, and the ASCII value `value`:
 
 ```text
-03 00 00 00 00 00 00 00 07 29 [11 × 32] 88 4E 05 76 61 6C 75 65
+03 00 00 00 00 00 00 00 07 29 03 05 88 4E 11 22 33 76 61 6C 75 65
 ```
 
 - `03`: `SET`
 - `00 00 00 00 00 00 00 07`: namespace ID 7 (`u64be`)
 - `29`: `IfAbsent` + `ExplicitTtl` + `EvictionProtected`
-- `[11 × 32]`: exact 32-octet Item ID
+- `03`: three-octet Item ID length
+- `05`: five-octet value length
 - `88 4E`: canonical `vu128` encoding of 5,000
-- `05`: five-octet value
+- `11 22 33`: exact three-octet Item ID
 
 A created response is:
 
@@ -1231,19 +1287,19 @@ A created response is:
 
 ### Unconditional empty `SET`
 
-For namespace ID `7` and an Item ID containing 32 `22` octets:
+For namespace ID `7`, an empty Item ID, and an empty value:
 
 ```text
-03 00 00 00 00 00 00 00 07 00 [22 × 32] 00
+03 00 00 00 00 00 00 00 07 00 00 00
 ```
 
-This is an unconditional `SET` inheriting both namespace policies, with no TTL
-field and an empty value.
+This is an unconditional `SET` inheriting both namespace policies, with
+`key_len = 0`, no TTL field, and `value_len = 0`.
 
 ### `DELETE`, `STATS`, and `SYNC`
 
 ```text
-04 00 00 00 00 00 00 00 07 [item_id × 32]  # DELETE
+04 00 00 00 00 00 00 00 07 03 11 22 33     # DELETE
 05 00 00 00 00 00 00 00 07                 # STATS
 06 00 00 00 00 00 00 00 07                 # SYNC
 ```
@@ -1306,14 +1362,20 @@ A protocol v1 implementation is not complete unless it:
   including after namespace deletion;
 - encodes namespace policies and descriptors exactly as specified;
 - accepts only `IfEmpty` for the v1 namespace-delete flags;
-- omits `item_id_len` from every request;
+- includes `key_len` in every `GET`, `SET`, and `DELETE` request;
+- accepts empty Item IDs and enforces the `0..=32` Item ID length ceiling;
+- places `SET` `value_len` immediately after `key_len`, followed by the
+  optional TTL and then the Item ID bytes;
 - includes `value_len` only in `SET`;
 - validates operation-specific flags for `SET`, `NAMESPACE_OPEN`, and
   `NAMESPACE_DELETE`;
 - encodes `Any`/`IfAbsent`/`IfPresent`, `ExpirationMode`, and `EvictionMode` as
   specified in the `SET` flags;
 - rejects non-canonical, truncated, wider-than-`u64`, and overflowing `vu128`;
-- validates the fixed 32-octet Item ID shape;
+- compares complete Item ID byte sequences and lengths;
+- persists the length-prefixed Item ID as the record key;
+- keeps `RouteFingerprint` internal, does not persist it, and resolves
+  fingerprint collisions by comparing the complete namespace ID and Item ID;
 - validates expiration-mode/TTL correspondence before reading a large
   value;
 - computes TTL from the mutation linearization point using a monotonic clock;
