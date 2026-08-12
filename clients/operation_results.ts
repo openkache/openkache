@@ -10,7 +10,12 @@ import {
 export type Operation_Result_Kind = string
 
 /** Generic response transport primitives shared by all generated clients. */
-export type Operation_Response_Transport = "empty" | "opaque" | "field_sequence"
+export type Operation_Response_Transport =
+  | "empty"
+  | "opaque"
+  | "optional_values"
+  | "field_sequence"
+  | "adapter_owned"
 
 /** Generic response transport plan shared by every language renderer. */
 export interface Operation_Result_Plan {
@@ -31,8 +36,14 @@ function operation_response_transport(
     case "opaque":
       return "opaque"
     case "optional_values":
+      return "optional_values"
     case "field_sequence":
       return "field_sequence"
+    default:
+      // The generic client plan preserves the fact that a non-generic
+      // response needs an adapter. It does not guess whether that adapter is
+      // a historical sentinel table, a tagged envelope, or a future format.
+      return "adapter_owned"
   }
 }
 

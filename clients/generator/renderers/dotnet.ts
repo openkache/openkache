@@ -8,6 +8,10 @@ import { encode_vu128 } from "../../generator_values"
 import { operation_field_count } from "../../operation_plans"
 import type { Operation_Result_Kind } from "../../compatibility_result_projections"
 import {
+  operation_uses_optional_value_layout,
+  optional_value_framing,
+} from "../../compatibility_response_framing"
+import {
   bytes_from_hex,
   formatted_byte,
   formatted_decimal,
@@ -40,8 +44,6 @@ import {
   operation_uses_compact_request_route,
   operation_uses_field_sequence_helpers,
   operation_uses_item_id_helpers,
-  operation_uses_optional_value_layout,
-  optional_value_framing,
   render_application_value_codec,
   render_composite_field_decode,
   render_composite_output,
@@ -497,14 +499,12 @@ function render_csharp_operation_method_body(
           "csharp",
           output_decoded_values,
         )
-        const response_values = operation.plan.contract.response_framing === "field_sequence"
-          ? render_field_sequence_response_decode(
-            "csharp",
-            operation,
-            "result.Payload",
-            `"${label}"`,
-          )
-          : `DecodeOptionalValues(result.Payload, ${operation_composite_value_count(operation)}, "${label}")`
+        const response_values = render_field_sequence_response_decode(
+          "csharp",
+          operation,
+          "result.Payload",
+          `"${label}"`,
+        )
         const invocation = render_expression_generic_invocation(
           "csharp",
           operation,

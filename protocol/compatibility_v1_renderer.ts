@@ -1,10 +1,10 @@
 /** Rust rendering for the historical protocol-v1 compatibility projection. */
 
-import type {
-  Wire_Contract,
-  Wire_Operation,
-  Wire_Operation_Field_Plan,
-} from "./wire_types"
+import type { Wire_Compatibility_Contract } from "./compatibility_v1"
+import type { Wire_Operation } from "./wire_types"
+import { fixed_field_width } from "./wire_layout"
+import { OPTIONAL_VALUES_RESPONSE_FRAMING } from "./compatibility_v1"
+import { optional_values_encoded_len_from_lengths } from "./compatibility_v1_layout"
 
 const PROTOCOL_V1_REQUEST_PROJECTION_EXTENSION =
   "openkache.protocol#operationContract.compatibilityRequestProjection"
@@ -80,7 +80,7 @@ function compatibility_request_projection(
  * limits without teaching generic framing about a legacy route.
  */
 export function compatibility_request_frame_bound(
-  contract: Wire_Contract,
+  contract: Wire_Compatibility_Contract,
 ): number {
   const operations = contract.operations?.filter(
     (operation) => compatibility_request_projection(operation) !== undefined,
@@ -128,7 +128,9 @@ export function compatibility_request_frame_bound(
  * @param contract - Validated Smithy wire contract containing protocol-v1 values.
  * @returns Rust source for the protocol-v1 semantic constants.
  */
-export function render_rust_semantic_constants(contract: Wire_Contract): string {
+export function render_rust_semantic_constants(
+  contract: Wire_Compatibility_Contract,
+): string {
   const v1 = contract.v1
   return `/// Maximum UTF-8 octets accepted in a namespace name.
 pub const NAMESPACE_NAME_MAX_BYTES: usize = ${formatted_decimal(v1.namespace_name_max_bytes)};
@@ -176,6 +178,90 @@ pub const POLICY_RESERVED_MASK: u8 = ${formatted_byte(v1.policy_reserved_mask)};
 `
 }
 
+/** Renders the historical optional-value constants owned by this adapter. */
+function render_rust_optional_value_constants(
+  contract: Wire_Compatibility_Contract,
+): string {
+  const length_bytes = contract.v1.optional_value_length_bytes ?? 4
+  const missing_sentinel = contract.v1.optional_value_missing ?? 0xffff_ffff
+  return `/// Width of each entry length in the historical protocol-v1
+/// optional-value response projection.
+pub const OPTIONAL_VALUE_LENGTH_BYTES: usize = ${formatted_decimal(length_bytes)};
+/// Missing-value sentinel used by the historical protocol-v1 response
+/// projection.
+pub const OPTIONAL_VALUE_MISSING: u32 = ${formatted_decimal(missing_sentinel)};
+`
+}
+
+function compatibility_response_budget(
+  contract: Wire_Compatibility_Contract,
+  operation: Wire_Operation,
+): number {
+  if (operation.contract.response_framing !== OPTIONAL_VALUES_RESPONSE_FRAMING) {
+    return 0
+  }
+  const plan = operation.contract.response_plan ?? []
+  const lengths = plan.map(
+    (field) => fixed_field_width(field) ?? contract.max_value_bytes,
+  )
+  return Math.min(
+    contract.max_value_bytes,
+    optional_values_encoded_len_from_lengths(
+      lengths,
+    ),
+  )
+}
+
+/** Renders the concrete response layout table selected by this adapter. */
+function render_rust_response_framing_metadata(
+  contract: Wire_Compatibility_Contract,
+): string {
+  const operations = contract.operations
+  const metadata = operations === undefined
+    ? "    None; crate::Opcode::COUNT"
+    : operations
+      .map((operation) =>
+        operation.contract.response_framing === OPTIONAL_VALUES_RESPONSE_FRAMING
+          ? "    Some(CompatibilityResponseFraming::OptionalValues),"
+          : "    None,"
+      )
+      .join("\n")
+  const budgets = operations === undefined
+    ? "    0; crate::Opcode::COUNT"
+    : operations
+      .map(
+        (operation) =>
+          `    ${formatted_decimal(compatibility_response_budget(contract, operation))},`,
+      )
+      .join("\n")
+  return `/// Concrete response layouts implemented by this compatibility adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CompatibilityResponseFraming {
+    OptionalValues,
+}
+
+/// Adapter-owned response framing in opcode order.
+pub const RESPONSE_FRAMINGS: [Option<CompatibilityResponseFraming>; crate::Opcode::COUNT] = [
+${metadata}
+];
+
+/// Adapter-owned response payload budgets in opcode order.
+pub const RESPONSE_BUDGETS: [usize; crate::Opcode::COUNT] = [
+${budgets}
+];
+
+pub const fn response_framing(
+    opcode: crate::Opcode,
+) -> Option<CompatibilityResponseFraming> {
+    RESPONSE_FRAMINGS[opcode.index()]
+}
+
+pub const fn response_budget(opcode: crate::Opcode) -> usize {
+    RESPONSE_BUDGETS[opcode.index()]
+}
+`
+}
+
 /**
  * Renders the generated protocol-v1 route and field-index adapter artifact.
  *
@@ -187,10 +273,15 @@ pub const POLICY_RESERVED_MASK: u8 = ${formatted_byte(v1.policy_reserved_mask)};
  * @param contract - Validated Smithy wire contract containing v1 projections.
  * @returns Rust source for the compatibility-only generated module.
  */
-export function render_rust_compatibility_contract(contract: Wire_Contract): string {
+export function render_rust_compatibility_contract(
+  contract: Wire_Compatibility_Contract,
+): string {
   const operations = contract.operations
   if (operations === undefined) {
-    return `/// No protocol-v1 compatibility operations are present in this
+    return `${render_rust_semantic_constants(contract)}
+${render_rust_optional_value_constants(contract)}
+${render_rust_response_framing_metadata(contract)}
+/// No protocol-v1 compatibility operations are present in this
 /// permissive contract fixture.
 pub const MAX_COMPATIBILITY_REQUEST_FRAME_BYTES: usize = 0;
 `
@@ -235,6 +326,8 @@ ${constants.join("\n")}
 `
   }
   return `${render_rust_semantic_constants(contract)}
+${render_rust_optional_value_constants(contract)}
+${render_rust_response_framing_metadata(contract)}
 /// Explicit public request projections owned by this protocol-v1 adapter.
 ///
 /// A missing projection means that an exact request plan, if present, is

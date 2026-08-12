@@ -9,6 +9,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generator_modules = client_directory.join("../generator");
     let api_shape_renderers = client_directory.join("../api_shape_renderers.ts");
     let operation_client_projection = client_directory.join("../operation_client_projection.ts");
+    let compatibility_response_framing =
+        client_directory.join("../compatibility_response_framing.ts");
     let protocol_wire_generator = client_directory.join("../../protocol/wire.ts");
     let protocol_wire_modules = client_directory.join("../../protocol/wire");
     let protocol_wire_descriptor = client_directory.join("../../protocol/wire_descriptor.ts");
@@ -31,6 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "cargo:rerun-if-changed={}",
         operation_client_projection.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        compatibility_response_framing.display()
     );
     println!(
         "cargo:rerun-if-changed={}",

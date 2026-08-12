@@ -57,6 +57,8 @@ mod operation_compatibility_bindings;
 mod operation_compatibility_registrations;
 #[path = "../operation_compatibility_services.rs"]
 mod operation_compatibility_services;
+#[path = "../operation_compatibility_status.rs"]
+mod operation_compatibility_status;
 #[path = "../operation_dispatch.rs"]
 pub(crate) mod operation_dispatch;
 #[path = "../operation_fields.rs"]
@@ -69,6 +71,8 @@ mod operation_generic_handlers;
 mod operation_generic_resources;
 #[path = "../operation_generic_registrations.rs"]
 mod operation_generic_registrations;
+#[path = "../operation_generic_status.rs"]
+mod operation_generic_status;
 #[path = "../operation_handlers.rs"]
 mod operation_handlers;
 #[path = "../operation_outcome.rs"]

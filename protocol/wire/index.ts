@@ -10,7 +10,6 @@ export {
 export {
   field_sequence_encoded_len_from_lengths,
   layout_encoded_len_from_lengths,
-  optional_values_encoded_len_from_lengths,
 } from "../wire_layout"
 export { extract_wire_contract, smithy_wire_ast } from "./extract_contract"
 export {

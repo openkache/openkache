@@ -711,9 +711,9 @@ bind two `item_id` members and two `value` members:
 ```
 
 The server may issue the two storage reads concurrently, but the response
-always preserves the request order. An `Ok` response carries the explicit
-four-octet optional-value payload selected by the generated compatibility
-contract:
+always preserves the request order. The descriptor selects the shared
+`optional_values` layout, preserving the historical four-octet optional-value
+payload byte-for-byte:
 
 ```text
 value_0_len:u32be | value_0 |
@@ -941,21 +941,20 @@ The dense layout is valid only when every modeled field is required and has an
 exact codec-declared width. A receiver MUST reject truncated, trailing, or
 width-mismatched payloads.
 
-### Optional-value sequences (explicit legacy layout)
+### Compact optional-value sequences
 
-An operation MAY explicitly select `responseFraming: optional_values` when it
-needs the historical four-octet optional-value bytes. This layout is not the
-default for optional or composite outputs; new operations SHOULD use the
-generic field sequence above unless exact compatibility bytes are required.
-The sequence is a transport primitive; the operation model supplies its field
-count and each field's codec.
+The four-octet optional-value sequence is a protocol-v1 compatibility format,
+not a generic layout. Generic operations use `field_sequence`; only the
+compatibility facade/projector uses this format.
 
 Each field is encoded as a four-octet big-endian length followed by that many
 value octets. `FF FF FF FF` is the missing-value sentinel. A zero length is a
 present empty value. Fields retain their modeled order, and the complete
 sequence is bounded by the protocol's maximum value size. The generated
-layout discriminator MUST remain `optional_values`; an adapter MUST NOT
-decode these bytes as a generic presence-mask field sequence.
+Any future API may select this layout when its fields are independently
+optional and compact fixed-width prefixes are preferable. If a different wire
+shape is needed, declare a new descriptor layout or an explicitly
+adapter-owned extension; do not add an operation-specific branch.
 
 For two optional values, the compatibility vectors are:
 

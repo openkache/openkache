@@ -15,3 +15,17 @@ pub(super) use openkache_protocol::compat_v1::{
     SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
     SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK, request_fields,
 };
+
+/// Returns the generated operation descriptor at the compatibility boundary.
+///
+/// Compatibility bindings may need generated role metadata to map their
+/// historical projection, but that lookup must not leak through the generic
+/// operation facade. Keeping the forwarding accessor here makes the dependency
+/// direction explicit: only this adapter facade knows that compatibility code
+/// combines generic descriptors with v1 field roles.
+#[inline]
+pub(super) const fn operation_wire_spec(
+    opcode: openkache_protocol::Opcode,
+) -> crate::contract::OperationWireSpec {
+    crate::contract::operation_wire_spec(opcode)
+}

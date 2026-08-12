@@ -5,6 +5,10 @@ import type { Client_Contract } from "../../client_contract"
 import { go_exported_name, snake_case } from "../../generator_names"
 import { derive_operation_plan, operation_field_count } from "../../operation_plans"
 import type { Operation_Result_Kind } from "../../compatibility_result_projections"
+import {
+  operation_uses_optional_value_layout,
+  optional_value_framing,
+} from "../../compatibility_response_framing"
 import { is_packed_f64_type } from "../rendering"
 import {
   adapter_contract_values,
@@ -33,8 +37,6 @@ import {
   operation_uses_compact_request_route,
   operation_uses_field_sequence_helpers,
   operation_uses_item_id_helpers,
-  operation_uses_optional_value_layout,
-  optional_value_framing,
   render_application_value_codec,
   render_composite_output,
   render_field_sequence_response_decode,
@@ -534,14 +536,12 @@ ${generic_invocation === undefined ? "" : `${generic_invocation.statements}
         const decode_statements = decoded_fields
           .map((field) => field.statements)
           .join("\n")
-        const response_values = operation.plan.contract.response_framing === "field_sequence"
-          ? render_field_sequence_response_decode(
-            "go",
-            operation,
-            "result.data",
-            `"${label}"`,
-          )
-          : `smithyDecodeOptionalValues(result.data, ${operation_composite_value_count(operation)})`
+        const response_values = render_field_sequence_response_decode(
+          "go",
+          operation,
+          "result.data",
+          `"${label}"`,
+        )
         const output_expression = render_composite_output(
           operation,
           "go",

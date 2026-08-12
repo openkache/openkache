@@ -3,15 +3,29 @@
 import {
   derive_wire_operation_descriptor,
   type Wire_Contract,
+  type Wire_Operation_Descriptor,
   type Wire_Entry,
   type Wire_Operation,
   type Wire_Operation_Field_Plan,
 } from "./wire"
-import {
-  derive_wire_compatibility_response_semantics,
-  derive_wire_compatibility_retry_mode,
-  derive_wire_compatibility_scope,
-} from "./compatibility_v1"
+
+/**
+ * Optional documentation metadata supplied by a protocol adapter.
+ *
+ * The generic specification renderer can describe every operation's framing
+ * and codecs without knowing a route, retry policy, or semantic result name.
+ * A compatibility adapter may add those reader-facing columns explicitly at
+ * the composition boundary.
+ */
+export interface Wire_Spec_Adapter {
+  readonly response_payload?: (
+    operation: Wire_Operation,
+    descriptor: Wire_Operation_Descriptor,
+  ) => string | undefined
+  readonly scope?: (operation: Wire_Operation) => string
+  readonly retry_mode?: (operation: Wire_Operation) => string
+  readonly response_semantics?: (operation: Wire_Operation) => string | undefined
+}
 
 function wire_name(identifier: string): string {
   return identifier
@@ -26,7 +40,10 @@ function wire_name(identifier: string): string {
  * Keeping this table generator-owned gives documentation a stale-checkable
  * representation of opcode assignments and role-derived framing shape.
  */
-export function render_protocol_spec_operation_table(contract: Wire_Contract): string {
+export function render_protocol_spec_operation_table(
+  contract: Wire_Contract,
+  adapter?: Wire_Spec_Adapter,
+): string {
   const operations = contract.operations
   if (operations === undefined) {
     throw new Error("protocol operation metadata is required for the specification table")
@@ -49,6 +66,8 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
   }
   const response_payload = (operation: Wire_Operation): string => {
     const descriptor = derive_wire_operation_descriptor(operation.contract)
+    const adapter_payload = adapter?.response_payload?.(operation, descriptor)
+    if (adapter_payload !== undefined) return adapter_payload
     // Generic ordered responses are defined by their complete generated plan,
     // not by a compatibility role count. This keeps documentation
     // correct for APIs whose fields are named `counter`, `enabled`, `status`,
@@ -59,14 +78,12 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
         return "empty"
       case "opaque":
         return "opaque payload"
-      case "optional_values":
-        return value_count === 1
-          ? "one ordered optional field"
-          : `${value_count} ordered optional fields`
       case "field_sequence":
         return value_count === 1
           ? "one compact ordered field"
           : `${value_count} compact ordered fields`
+      default:
+        return "adapter-owned response payload"
     }
   }
   const field_codecs = (fields: readonly Wire_Operation_Field_Plan[]): string => {
@@ -97,6 +114,7 @@ export const PROTOCOL_SPEC_OPERATION_TABLE_END =
 export function protocol_spec_operation_table_issues(
   spec: string,
   contract: Wire_Contract,
+  adapter?: Wire_Spec_Adapter,
 ): readonly string[] {
   const start = spec.indexOf(PROTOCOL_SPEC_OPERATION_TABLE_START)
   const end = spec.indexOf(PROTOCOL_SPEC_OPERATION_TABLE_END)
@@ -106,7 +124,7 @@ export function protocol_spec_operation_table_issues(
   const actual = spec
     .slice(start + PROTOCOL_SPEC_OPERATION_TABLE_START.length, end)
     .trim()
-  const expected = render_protocol_spec_operation_table(contract).trim()
+  const expected = render_protocol_spec_operation_table(contract, adapter).trim()
   return actual === expected ? [] : ["protocol/SPEC.md (generated operation table stale)"]
 }
 
@@ -126,6 +144,7 @@ export const PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END =
  */
 export function render_protocol_spec_contract_snapshot(
   contract: Wire_Contract,
+  adapter?: Wire_Spec_Adapter,
 ): string {
   const operations = contract.operations
   if (operations === undefined) {
@@ -155,11 +174,11 @@ export function render_protocol_spec_contract_snapshot(
         })
         .join("; ")
   const operation_scope = (operation: Wire_Operation): string =>
-    derive_wire_compatibility_scope(operation.contract)
+    adapter?.scope?.(operation) ?? "-"
   const operation_retry_mode = (operation: Wire_Operation): string =>
-    derive_wire_compatibility_retry_mode(operation.contract)
+    adapter?.retry_mode?.(operation) ?? "-"
   const operation_semantics = (operation: Wire_Operation): string =>
-    derive_wire_compatibility_response_semantics(operation.contract) ?? "-"
+    adapter?.response_semantics?.(operation) ?? "-"
   const rows = operations
     .map((operation) => {
       const operation_contract = operation.contract
@@ -176,6 +195,7 @@ ${rows}`
 export function protocol_spec_contract_snapshot_issues(
   spec: string,
   contract: Wire_Contract,
+  adapter?: Wire_Spec_Adapter,
 ): readonly string[] {
   const start = spec.indexOf(PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START)
   const end = spec.indexOf(PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END)
@@ -185,7 +205,7 @@ export function protocol_spec_contract_snapshot_issues(
   const actual = spec
     .slice(start + PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START.length, end)
     .trim()
-  const expected = render_protocol_spec_contract_snapshot(contract).trim()
+  const expected = render_protocol_spec_contract_snapshot(contract, adapter).trim()
   return actual === expected
     ? []
     : ["protocol/SPEC.md (generated operation contract snapshot stale)"]

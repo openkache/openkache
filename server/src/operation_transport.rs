@@ -1,18 +1,19 @@
 //! Protocol response projection for transport-neutral operation outcomes.
 //!
 //! Operation behavior and dispatch live in `operation_handlers`; this module
-//! is the only operation-layer code that turns an outcome into the protocol
-//! `Response`. Keeping this adapter separate prevents API behavior from
-//! acquiring wire status or framing branches.
+//! is the operation-layer code that turns an outcome into the protocol
+//! `Response`. The generated descriptor selects generic response framing and
+//! compact field layout for every API.
 
-use openkache_protocol::{Opcode, Response, ResponseParts, ResponseSegment, Status};
+use openkache_protocol::{
+    encode_layout_segments, Opcode, ResponseParts, ResponseSegment, Status,
+};
 use smallvec::SmallVec;
 
 use super::operation_capabilities::CapabilityCatalog;
-use super::operation_contract::OperationStatus;
 use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::{
-    OperationBody, OperationError, OperationOutcome, OperationSuccessStatus, OperationValue,
+    OperationBody, OperationError, OperationOutcome, OperationValue, StatusToken,
 };
 use super::operation_registry::OperationHandler;
 use crate::operation_contract as contract;
@@ -24,22 +25,16 @@ pub(super) struct OperationResponse {
 }
 
 impl OperationResponse {
+    pub(super) const fn from_parts(status: Status, parts: ResponseParts) -> Self {
+        Self { status, parts }
+    }
+
     pub(super) const fn status(&self) -> Status {
         self.status
     }
 
     pub(super) fn into_parts(self) -> ResponseParts {
         self.parts
-    }
-}
-
-impl From<Response> for OperationResponse {
-    fn from(response: Response) -> Self {
-        let status = response.status;
-        let parts = response
-            .into_parts()
-            .expect("validated response remains within the protocol limit");
-        Self { status, parts }
     }
 }
 
@@ -55,14 +50,22 @@ pub(super) fn request_too_large_response() -> OperationResponse {
     response_bytes(Status::TooLarge, b"request exceeds the protocol limit")
 }
 
+/// Builds an operation-scoped timeout response through its generated contract.
+pub(super) fn timeout_response(opcode: Opcode, message: &[u8]) -> OperationResponse {
+    contract_error_response(opcode, Status::Timeout, message)
+}
+
+/// Builds an operation-scoped overload response through its generated contract.
+pub(super) fn overloaded_response(opcode: Opcode, message: &[u8]) -> OperationResponse {
+    contract_error_response(opcode, Status::Overloaded, message)
+}
+
 /// Projects a server protocol-adapter error into the wire status vocabulary.
 ///
 /// Framing errors are discovered before an operation handler exists, so this
 /// adapter intentionally uses the common protocol status set instead of a
 /// generated operation contract.
-pub(super) fn protocol_error_response(
-    error: crate::protocol::ProtocolError,
-) -> OperationResponse {
+pub(super) fn protocol_error_response(error: crate::protocol::ProtocolError) -> OperationResponse {
     let status = match error {
         crate::protocol::ProtocolError::UnknownOpcode(_) => Status::UnsupportedOpcode,
         crate::protocol::ProtocolError::ValueTooLarge { .. } => Status::TooLarge,
@@ -92,11 +95,12 @@ pub(super) const fn response_budget(opcode: Opcode) -> usize {
     contract::response_budget(opcode)
 }
 
-/// Executes one API handler and projects its outcome to a response.
+/// Executes one API handler and projects its outcome through the generated
+/// response contract.
 ///
-/// Every registration uses this same boundary, including compatibility
-/// adapters. The handler decides domain behavior; this module alone maps the
-/// transport-neutral outcome through the generated response contract.
+/// Every registration uses this same boundary. The handler decides domain
+/// behavior; this module alone maps the transport-neutral outcome through the
+/// generated response contract.
 pub(super) async fn execute(
     capabilities: &dyn CapabilityCatalog,
     input: OperationInputView,
@@ -117,19 +121,7 @@ pub(super) async fn execute(
 /// capability before an API-owned handler runs. Returning a hard-coded status
 /// here would make a future operation violate its own contract.
 pub(super) fn contract_error_status(opcode: Opcode, preferred: Status) -> Status {
-    let wire = contract::spec(opcode);
-    wire.error_statuses
-        .iter()
-        .copied()
-        .find(|status| *status == preferred)
-        .or_else(|| {
-            wire.error_statuses
-                .iter()
-                .copied()
-                .find(|status| *status == Status::InternalError)
-        })
-        .or_else(|| wire.error_statuses.first().copied())
-        .unwrap_or(Status::InternalError)
+    select_error_status(contract::spec(opcode), preferred)
 }
 
 /// Builds a contract-valid error response for a generated operation.
@@ -139,34 +131,104 @@ pub(super) fn contract_error_response(
     message: &[u8],
 ) -> OperationResponse {
     let status = contract_error_status(opcode, preferred);
-    Response::new(status, message.to_vec()).unwrap_or_else(|_| {
-        // Error diagnostics are API-owned bytes. A malformed adapter must not
-        // turn an oversized diagnostic into a server panic; retain the
-        // contract-valid status and send a bounded generic diagnostic instead.
-        Response::new(
-            status,
-            b"operation error exceeds the protocol limit".to_vec(),
-        )
-        .unwrap_or(Response {
-            status,
-            payload: Vec::new(),
-        })
-    })
-    .into()
+    bounded_bytes_response(
+        status,
+        message,
+        b"operation error exceeds the protocol limit",
+    )
 }
 
-/// Builds a contract-valid error response from an API-owned semantic status.
-pub(super) fn contract_error_response_status(
+/// Builds a contract-valid error response from an API-owned opaque status.
+pub(super) fn contract_error_response_token(
     opcode: Opcode,
-    preferred: OperationStatus,
+    preferred: StatusToken,
     message: &[u8],
 ) -> OperationResponse {
-    contract_error_response(opcode, preferred.wire_status(), message)
+    contract_error_response(
+        opcode,
+        wire_status(preferred).unwrap_or(Status::InternalError),
+        message,
+    )
 }
 
-/// Encodes a generated ordered-field response without consulting a semantic
-/// route name. Compatibility framing is delegated to its adapter, while this
-/// function owns the generic presence-mask representation.
+/// Builds a contract-valid response for a common infrastructure failure.
+///
+/// These helpers keep wire status selection inside the transport adapter. The
+/// dispatcher only reports the failure category and never imports the wire
+/// enum.
+pub(super) fn invalid_request_response(opcode: Opcode, message: &[u8]) -> OperationResponse {
+    contract_error_response(opcode, Status::InvalidRequest, message)
+}
+
+pub(super) fn unsupported_operation_response(
+    opcode: Opcode,
+    message: &[u8],
+) -> OperationResponse {
+    contract_error_response(opcode, Status::UnsupportedOpcode, message)
+}
+
+pub(super) fn forbidden_response(opcode: Opcode, message: &[u8]) -> OperationResponse {
+    contract_error_response(opcode, Status::Forbidden, message)
+}
+
+/// Encodes a transport-neutral outcome through the shared generated response
+/// layout selected by the operation descriptor.
+pub(super) fn encode_operation_outcome(
+    opcode: Opcode,
+    outcome: OperationOutcome,
+) -> Option<OperationResponse> {
+    match outcome {
+        OperationOutcome::Success {
+            status,
+            body: payload,
+        } => {
+            let Some(status) = operation_success_status(opcode, status) else {
+                return Some(contract_error_response(
+                    opcode,
+                    Status::InternalError,
+                    b"operation returned a success status outside its contract",
+                ));
+            };
+            match payload {
+                OperationBody::Empty => {
+                    let wire = contract::spec(opcode);
+                    if wire.generic_response_framing()
+                        != Some(contract::OperationResponseFraming::Empty)
+                    {
+                        return Some(contract_error_response(
+                            opcode,
+                            Status::InternalError,
+                            b"empty operation payload does not match its response framing",
+                        ));
+                    }
+                    Some(operation_response(
+                        opcode,
+                        status,
+                        OperationValue::inline(b""),
+                    ))
+                }
+                OperationBody::Opaque(value) => {
+                    if value.len() > response_budget(opcode) {
+                        return Some(contract_error_response(
+                            opcode,
+                            Status::TooLarge,
+                            b"operation response exceeds the protocol limit",
+                        ));
+                    }
+                    Some(generic_opaque_response(opcode, status, value))
+                }
+                OperationBody::Fields(values) => {
+                    Some(planned_fields_response(opcode, status, values))
+                }
+            }
+        }
+        OperationOutcome::Error(error) => operation_error_response(opcode, error),
+        OperationOutcome::Abandoned => None,
+    }
+}
+
+/// Encodes a generated ordered-field response through its descriptor-selected
+/// shared layout.
 pub(super) fn operation_fields_response(
     opcode: Opcode,
     status: Status,
@@ -176,11 +238,6 @@ pub(super) fn operation_fields_response(
 }
 
 /// Encodes any descriptor-planned field response.
-///
-/// The layout and field codecs come from the generated operation descriptor.
-/// Both the presence-mask sequence and the explicit fixed-width optional-value table
-/// use this same boundary; operation behavior never chooses a layout by
-/// operation name.
 fn planned_fields_response(
     opcode: Opcode,
     status: Status,
@@ -188,9 +245,8 @@ fn planned_fields_response(
 ) -> OperationResponse {
     let wire = contract::spec(opcode);
     if !matches!(
-        wire.response.framing,
-        contract::OperationLayoutFraming::FieldSequence
-            | contract::OperationLayoutFraming::OptionalValues
+        wire.generic_response_framing(),
+        Some(contract::OperationResponseFraming::FieldSequence)
     ) || values.len() != wire.response.fields.len()
     {
         return contract_error_response(
@@ -202,82 +258,36 @@ fn planned_fields_response(
     if let Err(message) = validate_response_fields(&values, wire.response.fields) {
         return contract_error_response(opcode, Status::InternalError, message);
     }
-    let parts = match segmented_response_fields(status, values, wire.response.layout) {
-        Ok(parts) => parts,
-        Err(()) => {
-            return contract_error_response(
-                opcode,
-                Status::TooLarge,
-                b"operation response fields exceed the protocol limit",
-            );
-        }
-    };
-    OperationResponse { status, parts }
+    match segmented_response_fields(values, wire.response.layout) {
+        Ok(segments) => response_parts_with_budget(
+            status,
+            segments,
+            response_budget(opcode),
+        )
+            .map(|parts| OperationResponse::from_parts(status, parts))
+            .unwrap_or_else(|_| {
+                contract_error_response(
+                    opcode,
+                    Status::TooLarge,
+                    b"operation response fields exceed the protocol limit",
+                )
+            }),
+        Err(()) => contract_error_response(
+            opcode,
+            Status::TooLarge,
+            b"operation response fields exceed the protocol limit",
+        ),
+    }
 }
 
 fn segmented_response_fields(
-    status: Status,
     values: SmallVec<[Option<OperationValue>; 8]>,
     layout: contract::OperationFieldLayout,
-) -> Result<ResponseParts, ()> {
-    if values.len() > contract::MAX_FIELDS {
-        return Err(());
-    }
-    let mut segments = SmallVec::<[ResponseSegment; 8]>::new();
-    match layout {
-        contract::OperationFieldLayout::Dense => {
-            for value in values.into_iter().flatten() {
-                append_operation_value(&mut segments, value);
-            }
-        }
-        contract::OperationFieldLayout::Sequence => {
-            let mut mask = SmallVec::<[u8; 32]>::new();
-            mask.resize(values.len().saturating_add(7) / 8, 0);
-            let final_present = values.iter().rposition(Option::is_some);
-            for (index, value) in values.iter().enumerate() {
-                if value.is_some() {
-                    mask[index / 8] |= 1 << (index % 8);
-                }
-            }
-            segments.push(ResponseSegment::Inline(mask));
-            for (index, value) in values.into_iter().enumerate() {
-                let Some(value) = value else {
-                    continue;
-                };
-                if Some(index) != final_present {
-                    let length = u64::try_from(value.len()).map_err(|_| ())?;
-                    let (encoded, encoded_len) = openkache_protocol::encode_varuint(length);
-                    segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
-                }
-                append_operation_value(&mut segments, value);
-            }
-        }
-        contract::OperationFieldLayout::OptionalValues => {
-            for value in values {
-                let length = match &value {
-                    Some(value) => {
-                        let length = u32::try_from(value.len()).map_err(|_| ())?;
-                        if length == openkache_protocol::OPTIONAL_VALUE_MISSING {
-                            return Err(());
-                        }
-                        length
-                    }
-                    None => openkache_protocol::OPTIONAL_VALUE_MISSING,
-                };
-                segments.push(ResponseSegment::inline(&length.to_be_bytes()));
-                if let Some(value) = value {
-                    append_operation_value(&mut segments, value);
-                }
-            }
-        }
-        contract::OperationFieldLayout::Empty | contract::OperationFieldLayout::Opaque => {
-            return Err(());
-        }
-    }
-    ResponseParts::from_segments(status, segments).map_err(|_| ())
+) -> Result<SmallVec<[ResponseSegment; 8]>, ()> {
+    encode_layout_segments(values, layout, append_operation_value).map_err(|_| ())
 }
 
-fn append_operation_value(
+pub(super) fn append_operation_value(
     segments: &mut SmallVec<[ResponseSegment; 8]>,
     value: OperationValue,
 ) {
@@ -321,76 +331,39 @@ pub(super) fn validate_response_fields(
     Ok(())
 }
 
-/// Converts a transport-neutral operation outcome through the generated
-/// status and response framing contract. An abandoned outcome deliberately
-/// produces no response when a mutation's commit state is unknowable.
-pub(super) fn encode_operation_outcome(
-    opcode: openkache_protocol::Opcode,
-    outcome: OperationOutcome,
-) -> Option<OperationResponse> {
-    match outcome {
-        OperationOutcome::Success {
-            status,
-            body: payload,
-        } => {
-            let Some(status) = operation_success_status(opcode, status) else {
-                return Some(contract_error_response(
-                    opcode,
-                    Status::InternalError,
-                    b"operation returned a success status outside its contract",
-                ));
-            };
-            match payload {
-                OperationBody::Empty => {
-                    let wire = contract::spec(opcode);
-                    if wire.response.framing != contract::OperationLayoutFraming::Empty {
-                        return Some(contract_error_response(
-                            opcode,
-                            Status::InternalError,
-                            b"empty operation payload does not match its response framing",
-                        ));
-                    }
-                    Some(operation_response(
-                        opcode,
-                        status,
-                        OperationValue::inline(b""),
-                    ))
-                }
-                OperationBody::Opaque(value) => {
-                    // Size admission is checked before codec validation. A
-                    // payload that exceeds the generated response budget must
-                    // always produce the contract's TooLarge response, even
-                    // when its bytes would also fail an application codec
-                    // (for example, an oversized invalid UTF-8 payload).
-                    if value.len() > response_budget(opcode) {
-                        return Some(contract_error_response(
-                            opcode,
-                            Status::TooLarge,
-                            b"operation response exceeds the protocol limit",
-                        ));
-                    }
-                    if !valid_opaque_response(opcode, &value) {
-                        return Some(contract_error_response(
-                            opcode,
-                            Status::InternalError,
-                            b"opaque operation payload does not match its response framing",
-                        ));
-                    }
-                    Some(operation_response(opcode, status, value))
-                }
-                OperationBody::Fields(values) => {
-                    Some(operation_fields_response(opcode, status, values))
-                }
-            }
-        }
-        OperationOutcome::Error(error) => operation_error_response(opcode, error),
-        OperationOutcome::Abandoned => None,
+fn generic_opaque_response(
+    opcode: Opcode,
+    status: Status,
+    value: OperationValue,
+) -> OperationResponse {
+    if !valid_opaque_response(opcode, &value) {
+        return contract_error_response(
+            opcode,
+            Status::InternalError,
+            b"opaque operation payload does not match its response framing",
+        );
     }
+    operation_response(opcode, status, value)
+}
+
+fn response_parts_with_budget(
+    status: Status,
+    segments: SmallVec<[ResponseSegment; 8]>,
+    budget: usize,
+) -> Result<ResponseParts, ()> {
+    let payload_len = segments
+        .iter()
+        .try_fold(0usize, |total, segment| total.checked_add(segment.len()))
+        .ok_or(())?;
+    if payload_len > budget {
+        return Err(());
+    }
+    ResponseParts::from_segments(status, segments).map_err(|_| ())
 }
 
 fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &OperationValue) -> bool {
     let wire = contract::spec(opcode);
-    if wire.response.framing != contract::OperationLayoutFraming::Opaque {
+    if wire.generic_response_framing() != Some(contract::OperationResponseFraming::Opaque) {
         return false;
     }
     // A composite opaque payload is valid only when the model explicitly marks
@@ -414,14 +387,18 @@ fn valid_opaque_response(opcode: openkache_protocol::Opcode, value: &OperationVa
 
 fn operation_success_status(
     opcode: openkache_protocol::Opcode,
-    status: OperationSuccessStatus,
+    status: StatusToken,
 ) -> Option<Status> {
-    let status = status.wire_status();
+    let status = wire_status(status)?;
     if contract::spec(opcode).success_statuses.contains(&status) {
         Some(status)
     } else {
         None
     }
+}
+
+fn wire_status(token: StatusToken) -> Option<Status> {
+    Status::try_from(token.code()).ok()
 }
 
 /// Maps a transport-neutral operation failure through the generated status
@@ -433,27 +410,48 @@ fn operation_error_response(
 ) -> Option<OperationResponse> {
     let contract = contract::spec(opcode);
     match error {
-        OperationError::InvalidRequest(message) => {
-            operation_status_response(opcode, contract, OperationStatus::InvalidRequest, message)
-        }
-        OperationError::Status { status, message } => {
-            operation_status_response(opcode, contract, status, message)
-        }
-        OperationError::OwnedStatus { status, message } => {
-            operation_status_response(opcode, contract, status, &message)
-        }
+        OperationError::InvalidRequest(message) => operation_status_response(
+            opcode,
+            contract,
+            Status::InvalidRequest,
+            OperationValue::inline(message),
+        ),
+        OperationError::Status { status, message } => operation_status_response(
+            opcode,
+            contract,
+            wire_status(status).unwrap_or(Status::InternalError),
+            OperationValue::inline(message),
+        ),
+        OperationError::OwnedStatus { status, message } => operation_status_response(
+            opcode,
+            contract,
+            wire_status(status).unwrap_or(Status::InternalError),
+            OperationValue::from(message),
+        ),
     }
 }
 
 fn operation_status_response(
     opcode: openkache_protocol::Opcode,
     contract: contract::OperationWireSpec,
-    requested: OperationStatus,
-    message: &[u8],
+    requested: Status,
+    message: OperationValue,
 ) -> Option<OperationResponse> {
-    let requested = requested.wire_status();
-    let status = Some(requested)
-        .filter(|status| contract.error_statuses.contains(status))
+    let status = select_error_status(contract, requested);
+    Some(operation_response(opcode, status, message))
+}
+
+/// Chooses the closest contract-valid error status for an adapter preference.
+///
+/// All pre-dispatch and post-behavior errors use this one projection. Keeping
+/// the fallback policy in one helper prevents a new operation from observing
+/// different status selection depending on which boundary detected the error.
+fn select_error_status(contract: contract::OperationWireSpec, requested: Status) -> Status {
+    contract
+        .error_statuses
+        .iter()
+        .copied()
+        .find(|candidate| *candidate == requested)
         .or_else(|| {
             contract
                 .error_statuses
@@ -462,8 +460,7 @@ fn operation_status_response(
                 .find(|candidate| *candidate == Status::InternalError)
         })
         .or_else(|| contract.error_statuses.first().copied())
-        .unwrap_or(Status::InternalError);
-    Some(operation_response(opcode, status, message.to_vec()))
+        .unwrap_or(Status::InternalError)
 }
 
 /// Encodes one operation response without allowing an API-owned payload to
@@ -473,16 +470,22 @@ fn operation_response(
     status: Status,
     payload: impl Into<OperationValue>,
 ) -> OperationResponse {
-    let mut segments = SmallVec::<[ResponseSegment; 8]>::new();
-    append_operation_value(&mut segments, payload.into());
-    match ResponseParts::from_segments(status, segments) {
-        Ok(parts) => OperationResponse { status, parts },
-        Err(_) => contract_error_response(
+    match response_parts(status, payload.into()) {
+        Ok(response) => response,
+        Err(()) => contract_error_response(
             opcode,
             Status::TooLarge,
             b"operation response exceeds the protocol limit",
         ),
     }
+}
+
+fn response_parts(status: Status, payload: OperationValue) -> Result<OperationResponse, ()> {
+    let mut segments = SmallVec::<[ResponseSegment; 8]>::new();
+    append_operation_value(&mut segments, payload);
+    ResponseParts::from_segments(status, segments)
+        .map(|parts| OperationResponse::from_parts(status, parts))
+        .map_err(|_| ())
 }
 
 fn response_display(status: Status, value: impl std::fmt::Display) -> OperationResponse {
@@ -491,17 +494,24 @@ fn response_display(status: Status, value: impl std::fmt::Display) -> OperationR
     );
     use std::fmt::Write as _;
     write!(payload, "{value}").expect("writing to a String cannot fail");
-    response_bytes(status, payload.as_bytes())
+    response_parts(status, OperationValue::from(payload.into_bytes()))
+        .unwrap_or_else(|_| response_bytes(status, b"operation error exceeds the protocol limit"))
 }
 
 fn response_bytes(status: Status, payload: &[u8]) -> OperationResponse {
-    let mut owned = Vec::with_capacity(
-        openkache_protocol::RESPONSE_FIXED_BYTES
-            + openkache_protocol::MAX_VARUINT_BYTES
-            + payload.len(),
-    );
-    owned.extend_from_slice(payload);
-    Response::new(status, owned)
-        .expect("server responses stay within protocol limits")
-        .into()
+    bounded_bytes_response(
+        status,
+        payload,
+        b"operation response exceeds the protocol limit",
+    )
+}
+
+fn bounded_bytes_response(status: Status, payload: &[u8], fallback: &[u8]) -> OperationResponse {
+    let payload = if payload.len() <= openkache_protocol::MAX_VALUE_BYTES {
+        payload
+    } else {
+        fallback
+    };
+    response_parts(status, OperationValue::inline(payload))
+        .expect("bounded server response must remain within protocol limits")
 }

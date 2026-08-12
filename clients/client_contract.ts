@@ -6,6 +6,8 @@ import {
   type Wire_Entry,
   type Wire_Operation_Contract,
 } from "../protocol/wire"
+import type { Wire_Compatibility_V1_Contract } from "../protocol/compatibility_v1"
+import type { Wire_Compatibility_Contract } from "../protocol/compatibility_v1"
 import { extract_wire_contract as extract_protocol_wire_contract } from "../protocol/wire"
 import { validate_operation_field_bindings } from "./operation_plans"
 import {
@@ -146,7 +148,9 @@ export interface Namespace_Descriptor_Field {
 }
 
 /** Wire contract combined with the client-owned Smithy model. */
-export interface Client_Contract extends Wire_Contract {
+export interface Client_Contract extends Omit<Wire_Contract, "v1"> {
+  /** The client generator is composed with the explicit protocol-v1 adapter. */
+  readonly v1: Wire_Compatibility_V1_Contract
   readonly api: Api_Contract
   readonly client_defaults: Client_Defaults_Contract
   readonly ffi: Ffi_Contract
@@ -1548,7 +1552,7 @@ export function extract_client_contract(
   // language renderers still project Smithy types for ergonomic source APIs,
   // but request/response cardinality and transport metadata must not be
   // re-derived independently from a second role-flattening algorithm.
-  const client_wire = wire
+  const client_wire = wire as Wire_Compatibility_Contract
   const client_service_id = has_client_service
     ? CLIENT_SERVICE_SHAPE_ID
     : SERVICE_SHAPE_ID

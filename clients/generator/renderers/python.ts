@@ -6,6 +6,10 @@ import { pascal_case, snake_case } from "../../generator_names"
 import { encode_vu128 } from "../../generator_values"
 import { operation_field_count } from "../../operation_plans"
 import type { Operation_Result_Kind } from "../../compatibility_result_projections"
+import {
+  operation_uses_optional_value_layout,
+  optional_value_framing,
+} from "../../compatibility_response_framing"
 import { bytes_from_hex, is_packed_f64_type } from "../rendering"
 import {
   field_sequence_framing,
@@ -35,8 +39,6 @@ import {
   operation_uses_compact_request_route,
   operation_uses_field_sequence_helpers,
   operation_uses_item_id_helpers,
-  operation_uses_optional_value_layout,
-  optional_value_framing,
   render_application_value_codec,
   render_composite_field_decode,
   render_composite_output,
@@ -287,14 +289,12 @@ ${scoped_request_value}            expected_kinds=(${result_kinds},),
           "python",
           output_decoded_values,
         )
-        const response_values = operation.plan.contract.response_framing === "field_sequence"
-          ? render_field_sequence_response_decode(
-            "python",
-            operation,
-            "payload",
-            String(operation_value),
-          )
-          : `_smithy_decode_optional_values(payload, ${operation_composite_value_count(operation)}, ${operation_value})`
+        const response_values = render_field_sequence_response_decode(
+          "python",
+          operation,
+          "payload",
+          String(operation_value),
+        )
         const invocation = render_expression_generic_invocation(
           "python",
           operation,

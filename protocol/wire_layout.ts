@@ -2,6 +2,8 @@
 
 import {
   DEFAULT_SHAPE_CODECS,
+  OPTIONAL_VALUE_LENGTH_BYTES,
+  OPTIONAL_VALUE_MISSING,
   WIRE_CODEC_DESCRIPTORS,
   WIRE_CODEC_NAMES,
   type Wire_Codec_Name,
@@ -59,12 +61,16 @@ export function field_layout(
 ): Wire_Operation_Field_Layout {
   if (framing === "empty") return "empty"
   if (framing === "opaque") return "opaque"
-  // Optional-values framing carries one fixed length/sentinel prefix per
-  // field even when every underlying codec happens to be fixed-width. Keep
-  // this explicit in the generated layout so adapters cannot accidentally
-  // decode the fixed optional-field table with the generic presence-mask
-  // sequence codec.
   if (framing === "optional_values") return "optional_values"
+  if (
+    framing !== "ordered_fields" &&
+    framing !== "field_sequence"
+  ) {
+    // Unknown response framings belong to the adapter that declared them.
+    // Keeping this marker opaque prevents a future adapter from adding a
+    // branch to the generic layout planner.
+    return "adapter_owned"
+  }
   return plan !== undefined &&
       plan.length > 0 &&
       plan.every((field) => fixed_field_width(field) !== undefined)
@@ -125,10 +131,6 @@ function bounded_add(value: number, increment: number, ceiling: number): number 
  * allocating field bytes. `undefined` is missing; `0` is a present-empty
  * field. Every present field before the final present field carries a
  * canonical length prefix; the final present field consumes the remainder.
- *
- * This is intentionally a wire primitive rather than an operation-family
- * helper, so generated planners can compare layouts before choosing a buffer
- * or response projection.
  */
 export function field_sequence_encoded_len_from_lengths(
   lengths: readonly (number | undefined)[],
@@ -162,38 +164,10 @@ export function field_sequence_encoded_len_from_lengths(
 }
 
 /**
- * Computes the fixed optional-value table size from lengths.
- *
- * The table is an explicit reusable layout primitive. A compatibility adapter
- * may select it to preserve an existing byte contract, while a future API may
- * use the same presence-preserving representation without adding a new
- * operation family.
- */
-export function optional_values_encoded_len_from_lengths(
-  lengths: readonly (number | undefined)[],
-): number {
-  let encoded_length = 0
-  for (const length of lengths) {
-    if (
-      length !== undefined &&
-      (!Number.isSafeInteger(length) || length < 0 || length >= 0xffff_ffff)
-    ) {
-      throw new Error(`optional value length is outside the u32 range: ${length}`)
-    }
-    const field_cost = 4 + (length ?? 0)
-    encoded_length = bounded_add(encoded_length, field_cost, Number.MAX_SAFE_INTEGER)
-  }
-  return encoded_length
-}
-
-/**
  * Computes the payload cost for a generated field layout without allocating
  * field bytes. `undefined` means a missing optional field. Dense and opaque
  * layouts reject missing or extra entries because their shape is fixed.
- *
- * This is the single planner primitive used by operation IR consumers. It
- * keeps layout selection descriptor-driven while retaining the fixed
- * optional-value table as an explicit calculation.
+ * Adapter-owned layouts are deliberately not interpreted here.
  */
 export function layout_encoded_len_from_lengths(
   layout: Wire_Operation_Field_Layout,
@@ -212,6 +186,25 @@ export function layout_encoded_len_from_lengths(
       }
       return length
     }
+    case "optional_values": {
+      let total = 0
+      for (const length of lengths) {
+        if (
+          length !== undefined &&
+          (!Number.isSafeInteger(length) ||
+            length < 0 ||
+            length >= OPTIONAL_VALUE_MISSING)
+        ) {
+          throw new Error(`optional value length is outside the u32 range: ${length}`)
+        }
+        total = bounded_add(
+          total,
+          OPTIONAL_VALUE_LENGTH_BYTES + (length ?? 0),
+          Number.MAX_SAFE_INTEGER,
+        )
+      }
+      return total
+    }
     case "dense": {
       let total = 0
       for (const length of lengths) {
@@ -224,8 +217,8 @@ export function layout_encoded_len_from_lengths(
     }
     case "sequence":
       return field_sequence_encoded_len_from_lengths(lengths)
-    case "optional_values":
-      return optional_values_encoded_len_from_lengths(lengths)
+    case "adapter_owned":
+      throw new Error("adapter-owned layout requires an adapter size planner")
   }
 }
 
@@ -239,12 +232,29 @@ export function layout_encoded_len_from_lengths(
 export function layout_payload_bound(
   max_value_bytes: number,
   max_varuint_bytes: number,
-  optional_length_bytes: number,
   framing: Wire_Request_Framing | Wire_Response_Framing,
   layout: Wire_Operation_Field_Layout,
   plan: readonly Wire_Operation_Field_Plan[],
 ): number {
   if (framing === "empty" || layout === "empty") return 0
+  if (layout === "adapter_owned") {
+    // The adapter owns any prefix, sentinel, or aggregate shape. Generic
+    // admission still enforces the protocol-wide value ceiling.
+    return max_value_bytes
+  }
+  if (layout === "optional_values") {
+    const prefix_bytes = Math.min(
+      max_value_bytes,
+      plan.length * OPTIONAL_VALUE_LENGTH_BYTES,
+    )
+    let payload_bound = prefix_bytes
+    for (const field of plan) {
+      if (payload_bound >= max_value_bytes) return max_value_bytes
+      const width = fixed_field_width(field) ?? max_value_bytes
+      payload_bound = bounded_add(payload_bound, width, max_value_bytes)
+    }
+    return Math.min(max_value_bytes, payload_bound)
+  }
   if (layout === "dense") {
     // A fixed tuple can still be wider than the aggregate protocol ceiling
     // when a model supplies an explicit codec width. Keep the generated
@@ -258,20 +268,13 @@ export function layout_payload_bound(
     return Math.min(max_value_bytes, width ?? max_value_bytes)
   }
   // Generic field sequences use one shared presence-mask prefix followed by
-  // a canonical length for every present field except the final present
-  // field, which consumes the remaining bytes. The explicit optional-value
-  // table keeps its fixed-width prefix.
-  const prefix_bytes = framing === "optional_values"
-    ? optional_length_bytes > 0 &&
-        plan.length > Math.floor(max_value_bytes / optional_length_bytes)
-      ? max_value_bytes
-      : Math.min(max_value_bytes, plan.length * optional_length_bytes)
-    : Math.min(max_value_bytes, Math.ceil(plan.length / 8))
+  // canonical lengths.
+  const prefix_bytes = Math.min(max_value_bytes, Math.ceil(plan.length / 8))
   let payload_bound = prefix_bytes
   for (const [index, field] of plan.entries()) {
     if (payload_bound >= max_value_bytes) return max_value_bytes
     const width = fixed_field_width(field) ?? max_value_bytes
-    const length_bytes = framing === "optional_values" || index + 1 === plan.length
+    const length_bytes = index + 1 === plan.length
       ? 0
       : max_varuint_bytes
     payload_bound = bounded_add(

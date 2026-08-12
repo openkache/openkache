@@ -74,10 +74,7 @@ impl<'a> CapabilityList<'a> {
 
 impl CapabilityCatalog for CapabilityList<'_> {
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|entry| entry.key == key)
-            .map(|entry| entry.value)
+        self.get_by_id(capability_id(key), key)
     }
 
     fn get_by_id(&self, id: u64, name: &'static str) -> Option<&(dyn Any + Send + Sync)> {
@@ -176,11 +173,7 @@ impl Default for CapabilityRegistry {
 
 impl CapabilityCatalog for CapabilityRegistry {
     fn get(&self, key: &'static str) -> Option<&(dyn Any + Send + Sync)> {
-        self.entries
-            .iter()
-            .find(|(_, name, _)| *name == key)
-            .map(|(_, _, value)| value.as_ref())
-            .or_else(|| self.base.as_ref()?.get(key))
+        self.get_by_id(capability_id(key), key)
     }
 
     fn get_by_id(&self, id: u64, name: &'static str) -> Option<&(dyn Any + Send + Sync)> {

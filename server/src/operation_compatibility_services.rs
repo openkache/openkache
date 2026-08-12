@@ -8,19 +8,24 @@
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::AtomicBool,
+};
 
 use futures_util::lock::Mutex as AsyncMutex;
 
 use super::super::types::StoredItemValue;
 use super::super::{KvError, SetOutcome};
+use super::operation_compatibility_status as status;
 use super::operation_api::{CapabilityKey, PrepareError, ResourceLock};
-use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
-use super::operation_contract::OperationStatus;
+use super::operation_capabilities::CapabilityRegistry;
 use super::{
     NamespaceDescriptor, NamespaceError, NamespaceOpenResult, NamespacePolicy, NamespaceRegistry,
     NetworkWorkerCache, ObservabilityState, SetReservation,
 };
+
+type NamespaceLock = (Arc<AsyncMutex<()>>, Arc<AtomicBool>);
 
 /// Resource resolver for the compatibility namespace/storage adapter.
 ///
@@ -42,18 +47,26 @@ impl CompatibilityResourceResolver {
             .try_into()
             .map_err(|_| PrepareError::invalid_request(b"resource identity is malformed"))?;
         let identity = u64::from_be_bytes(identity);
-        self.namespaces.operation_lock(identity).ok_or_else(|| {
+        let (lock, active) = self.namespaces.operation_lock(identity).ok_or_else(|| {
             PrepareError::resource_unavailable(
-                OperationStatus::NamespaceNotFound,
+                status::NAMESPACE_NOT_FOUND,
                 b"namespace does not exist",
             )
-        })
+        })?;
+        Ok(ResourceLock::new(
+            lock,
+            active,
+            PrepareError::resource_unavailable(
+                status::NAMESPACE_NOT_FOUND,
+                b"namespace was deleted while the operation was waiting",
+            ),
+        ))
     }
 
     pub(super) fn resolve_global(&self) -> Result<ResourceLock, PrepareError> {
         let shared = self.namespaces.lifecycle_lock().map_err(|_| {
             PrepareError::resource_unavailable(
-                OperationStatus::InternalError,
+                status::INTERNAL_ERROR,
                 b"namespace metadata is unavailable",
             )
         })?;
@@ -67,6 +80,35 @@ impl CompatibilityResourceResolver {
 pub(super) const COMPATIBILITY_RESOURCE_RESOLVER: CapabilityKey<CompatibilityResourceResolver> =
     CapabilityKey::new("openkache.compatibility.resource_resolver");
 
+/// Runtime services made available to this adapter by the composition root.
+///
+/// The bundle is an API-owned capability value rather than a shared
+/// composition-context type. The compatibility module can therefore be
+/// registered in another server composition without depending on the
+/// operation registry's concrete runtime struct.
+pub(super) struct CompatibilityRuntime {
+    pub(super) cache: Arc<NetworkWorkerCache>,
+    pub(super) namespaces: Arc<Mutex<NamespaceRegistry>>,
+    pub(super) observability: Arc<ObservabilityState>,
+}
+
+impl CompatibilityRuntime {
+    pub(super) const fn new(
+        cache: Arc<NetworkWorkerCache>,
+        namespaces: Arc<Mutex<NamespaceRegistry>>,
+        observability: Arc<ObservabilityState>,
+    ) -> Self {
+        Self {
+            cache,
+            namespaces,
+            observability,
+        }
+    }
+}
+
+pub(super) const COMPATIBILITY_RUNTIME: CapabilityKey<CompatibilityRuntime> =
+    CapabilityKey::new("openkache.compatibility.runtime");
+
 /// Adds the compatibility adapter's worker-scoped capabilities.
 ///
 /// Generic runtime capabilities are installed by the server composition root
@@ -74,18 +116,16 @@ pub(super) const COMPATIBILITY_RESOURCE_RESOLVER: CapabilityKey<CompatibilityRes
 /// service values.
 pub(super) fn install_compatibility_services(
     registry: &mut CapabilityRegistry,
-    cache: Arc<NetworkWorkerCache>,
-    namespaces: Arc<Mutex<NamespaceRegistry>>,
-    observability: Arc<ObservabilityState>,
+    runtime: &CompatibilityRuntime,
 ) {
     let services: Arc<dyn CompatibilityServices + Send + Sync> = Arc::new(ServerContext::new(
-        Arc::clone(&cache),
-        Arc::clone(&namespaces),
-        observability,
+        Arc::clone(&runtime.cache),
+        Arc::clone(&runtime.namespaces),
+        Arc::clone(&runtime.observability),
     ));
     registry.insert(
         COMPATIBILITY_RESOURCE_RESOLVER,
-        CompatibilityResourceResolver::new(namespaces),
+        CompatibilityResourceResolver::new(Arc::clone(&runtime.namespaces)),
     );
     registry.insert(COMPATIBILITY_SERVICES, services);
 }
@@ -126,7 +166,7 @@ pub(super) trait StorageCapability {
 
 /// Namespace metadata capability exposed to the current storage behavior.
 pub(super) trait NamespaceCapability {
-    fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock>;
+    fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceLock>;
     fn lifecycle_lock(&self) -> Result<Arc<AsyncMutex<()>>, NamespaceError>;
     fn exists(&self, namespace_id: u64) -> bool;
     fn policy(&self, namespace_id: u64) -> Option<NamespacePolicy>;
@@ -198,16 +238,6 @@ pub(super) trait CompatibilityServices: Any + Send + Sync {
 pub(super) const COMPATIBILITY_SERVICES: CapabilityKey<
     Arc<dyn CompatibilityServices + Send + Sync>,
 > = CapabilityKey::new("openkache.compatibility.services");
-
-/// Looks up one API-owned capability without exposing the catalog's type
-/// erasure to every binding.
-#[allow(dead_code)]
-pub(super) fn capability<'a, T: Any>(
-    capabilities: &'a dyn CapabilityCatalog,
-    key: CapabilityKey<T>,
-) -> Option<&'a T> {
-    super::operation_api::downcast_capability(capabilities, key)
-}
 
 /// Server-owned dependencies for the current composition.
 pub(super) struct ServerContext {
@@ -289,7 +319,7 @@ impl StorageCapability for NetworkWorkerCache {
 }
 
 impl NamespaceCapability for Mutex<NamespaceRegistry> {
-    fn operation_lock(&self, namespace_id: u64) -> Option<ResourceLock> {
+    fn operation_lock(&self, namespace_id: u64) -> Option<NamespaceLock> {
         self.lock().ok()?.operation_lock(namespace_id)
     }
 

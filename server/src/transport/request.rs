@@ -450,9 +450,19 @@ async fn read_request_payload<S: RequestByteStream>(
         return Ok(first);
     }
 
-    let mut coalesced = Vec::new();
+    // Reuse the first backend-owned allocation whenever it represents a
+    // complete visible range. Chunk-oriented backends commonly return a
+    // `Vec`/`Bytes` of exactly the first fragment; copying it into a fresh
+    // accumulator would add an avoidable move before the remaining fragments
+    // arrive. A non-whole range is materialized only at this explicit
+    // compatibility boundary.
+    let first_len = first.len();
+    let (mut coalesced, first_range) = first.into_parts();
+    if first_range.start != 0 || first_range.end != coalesced.len() {
+        coalesced = coalesced[first_range].to_vec();
+    }
     coalesced
-        .try_reserve(value_len)
+        .try_reserve(value_len - first_len)
         .map_err(|error| {
             StreamReadError::Transport(TransportError::backend(
                 backend,
@@ -460,7 +470,6 @@ async fn read_request_payload<S: RequestByteStream>(
                 error,
             ))
         })?;
-    coalesced.extend_from_slice(first.as_slice());
     while coalesced.len() < value_len {
         let remaining = value_len - coalesced.len();
         let next = stream

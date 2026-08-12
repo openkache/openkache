@@ -26,6 +26,7 @@ import {
   type Compact_Request_Adapter_Route,
   type Request_Transport_Plan,
 } from "../compatibility_request_adapters"
+import { operation_uses_optional_value_layout } from "../compatibility_response_framing"
 import {
   derive_operation_plan,
   operation_field_requirements,
@@ -593,6 +594,28 @@ export function render_field_sequence_response_decode(
   diagnostic: string,
 ): string {
   const count = operation_composite_value_count(operation)
+  if (operation_uses_optional_value_layout(operation)) {
+    switch (language) {
+      case "java":
+        return `smithyDecodeOptionalValues(${payload}, ${count}, ${diagnostic})`
+      case "kotlin":
+        return `smithyDecodeOptionalValues(${payload}, ${count}, ${diagnostic})`
+      case "dart":
+        return `_smithyDecodeOptionalValues(${payload}, ${count}, ${diagnostic})`
+      case "typescript":
+        return `smithy_decode_optional_values(${payload}, ${count}, ${diagnostic})`
+      case "python":
+        return `_smithy_decode_optional_values(${payload}, ${count}, ${diagnostic})`
+      case "swift":
+        return `try smithyDecodeOptionalValues(${payload}, valueCount: ${count}, operation: ${diagnostic})`
+      case "csharp":
+        return `DecodeOptionalValues(${payload}, ${count}, ${diagnostic})`
+      case "go":
+        return `smithyDecodeOptionalValues(${payload}, ${count})`
+      case "rust":
+        return `smithy_decode_optional_values(${payload}, ${count}, ${diagnostic})?`
+    }
+  }
   if (!operation_uses_dense_layout(operation, "output")) {
     switch (language) {
       case "java":
@@ -1143,8 +1166,10 @@ export function render_operation_result<T>(
     >
   >,
 ): T {
-  const projection = managed_result_projection(operation).projection
-  const renderer = renderers[projection]
+  const result_projection = managed_result_projection(operation)
+  const projection = result_projection.projection
+  const renderer = renderers[projection] ??
+    (projection === "optional_payload" ? renderers.field_sequence : undefined)
   if (renderer === undefined) {
     throw new Error(`unsupported generated ${language} response projection ${projection}`)
   }

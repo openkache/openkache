@@ -6,6 +6,25 @@
 
 use super::{Opcode, Request, compat_v1, generic};
 
+/// Decodes one response through the composed client adapters.
+///
+/// Descriptor-selected response bytes are decoded through the shared layout
+/// codec. Compatibility modules remain responsible only for typed request and
+/// result conveniences.
+pub(crate) fn decode_response_fields<'a>(
+    operation: Opcode,
+    payload: &'a [u8],
+) -> super::Result<generic::OperationFields<'a>> {
+    let contract = crate::contract::operation_wire_spec(operation);
+    if contract.generic_response_framing().is_some() {
+        return generic::decode_response_fields_view(payload, &contract.response);
+    }
+    let _ = operation;
+    Err(super::ProtocolError::InvalidFieldSequence(
+        "operation response framing is not generic",
+    ))
+}
+
 fn generic_request_from_contract(
     operation: Opcode,
     namespace_id: Option<u64>,

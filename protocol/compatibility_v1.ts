@@ -6,10 +6,13 @@
  */
 
 import type {
+  Wire_Contract,
   Wire_Contract_Adapter,
   Wire_Operation_Contract,
   Wire_Operation_Field_Plan,
+  Wire_V1_Contract,
 } from "./wire_types"
+import { WIRE_RESPONSE_FRAMINGS } from "./wire_types"
 import { extract_wire_contract as extract_generic_wire_contract } from "./wire"
 import {
   PROTOCOL_V1_RESPONSE_SEMANTICS_EXTENSION,
@@ -18,6 +21,7 @@ import {
   WIRE_RESPONSE_ROUTES,
   type Wire_Response_Route,
 } from "./compat_v1_types"
+import { optional_integer_member } from "./wire/validate_contract"
 export {
   PROTOCOL_V1_RESPONSE_SEMANTICS_EXTENSION,
   PROTOCOL_V1_RETRY_MODE_EXTENSION,
@@ -25,6 +29,19 @@ export {
   WIRE_RESPONSE_ROUTES,
 } from "./compat_v1_types"
 export type { Wire_Response_Route } from "./compat_v1_types"
+
+/** Concrete v1 fields owned by the historical compatibility adapter. */
+export interface Wire_Compatibility_V1_Contract extends Wire_V1_Contract {
+  readonly optional_value_length_bytes: number
+  readonly optional_value_missing: number
+}
+
+/** Contract returned by the protocol-v1 generation composition root. */
+export interface Wire_Compatibility_Contract extends Omit<Wire_Contract, "v1"> {
+  readonly v1: Wire_Compatibility_V1_Contract
+}
+
+export const OPTIONAL_VALUES_RESPONSE_FRAMING = "optional_values" as const
 
 const POLICY_ROLES = [
   "policy",
@@ -41,6 +58,45 @@ const POLICY_ROLES = [
    * Exact request plans are validated entirely by the generic extractor.
  */
 export const PROTOCOL_V1_WIRE_ADAPTER: Wire_Contract_Adapter = {
+  extract_v1(
+    contract: Readonly<Record<string, unknown>>,
+    contract_location: string,
+  ) {
+    const optional_value_length_bytes = optional_integer_member(
+      contract,
+      "optionalValueLengthBytes",
+      contract_location,
+      1,
+      0xff,
+    )
+    const optional_value_missing = optional_integer_member(
+      contract,
+      "optionalValueMissing",
+      contract_location,
+      0,
+      Number.MAX_SAFE_INTEGER,
+    )
+    if (
+      optional_value_length_bytes !== undefined &&
+      optional_value_length_bytes !== 4
+    ) {
+      throw new Error(
+        `${contract_location}.optionalValueLengthBytes must be 4 for protocol-v1`,
+      )
+    }
+    if (
+      optional_value_missing !== undefined &&
+      optional_value_missing !== 0xffff_ffff
+    ) {
+      throw new Error(
+        `${contract_location}.optionalValueMissing must be 0xffffffff for protocol-v1`,
+      )
+    }
+    return {
+      optional_value_length_bytes: optional_value_length_bytes ?? 4,
+      optional_value_missing: optional_value_missing ?? 0xffff_ffff,
+    }
+  },
   extract_extensions(
     contract: Readonly<Record<string, unknown>>,
     operation_location: string,
@@ -64,10 +120,30 @@ export const PROTOCOL_V1_WIRE_ADAPTER: Wire_Contract_Adapter = {
     return Object.keys(extensions).length === 0 ? undefined : extensions
   },
   validate_operation(contract: Wire_Operation_Contract, operation_location: string): void {
-    if (contract.request_wire === undefined) return
-    if (contract.request_framing !== "ordered_fields") {
+    if (
+      contract.request_wire !== undefined &&
+      contract.request_framing !== "ordered_fields"
+    ) {
       throw new Error(
         `${operation_location}.requestWire compatibility projection requires requestFraming ordered_fields`,
+      )
+    }
+    if (
+      contract.response_framing !== undefined &&
+      !WIRE_RESPONSE_FRAMINGS.includes(contract.response_framing as
+        (typeof WIRE_RESPONSE_FRAMINGS)[number]) &&
+      contract.response_framing !== OPTIONAL_VALUES_RESPONSE_FRAMING
+    ) {
+      throw new Error(
+        `${operation_location}.responseFraming is not supported by protocol-v1 compatibility`,
+      )
+    }
+    if (
+      contract.response_framing === OPTIONAL_VALUES_RESPONSE_FRAMING &&
+      (contract.response_plan?.length ?? 0) === 0
+    ) {
+      throw new Error(
+        `${operation_location}.responseFraming optional_values requires at least one modeled field`,
       )
     }
   },
@@ -82,12 +158,12 @@ export const PROTOCOL_V1_WIRE_ADAPTER: Wire_Contract_Adapter = {
 export function extract_compatibility_wire_contract(
   ast: unknown,
   strict_operations = false,
-): ReturnType<typeof extract_generic_wire_contract> {
+): Wire_Compatibility_Contract {
   return extract_generic_wire_contract(
     ast,
     strict_operations,
     PROTOCOL_V1_WIRE_ADAPTER,
-  )
+  ) as Wire_Compatibility_Contract
 }
 
 /** Returns an adapter-owned open semantic label, when one was modeled. */
@@ -182,7 +258,7 @@ export function derive_wire_response_route(
           ? "empty"
           : contract.response_framing === "opaque"
           ? "application_value"
-          : contract.response_framing === "optional_values"
+          : contract.response_framing === OPTIONAL_VALUES_RESPONSE_FRAMING
           ? "field_sequence"
           : response_field_count === 0
           ? "empty"

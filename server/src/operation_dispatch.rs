@@ -38,11 +38,7 @@ pub(super) fn timeout_response(
     opcode: Opcode,
     message: &'static [u8],
 ) -> operation_transport::OperationResponse {
-    operation_transport::contract_error_response_status(
-        opcode,
-        super::operation_contract::OperationStatus::Timeout,
-        message,
-    )
+    operation_transport::timeout_response(opcode, message)
 }
 
 /// Builds the contract-valid response used when the response budget cannot be
@@ -51,11 +47,7 @@ pub(super) fn overloaded_response(
     opcode: Opcode,
     message: &'static [u8],
 ) -> operation_transport::OperationResponse {
-    operation_transport::contract_error_response_status(
-        opcode,
-        super::operation_contract::OperationStatus::Overloaded,
-        message,
-    )
+    operation_transport::overloaded_response(opcode, message)
 }
 
 /// Returns the generated response-memory reservation for one operation.
@@ -64,7 +56,7 @@ pub(super) fn overloaded_response(
 /// bounds remain owned by the generated contract adapter rather than being
 /// re-derived by the network server.
 pub(crate) fn response_budget_bytes(opcode: Opcode) -> Option<usize> {
-    operation_api::server_operation(opcode).and_then(|_| {
+    operation_api::server_operation(opcode).and_then(|_registration| {
         let budget = operation_transport::response_budget(opcode);
         (budget > 0).then_some(budget)
     })
@@ -72,8 +64,9 @@ pub(crate) fn response_budget_bytes(opcode: Opcode) -> Option<usize> {
 
 /// Executes a decoded request through the generic operation boundary.
 ///
-/// The caller only needs a response or an abandoned mutation. All protocol
-/// status selection and response framing stay in `operation_transport`.
+/// The caller only needs a response or an abandoned mutation. The generated
+/// operation descriptor selects the shared response layout; the network loop
+/// does not interpret it.
 pub(super) async fn execute_request(
     request: ServerRequest,
     authorization: operation_handlers::AuthorizationContext,
@@ -81,16 +74,14 @@ pub(super) async fn execute_request(
 ) -> Option<operation_transport::OperationResponse> {
     let opcode = request.opcode();
     let Some(registration) = operation_api::server_operation(opcode) else {
-        return Some(operation_transport::contract_error_response_status(
+        return Some(operation_transport::unsupported_operation_response(
             opcode,
-            super::operation_contract::OperationStatus::UnsupportedOpcode,
             b"modeled operation has no server registration",
         ));
     };
     if !operation_handlers::authorization_allowed(registration, authorization.clone()) {
-        return Some(operation_transport::contract_error_response_status(
+        return Some(operation_transport::forbidden_response(
             opcode,
-            super::operation_contract::OperationStatus::Forbidden,
             b"operation authorization capability is not satisfied",
         ));
     }
@@ -100,16 +91,14 @@ pub(super) async fn execute_request(
     // as asynchronous ones.
     let input = (registration.decode)(request);
     if !input.is_valid() {
-        return Some(operation_transport::contract_error_response_status(
+        return Some(operation_transport::invalid_request_response(
             opcode,
-            super::operation_contract::OperationStatus::InvalidRequest,
             b"operation field sequence is invalid",
         ));
     }
     if let Err(message) = input.validate_codecs() {
-        return Some(operation_transport::contract_error_response_status(
+        return Some(operation_transport::invalid_request_response(
             opcode,
-            super::operation_contract::OperationStatus::InvalidRequest,
             message,
         ));
     }
@@ -117,11 +106,12 @@ pub(super) async fn execute_request(
     let preparation =
         match (registration.prepare)(&input, operation_api::PrepareContext { capabilities }) {
             Ok(preparation) => preparation,
-            Err(error) => {
-                return Some(operation_transport::contract_error_response_status(
-                    opcode,
-                    error.status,
-                    error.message,
+            Err(operation_api::PrepareError::InvalidRequest(message)) => {
+                return Some(operation_transport::invalid_request_response(opcode, message));
+            }
+            Err(operation_api::PrepareError::Status { status, message }) => {
+                return Some(operation_transport::contract_error_response_token(
+                    opcode, status, message,
                 ));
             }
         };
@@ -135,11 +125,16 @@ pub(super) async fn execute_request(
     }
     for resource in preparation.resources() {
         if let Some(error) = resource.inactive_error() {
-            return Some(operation_transport::contract_error_response_status(
-                opcode,
-                error.status,
-                error.message,
-            ));
+            return Some(match error {
+                operation_api::PrepareError::InvalidRequest(message) => {
+                    operation_transport::invalid_request_response(opcode, message)
+                }
+                operation_api::PrepareError::Status { status, message } => {
+                    operation_transport::contract_error_response_token(
+                        opcode, status, message,
+                    )
+                }
+            });
         }
     }
 

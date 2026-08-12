@@ -13,6 +13,7 @@ import type { Client_Contract } from "../../client_contract"
 import type { Operation_Result_Plan } from "../../operation_results"
 import type { Operation_Result_Projection } from "../../compatibility_result_projections"
 import type { Request_Transport_Plan } from "../../compatibility_request_adapters"
+import { operation_uses_optional_value_layout } from "../../compatibility_response_framing"
 import {
   operation_field_count,
   type Operation_Field_Plan,
@@ -183,14 +184,8 @@ export function operation_uses_field_sequence_helpers(
   operation: Managed_Api_Operation,
 ): boolean {
   return operation_uses_generic_field_sequence_request(operation) ||
-    operation.plan.contract.response_framing === "field_sequence"
-}
-
-/** Returns whether this operation selected the explicit optional-value layout. */
-export function operation_uses_optional_value_layout(
-  operation: Managed_Api_Operation,
-): boolean {
-  return operation.plan.contract.response_framing === "optional_values"
+    operation.plan.result_plan.response_transport === "field_sequence" ||
+    operation_uses_optional_value_layout(operation)
 }
 
 /** Returns whether this operation uses the compact multi-item compatibility route. */
@@ -201,10 +196,8 @@ export function operation_uses_item_id_helpers(
 }
 
 /**
- * One framing descriptor feeds every generated optional-value decoder.
+ * One framing descriptor feeds every generated nullable field decoder.
  *
- * The language snippets are necessarily written in each target language, but
- * their width, sentinel, aggregate value limit, and byte order come from this
- * one contract projection.  A framing change therefore cannot silently drift
- * in one adapter.
+ * Language snippets remain target-specific, while the selected response
+ * adapter owns any prefix, sentinel, aggregate limit, or byte-order details.
  */

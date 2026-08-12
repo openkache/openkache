@@ -42,6 +42,32 @@ function pascal_case(identifier: string): string {
     .join("")
 }
 
+function rust_field_layout(identifier: string): string {
+  switch (identifier) {
+    case "empty":
+    case "opaque":
+    case "sequence":
+    case "dense":
+      return pascal_case(identifier)
+    default:
+      return "AdapterOwned"
+  }
+}
+
+function rust_layout_framing(identifier: string): string {
+  // Keep adapter-specific framing names out of the generic Rust contract.
+  // The selected adapter publishes its concrete representation separately.
+  switch (identifier) {
+    case "empty":
+    case "opaque":
+    case "ordered_fields":
+    case "field_sequence":
+      return pascal_case(identifier)
+    default:
+      return "AdapterOwned"
+  }
+}
+
 function rust_const_identifier(identifier: string): string {
   let value = wire_name(identifier)
     .replace(/[^a-z0-9_]/g, "_")
@@ -398,18 +424,18 @@ ${operation_modules.join("\n")}
       const operation_descriptor = descriptor(operation)
       return `    OperationWireSpec {
         request: OperationLayoutPlan {
-            framing: OperationLayoutFraming::${pascal_case(operation_descriptor.request_framing)},
+            framing: OperationLayoutFraming::${rust_layout_framing(operation_descriptor.request_framing)},
             frame: OperationFramePolicy::${pascal_case(operation_descriptor.request_frame)},
-            layout: OperationFieldLayout::${pascal_case(operation_descriptor.request_layout)},
+            layout: OperationFieldLayout::${rust_field_layout(operation_descriptor.request_layout)},
             fields: ${plan_slice(request_plan)},
             exact_width: ${formatted_decimal(fixed_plan_width(request_plan) ?? 0)},
             max_width: ${formatted_decimal(request_payload_bound(contract, operation))},
             opaque_aggregate: false,
         },
         response: OperationLayoutPlan {
-            framing: OperationLayoutFraming::${pascal_case(operation_descriptor.response_framing)},
+            framing: OperationLayoutFraming::${rust_layout_framing(operation_descriptor.response_framing)},
             frame: OperationFramePolicy::${pascal_case(operation_descriptor.response_frame)},
-            layout: OperationFieldLayout::${pascal_case(operation_descriptor.response_layout)},
+            layout: OperationFieldLayout::${rust_field_layout(operation_descriptor.response_layout)},
             fields: ${plan_slice(response_plan)},
             exact_width: ${formatted_decimal(fixed_plan_width(response_plan) ?? 0)},
             max_width: ${formatted_decimal(response_payload_bound(contract, operation))},
@@ -495,18 +521,18 @@ ${field_index_modules("request")}
 ${field_index_modules("response")}
 
 /// Generic response payload framing selected by the modeled operation.
+///
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationResponseFraming {
     Empty,
     Opaque,
-    OptionalValues,
     FieldSequence,
 }
 
 /// Generic request framing consumed by transport-neutral executors.
 ///
-/// Historical protocol-v1 routes are handled by adapters; generic server/client
-/// code only needs this byte-shape class.
+/// Exact request-wire plans are handled by an explicit adapter; generic
+/// operation code only consumes these neutral body-shape classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationRequestFraming {
     Empty,
@@ -518,15 +544,16 @@ pub enum OperationRequestFraming {
 ///
 /// Empty and opaque are explicit non-field layouts. Dense is used only for
 /// all-required flattened fixed-width plans. Sequence is the general fallback
-/// for optional, variable, repeated, and nested values. OptionalValues is an
-/// explicit fixed presence-table layout selected by the operation descriptor.
+/// for optional, variable, repeated, and nested values. Adapter-owned layouts
+/// are projected outside this generic contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OperationFieldLayout {
     Empty,
     Opaque,
     Sequence,
     Dense,
-    OptionalValues,
+    /// The concrete representation is supplied by an API-owned extension.
+    AdapterOwned,
 }
 
 /// Generic frame policy selected by the same shape plan as the payload
@@ -559,8 +586,10 @@ pub enum OperationLayoutFraming {
     Empty,
     Opaque,
     OrderedFields,
-    OptionalValues,
     FieldSequence,
+    /// The concrete representation is supplied by an API-owned adapter. The
+    /// generic contract deliberately does not name that representation.
+    AdapterOwned,
 }
 
 /// One ordered field in a generated request or response plan.
@@ -596,25 +625,42 @@ pub struct OperationWireSpec {
 
 impl OperationWireSpec {
     /// Returns the request framing enum derived from the canonical layout.
-    pub const fn request_framing(self) -> OperationRequestFraming {
+    pub const fn request_framing(self) -> Option<OperationRequestFraming> {
         match self.request.framing {
-            OperationLayoutFraming::Empty => OperationRequestFraming::Empty,
-            OperationLayoutFraming::Opaque => OperationRequestFraming::Opaque,
+            OperationLayoutFraming::Empty => Some(OperationRequestFraming::Empty),
+            OperationLayoutFraming::Opaque => Some(OperationRequestFraming::Opaque),
             OperationLayoutFraming::OrderedFields
-            | OperationLayoutFraming::FieldSequence
-            | OperationLayoutFraming::OptionalValues => OperationRequestFraming::OrderedFields,
+            | OperationLayoutFraming::FieldSequence => Some(OperationRequestFraming::OrderedFields),
+            OperationLayoutFraming::AdapterOwned => None,
         }
     }
 
-    /// Returns the response framing enum derived from the canonical layout.
-    pub const fn response_framing(self) -> OperationResponseFraming {
+    /// Returns the generic response framing, or None for an adapter-owned
+    /// extension that has no shared layout.
+    pub const fn response_framing(self) -> Option<OperationResponseFraming> {
         match self.response.framing {
-            OperationLayoutFraming::Empty => OperationResponseFraming::Empty,
-            OperationLayoutFraming::Opaque => OperationResponseFraming::Opaque,
-            OperationLayoutFraming::OptionalValues => OperationResponseFraming::OptionalValues,
+            OperationLayoutFraming::Empty => Some(OperationResponseFraming::Empty),
+            OperationLayoutFraming::Opaque => Some(OperationResponseFraming::Opaque),
+            OperationLayoutFraming::AdapterOwned => None,
             OperationLayoutFraming::FieldSequence
-            | OperationLayoutFraming::OrderedFields => OperationResponseFraming::FieldSequence,
+            | OperationLayoutFraming::OrderedFields => Some(OperationResponseFraming::FieldSequence),
         }
+    }
+
+    /// Returns the request framing supported by the generic operation adapter.
+    pub const fn generic_request_framing(self) -> Option<OperationRequestFraming> {
+        match self.request.framing {
+            OperationLayoutFraming::Empty => Some(OperationRequestFraming::Empty),
+            OperationLayoutFraming::Opaque => Some(OperationRequestFraming::Opaque),
+            OperationLayoutFraming::OrderedFields
+            | OperationLayoutFraming::FieldSequence => Some(OperationRequestFraming::OrderedFields),
+            OperationLayoutFraming::AdapterOwned => None,
+        }
+    }
+
+    /// Returns the response framing supported by the generic operation adapter.
+    pub const fn generic_response_framing(self) -> Option<OperationResponseFraming> {
+        self.response_framing()
     }
 
     pub const fn request_layout(self) -> OperationFieldLayout {
@@ -826,10 +872,6 @@ pub const NAMESPACE_ID_BYTES: usize = ${formatted_decimal(v1.namespace_id_bytes)
 pub const NAMESPACE_REVISION_BYTES: usize = ${formatted_decimal(v1.namespace_revision_bytes)};
 /// Bytes in the fixed namespace name length field.
 pub const NAMESPACE_NAME_LENGTH_BYTES: usize = ${formatted_decimal(v1.namespace_name_length_bytes)};
-/// Width and missing sentinel used by the generic optional-value codec.
-pub const OPTIONAL_VALUE_LENGTH_BYTES: usize = ${formatted_decimal(v1.optional_value_length_bytes ?? 4)};
-pub const OPTIONAL_VALUE_MISSING: u32 = ${formatted_decimal(v1.optional_value_missing ?? 0xffff_ffff)};
-
 /// First assigned status value reserved for errors.
 pub const ERROR_STATUS_MINIMUM: u8 = ${formatted_byte(v1.error_status_minimum)};
 

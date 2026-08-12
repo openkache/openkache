@@ -56,7 +56,10 @@ export function operation_response_context(
   return {
     request_adapter_route: request.compact_adapter?.route,
     request_framing: contract.request_framing ?? descriptor.request_framing,
-    response_framing: descriptor.response_framing,
+    // Generic descriptor planning deliberately collapses unknown response
+    // tokens to `adapter_owned`. The compatibility resolver still needs the
+    // adapter's declared token to select its concrete decoder.
+    response_framing: contract.response_framing ?? descriptor.response_framing,
   }
 }
 
@@ -82,10 +85,18 @@ export function operation_result_projection(
     context,
   )
   const response_framing = derive_wire_operation_descriptor(contract).response_framing
-  const generic_projection: Operation_Response_Transport =
-    response_framing === "field_sequence" || response_framing === "optional_values"
-      ? "field_sequence"
-      : response_framing
+  const generic_projection: Operation_Response_Transport = (() => {
+    switch (response_framing) {
+      case "empty":
+        return "empty"
+      case "opaque":
+        return "opaque"
+      case "field_sequence":
+        return "field_sequence"
+      default:
+        return "adapter_owned"
+    }
+  })()
   return {
     ...(adapter === undefined ? {} : { compatibility_adapter: adapter }),
     projection: adapter?.projection ?? generic_projection,

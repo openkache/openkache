@@ -128,7 +128,14 @@ export const COMPATIBILITY_RESPONSE_ADAPTERS: Readonly<
     result_kind_for_status: (status) =>
       status === "not_found" ? "not_found" : "value",
     route: "value",
-    supports: supports_compatibility_framing("opaque", "optional_values"),
+    supports: supports_compatibility_framing("opaque", "adapter_owned"),
+  },
+  values: {
+    projection: "optional_payload",
+    result_kinds: ["value"],
+    result_kind_for_status: () => "value",
+    route: "value",
+    supports: supports_compatibility_framing("optional_values"),
   },
   set_outcome: {
     projection: "status_outcome",

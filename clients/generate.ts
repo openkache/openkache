@@ -119,11 +119,13 @@ export {
 export {
   WIRE_CODEC_REGISTRY,
   field_sequence_framing,
-  optional_value_framing,
   type Field_Sequence_Framing,
-  type Optional_Value_Framing,
   type Wire_Codec_Registration,
 } from "./generator/managed"
+export {
+  optional_value_framing,
+  type Optional_Value_Framing,
+} from "./compatibility_response_framing"
 import {
   render_dart_contract,
   render_dart_operations,

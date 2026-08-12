@@ -14,16 +14,22 @@ use super::operation_api::{OperationCatalog, ServerOperationRegistration};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityRegistry},
-    operation_compatibility_bindings as compatibility_bindings,
+    operation_compatibility_services::{
+        COMPATIBILITY_RUNTIME, CompatibilityRuntime,
+    },
     operation_compatibility_registrations as compatibility,
-    operation_generic_resources as generic_resources,
     operation_generic_registrations as generic,
+    storage_port::STORAGE_PORT,
 };
 
 /// Composition-root operation catalog assembled from API-owned modules.
-pub(super) const SERVER_OPERATIONS: OperationCatalog = OperationCatalog::new()
-    .register_module(generic::API)
-    .register_module(compatibility::API);
+pub(super) const API_MODULES: &[super::operation_api::ApiModule] = &[
+    generic::API,
+    compatibility::API,
+];
+
+pub(super) const SERVER_OPERATIONS: OperationCatalog =
+    OperationCatalog::new().register_modules(API_MODULES);
 
 pub(super) fn server_operation(opcode: Opcode) -> Option<&'static ServerOperationRegistration> {
     SERVER_OPERATIONS.get(opcode)
@@ -46,16 +52,22 @@ pub(super) fn install_runtime_capabilities(
     namespaces: Arc<Mutex<NamespaceRegistry>>,
     observability: Arc<ObservabilityState>,
 ) -> Arc<dyn CapabilityCatalog> {
+    let mut source = CapabilityRegistry::overlay(Arc::clone(&base));
     let storage_port: super::storage_port::StoragePortHandle = cache.clone();
-    let mut registry = CapabilityRegistry::overlay(base);
-    generic_resources::install_storage_port(&mut registry, storage_port);
-    generic_resources::install_resource_store(&mut registry);
-    compatibility_bindings::install_compatibility_services(
-        &mut registry,
-        cache,
-        namespaces,
-        observability,
+    source.insert(STORAGE_PORT, storage_port);
+    source.insert(
+        COMPATIBILITY_RUNTIME,
+        CompatibilityRuntime::new(
+            Arc::clone(&cache),
+            Arc::clone(&namespaces),
+            Arc::clone(&observability),
+        ),
     );
+    let source: Arc<dyn CapabilityCatalog> = Arc::new(source);
+    let mut registry = CapabilityRegistry::overlay(base);
+    for module in API_MODULES {
+        module.install_capabilities(&mut registry, source.as_ref());
+    }
     Arc::new(registry)
 }
 

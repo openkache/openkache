@@ -33,15 +33,26 @@ export const WIRE_RESPONSE_FRAMINGS = [
   "field_sequence",
 ] as const
 
-export type Wire_Response_Framing = (typeof WIRE_RESPONSE_FRAMINGS)[number]
+/** Width of the shared compact optional-value length/sentinel prefix. */
+export const OPTIONAL_VALUE_LENGTH_BYTES = 4
+
+/** Missing marker for the shared compact optional-value layout. */
+export const OPTIONAL_VALUE_MISSING = 0xffff_ffff
+
+/** Generic response framing plus opaque adapter-owned extensions. */
+export type Wire_Response_Framing =
+  | (typeof WIRE_RESPONSE_FRAMINGS)[number]
+  | "adapter_owned"
+  | (string & {})
 
 /** Generic payload layout selected from generated field shape metadata. */
 export type Wire_Operation_Field_Layout =
   | "empty"
   | "opaque"
+  | "optional_values"
   | "sequence"
   | "dense"
-  | "optional_values"
+  | "adapter_owned"
 
 /** Generic request/response frame policy selected by the shape plan. */
 export type Wire_Operation_Frame_Policy = "length_delimited" | "fixed_body"
@@ -337,15 +348,15 @@ export interface Wire_Operation_Contract {
    * an adapter may narrow its own values after extraction.
    */
   readonly extensions?: Readonly<Record<string, unknown>>
-  /**
-   * Ordered response field plan. This is the generic field-sequence source of
-   * truth; optional-value framing is only one encoding used by that plan.
-   */
+  /** Ordered response field plan used by generic or adapter-owned layouts. */
   readonly response_plan?: readonly Wire_Operation_Field_Plan[]
   /**
-   * Explicit generic response framing. This is independent from the semantic
-   * result represented by the response. Production contracts always provide
-   * this member; the optional type keeps non-strict AST fixtures readable.
+   * Explicit response framing. Generic values are interpreted by shared
+   * infrastructure; an adapter-owned value is preserved opaquely and must be
+   * projected by the adapter that declared it.
+   *
+   * Production contracts always provide this member; the optional type keeps
+   * non-strict AST fixtures readable.
    */
   readonly response_framing?: Wire_Response_Framing
   /** Explicit adapter-owned aggregate opaque payload marker. */
@@ -362,6 +373,12 @@ export interface Wire_Operation_Contract {
  * import or enumerate any adapter's route vocabulary.
  */
 export interface Wire_Contract_Adapter {
+  /** Extracts adapter-owned protocol-version members from the versioned
+   * contract without adding their vocabulary to the generic contract type. */
+  readonly extract_v1?: (
+    contract: Readonly<Record<string, unknown>>,
+    contract_location: string,
+  ) => Readonly<Record<string, unknown>> | undefined
   /**
    * Adds or validates adapter-owned operation-contract extensions.
    *
@@ -431,9 +448,6 @@ export interface Wire_V1_Contract {
   readonly namespace_revision_bytes: number
   readonly namespace_name_length_bytes: number
   readonly namespace_name_max_bytes: number
-  /** Optional-value response framing; defaults preserve permissive AST fixtures. */
-  readonly optional_value_length_bytes?: number
-  readonly optional_value_missing?: number
   readonly set_flags_bytes: number
   readonly set_condition_mask: number
   readonly set_condition_any_bits: number

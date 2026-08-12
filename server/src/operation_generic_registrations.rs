@@ -13,6 +13,7 @@ use super::operation_generic_handlers::{
     prepare_multi_resource_mutation, reverse_handler_async, square_array_handler_async,
     storage_read_handler,
 };
+use super::operation_generic_resources::install_capabilities;
 
 pub(super) const API: ApiModule = ApiModule::new(&[
     RegistrationBuilder::generic(Opcode::Ping, ping_handler_async)
@@ -49,4 +50,5 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .prepare(prepare_multi_resource_mutation)
     .mutation()
     .build(),
-]);
+])
+.with_capabilities(install_capabilities);

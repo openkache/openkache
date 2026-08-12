@@ -7,7 +7,7 @@
 use openkache_protocol::OwnedRange;
 
 use super::operation_api::{PrepareContext, PrepareError, PreparePlan};
-use super::operation_contract::{OperationStatus, request_fields};
+use super::operation_contract::request_fields;
 use super::operation_fields::OperationFieldEnvelope;
 use super::operation_generic_behavior as behavior;
 use super::operation_generic_resources::EXPERIMENTAL_RESOURCE_STORE;
@@ -15,6 +15,7 @@ use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::{
     OperationBody, OperationError, OperationOutcome, OperationValue,
 };
+use super::operation_generic_status as status;
 use super::operation_registry::OperationFuture;
 use super::storage_port::{
     StorageAddress, StorageError, StoragePortExt,
@@ -22,18 +23,9 @@ use super::storage_port::{
 
 pub(crate) fn ping_handler(_input: OperationInputView) -> Result<OperationOutcome, OperationError> {
     Ok(OperationOutcome::opaque(
-        OperationStatus::Ok,
+        status::OK,
         OperationValue::inline(behavior::ping()),
     ))
-}
-
-fn require_single_field(input: &OperationInputView) -> Result<(), OperationError> {
-    if input.field_count() != 1 || input.field_at_index(0).is_none() {
-        return Err(OperationError::InvalidRequest(
-            b"operation requires one request field",
-        ));
-    }
-    Ok(())
 }
 
 fn transform_packed_f64(
@@ -45,28 +37,24 @@ fn transform_packed_f64(
     openkache_protocol::codec::transform_packed_f64_be(field.bytes(), behavior::square)
 }
 
-fn take_single_field_range(
+pub(crate) fn echo_handler(
     mut input: OperationInputView,
-) -> Result<OwnedRange, OperationError> {
-    require_single_field(&input)?;
-    input
-        .take_single_field_bytes_range()
-        .ok_or(OperationError::InvalidRequest(
-            b"operation requires one request field",
-        ))
-}
-
-pub(crate) fn echo_handler(input: OperationInputView) -> Result<OperationOutcome, OperationError> {
+) -> Result<OperationOutcome, OperationError> {
     Ok(OperationOutcome::opaque(
-        OperationStatus::Ok,
-        behavior::echo(take_single_field_range(input)?),
+        status::OK,
+        behavior::echo(
+            input
+                .take_single_field_bytes_range()
+                .ok_or(OperationError::InvalidRequest(
+                    b"operation requires one request field",
+                ))?,
+        ),
     ))
 }
 
 pub(crate) fn acknowledge_handler(
     input: OperationInputView,
 ) -> Result<OperationOutcome, OperationError> {
-    require_single_field(&input)?;
     let token_field = input
         .required_encoded_field_at_index(
             request_fields::op_experimental_acknowledge::TOKEN,
@@ -78,7 +66,7 @@ pub(crate) fn acknowledge_handler(
         .map_err(OperationError::InvalidRequest)?;
     behavior::acknowledge(token);
     Ok(OperationOutcome::success(
-        OperationStatus::Accepted,
+        status::ACCEPTED,
         OperationBody::Empty,
     ))
 }
@@ -103,8 +91,8 @@ pub(crate) fn dense_handler(input: OperationInputView) -> Result<OperationOutcom
     let output = behavior::dense(behavior::DenseValue { counter, enabled });
     let counter = output.counter.to_be_bytes();
     let enabled = [u8::from(output.enabled)];
-    Ok(OperationOutcome::field_sequence(
-        OperationStatus::Ok,
+    Ok(OperationOutcome::fields(
+        status::OK,
         [
             Some(OperationValue::inline(&counter)),
             Some(OperationValue::inline(&enabled)),
@@ -126,7 +114,7 @@ pub(crate) fn reverse_handler(
         .map_err(OperationError::InvalidRequest)?;
     let value = behavior::reverse(value);
     Ok(OperationOutcome::opaque(
-        OperationStatus::Ok,
+        status::OK,
         value.into_bytes(),
     ))
 }
@@ -141,7 +129,7 @@ pub(crate) fn square_array_handler(
         )
         .map_err(OperationError::InvalidRequest)?;
     let output = transform_packed_f64(field).map_err(OperationError::InvalidRequest)?;
-    Ok(OperationOutcome::opaque(OperationStatus::Ok, output))
+    Ok(OperationOutcome::opaque(status::OK, output))
 }
 
 pub(crate) fn page_handler(input: OperationInputView) -> Result<OperationOutcome, OperationError> {
@@ -152,8 +140,8 @@ pub(crate) fn page_handler(input: OperationInputView) -> Result<OperationOutcome
         page.items.into_iter().map(OwnedRange::whole),
     )
     .map_err(|error| OperationError::InvalidRequest(error.message()))?;
-    Ok(OperationOutcome::field_sequence(
-        OperationStatus::Ok,
+    Ok(OperationOutcome::fields(
+        status::OK,
         [
             Some(OperationValue::from(items)),
             page.next_cursor.map(OperationValue::from),
@@ -168,8 +156,8 @@ pub(crate) fn prepare_multi_resource_mutation(
     let store = context
         .capability(EXPERIMENTAL_RESOURCE_STORE)
         .ok_or_else(|| {
-            PrepareError::resource_unavailable(
-                OperationStatus::InternalError,
+        PrepareError::resource_unavailable(
+                status::INTERNAL_ERROR,
                 b"experimental resource store is not installed",
             )
         })?;
@@ -184,10 +172,10 @@ pub(crate) fn prepare_multi_resource_mutation(
         )
         .ok_or_else(|| PrepareError::invalid_request(b"target resource is missing"))?;
     let source_lock = store.resource_lock(source).map_err(|message| {
-        PrepareError::resource_unavailable(OperationStatus::InternalError, message)
+        PrepareError::resource_unavailable(status::INTERNAL_ERROR, message)
     })?;
     let target_lock = store.resource_lock(target).map_err(|message| {
-        PrepareError::resource_unavailable(OperationStatus::InternalError, message)
+        PrepareError::resource_unavailable(status::INTERNAL_ERROR, message)
     })?;
     Ok(PreparePlan::from_resources([source_lock, target_lock]))
 }
@@ -197,7 +185,7 @@ pub(crate) fn multi_resource_mutation_handler<'a>(
 ) -> OperationFuture<'a> {
     let Some(store) = context.capability(EXPERIMENTAL_RESOURCE_STORE) else {
         return OperationFuture::ready(OperationOutcome::error(OperationError::status(
-            OperationStatus::InternalError,
+            status::INTERNAL_ERROR,
             b"experimental resource store is not installed",
         )));
     };
@@ -225,10 +213,10 @@ pub(crate) fn multi_resource_mutation_handler<'a>(
     };
     let outcome = match store.mutate(source, target, payload) {
         Ok(receipt) => {
-            OperationOutcome::field_sequence(OperationStatus::Ok, [Some(receipt)])
+            OperationOutcome::fields(status::OK, [Some(receipt)])
         }
         Err(message) => OperationOutcome::error(OperationError::status(
-            OperationStatus::InternalError,
+            status::INTERNAL_ERROR,
             message,
         )),
     };
@@ -237,10 +225,10 @@ pub(crate) fn multi_resource_mutation_handler<'a>(
 
 fn storage_failure(error: StorageError) -> OperationOutcome {
     let status = match &error {
-        StorageError::InvalidRequest(_) => OperationStatus::InvalidRequest,
-        StorageError::Unavailable(_) => OperationStatus::Overloaded,
-        StorageError::Timeout(_) => OperationStatus::Timeout,
-        StorageError::Worker(_) | StorageError::Backend(_) => OperationStatus::InternalError,
+        StorageError::InvalidRequest(_) => status::INVALID_REQUEST,
+        StorageError::Unavailable(_) => status::OVERLOADED,
+        StorageError::Timeout(_) => status::TIMEOUT,
+        StorageError::Worker(_) | StorageError::Backend(_) => status::INTERNAL_ERROR,
     };
     OperationOutcome::error(OperationError::owned_status(
         status,
@@ -264,7 +252,7 @@ pub(crate) fn storage_read_handler<'a>(context: OperationContext<'a>) -> Operati
     };
     let Some(storage) = storage else {
         return OperationFuture::ready(OperationOutcome::error(OperationError::status(
-            OperationStatus::InternalError,
+            status::INTERNAL_ERROR,
             b"storage capability is not installed",
         )));
     };
@@ -275,9 +263,9 @@ pub(crate) fn storage_read_handler<'a>(context: OperationContext<'a>) -> Operati
             .execute_typed_for_key(address, move |worker| Box::pin(worker.get(task_address)))
             .await
         {
-            Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value),
+            Ok(Some(value)) => OperationOutcome::opaque(status::OK, value),
             Ok(None) => OperationOutcome::opaque(
-                OperationStatus::NotFound,
+                status::NOT_FOUND,
                 OperationValue::inline(b""),
             ),
             Err(error) => storage_failure(error),

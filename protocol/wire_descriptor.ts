@@ -4,6 +4,7 @@ import {
   field_layout,
   layout_payload_bound,
 } from "./wire_layout"
+import { WIRE_RESPONSE_FRAMINGS } from "./wire_types"
 import type {
   Wire_Contract,
   Wire_Operation,
@@ -11,12 +12,22 @@ import type {
   Wire_Operation_Descriptor,
   Wire_Request_Framing,
   Wire_Request_Step,
+  Wire_Response_Framing,
 } from "./wire_types"
 
 function response_framing_for(
   contract: Wire_Operation_Contract,
-): NonNullable<Wire_Operation_Contract["response_framing"]> {
-  if (contract.response_framing !== undefined) return contract.response_framing
+): Wire_Response_Framing {
+  if (contract.response_framing !== undefined) {
+    if (contract.response_framing === "optional_values") {
+      return "adapter_owned"
+    }
+    return WIRE_RESPONSE_FRAMINGS.includes(
+      contract.response_framing as (typeof WIRE_RESPONSE_FRAMINGS)[number],
+    )
+      ? contract.response_framing
+      : "adapter_owned"
+  }
   const field_count = contract.response_plan?.length ?? 0
   return field_count === 0
     ? "empty"
@@ -44,15 +55,14 @@ export function derive_wire_operation_descriptor(
     throw new Error("operation contract is missing request framing")
   }
 
-  // Response framing is a wire property, not a semantic route. Compatibility
-  // adapters may interpret the open semantic label after this descriptor is
+  // Response framing is a wire property, not a semantic route. API adapters
+  // may interpret an application semantic label after this descriptor is
   // built, but generic planning must never infer bytes from names such as
   // `value`, `pong`, or `composite`.
   const response_framing = response_framing_for(contract)
-  // Historical routes are an adapter projection, not a property of the
-  // canonical operation descriptor. Their prefix grammar is selected by the
-  // compatibility adapter; generic layout planning remains entirely a
-  // function of the modeled field plan.
+  // Exact request-wire prefixes remain an explicit generated plan. Generic
+  // consumers accept only the generic response subset; an unknown response
+  // framing becomes adapter-owned without being interpreted here.
   const request_layout = field_layout(contract.request_plan, request_framing)
   const response_layout = field_layout(contract.response_plan, response_framing)
   return {
@@ -69,11 +79,12 @@ export function derive_wire_operation_descriptor(
  * Returns the maximum payload bytes a modeled response may occupy.
  *
  * Response budgeting is a property of the output shape, never of the
- * request's input value length. Fixed optional-value responses carry one
- * length/sentinel prefix per modeled field. Generic field sequences use one
- * shared presence mask followed by a canonical length for every present field
- * except the final present field, which consumes the remainder. Status-only
- * responses carry no payload.
+ * request's input value length. Generic field sequences use one shared
+ * presence mask followed by a canonical length for every present field except
+ * the final present field, which consumes the remainder. Adapter-owned
+ * responses receive the aggregate protocol ceiling here; their concrete
+ * prefix and sentinel costs are owned by the adapter. Status-only responses
+ * carry no payload.
  *
  * @param contract - Contract-wide payload and varuint limits.
  * @param operation - Operation whose response shape is being budgeted.
@@ -89,7 +100,6 @@ export function response_payload_bound(
   return layout_payload_bound(
     contract.max_value_bytes,
     contract.v1.max_varuint_bytes,
-    contract.v1.optional_value_length_bytes ?? 4,
     descriptor.response_framing,
     descriptor.response_layout,
     plan,
@@ -112,7 +122,6 @@ export function request_payload_bound(
   return layout_payload_bound(
     contract.max_value_bytes,
     contract.v1.max_varuint_bytes,
-    contract.v1.optional_value_length_bytes ?? 4,
     descriptor.request_framing,
     descriptor.request_layout,
     operation.contract.request_plan ?? [],

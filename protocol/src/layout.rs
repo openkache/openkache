@@ -6,12 +6,82 @@
 //! adapters.
 
 use crate::{
-    MAX_OPERATION_FIELDS, OperationFieldLayout, OperationFieldPlan, ProtocolError, Result,
-    encode_field_sequence, encode_optional_values, validate_value_length,
+    MAX_OPERATION_FIELDS, OperationFieldLayout, OperationFieldPlan, ProtocolError, ResponseSegment,
+    Result, encode_field_sequence, encode_varuint,
+    validate_value_length,
 };
 use smallvec::SmallVec;
 
 const INLINE_OPERATION_FIELDS: usize = 8;
+
+/// Value abstraction used by ownership-preserving layout encoders.
+pub trait LayoutValue {
+    /// Returns the exact encoded length of this value.
+    fn encoded_len(&self) -> usize;
+}
+
+/// Encodes a generated field layout into ownership-preserving response
+/// segments. Framing bytes are created here while the caller moves each
+/// application/storage value into a segment, avoiding a coalescing copy.
+pub fn encode_layout_segments<T, F>(
+    values: SmallVec<[Option<T>; INLINE_OPERATION_FIELDS]>,
+    layout: OperationFieldLayout,
+    mut append_value: F,
+) -> Result<SmallVec<[ResponseSegment; INLINE_OPERATION_FIELDS]>>
+where
+    T: LayoutValue,
+    F: FnMut(&mut SmallVec<[ResponseSegment; INLINE_OPERATION_FIELDS]>, T),
+{
+    if values.len() > MAX_OPERATION_FIELDS {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "field values exceed the generated operation bound",
+        ));
+    }
+    let mut segments = SmallVec::<[ResponseSegment; INLINE_OPERATION_FIELDS]>::new();
+    match layout {
+        OperationFieldLayout::Dense => {
+            if values.iter().any(Option::is_none) {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "dense layout cannot omit a required field",
+                ));
+            }
+            for value in values.into_iter().flatten() {
+                append_value(&mut segments, value);
+            }
+        }
+        OperationFieldLayout::Sequence => {
+            let mut mask = SmallVec::<[u8; 32]>::new();
+            mask.resize(values.len().saturating_add(7) / 8, 0);
+            let final_present = values.iter().rposition(Option::is_some);
+            for (index, value) in values.iter().enumerate() {
+                if value.is_some() {
+                    mask[index / 8] |= 1 << (index % 8);
+                }
+            }
+            segments.push(ResponseSegment::Inline(mask));
+            for (index, value) in values.into_iter().enumerate() {
+                let Some(value) = value else {
+                    continue;
+                };
+                if Some(index) != final_present {
+                    let length = u64::try_from(value.encoded_len())
+                        .map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                    let (encoded, encoded_len) = encode_varuint(length);
+                    segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
+                }
+                append_value(&mut segments, value);
+            }
+        }
+        OperationFieldLayout::Empty
+        | OperationFieldLayout::Opaque
+        | OperationFieldLayout::AdapterOwned => {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "selected layout does not encode ordered fields",
+            ));
+        }
+    }
+    Ok(segments)
+}
 
 /// Encodes a flat tuple of required fixed-width fields without per-field
 /// presence or length prefixes.
@@ -106,10 +176,11 @@ impl<'a, 'b> DenseFields<'a, 'b> {
 /// Encodes modeled fields using the layout selected by the generated shape
 /// plan.
 ///
-/// This is the single wire-shape dispatch point shared by clients, servers,
-/// and private adapters. It accepts only ordered opaque field bytes; semantic
-/// roles, operation names, and compatibility policies stay outside the
-/// protocol primitive.
+/// This is the generic wire-shape dispatch point shared by clients, servers,
+/// and private adapters. It accepts only generic ordered opaque field bytes;
+/// semantic roles, operation names, and compatibility policies stay outside
+/// the protocol primitive. Adapter-owned layouts are rejected here and must be
+/// projected by the adapter that declared them.
 pub fn encode_layout_fields(
     values: &[Option<&[u8]>],
     layout: OperationFieldLayout,
@@ -123,7 +194,6 @@ pub fn encode_layout_fields(
     match layout {
         OperationFieldLayout::Sequence => encode_field_sequence(values),
         OperationFieldLayout::Dense => encode_dense_fields(values, widths),
-        OperationFieldLayout::OptionalValues => encode_optional_values(values),
         OperationFieldLayout::Empty => {
             if values.is_empty() {
                 Ok(Vec::new())
@@ -136,6 +206,9 @@ pub fn encode_layout_fields(
         OperationFieldLayout::Opaque => Err(ProtocolError::InvalidFieldSequence(
             "opaque layout cannot encode ordered fields",
         )),
+        OperationFieldLayout::AdapterOwned => Err(ProtocolError::InvalidFieldSequence(
+            "adapter-owned layout requires its response adapter",
+        )),
     }
 }
 
@@ -144,7 +217,7 @@ pub fn encode_layout_fields(
 ///
 /// Keeping this dispatch in the shared protocol crate prevents server and
 /// client implementations from drifting on presence masks, field lengths,
-/// fixed-width tuples, or the explicitly selected optional-value layout.
+/// and fixed-width tuples. Adapter-owned layouts are fail-closed here.
 pub fn decode_layout_fields(
     payload: &[u8],
     layout: OperationFieldLayout,
@@ -169,9 +242,6 @@ pub fn decode_layout_fields(
             }
             DenseFields::decode(payload, widths, offsets).map(|_| ())
         }
-        OperationFieldLayout::OptionalValues => {
-            crate::OptionalValues::decode(payload, required.len(), offsets).map(|_| ())
-        }
         OperationFieldLayout::Empty => {
             if required.is_empty() && payload.is_empty() {
                 Ok(())
@@ -183,6 +253,9 @@ pub fn decode_layout_fields(
         }
         OperationFieldLayout::Opaque => Err(ProtocolError::InvalidFieldSequence(
             "opaque layout cannot decode ordered fields",
+        )),
+        OperationFieldLayout::AdapterOwned => Err(ProtocolError::InvalidFieldSequence(
+            "adapter-owned layout requires its response adapter",
         )),
     }
 }

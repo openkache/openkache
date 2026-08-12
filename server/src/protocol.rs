@@ -4,7 +4,8 @@
 //! facade live in separate modules. This root keeps only their composition
 //! boundary, shared errors, and small protocol-wide helpers.
 
-pub use crate::contract::{WireRequestLayout, WireRequestStep, wire_request_layout};
+#[allow(unused_imports)]
+pub(crate) use crate::contract::{WireRequestLayout, WireRequestStep, wire_request_layout};
 use openkache_protocol::{
     MAX_VALUE_BYTES, MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES, REQUEST_FIXED_BYTES,
 };
@@ -136,8 +137,6 @@ pub enum ProtocolError {
     },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
-    #[error("optional-value payload is invalid: {0}")]
-    InvalidOptionalValues(&'static str),
     #[error("operation field sequence is invalid: {0}")]
     InvalidFieldSequence(&'static str),
     #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
@@ -192,9 +191,6 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
-            }
-            openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
-                Self::InvalidOptionalValues(message)
             }
             openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
                 Self::InvalidFieldSequence(message)

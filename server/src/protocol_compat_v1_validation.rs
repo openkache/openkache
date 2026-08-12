@@ -50,7 +50,9 @@ pub(crate) fn validate_request(request: &super::super::Request) -> Result<()> {
         let name = request
             .namespace_name
             .as_deref()
-            .ok_or(ProtocolError::InvalidNamespaceName("namespace name missing"))?;
+            .ok_or(ProtocolError::InvalidNamespaceName(
+                "namespace name missing",
+            ))?;
         validate_namespace_name(name)?;
         if request.create_if_missing != request.namespace_policy.is_some()
             || request.namespace_id.is_some()

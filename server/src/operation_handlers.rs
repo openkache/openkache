@@ -24,6 +24,17 @@ pub(super) type RequestDecoder = fn(ServerRequest) -> OperationInputView;
 
 const INLINE_OPERATION_FIELDS: usize = 8;
 
+enum InputFields {
+    /// A projection that already owns one range per generated field.
+    Exact(SmallVec<[Option<OwnedRange>; INLINE_OPERATION_FIELDS]>),
+    /// A generic request that keeps one allocation and borrows logical ranges
+    /// from it until a handler explicitly moves one out.
+    Generic {
+        payload: OwnedRange,
+        offsets: SmallVec<[(usize, usize); INLINE_OPERATION_FIELDS]>,
+    },
+}
+
 /// Context passed from the protocol server to one concrete handler.
 ///
 /// The context deliberately contains storage primitives and decoded request
@@ -31,11 +42,7 @@ const INLINE_OPERATION_FIELDS: usize = 8;
 pub(super) struct OperationInputView {
     pub(super) opcode: Opcode,
     plan: &'static [contract::OperationFieldPlan],
-    fields: SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]>,
-    /// Generic field-sequence or opaque bytes. The offset table keeps fields
-    /// borrowed from this one allocation.
-    generic_payload: Option<OwnedRange>,
-    generic_offsets: SmallVec<[(usize, usize); INLINE_OPERATION_FIELDS]>,
+    fields: InputFields,
     generic_error: Option<&'static str>,
 }
 
@@ -44,7 +51,9 @@ pub(super) struct OperationInputView {
 /// through registration instead of changing this envelope.
 pub(super) fn decode_request(request: ServerRequest) -> OperationInputView {
     let opcode = request.opcode();
-    if let Some(plan) = contract::request_wire_plan(opcode) {
+    if contract::spec(opcode).generic_request_framing().is_some()
+        && let Some(plan) = contract::request_wire_plan(opcode)
+    {
         let (_, prefix, payload) = request.into_wire_parts();
         return match openkache_protocol::decode_request_wire_fields(
             OwnedRange::whole(prefix),
@@ -62,24 +71,6 @@ pub(super) fn decode_request(request: ServerRequest) -> OperationInputView {
     OperationInputView::from_owned_payload(opcode, payload)
 }
 
-/// One generated plan entry and its decoded semantic value.
-///
-/// Records are ordered exactly like the Smithy request plan. Optional fields
-/// remain present with `None`, so a server operation can distinguish a missing
-/// optional member from a zero/empty value without an operation-specific
-/// context union.
-pub(super) struct OperationFieldRecord {
-    pub(super) plan: &'static contract::OperationFieldPlan,
-    pub(super) value: Option<OperationFieldStorage>,
-}
-
-/// Storage owned or borrowed by one operation-field record.
-///
-/// The generic view carries only bytes. Application payloads stay owned so
-/// dispatch can move the existing request allocation without copying;
-/// compatibility adapters may use static bytes for canonical tokens.
-pub(super) struct OperationFieldStorage(OwnedRange);
-
 /// A borrowed generic field value. All semantic interpretation happens
 /// through a generated codec or an API-owned binding.
 pub(super) type OperationFieldValue<'a> = &'a [u8];
@@ -92,9 +83,10 @@ impl OperationInputView {
         OperationInputView {
             opcode,
             plan,
-            fields: empty_field_records(plan.len()),
-            generic_payload: None,
-            generic_offsets: sentinel_offsets(plan.len()),
+            fields: InputFields::Generic {
+                payload: OwnedRange::whole(Vec::new()),
+                offsets: sentinel_offsets(plan.len()),
+            },
             generic_error: Some(message),
         }
     }
@@ -107,22 +99,28 @@ impl OperationInputView {
     where
         I: IntoIterator<Item = Option<OwnedRange>>,
     {
-        let values: SmallVec<[Option<OwnedRange>; INLINE_OPERATION_FIELDS]> =
-            values.into_iter().collect();
         let plan = contract::spec(opcode).request.fields;
-        if values.len() != plan.len() {
+        if plan.len() > contract::MAX_OPERATION_REQUEST_FIELDS {
             return Self::invalid(opcode, "request wire field count is invalid");
         }
-        let fields = plan
-            .iter()
-            .zip(values)
-            .map(|(plan, value)| {
-                Some(OperationFieldRecord {
-                    plan,
-                    value: value.map(OperationFieldStorage),
-                })
-            });
-        let mut input = Self::from_populated_parts(opcode, fields);
+        let mut values = values.into_iter();
+        let mut fields =
+            SmallVec::<[Option<OwnedRange>; INLINE_OPERATION_FIELDS]>::with_capacity(plan.len());
+        for _ in plan {
+            let Some(value) = values.next() else {
+                return Self::invalid(opcode, "request wire field count is invalid");
+            };
+            fields.push(value);
+        }
+        if values.next().is_some() {
+            return Self::invalid(opcode, "request wire field count is invalid");
+        }
+        let mut input = Self {
+            opcode,
+            plan,
+            fields: InputFields::Exact(fields),
+            generic_error: None,
+        };
         input.validate_populated_fields();
         input
     }
@@ -132,127 +130,49 @@ impl OperationInputView {
         self.opcode
     }
 
-    /// Builds a generated field view from a generic request payload.
-    ///
-    /// Compatibility projections use [`Self::from_populated_parts`] instead,
-    /// so this constructor never needs to identify a compatibility route.
-    #[allow(dead_code)]
-    pub(super) fn from_parts<I>(opcode: Opcode, value: Vec<u8>, fields: I) -> OperationInputView
-    where
-        I: IntoIterator<Item = Option<OperationFieldRecord>>,
-    {
-        // Keep this fallback on the same generated shape validator as the
-        // zero-copy frame path. Besides avoiding two interpretations of the
-        // contract, this makes an accidentally non-empty `empty` request
-        // fail consistently instead of silently discarding its payload.
-        Self::from_generic_payload(
-            opcode,
-            fields.into_iter().collect(),
-            OwnedRange::whole(value),
-        )
-    }
-
-    /// Builds a view from fields populated by an external projection.
-    ///
-    /// The projection owns all framing-specific decoding and supplies only
-    /// generated field records. Keeping this constructor separate makes the
-    /// generic payload path independent from protocol-v1 route metadata.
-    pub(super) fn from_populated_parts<I>(opcode: Opcode, fields: I) -> OperationInputView
-    where
-        I: IntoIterator<Item = Option<OperationFieldRecord>>,
-    {
-        let mut fields: SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]> =
-            fields.into_iter().collect();
-        let plan = contract::spec(opcode).request.fields;
-        let generic_error = (plan.len() > contract::MAX_OPERATION_REQUEST_FIELDS)
-            .then_some("generated operation request field bound is stale");
-        if fields.len() < plan.len() {
-            fields.resize_with(plan.len(), || None);
-        }
-        OperationInputView {
-            opcode,
-            plan,
-            fields,
-            generic_payload: None,
-            generic_offsets: sentinel_offsets(plan.len()),
-            generic_error,
-        }
-    }
-
     /// Builds a generic view over an independently owned request payload.
     pub(super) fn from_owned_payload(opcode: Opcode, payload: OwnedRange) -> OperationInputView {
-        Self::from_generic_payload(
-            opcode,
-            empty_field_records(contract::spec(opcode).request.fields.len()),
-            payload,
-        )
+        Self::from_generic_payload(opcode, payload)
     }
 
-    fn from_generic_payload(
-        opcode: Opcode,
-        mut fields: SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]>,
-        payload: OwnedRange,
-    ) -> OperationInputView {
+    fn from_generic_payload(opcode: Opcode, payload: OwnedRange) -> OperationInputView {
         let contract = contract::spec(opcode);
         let plan = contract.request.fields;
-        if fields.len() < plan.len() {
-            fields.resize_with(plan.len(), || None);
-        }
-        let mut generic_offsets = sentinel_offsets(plan.len());
+        let mut offsets = sentinel_offsets(plan.len());
         let mut generic_error = None;
-        let mut generic_payload = None;
-        match contract.request.framing {
-            contract::OperationLayoutFraming::OrderedFields
-            | contract::OperationLayoutFraming::FieldSequence => {
-                for (index, field_plan) in plan.iter().enumerate().take(fields.len()) {
-                    fields[index] = Some(OperationFieldRecord {
-                        plan: field_plan,
-                        value: None,
-                    });
-                }
-                if plan.len() > generic_offsets.len() {
+        match contract.generic_request_framing() {
+            Some(contract::OperationRequestFraming::OrderedFields) => {
+                if plan.len() > offsets.len() {
                     generic_error = Some("generated operation request field bound is stale");
                 } else if decode_planned_fields(
                     payload.as_slice(),
                     plan,
                     contract.request.layout,
-                    &mut generic_offsets[..],
+                    &mut offsets[..],
                 )
                 .is_err()
                 {
                     generic_error = Some("operation field sequence is malformed");
                 }
-                generic_payload = Some(payload);
             }
-            contract::OperationLayoutFraming::Opaque => {
+            Some(contract::OperationRequestFraming::Opaque) => {
                 if plan.len() != 1 {
                     generic_error = Some("opaque operation requires one modeled field");
-                    generic_payload = Some(payload);
-                } else if let Some(field_plan) = plan.first() {
-                    fields[0] = Some(OperationFieldRecord {
-                        plan: field_plan,
-                        value: None,
-                    });
-                    generic_offsets[0] = (0, payload.len());
-                    generic_payload = Some(payload);
+                } else if plan.first().is_some() {
+                    offsets[0] = (0, payload.len());
                 }
             }
-            contract::OperationLayoutFraming::OptionalValues => {
-                generic_error = Some("optional-value framing is response-only");
-                generic_payload = Some(payload);
-            }
-            contract::OperationLayoutFraming::Empty => {
+            Some(contract::OperationRequestFraming::Empty) => {
                 if !payload.is_empty() {
                     generic_error = Some("empty operation request contains a payload");
                 }
             }
+            None => generic_error = Some("operation request framing is not generic"),
         }
         Self {
             opcode,
             plan,
-            fields,
-            generic_payload,
-            generic_offsets,
+            fields: InputFields::Generic { payload, offsets },
             generic_error,
         }
     }
@@ -260,11 +180,15 @@ impl OperationInputView {
     /// Validates fields populated by an API-owned framing adapter.
     ///
     /// The generic constructor validates ordered and opaque payloads from
-    /// their generated byte envelopes. Compact protocol projections invoke
-    /// this separate hook after populating their records, keeping the
-    /// protocol-v1 framing decision out of the generic constructor.
+    /// their generated byte envelopes. Exact-plan projections invoke this
+    /// hook after populating their fields, keeping framing decisions out of
+    /// the generic field validator.
     pub(super) fn validate_populated_fields(&mut self) {
-        if self.plan.len() > self.fields.len() {
+        let InputFields::Exact(fields) = &self.fields else {
+            self.generic_error = Some("operation fields were not populated");
+            return;
+        };
+        if self.plan.len() > fields.len() {
             self.generic_error = Some("generated operation request field bound is stale");
             return;
         }
@@ -282,7 +206,7 @@ impl OperationInputView {
             }
         }
         let plan = self.plan;
-        let presence = Self::populated_presence(&self.fields, plan);
+        let presence = Self::populated_presence(fields, plan);
         if plan
             .iter()
             .enumerate()
@@ -293,16 +217,13 @@ impl OperationInputView {
     }
 
     fn populated_presence(
-        fields: &[Option<OperationFieldRecord>],
+        fields: &[Option<OwnedRange>],
         plan: &'static [contract::OperationFieldPlan],
     ) -> SmallVec<[bool; INLINE_OPERATION_FIELDS]> {
         let mut presence = SmallVec::<[bool; INLINE_OPERATION_FIELDS]>::new();
         presence.resize(plan.len(), false);
         for (index, field) in plan.iter().enumerate() {
-            if fields[index]
-                .as_ref()
-                .is_some_and(|record| record.value.is_some())
-            {
+            if fields[index].is_some() {
                 presence[index] = true;
                 let mut parent = field.parent_index;
                 let mut hops = 0;
@@ -341,24 +262,9 @@ impl OperationInputView {
         Ok(())
     }
 
-    /// Returns the number of modeled fields in the generated request plan.
-    ///
-    /// Generic behavior only needs this cardinality for shape-level checks;
-    /// the generated plan itself remains an implementation detail of the
-    /// input decoder and codec envelope.
-    pub(super) const fn field_count(&self) -> usize {
-        self.plan.len()
-    }
-
-    /// Returns the decoded ordered records, including missing optional fields.
-    #[allow(dead_code)]
-    pub(super) fn records(&self) -> &[Option<OperationFieldRecord>] {
-        &self.fields[..self.plan.len()]
-    }
-
     /// Returns the generated plan entry at a numeric slot.
     fn field_plan_at_index(&self, index: usize) -> Option<&'static contract::OperationFieldPlan> {
-        self.fields.get(index)?.as_ref().map(|field| field.plan)
+        self.plan.get(index)
     }
 
     /// Returns one ordered field by its generated numeric index.
@@ -366,18 +272,17 @@ impl OperationInputView {
         if index >= self.plan.len() {
             return None;
         }
-        if let Some(payload) = self.generic_payload.as_ref() {
-            let (start, end) = *self.generic_offsets.get(index)?;
-            if start != usize::MAX {
-                return payload.as_slice().get(start..end);
+        match &self.fields {
+            InputFields::Generic { payload, offsets } => {
+                let (start, end) = *offsets.get(index)?;
+                if start != usize::MAX {
+                    payload.as_slice().get(start..end)
+                } else {
+                    None
+                }
             }
+            InputFields::Exact(fields) => fields.get(index)?.as_ref().map(OwnedRange::as_slice),
         }
-        self.fields
-            .get(index)?
-            .as_ref()?
-            .value
-            .as_ref()
-            .map(OperationFieldStorage::as_value)
     }
 
     /// Returns one present field together with its generated codec metadata.
@@ -418,30 +323,41 @@ impl OperationInputView {
         &mut self,
         index: usize,
     ) -> Option<OwnedRange> {
-        let field = self.fields.get_mut(index)?.as_mut()?;
-        if let Some(value) = field.value.take() {
-            return Some(value.0);
-        }
-        let (start, end) = *self.generic_offsets.get(index)?;
-        if start == usize::MAX || start > end {
-            return None;
-        }
-        // A multi-field generic request keeps the shared `Bytes` allocation
-        // alive so each extracted field can move a zero-copy range. The
-        // single-field path still transfers the owner directly, avoiding an
-        // unnecessary reference-count increment for the common opaque case.
-        let payload = if self.plan.len() == 1 {
-            self.generic_payload.take()?
-        } else {
-            self.generic_payload.as_ref()?.clone()
-        };
-        if end > payload.len() {
-            if self.plan.len() == 1 {
-                self.generic_payload = Some(payload);
+        match &mut self.fields {
+            InputFields::Exact(fields) => fields.get_mut(index).and_then(Option::take),
+            InputFields::Generic { payload, offsets } => {
+                let (start, end) = *offsets.get(index)?;
+                if start == usize::MAX || start > end || end > payload.len() {
+                    return None;
+                }
+                // A multi-field generic request keeps the shared `Bytes`
+                // allocation alive so each extracted field can move a
+                // zero-copy range. The single-field path transfers the owner
+                // directly, avoiding an unnecessary reference-count
+                // increment for the common opaque case.
+                let value = if self.plan.len() == 1 {
+                    if end > payload.len() {
+                        return None;
+                    }
+                    let payload = std::mem::replace(payload, OwnedRange::whole(Vec::new()));
+                    // The bounds check above makes this infallible. Keeping
+                    // the checked constructor here still makes the ownership
+                    // transfer fail closed if the range representation ever
+                    // changes independently of the generated decoder.
+                    payload.slice(start..end)?
+                } else {
+                    payload.clone().slice(start..end)?
+                };
+                // Mark a shared generic range as consumed. The backing
+                // allocation remains available for sibling fields, but the
+                // same logical field must not be moved twice if a binding
+                // retries extraction.
+                if self.plan.len() > 1 {
+                    offsets[index] = (usize::MAX, usize::MAX);
+                }
+                Some(value)
             }
-            return None;
         }
-        payload.slice(start..end)
     }
 
     /// Moves an owned payload out of a generated numeric field index without
@@ -468,49 +384,20 @@ impl OperationInputView {
     /// generic single-field request.
     ///
     /// This is the allocation-preserving counterpart to
-    /// [`Self::take_single_field_bytes`]. It lets a generic storage binding
+    /// [`Self::take_owned_bytes_at_index`]. It lets a generic storage binding
     /// retain the original frame range without selecting an API role name.
     pub(super) fn take_single_field_bytes_range(&mut self) -> Option<OwnedRange> {
-        if self.plan.len() != 1 {
+        if self.plan.len() != 1 || self.field_at_index(0).is_none() {
             return None;
         }
         self.take_owned_bytes_range_at_index(0)
     }
-
-    /// Moves or copies the one modeled byte field owned by a generic binding.
-    ///
-    /// Opaque requests can move their frame allocation directly. Ordered
-    /// fields are borrowed from the generic payload and copied only at this
-    /// explicit owned API boundary, so the transport never needs an operation
-    /// specific framing branch.
-    #[allow(dead_code)]
-    pub(super) fn take_single_field_bytes(&mut self) -> Option<Vec<u8>> {
-        if self.plan.len() != 1 {
-            return None;
-        }
-        self.take_owned_bytes_at_index(0)
-            .or_else(|| self.bytes_at_index(0).map(ToOwned::to_owned))
-    }
-}
-
-fn empty_field_records(
-    field_count: usize,
-) -> SmallVec<[Option<OperationFieldRecord>; INLINE_OPERATION_FIELDS]> {
-    let mut fields = SmallVec::with_capacity(field_count);
-    fields.resize_with(field_count, || None);
-    fields
 }
 
 fn sentinel_offsets(field_count: usize) -> SmallVec<[(usize, usize); INLINE_OPERATION_FIELDS]> {
     let mut offsets = SmallVec::with_capacity(field_count);
     offsets.resize(field_count, (usize::MAX, usize::MAX));
     offsets
-}
-
-impl OperationFieldStorage {
-    fn as_value(&self) -> &[u8] {
-        self.0.as_slice()
-    }
 }
 
 pub(super) struct OperationContext<'a> {
@@ -521,7 +408,6 @@ pub(super) struct OperationContext<'a> {
 impl<'a> OperationContext<'a> {
     /// Looks up an API-owned dependency without exposing type erasure to a
     /// behavior binding.
-    #[allow(dead_code)]
     pub(super) fn capability<T: Any>(
         &self,
         key: super::operation_api::CapabilityKey<T>,

@@ -2,15 +2,34 @@
 //!
 //! The shared operation handler maps these outcomes through the generated
 //! Smithy status contract and owns all wire response framing. API
-//! implementations therefore do not need to construct a `Response`, select a
-//! wire `Status`, or encode a sentinel.
+//! implementations therefore do not need to construct a `Response`, encode a
+//! wire frame, or select a layout-specific sentinel.
 
 use smallvec::SmallVec;
 
-use super::operation_contract::OperationStatus;
 use openkache_protocol::{OwnedRange, SegmentedValue};
 
 const INLINE_OPERATION_VALUE_BYTES: usize = 32;
+
+/// Opaque status token carried from an API binding to the response adapter.
+///
+/// The token deliberately does not embed the generated wire-status enum.
+/// API modules own the constants they use and the response adapter validates
+/// the resulting code against each operation's generated contract. Keeping
+/// only the discriminant here means behavior code does not import a wire
+/// response type merely to report a domain outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct StatusToken(u8);
+
+impl StatusToken {
+    pub(super) const fn new(code: u8) -> Self {
+        Self(code)
+    }
+
+    pub(super) const fn code(self) -> u8 {
+        self.0
+    }
+}
 
 /// An owned wire value returned by a modeled server operation.
 ///
@@ -51,6 +70,12 @@ impl OperationValue {
     }
 }
 
+impl openkache_protocol::LayoutValue for OperationValue {
+    fn encoded_len(&self) -> usize {
+        self.len()
+    }
+}
+
 impl From<Vec<u8>> for OperationValue {
     fn from(value: Vec<u8>) -> Self {
         Self::Owned(value.into())
@@ -82,7 +107,7 @@ pub(super) enum OperationError {
     InvalidRequest(&'static [u8]),
     /// An API-defined status token resolved by the generated contract.
     Status {
-        status: OperationStatus,
+        status: StatusToken,
         message: &'static [u8],
     },
     /// A domain-owned status with an allocated diagnostic.
@@ -90,7 +115,7 @@ pub(super) enum OperationError {
     /// The allocation keeps backend error types out of the shared outcome
     /// boundary while preserving their useful diagnostic text.
     OwnedStatus {
-        status: OperationStatus,
+        status: StatusToken,
         message: Vec<u8>,
     },
 }
@@ -98,21 +123,15 @@ pub(super) enum OperationError {
 impl OperationError {
     /// Creates a contract-resolved error without adding an infrastructure enum
     /// variant for one API's status vocabulary.
-    pub(super) const fn status(status: OperationStatus, message: &'static [u8]) -> Self {
+    pub(super) const fn status(status: StatusToken, message: &'static [u8]) -> Self {
         Self::Status { status, message }
     }
 
     /// Creates a contract-resolved status with an owned diagnostic.
-    pub(super) fn owned_status(status: OperationStatus, message: Vec<u8>) -> Self {
+    pub(super) fn owned_status(status: StatusToken, message: Vec<u8>) -> Self {
         Self::OwnedStatus { status, message }
     }
 }
-/// Generated semantic status understood by the contract adapter.
-///
-/// The shared response adapter validates the value against the operation's
-/// generated status table and rejects values outside that contract.
-pub(super) type OperationSuccessStatus = OperationStatus;
-
 /// Domain payload returned by a successful operation.
 pub(super) enum OperationBody {
     /// A status-only response with no payload.
@@ -138,7 +157,7 @@ impl OperationBody {
 pub(super) enum OperationOutcome {
     /// A successful domain result and its transport-neutral status.
     Success {
-        status: OperationSuccessStatus,
+        status: StatusToken,
         body: OperationBody,
     },
     /// A domain-level failure to be mapped by the shared contract adapter.
@@ -155,7 +174,7 @@ impl OperationOutcome {
     /// receipt, or encoded structure).  The shared response adapter decides
     /// how the operation's declared opaque framing is written to the wire.
     pub(super) fn opaque(
-        status: OperationSuccessStatus,
+        status: StatusToken,
         value: impl Into<OperationValue>,
     ) -> Self {
         Self::Success {
@@ -164,8 +183,12 @@ impl OperationOutcome {
         }
     }
 
-    /// Creates a successful ordered field-sequence response.
-    pub(super) fn field_sequence<I, V>(status: OperationSuccessStatus, values: I) -> Self
+    /// Creates a successful ordered field body.
+    ///
+    /// The generated response descriptor chooses whether these fields are
+    /// dense, variable-length, or projected by an API adapter. The outcome
+    /// boundary therefore does not expose a wire layout name.
+    pub(super) fn fields<I, V>(status: StatusToken, values: I) -> Self
     where
         I: IntoIterator<Item = Option<V>>,
         V: Into<OperationValue>,
@@ -182,7 +205,7 @@ impl OperationOutcome {
     }
 
     /// Creates a successful result with an explicit domain status.
-    pub(super) fn success(status: OperationSuccessStatus, body: OperationBody) -> Self {
+    pub(super) fn success(status: StatusToken, body: OperationBody) -> Self {
         Self::Success { status, body }
     }
 

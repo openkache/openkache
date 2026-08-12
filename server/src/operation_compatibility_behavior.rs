@@ -21,9 +21,9 @@ use super::operation_compatibility_bindings::{
 use super::operation_compatibility_services::{
     CompatibilityServices, NamespaceCapability, StorageCapability,
 };
-use super::operation_contract::OperationStatus;
+use super::operation_compatibility_status as status;
 use super::operation_outcome::{
-    OperationBody, OperationError, OperationOutcome, OperationSuccessStatus,
+    OperationBody, OperationError, OperationOutcome, StatusToken,
 };
 use super::{KvError, NamespaceError, NamespaceOpenResult};
 
@@ -70,12 +70,12 @@ fn resolve_set_options(
     ))
 }
 
-fn domain_success(status: OperationSuccessStatus, body: OperationBody) -> OperationOutcome {
+fn domain_success(status: StatusToken, body: OperationBody) -> OperationOutcome {
     OperationOutcome::success(status, body)
 }
 
-fn domain_error(status: OperationStatus, message: &'static [u8]) -> OperationOutcome {
-    OperationOutcome::error(OperationError::status(status, message))
+fn domain_error(token: StatusToken, message: &'static [u8]) -> OperationOutcome {
+    OperationOutcome::error(OperationError::status(token, message))
 }
 
 fn domain_storage(error: KvError) -> OperationOutcome {
@@ -84,20 +84,20 @@ fn domain_storage(error: KvError) -> OperationOutcome {
 
 /// Converts the storage backend's error vocabulary at the API-owned boundary.
 ///
-/// The generic operation outcome carries only a generated semantic status and bytes;
+/// The generic operation outcome carries only an opaque status token and bytes;
 /// it does not depend on `KvError` or construct a wire response. A future
 /// backend can provide the same boundary with its own mapping.
 pub(super) fn storage_error(error: KvError) -> OperationError {
     let status = match &error {
-        KvError::Timeout(_) => OperationStatus::Timeout,
-        KvError::NoCapacity => OperationStatus::NoCapacity,
-        KvError::TableFull | KvError::CapacityExhausted { .. } => OperationStatus::Overloaded,
+        KvError::Timeout(_) => status::TIMEOUT,
+        KvError::NoCapacity => status::NO_CAPACITY,
+        KvError::TableFull | KvError::CapacityExhausted { .. } => status::OVERLOADED,
         KvError::ItemTooLarge { .. } | KvError::BlobSegmentFull { .. } => {
-            OperationStatus::TooLarge
+            status::TOO_LARGE
         }
-        KvError::InvalidRequest(_) => OperationStatus::InvalidRequest,
+        KvError::InvalidRequest(_) => status::INVALID_REQUEST,
         KvError::Io(_) | KvError::InvalidConfig(_) | KvError::Worker(_) | KvError::Usage(_) => {
-            OperationStatus::InternalError
+            status::INTERNAL_ERROR
         }
     };
     OperationError::owned_status(status, error.to_string().into_bytes())
@@ -105,19 +105,19 @@ pub(super) fn storage_error(error: KvError) -> OperationError {
 
 fn namespace_error(error: NamespaceError, message: &'static [u8]) -> OperationOutcome {
     let status = match error {
-        NamespaceError::InvalidRequest => OperationStatus::InvalidRequest,
-        NamespaceError::NotFound => OperationStatus::NamespaceNotFound,
-        NamespaceError::Conflict => OperationStatus::Conflict,
-        NamespaceError::PolicyConflict => OperationStatus::PolicyConflict,
-        NamespaceError::NotEmpty => OperationStatus::NamespaceNotEmpty,
-        NamespaceError::Internal => OperationStatus::InternalError,
+        NamespaceError::InvalidRequest => status::INVALID_REQUEST,
+        NamespaceError::NotFound => status::NAMESPACE_NOT_FOUND,
+        NamespaceError::Conflict => status::CONFLICT,
+        NamespaceError::PolicyConflict => status::POLICY_CONFLICT,
+        NamespaceError::NotEmpty => status::NAMESPACE_NOT_EMPTY,
+        NamespaceError::Internal => status::INTERNAL_ERROR,
     };
     domain_error(status, message)
 }
 
 fn missing_services() -> OperationOutcome {
     domain_error(
-        OperationStatus::InternalError,
+        status::INTERNAL_ERROR,
         b"operation requires an unavailable capability",
     )
 }
@@ -142,7 +142,7 @@ pub(super) fn mutation_domain_error(is_set: bool, error: KvError) -> OperationOu
         return OperationOutcome::abandoned();
     }
     if matches!(error, KvError::NoCapacity) && !is_set {
-        domain_error(OperationStatus::Overloaded, b"storage has no capacity")
+        domain_error(status::OVERLOADED, b"storage has no capacity")
     } else {
         domain_storage(error)
     }
@@ -177,12 +177,12 @@ pub(super) fn namespace_open<'a>(
         match result {
             Ok((NamespaceOpenResult::Existing, descriptor)) => {
                 domain_success(
-                    OperationStatus::Ok,
+                    status::OK,
                     OperationBody::opaque(descriptor_payload(descriptor)),
                 )
             }
             Ok((NamespaceOpenResult::Created, descriptor)) => domain_success(
-                OperationStatus::Created,
+                status::CREATED,
                 OperationBody::opaque(descriptor_payload(descriptor)),
             ),
             Err(error) => namespace_error(error, b"namespace operation rejected"),
@@ -208,7 +208,7 @@ pub(super) fn namespace_update_policy<'a>(
         match result {
             Ok(descriptor) => {
                 domain_success(
-                    OperationStatus::Ok,
+                    status::OK,
                     OperationBody::opaque(descriptor_payload(descriptor)),
                 )
             }
@@ -234,7 +234,7 @@ pub(super) fn namespace_delete<'a>(
             Some(items) => items,
             None => {
                 return domain_error(
-                    OperationStatus::InternalError,
+                    status::INTERNAL_ERROR,
                     b"namespace metadata is unavailable",
                 );
             }
@@ -246,7 +246,7 @@ pub(super) fn namespace_delete<'a>(
                     let pruned = namespaces.prune_item(namespace_id, item_id).map_err(|_| ());
                     if pruned.is_err() {
                         return domain_error(
-                            OperationStatus::InternalError,
+                            status::INTERNAL_ERROR,
                             b"namespace metadata is unavailable",
                         );
                     }
@@ -256,7 +256,7 @@ pub(super) fn namespace_delete<'a>(
         }
         let result = namespaces.delete(namespace_id, expected_revision);
         match result {
-            Ok(()) => domain_success(OperationStatus::Deleted, OperationBody::Empty),
+            Ok(()) => domain_success(status::DELETED, OperationBody::Empty),
             Err(error) => namespace_error(error, b"namespace deletion rejected"),
         }
     })
@@ -279,7 +279,7 @@ pub(super) fn set<'a>(
             Some(policy) => policy,
             None => {
                 return domain_error(
-                    OperationStatus::NamespaceNotFound,
+                    status::NAMESPACE_NOT_FOUND,
                     b"namespace does not exist",
                 );
             }
@@ -307,16 +307,16 @@ pub(super) fn set<'a>(
             .await;
         match outcome {
             Ok(SetOutcome::Created) => {
-                domain_success(OperationStatus::Created, OperationBody::Empty)
+                domain_success(status::CREATED, OperationBody::Empty)
             }
             Ok(SetOutcome::Replaced) => {
-                domain_success(OperationStatus::Replaced, OperationBody::Empty)
+                domain_success(status::REPLACED, OperationBody::Empty)
             }
             Ok(SetOutcome::NotStored) => {
                 let rollback =
                     namespaces.rollback_set_reservation(namespace_id, item_id, worker, reservation);
                 match rollback {
-                    Ok(()) => domain_success(OperationStatus::NotStored, OperationBody::Empty),
+                    Ok(()) => domain_success(status::NOT_STORED, OperationBody::Empty),
                     Err(_) => OperationOutcome::abandoned(),
                 }
             }
@@ -348,7 +348,7 @@ pub(super) fn delete<'a>(
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
-                OperationStatus::NamespaceNotFound,
+                status::NAMESPACE_NOT_FOUND,
                 b"namespace does not exist",
             );
         }
@@ -368,9 +368,9 @@ pub(super) fn delete<'a>(
                 }
                 domain_success(
                     if deleted {
-                        OperationStatus::Deleted
+                        status::DELETED
                     } else {
-                        OperationStatus::NotFound
+                        status::NOT_FOUND
                     },
                     OperationBody::Empty,
                 )
@@ -395,7 +395,7 @@ pub(super) fn stats<'a>(
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
-                OperationStatus::NamespaceNotFound,
+                status::NAMESPACE_NOT_FOUND,
                 b"namespace does not exist",
             );
         }
@@ -414,7 +414,7 @@ pub(super) fn stats<'a>(
                 payload.push_str(&observability.stats_json_fields());
                 payload.push_str("}}");
                 domain_success(
-                    OperationStatus::Ok,
+                    status::OK,
                     OperationBody::opaque(payload.into_bytes()),
                 )
             }
@@ -437,7 +437,7 @@ pub(super) fn sync<'a>(
         let namespace_id = decoded.namespace_id;
         if !namespaces.exists(namespace_id) {
             return domain_error(
-                OperationStatus::NamespaceNotFound,
+                status::NAMESPACE_NOT_FOUND,
                 b"namespace does not exist",
             );
         }
@@ -445,7 +445,7 @@ pub(super) fn sync<'a>(
             Some(workers) => workers,
             None => {
                 return domain_error(
-                    OperationStatus::NamespaceNotFound,
+                    status::NAMESPACE_NOT_FOUND,
                     b"namespace does not exist",
                 );
             }
@@ -454,7 +454,7 @@ pub(super) fn sync<'a>(
             Ok(()) => {
                 let clean = namespaces.mark_workers_clean(namespace_id);
                 match clean {
-                    Ok(()) => domain_success(OperationStatus::Ok, OperationBody::Empty),
+                    Ok(()) => domain_success(status::OK, OperationBody::Empty),
                     Err(_) => OperationOutcome::abandoned(),
                 }
             }
@@ -471,21 +471,21 @@ async fn execute_get(
 ) -> OperationOutcome {
     if !namespaces.exists(namespace_id) {
         return domain_error(
-            OperationStatus::NamespaceNotFound,
+            status::NAMESPACE_NOT_FOUND,
             b"namespace does not exist",
         );
     }
     match cache.get_in_namespace(namespace_id, item_id).await {
-        Ok(Some(value)) => OperationOutcome::opaque(OperationStatus::Ok, value.into_bytes()),
+        Ok(Some(value)) => OperationOutcome::opaque(status::OK, value.into_bytes()),
         Ok(None) => {
             if namespaces.prune_item(namespace_id, item_id).is_err() {
                 return domain_error(
-                    OperationStatus::InternalError,
+                    status::INTERNAL_ERROR,
                     b"namespace metadata is unavailable",
                 );
             }
             domain_success(
-                OperationStatus::NotFound,
+                status::NOT_FOUND,
                 OperationBody::opaque(Vec::new()),
             )
         }
@@ -507,7 +507,7 @@ async fn execute_get2(
     let [first_item, second_item] = input.item_ids;
     if !namespaces.exists(namespace_id) {
         return domain_error(
-            OperationStatus::NamespaceNotFound,
+            status::NAMESPACE_NOT_FOUND,
             b"namespace does not exist",
         );
     }
@@ -523,7 +523,7 @@ async fn execute_get2(
             Ok(value) => {
                 if value.is_none() && namespaces.prune_item(namespace_id, item_id).is_err() {
                     return domain_error(
-                        OperationStatus::InternalError,
+                        status::INTERNAL_ERROR,
                         b"namespace metadata is unavailable",
                     );
                 }
@@ -533,7 +533,7 @@ async fn execute_get2(
         }
     }
 
-    OperationOutcome::field_sequence(OperationStatus::Ok, values)
+    OperationOutcome::fields(status::OK, values)
 }
 
 pub(super) fn get2<'a>(

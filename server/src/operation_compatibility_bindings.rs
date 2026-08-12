@@ -7,15 +7,14 @@
 
 use openkache_protocol::ItemId;
 
-use super::operation_api::{
-    PrepareContext, PrepareError, PreparePlan, ResourceLock,
-};
+use super::operation_api::{PrepareContext, PrepareError, PreparePlan, ResourceLock};
+use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::operation_compatibility_behavior as compatibility_behavior;
 use super::operation_compatibility_services::{
-    COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_SERVICES, CompatibilityResourceResolver,
-    CompatibilityServices,
+    COMPATIBILITY_RESOURCE_RESOLVER, COMPATIBILITY_RUNTIME, COMPATIBILITY_SERVICES,
+    CompatibilityResourceResolver, CompatibilityServices,
 };
-use super::operation_contract::OperationStatus;
+use super::operation_compatibility_status as status;
 use super::operation_handlers::{OperationContext, OperationInputView};
 use super::operation_outcome::OperationOutcome;
 use super::operation_registry::OperationFuture;
@@ -34,6 +33,17 @@ use contract::request_fields;
 /// composition boundary. The network loop only calls the aggregate operation
 /// registration installer and never reaches into this compatibility surface.
 pub(super) use super::operation_compatibility_services::install_compatibility_services;
+
+pub(super) fn install_capabilities(
+    registry: &mut CapabilityRegistry,
+    source: &dyn CapabilityCatalog,
+) {
+    let Some(runtime) = super::operation_api::downcast_capability(source, COMPATIBILITY_RUNTIME)
+    else {
+        return;
+    };
+    install_compatibility_services(registry, runtime);
+}
 
 /// Typed input for the namespace/item compatibility adapter.
 pub(super) struct GetInput {
@@ -119,7 +129,7 @@ fn field_index_at_role(
     role: &str,
     occurrence: usize,
 ) -> Option<usize> {
-    crate::contract::operation_wire_spec(input.opcode())
+    contract::operation_wire_spec(input.opcode())
         .request
         .fields
         .iter()
@@ -129,7 +139,7 @@ fn field_index_at_role(
 }
 
 fn field_count(input: &OperationInputView, role: &str) -> usize {
-    crate::contract::operation_wire_spec(input.opcode())
+    contract::operation_wire_spec(input.opcode())
         .request
         .fields
         .iter()
@@ -301,7 +311,7 @@ fn compatibility_resolver<'a>(
     context
         .capability::<CompatibilityResourceResolver>(COMPATIBILITY_RESOURCE_RESOLVER)
         .ok_or(PrepareError::resource_unavailable(
-            OperationStatus::InternalError,
+            status::INTERNAL_ERROR,
             b"compatibility resource resolver is unavailable",
         ))
 }
@@ -325,7 +335,7 @@ pub(crate) fn prepare_namespace(
 }
 
 fn namespace_field_index(opcode: openkache_protocol::Opcode) -> Option<usize> {
-    crate::contract::operation_wire_spec(opcode)
+    contract::operation_wire_spec(opcode)
         .request
         .fields
         .iter()
@@ -456,8 +466,7 @@ fn decode_namespace_policy(
     };
     let default_expiration = match default_expiration {
         b"no_expiry" => {
-            if unsigned_long_at_index(input, fields.default_ttl_milliseconds).is_some()
-            {
+            if unsigned_long_at_index(input, fields.default_ttl_milliseconds).is_some() {
                 return Err(b"namespace TTL is invalid for no-expiry policy");
             }
             ExpirationDefault::NoExpiry

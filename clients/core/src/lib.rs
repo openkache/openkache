@@ -39,9 +39,8 @@ pub use key::{
     ResolvedKey, canonical_key_bytes,
 };
 pub use openkache_protocol::{
-    FieldSequence, ITEM_ID_BYTES, NAMESPACE_ID_BYTES, OPTIONAL_VALUE_LENGTH_BYTES,
-    OPTIONAL_VALUE_MISSING, Opcode, decode_optional_values, decode_varuint, encode_field_sequence,
-    encode_optional_values, encode_varuint,
+    FieldSequence, ITEM_ID_BYTES, NAMESPACE_ID_BYTES, Opcode, decode_varuint,
+    encode_field_sequence, encode_varuint,
 };
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
@@ -53,6 +52,27 @@ pub use protocol::{
     NamespacePolicy, OperationFields, OverridePolicy, ProtocolError, SetCondition,
 };
 pub use value::ItemValue;
+
+/// Compatibility-only codecs retained for generated protocol-v1 client
+/// projections. Generic clients do not import these aliases.
+pub mod compatibility {
+    pub use openkache_protocol::compat_v1::{
+        decode_optional_values, encode_optional_values, OptionalValues,
+        OptionalValuesEncoder, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
+        optional_value_prefix,
+        optional_values_encoded_len, optional_values_encoded_len_from_lengths,
+        optional_values_max_encoded_len,
+    };
+}
+
+// Temporary source-compatibility surface for generated protocol-v1 clients.
+// New generic clients use the contract/layout APIs above.
+pub use compatibility::{
+    decode_optional_values, encode_optional_values, OptionalValues,
+    OptionalValuesEncoder, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
+    optional_values_encoded_len, optional_values_encoded_len_from_lengths,
+    optional_values_max_encoded_len,
+};
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
 compile_error!("enable at least one client QUIC backend feature");
@@ -348,8 +368,7 @@ impl OperationResult {
     /// result payload. Use [`OperationFields::to_owned`] only when ownership
     /// is required by the caller.
     pub fn fields_view(&self, operation: Opcode) -> Result<OperationFields<'_>> {
-        let contract = contract::operation_wire_spec(operation);
-        protocol::decode_response_fields_view(&self.payload, &contract.response)
+        protocol::decode_operation_response_fields(operation, &self.payload)
             .map_err(Error::protocol)
     }
 
@@ -388,12 +407,13 @@ fn generated_response_result(operation: Opcode, response: Response) -> Result<Op
     let contract = contract::operation_wire_spec(operation);
     let kind = contract::operation_result_kind(operation, response.status)
         .ok_or_else(|| unexpected_status(Operation::from_opcode(operation), response.status))?;
-    let payload = match contract.response.framing {
-        contract::OperationLayoutFraming::Empty => Vec::new(),
-        contract::OperationLayoutFraming::Opaque
-        | contract::OperationLayoutFraming::OptionalValues
-        | contract::OperationLayoutFraming::FieldSequence
-        | contract::OperationLayoutFraming::OrderedFields => response.payload,
+    let payload = if matches!(
+        contract.response.framing,
+        contract::OperationLayoutFraming::Empty
+    ) {
+        Vec::new()
+    } else {
+        response.payload
     };
     Ok(operation_result_with_status(response.status, kind, payload))
 }
@@ -559,9 +579,8 @@ impl<C: ClientConnection> Core<C> {
         let started = Instant::now();
         let response = self
             .request(
-                Request::new_with_retry_policy(
+                Request::new_generic_with_retry_policy(
                     Opcode::Ping,
-                    None,
                     Vec::new(),
                     RequestRetryPolicy::Always,
                 )
@@ -591,7 +610,7 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new_scoped_retryable(
+                protocol::compat_v1::new_scoped_retryable(
                     Opcode::Get,
                     namespace_id,
                     Some(item_id.into_protocol()),
@@ -630,7 +649,7 @@ impl<C: ClientConnection> Core<C> {
         options: SetOptions,
     ) -> Result<SetOutcome> {
         validate_client_namespace_id(namespace_id)?;
-        let request = Request::new_scoped_with_options(
+        let request = protocol::compat_v1::new_scoped_with_options(
             Opcode::Set,
             namespace_id,
             Some(item_id.into_protocol()),
@@ -666,7 +685,7 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new_scoped(
+                protocol::compat_v1::new_scoped(
                     Opcode::Delete,
                     namespace_id,
                     Some(item_id.into_protocol()),
@@ -695,7 +714,12 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new_scoped_retryable(Opcode::Stats, namespace_id, None, Vec::new())
+                protocol::compat_v1::new_scoped_retryable(
+                    Opcode::Stats,
+                    namespace_id,
+                    None,
+                    Vec::new(),
+                )
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -714,7 +738,7 @@ impl<C: ClientConnection> Core<C> {
         validate_client_namespace_id(namespace_id)?;
         let response = self
             .request(
-                Request::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
+                protocol::compat_v1::new_scoped(Opcode::Sync, namespace_id, None, Vec::new())
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -845,7 +869,7 @@ impl<C: ClientConnection> Core<C> {
     ) -> Result<(NamespaceDescriptor, bool)> {
         let response = self
             .request(
-                Request::namespace_open(name, create_if_missing, policy)
+                protocol::compat_v1::namespace_open(name, create_if_missing, policy)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -879,7 +903,11 @@ impl<C: ClientConnection> Core<C> {
     ) -> Result<NamespaceDescriptor> {
         let response = self
             .request(
-                Request::namespace_update_policy(namespace_id, expected_revision, policy)
+                protocol::compat_v1::namespace_update_policy(
+                    namespace_id,
+                    expected_revision,
+                    policy,
+                )
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -924,7 +952,7 @@ impl<C: ClientConnection> Core<C> {
     async fn delete_namespace(&self, namespace_id: u64, expected_revision: u64) -> Result<()> {
         let response = self
             .request(
-                Request::namespace_delete(namespace_id, expected_revision)
+                protocol::compat_v1::namespace_delete(namespace_id, expected_revision)
                     .map_err(Error::protocol)?,
             )
             .await?;
@@ -955,7 +983,6 @@ impl<C: ClientConnection> Core<C> {
         deadline: transport::Deadline,
     ) -> std::result::Result<Response, RequestFailure> {
         let opcode = request.opcode;
-        let create_if_missing = request.create_if_missing;
         let mut stream = connection
             .acquire_lane(deadline)
             .await
@@ -984,7 +1011,7 @@ impl<C: ClientConnection> Core<C> {
         // violation; the lane must be discarded even when the QUIC connection remains
         // usable. This also prevents a malformed success from being mistaken for a
         // definitive mutation result.
-        if let Err(error) = validate_response_contract(opcode, create_if_missing, &response) {
+        if let Err(error) = validate_response_contract(opcode, &response) {
             return Err(RequestFailure::after_response(error));
         }
         // Error responses may be emitted while the server is still parsing a request,
@@ -1893,7 +1920,6 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
 
 fn validate_response_contract(
     opcode: Opcode,
-    _create_if_missing: bool,
     response: &Response,
 ) -> Result<()> {
     let operation = operation(opcode);
@@ -1923,15 +1949,15 @@ fn validate_response_contract(
             message: message.into(),
         })
     };
-    match operation_contract.response.framing {
-        contract::OperationLayoutFraming::Empty => {
+    match operation_contract.generic_response_framing() {
+        Some(contract::OperationResponseFraming::Empty) => {
             if response.payload.is_empty() {
                 Ok(())
             } else {
                 invalid_payload("empty-response operations must have an empty payload")
             }
         }
-        contract::OperationLayoutFraming::Opaque => {
+        Some(contract::OperationResponseFraming::Opaque) => {
             let response_plan = operation_contract.response.fields;
             if response_plan.len() > 1 {
                 return if operation_contract.response.opaque_aggregate {
@@ -1959,16 +1985,15 @@ fn validate_response_contract(
             })?;
             Ok(())
         }
-        contract::OperationLayoutFraming::OptionalValues
-        | contract::OperationLayoutFraming::FieldSequence
-        | contract::OperationLayoutFraming::OrderedFields => {
-            protocol::decode_response_fields_view(&response.payload, &operation_contract.response)
+        Some(contract::OperationResponseFraming::FieldSequence) => {
+            protocol::decode_operation_response_fields(opcode, &response.payload)
                 .map_err(|error| Error::UnexpectedResponse {
                     operation,
-                    message: format!("ordered response payload is invalid: {error}"),
+                    message: format!("structured response payload is invalid: {error}"),
                 })?;
             Ok(())
         }
+        None => invalid_payload("operation response framing requires an adapter-owned decoder"),
     }
 }
 

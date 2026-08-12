@@ -14,11 +14,182 @@ use openkache_protocol::compat_v1::{
     SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
     SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK,
 };
-use openkache_protocol::{ITEM_ID_BYTES, ItemId};
-
-use super::{
-    Opcode, ProtocolError, Request, Result, SetWireOptions, invalid_shape, validate_value_length,
+use openkache_protocol::{
+    ITEM_ID_BYTES, NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES, ItemId, decode_varuint,
+    encode_varuint,
 };
+use smallvec::SmallVec;
+use super::{
+    Opcode, ProtocolError, Request, RequestRetryPolicy, Result, generic, invalid_shape,
+    validate_operation_field, validate_value_length,
+};
+
+/// Condition applied atomically by a protocol-v1 `SET` request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SetCondition {
+    /// Store regardless of whether the item ID exists.
+    #[default]
+    Any,
+    /// Store only when the item ID does not exist.
+    IfAbsent,
+    /// Store only when the item ID already exists.
+    IfPresent,
+}
+
+/// Item-level expiration selection in the protocol-v1 compatibility API.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ExpirationMode {
+    /// Resolve the namespace's current default at the SET linearization point.
+    #[default]
+    Inherit,
+    /// Store without a TTL deadline.
+    NoExpiry,
+    /// Carry a positive `ttl_ms` in the SET request.
+    ExplicitTtl,
+}
+
+/// Item-level capacity-eviction selection in the protocol-v1 API.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EvictionMode {
+    /// Resolve the namespace's current default at the SET linearization point.
+    #[default]
+    Inherit,
+    /// Permit selection by the namespace eviction algorithm.
+    Evictable,
+    /// Do not select this item for capacity eviction.
+    EvictionProtected,
+}
+
+/// Whether a protocol-v1 namespace permits an item to override its default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OverridePolicy {
+    Allowed,
+    Disallowed,
+}
+
+/// Namespace expiration default used by the protocol-v1 management adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpirationDefault {
+    NoExpiry,
+    FixedTtl { ttl_ms: u64 },
+}
+
+/// Namespace capacity-eviction default used by the protocol-v1 adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvictionDefault {
+    Evictable,
+    EvictionProtected,
+}
+
+/// Policy applied to newly written items in the protocol-v1 namespace API.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespacePolicy {
+    pub default_expiration: ExpirationDefault,
+    pub expiration_override: OverridePolicy,
+    pub default_eviction: EvictionDefault,
+    pub eviction_override: OverridePolicy,
+}
+
+impl Default for NamespacePolicy {
+    fn default() -> Self {
+        Self {
+            default_expiration: ExpirationDefault::NoExpiry,
+            expiration_override: OverridePolicy::Allowed,
+            default_eviction: EvictionDefault::Evictable,
+            eviction_override: OverridePolicy::Allowed,
+        }
+    }
+}
+
+/// Namespace identity and policy returned by protocol-v1 management calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceDescriptor {
+    pub namespace_id: u64,
+    pub revision: u64,
+    pub policy: NamespacePolicy,
+}
+
+/// Decodes the historical protocol-v1 optional-value response projection into
+/// the same borrowed operation-field view used by generic clients.
+///
+/// The sentinel table is selected by the generated compatibility artifact.
+/// Generic response decoding never sees this branch.
+pub(crate) fn decode_response_fields<'a>(
+    operation: Opcode,
+    payload: &'a [u8],
+) -> Result<generic::OperationFields<'a>> {
+    if openkache_protocol::compat_v1::response_framing(operation)
+        != Some(openkache_protocol::compat_v1::CompatibilityResponseFraming::OptionalValues)
+    {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "operation does not use the protocol-v1 optional-value response projection",
+        ));
+    }
+    let plan = crate::contract::operation_wire_spec(operation).response;
+    let mut offsets =
+        SmallVec::<[(usize, usize); generic::INLINE_OPERATION_FIELDS]>::with_capacity(
+            plan.fields.len(),
+        );
+    offsets.resize(plan.fields.len(), (usize::MAX, usize::MAX));
+    openkache_protocol::compat_v1::OptionalValues::decode(
+        payload,
+        plan.fields.len(),
+        &mut offsets,
+    )
+    .map_err(ProtocolError::from)?;
+    for (index, field) in plan.fields.iter().enumerate() {
+        let Some(value) = (offsets[index].0 != usize::MAX)
+            .then(|| &payload[offsets[index].0..offsets[index].1])
+        else {
+            if field.required {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "required response field is missing",
+                ));
+            }
+            continue;
+        };
+        validate_operation_field(field, value)?;
+    }
+    Ok(generic::OperationFields::from_parts(
+        payload,
+        offsets,
+        plan.fields.len(),
+    ))
+}
+
+/// Client-side representation of protocol-v1 SET policy bits.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SetWireOptions {
+    pub condition: SetCondition,
+    pub expiration_mode: ExpirationMode,
+    pub ttl_ms: Option<u64>,
+    pub eviction_mode: EvictionMode,
+}
+
+impl SetWireOptions {
+    /// The ordinary unconditional SET behavior.
+    pub const NONE: Self = Self {
+        condition: SetCondition::Any,
+        expiration_mode: ExpirationMode::Inherit,
+        ttl_ms: None,
+        eviction_mode: EvictionMode::Inherit,
+    };
+
+    /// Creates options with all protocol-v1 policy selections.
+    pub const fn with_policies(
+        condition: SetCondition,
+        expiration_mode: ExpirationMode,
+        ttl_ms: Option<u64>,
+        eviction_mode: EvictionMode,
+    ) -> Self {
+        Self {
+            condition,
+            expiration_mode,
+            ttl_ms,
+            eviction_mode,
+        }
+    }
+}
 
 impl SetWireOptions {
     /// Decodes the historical SET flags and optional TTL.
@@ -33,9 +204,9 @@ impl SetWireOptions {
             ));
         }
         let condition = match flags & SET_CONDITION_MASK {
-            SET_CONDITION_ANY_BITS => super::SetCondition::Any,
-            SET_IF_ABSENT_BITS => super::SetCondition::IfAbsent,
-            SET_IF_PRESENT_BITS => super::SetCondition::IfPresent,
+            SET_CONDITION_ANY_BITS => SetCondition::Any,
+            SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
+            SET_IF_PRESENT_BITS => SetCondition::IfPresent,
             _ => return Err(ProtocolError::ConflictingSetConditions),
         };
         let expiration_mode = match flags & SET_EXPIRATION_MASK {
@@ -43,20 +214,20 @@ impl SetWireOptions {
                 if ttl_ms.is_some() {
                     return Err(ProtocolError::UnexpectedSetTtl);
                 }
-                super::ExpirationMode::Inherit
+                ExpirationMode::Inherit
             }
             SET_NO_EXPIRY_BITS => {
                 if ttl_ms.is_some() {
                     return Err(ProtocolError::UnexpectedSetTtl);
                 }
-                super::ExpirationMode::NoExpiry
+                ExpirationMode::NoExpiry
             }
             SET_EXPLICIT_TTL_BITS => {
                 let ttl_ms = ttl_ms.ok_or(ProtocolError::MissingSetTtl)?;
                 if ttl_ms == 0 {
                     return Err(ProtocolError::InvalidSetTtl);
                 }
-                super::ExpirationMode::ExplicitTtl
+                ExpirationMode::ExplicitTtl
             }
             _ => {
                 return Err(ProtocolError::InvalidSetOptions {
@@ -65,9 +236,9 @@ impl SetWireOptions {
             }
         };
         let eviction_mode = match flags & SET_EVICTION_MASK {
-            SET_INHERIT_EVICTION_BITS => super::EvictionMode::Inherit,
-            SET_EVICTABLE_BITS => super::EvictionMode::Evictable,
-            SET_EVICTION_PROTECTED_BITS => super::EvictionMode::EvictionProtected,
+            SET_INHERIT_EVICTION_BITS => EvictionMode::Inherit,
+            SET_EVICTABLE_BITS => EvictionMode::Evictable,
+            SET_EVICTION_PROTECTED_BITS => EvictionMode::EvictionProtected,
             _ => {
                 return Err(ProtocolError::InvalidSetOptions {
                     opcode: Opcode::Set,
@@ -83,7 +254,7 @@ impl SetWireOptions {
     }
 }
 
-impl super::NamespacePolicy {
+impl NamespacePolicy {
     /// Decodes the historical namespace policy flags and optional TTL.
     #[allow(dead_code)]
     pub(crate) fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
@@ -91,9 +262,147 @@ impl super::NamespacePolicy {
     }
 }
 
+const MAX_POLICY_BYTES: usize =
+    POLICY_FLAGS_BYTES + openkache_protocol::MAX_VARUINT_BYTES;
+
+impl NamespaceDescriptor {
+    /// Encodes the historical descriptor payload owned by the v1 adapter.
+    pub fn encode(self) -> Result<Vec<u8>> {
+        if self.namespace_id == 0 {
+            return Err(ProtocolError::InvalidNamespaceId);
+        }
+        if self.revision == 0 {
+            return Err(ProtocolError::InvalidRevision);
+        }
+        let mut payload =
+            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
+        payload.extend_from_slice(&self.namespace_id.to_be_bytes());
+        payload.extend_from_slice(&self.revision.to_be_bytes());
+        payload.extend_from_slice(&self.policy.encode()?);
+        Ok(payload)
+    }
+
+    /// Decodes one complete historical descriptor payload.
+    pub fn decode(input: &[u8]) -> Result<Self> {
+        let fixed = NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
+        if input.len() < fixed {
+            return Err(ProtocolError::FrameTooShort {
+                expected: fixed,
+                actual: input.len(),
+            });
+        }
+        let namespace_id = read_u64_be(input)?;
+        if namespace_id == 0 {
+            return Err(ProtocolError::InvalidNamespaceId);
+        }
+        let revision = read_u64_be(&input[NAMESPACE_ID_BYTES..])?;
+        if revision == 0 {
+            return Err(ProtocolError::InvalidRevision);
+        }
+        let (policy, policy_len) = decode_namespace_policy(&input[fixed..])?
+            .ok_or(ProtocolError::MissingNamespacePolicy)?;
+        if fixed + policy_len != input.len() {
+            return Err(ProtocolError::FrameLength {
+                expected: fixed + policy_len,
+                actual: input.len(),
+            });
+        }
+        Ok(Self {
+            namespace_id,
+            revision,
+            policy,
+        })
+    }
+}
+
+impl NamespacePolicy {
+    /// Encodes the historical namespace policy payload owned by the v1 adapter.
+    pub fn encode(self) -> Result<Vec<u8>> {
+        let mut flags = match self.default_expiration {
+            ExpirationDefault::NoExpiry => POLICY_NO_EXPIRY,
+            ExpirationDefault::FixedTtl { ttl_ms } => {
+                if ttl_ms == 0 {
+                    return Err(ProtocolError::InvalidNamespacePolicy(
+                        "fixed namespace TTL must be positive",
+                    ));
+                }
+                POLICY_FIXED_TTL
+            }
+        };
+        if self.expiration_override == OverridePolicy::Allowed {
+            flags |= POLICY_EXPIRATION_OVERRIDE;
+        }
+        if self.default_eviction == EvictionDefault::EvictionProtected {
+            flags |= POLICY_EVICTION_PROTECTED;
+        }
+        if self.eviction_override == OverridePolicy::Allowed {
+            flags |= POLICY_EVICTION_OVERRIDE;
+        }
+        let mut output = Vec::with_capacity(MAX_POLICY_BYTES);
+        output.push(flags);
+        if let ExpirationDefault::FixedTtl { ttl_ms } = self.default_expiration {
+            let (encoded, length) = encode_varuint(ttl_ms);
+            output.extend_from_slice(&encoded[..length]);
+        }
+        Ok(output)
+    }
+}
+
+impl SetWireOptions {
+    /// Encodes the historical SET policy bits owned by the v1 adapter.
+    pub(crate) fn flags(self) -> Result<u8> {
+        if self.ttl_ms == Some(0) {
+            return Err(ProtocolError::InvalidSetTtl);
+        }
+        let condition = match self.condition {
+            SetCondition::Any => SET_CONDITION_ANY_BITS,
+            SetCondition::IfAbsent => SET_IF_ABSENT_BITS,
+            SetCondition::IfPresent => SET_IF_PRESENT_BITS,
+        };
+        let expiration = match self.expiration_mode {
+            ExpirationMode::Inherit => {
+                if self.ttl_ms.is_some() {
+                    return Err(ProtocolError::UnexpectedSetTtl);
+                }
+                SET_INHERIT_EXPIRATION_BITS
+            }
+            ExpirationMode::NoExpiry => {
+                if self.ttl_ms.is_some() {
+                    return Err(ProtocolError::UnexpectedSetTtl);
+                }
+                SET_NO_EXPIRY_BITS
+            }
+            ExpirationMode::ExplicitTtl => {
+                if self.ttl_ms.is_none() {
+                    return Err(ProtocolError::MissingSetTtl);
+                }
+                SET_EXPLICIT_TTL_BITS
+            }
+        };
+        let eviction = match self.eviction_mode {
+            EvictionMode::Inherit => SET_INHERIT_EVICTION_BITS,
+            EvictionMode::Evictable => SET_EVICTABLE_BITS,
+            EvictionMode::EvictionProtected => SET_EVICTION_PROTECTED_BITS,
+        };
+        Ok(condition | expiration | eviction)
+    }
+}
+
+fn read_u64_be(input: &[u8]) -> Result<u64> {
+    let bytes: [u8; NAMESPACE_ID_BYTES] = input
+        .get(..NAMESPACE_ID_BYTES)
+        .ok_or(ProtocolError::FrameTooShort {
+            expected: NAMESPACE_ID_BYTES,
+            actual: input.len(),
+        })?
+        .try_into()
+        .expect("slice length checked");
+    Ok(u64::from_be_bytes(bytes))
+}
+
 pub(crate) fn decode_namespace_policy(
     input: &[u8],
-) -> Result<Option<(super::NamespacePolicy, usize)>> {
+) -> Result<Option<(NamespacePolicy, usize)>> {
     let Some(&flags) = input.first() else {
         return Ok(None);
     };
@@ -101,7 +410,7 @@ pub(crate) fn decode_namespace_policy(
         POLICY_NO_EXPIRY => (None, POLICY_FLAGS_BYTES),
         POLICY_FIXED_TTL => {
             let Some((ttl_ms, length)) =
-                super::decode_varuint(&input[POLICY_FLAGS_BYTES..], "namespace default TTL")?
+                decode_varuint(&input[POLICY_FLAGS_BYTES..], "namespace default TTL")?
             else {
                 return Ok(None);
             };
@@ -119,7 +428,7 @@ pub(crate) fn decode_namespace_policy(
     )))
 }
 
-fn decode_namespace_policy_parts(flags: u8, ttl_ms: Option<u64>) -> Result<super::NamespacePolicy> {
+fn decode_namespace_policy_parts(flags: u8, ttl_ms: Option<u64>) -> Result<NamespacePolicy> {
     if flags & POLICY_RESERVED_MASK != 0 {
         return Err(ProtocolError::InvalidNamespacePolicy(
             "namespace policy contains reserved bits",
@@ -132,7 +441,7 @@ fn decode_namespace_policy_parts(flags: u8, ttl_ms: Option<u64>) -> Result<super
                     "namespace default TTL is only valid with fixed TTL mode",
                 ));
             }
-            super::ExpirationDefault::NoExpiry
+            ExpirationDefault::NoExpiry
         }
         POLICY_FIXED_TTL => {
             let ttl_ms = ttl_ms.ok_or(ProtocolError::InvalidNamespacePolicy(
@@ -143,7 +452,7 @@ fn decode_namespace_policy_parts(flags: u8, ttl_ms: Option<u64>) -> Result<super
                     "fixed namespace TTL must be positive",
                 ));
             }
-            super::ExpirationDefault::FixedTtl { ttl_ms }
+            ExpirationDefault::FixedTtl { ttl_ms }
         }
         _ => {
             return Err(ProtocolError::InvalidNamespacePolicy(
@@ -151,22 +460,22 @@ fn decode_namespace_policy_parts(flags: u8, ttl_ms: Option<u64>) -> Result<super
             ));
         }
     };
-    Ok(super::NamespacePolicy {
+    Ok(NamespacePolicy {
         default_expiration,
         expiration_override: if flags & POLICY_EXPIRATION_OVERRIDE != 0 {
-            super::OverridePolicy::Allowed
+            OverridePolicy::Allowed
         } else {
-            super::OverridePolicy::Disallowed
+            OverridePolicy::Disallowed
         },
         default_eviction: if flags & POLICY_EVICTION_PROTECTED != 0 {
-            super::EvictionDefault::EvictionProtected
+            EvictionDefault::EvictionProtected
         } else {
-            super::EvictionDefault::Evictable
+            EvictionDefault::Evictable
         },
         eviction_override: if flags & POLICY_EVICTION_OVERRIDE != 0 {
-            super::OverridePolicy::Allowed
+            OverridePolicy::Allowed
         } else {
-            super::OverridePolicy::Disallowed
+            OverridePolicy::Disallowed
         },
     })
 }
@@ -183,27 +492,204 @@ pub(crate) fn request_from_contract(
     compact_request(operation, namespace_id, item_id, value, set_options)
 }
 
+/// Builds a scoped protocol-v1 request for the typed convenience client.
+pub(crate) fn new_scoped(
+    operation: Opcode,
+    namespace_id: u64,
+    item_id: Option<ItemId>,
+    value: Vec<u8>,
+) -> Result<Request> {
+    scoped_request(
+        operation,
+        namespace_id,
+        item_id.into_iter().collect(),
+        SetWireOptions::NONE,
+        value,
+        super::generated_retry_policy(operation, false),
+    )
+}
+
+/// Builds a scoped protocol-v1 request with SET policy options.
+pub(crate) fn new_scoped_with_options(
+    operation: Opcode,
+    namespace_id: u64,
+    item_id: Option<ItemId>,
+    set_options: SetWireOptions,
+    value: Vec<u8>,
+) -> Result<Request> {
+    scoped_request(
+        operation,
+        namespace_id,
+        item_id.into_iter().collect(),
+        set_options,
+        value,
+        super::generated_retry_policy(operation, false),
+    )
+}
+
+/// Builds a retryable scoped protocol-v1 request.
+pub(crate) fn new_scoped_retryable(
+    operation: Opcode,
+    namespace_id: u64,
+    item_id: Option<ItemId>,
+    value: Vec<u8>,
+) -> Result<Request> {
+    new_scoped(operation, namespace_id, item_id, value)
+}
+
+fn scoped_request(
+    operation: Opcode,
+    namespace_id: u64,
+    item_ids: Vec<ItemId>,
+    set_options: SetWireOptions,
+    value: Vec<u8>,
+    retry_policy: RequestRetryPolicy,
+) -> Result<Request> {
+    CompatibilityRequest {
+        opcode: operation,
+        namespace_id: Some(namespace_id),
+        item_ids,
+        set_options,
+        value,
+        namespace_name: None,
+        namespace_policy: None,
+        expected_revision: None,
+        create_if_missing: false,
+        retry_policy,
+    }
+    .into_request()
+}
+
+/// Builds the protocol-v1 namespace-open request.
+pub(crate) fn namespace_open(
+    name: impl AsRef<[u8]>,
+    create_if_missing: bool,
+    policy: Option<NamespacePolicy>,
+) -> Result<Request> {
+    CompatibilityRequest {
+        opcode: Opcode::NamespaceOpen,
+        namespace_id: None,
+        item_ids: Vec::new(),
+        set_options: SetWireOptions::NONE,
+        value: Vec::new(),
+        namespace_name: Some(name.as_ref().to_vec()),
+        namespace_policy: policy,
+        expected_revision: None,
+        create_if_missing,
+        retry_policy: super::generated_retry_policy(Opcode::NamespaceOpen, create_if_missing),
+    }
+    .into_request()
+}
+
+/// Builds the protocol-v1 namespace policy update request.
+pub(crate) fn namespace_update_policy(
+    namespace_id: u64,
+    expected_revision: u64,
+    policy: NamespacePolicy,
+) -> Result<Request> {
+    CompatibilityRequest {
+        opcode: Opcode::NamespaceUpdatePolicy,
+        namespace_id: Some(namespace_id),
+        item_ids: Vec::new(),
+        set_options: SetWireOptions::NONE,
+        value: Vec::new(),
+        namespace_name: None,
+        namespace_policy: Some(policy),
+        expected_revision: Some(expected_revision),
+        create_if_missing: false,
+        retry_policy: super::generated_retry_policy(Opcode::NamespaceUpdatePolicy, false),
+    }
+    .into_request()
+}
+
+/// Builds the protocol-v1 namespace deletion request.
+pub(crate) fn namespace_delete(
+    namespace_id: u64,
+    expected_revision: u64,
+) -> Result<Request> {
+    CompatibilityRequest {
+        opcode: Opcode::NamespaceDelete,
+        namespace_id: Some(namespace_id),
+        item_ids: Vec::new(),
+        set_options: SetWireOptions::NONE,
+        value: Vec::new(),
+        namespace_name: None,
+        namespace_policy: None,
+        expected_revision: Some(expected_revision),
+        create_if_missing: false,
+        retry_policy: super::generated_retry_policy(Opcode::NamespaceDelete, false),
+    }
+    .into_request()
+}
+
 /// Returns whether generic ABI entry points must reject this opcode.
 pub(crate) fn is_compatibility_operation(operation: Opcode) -> bool {
     openkache_protocol::compat_v1::request_projection(operation).is_some()
 }
 
-/// Encodes the historical prefix for a compatibility request.
+/// Semantic request state owned by the protocol-v1 adapter.
 ///
-/// `None` means the request is generic and should use the plan-driven prefix
-/// in `protocol.rs`.
-pub(crate) fn encode_prefix(request: &Request) -> Result<Option<Vec<u8>>> {
-    let Some(plan) = openkache_protocol::operation::request_wire_plan(request.opcode) else {
-        return Ok(None);
-    };
+/// This is deliberately not part of the generic client request envelope. It
+/// exists only long enough to validate the historical route and turn its
+/// fields into an adapter-owned wire prefix.
+#[derive(Debug)]
+struct CompatibilityRequest {
+    opcode: Opcode,
+    namespace_id: Option<u64>,
+    item_ids: Vec<ItemId>,
+    set_options: SetWireOptions,
+    value: Vec<u8>,
+    namespace_name: Option<Vec<u8>>,
+    namespace_policy: Option<NamespacePolicy>,
+    expected_revision: Option<u64>,
+    create_if_missing: bool,
+    retry_policy: RequestRetryPolicy,
+}
+
+impl CompatibilityRequest {
+    fn into_request(self) -> Result<Request> {
+        validate_compact_request(&self)?;
+        let prefix = encode_prefix(&self)?;
+        Ok(Request::new_wire(
+            self.opcode,
+            prefix,
+            self.value,
+            self.retry_policy,
+        ))
+    }
+
+    fn has_non_empty_fields_except_namespace(&self) -> bool {
+        !self.item_ids.is_empty()
+            || self.set_options != SetWireOptions::NONE
+            || !self.value.is_empty()
+            || self.namespace_name.is_some()
+            || self.namespace_policy.is_some()
+            || self.expected_revision.is_some()
+            || self.create_if_missing
+    }
+
+    fn has_non_empty_fields_except_namespace_revision(&self) -> bool {
+        !self.item_ids.is_empty()
+            || self.set_options != SetWireOptions::NONE
+            || !self.value.is_empty()
+            || self.namespace_name.is_some()
+            || self.namespace_policy.is_some()
+            || self.create_if_missing
+    }
+}
+
+/// Encodes the historical prefix for a compatibility request.
+fn encode_prefix(request: &CompatibilityRequest) -> Result<Vec<u8>> {
+    let plan = openkache_protocol::operation::request_wire_plan(request.opcode).ok_or(
+        ProtocolError::InvalidFieldSequence("compatibility operation has no request wire plan"),
+    )?;
     let values = request_wire_values(request);
     let borrowed: Vec<Option<&[u8]>> = values.iter().map(|field| field.as_deref()).collect();
     openkache_protocol::encode_request_wire_prefix(request.opcode, &borrowed, plan)
-        .map(Some)
         .map_err(Into::into)
 }
 
-fn request_wire_values(request: &Request) -> Vec<Option<Cow<'_, [u8]>>> {
+fn request_wire_values(request: &CompatibilityRequest) -> Vec<Option<Cow<'_, [u8]>>> {
     let plan = crate::contract::operation_wire_spec(request.opcode).request.fields;
     let mut item_ids = request.item_ids.iter();
     plan
@@ -244,10 +730,10 @@ fn request_wire_values(request: &Request) -> Vec<Option<Cow<'_, [u8]>>> {
                 request
                     .namespace_policy
                     .and_then(|policy| match policy.default_expiration {
-                        super::ExpirationDefault::FixedTtl { ttl_ms } => {
+                        ExpirationDefault::FixedTtl { ttl_ms } => {
                             Some(Cow::Owned(ttl_ms.to_be_bytes().to_vec()))
                         }
-                        super::ExpirationDefault::NoExpiry => None,
+                        ExpirationDefault::NoExpiry => None,
                     })
             }
             "expiration_override" => request.namespace_policy.map(|policy| {
@@ -264,11 +750,11 @@ fn request_wire_values(request: &Request) -> Vec<Option<Cow<'_, [u8]>>> {
         .collect()
 }
 
-const fn set_condition_value(value: super::SetCondition) -> &'static [u8] {
+const fn set_condition_value(value: SetCondition) -> &'static [u8] {
     match value {
-        super::SetCondition::Any => b"any",
-        super::SetCondition::IfAbsent => b"if_absent",
-        super::SetCondition::IfPresent => b"if_present",
+        SetCondition::Any => b"any",
+        SetCondition::IfAbsent => b"if_absent",
+        SetCondition::IfPresent => b"if_present",
     }
 }
 
@@ -276,51 +762,41 @@ const fn boolean_value(value: bool) -> &'static [u8] {
     if value { b"\x01" } else { b"\x00" }
 }
 
-const fn expiration_mode_value(value: super::ExpirationMode) -> &'static [u8] {
+const fn expiration_mode_value(value: ExpirationMode) -> &'static [u8] {
     match value {
-        super::ExpirationMode::Inherit => b"inherit",
-        super::ExpirationMode::NoExpiry => b"no_expiry",
-        super::ExpirationMode::ExplicitTtl => b"explicit_ttl",
+        ExpirationMode::Inherit => b"inherit",
+        ExpirationMode::NoExpiry => b"no_expiry",
+        ExpirationMode::ExplicitTtl => b"explicit_ttl",
     }
 }
 
-const fn eviction_mode_value(value: super::EvictionMode) -> &'static [u8] {
+const fn eviction_mode_value(value: EvictionMode) -> &'static [u8] {
     match value {
-        super::EvictionMode::Inherit => b"inherit",
-        super::EvictionMode::Evictable => b"evictable",
-        super::EvictionMode::EvictionProtected => b"eviction_protected",
+        EvictionMode::Inherit => b"inherit",
+        EvictionMode::Evictable => b"evictable",
+        EvictionMode::EvictionProtected => b"eviction_protected",
     }
 }
 
-const fn override_policy_value(value: super::OverridePolicy) -> &'static [u8] {
+const fn override_policy_value(value: OverridePolicy) -> &'static [u8] {
     match value {
-        super::OverridePolicy::Allowed => b"allowed",
-        super::OverridePolicy::Disallowed => b"disallowed",
+        OverridePolicy::Allowed => b"allowed",
+        OverridePolicy::Disallowed => b"disallowed",
     }
 }
 
-const fn default_expiration_value(value: super::ExpirationDefault) -> &'static [u8] {
+const fn default_expiration_value(value: ExpirationDefault) -> &'static [u8] {
     match value {
-        super::ExpirationDefault::NoExpiry => b"no_expiry",
-        super::ExpirationDefault::FixedTtl { .. } => b"fixed_ttl",
+        ExpirationDefault::NoExpiry => b"no_expiry",
+        ExpirationDefault::FixedTtl { .. } => b"fixed_ttl",
     }
 }
 
-const fn default_eviction_value(value: super::EvictionDefault) -> &'static [u8] {
+const fn default_eviction_value(value: EvictionDefault) -> &'static [u8] {
     match value {
-        super::EvictionDefault::Evictable => b"evictable",
-        super::EvictionDefault::EvictionProtected => b"eviction_protected",
+        EvictionDefault::Evictable => b"evictable",
+        EvictionDefault::EvictionProtected => b"eviction_protected",
     }
-}
-
-/// Validates a compatibility request. `false` means generic validation should
-/// run in the plan-driven request core.
-pub(crate) fn validate_request(request: &Request) -> Result<bool> {
-    if !is_compatibility_operation(request.opcode) {
-        return Ok(false);
-    }
-    validate_compact_request(request)?;
-    Ok(true)
 }
 
 fn compact_request(
@@ -358,17 +834,22 @@ fn compact_request(
     if !value.is_empty() {
         validate_compact_value(operation, &value).map_err(crate::Error::protocol)?;
     }
-    Request::new_scoped_items_with_options(
-        operation,
-        namespace_id,
-        items,
-        set_options.into_protocol()?,
+    let request = CompatibilityRequest {
+        opcode: operation,
+        namespace_id: Some(namespace_id),
+        item_ids: items,
+        set_options: set_options.into_protocol()?,
         value,
-    )
-    .map_err(crate::Error::protocol)
+        namespace_name: None,
+        namespace_policy: None,
+        expected_revision: None,
+        create_if_missing: false,
+        retry_policy: super::generated_retry_policy(operation, false),
+    };
+    request.into_request().map_err(crate::Error::protocol)
 }
 
-fn validate_compact_request(request: &Request) -> Result<()> {
+fn validate_compact_request(request: &CompatibilityRequest) -> Result<()> {
     validate_value_length(request.value.len())?;
     let item_count = compact_request_field_count(request.opcode, "item_id");
     let value_count = compact_request_field_count(request.opcode, "value");

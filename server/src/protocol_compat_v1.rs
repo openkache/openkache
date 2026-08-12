@@ -10,20 +10,24 @@ use std::borrow::Cow;
 use openkache_protocol::{ItemId, Opcode, OwnedRange};
 use smallvec::SmallVec;
 
-use super::{
-    NamespacePolicy, ProtocolError, RequestHeader, Result, SetOptions,
-};
 use super::super::operation_compatibility_contract as compatibility_contract;
 use super::super::operation_contract as contract;
+use super::{NamespacePolicy, ProtocolError, RequestHeader, Result, SetOptions};
 
+#[path = "protocol_compat_v1_fields.rs"]
+mod fields;
 #[path = "protocol_compat_v1_policy.rs"]
 mod policy;
 #[path = "protocol_compat_v1_validation.rs"]
 mod validation;
+#[path = "protocol_compat_v1_wire.rs"]
+mod wire;
+use fields::{field_bytes, field_count, field_u64, field_values};
 pub(crate) use policy::decode_namespace_policy;
 pub(super) use validation::{
     validate_namespace_id, validate_namespace_name, validate_request, validate_revision,
 };
+use wire::map_wire_decode_error;
 
 pub(super) struct DecodedRequestMetadata {
     pub(super) namespace_id: Option<u64>,
@@ -51,6 +55,11 @@ pub(super) const fn is_compatibility_operation(opcode: Opcode) -> bool {
 
 /// Encodes a compact request through its generated declarative plan.
 pub(super) fn encode_request(request: &super::Request) -> Result<Vec<u8>> {
+    if !is_compatibility_operation(request.opcode) {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "operation has no protocol-v1 compatibility projection",
+        ));
+    }
     let plan = contract::request_wire_plan(request.opcode).ok_or(
         ProtocolError::InvalidFieldSequence("operation has no compact request plan"),
     )?;
@@ -66,21 +75,21 @@ pub(super) fn encode_request_prefix(
     request: &super::Request,
     output: &mut Vec<u8>,
 ) -> Result<bool> {
+    if !is_compatibility_operation(request.opcode) {
+        return Ok(false);
+    }
     let Some(plan) = contract::request_wire_plan(request.opcode) else {
         return Ok(false);
     };
     let values = request_wire_values(request)?;
     let borrowed: SmallVec<[Option<&[u8]>; 8]> =
         values.iter().map(|value| value.as_deref()).collect();
-    let prefix =
-        openkache_protocol::encode_request_wire_prefix(request.opcode, &borrowed, plan)?;
+    let prefix = openkache_protocol::encode_request_wire_prefix(request.opcode, &borrowed, plan)?;
     output.extend_from_slice(&prefix[openkache_protocol::OPCODE_BYTES..]);
     Ok(true)
 }
 
-fn request_wire_values(
-    request: &super::Request,
-) -> Result<SmallVec<[Option<Cow<'_, [u8]>>; 8]>> {
+fn request_wire_values(request: &super::Request) -> Result<SmallVec<[Option<Cow<'_, [u8]>>; 8]>> {
     let fields = contract::spec(request.opcode).request.fields;
     let mut item_ids = request.item_ids.iter();
     Ok(fields
@@ -110,30 +119,28 @@ fn request_wire_values(
                 .set_options
                 .ttl_ms
                 .map(|value| Cow::Owned(value.to_be_bytes().to_vec())),
-            "create_if_missing" => Some(Cow::Borrowed(boolean_value(
-                request.create_if_missing,
-            ))),
+            "create_if_missing" => Some(Cow::Borrowed(boolean_value(request.create_if_missing))),
             "policy" => None,
-            "default_expiration" => request.namespace_policy.map(|policy| {
-                Cow::Borrowed(default_expiration_value(policy.default_expiration))
-            }),
-            "default_ttl_milliseconds" => request
+            "default_expiration" => request
                 .namespace_policy
-                .and_then(|policy| match policy.default_expiration {
-                    super::ExpirationDefault::FixedTtl { ttl_ms } => {
-                        Some(Cow::Owned(ttl_ms.to_be_bytes().to_vec()))
-                    }
-                    super::ExpirationDefault::NoExpiry => None,
-                }),
-            "expiration_override" => request.namespace_policy.map(|policy| {
-                Cow::Borrowed(override_policy_value(policy.expiration_override))
+                .map(|policy| Cow::Borrowed(default_expiration_value(policy.default_expiration))),
+            "default_ttl_milliseconds" => request.namespace_policy.and_then(|policy| match policy
+                .default_expiration
+            {
+                super::ExpirationDefault::FixedTtl { ttl_ms } => {
+                    Some(Cow::Owned(ttl_ms.to_be_bytes().to_vec()))
+                }
+                super::ExpirationDefault::NoExpiry => None,
             }),
-            "default_eviction" => request.namespace_policy.map(|policy| {
-                Cow::Borrowed(default_eviction_value(policy.default_eviction))
-            }),
-            "eviction_override" => request.namespace_policy.map(|policy| {
-                Cow::Borrowed(override_policy_value(policy.eviction_override))
-            }),
+            "expiration_override" => request
+                .namespace_policy
+                .map(|policy| Cow::Borrowed(override_policy_value(policy.expiration_override))),
+            "default_eviction" => request
+                .namespace_policy
+                .map(|policy| Cow::Borrowed(default_eviction_value(policy.default_eviction))),
+            "eviction_override" => request
+                .namespace_policy
+                .map(|policy| Cow::Borrowed(override_policy_value(policy.eviction_override))),
             _ => None,
         })
         .collect())
@@ -189,18 +196,15 @@ const fn default_eviction_value(value: super::EvictionDefault) -> &'static [u8] 
 }
 
 /// Decodes one compact header using the generated byte-consumption layout.
-pub(super) fn decode_header(
-    prefix: &[u8],
-    opcode: Opcode,
-) -> Result<Option<RequestHeader>> {
-    let plan = contract::request_wire_plan(opcode).ok_or(
-        ProtocolError::InvalidFieldSequence("operation has no compact request plan"),
-    )?;
+pub(super) fn decode_header(prefix: &[u8], opcode: Opcode) -> Result<Option<RequestHeader>> {
+    let plan = contract::request_wire_plan(opcode).ok_or(ProtocolError::InvalidFieldSequence(
+        "operation has no compact request plan",
+    ))?;
     let layout = super::wire_request_layout(opcode);
     // Report semantic packed-flag errors as soon as their byte is retained.
     // Header callers commonly pass a partial prefix and still expect a
     // malformed flag to be rejected before the value-length byte arrives.
-    if let Some(error) = classify_wire_prefix(opcode, prefix) {
+    if let Some(error) = wire::classify_wire_prefix(opcode, prefix) {
         return Err(error);
     }
     let Some(header) = openkache_protocol::OpaqueRequestFrame::decode_header(prefix, layout)
@@ -208,11 +212,12 @@ pub(super) fn decode_header(
     else {
         return Ok(None);
     };
-    let metadata_prefix = prefix
-        .get(..header.encoded_len())
-        .ok_or(ProtocolError::InvalidFieldSequence(
-            "compact header exceeds retained prefix",
-        ))?;
+    let metadata_prefix =
+        prefix
+            .get(..header.encoded_len())
+            .ok_or(ProtocolError::InvalidFieldSequence(
+                "compact header exceeds retained prefix",
+            ))?;
     let fields = openkache_protocol::decode_request_wire_prefix_fields(
         OwnedRange::whole(metadata_prefix.to_vec()),
         header.value_len(),
@@ -247,10 +252,7 @@ pub(super) fn decode_header(
     )))
 }
 
-pub(super) fn decode_request(
-    frame: &[u8],
-    header: RequestHeader,
-) -> Result<super::Request> {
+pub(super) fn decode_request(frame: &[u8], header: RequestHeader) -> Result<super::Request> {
     let metadata = decode_request_metadata(frame, header)?;
     let value = frame
         .get(header.encoded_len()..)
@@ -275,14 +277,11 @@ pub(super) fn decode_owned_request(
     super::Request::from_decoded_parts(metadata, value, header.opcode())
 }
 
-fn decode_request_metadata(
-    frame: &[u8],
-    header: RequestHeader,
-) -> Result<DecodedRequestMetadata> {
+fn decode_request_metadata(frame: &[u8], header: RequestHeader) -> Result<DecodedRequestMetadata> {
     let opcode = header.opcode();
-    let plan = contract::request_wire_plan(opcode).ok_or(
-        ProtocolError::InvalidFieldSequence("operation has no compact request plan"),
-    )?;
+    let plan = contract::request_wire_plan(opcode).ok_or(ProtocolError::InvalidFieldSequence(
+        "operation has no compact request plan",
+    ))?;
     let prefix = frame
         .get(..header.encoded_len())
         .ok_or(ProtocolError::FrameTooShort {
@@ -305,11 +304,13 @@ fn decode_request_metadata(
         .into_iter()
         .map(|value| {
             let bytes: [u8; openkache_protocol::ITEM_ID_BYTES] =
-                value.try_into().map_err(|_| ProtocolError::InvalidItemIdLength {
-                    opcode,
-                    expected: openkache_protocol::ITEM_ID_BYTES,
-                    actual: value.len(),
-                })?;
+                value
+                    .try_into()
+                    .map_err(|_| ProtocolError::InvalidItemIdLength {
+                        opcode,
+                        expected: openkache_protocol::ITEM_ID_BYTES,
+                        actual: value.len(),
+                    })?;
             Ok(ItemId::new(bytes))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -332,236 +333,6 @@ fn decode_request_metadata(
     })
 }
 
-fn field_count(opcode: Opcode, role: &str) -> usize {
-    contract::spec(opcode)
-        .request
-        .fields
-        .iter()
-        .filter(|field| field.role == role)
-        .count()
-}
-
-fn field_index(
-    opcode: Opcode,
-    role: &str,
-    occurrence: usize,
-) -> Option<usize> {
-    contract::spec(opcode)
-        .request
-        .fields
-        .iter()
-        .filter(|field| field.role == role)
-        .nth(occurrence)
-        .map(|field| field.index)
-}
-
-fn field_bytes<'a>(
-    opcode: Opcode,
-    fields: &'a [Option<OwnedRange>],
-    role: &str,
-    occurrence: usize,
-) -> Option<&'a [u8]> {
-    field_index(opcode, role, occurrence)
-        .and_then(|index| fields.get(index))
-        .and_then(Option::as_ref)
-        .map(OwnedRange::as_slice)
-}
-
-fn field_values<'a>(
-    opcode: Opcode,
-    fields: &'a [Option<OwnedRange>],
-    role: &str,
-) -> Vec<&'a [u8]> {
-    (0..field_count(opcode, role))
-        .filter_map(|occurrence| field_bytes(opcode, fields, role, occurrence))
-        .collect()
-}
-
-fn field_u64(
-    opcode: Opcode,
-    fields: &[Option<OwnedRange>],
-    role: &str,
-    occurrence: usize,
-) -> Result<Option<u64>> {
-    let Some(value) = field_bytes(opcode, fields, role, occurrence) else {
-        return Ok(None);
-    };
-    let bytes: [u8; 8] = value.try_into().map_err(|_| {
-        ProtocolError::InvalidFieldSequence("compact integer field has the wrong width")
-    })?;
-    Ok(Some(u64::from_be_bytes(bytes)))
-}
-
-/// Projects operation-neutral generated-plan failures into the public
-/// compatibility error vocabulary.
-///
-/// The shared plan decoder intentionally reports only structural failures.
-/// This adapter is the one place that can say whether an invalid packed value
-/// is a SET condition conflict, a policy error, or an unknown request flag.
-fn map_wire_decode_error(
-    opcode: Opcode,
-    prefix: &[u8],
-    error: openkache_protocol::ProtocolError,
-) -> ProtocolError {
-    match error {
-        openkache_protocol::ProtocolError::NonCanonicalVaruint {
-            context: "request wire integer" | "request integer",
-        } if opcode == Opcode::Set => ProtocolError::NonCanonicalVaruint {
-            context: "SET TTL",
-        },
-        openkache_protocol::ProtocolError::InvalidFieldSequence(_) => {
-            classify_wire_prefix(opcode, prefix).unwrap_or_else(|| {
-                ProtocolError::InvalidFieldSequence(
-                    "request wire plan rejected the compact prefix",
-                )
-            })
-        }
-        error => error.into(),
-    }
-}
-
-const MAX_COMPACT_FIELDS: usize = 64;
-
-fn classify_wire_prefix(
-    opcode: Opcode,
-    prefix: &[u8],
-) -> Option<ProtocolError> {
-    let plan = contract::request_wire_plan(opcode)?;
-    let mut cursor = openkache_protocol::OPCODE_BYTES;
-    let mut selectors = [None; MAX_COMPACT_FIELDS];
-    classify_wire_steps(opcode, prefix, &mut cursor, plan.steps, &mut selectors)
-}
-
-fn classify_wire_steps(
-    opcode: Opcode,
-    prefix: &[u8],
-    cursor: &mut usize,
-    steps: &[openkache_protocol::RequestWireStep],
-    selectors: &mut [Option<&'static [u8]>; MAX_COMPACT_FIELDS],
-) -> Option<ProtocolError> {
-    for step in steps {
-        match *step {
-            openkache_protocol::RequestWireStep::FixedField { bytes, .. } => {
-                *cursor = cursor.checked_add(bytes)?;
-            }
-            openkache_protocol::RequestWireStep::Packed {
-                fields,
-                reserved_mask,
-                ..
-            } => {
-                let byte = *prefix.get(*cursor)?;
-                if byte & reserved_mask != 0 {
-                    return Some(packed_flags_error(opcode, fields, byte & reserved_mask));
-                }
-                for field in fields {
-                    let selected = byte & field.mask;
-                    let Some(mapping) =
-                        field.values.iter().find(|mapping| mapping.bits == selected)
-                    else {
-                        return Some(packed_field_error(opcode, field.field));
-                    };
-                    *selectors.get_mut(field.field)? = Some(mapping.value);
-                }
-                *cursor = cursor.checked_add(1)?;
-            }
-            openkache_protocol::RequestWireStep::ByteLengthField { .. } => {
-                let length = usize::from(*prefix.get(*cursor)?);
-                *cursor = cursor
-                    .checked_add(1)?
-                    .checked_add(length)?;
-            }
-            openkache_protocol::RequestWireStep::VarUIntField { .. } => {
-                let (_, encoded_len) = openkache_protocol::decode_varuint(
-                    prefix.get(*cursor..).unwrap_or_default(),
-                    "request wire integer",
-                )
-                .ok()??
-                ;
-                *cursor = cursor.checked_add(encoded_len)?;
-            }
-            openkache_protocol::RequestWireStep::Conditional {
-                field,
-                equals,
-                steps,
-            } => {
-                if selectors.get(field).copied().flatten() == Some(equals)
-                    && let Some(error) =
-                        classify_wire_steps(opcode, prefix, cursor, steps, selectors)
-                {
-                    return Some(error);
-                }
-            }
-            openkache_protocol::RequestWireStep::Bytes { expected } => {
-                let end = cursor.checked_add(expected.len())?;
-                if prefix.get(*cursor..end) != Some(expected) {
-                    let actual = *prefix.get(*cursor)?;
-                    return Some(ProtocolError::UnknownRequestFlags(actual));
-                }
-                *cursor = end;
-            }
-            openkache_protocol::RequestWireStep::TrailingField { .. } => {
-                let (_, encoded_len) = openkache_protocol::decode_varuint(
-                    prefix.get(*cursor..).unwrap_or_default(),
-                    "request trailing field length",
-                )
-                .ok()??
-                ;
-                *cursor = cursor.checked_add(encoded_len)?;
-            }
-        }
-    }
-    None
-}
-
-fn packed_flags_error(
-    opcode: Opcode,
-    fields: &[openkache_protocol::RequestWirePackedField],
-    bits: u8,
-) -> ProtocolError {
-    if fields.iter().any(|field| {
-        matches!(
-            contract::spec(opcode)
-                .request
-                .fields
-                .get(field.field)
-                .map(|field| field.role),
-            Some(
-                "default_expiration"
-                    | "default_ttl_milliseconds"
-                    | "expiration_override"
-                    | "default_eviction"
-                    | "eviction_override"
-            )
-        )
-    }) {
-        ProtocolError::InvalidNamespacePolicy("namespace policy contains reserved bits")
-    } else {
-        ProtocolError::UnknownRequestFlags(bits)
-    }
-}
-
-fn packed_field_error(opcode: Opcode, field: usize) -> ProtocolError {
-    match contract::spec(opcode)
-        .request
-        .fields
-        .get(field)
-        .map(|field| field.role)
-    {
-        Some("condition") => ProtocolError::ConflictingSetConditions,
-        Some("expiration_mode" | "eviction_mode") => {
-            ProtocolError::InvalidSetOptions { opcode }
-        }
-        Some(
-            "default_expiration"
-            | "default_ttl_milliseconds"
-            | "expiration_override"
-            | "default_eviction"
-            | "eviction_override",
-        ) => ProtocolError::InvalidNamespacePolicy("namespace policy contains an unknown mode"),
-        _ => ProtocolError::InvalidFieldSequence("request packed field has an unknown value"),
-    }
-}
-
 fn decode_bool(value: &[u8]) -> Result<bool> {
     match value {
         [0] => Ok(false),
@@ -572,10 +343,7 @@ fn decode_bool(value: &[u8]) -> Result<bool> {
     }
 }
 
-fn decode_set_options(
-    opcode: Opcode,
-    fields: &[Option<OwnedRange>],
-) -> Result<SetOptions> {
+fn decode_set_options(opcode: Opcode, fields: &[Option<OwnedRange>]) -> Result<SetOptions> {
     if field_count(opcode, "condition") == 0 {
         return Ok(SetOptions::NONE);
     }
@@ -598,22 +366,16 @@ fn decode_set_options(
         _ => return Err(ProtocolError::InvalidSetOptions { opcode }),
     };
     let ttl_ms = field_u64(opcode, fields, "ttl_milliseconds", 0)?;
-    let options =
-        SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode);
+    let options = SetOptions::with_policies(condition, expiration_mode, ttl_ms, eviction_mode);
     options.flags()?;
     Ok(options)
 }
 
-fn decode_policy(
-    opcode: Opcode,
-    fields: &[Option<OwnedRange>],
-) -> Result<Option<NamespacePolicy>> {
+fn decode_policy(opcode: Opcode, fields: &[Option<OwnedRange>]) -> Result<Option<NamespacePolicy>> {
     if field_count(opcode, "policy") == 0 {
         return Ok(None);
     }
-    let Some(default_expiration) =
-        field_bytes(opcode, fields, "default_expiration", 0)
-    else {
+    let Some(default_expiration) = field_bytes(opcode, fields, "default_expiration", 0) else {
         return Ok(None);
     };
     let default_expiration = match default_expiration {
@@ -630,18 +392,16 @@ fn decode_policy(
     };
     let expiration_override =
         decode_override(field_bytes(opcode, fields, "expiration_override", 0))?;
-    let default_eviction =
-        match field_bytes(opcode, fields, "default_eviction", 0) {
-            Some(b"evictable") => super::EvictionDefault::Evictable,
-            Some(b"eviction_protected") => super::EvictionDefault::EvictionProtected,
-            _ => {
-                return Err(ProtocolError::InvalidNamespacePolicy(
-                    "unknown default eviction",
-                ));
-            }
-        };
-    let eviction_override =
-        decode_override(field_bytes(opcode, fields, "eviction_override", 0))?;
+    let default_eviction = match field_bytes(opcode, fields, "default_eviction", 0) {
+        Some(b"evictable") => super::EvictionDefault::Evictable,
+        Some(b"eviction_protected") => super::EvictionDefault::EvictionProtected,
+        _ => {
+            return Err(ProtocolError::InvalidNamespacePolicy(
+                "unknown default eviction",
+            ));
+        }
+    };
+    let eviction_override = decode_override(field_bytes(opcode, fields, "eviction_override", 0))?;
     let policy = NamespacePolicy {
         default_expiration,
         expiration_override,

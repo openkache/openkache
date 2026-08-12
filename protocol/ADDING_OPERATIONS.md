@@ -47,12 +47,17 @@ client field views apply the same plan validation when they expose a response.
 | no modeled members | `empty` | `empty` or `opaque` | control/status operations |
 | one already-encoded value | `opaque` | `opaque` or `empty` | pass-through or application values |
 | ordered members | `ordered_fields` | `field_sequence` | optional, repeated, or mixed fields |
-| historical v1 result | `ordered_fields` | `optional_values` | only when preserving the v1 byte contract |
+| generic optional result | `ordered_fields` | `field_sequence` | default for optional, repeated, or mixed fields |
+| legacy compact optional result | `ordered_fields` | `adapter_owned` | only when a compatibility adapter must preserve an existing length/sentinel wire format |
 
 `dense` is selected automatically for an all-required fixed-width ordered plan.
-It is a layout optimization, not an operation family. A new operation must not
-select `optional_values` merely because it returns multiple values; use the
-generic sequence unless compatibility requires the historical table.
+The legacy compact format is not a generic layout. Its compatibility adapter
+owns the four-byte big-endian length/sentinel representation. A new operation
+should use `field_sequence`; it must not add a route or dispatcher branch.
+
+An unknown response framing is retained as `adapter_owned` and must be handled
+by its declaring adapter. The adapter may add only body segments; generic
+status validation, aggregate limits, and response ownership remain shared.
 
 Use `requestWire` only when an operation requires exact request bytes that the
 shape-selected generic layout cannot provide. Compose its fixed, packed,
@@ -72,7 +77,8 @@ descriptor also records a shape-derived admission bound:
 - sequences include one shared presence-mask prefix plus the maximum canonical
   length prefix and value bytes for every present field except the final
   present field, which consumes the remainder;
-- optional-value tables include their fixed four-byte prefixes.
+- compact optional-value tables include one four-byte prefix per modeled field;
+  unknown adapter-owned tables are budgeted by their adapter.
 
 The runtime still validates actual frame and field lengths. Generated plans are
 bounded to 256 flattened fields, 64 nested codec levels, and 256 nested codec
@@ -101,7 +107,10 @@ result projections belong in `protocol/compatibility_v1.ts` and the matching
 server/client API adapter modules. Their exact request bytes still use the
 generic `requestWire` plan. Compatibility code may translate modeled fields
 into existing public types and error variants, but transport, framing, and
-server dispatch must not learn that vocabulary.
+server dispatch must not learn that vocabulary. The protocol-v1 four-byte
+big-endian length and `0xffffffff` missing sentinel are implemented once in
+the shared `optional_values` codec; the v1 module only re-exports it and adds
+typed convenience projections.
 
 Only an operation that preserves an existing protocol-v1 client convenience
 surface should declare `compatibilityRequestProjection`. New operations omit

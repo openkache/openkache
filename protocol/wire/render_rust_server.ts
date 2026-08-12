@@ -152,46 +152,22 @@ pub const fn wire_request_layout(opcode: Opcode) -> WireRequestLayout {
 
 /** Renders generic operation metadata for the server-owned adapter. */
 export function render_rust_server_contract(contract: Wire_Contract): string {
-  const operation_status_variants = contract.statuses
-    .map((status) => `    ${status.name},`)
-    .join("\n")
-  const operation_status_wire_arms = contract.statuses
-    .map((status) => `            Self::${status.name} => Status::${status.name},`)
-    .join("\n")
   return `// Generated from the OpenKache Smithy operation contract. Do not edit.
 
-use openkache_protocol::{OPCODE_BYTES, Opcode, Status};
+use openkache_protocol::{OPCODE_BYTES, Opcode};
 // The server consumes only the canonical wire projection.  Keep the
-// Client-result/retry and execution-scope metadata belongs to the respective
+// client-result/retry and execution-scope metadata in their respective
 // adapters; it is intentionally absent from this server contract surface.
 pub use openkache_protocol::operation::{
     operation_registry, operation_wire_spec, wire_codec_kind,
     MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS,
     request_fields, request_wire_plan,
     OperationFieldLayout, OperationFieldPlan,
-    OperationFramePolicy, OperationLayoutFraming,
+    OperationFramePolicy,
     OperationWireSpec, WireCodecCardinality, WireCodecDescriptor, WireCodecKind,
     WireCodecLengthEncoding, WireCodecWidth, WIRE_CODEC_DESCRIPTORS,
     WIRE_CODEC_NAMES,
 };
-
-/// Transport-neutral semantic status generated from the modeled vocabulary.
-///
-/// API behavior returns this enum. Only the response adapter projects it to
-/// the protocol wire value, so request execution performs no string lookup.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OperationStatus {
-${operation_status_variants}
-}
-
-impl OperationStatus {
-    /// Projects one semantic status at the wire-adapter boundary.
-    pub const fn wire_status(self) -> Status {
-        match self {
-${operation_status_wire_arms}
-        }
-    }
-}
 
 /// Aggregate payload ceiling for generic request layouts.
 ///

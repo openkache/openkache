@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use futures_util::lock::Mutex as AsyncMutex;
 
 use super::operation_api::{CapabilityKey, ResourceLock};
-use super::operation_capabilities::CapabilityRegistry;
+use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::storage_port::{STORAGE_PORT, StoragePortHandle};
 
 #[derive(Default)]
@@ -57,6 +57,16 @@ impl ExperimentalResourceStore {
 
 pub(crate) const EXPERIMENTAL_RESOURCE_STORE: CapabilityKey<ExperimentalResourceStore> =
     CapabilityKey::new("openkache.experimental.resource_store");
+
+pub(crate) fn install_capabilities(
+    registry: &mut CapabilityRegistry,
+    source: &dyn CapabilityCatalog,
+) {
+    if let Some(storage) = super::operation_api::downcast_capability(source, STORAGE_PORT) {
+        install_storage_port(registry, storage.clone());
+    }
+    install_resource_store(registry);
+}
 
 /// Installs the runtime-neutral storage port used by this API module.
 ///

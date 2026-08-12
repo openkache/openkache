@@ -24,16 +24,24 @@ import {
   render_rust_compatibility_contract,
   render_rust_semantic_constants,
 } from "./compatibility_v1_renderer"
-import { extract_compatibility_wire_contract } from "./compatibility_v1"
 import {
-  render_protocol_spec_contract_snapshot,
-  render_protocol_spec_operation_table,
-  protocol_spec_contract_snapshot_issues,
-  protocol_spec_operation_table_issues,
+  derive_wire_compatibility_response_semantics,
+  derive_wire_compatibility_retry_mode,
+  derive_wire_compatibility_scope,
+  extract_compatibility_wire_contract,
+  OPTIONAL_VALUES_RESPONSE_FRAMING,
+  type Wire_Compatibility_Contract,
+} from "./compatibility_v1"
+import {
+  render_protocol_spec_contract_snapshot as render_protocol_spec_contract_snapshot_generic,
+  render_protocol_spec_operation_table as render_protocol_spec_operation_table_generic,
+  protocol_spec_contract_snapshot_issues as protocol_spec_contract_snapshot_issues_generic,
+  protocol_spec_operation_table_issues as protocol_spec_operation_table_issues_generic,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
   PROTOCOL_SPEC_OPERATION_TABLE_END,
   PROTOCOL_SPEC_OPERATION_TABLE_START,
+  type Wire_Spec_Adapter,
 } from "./wire_spec"
 
 export {
@@ -47,10 +55,6 @@ export {
 } from "./compatibility_v1_renderer"
 export { extract_generic_wire_contract }
 export {
-  render_protocol_spec_contract_snapshot,
-  render_protocol_spec_operation_table,
-  protocol_spec_contract_snapshot_issues,
-  protocol_spec_operation_table_issues,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
   PROTOCOL_SPEC_OPERATION_TABLE_END,
@@ -62,6 +66,62 @@ export type {
   Wire_Entry,
   Wire_V1_Contract,
 } from "./wire"
+
+/**
+ * Reader-facing metadata for the checked-in protocol-v1 specification.
+ *
+ * The generic renderer remains unaware of route names, retry policy, and
+ * semantic result labels. The protocol generation entry point supplies those
+ * compatibility details explicitly when it renders SPEC.md.
+ */
+const PROTOCOL_V1_SPEC_ADAPTER: Wire_Spec_Adapter = {
+  response_payload(operation): string | undefined {
+    if (
+      operation.contract.response_framing !== OPTIONAL_VALUES_RESPONSE_FRAMING
+    ) return undefined
+    const value_count = operation.contract.response_plan?.length ?? 0
+    return value_count === 1
+      ? "one ordered optional field"
+      : `${value_count} ordered optional fields`
+  },
+  scope: (operation) => derive_wire_compatibility_scope(operation.contract),
+  retry_mode: (operation) => derive_wire_compatibility_retry_mode(operation.contract),
+  response_semantics: (operation) =>
+    derive_wire_compatibility_response_semantics(operation.contract),
+}
+
+export function render_protocol_spec_operation_table(contract: Wire_Contract): string {
+  return render_protocol_spec_operation_table_generic(contract, PROTOCOL_V1_SPEC_ADAPTER)
+}
+
+export function protocol_spec_operation_table_issues(
+  spec: string,
+  contract: Wire_Contract,
+): readonly string[] {
+  return protocol_spec_operation_table_issues_generic(
+    spec,
+    contract,
+    PROTOCOL_V1_SPEC_ADAPTER,
+  )
+}
+
+export function render_protocol_spec_contract_snapshot(contract: Wire_Contract): string {
+  return render_protocol_spec_contract_snapshot_generic(
+    contract,
+    PROTOCOL_V1_SPEC_ADAPTER,
+  )
+}
+
+export function protocol_spec_contract_snapshot_issues(
+  spec: string,
+  contract: Wire_Contract,
+): readonly string[] {
+  return protocol_spec_contract_snapshot_issues_generic(
+    spec,
+    contract,
+    PROTOCOL_V1_SPEC_ADAPTER,
+  )
+}
 
 /**
  * Extracts the checked-in protocol contract with its explicit v1 adapter.
@@ -181,7 +241,8 @@ export function main(): number {
           "run `../clients/generate.ts` for client language or ABI outputs",
       )
     }
-    const contract: Wire_Contract = extract_compatibility_wire_contract(smithy_wire_ast(), true)
+    const contract: Wire_Compatibility_Contract =
+      extract_compatibility_wire_contract(smithy_wire_ast(), true)
     const check_only = process.env.OPENKACHE_GENERATION_CHECK === "1"
     // Build-script generation must be hermetic: Bazel and Cargo provide only
     // the declared model/generator inputs, not the checked-in documentation.

@@ -1,4 +1,3 @@
-use super::operation_api;
 use super::{ItemId, NamespaceDescriptor, NamespacePolicy};
 use futures_util::lock::Mutex as AsyncMutex;
 use std::collections::{HashMap, HashSet};
@@ -177,15 +176,11 @@ impl NamespaceRegistry {
     pub(crate) fn operation_lock(
         &self,
         namespace_id: u64,
-    ) -> Option<operation_api::ResourceLock> {
+    ) -> Option<(Arc<AsyncMutex<()>>, Arc<AtomicBool>)> {
         self.by_id.get(&namespace_id).map(|entry| {
-            operation_api::ResourceLock::new(
+            (
                 Arc::clone(&entry.operation_lock),
                 Arc::clone(&entry.active),
-                operation_api::PrepareError::resource_unavailable(
-                    super::operation_contract::OperationStatus::NamespaceNotFound,
-                    b"namespace does not exist",
-                ),
             )
         })
     }

@@ -16,14 +16,15 @@ pub(super) fn encode_request_prefix(
     request: &super::Request,
     output: &mut Vec<u8>,
 ) -> Result<bool> {
-    let contract = contract::operation_wire_spec(request.opcode).request;
-    match contract.framing {
-        contract::OperationLayoutFraming::Empty => {}
-        contract::OperationLayoutFraming::Opaque
-        | contract::OperationLayoutFraming::OrderedFields
-        | contract::OperationLayoutFraming::FieldSequence => {
-            if contract.frame == contract::OperationFramePolicy::FixedBody {
-                if request.value.len() != contract.exact_width {
+    let layout = contract::operation_wire_spec(request.opcode).request;
+    match contract::operation_wire_spec(request.opcode).generic_request_framing() {
+        Some(contract::OperationRequestFraming::Empty) => {}
+        Some(
+            contract::OperationRequestFraming::Opaque
+            | contract::OperationRequestFraming::OrderedFields,
+        ) => {
+            if layout.frame == contract::OperationFramePolicy::FixedBody {
+                if request.value.len() != layout.exact_width {
                     return Err(ProtocolError::InvalidFieldSequence(
                         "fixed generic request width does not match contract",
                     ));
@@ -33,9 +34,9 @@ pub(super) fn encode_request_prefix(
                 output.extend_from_slice(&encoded[..length]);
             }
         }
-        contract::OperationLayoutFraming::OptionalValues => {
+        None => {
             return Err(ProtocolError::InvalidFieldSequence(
-                "optional-values framing is response-only",
+                "operation request framing is not generic",
             ));
         }
     }
@@ -51,9 +52,8 @@ pub(super) fn encode_request_prefix(
 pub(super) fn encode_fields(opcode: Opcode, values: Vec<Option<Vec<u8>>>) -> Result<Vec<u8>> {
     let wire = contract::spec(opcode);
     if !matches!(
-        wire.request.framing,
-        contract::OperationLayoutFraming::OrderedFields
-            | contract::OperationLayoutFraming::FieldSequence
+        wire.generic_request_framing(),
+        Some(contract::OperationRequestFraming::OrderedFields)
     ) {
         return Err(ProtocolError::InvalidFieldSequence(
             "generic ordered fields require ordered request framing",
@@ -116,21 +116,19 @@ pub(super) fn encode_fields(opcode: Opcode, values: Vec<Option<Vec<u8>>>) -> Res
 pub(super) fn validate_request(request: &super::Request) -> Result<()> {
     let payload = request.generic_payload()?;
     validate_value_length(payload.len())?;
-    match contract::spec(request.opcode).request.framing {
-        contract::OperationLayoutFraming::OrderedFields
-        | contract::OperationLayoutFraming::FieldSequence => {
+    match contract::spec(request.opcode).generic_request_framing() {
+        Some(contract::OperationRequestFraming::OrderedFields) => {
             validate_fields(request.opcode, payload)?;
             Ok(())
         }
-        contract::OperationLayoutFraming::Empty if !payload.is_empty() => Err(
+        Some(contract::OperationRequestFraming::Empty) if !payload.is_empty() => Err(
             ProtocolError::InvalidFieldSequence("empty generic request contains a payload"),
         ),
-        contract::OperationLayoutFraming::Empty | contract::OperationLayoutFraming::Opaque => {
-            Ok(())
-        }
-        contract::OperationLayoutFraming::OptionalValues => Err(
-            ProtocolError::InvalidFieldSequence("optional-values framing is response-only"),
-        ),
+        Some(contract::OperationRequestFraming::Empty)
+        | Some(contract::OperationRequestFraming::Opaque) => Ok(()),
+        None => Err(ProtocolError::InvalidFieldSequence(
+            "operation request framing is not generic",
+        )),
     }
 }
 

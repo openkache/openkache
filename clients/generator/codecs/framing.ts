@@ -8,33 +8,6 @@ import { go_api_name } from "./contract"
 import { WIRE_CODEC_REGISTRY, type Application_Value_Codec, type Application_Value_Language } from "./registry"
 import { operation_composite_field_codec, type Managed_Api_Operation } from "./shapes"
 
-export interface Optional_Value_Framing {
-  readonly encoding: "big_endian"
-  readonly length_bytes: number
-  readonly max_encoded_entry_bytes: number
-  readonly max_value_bytes: number
-  readonly missing_sentinel: number
-}
-
-export function optional_value_framing(
-  contract: Pick<Client_Contract, "max_value_bytes" | "v1">,
-): Optional_Value_Framing {
-  const length_bytes = contract.v1.optional_value_length_bytes ?? 4
-  const missing_sentinel = contract.v1.optional_value_missing ?? 0xffff_ffff
-  if (length_bytes !== 4 || missing_sentinel !== 0xffff_ffff) {
-    throw new Error(
-      "optional-value framing must use four big-endian length bytes and 0xffffffff as the missing sentinel",
-    )
-  }
-  return {
-    encoding: "big_endian",
-    length_bytes,
-    max_encoded_entry_bytes: length_bytes + contract.max_value_bytes,
-    max_value_bytes: contract.max_value_bytes,
-    missing_sentinel,
-  }
-}
-
 /** Descriptor for the generic compact field-sequence primitive. */
 export interface Field_Sequence_Framing {
   readonly max_value_bytes: number
@@ -47,9 +20,11 @@ export function field_sequence_framing(
 }
 
 /**
- * Renders a nullable decode for one field in the optional-value sequence.
- * The sequence is always byte-oriented; the registered field codec supplies
- * the language-specific conversion after the missing sentinel is handled.
+ * Renders a nullable decode for one ordered response field.
+ *
+ * The payload is byte-oriented at this boundary; the selected adapter or
+ * generic sequence decoder supplies the language-specific conversion before
+ * the registered field codec runs.
  */
 export function render_composite_field_decode(
   language: Application_Value_Language,

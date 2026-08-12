@@ -15,6 +15,7 @@ filegroup(
         "compatibility_ffi_adapters.ts",
         "compatibility_request_adapters.ts",
         "compatibility_response_adapters.ts",
+        "compatibility_response_framing.ts",
         "compatibility_result_projections.ts",
         "native_abi_renderers.ts",
         "operation_client_projection.ts",

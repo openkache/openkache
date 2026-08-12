@@ -8,7 +8,7 @@
 use smallvec::SmallVec;
 
 use crate::{
-    OPTIONAL_VALUE_MISSING, SegmentedPayload, SegmentedValue, decode_varuint, encode_varuint,
+    SegmentedPayload, SegmentedValue, decode_varuint, encode_varuint,
     response::SegmentedEncoding,
 };
 
@@ -1026,10 +1026,7 @@ pub fn encode_union_segmented(
         return Err(INVALID_UNION);
     }
     let payload = payload.into();
-    let length = u32::try_from(payload.len()).map_err(|_| TOO_MANY_ENTRIES)?;
-    if length >= OPTIONAL_VALUE_MISSING {
-        return Err(TOO_MANY_ENTRIES);
-    }
+    u32::try_from(payload.len()).map_err(|_| TOO_MANY_ENTRIES)?;
     let encoded_len = 1usize
         .checked_add(std::mem::size_of::<u32>())
         .and_then(|length| length.checked_add(payload.len()))
@@ -1085,9 +1082,6 @@ pub fn transform_packed_f64_be(
 
 fn append_length_delimited(output: &mut Vec<u8>, value: &[u8]) -> Result<(), CodecError> {
     let length = u32::try_from(value.len()).map_err(|_| TOO_MANY_ENTRIES)?;
-    if length >= OPTIONAL_VALUE_MISSING {
-        return Err(TOO_MANY_ENTRIES);
-    }
     let next_len = output
         .len()
         .checked_add(std::mem::size_of::<u32>())
@@ -1106,10 +1100,7 @@ fn segmented_children_len<'a>(
     values: impl IntoIterator<Item = &'a SegmentedPayload>,
 ) -> Result<usize, CodecError> {
     values.into_iter().try_fold(prefix_len, |total, value| {
-        let length = u32::try_from(value.len()).map_err(|_| TOO_MANY_ENTRIES)?;
-        if length >= OPTIONAL_VALUE_MISSING {
-            return Err(TOO_MANY_ENTRIES);
-        }
+        u32::try_from(value.len()).map_err(|_| TOO_MANY_ENTRIES)?;
         total
             .checked_add(std::mem::size_of::<u32>())
             .and_then(|total| total.checked_add(value.len()))
@@ -1134,9 +1125,6 @@ fn read_length_delimited(
     let length_end = cursor.checked_add(4).ok_or(error)?;
     let bytes = payload.get(cursor..length_end).ok_or(error)?;
     let length = u32::from_be_bytes(bytes.try_into().expect("length width is fixed"));
-    if length == OPTIONAL_VALUE_MISSING {
-        return Err(error);
-    }
     let value_start = length_end;
     let value_end = value_start
         .checked_add(usize::try_from(length).map_err(|_| error)?)

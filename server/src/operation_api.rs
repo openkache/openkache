@@ -14,10 +14,10 @@ use futures_util::lock::Mutex as AsyncMutex;
 use openkache_protocol::Opcode;
 use smallvec::SmallVec;
 
-use super::operation_capabilities::CapabilityCatalog;
+use super::operation_capabilities::{CapabilityCatalog, CapabilityRegistry};
 use super::operation_contract as contract;
-use super::operation_contract::OperationStatus;
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
+use super::operation_outcome::StatusToken;
 use super::operation_registry::OperationHandler;
 
 /// Downcasts one API-owned capability without exposing the catalog's
@@ -100,9 +100,14 @@ impl OperationCommitDisposition {
 /// does not know whether the failed resource was a namespace, tenant, shard,
 /// or another API-owned identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct PrepareError {
-    pub(super) status: OperationStatus,
-    pub(super) message: &'static [u8],
+pub(super) enum PrepareError {
+    /// A malformed request discovered while resolving API-owned resources.
+    InvalidRequest(&'static [u8]),
+    /// An API-owned resource failure with an opaque status token.
+    Status {
+        status: StatusToken,
+        message: &'static [u8],
+    },
 }
 
 /// Dependencies exposed to an API-owned preparation boundary.
@@ -116,6 +121,15 @@ pub(super) type PrepareFn = for<'a> fn(
     &OperationInputView,
     PrepareContext<'a>,
 ) -> std::result::Result<PreparePlan, PrepareError>;
+
+/// Installs the dependencies owned by one API module.
+///
+/// The source catalog is deliberately generic. An API module looks up only
+/// the typed capabilities it owns; it never downcasts a server composition
+/// context or imports the composition root's concrete service bundle.
+pub(super) type CapabilityInstaller = fn(&mut CapabilityRegistry, &dyn CapabilityCatalog);
+
+fn install_no_capabilities(_registry: &mut CapabilityRegistry, _source: &dyn CapabilityCatalog) {}
 
 /// Default preparation for an operation that has no API-owned resources.
 ///
@@ -149,17 +163,14 @@ impl<'a> PrepareContext<'a> {
 
 impl PrepareError {
     pub(super) const fn invalid_request(message: &'static [u8]) -> Self {
-        Self {
-            status: OperationStatus::InvalidRequest,
-            message,
-        }
+        Self::InvalidRequest(message)
     }
 
     pub(super) const fn resource_unavailable(
-        status: OperationStatus,
+        status: StatusToken,
         message: &'static [u8],
     ) -> Self {
-        Self { status, message }
+        Self::Status { status, message }
     }
 }
 
@@ -198,8 +209,10 @@ impl ResourceLock {
         Self {
             lock,
             active: None,
-            inactive_error: PrepareError::resource_unavailable(
-                OperationStatus::InternalError,
+            // The inactive error is unreachable while `active` is `None`.
+            // Keep a fail-closed value without importing an API status map
+            // into the generic resource primitive.
+            inactive_error: PrepareError::invalid_request(
                 b"prepared resource is no longer available",
             ),
         }
@@ -292,8 +305,9 @@ pub(super) struct ServerOperationRegistration {
 ///     .build()
 /// ```
 ///
-/// Compatibility adapters use the same builder and replace only their request
-/// decoder. The dispatch loop never needs a second registration family.
+/// API-owned adapters use the same builder for any request decoder they need.
+/// Response framing is always selected by generated metadata and projected by
+/// the shared transport boundary.
 #[derive(Clone, Copy)]
 pub(super) struct RegistrationBuilder {
     registration: ServerOperationRegistration,
@@ -310,6 +324,7 @@ impl RegistrationBuilder {
     /// This is the only customization needed by a compatibility adapter or a
     /// future wire-family adapter. The remaining behavior hooks are shared
     /// with generic operations.
+    #[allow(dead_code)]
     pub(super) const fn with_decoder(
         opcode: Opcode,
         decode: super::operation_handlers::RequestDecoder,
@@ -374,15 +389,35 @@ impl RegistrationBuilder {
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
     operations: &'static [ServerOperationRegistration],
+    install_capabilities: CapabilityInstaller,
 }
 
 impl ApiModule {
     pub(super) const fn new(operations: &'static [ServerOperationRegistration]) -> Self {
-        Self { operations }
+        Self {
+            operations,
+            install_capabilities: install_no_capabilities,
+        }
+    }
+
+    pub(super) const fn with_capabilities(
+        mut self,
+        install_capabilities: CapabilityInstaller,
+    ) -> Self {
+        self.install_capabilities = install_capabilities;
+        self
     }
 
     pub(super) const fn operations(self) -> &'static [ServerOperationRegistration] {
         self.operations
+    }
+
+    pub(super) fn install_capabilities(
+        self,
+        registry: &mut CapabilityRegistry,
+        source: &dyn CapabilityCatalog,
+    ) {
+        (self.install_capabilities)(registry, source);
     }
 }
 
@@ -402,22 +437,34 @@ impl OperationCatalog {
         }
     }
 
-    pub(super) const fn register(mut self, registrations: &[ServerOperationRegistration]) -> Self {
+    pub(super) const fn register_module(self, module: ApiModule) -> Self {
+        let mut catalog = self;
+        let registrations = module.operations();
         let mut index = 0;
         while index < registrations.len() {
-            let registration = registrations[index];
-            let slot = registration.opcode.index();
-            if self.entries[slot].is_some() {
-                panic!("duplicate operation registration");
-            }
-            self.entries[slot] = Some(registration);
+            catalog = catalog.register_one(registrations[index]);
             index += 1;
         }
+        catalog
+    }
+
+    const fn register_one(mut self, registration: ServerOperationRegistration) -> Self {
+        let slot = registration.opcode.index();
+        if self.entries[slot].is_some() {
+            panic!("duplicate operation registration");
+        }
+        self.entries[slot] = Some(registration);
         self
     }
 
-    pub(super) const fn register_module(self, module: ApiModule) -> Self {
-        self.register(module.operations())
+    pub(super) const fn register_modules(self, modules: &'static [ApiModule]) -> Self {
+        let mut catalog = self;
+        let mut index = 0;
+        while index < modules.len() {
+            catalog = catalog.register_module(modules[index]);
+            index += 1;
+        }
+        catalog
     }
 
     pub(super) fn get(
@@ -432,11 +479,6 @@ impl OperationCatalog {
     ) -> impl Iterator<Item = &'static ServerOperationRegistration> {
         self.entries.iter().filter_map(Option::as_ref)
     }
-}
-
-#[allow(dead_code)]
-pub(super) fn handles(opcode: Opcode) -> bool {
-    super::operation_registrations::server_operation(opcode).is_some()
 }
 
 pub(super) fn server_operation(opcode: Opcode) -> Option<&'static ServerOperationRegistration> {
@@ -461,13 +503,20 @@ pub(super) fn validate_registry() -> Result<(), &'static str> {
         if wire.request.fields.len() > contract::MAX_OPERATION_REQUEST_FIELDS {
             return Err("modeled operation request plan exceeds generated bounds");
         }
+        if wire.generic_request_framing().is_none() {
+            return Err("modeled operation request framing is not supported");
+        }
         if matches!(
-            wire.response.framing,
-            contract::OperationLayoutFraming::OptionalValues
-                | contract::OperationLayoutFraming::FieldSequence
+            wire.generic_response_framing(),
+            Some(contract::OperationResponseFraming::FieldSequence)
         ) && wire.response.fields.is_empty()
         {
             return Err("ordered response operation has no generated fields");
+        }
+        if wire.generic_response_framing().is_none()
+            && wire.response.framing != openkache_protocol::OperationLayoutFraming::AdapterOwned
+        {
+            return Err("operation response framing is not supported by the shared layout codec");
         }
         // The single handler pointer is the executable behavior boundary.
     }

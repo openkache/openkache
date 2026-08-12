@@ -5,13 +5,13 @@
 //! [`super::compat_v1`], while the transport core calls the small functions
 //! re-exported by `protocol.rs`.
 
-use openkache_protocol::{decode_layout_fields, decode_planned_fields, encode_planned_fields};
+use openkache_protocol::{decode_planned_fields, encode_planned_fields};
 use smallvec::SmallVec;
 
 use super::{Opcode, ProtocolError, Request, Result};
 use crate::contract::{MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS};
 
-const INLINE_OPERATION_FIELDS: usize = 8;
+pub(crate) const INLINE_OPERATION_FIELDS: usize = 8;
 
 /// Borrowed view over a decoded ordered response field sequence.
 ///
@@ -48,6 +48,18 @@ impl<'a> OperationFields<'a> {
             .map(|index| self.get(index).map(ToOwned::to_owned))
             .collect()
     }
+
+    pub(crate) fn from_parts(
+        payload: &'a [u8],
+        offsets: SmallVec<[(usize, usize); INLINE_OPERATION_FIELDS]>,
+        field_len: usize,
+    ) -> Self {
+        Self {
+            payload,
+            offsets,
+            field_len,
+        }
+    }
 }
 
 /// Builds a request from a raw generic operation body.
@@ -59,29 +71,63 @@ pub(crate) fn request_from_contract_body(
     value: Vec<u8>,
 ) -> crate::Result<Request> {
     let contract = crate::contract::operation_wire_spec(operation);
-    match contract.request.framing {
-        crate::contract::OperationLayoutFraming::Empty => {
-            if !value.is_empty() {
-                return Err(crate::Error::configuration(
-                    "body",
-                    "empty request framing cannot carry body bytes",
-                ));
-            }
+    match contract.generic_request_framing() {
+        Some(crate::contract::OperationRequestFraming::Empty) => {
             Request::new_generic(operation, value).map_err(crate::Error::protocol)
         }
-        crate::contract::OperationLayoutFraming::Opaque => {
-            if let Some(field) = contract.request.fields.first() {
-                validate_operation_field(field, &value).map_err(crate::Error::protocol)?;
-            }
+        Some(crate::contract::OperationRequestFraming::Opaque) => {
             Request::new_generic(operation, value).map_err(crate::Error::protocol)
         }
-        crate::contract::OperationLayoutFraming::OrderedFields
-        | crate::contract::OperationLayoutFraming::FieldSequence => {
+        Some(crate::contract::OperationRequestFraming::OrderedFields) => {
             ordered_request(operation, value)
         }
-        crate::contract::OperationLayoutFraming::OptionalValues => Err(
-            crate::Error::configuration("operation", "optional-value framing is response-only"),
-        ),
+        None => Err(crate::Error::configuration(
+            "operation",
+            "operation request framing is not generic",
+        )),
+    }
+}
+
+/// Validates a generic request body against its generated framing and codecs.
+///
+/// Compatibility fields are intentionally absent from this boundary. The
+/// client request facade calls this helper after its legacy adapter has
+/// rejected namespace, item, and SET projections, so generic validation has
+/// one implementation shared by construction and re-validation.
+pub(crate) fn validate_request_body(operation: Opcode, value: &[u8]) -> Result<()> {
+    let contract = crate::contract::operation_wire_spec(operation);
+    match contract.generic_request_framing() {
+        Some(crate::contract::OperationRequestFraming::Empty) => {
+            if !contract.request.fields.is_empty() {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "empty request framing cannot model fields",
+                ));
+            }
+            if value.is_empty() {
+                Ok(())
+            } else {
+                Err(ProtocolError::InvalidFieldSequence(
+                    "empty request framing cannot carry body bytes",
+                ))
+            }
+        }
+        Some(crate::contract::OperationRequestFraming::Opaque) => {
+            if contract.request.fields.len() != 1 {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "opaque request framing requires one modeled field",
+                ));
+            }
+            let field = &contract.request.fields[0];
+            validate_operation_field(field, value)?;
+            Ok(())
+        }
+        Some(crate::contract::OperationRequestFraming::OrderedFields) => {
+            validate_ordered_body(operation, value)?;
+            Ok(())
+        }
+        None => Err(ProtocolError::InvalidFieldSequence(
+            "operation request framing is not generic",
+        )),
     }
 }
 
@@ -91,32 +137,7 @@ pub(crate) fn request_from_unary(operation: Opcode, body: Vec<u8>) -> crate::Res
 }
 
 fn ordered_request(operation: Opcode, value: Vec<u8>) -> crate::Result<Request> {
-    let contract = crate::contract::operation_wire_spec(operation);
-    let plan = contract.request.fields;
-    if plan.len() > MAX_OPERATION_REQUEST_FIELDS {
-        return Err(crate::Error::configuration(
-            "fields",
-            "generated request field plan exceeds client bounds",
-        ));
-    }
-    let mut offsets =
-        SmallVec::<[(usize, usize); INLINE_OPERATION_FIELDS]>::with_capacity(plan.len());
-    offsets.resize(plan.len(), (usize::MAX, usize::MAX));
-    decode_planned_fields(&value, plan, contract.request.layout, &mut offsets)
-        .map_err(|error| crate::Error::protocol(error.to_string()))?;
-    for (index, field) in plan.iter().enumerate() {
-        let (start, end) = offsets[index];
-        let field_value = (start != usize::MAX).then(|| &value[start..end]);
-        if field.required && field_value.is_none() {
-            return Err(crate::Error::configuration(
-                "fields",
-                format!("required request field {} is missing", field.path.join(".")),
-            ));
-        }
-        if let Some(field_value) = field_value {
-            validate_operation_field(field, field_value).map_err(crate::Error::protocol)?;
-        }
-    }
+    let offsets = validate_ordered_body(operation, &value).map_err(crate::Error::protocol)?;
     if openkache_protocol::operation::request_wire_plan(operation).is_some() {
         let mut fields = offsets
             .into_iter()
@@ -130,6 +151,36 @@ fn ordered_request(operation: Opcode, value: Vec<u8>) -> crate::Result<Request> 
         });
     }
     Ok(Request::new_ordered_unchecked(operation, value))
+}
+
+fn validate_ordered_body(
+    operation: Opcode,
+    value: &[u8],
+) -> Result<SmallVec<[(usize, usize); INLINE_OPERATION_FIELDS]>> {
+    let contract = crate::contract::operation_wire_spec(operation);
+    let plan = contract.request.fields;
+    if plan.len() > MAX_OPERATION_REQUEST_FIELDS {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "generated request field plan exceeds client bounds",
+        ));
+    }
+    let mut offsets =
+        SmallVec::<[(usize, usize); INLINE_OPERATION_FIELDS]>::with_capacity(plan.len());
+    offsets.resize(plan.len(), (usize::MAX, usize::MAX));
+    decode_planned_fields(value, plan, contract.request.layout, &mut offsets)?;
+    for (index, field) in plan.iter().enumerate() {
+        let (start, end) = offsets[index];
+        let field_value = (start != usize::MAX).then(|| &value[start..end]);
+        if field.required && field_value.is_none() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "required request field is missing",
+            ));
+        }
+        if let Some(field_value) = field_value {
+            validate_operation_field(field, field_value)?;
+        }
+    }
+    Ok(offsets)
 }
 
 fn exact_request(
@@ -170,9 +221,8 @@ pub(crate) fn request_from_fields(
     let contract = crate::contract::operation_wire_spec(operation);
     let plan = contract.request.fields;
     if !matches!(
-        contract.request.framing,
-        crate::contract::OperationLayoutFraming::OrderedFields
-            | crate::contract::OperationLayoutFraming::FieldSequence
+        contract.generic_request_framing(),
+        Some(crate::contract::OperationRequestFraming::OrderedFields)
     ) {
         return Err(crate::Error::configuration(
             "operation",
@@ -258,70 +308,27 @@ pub(crate) fn decode_field_sequence_view<'a>(
         SmallVec::<[(usize, usize); INLINE_OPERATION_FIELDS]>::with_capacity(plan.len());
     offsets.resize(plan.len(), (usize::MAX, usize::MAX));
     decode_planned_fields(payload, plan, layout, &mut offsets).map_err(ProtocolError::from)?;
-    Ok(OperationFields {
-        payload,
-        offsets,
-        field_len: plan.len(),
-    })
+    Ok(OperationFields::from_parts(payload, offsets, plan.len()))
 }
 
-/// Decodes the fixed-width optional-value response projection into the same
-/// borrowed view used by generic field sequences.
-pub(crate) fn decode_optional_values_view<'a>(
-    payload: &'a [u8],
-    plan: &crate::contract::OperationLayoutPlan,
-) -> Result<OperationFields<'a>> {
-    let field_count = plan.fields.len();
-    if field_count > MAX_OPERATION_FIELDS {
-        return Err(ProtocolError::InvalidOptionalValues(
-            "generated operation field bound is stale",
-        ));
-    }
-    let mut offsets =
-        SmallVec::<[(usize, usize); INLINE_OPERATION_FIELDS]>::with_capacity(field_count);
-    offsets.resize(field_count, (usize::MAX, usize::MAX));
-    let required: SmallVec<[bool; INLINE_OPERATION_FIELDS]> =
-        plan.fields.iter().map(|field| field.required).collect();
-    let widths = SmallVec::<[usize; INLINE_OPERATION_FIELDS]>::from_elem(0, field_count);
-    decode_layout_fields(
-        payload,
-        crate::contract::OperationFieldLayout::OptionalValues,
-        &required,
-        &widths,
-        &mut offsets,
-    )
-    .map_err(ProtocolError::from)?;
-    Ok(OperationFields {
-        payload,
-        offsets,
-        field_len: field_count,
-    })
-}
-
-/// Decodes any generated ordered response plan into the common borrowed view.
+/// Decodes a generated response field plan into the common borrowed view.
 ///
-/// The client core does not select a response family. It consumes the framing
-/// and layout already selected by the generated descriptor, keeping optional
-/// value compatibility bytes beside the generic presence-mask sequence
-/// primitive.
+/// Generic field-sequence layouts use the common borrowed view. Adapter-owned
+/// framings are rejected here because their representation is intentionally
+/// outside this shared codec.
 pub(crate) fn decode_response_fields_view<'a>(
     payload: &'a [u8],
     plan: &crate::contract::OperationLayoutPlan,
 ) -> Result<OperationFields<'a>> {
     let fields = match plan.framing {
-        crate::contract::OperationLayoutFraming::OptionalValues => {
-            decode_optional_values_view(payload, plan)
-        }
         crate::contract::OperationLayoutFraming::FieldSequence
-        | crate::contract::OperationLayoutFraming::OrderedFields => {
+        | crate::contract::OperationLayoutFraming::OrderedFields
+        => {
             decode_field_sequence_view(payload, plan.fields, plan.layout)
         }
-        crate::contract::OperationLayoutFraming::Empty
-        | crate::contract::OperationLayoutFraming::Opaque => {
-            Err(ProtocolError::InvalidFieldSequence(
-                "operation response does not use ordered field framing",
-            ))
-        }
+        _ => Err(ProtocolError::InvalidFieldSequence(
+            "operation response does not use generic ordered field framing",
+        )),
     }?;
     for (index, field) in plan.fields.iter().enumerate() {
         let Some(value) = fields.get(index) else {

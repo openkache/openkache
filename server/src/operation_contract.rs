@@ -14,11 +14,13 @@ use openkache_protocol::Opcode;
 // them.
 pub(super) use crate::contract::{
     MAX_OPERATION_REQUEST_FIELDS, OperationFieldLayout, OperationFieldPlan, OperationFramePolicy,
-    OperationLayoutFraming, OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS,
-    WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor, WireCodecKind,
-    WireCodecLengthEncoding, WireCodecWidth, operation_registry, operation_wire_spec,
-    request_fields, request_wire_plan, wire_codec_kind,
+    OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
+    WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding, WireCodecWidth,
+    operation_registry, operation_wire_spec, request_fields, request_wire_plan, wire_codec_kind,
 };
+pub(super) use openkache_protocol::{OperationRequestFraming, OperationResponseFraming};
+#[allow(unused_imports)]
+pub(super) use openkache_protocol::OperationLayoutFraming;
 
 pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;
 

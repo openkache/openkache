@@ -24,6 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed={}", wire_spec_renderer.display());
     for dependency in [
         "compatibility_v1.ts",
+        "compatibility_v1_layout.ts",
         "compatibility_v1_renderer.ts",
         "wire_descriptor.ts",
         "wire_types.ts",
