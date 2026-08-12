@@ -129,10 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cargo:rerun-if-changed={}",
         protocol_wire_generator.display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        protocol_wire_modules.display()
-    );
+    println!("cargo:rerun-if-changed={}", protocol_wire_modules.display());
     for dependency in [
         &protocol_wire_descriptor,
         &protocol_wire_layout,
