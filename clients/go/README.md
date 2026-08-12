@@ -79,6 +79,8 @@ with a cache miss. `Close` is idempotent and waits for in-flight native
 operations.
 `Reconnect` explicitly replaces the connection without replaying an operation,
 and `ConnectionState` returns a best-effort lifecycle snapshot.
+Use `client.Smithy()` when an application needs the generated
+`SmithyOpenKacheAPI` operation structures shared with other bindings.
 `GetJSON` and `SetJSON` delegate JSON parsing and RFC 8785 canonicalization to
 the shared core; they accept and return complete JSON documents as bytes.
 `NewItemID`, `GetItem`, `SetItem`, and `DeleteItem` expose the exact wire
@@ -102,10 +104,11 @@ item-ID/raw-value layer when an application already owns protocol IDs.
 Protocol operations, Smithy models, and value-format identifiers are generated
 from [`../model/openkache.smithy`](../model/openkache.smithy) and
 [`../../protocol/model/openkache.smithy`](../../protocol/model/openkache.smithy).
-`go generate` writes `smithy_api.go` and `smithy_contract.go` beside the
-handwritten adapter sources; both files are ignored and must never be staged.
-The C contract header is emitted into `core/generated_local/` and is supplied
-to CGO via the package include path.
+`go generate` writes the generated Go API, contract, operation methods, and
+native ABI header beside the handwritten adapter sources. These files are
+ignored build artifacts and must never be staged. The C contract header is
+emitted into `core/generated_local/` and is supplied to CGO via the package
+include path.
 
 When using a pre-ABI-extension native library, `Identity`, `EncryptionCompact`,
 non-default `Retry.MaxAttempts`, and non-default `MaxInFlight` require upgrading
