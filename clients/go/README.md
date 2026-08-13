@@ -71,7 +71,7 @@ _ = outcome
 value, found, err := client.Get(ctx, []byte("profile"))
 ```
 
-`Get` and `Set` treat the `[]byte` key as a v1 `Bytes` PortableKey and encode
+`Get` and `Set` treat the `[]byte` key as a v1 `TypedKey.Bytes` value and encode
 it as canonical deterministic CBOR before crossing the native ABI. `Get`
 returns `found` separately so an empty stored value is not confused with a
 cache miss. `Close` is idempotent and waits for in-flight native operations.

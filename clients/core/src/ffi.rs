@@ -1083,6 +1083,18 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         options.data_protection_key,
         options.data_protection_key_length,
     )?;
+    // `NONE` is the ABI's "use the profile default" sentinel: it means
+    // unprotected when no key is supplied and Robust when a key is supplied.
+    // Any explicit authenticated profile without key material must fail rather
+    // than silently downgrading to an unprotected codec.
+    if data_protection_key.is_none()
+        && options.encryption != VALUE_FORMAT_ENCRYPTION_NONE as u32
+    {
+        return Err(
+            "an authenticated value-encryption profile requires a data protection key"
+                .to_owned(),
+        );
+    }
     let client_certificate_chain = copy_bytes(
         options.client_certificate_chain,
         options.client_certificate_chain_length,
@@ -1680,13 +1692,28 @@ fn execute_entry_inner(
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
         let application_key = match key_spec {
-            Some(key_spec) if raw => {
+            Some(_) if raw => {
                 return Err("typed key inputs are only valid for protected operations".to_owned());
             }
             Some(key_spec) => KeySpace::new(key_spec.into())
                 .resolve_logical_bytes(&application_key)
                 .map_err(|error| error.to_string())?
                 .into_canonical_bytes(),
+            None if raw => application_key,
+            None
+                if matches!(
+                    operation,
+                    FfiOperation::Get
+                        | FfiOperation::GetJson
+                        | FfiOperation::Set
+                        | FfiOperation::SetJson
+                        | FfiOperation::Delete
+                ) =>
+            {
+                crate::ResolvedKey::from_canonical(&application_key)
+                    .map_err(|error| error.to_string())?
+                    .into_canonical_bytes()
+            }
             None => application_key,
         };
         if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {

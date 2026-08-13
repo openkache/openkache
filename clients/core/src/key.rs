@@ -144,11 +144,10 @@ impl KeySpace {
         self.validate()?;
         let typed = TypedKey::decode_canonical(canonical_key)?;
         ensure_key_type(self.key_type, typed.key_type())?;
-        if self.format == KeyFormat::ByteKeyOrHash {
-            if let TypedKey::Bytes(bytes) = typed {
-                return ResolvedKey::from_direct_bytes(bytes);
-            }
-        }
+        // Canonical-key inputs are already the complete deterministic-CBOR
+        // representation. They always use the Hash profile, even when the
+        // configured logical key space uses ByteKeyOrHash: the preserve path
+        // applies only to direct byte-key inputs without a CBOR wrapper.
         ResolvedKey::from_typed(typed)
     }
 }

@@ -641,6 +641,36 @@ impl ValueCodec {
         let format = encryption.identifier()
             | (compression_id << COMPRESSION_SHIFT)
             | (payload_id << PAYLOAD_SHIFT);
+        // Reject an envelope that cannot fit before authenticated-encryption
+        // allocates nonce/tag overhead. This keeps the complete-envelope limit
+        // a pre-allocation invariant for every protection profile.
+        let protection_overhead = match encryption {
+            Encryption::Unprotected => 0,
+            Encryption::Compact => VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
+            Encryption::Robust => {
+                VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES
+            }
+        };
+        let body_limit = MAX_VALUE_BYTES
+            .checked_sub(CONTAINER_HEADER_BYTES)
+            .ok_or(Error::EncodedValueTooLarge {
+                size: usize::MAX,
+                maximum: MAX_VALUE_BYTES,
+            })?;
+        let body_length = transformed
+            .len()
+            .checked_add(protection_overhead)
+            .ok_or(Error::EncodedValueTooLarge {
+                size: usize::MAX,
+                maximum: MAX_VALUE_BYTES,
+            })?;
+        if body_length > body_limit {
+            return Err(Error::EncodedValueTooLarge {
+                size: CONTAINER_HEADER_BYTES
+                    .saturating_add(body_length),
+                maximum: MAX_VALUE_BYTES,
+            });
+        }
         let aad = (encryption != Encryption::Unprotected)
             .then(|| make_aad(namespace_id, item_id, format));
         let body = match encryption {
@@ -932,8 +962,22 @@ impl ValueCodec {
 
     fn serialize_value(&self, value: Value) -> Result<(Vec<u8>, u8)> {
         match value {
-            Value::Raw(bytes) => Ok((bytes, PAYLOAD_OPAQUE_BYTES)),
+            Value::Raw(bytes) => {
+                if bytes.len() > MAX_VALUE_BYTES {
+                    return Err(Error::DecodedValueTooLarge {
+                        size: bytes.len(),
+                        maximum: MAX_VALUE_BYTES,
+                    });
+                }
+                Ok((bytes, PAYLOAD_OPAQUE_BYTES))
+            }
             Value::Cbor(bytes) => {
+                if bytes.len() > MAX_VALUE_BYTES {
+                    return Err(Error::DecodedValueTooLarge {
+                        size: bytes.len(),
+                        maximum: MAX_VALUE_BYTES,
+                    });
+                }
                 validate_cbor_payload(&bytes)?;
                 Ok((bytes, PAYLOAD_CBOR))
             }

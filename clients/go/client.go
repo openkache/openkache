@@ -809,7 +809,7 @@ func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
 	return deleteResult("delete", result)
 }
 
-// canonicalBytesKey encodes a Go []byte key as the v1 Bytes PortableKey.
+// canonicalBytesKey encodes a Go []byte key as the v1 TypedKey.Bytes value.
 // The native ABI accepts canonical key bytes, not the caller's raw bytes.
 func canonicalBytesKey(key []byte) ([]byte, error) {
 	if len(key) > maxKeyInputBytes {

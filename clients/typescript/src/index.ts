@@ -1030,6 +1030,10 @@ function encode_cbor_integer(value: bigint): Uint8Array {
 }
 
 function bigint_magnitude(value: bigint): Uint8Array {
+  // Canonical bignum byte strings use an empty magnitude for zero. Small
+  // integers still use their normal major-type integer encoding, so this
+  // only affects the logical-input size check and the tagged bignum path.
+  if (value === 0n) return new Uint8Array(0)
   const hexadecimal = value.toString(16)
   const padded_hexadecimal =
     hexadecimal.length % 2 === 0 ? hexadecimal : `0${hexadecimal}`
