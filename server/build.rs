@@ -33,8 +33,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| PathBuf::from("bun"));
     let status = Command::new(bun)
         .arg(&generator)
-        .env("OPENKACHE_GENERATION_TARGET", "rust-server")
-        .env("OPENKACHE_RUST_SERVER_OUTPUT", &output)
+        .env("OPENKACHE_GENERATION_TARGET", "rust-wire")
+        .env("OPENKACHE_RUST_WIRE_OUTPUT", &output)
         .env(
             "OPENKACHE_SMITHY_EXECUTABLE",
             std::env::var_os("OPENKACHE_SMITHY_EXECUTABLE").unwrap_or_else(|| "smithy".into()),
