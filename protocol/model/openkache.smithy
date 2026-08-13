@@ -207,7 +207,9 @@ structure operationContract {
 @trait(selector: "service")
 structure wireContract {
     @required
-    itemIdBytes: Integer
+    /// Maximum number of octets in one opaque Item ID. Wire Item IDs are
+    /// length-delimited and may contain zero through this maximum.
+    maxItemIdBytes: Integer
 
     @required
     maxValueBytes: Integer
@@ -376,7 +378,7 @@ structure wireStatus {
 }
 
 @wireContract(
-    itemIdBytes: 32,
+    maxItemIdBytes: 32,
     maxValueBytes: 67108864,
     v1: {
         alpn: "openkache/1",

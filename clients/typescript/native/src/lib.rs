@@ -68,7 +68,7 @@ pub struct NativeClientOptions {
     pub key_spec: Option<String>,
 }
 
-/// Decoded components of a canonical OpenKache value envelope.
+/// Decoded components of the legacy TypeScript metadata envelope.
 #[napi(object)]
 pub struct NativeValueEnvelope {
     pub encoding: String,
@@ -137,13 +137,13 @@ impl NativeClient {
         match outcome {
             GetOutcome::NotFound => Ok(None),
             GetOutcome::Found(Value::Raw(bytes)) => Ok(Some(Uint8Array::new(bytes))),
-            GetOutcome::Found(Value::Json(_)) => Err(native_error(
+            GetOutcome::Found(Value::Json(_)) | GetOutcome::Found(Value::Cbor(_)) => Err(native_error(
                 "stored value uses canonical JSON serialization, expected raw bytes",
             )),
         }
     }
 
-    /// Retrieves and decodes a canonical value envelope.
+    /// Retrieves and decodes the legacy TypeScript metadata envelope.
     ///
     /// # Arguments
     ///
@@ -156,16 +156,26 @@ impl NativeClient {
     /// # Errors
     ///
     /// Returns an error when the client is closed, transport or value transformation fails, or
-    /// the stored bytes are not a supported value envelope.
+    /// the stored bytes are not a supported legacy metadata envelope.
     #[napi(js_name = "get_value")]
     pub async fn get_value(&self, key: Uint8Array) -> Result<Option<NativeValueEnvelope>> {
-        let GetOutcome::Found(Value::Raw(bytes)) = self
+        let outcome = self
             .active_client()?
             .get_canonical_key(key.as_ref())
             .await
-            .map_err(native_error)?
-        else {
-            return Ok(None);
+            .map_err(native_error)?;
+        let GetOutcome::Found(Value::Raw(bytes)) = outcome else {
+            return match outcome {
+                GetOutcome::NotFound => Ok(None),
+                GetOutcome::Found(Value::Raw(_)) => Err(native_error(
+                    "stored value does not use the legacy metadata envelope",
+                )),
+                GetOutcome::Found(Value::Json(_)) | GetOutcome::Found(Value::Cbor(_)) => {
+                    Err(native_error(
+                        "stored value does not use the legacy metadata envelope",
+                    ))
+                }
+            };
         };
         let envelope = value_envelope::decode(&bytes).map_err(native_error)?;
         Ok(Some(NativeValueEnvelope {
@@ -187,11 +197,14 @@ impl NativeClient {
             .map_err(native_error)?;
         match outcome {
             GetOutcome::NotFound => Ok(None),
-            GetOutcome::Found(Value::Json(value)) => serde_json::to_string(&value)
-                .map(Some)
-                .map_err(native_error),
-            GetOutcome::Found(Value::Raw(_)) => Err(native_error(
-                "stored value uses raw serialization, expected canonical JSON",
+            GetOutcome::Found(Value::Json(value)) => canonical_json_string(&value),
+            GetOutcome::Found(Value::Raw(payload)) => {
+                let value = openkache_client_core::value::parse_json_input(&payload)
+                    .map_err(native_error)?;
+                canonical_json_string(&value)
+            }
+            GetOutcome::Found(Value::Cbor(_)) => Err(native_error(
+                "stored value uses CBOR serialization, expected canonical JSON",
             )),
         }
     }
@@ -218,7 +231,7 @@ impl NativeClient {
         .await
     }
 
-    /// Encodes and stores a canonical value envelope.
+    /// Encodes and stores the legacy TypeScript metadata envelope.
     ///
     /// # Arguments
     ///
@@ -350,7 +363,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    /// Retrieves exact bytes for a variable-length protocol item ID.
     #[napi(js_name = "raw_get")]
     pub async fn raw_get(&self, item_id: Uint8Array) -> Result<Option<Uint8Array>> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -387,7 +400,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Stores exact bytes for a fixed-size protocol item ID.
+    /// Stores exact bytes for a variable-length protocol item ID.
     #[napi(js_name = "raw_set")]
     pub async fn raw_set(
         &self,
@@ -446,7 +459,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Deletes a fixed-size protocol item ID.
+    /// Deletes a variable-length protocol item ID.
     #[napi(js_name = "raw_delete")]
     pub async fn raw_delete(&self, item_id: Uint8Array) -> Result<bool> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -968,6 +981,12 @@ fn parse_json_value(value: serde_json::Value) -> Result<JsonValue> {
             .collect::<Result<Vec<_>>>()
             .map(JsonValue::Object),
     }
+}
+
+fn canonical_json_string(value: &JsonValue) -> Result<Option<String>> {
+    openkache_client_core::value::canonical_json_bytes(value)
+        .map_err(native_error)
+        .and_then(|bytes| String::from_utf8(bytes).map(Some).map_err(native_error))
 }
 
 fn parse_json_number(value: serde_json::Number) -> Result<JsonValue> {

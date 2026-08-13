@@ -747,11 +747,11 @@ public sealed class Client : IAsyncDisposable, Smithy.IOpenKacheApi
 
     private static ReadOnlyMemory<byte> ValidateItemId(ReadOnlyMemory<byte> itemId)
     {
-        if (itemId.Length != Protocol.ItemIdBytes)
+        if (itemId.Length > Protocol.MaxItemIdBytes)
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
-                $"item ID must contain exactly {Protocol.ItemIdBytes} bytes.");
+                $"item ID must contain at most {Protocol.MaxItemIdBytes} bytes.");
         }
 
         return itemId;

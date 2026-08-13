@@ -462,7 +462,8 @@ export interface Wire_V1_Contract {
 
 /** Language-neutral server-visible subset of the OpenKache Smithy model. */
 export interface Wire_Contract {
-  readonly item_id_bytes: number
+  /** Maximum number of octets in one length-delimited opaque Item ID. */
+  readonly max_item_id_bytes: number
   readonly max_value_bytes: number
   /**
    * Operation metadata is optional for permissive AST fixtures. Production

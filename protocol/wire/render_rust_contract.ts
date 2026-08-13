@@ -751,8 +751,10 @@ pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(v1.response_fixed_by
 pub const MIN_VARUINT_BYTES: usize = ${formatted_decimal(v1.min_varuint_bytes)};
 /// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
 pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(v1.max_varuint_bytes)};
-/// Bytes in every canonical item ID carried by the protocol.
-pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
+/// Maximum bytes in one opaque length-delimited Item ID carried by the protocol.
+pub const MAX_ITEM_ID_BYTES: usize = ${formatted_decimal(contract.max_item_id_bytes)};
+/// Legacy name retained for source compatibility; Item IDs are variable-width.
+pub const ITEM_ID_BYTES: usize = MAX_ITEM_ID_BYTES;
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};
 /// Conservative maximum complete response frame size for protocol v1.

@@ -56,7 +56,8 @@ whether a value existed. `Set_Options` supports conditional writes,
 namespace-inherited or explicit expiration, and evictable or
 eviction-protected items; a non-empty `ttl_ms` without an explicit mode is
 accepted as the convenience `Explicit_Ttl` shorthand. `get_raw`, `set_raw`,
-and `remove_raw` expose exact 32-byte item-ID operations without value
+and `remove_raw` expose exact opaque item-ID operations (up to the 32-byte
+wire maximum) without value
 protection. `namespace_open`, `namespace_update_policy`, and
 `namespace_delete` expose the server-assigned namespace lifecycle and
 optimistic revisions. Transport and validation failures throw

@@ -32,7 +32,7 @@ import {
   SMITHY_DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES,
   SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
   SMITHY_CLIENT_DEFAULT_SERVER_NAME,
-  SMITHY_ITEM_ID_BYTES,
+  SMITHY_MAX_ITEM_ID_BYTES,
   SMITHY_MAX_VALUE_BYTES,
   SMITHY_EVICTION_MODE_EVICTABLE,
   SMITHY_EVICTION_MODE_EVICTION_PROTECTED,
@@ -80,7 +80,8 @@ import {
 import { SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES } from "./generated_local/smithy-value-format.js"
 
 const TEXT_ENCODER = new TextEncoder()
-export const MAX_CANONICAL_KEY_BYTES = 1_048_576
+/** Maximum logical application-key input bytes accepted by the key contract. */
+export const MAX_KEY_INPUT_BYTES = 1_048_576
 
 export type Key_Spec = "integer" | "text" | "bytes"
 export type Client_Key = string | Uint8Array | number | bigint
@@ -992,13 +993,13 @@ function encode_cbor_bytes_or_text(
   major: 2 | 3,
   bytes: Uint8Array,
 ): Uint8Array {
-  const header = encode_cbor_argument(major, bytes.byteLength)
-  const total_length = header.byteLength + bytes.byteLength
-  if (total_length > MAX_CANONICAL_KEY_BYTES) {
+  if (bytes.byteLength > MAX_KEY_INPUT_BYTES) {
     throw new OpenKache_Error(
-      `canonical key exceeds ${MAX_CANONICAL_KEY_BYTES} bytes`,
+      `key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`,
     )
   }
+  const header = encode_cbor_argument(major, bytes.byteLength)
+  const total_length = header.byteLength + bytes.byteLength
   const output = new Uint8Array(total_length)
   output.set(header)
   output.set(bytes, header.byteLength)
@@ -1006,6 +1007,12 @@ function encode_cbor_bytes_or_text(
 }
 
 function encode_cbor_integer(value: bigint): Uint8Array {
+  const input_magnitude = bigint_magnitude(value < 0n ? -value : value)
+  if (input_magnitude.byteLength > MAX_KEY_INPUT_BYTES) {
+    throw new OpenKache_Error(
+      `key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`,
+    )
+  }
   const negative = value < 0n
   const transformed = negative ? -value - 1n : value
   if (transformed <= 0xffff_ffff_ffff_ffffn) {
@@ -1016,11 +1023,6 @@ function encode_cbor_integer(value: bigint): Uint8Array {
   const tag = new Uint8Array([negative ? 0xc3 : 0xc2])
   const byte_string = encode_cbor_bytes_or_text(2, magnitude)
   const total_length = tag.byteLength + byte_string.byteLength
-  if (total_length > MAX_CANONICAL_KEY_BYTES) {
-    throw new OpenKache_Error(
-      `canonical key exceeds ${MAX_CANONICAL_KEY_BYTES} bytes`,
-    )
-  }
   const output = new Uint8Array(total_length)
   output.set(tag)
   output.set(byte_string, tag.byteLength)
@@ -1126,9 +1128,9 @@ function owned_item_id(item_id: Uint8Array): Uint8Array {
     throw new OpenKache_Error("item_id must be a Uint8Array")
   }
   const bytes = item_id.slice()
-  if (bytes.byteLength !== SMITHY_ITEM_ID_BYTES) {
+  if (bytes.byteLength > SMITHY_MAX_ITEM_ID_BYTES) {
     throw new OpenKache_Error(
-      `item_id must contain exactly ${SMITHY_ITEM_ID_BYTES} bytes, got ${bytes.byteLength}`,
+      `item_id must contain at most ${SMITHY_MAX_ITEM_ID_BYTES} bytes, got ${bytes.byteLength}`,
     )
   }
   return bytes

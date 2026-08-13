@@ -18,6 +18,9 @@ namespace openkache {
 using Byte = std::uint8_t;
 using Bytes = std::vector<Byte>;
 
+/// Maximum logical application-key input bytes accepted by the key contract.
+inline constexpr std::size_t MAX_KEY_INPUT_BYTES = 1u << 20;
+
 /// Native C++ exception carrying a core or argument failure.
 class Error : public std::runtime_error {
 public:
@@ -280,7 +283,7 @@ public:
         }
     }
 
-    /// Retrieves a Bytes PortableKey value, or `std::nullopt` when absent.
+    /// Retrieves a Bytes typed-key value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
         const auto canonical_key = canonical_key_bytes(key, 2);
         return get_outcome(
@@ -288,7 +291,7 @@ public:
             "GET");
     }
 
-    /// Convenience overload for a Text PortableKey.
+    /// Convenience overload for a Text typed-key value.
     std::optional<Bytes> get(std::string_view key) const {
         const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return get_outcome(
@@ -296,7 +299,7 @@ public:
             "GET");
     }
 
-    /// Stores a Bytes PortableKey value and returns the server outcome.
+    /// Stores a Bytes typed-key value and returns the server outcome.
     Set_Outcome set(
         std::span<const Byte> key,
         std::span<const Byte> value,
@@ -307,7 +310,7 @@ public:
             "SET");
     }
 
-    /// Convenience overload for a Text PortableKey and textual value bytes.
+    /// Convenience overload for a Text typed-key value and textual value bytes.
     Set_Outcome set(
         std::string_view key,
         std::string_view value,
@@ -318,21 +321,21 @@ public:
             "SET");
     }
 
-    /// Deletes a Bytes PortableKey value and reports whether it existed.
+    /// Deletes a Bytes typed-key value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
         const auto canonical_key = canonical_key_bytes(key, 2);
         return delete_outcome(
             execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
     }
 
-    /// Convenience overload for a Text PortableKey.
+    /// Convenience overload for a Text typed-key value.
     bool remove(std::string_view key) const {
         const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return delete_outcome(
             execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
     }
 
-    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    /// Retrieves exact bytes for a variable-length protocol item ID.
     std::optional<Bytes> get_raw(std::span<const Byte> item_id) const {
         return get_outcome(
             execute(
@@ -344,7 +347,7 @@ public:
             "raw GET");
     }
 
-    /// Stores exact bytes for a fixed-size protocol item ID without value protection.
+    /// Stores exact bytes for a variable-length protocol item ID without value protection.
     Set_Outcome set_raw(
         std::span<const Byte> item_id,
         std::span<const Byte> value,
@@ -359,7 +362,7 @@ public:
             "raw SET");
     }
 
-    /// Deletes a fixed-size protocol item ID without application-key derivation.
+    /// Deletes a variable-length protocol item ID without application-key derivation.
     bool remove_raw(std::span<const Byte> item_id) const {
         return delete_outcome(
             execute(
@@ -533,6 +536,11 @@ private:
             throw Error("OpenKache key type is not supported");
         }
         const auto length = payload.size();
+        if (length > MAX_KEY_INPUT_BYTES) {
+            throw Error(
+                "OpenKache key input exceeds " +
+                std::to_string(MAX_KEY_INPUT_BYTES) + " bytes");
+        }
         Bytes encoded;
         if (length <= 23) {
             encoded.push_back(static_cast<Byte>((major << 5) | length));
@@ -557,9 +565,6 @@ private:
             };
         } else {
             throw Error("OpenKache key length exceeds canonical CBOR uint32");
-        }
-        if (encoded.size() + payload.size() > (1u << 20)) {
-            throw Error("OpenKache canonical key exceeds 1048576 bytes");
         }
         encoded.insert(encoded.end(), payload.begin(), payload.end());
         return encoded;

@@ -2,13 +2,13 @@
 
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
 use crate::{
-    ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeySpace, KeySpec, PortableKey, Result,
+    ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeySpace, KeyType, Result, TypedKey,
 };
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
     key: ClientRootKey,
-    key_spec: KeySpec,
+    key_type: KeyType,
     key_format: KeyFormat,
     codec: ValueCodec,
 }
@@ -29,13 +29,13 @@ impl DataProtection {
     ///
     /// Returns an error when the compression settings are invalid.
     pub fn new(key: DataProtectionKey, compression: Compression) -> Result<Self> {
-        Self::with_key_spec(key, KeySpec::Bytes, compression)
+        Self::with_key_type(key, KeyType::Bytes, compression)
     }
 
-    /// Creates mandatory protection with an explicit formatted key spec.
-    pub fn with_key_spec(
+    /// Creates mandatory protection with an explicit typed-key type.
+    pub fn with_key_type(
         key: ClientRootKey,
-        key_spec: KeySpec,
+        key_type: KeyType,
         compression: Compression,
     ) -> Result<Self> {
         if key.is_zero() {
@@ -47,22 +47,54 @@ impl DataProtection {
         let codec = ValueCodec::protected(&key, compression)?;
         Ok(Self {
             key,
-            key_spec,
+            key_type,
             key_format: KeyFormat::Hash,
             codec,
         })
+    }
+
+    /// Compatibility spelling for [`Self::with_key_type`].
+    pub fn with_key_spec(
+        key: ClientRootKey,
+        key_spec: KeyType,
+        compression: Compression,
+    ) -> Result<Self> {
+        Self::with_key_type(key, key_spec, compression)
     }
 
     /// Creates the default unprotected formatted client.
     ///
     /// The all-zero root still participates in namespace-bound Item ID
     /// derivation. Only value protection is disabled.
-    pub fn unprotected(key_spec: KeySpec, compression: Compression) -> Result<Self> {
-        let codec = ValueCodec::compressed(compression)?;
+    pub fn unprotected(key_type: KeyType, compression: Compression) -> Result<Self> {
+        Self::unprotected_with_root(
+            ClientRootKey::zero(),
+            key_type,
+            KeyFormat::Hash,
+            compression,
+        )
+    }
+
+    /// Creates an unprotected value codec while retaining a supplied root for
+    /// client-side Item ID derivation.
+    ///
+    /// This is used when a caller deliberately disables value encryption but
+    /// still supplies a root-bound Item ID profile. The root is not used to
+    /// encrypt values, but it remains the source of the Item ID derivation key.
+    pub(crate) fn unprotected_with_root(
+        key: ClientRootKey,
+        key_type: KeyType,
+        key_format: KeyFormat,
+        compression: Compression,
+    ) -> Result<Self> {
+        KeySpace::with_format(key_type, key_format)
+            .validate()
+            .map_err(crate::Error::from)?;
+        let codec = ValueCodec::compressed_with_key(&key, compression)?;
         Ok(Self {
-            key: ClientRootKey::zero(),
-            key_spec,
-            key_format: KeyFormat::Hash,
+            key,
+            key_type,
+            key_format,
             codec,
         })
     }
@@ -87,13 +119,13 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        Self::with_profile_and_key_spec(key, KeySpec::Bytes, compression, encryption)
+        Self::with_profile_and_key_type(key, KeyType::Bytes, compression, encryption)
     }
 
-    /// Creates protection with an explicit key spec and encryption profile.
-    pub fn with_profile_and_key_spec(
+    /// Creates protection with an explicit key type and encryption profile.
+    pub fn with_profile_and_key_type(
         key: ClientRootKey,
-        key_spec: KeySpec,
+        key_type: KeyType,
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
@@ -106,15 +138,30 @@ impl DataProtection {
         let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
         Ok(Self {
             key,
-            key_spec,
+            key_type,
             key_format: KeyFormat::Hash,
             codec,
         })
     }
 
-    /// Returns the configured formatted key spec.
-    pub const fn key_spec(&self) -> KeySpec {
-        self.key_spec
+    /// Compatibility spelling for [`Self::with_profile_and_key_type`].
+    pub fn with_profile_and_key_spec(
+        key: ClientRootKey,
+        key_spec: KeyType,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        Self::with_profile_and_key_type(key, key_spec, compression, encryption)
+    }
+
+    /// Returns the configured typed-key type.
+    pub const fn key_type(&self) -> KeyType {
+        self.key_type
+    }
+
+    /// Compatibility spelling for [`Self::key_type`].
+    pub const fn key_spec(&self) -> KeyType {
+        self.key_type()
     }
 
     /// Returns the client-owned key mapping profile.
@@ -122,10 +169,10 @@ impl DataProtection {
         self.key_format
     }
 
-    /// Creates mandatory protection with an explicit key mapping profile.
-    pub fn with_key_spec_and_format(
+    /// Creates mandatory protection with an explicit key type and mapping profile.
+    pub fn with_key_type_and_format(
         key: ClientRootKey,
-        key_spec: KeySpec,
+        key_type: KeyType,
         key_format: KeyFormat,
         compression: Compression,
     ) -> Result<Self> {
@@ -135,22 +182,32 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        KeySpace::with_format(key_spec, key_format)
+        KeySpace::with_format(key_type, key_format)
             .validate()
             .map_err(crate::Error::from)?;
         let codec = ValueCodec::protected(&key, compression)?;
         Ok(Self {
             key,
-            key_spec,
+            key_type,
             key_format,
             codec,
         })
     }
 
-    /// Creates protection with explicit key mapping and value profile.
-    pub fn with_key_spec_and_format_profile(
+    /// Compatibility spelling for [`Self::with_key_type_and_format`].
+    pub fn with_key_spec_and_format(
         key: ClientRootKey,
-        key_spec: KeySpec,
+        key_spec: KeyType,
+        key_format: KeyFormat,
+        compression: Compression,
+    ) -> Result<Self> {
+        Self::with_key_type_and_format(key, key_spec, key_format, compression)
+    }
+
+    /// Creates protection with explicit key mapping and value profile.
+    pub fn with_key_type_and_format_profile(
+        key: ClientRootKey,
+        key_type: KeyType,
         key_format: KeyFormat,
         compression: Compression,
         encryption: Encryption,
@@ -161,49 +218,66 @@ impl DataProtection {
                 "must not be all zero when value protection is enabled",
             ));
         }
-        KeySpace::with_format(key_spec, key_format)
+        KeySpace::with_format(key_type, key_format)
             .validate()
             .map_err(crate::Error::from)?;
         let codec = ValueCodec::protected_with_profile(&key, compression, encryption)?;
         Ok(Self {
             key,
-            key_spec,
+            key_type,
             key_format,
             codec,
         })
     }
 
+    /// Compatibility spelling for [`Self::with_key_type_and_format_profile`].
+    pub fn with_key_spec_and_format_profile(
+        key: ClientRootKey,
+        key_spec: KeyType,
+        key_format: KeyFormat,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        Self::with_key_type_and_format_profile(
+            key,
+            key_spec,
+            key_format,
+            compression,
+            encryption,
+        )
+    }
+
     /// Creates an unprotected client with an explicit key mapping profile.
     pub fn unprotected_with_format(
-        key_spec: KeySpec,
+        key_type: KeyType,
         key_format: KeyFormat,
         compression: Compression,
     ) -> Result<Self> {
-        KeySpace::with_format(key_spec, key_format)
+        KeySpace::with_format(key_type, key_format)
             .validate()
             .map_err(crate::Error::from)?;
         Ok(Self {
             key: ClientRootKey::zero(),
-            key_spec,
+            key_type,
             key_format,
             codec: ValueCodec::compressed(compression)?,
         })
     }
 
-    /// Derives a namespace-bound Item ID for a typed portable key.
+    /// Derives a namespace-bound Item ID for a typed key.
     pub fn item_id_in_namespace(
         &self,
         namespace_id: u64,
-        key: impl Into<PortableKey>,
+        key: impl Into<TypedKey>,
     ) -> Result<ItemId> {
         let key = key.into();
-        if key.spec() != self.key_spec {
-            return Err(crate::Error::Key(crate::KeyError::KeySpecMismatch {
-                expected: self.key_spec,
-                actual: key.spec(),
+        if key.key_type() != self.key_type {
+            return Err(crate::Error::Key(crate::KeyError::KeyTypeMismatch {
+                expected: self.key_type,
+                actual: key.key_type(),
             }));
         }
-        let resolved = KeySpace::with_format(self.key_spec, self.key_format)
+        let resolved = KeySpace::with_format(self.key_type, self.key_format)
             .resolve(key)
             .map_err(crate::Error::from)?;
         self.key
@@ -217,14 +291,14 @@ impl DataProtection {
         namespace_id: u64,
         canonical_key: &[u8],
     ) -> Result<ItemId> {
-        let key = PortableKey::decode_canonical(canonical_key)?;
-        if key.spec() != self.key_spec {
-            return Err(crate::Error::Key(crate::KeyError::KeySpecMismatch {
-                expected: self.key_spec,
-                actual: key.spec(),
+        let key = TypedKey::decode_canonical(canonical_key)?;
+        if key.key_type() != self.key_type {
+            return Err(crate::Error::Key(crate::KeyError::KeyTypeMismatch {
+                expected: self.key_type,
+                actual: key.key_type(),
             }));
         }
-        let resolved = KeySpace::with_format(self.key_spec, self.key_format)
+        let resolved = KeySpace::with_format(self.key_type, self.key_format)
             .resolve_canonical(canonical_key)
             .map_err(crate::Error::from)?;
         self.key
@@ -233,7 +307,7 @@ impl DataProtection {
     }
 
     /// Derives an Item ID from canonical key bytes without applying a configured
-    /// [`KeySpec`].
+    /// [`KeyType`].
     ///
     /// This is the boundary for the low-level native ABI. The canonical CBOR
     /// item carries its own `Integer`, `Text`, or `Bytes` discriminator; typed
@@ -251,8 +325,31 @@ impl DataProtection {
     }
 
     /// Legacy byte-key convenience using namespace `1`.
+    ///
+    /// This helper still applies the configured [`KeyFormat`]. In particular,
+    /// `ByteKeyOrHash` preserves direct byte keys up to the wire Item ID limit
+    /// and hashes only longer keys. Use [`Self::try_item_id`] when the caller
+    /// needs a validation error instead of the compatibility panic behavior.
     pub fn item_id(&self, application_key: impl AsRef<[u8]>) -> ItemId {
-        self.key.derive_item_id(application_key)
+        self.try_item_id(application_key)
+            .expect("legacy application key does not match the configured key space")
+    }
+
+    /// Fallible legacy byte-key convenience using namespace `1`.
+    ///
+    /// The bytes are interpreted by the configured [`KeyType`] and
+    /// [`KeyFormat`]. Empty keys are valid; malformed text or integer bytes and
+    /// oversized inputs are rejected.
+    pub fn try_item_id(
+        &self,
+        application_key: impl AsRef<[u8]>,
+    ) -> std::result::Result<ItemId, crate::KeyError> {
+        if self.key_type == KeyType::Bytes && self.key_format == KeyFormat::ByteKeyOrHash {
+            self.key
+                .derive_byte_key_or_hash_in_namespace(1, application_key)
+        } else {
+            self.key.try_derive_item_id(application_key)
+        }
     }
 
     /// Serializes and protects one core logical value.
@@ -286,6 +383,29 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
+    /// Serializes a logical JSON value as canonical UTF-8 `OpaqueBytes`.
+    pub fn encode_json(
+        &self,
+        item_id: ItemId,
+        value: crate::value::JsonValue,
+    ) -> Result<ItemValue> {
+        self.codec
+            .encode_json(item_id, value)
+            .map_err(Into::into)
+    }
+
+    /// Serializes a logical JSON value and binds its namespace into AAD.
+    pub fn encode_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: crate::value::JsonValue,
+    ) -> Result<ItemValue> {
+        self.codec
+            .encode_json_in_namespace(namespace_id, item_id, value)
+            .map_err(Into::into)
+    }
+
     /// Authenticates and decodes one stored value into the core logical model.
     ///
     /// # Arguments
@@ -314,6 +434,29 @@ impl DataProtection {
     ) -> Result<Value> {
         self.codec
             .decode_in_namespace(namespace_id, item_id, encoded)
+            .map_err(Into::into)
+    }
+
+    /// Authenticates and parses canonical JSON stored as `OpaqueBytes`.
+    pub fn decode_json(
+        &self,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<crate::value::JsonValue> {
+        self.codec
+            .decode_json(item_id, encoded)
+            .map_err(Into::into)
+    }
+
+    /// Authenticates and parses canonical JSON while binding its namespace.
+    pub fn decode_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<crate::value::JsonValue> {
+        self.codec
+            .decode_json_in_namespace(namespace_id, item_id, encoded)
             .map_err(Into::into)
     }
 

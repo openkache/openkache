@@ -6,7 +6,8 @@ core's C ABI.
 ## Purpose
 
 The package provides binary-safe cache operations over one authenticated QUIC
-connection owned by the shared core. It accepts exact 32-byte item IDs and
+connection owned by the shared core. It accepts opaque item IDs up to the
+protocol's 32-byte maximum and
 plaintext values; framing, TLS, retries, stream lanes, and protocol validation
 remain in `clients/core`.
 
@@ -72,7 +73,7 @@ var deleted = await client.DeleteAsync(itemId);
 `SetAsync` returns `NotStored` when a condition fails and `Created` or
 `Replaced` after a write. `GetAsync` returns `null` for a missing item ID.
 `DeleteAsync` reports whether the item ID existed. Every item-ID-taking operation
-requires exactly 32 bytes and sends them unchanged.
+accepts zero through 32 bytes and sends them unchanged.
 
 ## Protocol and configuration
 

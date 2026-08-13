@@ -79,7 +79,7 @@ from ._generated.smithy_contract import (
     SMITHY_CLIENT_CERTIFICATE_PEM_TYPE,
     SMITHY_CLIENT_DEFAULT_SERVER_NAME,
     SMITHY_CLIENT_MINIMUM_POSITIVE_VALUE,
-    SMITHY_ITEM_ID_BYTES,
+    SMITHY_MAX_ITEM_ID_BYTES,
     SMITHY_MAX_VALUE_BYTES,
     SMITHY_OPCODE_DELETE,
     SMITHY_OPCODE_GET,
@@ -119,7 +119,7 @@ from ._native import NativeClient as _NativeClient, NativeError
 
 _UINT64_MAX: Final = (1 << 64) - 1
 _SIZE_T_MAX: Final = (sys.maxsize << 1) | 1
-_MAX_CANONICAL_KEY_BYTES: Final = 1_048_576
+_MAX_KEY_INPUT_BYTES: Final = 1_048_576
 _BINARY64_SIGNIFICAND_BITS: Final = 53
 _BINARY64_MAX_INTEGER_BITS: Final = 1024
 
@@ -1021,12 +1021,11 @@ def _key_bytes(
 def _canonical_cbor_string(major: int, payload: bytes) -> bytes:
     """Encode one v1 Text or Bytes key as deterministic preferred CBOR."""
 
-    header = _canonical_cbor_argument(major, len(payload))
-    total = len(header) + len(payload)
-    if total > _MAX_CANONICAL_KEY_BYTES:
+    if len(payload) > _MAX_KEY_INPUT_BYTES:
         raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
+            f"key input exceeds {_MAX_KEY_INPUT_BYTES} bytes"
         )
+    header = _canonical_cbor_argument(major, len(payload))
     return header + payload
 
 
@@ -1052,31 +1051,31 @@ def _canonical_cbor_integer(value: int) -> bytes:
 
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError("key must be an integer")
+    input_magnitude = abs(value)
+    input_magnitude_length = (
+        0 if input_magnitude == 0 else (input_magnitude.bit_length() + 7) // 8
+    )
+    if input_magnitude_length > _MAX_KEY_INPUT_BYTES:
+        raise OpenKacheValueError(
+            f"key input exceeds {_MAX_KEY_INPUT_BYTES} bytes"
+        )
     negative = value < 0
     transformed = -value - 1 if negative else value
     if transformed <= 0xFFFF_FFFF_FFFF_FFFF:
         return _canonical_cbor_argument(1 if negative else 0, transformed)
 
     magnitude_length = max(1, (transformed.bit_length() + 7) // 8)
-    if magnitude_length > _MAX_CANONICAL_KEY_BYTES:
-        raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
-        )
     magnitude = transformed.to_bytes(magnitude_length, "big")
     tag = b"\xc3" if negative else b"\xc2"
     encoded = tag + _canonical_cbor_string(2, magnitude)
-    if len(encoded) > _MAX_CANONICAL_KEY_BYTES:
-        raise OpenKacheValueError(
-            f"canonical key exceeds {_MAX_CANONICAL_KEY_BYTES} bytes"
-        )
     return encoded
 
 
 def _item_id(value: bytes | bytearray | memoryview) -> bytes:
     item_id = _as_bytes(value, "item_id")
-    if len(item_id) != SMITHY_ITEM_ID_BYTES:
+    if len(item_id) > SMITHY_MAX_ITEM_ID_BYTES:
         raise OpenKacheValueError(
-            f"item_id must contain exactly {SMITHY_ITEM_ID_BYTES} bytes"
+            f"item_id must contain at most {SMITHY_MAX_ITEM_ID_BYTES} bytes"
         )
     return item_id
 

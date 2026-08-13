@@ -317,7 +317,7 @@ pub(super) fn decode_server_request(
 const COMPACT_V1_ITEM_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[
         WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
+            bytes: openkache_protocol::NAMESPACE_ID_BYTES,
         },
         WireRequestStep::ByteLengthPrefix { slot: 0 },
         WireRequestStep::ByteLengthBody { slot: 0 },
@@ -326,7 +326,7 @@ const COMPACT_V1_ITEM_LAYOUT: WireRequestLayout = WireRequestLayout {
 const COMPACT_V1_ITEM_PAIR_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[
         WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
+            bytes: openkache_protocol::NAMESPACE_ID_BYTES,
         },
         WireRequestStep::ByteLengthPrefix { slot: 0 },
         WireRequestStep::ByteLengthBody { slot: 0 },
@@ -337,9 +337,7 @@ const COMPACT_V1_ITEM_PAIR_LAYOUT: WireRequestLayout = WireRequestLayout {
 const COMPACT_V1_SET_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[
         WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES
-                + SET_FLAGS_BYTES,
+            bytes: openkache_protocol::NAMESPACE_ID_BYTES + SET_FLAGS_BYTES,
         },
         WireRequestStep::ByteLengthPrefix { slot: 0 },
         WireRequestStep::ValueLengthPrefix,
@@ -354,13 +352,13 @@ const COMPACT_V1_SET_LAYOUT: WireRequestLayout = WireRequestLayout {
 };
 const COMPACT_V1_NAMESPACE_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
+        bytes: openkache_protocol::NAMESPACE_ID_BYTES,
     }],
 };
 const COMPACT_V1_NAMESPACE_OPEN_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[
         WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES + contract::OPEN_FLAGS_BYTES,
+            bytes: contract::OPEN_FLAGS_BYTES,
         },
         WireRequestStep::ByteLength,
         WireRequestStep::ConditionalByteThenVarUInt {
@@ -376,8 +374,7 @@ const COMPACT_V1_NAMESPACE_OPEN_LAYOUT: WireRequestLayout = WireRequestLayout {
 const COMPACT_V1_NAMESPACE_POLICY_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[
         WireRequestStep::Fixed {
-            bytes: openkache_protocol::OPCODE_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES
+            bytes: openkache_protocol::NAMESPACE_ID_BYTES
                 + openkache_protocol::NAMESPACE_REVISION_BYTES,
         },
         WireRequestStep::ByteThenVarUInt {
@@ -389,8 +386,7 @@ const COMPACT_V1_NAMESPACE_POLICY_LAYOUT: WireRequestLayout = WireRequestLayout 
 };
 const COMPACT_V1_NAMESPACE_DELETE_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES
-            + contract::DELETE_FLAGS_BYTES
+        bytes: contract::DELETE_FLAGS_BYTES
             + openkache_protocol::NAMESPACE_ID_BYTES
             + openkache_protocol::NAMESPACE_REVISION_BYTES,
     }],
@@ -835,7 +831,7 @@ pub(super) fn validate_request(request: &super::Request) -> Result<()> {
             {
                 return Err(ProtocolError::InvalidRequestShape {
                     opcode: request.opcode,
-                    expected_item_id: openkache_protocol::ITEM_ID_BYTES * expected_item_count,
+                    expected_item_id: openkache_protocol::MAX_ITEM_ID_BYTES * expected_item_count,
                     expected_value: "0",
                 });
             }
@@ -862,7 +858,7 @@ pub(super) fn validate_request(request: &super::Request) -> Result<()> {
             if request.item_ids.len() != 1 {
                 return Err(ProtocolError::InvalidRequestItemIdLength {
                     opcode: request.opcode,
-                    expected: openkache_protocol::ITEM_ID_BYTES,
+                    expected: openkache_protocol::MAX_ITEM_ID_BYTES,
                     actual: 0,
                 });
             }

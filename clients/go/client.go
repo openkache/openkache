@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const maxCanonicalKeyBytes = 1 << 20
+const maxKeyInputBytes = 1 << 20
 
 // ErrClosed is returned after a client has been permanently closed.
 var ErrClosed = errors.New("openkache: client is closed")
@@ -349,26 +349,34 @@ func (state ConnectionState) String() string {
 	}
 }
 
-// ItemID is the exact fixed-width identifier carried by the wire protocol.
-type ItemID [SmithyItemIDBytes]byte
+// ItemID is an owned opaque protocol identifier.
+//
+// The wire protocol accepts zero through SmithyMaxItemIDBytes octets. The
+// length is part of the identity, so this type intentionally does not pad
+// shorter IDs to the historical digest width.
+type ItemID []byte
 
-// NewItemID copies an exact protocol-width wire item ID.
+// NewItemID copies an opaque wire item ID.
 func NewItemID(value []byte) (ItemID, error) {
-	var itemID ItemID
-	if len(value) != SmithyItemIDBytes {
-		return itemID, validationError(
+	if len(value) > SmithyMaxItemIDBytes {
+		return nil, validationError(
 			"item_id",
-			fmt.Sprintf("must contain exactly %d bytes, got %d", SmithyItemIDBytes, len(value)),
+			fmt.Sprintf(
+				"must contain at most %d bytes, got %d",
+				SmithyMaxItemIDBytes,
+				len(value),
+			),
 		)
 	}
-	copy(itemID[:], value)
+	itemID := make(ItemID, len(value))
+	copy(itemID, value)
 	return itemID, nil
 }
 
-// Bytes returns a copy of the exact item-ID bytes.
+// Bytes returns a copy of the exact opaque item-ID bytes.
 func (id ItemID) Bytes() []byte {
 	value := make([]byte, len(id))
-	copy(value, id[:])
+	copy(value, id)
 	return value
 }
 
@@ -804,15 +812,15 @@ func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
 // canonicalBytesKey encodes a Go []byte key as the v1 Bytes PortableKey.
 // The native ABI accepts canonical key bytes, not the caller's raw bytes.
 func canonicalBytesKey(key []byte) ([]byte, error) {
+	if len(key) > maxKeyInputBytes {
+		return nil, validationError(
+			"key",
+			fmt.Sprintf("key input exceeds %d bytes", maxKeyInputBytes),
+		)
+	}
 	header, err := cborArgument(2, uint64(len(key)))
 	if err != nil {
 		return nil, err
-	}
-	if len(header)+len(key) > maxCanonicalKeyBytes {
-		return nil, validationError(
-			"key",
-			fmt.Sprintf("canonical encoding exceeds %d bytes", maxCanonicalKeyBytes),
-		)
 	}
 	encoded := make([]byte, 0, len(header)+len(key))
 	encoded = append(encoded, header...)

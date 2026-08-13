@@ -111,7 +111,7 @@ export function compatibility_request_frame_bound(
   )
   const item_prefix = v1.opcode_bytes +
     v1.namespace_id_bytes +
-    contract.item_id_bytes * item_count +
+    (1 + contract.max_item_id_bytes) * item_count +
     v1.set_flags_bytes +
     v1.max_varuint_bytes * 2
   const namespace_open_prefix = v1.opcode_bytes +

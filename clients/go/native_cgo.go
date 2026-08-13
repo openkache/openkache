@@ -710,7 +710,7 @@ func (h *nativeHandle) executeRaw(
 			Message:   "native library does not support exact-item-ID operations",
 		}
 	}
-	return h.executeNative(ctx, operation, itemID[:], value, options, true)
+	return h.executeNative(ctx, operation, itemID, value, options, true)
 }
 
 func (h *nativeHandle) executeScoped(
@@ -735,7 +735,7 @@ func (h *nativeHandle) executeScoped(
 	if err != nil {
 		return nativeResult{}, err
 	}
-	itemBytes := itemID[:]
+	itemBytes := []byte(itemID)
 	if operation == SmithyOpcodeStats || operation == SmithyOpcodeSync {
 		itemBytes = nil
 	}

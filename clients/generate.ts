@@ -38,8 +38,12 @@ export interface Value_Format_Contract {
   readonly encryption_none: number
   readonly encryption_robust: number
   readonly format_byte_bytes: number
+  readonly format_protection_mask: number
   readonly format_compression_mask: number
-  readonly format_encryption_shift: number
+  readonly format_compression_shift: number
+  readonly format_payload_mask: number
+  readonly format_payload_shift: number
+  readonly format_reserved_mask: number
   readonly item_id_root_context: string
   readonly robust_context: string
   readonly robust_nonce_bytes: number
@@ -827,6 +831,13 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       1,
       1,
     ),
+    format_protection_mask: integer_member(
+      contract,
+      "formatProtectionMask",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
     format_compression_mask: integer_member(
       contract,
       "formatCompressionMask",
@@ -834,12 +845,33 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       0,
       0xff,
     ),
-    format_encryption_shift: integer_member(
+    format_compression_shift: integer_member(
       contract,
-      "formatEncryptionShift",
+      "formatCompressionShift",
       VALUE_FORMAT_TRAIT_ID,
       0,
       7,
+    ),
+    format_payload_mask: integer_member(
+      contract,
+      "formatPayloadMask",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
+    ),
+    format_payload_shift: integer_member(
+      contract,
+      "formatPayloadShift",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      7,
+    ),
+    format_reserved_mask: integer_member(
+      contract,
+      "formatReservedMask",
+      VALUE_FORMAT_TRAIT_ID,
+      0,
+      0xff,
     ),
     item_id_root_context: string_member(
       contract,
@@ -900,18 +932,39 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       )
     }
   }
-  if (values.format_compression_mask !== 0x0f) {
+  if (values.format_protection_mask !== 0x03) {
     throw new Error(
-      "value format compression mask must cover exactly the low four format bits",
+      "value format protection mask must cover exactly selector bits 0..1",
     )
   }
-  if (values.format_encryption_shift !== 4) {
-    throw new Error("value format encryption shift must be exactly four bits")
+  if (values.format_compression_mask !== 0x0c) {
+    throw new Error(
+      "value format compression mask must cover exactly selector bits 2..3",
+    )
   }
-  const format_encryption_mask =
-    values.format_compression_mask << values.format_encryption_shift
-  if (format_encryption_mask !== 0xf0) {
-    throw new Error("value format encryption mask must cover exactly the high four format bits")
+  if (values.format_compression_shift !== 2) {
+    throw new Error("value format compression shift must be exactly two bits")
+  }
+  if (values.format_payload_mask !== 0x30) {
+    throw new Error(
+      "value format payload mask must cover exactly selector bits 4..5",
+    )
+  }
+  if (values.format_payload_shift !== 4) {
+    throw new Error("value format payload shift must be exactly four bits")
+  }
+  if (values.format_reserved_mask !== 0xc0) {
+    throw new Error(
+      "value format reserved mask must cover exactly selector bits 6..7",
+    )
+  }
+  if (
+    (values.format_protection_mask |
+      values.format_compression_mask |
+      values.format_payload_mask |
+      values.format_reserved_mask) !== 0xff
+  ) {
+    throw new Error("value format selector masks must cover one byte without overlap")
   }
   const version_bytes = encode_vu128(values.version)
   if (version_bytes.length > values.max_vu128_bytes) {
@@ -926,8 +979,17 @@ function value_format_contract(value: unknown): Value_Format_Contract {
     ["encryption", values.encryption_compact],
     ["encryption", values.encryption_robust],
   ] as const) {
-    if (value > values.format_compression_mask) {
-      throw new Error(`${kind} identifier ${value} does not fit in a format nibble`)
+    const maximum =
+      kind === "compression"
+        ? values.format_compression_mask >> values.format_compression_shift
+        : values.format_protection_mask
+    if (value > maximum) {
+      throw new Error(`${kind} identifier ${value} does not fit in its selector field`)
+    }
+  }
+  for (const value of [values.serialization_opaque_bytes, values.serialization_cbor]) {
+    if (value > (values.format_payload_mask >> values.format_payload_shift)) {
+      throw new Error(`payload identifier ${value} does not fit in its selector field`)
     }
   }
 
@@ -1700,17 +1762,22 @@ pub const VALUE_FORMAT_VERSION_BYTES: &[u8] = &[${value_version_bytes.map(format
 pub const VALUE_FORMAT_MAX_VU128_BYTES: usize = ${formatted_decimal(value.max_vu128_bytes)};
 /// Bytes occupied by the value-format transform byte.
 pub const VALUE_FORMAT_FORMAT_BYTE_BYTES: usize = ${formatted_decimal(value.format_byte_bytes)};
-/// Low-nibble mask for the value-format compression identifier.
+/// Selector protection field mask (bits 0..1).
+pub const VALUE_FORMAT_PROTECTION_MASK: u8 = ${formatted_byte(value.format_protection_mask)};
+/// Selector compression field mask (bits 2..3).
 pub const VALUE_FORMAT_COMPRESSION_MASK: u8 = ${formatted_byte(value.format_compression_mask)};
-/// Number of bits to shift the value-format encryption identifier.
-pub const VALUE_FORMAT_ENCRYPTION_SHIFT: u8 = ${formatted_byte(value.format_encryption_shift)};
+/// Selector compression field shift.
+pub const VALUE_FORMAT_COMPRESSION_SHIFT: u8 = ${formatted_byte(value.format_compression_shift)};
+/// Selector payload-format field mask (bits 4..5).
+pub const VALUE_FORMAT_PAYLOAD_MASK: u8 = ${formatted_byte(value.format_payload_mask)};
+/// Selector payload-format field shift.
+pub const VALUE_FORMAT_PAYLOAD_SHIFT: u8 = ${formatted_byte(value.format_payload_shift)};
+/// Selector reserved-bit mask (bits 6..7).
+pub const VALUE_FORMAT_RESERVED_MASK: u8 = ${formatted_byte(value.format_reserved_mask)};
 /// OpaqueBytes payload-format identifier.
 pub const VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES: u8 = ${formatted_byte(value.serialization_opaque_bytes)};
 /// CBOR payload-format identifier.
 pub const VALUE_FORMAT_PAYLOAD_CBOR: u8 = ${formatted_byte(value.serialization_cbor)};
-// Compatibility aliases retained for generated consumers of the draft API.
-pub const VALUE_FORMAT_SERIALIZATION_RAW: u8 = VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES;
-pub const VALUE_FORMAT_SERIALIZATION_JSON: u8 = VALUE_FORMAT_PAYLOAD_CBOR;
 /// Uncompressed value-format identifier.
 pub const VALUE_FORMAT_COMPRESSION_NONE: u8 = ${formatted_byte(value.compression_none)};
 /// Zstandard value-format identifier.
@@ -1886,7 +1953,9 @@ _Static_assert(sizeof(openkache_smithy_namespace_descriptor_t) ==
                "Smithy namespace descriptor size changed");
 ${descriptor_offset_asserts}
 
-#define OPENKACHE_SMITHY_ITEM_ID_BYTES ${contract.item_id_bytes}u
+#define OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES ${contract.max_item_id_bytes}u
+/* Legacy fixed-width name; Item IDs are length-delimited and variable-width. */
+#define OPENKACHE_SMITHY_ITEM_ID_BYTES OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES
 #define OPENKACHE_SMITHY_MAX_VALUE_BYTES ${contract.max_value_bytes}u
 #define OPENKACHE_SMITHY_ALPN ${c_string_literal(contract.v1.alpn)}
 #define OPENKACHE_SMITHY_OPCODE_BYTES ${contract.v1.opcode_bytes}u
@@ -1949,8 +2018,12 @@ ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_VERSION ${value.version}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_MAX_VU128_BYTES ${value.max_vu128_bytes}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES ${value.format_byte_bytes}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_PROTECTION_MASK ${formatted_byte(value.format_protection_mask)}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_COMPRESSION_MASK ${formatted_byte(value.format_compression_mask)}u
-#define OPENKACHE_SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT ${formatted_byte(value.format_encryption_shift)}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_COMPRESSION_SHIFT ${formatted_byte(value.format_compression_shift)}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_PAYLOAD_MASK ${formatted_byte(value.format_payload_mask)}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_PAYLOAD_SHIFT ${formatted_byte(value.format_payload_shift)}u
+#define OPENKACHE_SMITHY_VALUE_FORMAT_RESERVED_MASK ${formatted_byte(value.format_reserved_mask)}u
 #define OPENKACHE_SMITHY_VALUE_PAYLOAD_OPAQUE_BYTES ${formatted_byte(value.serialization_opaque_bytes)}u
 #define OPENKACHE_SMITHY_VALUE_PAYLOAD_CBOR ${formatted_byte(value.serialization_cbor)}u
 #define OPENKACHE_SMITHY_VALUE_COMPRESSION_NONE ${formatted_byte(value.compression_none)}u
@@ -2112,15 +2185,20 @@ ${csharp_api_enum_constants}
     internal const int FfiNamespaceDescriptorSizeBytes = ${formatted_decimal(descriptor_layout.size_bytes)};
 ${csharp_descriptor_offsets}
 
-    internal const int ItemIdBytes = ${formatted_decimal(contract.item_id_bytes)};
+    internal const int MaxItemIdBytes = ${formatted_decimal(contract.max_item_id_bytes)};
+    internal const int ItemIdBytes = MaxItemIdBytes;
     internal const byte SetIfAbsentBits = ${formatted_byte(contract.v1.set_if_absent_flag)};
     internal const byte SetIfPresentBits = ${formatted_byte(contract.v1.set_if_present_flag)};
 
     internal const uint ValueFormatVersion = ${formatted_decimal(value.version)}u;
     internal const int ValueFormatMaxVu128Bytes = ${formatted_decimal(value.max_vu128_bytes)};
     internal const int ValueFormatFormatByteBytes = ${formatted_decimal(value.format_byte_bytes)};
+    internal const byte ValueFormatProtectionMask = ${formatted_byte(value.format_protection_mask)};
     internal const byte ValueFormatCompressionMask = ${formatted_byte(value.format_compression_mask)};
-    internal const byte ValueFormatEncryptionShift = ${formatted_byte(value.format_encryption_shift)};
+    internal const byte ValueFormatCompressionShift = ${formatted_byte(value.format_compression_shift)};
+    internal const byte ValueFormatPayloadMask = ${formatted_byte(value.format_payload_mask)};
+    internal const byte ValueFormatPayloadShift = ${formatted_byte(value.format_payload_shift)};
+    internal const byte ValueFormatReservedMask = ${formatted_byte(value.format_reserved_mask)};
     internal const byte ValueFormatPayloadOpaqueBytes = ${formatted_byte(value.serialization_opaque_bytes)};
     internal const byte ValueFormatPayloadCbor = ${formatted_byte(value.serialization_cbor)};
     internal const byte ValueFormatCompressionNone = ${formatted_byte(value.compression_none)};
@@ -2230,8 +2308,10 @@ export const SMITHY_${snake_case(enum_.name).toUpperCase()}_${snake_case(member.
     .join("\n")
   return `// Generated from the OpenKache Smithy contract. Do not edit.
 
-/** Exact number of bytes in a protocol item identifier. */
-export const SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+/** Maximum number of octets in one length-delimited protocol Item ID. */
+export const SMITHY_MAX_ITEM_ID_BYTES = ${contract.max_item_id_bytes}
+/** @deprecated Use SMITHY_MAX_ITEM_ID_BYTES; Item IDs are variable-width. */
+export const SMITHY_ITEM_ID_BYTES = SMITHY_MAX_ITEM_ID_BYTES
 /** Maximum opaque value bytes accepted by the protocol. */
 export const SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 /** Width of the request opcode and response status fields. */
@@ -2501,8 +2581,10 @@ ${go_namespace_descriptor_fields}
 const (
 \t// SmithyProtocolALPN is the negotiated protocol identifier.
 \tSmithyProtocolALPN = ${JSON.stringify(contract.v1.alpn)}
-\t// SmithyItemIDBytes is the exact protocol item-ID width.
-\tSmithyItemIDBytes = ${contract.item_id_bytes}
+\t// SmithyMaxItemIDBytes is the maximum length of a protocol Item ID.
+\tSmithyMaxItemIDBytes = ${contract.max_item_id_bytes}
+\t// SmithyItemIDBytes is retained as a source-compatibility alias.
+\tSmithyItemIDBytes = SmithyMaxItemIDBytes
 \t// SmithyMaxValueBytes is the protocol value and payload ceiling.
 \tSmithyMaxValueBytes = ${contract.max_value_bytes}
 \t// SmithyOpcodeBytes and SmithyStatusBytes are fixed opcode/status widths.
@@ -2890,7 +2972,9 @@ SMITHY_REQUEST_FIXED_BYTES = ${contract.v1.request_fixed_bytes}
 SMITHY_RESPONSE_FIXED_BYTES = ${contract.v1.response_fixed_bytes}
 SMITHY_MIN_VARUINT_BYTES = ${contract.v1.min_varuint_bytes}
 SMITHY_MAX_VARUINT_BYTES = ${contract.v1.max_varuint_bytes}
-SMITHY_ITEM_ID_BYTES = ${contract.item_id_bytes}
+SMITHY_MAX_ITEM_ID_BYTES = ${contract.max_item_id_bytes}
+# Legacy name retained for source compatibility; Item IDs are variable-width.
+SMITHY_ITEM_ID_BYTES = SMITHY_MAX_ITEM_ID_BYTES
 SMITHY_MAX_VALUE_BYTES = ${contract.max_value_bytes}
 SMITHY_NAMESPACE_ID_BYTES = ${contract.v1.namespace_id_bytes}
 SMITHY_NAMESPACE_REVISION_BYTES = ${contract.v1.namespace_revision_bytes}
@@ -2960,8 +3044,12 @@ SMITHY_VALUE_FORMAT_VERSION = ${value.version}
 SMITHY_VALUE_FORMAT_VERSION_BYTES = bytes([${version_bytes.join(", ")}])
 SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
 SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES = ${value.format_byte_bytes}
+SMITHY_VALUE_FORMAT_PROTECTION_MASK = ${value.format_protection_mask}
 SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
-SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
+SMITHY_VALUE_FORMAT_COMPRESSION_SHIFT = ${value.format_compression_shift}
+SMITHY_VALUE_FORMAT_PAYLOAD_MASK = ${value.format_payload_mask}
+SMITHY_VALUE_FORMAT_PAYLOAD_SHIFT = ${value.format_payload_shift}
+SMITHY_VALUE_FORMAT_RESERVED_MASK = ${value.format_reserved_mask}
 SMITHY_VALUE_PAYLOAD_OPAQUE_BYTES = ${value.serialization_opaque_bytes}
 SMITHY_VALUE_PAYLOAD_CBOR = ${value.serialization_cbor}
 SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
@@ -3180,7 +3268,9 @@ ${opcodes}
 /// Wire and value-format identifiers shared by all language bindings.
 public enum Smithy_Value_Format: Sendable {
   public static let protocolAlpn: String = ${swift_string_literal(contract.v1.alpn)}
-  public static let itemIdBytes: Int = ${contract.item_id_bytes}
+  public static let maxItemIdBytes: Int = ${contract.max_item_id_bytes}
+  @available(*, deprecated, renamed: "maxItemIdBytes")
+  public static let itemIdBytes: Int = maxItemIdBytes
   public static let maxValueBytes: Int = ${contract.max_value_bytes}
   public static let opcodeBytes: Int = ${contract.v1.opcode_bytes}
   public static let statusBytes: Int = ${contract.v1.status_bytes}
@@ -3245,8 +3335,12 @@ public enum Smithy_Value_Format: Sendable {
   public static let setTtlFlag: UInt8 = ${contract.v1.set_ttl_flag}
   public static let setIfAbsentFlag: UInt8 = ${contract.v1.set_if_absent_flag}
   public static let setIfPresentFlag: UInt8 = ${contract.v1.set_if_present_flag}
+  public static let formatProtectionMask: UInt8 = ${value.format_protection_mask}
   public static let formatCompressionMask: UInt8 = ${value.format_compression_mask}
-  public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
+  public static let formatCompressionShift: UInt8 = ${value.format_compression_shift}
+  public static let formatPayloadMask: UInt8 = ${value.format_payload_mask}
+  public static let formatPayloadShift: UInt8 = ${value.format_payload_shift}
+  public static let formatReservedMask: UInt8 = ${value.format_reserved_mask}
   public static let payloadOpaqueBytes: UInt8 = ${value.serialization_opaque_bytes}
   public static let payloadCbor: UInt8 = ${value.serialization_cbor}
   public static let compressionNone: UInt8 = ${value.compression_none}
@@ -3304,13 +3398,21 @@ export const SMITHY_VALUE_FORMAT_VERSION_BYTES = [${version_bytes.join(", ")}] a
 export const SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
 /** Bytes occupied by the value-format transform byte. */
 export const SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES = ${value.format_byte_bytes}
-/** Low-nibble mask for the value-format compression identifier. */
+/** Selector protection field mask (bits 0..1). */
+export const SMITHY_VALUE_FORMAT_PROTECTION_MASK = ${value.format_protection_mask}
+/** Selector compression field mask (bits 2..3). */
 export const SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
-/** Number of bits to shift the value-format encryption identifier. */
-export const SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
-/** Raw serialized-value identifier. */
+/** Selector compression field shift. */
+export const SMITHY_VALUE_FORMAT_COMPRESSION_SHIFT = ${value.format_compression_shift}
+/** Selector payload-format field mask (bits 4..5). */
+export const SMITHY_VALUE_FORMAT_PAYLOAD_MASK = ${value.format_payload_mask}
+/** Selector payload-format field shift. */
+export const SMITHY_VALUE_FORMAT_PAYLOAD_SHIFT = ${value.format_payload_shift}
+/** Selector reserved-bit mask (bits 6..7). */
+export const SMITHY_VALUE_FORMAT_RESERVED_MASK = ${value.format_reserved_mask}
+/** OpaqueBytes payload-format identifier. */
 export const SMITHY_VALUE_PAYLOAD_OPAQUE_BYTES = ${value.serialization_opaque_bytes}
-/** Canonical JSON serialized-value identifier. */
+/** CBOR payload-format identifier. */
 export const SMITHY_VALUE_PAYLOAD_CBOR = ${value.serialization_cbor}
 /** Uncompressed value-format identifier. */
 export const SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}

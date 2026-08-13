@@ -1320,7 +1320,12 @@ export function extract_wire_contract(
     "status",
   )
   const contract = {
-    item_id_bytes: integer_member(contract_trait, "itemIdBytes", "wireContract", 1),
+    max_item_id_bytes: integer_member(
+      contract_trait,
+      "maxItemIdBytes",
+      "wireContract",
+      1,
+    ),
     max_value_bytes: integer_member(contract_trait, "maxValueBytes", "wireContract", 1),
     opcodes,
     statuses,

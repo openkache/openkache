@@ -397,7 +397,7 @@ follows the hash-fallback path for the 33-byte direct byte key.
 |---|---|
 | empty direct byte key | empty Item ID |
 | 32-byte direct byte key `00 01 02 ... 1f` | same 32 bytes |
-| 33-byte direct byte key `00 01 02 ... 20` | `ee 7e 7b 63 94 f2 96 bc 45 1c 0c 25 50 0f ce e8 37 e4 de 6d 23 88 84 57 5d fb 0f 9f f2 27 07 bc` |
+| 33-byte direct byte key `00 01 02 ... 20` | `6a b6 43 ac ea f8 cd a7 b0 61 21 4f 7f 55 dd 86 79 37 9e 94 7a c6 aa 7f 42 af 92 c5 be 31 2a 86` |
 
 ### 7.3 Root separation
 

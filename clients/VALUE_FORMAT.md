@@ -2,9 +2,15 @@
 
 > **Status: Draft — pre-freeze**
 
-This document defines the client-side encoding of a value before it is handed
-to the server. The server stores the resulting bytes opaquely and does not
+This document defines the client-side v1 value encoding before it is handed to
+the server. The server stores the resulting bytes opaquely and does not
 interpret payload formats, compression, or cryptographic protection.
+
+The Rust `value_envelope` module and the TypeScript `set_value`/`get_value`
+compatibility methods use a separate legacy metadata envelope (`OKV1` magic
+prefix plus metadata lengths). That legacy format is not this v1 value format;
+it is retained only for migration compatibility and is not described by the
+grammar below.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -45,7 +51,9 @@ source value
 
 `OpaqueBytes` treats the source as an exact byte string: before optional
 compression and protection, the payload bytes are identical to the supplied
-bytes. `CBOR` accepts one CBOR data item under the rules in §5. The payload
+bytes. `CBOR` accepts one CBOR data item under the rules in §5. `Json` is an
+API convenience type, not a v1 payload selector: it is serialized as canonical
+RFC 8785 UTF-8 and carried using `OpaqueBytes` (selector `0`). The payload
 format is selected by the caller; the encoding does not infer a format from the
 payload bytes.
 
@@ -207,6 +215,10 @@ MUST be represented as CBOR byte strings, with their interpretation defined by
 the application.
 
 CBOR tags are not supported by this profile. Tagged items MUST be rejected.
+The core acceptance implementation additionally limits nesting depth to 128
+levels and rejects compound or floating-point map keys when it cannot
+determine semantic key uniqueness. These are bounded-parser requirements for
+the v1 acceptance profile, not alternate payload semantics.
 
 ## 6. Compression
 
@@ -237,6 +249,26 @@ For a protected envelope, the authenticated data MUST include the exact
 encoded `value_envelope_version` bytes and the exact `selector_byte`, in
 addition to
 any external associated data supplied by the enclosing client profile.
+
+For the OpenKache client profile, that associated data is the following
+unambiguous byte sequence (all concatenated without delimiters):
+
+```text
+aad =
+    "openkache/value-format/aad/v1"
+  | namespace_id:u64be
+  | item_id_length:u8
+  | item_id:item_id_length
+  | value_envelope_version:vu128
+  | selector_byte:u8
+```
+
+`namespace_id` MUST be a nonzero server-assigned namespace identity and
+`item_id_length` MUST be the exact number of Item ID bytes (0 through 32).
+The version bytes in `aad` MUST be the same canonical bytes emitted in the
+envelope; an implementation MUST NOT re-encode the numeric version through a
+different integer representation. This binds a protected value to its
+namespace, exact variable-length Item ID, version, and selector.
 
 The transform order is:
 

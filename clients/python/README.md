@@ -55,7 +55,7 @@ finally:
 
 `set` and `get` use the core canonical JSON value format. Use `set_raw` and
 `get_raw` for exact bytes; empty raw values are supported. A `str` key is the
-v1 `Text` PortableKey by default. Select `key_spec=KeySpec.BYTES` or
+v1 `Text` typed keys by default. Select `key_spec=KeySpec.BYTES` or
 `key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
 precision integers. The selected spec is enforced for every formatted
 operation and the key is converted to canonical deterministic CBOR before the
@@ -79,7 +79,7 @@ from openkache import (
     SmithySetInput,
 )
 
-item_id = bytes(32)
+item_id = bytes(32)  # Any length from zero through 32 bytes is valid.
 namespace = await client.raw.namespace_open(
     SmithyNamespaceOpenInput(
         name="example",

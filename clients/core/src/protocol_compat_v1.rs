@@ -15,7 +15,7 @@ use openkache_protocol::compat_v1::{
     SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
     SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK, operation_field_count,
 };
-use openkache_protocol::{ITEM_ID_BYTES, ItemId};
+use openkache_protocol::{ItemId, MAX_ITEM_ID_BYTES};
 
 use super::{
     Opcode, ProtocolError, Request, Result, SetWireOptions, append_varuint, invalid_shape,
@@ -201,20 +201,34 @@ pub(crate) fn encode_prefix(request: &Request) -> Result<Option<Vec<u8>>> {
     let mut output = Vec::new();
     output.push(request.opcode as u8);
     match compact_request_route(request.opcode)? {
-        CompactV1RequestRoute::Item | CompactV1RequestRoute::Set => {
+        CompactV1RequestRoute::Item => {
             append_namespace_id(&mut output, request.namespace_id)?;
-            if compact_request_field_count(request.opcode, OperationFieldRole::Value) > 0 {
-                output.push(request.set_options.flags()?);
-            }
             for item_id in &request.item_ids {
+                // Every Item ID is length-delimited on the v1 wire. Do not
+                // widen short IDs to the historical 32-byte digest width:
+                // zero through 32 bytes (including empty) are distinct wire
+                // identities.
+                output.push(item_id.len() as u8);
                 output.extend_from_slice(item_id.as_ref());
             }
-            if compact_request_field_count(request.opcode, OperationFieldRole::Value) > 0 {
-                if let Some(ttl_ms) = request.set_options.ttl_ms {
-                    append_varuint(&mut output, ttl_ms);
-                }
-                append_varuint(&mut output, request.value.len() as u64);
+        }
+        CompactV1RequestRoute::Set => {
+            append_namespace_id(&mut output, request.namespace_id)?;
+            output.push(request.set_options.flags()?);
+            let item_id = request.item_ids.first().ok_or(invalid_shape(
+                request.opcode,
+                MAX_ITEM_ID_BYTES,
+                "any",
+            ))?;
+            output.push(item_id.len() as u8);
+            // The value length is deliberately before the optional TTL and
+            // item bytes. This lets a receiver reject an oversized SET
+            // before reading either body.
+            append_varuint(&mut output, request.value.len() as u64);
+            if let Some(ttl_ms) = request.set_options.ttl_ms {
+                append_varuint(&mut output, ttl_ms);
             }
+            output.extend_from_slice(item_id.as_ref());
         }
         CompactV1RequestRoute::Namespace => {
             append_namespace_id(&mut output, request.namespace_id)?;
@@ -334,13 +348,13 @@ fn validate_compact_request(request: &Request) -> Result<()> {
             {
                 return Err(invalid_shape(
                     request.opcode,
-                    ITEM_ID_BYTES * item_count,
+                    MAX_ITEM_ID_BYTES * item_count,
                     if value_count == 0 { "0" } else { "any" },
                 ));
             }
             if value_count == 0 {
                 if request.set_options != SetWireOptions::NONE || !request.value.is_empty() {
-                    return Err(invalid_shape(request.opcode, ITEM_ID_BYTES, "0"));
+                    return Err(invalid_shape(request.opcode, MAX_ITEM_ID_BYTES, "0"));
                 }
             } else {
                 request.set_options.flags()?;
@@ -513,25 +527,73 @@ pub(crate) fn parse_compact_item_ids(
     bytes: &[u8],
     item_count: usize,
 ) -> std::result::Result<Vec<ItemId>, String> {
-    let expected = item_count
-        .checked_mul(ITEM_ID_BYTES)
-        .ok_or_else(|| "item ID count overflows the ABI".to_owned())?;
-    if bytes.len() != expected {
-        return Err(format!(
-            "expected {expected} bytes for {item_count} item IDs, got {}",
-            bytes.len()
-        ));
+    if item_count == 0 {
+        return if bytes.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(format!("expected no item IDs, got {} bytes", bytes.len()))
+        };
     }
-    (0..item_count)
-        .map(|index| {
-            let bytes = bytes
-                .get(index * ITEM_ID_BYTES..(index + 1) * ITEM_ID_BYTES)
-                .expect("item ID range was validated");
-            Ok(ItemId::new(
-                bytes.try_into().expect("item ID width was validated"),
-            ))
-        })
-        .collect()
+
+    // The ordinary GET/SET/DELETE API carries exactly one opaque Item ID and
+    // therefore passes the ID bytes without another wrapper. Preserve the
+    // complete byte sequence, including an empty ID.
+    if item_count == 1 {
+        return ItemId::from_slice(bytes)
+            .map(|item_id| vec![item_id])
+            .map_err(|error| error.to_string());
+    }
+
+    // Multi-item compatibility operations use the same length-delimited
+    // representation as their wire request. This is the only unambiguous
+    // way to pass two variable-length IDs through the historical byte-slice
+    // API. Accept the old fixed-width form as a source-compatibility fallback
+    // for callers that still provide two 32-byte digests.
+    let mut cursor = 0;
+    let mut item_ids = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        let Some(&length) = bytes.get(cursor) else {
+            item_ids.clear();
+            break;
+        };
+        cursor += 1;
+        let length = usize::from(length);
+        if length > MAX_ITEM_ID_BYTES {
+            item_ids.clear();
+            break;
+        }
+        let Some(end) = cursor.checked_add(length) else {
+            item_ids.clear();
+            break;
+        };
+        let Some(item_bytes) = bytes.get(cursor..end) else {
+            item_ids.clear();
+            break;
+        };
+        item_ids.push(ItemId::from_slice(item_bytes).map_err(|error| error.to_string())?);
+        cursor = end;
+    }
+    if item_ids.len() == item_count && cursor == bytes.len() {
+        return Ok(item_ids);
+    }
+
+    let expected = item_count
+        .checked_mul(MAX_ITEM_ID_BYTES)
+        .ok_or_else(|| "item ID count overflows the ABI".to_owned())?;
+    if bytes.len() == expected {
+        return (0..item_count)
+            .map(|index| {
+                let start = index * MAX_ITEM_ID_BYTES;
+                let end = start + MAX_ITEM_ID_BYTES;
+                ItemId::from_slice(&bytes[start..end]).map_err(|error| error.to_string())
+            })
+            .collect();
+    }
+
+    Err(format!(
+        "expected {item_count} length-delimited item IDs (or {expected} legacy bytes), got {}",
+        bytes.len()
+    ))
 }
 
 /// Validates the payload field carried by a compact protocol-v1 request.

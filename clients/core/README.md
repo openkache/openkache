@@ -80,8 +80,9 @@ let outcome = client
     .await?;
 ```
 
-`ItemId::from_bytes` preserves a fixed array. `ItemId::from_slice` validates
-and copies a dynamic buffer. Neither hashes the supplied bytes. The pre-freeze
+`ItemId::from_bytes` preserves the supplied bytes (including an empty or
+short ID). `ItemId::from_slice` validates and copies a dynamic buffer. Neither
+hashes the supplied bytes. The pre-freeze
 v1 contract calls the root secret `client_root_key` and binds the selected
 namespace into both Item ID derivation and value AAD. The Rust API retains
 `DataProtectionKey` as a source-compatible alias; it is not a separate wire

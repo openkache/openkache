@@ -575,7 +575,7 @@ impl NamespaceRegistry {
             let minimum_item_bytes = if metadata_version == NAMESPACE_METADATA_VERSION {
                 1
             } else {
-                openkache_protocol::ITEM_ID_BYTES
+                openkache_protocol::MAX_ITEM_ID_BYTES
             };
             if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY
                 || item_count > (cursor.remaining() / minimum_item_bytes) as u64
@@ -590,7 +590,7 @@ impl NamespaceRegistry {
                     ItemId::from_slice(item_bytes)
                         .map_err(|_| cursor.invalid("namespace metadata item ID is too long"))?
                 } else {
-                    let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
+                    let item_bytes = cursor.take(openkache_protocol::MAX_ITEM_ID_BYTES)?;
                     ItemId::from_slice(item_bytes)
                         .expect("legacy metadata item ID width is fixed")
                 };

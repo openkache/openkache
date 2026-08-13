@@ -899,14 +899,13 @@ fn set_result(outcome: SetOutcome) -> FfiResult {
 
 fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, crate::Error> {
     match outcome {
-        GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
+        GetOutcome::Found(Value::Json(value)) => crate::value::canonical_json_bytes(&value)
             .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-            .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
+            .map_err(Into::into),
         GetOutcome::Found(Value::Raw(payload)) => crate::value::parse_json_input(&payload)
             .and_then(|value| {
-                serde_json_canonicalizer::to_vec(&value)
+                crate::value::canonical_json_bytes(&value)
                     .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
-                    .map_err(|error| crate::value::Error::InvalidJson(error.to_string()))
             })
             .map_err(Into::into),
         GetOutcome::Found(Value::Cbor(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
@@ -1170,7 +1169,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
 /// For `GET`, `SET`, and `DELETE`, `application_key` is exactly one canonical
 /// v1 key item from `KEY_FORMAT.md`. The CBOR item is the ABI's type
 /// discriminator (`Integer`, `Text`, or `Bytes`); it is not raw application
-/// bytes and is not a 32-byte Item ID. `SET` accepts an empty value and
+/// bytes and is not an Item ID. `SET` accepts an empty value and
 /// optional existence/TTL options. `PING`, `STATS`, and `SYNC` require empty
 /// key and value buffers.
 ///

@@ -106,7 +106,7 @@ func (s smithyClient) Stats(
 		ctx,
 		SmithyOpcodeStats,
 		input.NamespaceID,
-		ItemID{},
+		nil,
 		nil,
 		SetOptions{},
 	)
@@ -127,7 +127,7 @@ func (s smithyClient) Sync(
 		ctx,
 		SmithyOpcodeSync,
 		input.NamespaceID,
-		ItemID{},
+		nil,
 		nil,
 		SetOptions{},
 	)

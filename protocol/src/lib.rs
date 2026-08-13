@@ -96,18 +96,15 @@ pub use response::{
 };
 pub use segments::{OwnedFrame, OwnedRange, ResponseSegment, SegmentFrame, WireSegment};
 
-/// Maximum number of bytes in one opaque Item ID.
-pub const MAX_ITEM_ID_BYTES: usize = ITEM_ID_BYTES;
-
 /// The opaque variable-length item identifier carried by the wire protocol.
 ///
-/// The wire contract permits an empty identifier through `ITEM_ID_BYTES`
+/// The wire contract permits an empty identifier through `MAX_ITEM_ID_BYTES`
 /// (currently 32) bytes.  The backing array keeps the common maximum-size
 /// representation inline while `len` preserves the exact wire identity.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ItemId {
     len: u8,
-    bytes: [u8; ITEM_ID_BYTES],
+    bytes: [u8; MAX_ITEM_ID_BYTES],
 }
 
 impl ItemId {
@@ -115,24 +112,24 @@ impl ItemId {
     ///
     /// This constructor is retained for callers that already own a fixed
     /// 32-byte digest.  Use [`Self::from_slice`] for an opaque wire ID.
-    pub const fn new(bytes: [u8; ITEM_ID_BYTES]) -> Self {
+    pub const fn new(bytes: [u8; MAX_ITEM_ID_BYTES]) -> Self {
         Self {
-            len: ITEM_ID_BYTES as u8,
+            len: MAX_ITEM_ID_BYTES as u8,
             bytes,
         }
     }
 
     /// Copies an opaque item ID of zero through the protocol maximum.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() > ITEM_ID_BYTES {
+        if bytes.len() > MAX_ITEM_ID_BYTES {
             return Err(ProtocolError::InvalidItemIdLength {
-                expected: ITEM_ID_BYTES,
+                expected: MAX_ITEM_ID_BYTES,
                 actual: bytes.len(),
             });
         }
         let mut item_id = Self {
             len: bytes.len() as u8,
-            bytes: [0; ITEM_ID_BYTES],
+            bytes: [0; MAX_ITEM_ID_BYTES],
         };
         item_id.bytes[..bytes.len()].copy_from_slice(bytes);
         Ok(item_id)

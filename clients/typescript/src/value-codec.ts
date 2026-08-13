@@ -17,8 +17,8 @@ const TEXT_ENCODER = new TextEncoder()
 const TEXT_DECODER = new TextDecoder("utf-8", { fatal: true })
 
 /**
- * JSON value accepted by the legacy envelope adapter and by the core-owned
- * canonical JSON API.
+ * JSON value accepted by the legacy metadata-envelope adapter and by the
+ * core-owned canonical JSON API.
  */
 export type Json_Value =
   | null
@@ -58,7 +58,9 @@ export interface Encoded_Value {
 }
 
 /**
- * Codec metadata and payload passed to the Rust value-envelope implementation.
+ * Codec metadata and payload passed to the Rust legacy metadata-envelope
+ * implementation. This compatibility path is separate from the v1
+ * `OpaqueBytes`/CBOR value format.
  */
 export interface Value_Envelope {
   /** Stable codec identifier, such as `json`, `protobuf`, or `flatbuffers`. */

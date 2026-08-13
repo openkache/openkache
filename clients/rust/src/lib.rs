@@ -23,9 +23,10 @@ pub use openkache_client_core::{
     CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, ClientRootKey, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode,
     ExpirationDefault, ExpirationMode, GetOutcome, ITEM_ID_BYTES, ItemId, ItemValue, KeyError,
-    KeySpec, MAX_CANONICAL_KEY_BYTES, NamespaceDescriptor, NamespacePolicy, Operation,
-    OverridePolicy, PortableInteger, PortableKey, PrivateKey, Result, RetryPolicy, ServerErrorCode,
-    ServerTrust, SetCondition, SetOptions, SetOutcome, canonical_key_bytes, value, value_envelope,
+    KeyFormat, KeySpace, KeySpec, KeyType, MAX_ITEM_ID_BYTES, MAX_KEY_INPUT_BYTES,
+    NamespaceDescriptor, NamespacePolicy, Operation, OverridePolicy, PortableInteger, PortableKey,
+    PrivateKey, ResolvedKey, Result, RetryPolicy, ServerErrorCode, ServerTrust, SetCondition,
+    SetOptions, SetOutcome, TypedInteger, TypedKey, canonical_key_bytes, value, value_envelope,
 };
 #[cfg(feature = "quic-compio")]
 use openkache_client_core::{
@@ -406,9 +407,14 @@ macro_rules! builder_methods {
             }
 
             /// Selects the exact key type accepted by this formatted keyspace.
-            pub fn key_spec(mut self, key_spec: KeySpec) -> Self {
-                self.inner = self.inner.key_spec(key_spec);
+            pub fn key_type(mut self, key_type: KeyType) -> Self {
+                self.inner = self.inner.key_type(key_type);
                 self
+            }
+
+            /// Compatibility spelling for [`Self::key_type`].
+            pub fn key_spec(self, key_spec: KeyType) -> Self {
+                self.key_type(key_spec)
             }
         }
     };
@@ -463,28 +469,28 @@ macro_rules! client_methods {
                     .await
             }
 
-            /// Retrieves and decodes a value for a portable key.
-            pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
+            /// Retrieves and decodes a value for a typed key.
+            pub async fn get(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Vec<u8>>> {
                 self.inner.get(key).await
             }
 
             /// Retrieves and decodes a value in the shared logical value model.
             pub async fn get_value(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
             ) -> Result<GetOutcome<value::Value>> {
                 self.inner.get_value(key).await
             }
 
-            /// Deletes a value for a portable key.
-            pub async fn delete(&self, key: impl Into<PortableKey>) -> Result<DeleteOutcome> {
+            /// Deletes a value for a typed key.
+            pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
                 self.inner.delete(key).await
             }
 
             /// Serializes, protects, and stores a value in the shared logical value model.
             pub async fn set_value(
                 &self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: value::Value,
                 options: SetOptions,
             ) -> Result<SetOutcome> {
@@ -519,7 +525,7 @@ macro_rules! client_methods {
             /// Starts an awaitable set request inheriting namespace policy defaults.
             pub fn set<'a>(
                 &'a self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: impl IntoValue,
             ) -> $request<'a> {
                 self.set_with_options(key, value, SetOptions::new())
@@ -528,7 +534,7 @@ macro_rules! client_methods {
             /// Starts an awaitable set request with explicit wire-level options.
             pub fn set_with_options<'a>(
                 &'a self,
-                key: impl Into<PortableKey>,
+                key: impl Into<TypedKey>,
                 value: impl IntoValue,
                 options: SetOptions,
             ) -> $request<'a> {
@@ -731,7 +737,7 @@ impl IntoValue for Arc<Vec<u8>> {
 /// Awaitable Tokio set request with optional condition and TTL modifiers.
 pub struct SetRequest<'a> {
     client: &'a Client,
-    application_key: PortableKey,
+    application_key: TypedKey,
     value: Vec<u8>,
     options: SetOptions,
 }
@@ -740,7 +746,7 @@ pub struct SetRequest<'a> {
 /// Awaitable Compio set request with optional condition and TTL modifiers.
 pub struct LocalSetRequest<'a> {
     client: &'a LocalClient,
-    application_key: PortableKey,
+    application_key: TypedKey,
     value: Vec<u8>,
     options: SetOptions,
 }

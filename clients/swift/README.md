@@ -5,7 +5,7 @@ core. It accepts Foundation `Data`, exposes async cache operations, and does
 not duplicate QUIC framing, TLS validation, retries, key derivation,
 compression, encryption, or value parsing.
 
-`OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
+`OpenKacheClient` derives protected item IDs from v1 typed-key values. `String`
 keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
 as canonical deterministic CBOR before crossing the native ABI. Use
 `OpenKacheRawClient` when an integration owns exact protocol item IDs and
@@ -73,7 +73,7 @@ For an exact protocol item ID, connect the raw adapter:
 
 ```swift
 let raw = try await OpenKacheRawClient.connect(options: options)
-let itemID = Data(repeating: 0x42, count: Smithy_Value_Format.itemIdBytes)
+let itemID = Data(repeating: 0x42, count: Smithy_Value_Format.maxItemIdBytes)
 let namespace = try await raw.namespaceOpen(
     Smithy_Namespace_Open_Input(
         name: "example",
@@ -101,8 +101,8 @@ _ = (output, smithyOutput)
 ```
 
 Keys are exact UTF-8 or binary bytes, including empty and NUL-containing keys.
-Empty values are valid for the protected adapter. Raw item IDs must contain exactly
-`Smithy_Value_Format.itemIdBytes` bytes. `dataProtectionKey` must contain
+Empty values are valid for the protected adapter. Raw item IDs may contain zero
+through `Smithy_Value_Format.maxItemIdBytes` bytes. `dataProtectionKey` must contain
 exactly 32 persistent random bytes.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system
 roots. A numeric address may provide a separate `serverName` for certificate

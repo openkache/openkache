@@ -17,11 +17,7 @@ pub const CLIENT_ROOT_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Maximum application key input bytes accepted by every conforming SDK.
 pub const MAX_KEY_INPUT_BYTES: usize = 1_048_576;
 /// Maximum Item ID bytes accepted by the wire protocol.
-pub const MAX_ITEM_ID_BYTES: usize = 32;
-/// Compatibility alias for the pre-contract name.
-///
-/// The limit is measured on logical input bytes, before canonical encoding.
-pub const MAX_CANONICAL_KEY_BYTES: usize = MAX_KEY_INPUT_BYTES;
+pub const MAX_ITEM_ID_BYTES: usize = openkache_protocol::MAX_ITEM_ID_BYTES;
 
 /// Client-owned application-key to Item ID mapping profile.
 ///
@@ -1077,12 +1073,12 @@ pub struct ItemId {
 }
 
 impl ItemId {
-    /// Wraps a legacy 32-byte item ID without hashing it again.
+    /// Wraps an opaque item ID without hashing it again.
     pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
         Self::from_slice(bytes.as_ref()).expect("item ID exceeds the wire length limit")
     }
 
-    /// Copies an exact item ID from a language binding or dynamic buffer.
+    /// Copies an opaque item ID from a language binding or dynamic buffer.
     ///
     /// # Arguments
     ///

@@ -237,7 +237,7 @@ openkache_client_result_t *openkache_client_execute(
 
 /*
  * Executes exact protocol item-ID operations. GET, SET, and DELETE accept
- * zero through OPENKACHE_SMITHY_ITEM_ID_BYTES item-ID bytes and bypass
+ * zero through OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES item-ID bytes and bypass
  * application-key derivation and value protection.
  */
 openkache_client_result_t *openkache_client_execute_raw(

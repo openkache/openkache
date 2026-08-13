@@ -81,11 +81,29 @@ structure valueFormat {
     @required
     formatByteBytes: Integer
 
+    /// Selector protection field mask (bits 0..1).
+    @required
+    formatProtectionMask: Byte
+
+    /// Selector compression field mask (bits 2..3).
     @required
     formatCompressionMask: Byte
 
+    /// Selector compression field shift.
     @required
-    formatEncryptionShift: Byte
+    formatCompressionShift: Byte
+
+    /// Selector payload-format field mask (bits 4..5).
+    @required
+    formatPayloadMask: Byte
+
+    /// Selector payload-format field shift.
+    @required
+    formatPayloadShift: Byte
+
+    /// Selector reserved-bit mask (bits 6..7).
+    @required
+    formatReservedMask: Integer
 
     @required
     serializationOpaqueBytes: Byte
@@ -178,8 +196,12 @@ structure valueEnvelope {
     // canonical encoding is nine bytes (the protocol's vu128 limit).
     maxVu128Bytes: 9,
     formatByteBytes: 1,
-    formatCompressionMask: 15,
-    formatEncryptionShift: 4,
+    formatProtectionMask: 3,
+    formatCompressionMask: 12,
+    formatCompressionShift: 2,
+    formatPayloadMask: 48,
+    formatPayloadShift: 4,
+    formatReservedMask: 192,
     serializationOpaqueBytes: 0,
     serializationCbor: 1,
     compressionNone: 0,

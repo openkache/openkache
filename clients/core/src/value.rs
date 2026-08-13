@@ -21,9 +21,13 @@ use crate::contract::{
     DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES, DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
     VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
     VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
-    VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_COMPRESSION_ZSTANDARD,
+    VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE,
+    VALUE_FORMAT_COMPRESSION_SHIFT, VALUE_FORMAT_COMPRESSION_ZSTANDARD,
     VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES, VALUE_FORMAT_FORMAT_BYTE_BYTES,
+    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
     VALUE_FORMAT_MAX_VU128_BYTES, VALUE_FORMAT_PAYLOAD_CBOR, VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES,
+    VALUE_FORMAT_PAYLOAD_MASK, VALUE_FORMAT_PAYLOAD_SHIFT, VALUE_FORMAT_PROTECTION_MASK,
+    VALUE_FORMAT_RESERVED_MASK,
     VALUE_FORMAT_ROBUST_CONTEXT, VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES,
     VALUE_FORMAT_VERSION, VALUE_FORMAT_VERSION_BYTES,
 };
@@ -31,15 +35,15 @@ use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 
 // The selector layout is part of the value contract. Keep these local until
 // the generated client contract exposes the same names across every binding.
-const PROTECTION_MASK: u8 = 0x03;
-const COMPRESSION_MASK: u8 = 0x0c;
-const COMPRESSION_SHIFT: u8 = 2;
-const PAYLOAD_MASK: u8 = 0x30;
-const PAYLOAD_SHIFT: u8 = 4;
-const RESERVED_MASK: u8 = 0xc0;
-const PROTECTION_UNPROTECTED: u8 = 0;
-const PROTECTION_AES_GCM_SIV: u8 = 1;
-const PROTECTION_AES_SIV_CMAC: u8 = 2;
+const PROTECTION_MASK: u8 = VALUE_FORMAT_PROTECTION_MASK;
+const COMPRESSION_MASK: u8 = VALUE_FORMAT_COMPRESSION_MASK;
+const COMPRESSION_SHIFT: u8 = VALUE_FORMAT_COMPRESSION_SHIFT;
+const PAYLOAD_MASK: u8 = VALUE_FORMAT_PAYLOAD_MASK;
+const PAYLOAD_SHIFT: u8 = VALUE_FORMAT_PAYLOAD_SHIFT;
+const RESERVED_MASK: u8 = VALUE_FORMAT_RESERVED_MASK as u8;
+const PROTECTION_UNPROTECTED: u8 = VALUE_FORMAT_ENCRYPTION_NONE;
+const PROTECTION_AES_GCM_SIV: u8 = VALUE_FORMAT_ENCRYPTION_ROBUST;
+const PROTECTION_AES_SIV_CMAC: u8 = VALUE_FORMAT_ENCRYPTION_COMPACT;
 const PAYLOAD_OPAQUE_BYTES: u8 = VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES;
 const PAYLOAD_CBOR: u8 = VALUE_FORMAT_PAYLOAD_CBOR;
 const MAX_VU128_BYTES: usize = VALUE_FORMAT_MAX_VU128_BYTES;
@@ -135,7 +139,7 @@ impl From<ItemValue> for Vec<u8> {
     }
 }
 
-/// Common logical JSON value shared by language adapters.
+/// Common logical JSON value used by the JSON convenience API.
 #[derive(Clone, Debug, PartialEq)]
 pub enum JsonValue {
     /// JSON `null`.
@@ -563,7 +567,7 @@ impl ValueCodec {
     /// # Arguments
     ///
     /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `value` - Raw or logical JSON value to serialize.
+    /// * `value` - Opaque bytes, CBOR, or a JSON convenience value to serialize.
     ///
     /// # Returns
     ///
@@ -740,7 +744,7 @@ impl ValueCodec {
     ///
     /// # Returns
     ///
-    /// The decoded opaque, CBOR, application-defined, or logical JSON value.
+    /// The decoded `OpaqueBytes` or CBOR payload.
     ///
     /// # Errors
     ///
@@ -937,9 +941,7 @@ impl ValueCodec {
             // Store its canonical UTF-8 representation as OpaqueBytes; JSON
             // APIs parse that representation after decoding.
             Value::Json(value) => {
-                validate_json_value(&value)?;
-                let payload = serde_json_canonicalizer::to_vec(&value)
-                    .map_err(|error| Error::InvalidJson(error.to_string()))?;
+                let payload = canonical_json_bytes(&value)?;
                 Ok((payload, PAYLOAD_OPAQUE_BYTES))
             }
         }
@@ -1498,7 +1500,12 @@ fn validate_object_keys(entries: &[(String, JsonValue)]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
+/// Parses one complete JSON value using the shared logical JSON rules.
+///
+/// This helper is public so language adapters can decode the canonical
+/// `OpaqueBytes` representation emitted by [`ValueCodec::encode_json`] without
+/// reimplementing number, duplicate-key, and trailing-input validation.
+pub fn parse_json_input(payload: &[u8]) -> Result<JsonValue> {
     validate_json_integer_tokens(payload)?;
     let mut deserializer = serde_json::Deserializer::from_slice(payload);
     let value = JsonValue::deserialize(&mut deserializer)
@@ -1517,6 +1524,16 @@ fn decode_json(payload: &[u8]) -> Result<JsonValue> {
         return Err(Error::NonCanonicalJson);
     }
     Ok(value)
+}
+
+/// Serializes a logical JSON value using the canonical RFC 8785 representation.
+///
+/// Language adapters should use this helper when returning a value decoded from
+/// the `OpaqueBytes` JSON convenience path.
+pub fn canonical_json_bytes(value: &JsonValue) -> Result<Vec<u8>> {
+    validate_json_value(value)?;
+    serde_json_canonicalizer::to_vec(value)
+        .map_err(|error| Error::InvalidJson(error.to_string()))
 }
 
 fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {

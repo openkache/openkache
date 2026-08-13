@@ -1,4 +1,11 @@
-//! Canonical framing for self-describing, cross-language values.
+//! Legacy metadata framing for self-describing, cross-language values.
+//!
+//! This module is retained for the TypeScript adapter migration. It is not the
+//! v1 value format described by `clients/VALUE_FORMAT.md`: the v1 format has a
+//! `vu128` version and selector, while this compatibility envelope has an
+//! `OKV1` magic prefix and metadata lengths.
+
+use openkache_protocol::MAX_VALUE_BYTES;
 
 /// Legacy metadata-envelope magic and version.
 pub const MAGIC_AND_VERSION: [u8; crate::contract::VALUE_ENVELOPE_MAGIC_AND_VERSION.len()] =
@@ -53,6 +60,14 @@ pub enum Error {
         /// Requested allocation size.
         size: usize,
     },
+    /// The complete legacy envelope exceeds the protocol value limit.
+    #[error("legacy value envelope contains {size} bytes, maximum is {maximum}")]
+    TooLarge {
+        /// Actual complete envelope length.
+        size: usize,
+        /// Maximum complete envelope length.
+        maximum: usize,
+    },
     /// The input does not contain a complete envelope header.
     #[error("value envelope contains {size} bytes, header requires {minimum}")]
     HeaderTruncated {
@@ -86,7 +101,7 @@ pub enum Error {
 /// Convenience alias for value-envelope results.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Encodes codec metadata and payload bytes into the canonical value envelope.
+/// Encodes codec metadata and payload bytes into the legacy metadata envelope.
 ///
 /// # Arguments
 ///
@@ -119,6 +134,12 @@ pub fn encode(encoding: &str, type_name: &str, payload: &[u8]) -> Result<Vec<u8>
         .and_then(|length| length.checked_add(type_name.len()))
         .and_then(|length| length.checked_add(payload.len()))
         .ok_or(Error::LengthOverflow)?;
+    if total_length > MAX_VALUE_BYTES {
+        return Err(Error::TooLarge {
+            size: total_length,
+            maximum: MAX_VALUE_BYTES,
+        });
+    }
 
     let mut bytes = Vec::new();
     bytes
@@ -139,7 +160,7 @@ pub fn encode(encoding: &str, type_name: &str, payload: &[u8]) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-/// Decodes and validates a canonical value envelope without copying its payload.
+/// Decodes and validates a legacy metadata envelope without copying its payload.
 ///
 /// # Arguments
 ///
@@ -154,6 +175,12 @@ pub fn encode(encoding: &str, type_name: &str, payload: &[u8]) -> Result<Vec<u8>
 /// Returns an error when the header, version, declared lengths, UTF-8 metadata,
 /// or encoding identifier is invalid.
 pub fn decode(bytes: &[u8]) -> Result<ValueEnvelope<'_>> {
+    if bytes.len() > MAX_VALUE_BYTES {
+        return Err(Error::TooLarge {
+            size: bytes.len(),
+            maximum: MAX_VALUE_BYTES,
+        });
+    }
     if bytes.len() < HEADER_BYTES {
         return Err(Error::HeaderTruncated {
             size: bytes.len(),
