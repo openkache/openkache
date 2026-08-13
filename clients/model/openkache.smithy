@@ -333,8 +333,7 @@ structure valueEnvelope {
                 { name: "retryMaxAttempts", type: "size", mutable: false },
                 { name: "maxInFlight", type: "size", mutable: false },
                 { name: "connectTimeoutMilliseconds", type: "uint64", mutable: false },
-                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false },
-                { name: "keyFormat", type: "uint32", mutable: false }
+                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false }
             ]
         },
         {
