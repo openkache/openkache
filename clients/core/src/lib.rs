@@ -34,8 +34,10 @@ pub use config::{
 };
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{
-    CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
-    KeyError, KeySpec, MAX_CANONICAL_KEY_BYTES, PortableInteger, PortableKey, canonical_key_bytes,
+    canonical_key_bytes, ClientRootKey, DataProtectionKey, ItemId, KeyError, KeyFormat, KeySpace,
+    KeySpec, KeyType, PortableInteger, PortableKey, ResolvedKey, TypedInteger, TypedKey,
+    CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
+    MAX_KEY_INPUT_BYTES,
 };
 pub use openkache_protocol::ITEM_ID_BYTES;
 #[cfg(feature = "quic-compio")]

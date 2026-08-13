@@ -35,7 +35,7 @@ struct WaitingSlot<T> {
 
 /// Bounded intrusive FIFO storage.  Requests are moved exactly once into and
 /// out of the slab; no per-request linked-list allocation is required.
-pub(super) struct WaitingSlab<T> {
+pub(crate) struct WaitingSlab<T> {
     slots: Vec<WaitingSlot<T>>,
     free: Vec<u32>,
     capacity: usize,

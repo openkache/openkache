@@ -866,7 +866,9 @@ fn bytes_result(payload: Vec<u8>) -> FfiResult {
 fn raw_value_result(value: Value) -> FfiResult {
     match value {
         Value::Raw(payload) => bytes_result(payload),
-        Value::Json(_) => FfiResult::error("formatted value is not Raw serialization"),
+        Value::Cbor(_) | Value::Json(_) => {
+            FfiResult::error("formatted value is not Raw serialization")
+        }
     }
 }
 
@@ -896,7 +898,13 @@ fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, cra
         GetOutcome::Found(Value::Json(value)) => serde_json_canonicalizer::to_vec(&value)
             .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
             .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
-        GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
+        GetOutcome::Found(Value::Raw(payload)) => crate::value::parse_json_input(&payload)
+            .and_then(|value| {
+                serde_json_canonicalizer::to_vec(&value)
+                    .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
+                    .map_err(|error| crate::value::Error::InvalidJson(error.to_string()))
+            }),
+        GetOutcome::Found(Value::Cbor(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
 }
@@ -1338,11 +1346,11 @@ pub unsafe extern "C" fn openkache_client_execute_scoped(
         };
         match operation {
             FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
-                if item_id.len() != crate::ITEM_ID_BYTES =>
+                if item_id.len() > crate::MAX_ITEM_ID_BYTES =>
             {
                 Err(format!(
-                    "item_id must contain exactly {} bytes, got {}",
-                    crate::ITEM_ID_BYTES,
+                    "item_id must contain at most {} bytes, got {}",
+                    crate::MAX_ITEM_ID_BYTES,
                     item_id.len()
                 ))
             }
@@ -1604,11 +1612,11 @@ fn execute_entry_inner(
                 operation,
                 FfiOperation::Get | FfiOperation::Set | FfiOperation::Delete
             )
-            && application_key.len() != crate::ITEM_ID_BYTES
+            && application_key.len() > crate::MAX_ITEM_ID_BYTES
         {
             return Err(format!(
-                "item_id must contain exactly {} bytes, got {}",
-                crate::ITEM_ID_BYTES,
+                "item_id must contain at most {} bytes, got {}",
+                crate::MAX_ITEM_ID_BYTES,
                 application_key.len()
             ));
         }

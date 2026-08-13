@@ -487,6 +487,18 @@ enum FfiSetCondition {
     IF_PRESENT = "if_present"
 }
 
+/// Native discriminator for the typed key representation supplied by the FFI.
+enum FfiKeySpec {
+    @ffiValue(value: 0)
+    TEXT = "text"
+
+    @ffiValue(value: 1)
+    BYTES = "bytes"
+
+    @ffiValue(value: 2)
+    INTEGER = "integer"
+}
+
 enum FfiConnectionState {
     @ffiValue(value: 0)
     CONNECTED = "connected"

@@ -139,6 +139,7 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly key_specs: readonly Ffi_Entry[]
   readonly namespace_default_evictions: readonly Ffi_Entry[]
   readonly namespace_default_expirations: readonly Ffi_Entry[]
   readonly namespace_descriptor_decode_statuses: readonly Ffi_Entry[]
@@ -200,6 +201,7 @@ const FFI_ENUMS = {
   result_kinds: { name: "FfiResultKind", kind: "FFI result" },
   connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
   set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },
+  key_specs: { name: "FfiKeySpec", kind: "FFI key specification" },
   namespace_descriptor_decode_statuses: {
     name: "FfiNamespaceDescriptorDecodeStatus",
     kind: "FFI namespace descriptor decode status",
@@ -716,6 +718,12 @@ function ffi_contract(
       FFI_ENUMS.connection_states.name,
       FFI_ENUMS.connection_states.kind,
     ),
+    key_specs: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.key_specs.name,
+      FFI_ENUMS.key_specs.kind,
+    ),
     namespace_default_evictions: ffi_enum_entries(
       shapes,
       namespace,
@@ -1149,6 +1157,9 @@ export function extract_client_contract(ast: unknown): Client_Contract {
       )
     }
   }
+  // The protocol model also contains server-only and experimental operations.
+  // Client generation validates the client-to-wire direction above, but does
+  // not require every wire opcode to have a public client projection.
   const ffi = ffi_contract(ffi_trait, shapes, client_namespace)
   const opcode_values = new Set(wire.opcodes.map((entry) => entry.value))
   for (const entry of ffi.operations) {
@@ -1519,6 +1530,13 @@ pub const FFI_RESULT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_
 pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_key_specs = ffi.key_specs
+    .map(
+      (entry) =>
+        `/// Native FFI key-specification identifier for ${entry.name}.
+pub const FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_set_conditions = ffi.set_conditions
     .map(
       (entry) =>
@@ -1626,6 +1644,7 @@ pub const FFI_ABI_VERSION: u32 = ${formatted_decimal(ffi.abi_version)};
 ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
+${ffi_key_specs}
 ${ffi_set_conditions}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
@@ -1657,6 +1676,13 @@ ${rust_ffi_enum(
   "Native FFI connection-state identifiers shared by every language adapter.",
   "Native FFI connection-state",
   ffi.connection_states,
+)}
+
+${rust_ffi_enum(
+  "FfiKeySpec",
+  "Native FFI typed-key identifiers shared by every language adapter.",
+  "Native FFI typed-key",
+  ffi.key_specs,
 )}
 
 ${rust_ffi_enum(

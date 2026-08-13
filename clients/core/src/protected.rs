@@ -6,8 +6,9 @@ use std::time::Duration;
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeySpec, NamespaceDescriptor,
-    NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeySpec,
+    NamespaceDescriptor, NamespacePolicy, PortableKey, Result, RetryPolicy, ServerTrust,
+    SetOptions, SetOutcome,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -20,6 +21,7 @@ struct ProtectionSettings {
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
     key_spec: KeySpec,
+    key_format: KeyFormat,
 }
 
 impl ProtectionSettings {
@@ -38,17 +40,23 @@ impl ProtectionSettings {
             encryption_explicit: false,
             key,
             key_spec: KeySpec::Bytes,
+            key_format: KeyFormat::Hash,
         }
     }
 
     fn finish(self) -> Result<Arc<DataProtection>> {
         match self.key {
             Some(key) => if self.encryption == Encryption::Unprotected {
-                DataProtection::unprotected(self.key_spec, self.compression)
+                DataProtection::unprotected_with_format(
+                    self.key_spec,
+                    self.key_format,
+                    self.compression,
+                )
             } else {
-                DataProtection::with_profile_and_key_spec(
+                DataProtection::with_key_spec_and_format_profile(
                     key,
                     self.key_spec,
+                    self.key_format,
                     self.compression,
                     self.encryption,
                 )
@@ -61,7 +69,12 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(self.key_spec, self.compression).map(Arc::new)
+                DataProtection::unprotected_with_format(
+                    self.key_spec,
+                    self.key_format,
+                    self.compression,
+                )
+                .map(Arc::new)
             }
         }
     }
@@ -156,6 +169,12 @@ macro_rules! protected_builder_methods {
                 self.protection.key_spec = key_spec;
                 self
             }
+
+            /// Selects the client-only key mapping profile.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.protection.key_format = key_format;
+                self
+            }
         }
     };
 }
@@ -216,7 +235,7 @@ macro_rules! protected_client_methods {
         pub async fn get(&self, key: impl Into<PortableKey>) -> Result<GetOutcome<Vec<u8>>> {
             match self.get_value(key).await? {
                 GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
-                GetOutcome::Found(Value::Json(_)) => {
+                GetOutcome::Found(Value::Cbor(_)) | GetOutcome::Found(Value::Json(_)) => {
                     Err(crate::value::Error::ExpectedRawValue.into())
                 }
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
