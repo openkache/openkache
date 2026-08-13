@@ -10,11 +10,12 @@ use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use openkache_protocol::Request;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use crate::QuicBackend;
 use crate::network_runtime;
+use crate::protocol::RequestFrame as ProtocolRequestFrame;
+use openkache_protocol::{ResponseParts, ResponseSegment};
 
 /// Parsed TLS material shared by every reuse-port endpoint.
 pub(super) struct ServerTlsConfig {
@@ -173,7 +174,7 @@ pub(super) trait ReceiveStream {
 pub(super) trait SendStream {
     fn write_response(
         &mut self,
-        frame: Vec<u8>,
+        parts: ResponseParts,
         timeout: Duration,
     ) -> impl Future<Output = Result<(), TransportError>>;
 }
@@ -362,11 +363,17 @@ impl Drop for RequestBudgetPermit {
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
 trait RequestByteStream {
-    fn read_chunk<'a>(
-        &'a mut self,
+    fn append_chunk(
+        &mut self,
+        frame: Vec<u8>,
         capacity: usize,
         backend: &'static str,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>>;
+    ) -> impl Future<Output = Result<Vec<u8>, TransportError>>;
+
+    fn has_readable_byte(
+        &mut self,
+        backend: &'static str,
+    ) -> impl Future<Output = Result<bool, TransportError>>;
 }
 
 #[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
@@ -378,7 +385,7 @@ async fn read_buffered_request<S: RequestByteStream>(
     timeout: Duration,
     budget: &RequestBudget,
 ) -> Result<RequestFrame, StreamReadError> {
-    let first = network_runtime::timeout(timeout, stream.read_chunk(1, backend))
+    let first = network_runtime::timeout(timeout, stream.append_chunk(Vec::new(), 1, backend))
         .await
         .map_err(|_| StreamReadError::Timeout)?
         .map_err(StreamReadError::Transport)?;
@@ -392,24 +399,24 @@ async fn read_buffered_request<S: RequestByteStream>(
     let (frame, header) = network_runtime::timeout(timeout, async {
         let mut frame = first;
         loop {
-            if let Some(header) = Request::decode_header(&frame)? {
+            if let Some(header) = ProtocolRequestFrame::decode_header(&frame)? {
                 break Ok::<_, StreamReadError>((frame, header));
             }
             if frame.len() >= maximum {
                 return Err(StreamReadError::TooLarge);
             }
-            let next = stream
-                .read_chunk(1, backend)
+            let previous_len = frame.len();
+            frame = stream
+                .append_chunk(frame, 1, backend)
                 .await
                 .map_err(StreamReadError::Transport)?;
-            if next.is_empty() {
+            if frame.len() == previous_len {
                 return Err(StreamReadError::Transport(TransportError::backend(
                     backend,
                     "stream header read",
                     "stream ended before request header completed",
                 )));
             }
-            frame.extend_from_slice(&next);
         }
     })
     .await
@@ -418,27 +425,9 @@ async fn read_buffered_request<S: RequestByteStream>(
         return Err(StreamReadError::TooLarge);
     }
     let (mut frame, frame_len) = network_runtime::timeout(timeout, async {
-        let mut frame = frame;
-        loop {
-            if let Some(frame_len) = header.frame_len(&frame)? {
-                break Ok::<_, StreamReadError>((frame, frame_len));
-            }
-            if frame.len() >= maximum {
-                return Err(StreamReadError::TooLarge);
-            }
-            let next = stream
-                .read_chunk(1, backend)
-                .await
-                .map_err(StreamReadError::Transport)?;
-            if next.is_empty() {
-                return Err(StreamReadError::Transport(TransportError::backend(
-                    backend,
-                    "stream metadata read",
-                    "stream ended before request metadata completed",
-                )));
-            }
-            frame.extend_from_slice(&next);
-        }
+        let frame = frame;
+        let frame_len = header.frame_len()?;
+        Ok::<_, StreamReadError>((frame, frame_len))
     })
     .await
     .map_err(|_| StreamReadError::Timeout)??;
@@ -448,18 +437,18 @@ async fn read_buffered_request<S: RequestByteStream>(
     let permit = budget.acquire(header.value_len(), timeout).await?;
     let body = network_runtime::timeout(timeout, async {
         while frame.len() < frame_len {
-            let next = stream
-                .read_chunk(frame_len - frame.len(), backend)
+            let previous_len = frame.len();
+            frame = stream
+                .append_chunk(frame, frame_len - previous_len, backend)
                 .await
                 .map_err(StreamReadError::Transport)?;
-            if next.is_empty() {
+            if frame.len() == previous_len {
                 return Err(StreamReadError::Transport(TransportError::backend(
                     backend,
                     "stream body read",
                     "stream ended before request body completed",
                 )));
             }
-            frame.extend_from_slice(&next);
         }
         Ok::<_, StreamReadError>(frame)
     })
@@ -470,11 +459,9 @@ async fn read_buffered_request<S: RequestByteStream>(
     // The zero-duration timeout is non-blocking: when no byte is buffered the
     // receive future is cancelled and the lane remains reusable.
     let has_trailing_bytes =
-        match network_runtime::timeout(Duration::ZERO, stream.read_chunk(1, backend)).await {
+        match network_runtime::timeout(Duration::ZERO, stream.has_readable_byte(backend)).await {
             Err(_) => false,
-            Ok(result) => !result
-                .map_err(StreamReadError::Transport)?
-                .is_empty(),
+            Ok(result) => result.map_err(StreamReadError::Transport)?,
         };
     Ok(RequestFrame::with_trailing_bytes(
         body,
@@ -548,6 +535,21 @@ fn tls_config(material: &ServerTlsConfig) -> Result<rustls::ServerConfig, rustls
     )?;
     tls.alpn_protocols = vec![openkache_protocol::ALPN.to_vec()];
     Ok(tls)
+}
+
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+struct ResponseWriteSegments(smallvec::SmallVec<[ResponseSegment; 8]>);
+
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+impl compio::buf::IoVectoredBuf for ResponseWriteSegments {
+    fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
+        self.0.iter().map(ResponseSegment::as_slice)
+    }
+}
+
+#[cfg(any(feature = "quic-quinn", feature = "quic-noq"))]
+fn response_write_segments(parts: ResponseParts) -> ResponseWriteSegments {
+    ResponseWriteSegments(parts.into_segments())
 }
 
 #[cfg(feature = "quic-quinn")]
@@ -651,21 +653,39 @@ mod quinn_backend {
     pub(crate) struct ReceiveStream(compio_quic::RecvStream);
 
     impl super::RequestByteStream for ReceiveStream {
-        fn read_chunk<'a>(
-            &'a mut self,
+        async fn append_chunk(
+            &mut self,
+            mut frame: Vec<u8>,
             capacity: usize,
             backend: &'static str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>> {
-            Box::pin(async move {
-                use compio::io::AsyncRead;
+        ) -> Result<Vec<u8>, TransportError> {
+            use compio::buf::{IntoInner, IoBuf};
+            use compio::io::AsyncReadExt;
 
-                let buffer = vec![0_u8; capacity.max(1)];
-                let compio::BufResult(result, mut buffer) = self.0.read(buffer).await;
-                let read = result
-                    .map_err(|error| TransportError::backend(backend, "stream read", error))?;
-                buffer.truncate(read);
-                Ok(buffer)
-            })
+            let capacity = capacity.max(1);
+            frame.try_reserve(capacity).map_err(|error| {
+                TransportError::backend(backend, "request buffer reserve", error)
+            })?;
+            let end = frame.len().checked_add(capacity).ok_or_else(|| {
+                TransportError::backend(backend, "request buffer reserve", "size overflow")
+            })?;
+            let compio::BufResult(result, frame) = self.0.append(frame.slice(..end)).await;
+            let read =
+                result.map_err(|error| TransportError::backend(backend, "stream read", error))?;
+            debug_assert!(read <= capacity);
+            Ok(frame.into_inner())
+        }
+
+        async fn has_readable_byte(
+            &mut self,
+            backend: &'static str,
+        ) -> Result<bool, TransportError> {
+            use compio::io::AsyncRead;
+
+            let compio::BufResult(result, _) = self.0.read([0_u8; 1]).await;
+            result
+                .map(|read| read != 0)
+                .map_err(|error| TransportError::backend(backend, "stream read", error))
         }
     }
 
@@ -686,13 +706,20 @@ mod quinn_backend {
     impl super::SendStream for SendStream {
         async fn write_response(
             &mut self,
-            frame: Vec<u8>,
+            parts: ResponseParts,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            let BufResult(result, _) = network_runtime::timeout(timeout, self.0.write_all(frame))
-                .await
-                .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
-            result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
+            let result = network_runtime::timeout(timeout, async {
+                let BufResult(result, _) = self
+                    .0
+                    .write_vectored_all(response_write_segments(parts))
+                    .await;
+                result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
+            result?;
             Ok(())
         }
     }
@@ -799,21 +826,39 @@ mod noq_backend {
     pub(crate) struct ReceiveStream(comnoq::RecvStream);
 
     impl super::RequestByteStream for ReceiveStream {
-        fn read_chunk<'a>(
-            &'a mut self,
+        async fn append_chunk(
+            &mut self,
+            mut frame: Vec<u8>,
             capacity: usize,
             backend: &'static str,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, TransportError>> + 'a>> {
-            Box::pin(async move {
-                use compio::io::AsyncRead;
+        ) -> Result<Vec<u8>, TransportError> {
+            use compio::buf::{IntoInner, IoBuf};
+            use compio::io::AsyncReadExt;
 
-                let buffer = vec![0_u8; capacity.max(1)];
-                let compio::BufResult(result, mut buffer) = self.0.read(buffer).await;
-                let read = result
-                    .map_err(|error| TransportError::backend(backend, "stream read", error))?;
-                buffer.truncate(read);
-                Ok(buffer)
-            })
+            let capacity = capacity.max(1);
+            frame.try_reserve(capacity).map_err(|error| {
+                TransportError::backend(backend, "request buffer reserve", error)
+            })?;
+            let end = frame.len().checked_add(capacity).ok_or_else(|| {
+                TransportError::backend(backend, "request buffer reserve", "size overflow")
+            })?;
+            let compio::BufResult(result, frame) = self.0.append(frame.slice(..end)).await;
+            let read =
+                result.map_err(|error| TransportError::backend(backend, "stream read", error))?;
+            debug_assert!(read <= capacity);
+            Ok(frame.into_inner())
+        }
+
+        async fn has_readable_byte(
+            &mut self,
+            backend: &'static str,
+        ) -> Result<bool, TransportError> {
+            use compio::io::AsyncRead;
+
+            let compio::BufResult(result, _) = self.0.read([0_u8; 1]).await;
+            result
+                .map(|read| read != 0)
+                .map_err(|error| TransportError::backend(backend, "stream read", error))
         }
     }
 
@@ -834,13 +879,20 @@ mod noq_backend {
     impl super::SendStream for SendStream {
         async fn write_response(
             &mut self,
-            frame: Vec<u8>,
+            parts: ResponseParts,
             timeout: Duration,
         ) -> Result<(), TransportError> {
-            let BufResult(result, _) = network_runtime::timeout(timeout, self.0.write_all(frame))
-                .await
-                .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
-            result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
+            let result = network_runtime::timeout(timeout, async {
+                let BufResult(result, _) = self
+                    .0
+                    .write_vectored_all(response_write_segments(parts))
+                    .await;
+                result.map_err(|error| TransportError::backend(NAME, "stream write", error))?;
+                Ok(())
+            })
+            .await
+            .map_err(|_| TransportError::backend(NAME, "stream write timeout", "timed out"))?;
+            result?;
             Ok(())
         }
     }
@@ -862,7 +914,7 @@ mod quiche_backend {
 
     const NAME: &str = "quiche";
     const MAX_DATAGRAM_BYTES: usize = 65_535;
-    const MAX_BUFFERED_REQUEST_BYTES: usize = openkache_protocol::MAX_REQUEST_FRAME_BYTES + 1;
+    const MAX_BUFFERED_REQUEST_BYTES: usize = crate::protocol::max_request_frame_bytes() + 1;
     const REQUEST_CANCELLED_ERROR_CODE: u64 = 0;
     const STREAM_CHUNK_BYTES: usize = 16 * 1024;
     const STREAM_CHUNK_BACKLOG: usize = 1;
@@ -1041,7 +1093,7 @@ mod quiche_backend {
             .map_err(StreamReadError::Transport)?;
             let header = network_runtime::timeout(timeout, async {
                 loop {
-                    if let Some(header) = Request::decode_header(&self.buffered)? {
+                    if let Some(header) = ProtocolRequestFrame::decode_header(&self.buffered)? {
                         break Ok::<_, StreamReadError>(header);
                     }
                     if self.buffered.len() >= maximum {
@@ -1057,16 +1109,8 @@ mod quiche_backend {
                 return Err(StreamReadError::TooLarge);
             }
             let frame_len = network_runtime::timeout(timeout, async {
-                loop {
-                    if let Some(frame_len) = header.frame_len(&self.buffered)? {
-                        break Ok::<_, StreamReadError>(frame_len);
-                    }
-                    if self.buffered.len() >= maximum {
-                        return Err(StreamReadError::TooLarge);
-                    }
-                    let chunk = self.next_chunk("stream metadata read").await?;
-                    self.buffered.extend_from_slice(&chunk);
-                }
+                let frame_len = header.frame_len()?;
+                Ok::<_, StreamReadError>(frame_len)
             })
             .await
             .map_err(|_| StreamReadError::Timeout)??;
@@ -1116,7 +1160,7 @@ mod quiche_backend {
     impl super::SendStream for SendStream {
         async fn write_response(
             &mut self,
-            frame: Vec<u8>,
+            parts: ResponseParts,
             timeout: Duration,
         ) -> Result<(), TransportError> {
             let (reply, response) = channel::bounded_sync_async(1);
@@ -1124,7 +1168,7 @@ mod quiche_backend {
                 .send_async_network(Command::SendResponse {
                     connection_id: self.connection_id.clone(),
                     stream_id: self.stream_id,
-                    frame,
+                    segments: parts.into_segments(),
                     reply,
                 })
                 .await
@@ -1150,15 +1194,16 @@ mod quiche_backend {
         SendResponse {
             connection_id: ConnectionId,
             stream_id: u64,
-            frame: Vec<u8>,
+            segments: SmallVec<[ResponseSegment; 8]>,
             reply: Sender<Result<(), String>>,
         },
         Shutdown,
     }
 
     struct PendingResponse {
-        frame: Vec<u8>,
-        written: usize,
+        segments: SmallVec<[ResponseSegment; 8]>,
+        segment_index: usize,
+        segment_written: usize,
         reply: Sender<Result<(), String>>,
     }
 
@@ -1353,7 +1398,7 @@ mod quiche_backend {
                 Command::SendResponse {
                     connection_id,
                     stream_id,
-                    frame,
+                    segments,
                     reply,
                 } => {
                     let Some(client) = self.clients.get_mut(&connection_id) else {
@@ -1363,8 +1408,9 @@ mod quiche_backend {
                     client.responses.insert(
                         stream_id,
                         PendingResponse {
-                            frame,
-                            written: 0,
+                            segments,
+                            segment_index: 0,
+                            segment_written: 0,
                             reply,
                         },
                     );
@@ -1496,15 +1542,19 @@ mod quiche_backend {
                 }
             }
         }
-        let mut buffer = [0_u8; STREAM_CHUNK_BYTES];
         loop {
             if request.chunks.is_full() {
                 break;
             }
-            match client.connection.stream_recv(stream_id, &mut buffer) {
+            let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+            match client
+                .connection
+                .stream_recv(stream_id, buffer.as_mut_slice())
+            {
                 Ok((read, finished)) => {
                     request.finished = finished;
-                    match request.chunks.try_send(buffer[..read].to_vec()) {
+                    buffer.truncate(read);
+                    match request.chunks.try_send(buffer) {
                         Ok(()) => {}
                         Err(TrySendError::Full(chunk)) => {
                             request.pending = Some(chunk);
@@ -1533,11 +1583,28 @@ mod quiche_backend {
         let Some(mut response) = client.responses.remove(&stream_id) else {
             return;
         };
-        let remaining = &response.frame[response.written..];
+        while response.segment_index < response.segments.len()
+            && response.segment_written == response.segments[response.segment_index].len()
+        {
+            response.segment_index += 1;
+            response.segment_written = 0;
+        }
+        let remaining = if let Some(segment) = response.segments.get(response.segment_index) {
+            &segment.as_slice()[response.segment_written..]
+        } else {
+            let _ = response.reply.try_send(Ok(()));
+            return;
+        };
         match client.connection.stream_send(stream_id, remaining, false) {
             Ok(written) => {
-                response.written += written;
-                if response.written == response.frame.len() {
+                response.segment_written += written;
+                while response.segment_index < response.segments.len()
+                    && response.segment_written == response.segments[response.segment_index].len()
+                {
+                    response.segment_index += 1;
+                    response.segment_written = 0;
+                }
+                if response.segment_index == response.segments.len() {
                     let _ = response.reply.try_send(Ok(()));
                 } else {
                     client.responses.insert(stream_id, response);
