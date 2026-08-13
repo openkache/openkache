@@ -4,17 +4,15 @@
 //! storage.  An API supplies a command implementing [`ScheduledTask`] and owns
 //! all preparation, reduction, and completion semantics.
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 
-/// Identity for a reducer family.  The token must be non-zero-sized because
-/// pointers to distinct zero-sized statics are allowed to compare equal.
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct CollapseGroup(pub(super) u8);
-
 /// Metadata needed by the scheduler to preserve lane ordering.
 pub(super) trait ScheduledTask {
-    fn collapse_group(&self) -> &'static CollapseGroup;
+    type CollapseGroup: Copy + Eq;
+
+    fn collapse_group(&self) -> Self::CollapseGroup;
     fn is_exclusive(&self) -> bool;
 }
 
@@ -124,22 +122,20 @@ impl<T> WaitingSlab<T> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LaneState {
+enum LaneState<G> {
     Ready,
-    Running {
-        collapse_group: &'static CollapseGroup,
-    },
+    Running { collapse_group: G },
 }
 
-struct KeyLane {
-    state: LaneState,
+struct KeyLane<G> {
+    state: LaneState<G>,
     waiting_head: Option<SlotId>,
     waiting_tail: Option<SlotId>,
 }
 
 /// Fair, bounded scheduler for one worker's keyed requests.
 pub(super) struct KeyScheduler<K, T: ScheduledTask> {
-    lanes: HashMap<K, KeyLane>,
+    lanes: HashMap<K, KeyLane<T::CollapseGroup>>,
     ready: VecDeque<K>,
     waiting: WaitingSlab<T>,
 }
@@ -182,26 +178,23 @@ where
 
     /// Removes the next fair command and records its reducer family.
     pub(super) fn take_ready(&mut self) -> Option<(K, T)> {
-        let storage_key = self.ready.pop_front()?;
+        let key = self.ready.pop_front()?;
         let head = self
             .lanes
-            .get(&storage_key)
+            .get(&key)
             .expect("ready key has a lane")
             .waiting_head
             .expect("ready lane has a waiting command");
         let collapse_group = self.waiting.get(head).collapse_group();
         let (command, next) = self.waiting.take(head);
-        let lane = self
-            .lanes
-            .get_mut(&storage_key)
-            .expect("ready key has a lane");
-        debug_assert_eq!(lane.state, LaneState::Ready);
+        let lane = self.lanes.get_mut(&key).expect("ready key has a lane");
+        debug_assert!(matches!(lane.state, LaneState::Ready));
         lane.waiting_head = next;
         if next.is_none() {
             lane.waiting_tail = None;
         }
         lane.state = LaneState::Running { collapse_group };
-        Some((storage_key, command))
+        Some((key, command))
     }
 
     pub(super) fn take_ready_exclusive(&mut self) -> Option<(K, T)> {
@@ -217,25 +210,27 @@ where
         command: T,
     ) -> std::result::Result<(), SchedulerError> {
         let slot = self.waiting.insert(command).ok_or(SchedulerError::Full)?;
-        if let Some(lane) = self.lanes.get_mut(&storage_key) {
-            if let Some(tail) = lane.waiting_tail {
-                self.waiting.link(tail, slot);
-            } else {
-                debug_assert!(lane.waiting_head.is_none());
-                lane.waiting_head = Some(slot);
+        match self.lanes.entry(storage_key) {
+            Entry::Occupied(mut entry) => {
+                let lane = entry.get_mut();
+                if let Some(tail) = lane.waiting_tail {
+                    self.waiting.link(tail, slot);
+                } else {
+                    debug_assert!(lane.waiting_head.is_none());
+                    lane.waiting_head = Some(slot);
+                }
+                lane.waiting_tail = Some(slot);
             }
-            lane.waiting_tail = Some(slot);
-            return Ok(());
+            Entry::Vacant(entry) => {
+                let ready_key = entry.key().clone();
+                entry.insert(KeyLane {
+                    state: LaneState::Ready,
+                    waiting_head: Some(slot),
+                    waiting_tail: Some(slot),
+                });
+                self.ready.push_back(ready_key);
+            }
         }
-        self.lanes.insert(
-            storage_key.clone(),
-            KeyLane {
-                state: LaneState::Ready,
-                waiting_head: Some(slot),
-                waiting_tail: Some(slot),
-            },
-        );
-        self.ready.push_back(storage_key);
         Ok(())
     }
 
@@ -261,7 +256,7 @@ where
         let mut commands = Vec::new();
         loop {
             let command = self.waiting.get(head);
-            if !std::ptr::eq(command.collapse_group(), collapse_group) || !can_collapse(command) {
+            if command.collapse_group() != collapse_group || !can_collapse(command) {
                 break;
             }
             let (command, next) = self.waiting.take(head);
