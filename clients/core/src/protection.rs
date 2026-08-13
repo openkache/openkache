@@ -48,12 +48,6 @@ impl DataProtection {
         compression: Compression,
     ) -> Result<Self> {
         crate::KeySpace::with_format(key_type, format).validate()?;
-        if format == KeyFormat::ByteKeyOrHash {
-            return Err(crate::Error::configuration(
-                "key_format",
-                "ByteKeyOrHash requires unprotected values",
-            ));
-        }
         if key.is_zero() {
             return Err(crate::Error::configuration(
                 "client_root_key",
@@ -144,12 +138,6 @@ impl DataProtection {
         encryption: Encryption,
     ) -> Result<Self> {
         crate::KeySpace::with_format(key_type, format).validate()?;
-        if format == KeyFormat::ByteKeyOrHash && encryption != Encryption::Unprotected {
-            return Err(crate::Error::configuration(
-                "key_format",
-                "ByteKeyOrHash requires unprotected values",
-            ));
-        }
         if key.is_zero() && encryption != Encryption::Unprotected {
             return Err(crate::Error::configuration(
                 "client_root_key",

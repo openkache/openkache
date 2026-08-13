@@ -120,6 +120,7 @@ export interface Ffi_Contract {
   readonly namespace_override_policies: readonly Ffi_Entry[]
   readonly operations: readonly Ffi_Entry[]
   readonly key_specs: readonly Ffi_Entry[]
+  readonly key_formats: readonly Ffi_Entry[]
   readonly result_kinds: readonly Ffi_Entry[]
   readonly set_conditions: readonly Ffi_Entry[]
 }
@@ -210,6 +211,7 @@ const FFI_ENUMS = {
   connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
   set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },
   key_specs: { name: "FfiKeySpec", kind: "FFI key spec" },
+  key_formats: { name: "FfiKeyFormat", kind: "FFI key format" },
   namespace_descriptor_decode_statuses: {
     name: "FfiNamespaceDescriptorDecodeStatus",
     kind: "FFI namespace descriptor decode status",
@@ -1163,6 +1165,19 @@ function ffi_contract(
       FFI_ENUMS.key_specs.name,
       FFI_ENUMS.key_specs.kind,
     ),
+    // Older synthetic contract fixtures may not carry the optional client
+    // key-format enum yet; production Smithy models do. Keep extraction
+    // backwards-compatible while generated production output remains sourced
+    // from the enum when present.
+    key_formats:
+      shapes[`${namespace}#${FFI_ENUMS.key_formats.name}`] === undefined
+        ? []
+        : ffi_enum_entries(
+            shapes,
+            namespace,
+            FFI_ENUMS.key_formats.name,
+            FFI_ENUMS.key_formats.kind,
+          ),
     namespace_descriptor_fields: descriptor.fields,
     namespace_descriptor_layout: descriptor.layout,
     namespace_override_policies: ffi_enum_entries(

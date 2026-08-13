@@ -434,6 +434,13 @@ pub const FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()}: u32 = ${for
 pub const FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_key_formats = ffi.key_formats
+    .map(
+      (entry) =>
+        `/// Native FFI key-format identifier for ${entry.name}.
+pub const FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_namespace_descriptor_decode_statuses =
     ffi.namespace_descriptor_decode_statuses
       .map(
@@ -532,6 +539,7 @@ ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
 ${ffi_key_specs}
+${ffi_key_formats}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
 ${ffi_namespace_default_evictions}
@@ -579,6 +587,13 @@ ${rust_ffi_enum(
   "Native FFI logical-key specification identifiers shared by every language adapter.",
   "Native FFI key spec",
   ffi.key_specs,
+)}
+
+${rust_ffi_enum(
+  "FfiKeyFormat",
+  "Native FFI client-local key-format identifiers.",
+  "Native FFI key format",
+  ffi.key_formats,
 )}
 
 /// Current client-owned value-format version.
@@ -809,6 +824,10 @@ export function render_c_contract(contract: Client_Contract): string {
     ...ffi.key_specs.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.key_formats.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
     ...ffi.namespace_descriptor_decode_statuses.map(
       (entry) =>

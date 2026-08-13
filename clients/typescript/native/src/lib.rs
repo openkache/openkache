@@ -10,7 +10,7 @@ use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, Zs
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DataProtectionKey,
     DeleteOutcome, Endpoint, EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue,
-    KeyType, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy, PrivateKey,
+    KeyFormat, KeyType, NamespaceDescriptor, NamespacePolicy, Opcode, OverridePolicy, PrivateKey,
     ProtectedClient, ResolvedKey, RetryPolicy, SetCondition, SetOptions, SetOutcome,
     contract::{
         ConnectionState, SMITHY_EVICTION_DEFAULT_EVICTABLE,
@@ -66,6 +66,8 @@ pub struct NativeClientOptions {
     pub encryption: Option<String>,
     #[napi(js_name = "key_type")]
     pub key_type: Option<String>,
+    #[napi(js_name = "key_format")]
+    pub key_format: Option<String>,
 }
 
 /// Decoded components of a canonical OpenKache value envelope.
@@ -734,6 +736,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
     let encryption = parse_encryption(options.encryption.as_deref())?;
     let key_type = parse_key_type(options.key_type.as_deref())?;
+    let key_format = parse_key_format(options.key_format.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
@@ -744,6 +747,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .max_in_flight(max_in_flight)
         .encryption(encryption)
         .key_type(key_type);
+    builder = builder.key_format(key_format);
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);
     }
@@ -1088,6 +1092,16 @@ fn parse_key_type(key_type: Option<&str>) -> Result<KeyType> {
                 "key_type must be integer, text, or bytes, got {value}"
             ))
         }),
+    }
+}
+
+fn parse_key_format(key_format: Option<&str>) -> Result<KeyFormat> {
+    match key_format {
+        None | Some("hash") => Ok(KeyFormat::Hash),
+        Some("byte_key_or_hash") => Ok(KeyFormat::ByteKeyOrHash),
+        Some(value) => Err(invalid_argument(format!(
+            "key_format must be hash or byte_key_or_hash, got {value}"
+        ))),
     }
 }
 

@@ -52,6 +52,8 @@ interface Adapter_Contract_Values {
   readonly key_spec_text: number
   readonly key_spec_bytes: number
   readonly key_spec_integer: number
+  readonly key_format_hash: number
+  readonly key_format_byte_key_or_hash: number
   readonly set_inherit_expiration: number
   readonly set_no_expiry: number
   readonly set_explicit_ttl: number
@@ -132,6 +134,9 @@ export function adapter_contract_values(contract: Client_Contract): Adapter_Cont
       name,
       "FFI key-spec contract",
     ).value
+  const key_format = (name: string): number =>
+    contract.ffi.key_formats.find((entry) => entry.name === name)?.value ??
+    (name === "Hash" ? 0 : 1)
   const descriptor_decode = (name: string): number =>
     required_contract_entry(
       contract.ffi.namespace_descriptor_decode_statuses,
@@ -184,6 +189,8 @@ export function adapter_contract_values(contract: Client_Contract): Adapter_Cont
     key_spec_text: key_spec("Text"),
     key_spec_bytes: key_spec("Bytes"),
     key_spec_integer: key_spec("Integer"),
+    key_format_hash: key_format("Hash"),
+    key_format_byte_key_or_hash: key_format("ByteKeyOrHash"),
     set_inherit_expiration: contract.v1.set_inherit_expiration_bits,
     set_no_expiry: contract.v1.set_no_expiry_bits,
     set_explicit_ttl: contract.v1.set_ttl_flag,

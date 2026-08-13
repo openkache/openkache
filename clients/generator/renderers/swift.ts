@@ -212,6 +212,7 @@ ${assignments}
     ["result", ffi.result_kinds],
     ["setCondition", ffi.set_conditions],
     ["keySpec", ffi.key_specs],
+    ["keyFormat", ffi.key_formats],
     ["namespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
     ["namespaceDefaultExpiration", ffi.namespace_default_expirations],
     ["namespaceDefaultEviction", ffi.namespace_default_evictions],

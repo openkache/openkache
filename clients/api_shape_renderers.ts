@@ -605,6 +605,12 @@ ${contract.ffi.key_specs
       `export const SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
   )
   .join("\n")}
+${contract.ffi.key_formats
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.namespace_descriptor_decode_statuses
   .map(
     (entry) =>

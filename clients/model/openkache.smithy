@@ -333,7 +333,8 @@ structure valueEnvelope {
                 { name: "retryMaxAttempts", type: "size", mutable: false },
                 { name: "maxInFlight", type: "size", mutable: false },
                 { name: "connectTimeoutMilliseconds", type: "uint64", mutable: false },
-                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false }
+                { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false },
+                { name: "keyFormat", type: "uint32", mutable: false }
             ]
         },
         {
@@ -608,7 +609,8 @@ structure valueEnvelope {
                 { name: "connectTimeoutMilliseconds", type: "uint64", mutable: false },
                 { name: "requestTimeoutMilliseconds", type: "uint64", mutable: false },
                 { name: "retryMaxAttempts", type: "size", mutable: false },
-                { name: "maxInFlight", type: "size", mutable: false }
+                { name: "maxInFlight", type: "size", mutable: false },
+                { name: "keyFormat", type: "uint32", mutable: false }
             ]
         },
         {
@@ -784,6 +786,18 @@ enum FfiKeySpec {
 
     @ffiValue(value: 2)
     INTEGER = "integer"
+}
+
+/// Client-local application-key to Item ID mapping profile.
+///
+/// This discriminator is never sent on the wire. `HASH` is the compatibility
+/// default used by legacy native entry points.
+enum FfiKeyFormat {
+    @ffiValue(value: 0)
+    HASH = "hash"
+
+    @ffiValue(value: 1)
+    BYTE_KEY_OR_HASH = "byte_key_or_hash"
 }
 
 enum FfiConnectionState {

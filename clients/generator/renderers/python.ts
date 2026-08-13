@@ -770,6 +770,12 @@ SMITHY_FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}_NAME = ${JSO
         `SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
     )
     .join("\n")
+  const ffi_key_formats = contract.ffi.key_formats
+    .map(
+      (entry) =>
+        `SMITHY_FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+    )
+    .join("\n")
   const ffi_namespace_descriptor_decode_statuses =
     contract.ffi.namespace_descriptor_decode_statuses
       .map(
@@ -886,6 +892,7 @@ ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
 ${ffi_key_specs}
+${ffi_key_formats}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
 ${ffi_namespace_default_evictions}

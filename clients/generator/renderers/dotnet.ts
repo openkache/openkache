@@ -100,6 +100,7 @@ export function render_csharp(contract: Client_Contract): string {
     ["FfiConnection", ffi.connection_states],
     ["FfiSetCondition", ffi.set_conditions],
     ["FfiKeySpec", ffi.key_specs],
+    ["FfiKeyFormat", ffi.key_formats],
     ["FfiNamespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
     ["FfiNamespaceDefaultExpiration", ffi.namespace_default_expirations],
     ["FfiNamespaceDefaultEviction", ffi.namespace_default_evictions],

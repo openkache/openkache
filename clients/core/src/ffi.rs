@@ -31,7 +31,8 @@ pub use crate::contract::{
     FFI_NAMESPACE_OVERRIDE_DISALLOWED,
 };
 pub use crate::contract::{
-    FfiInputKind, FfiKeySpec, FfiOperation, FfiOperationContract, FfiResultKind, FfiSetCondition,
+    FfiInputKind, FfiKeyFormat, FfiKeySpec, FfiOperation, FfiOperationContract, FfiResultKind,
+    FfiSetCondition,
 };
 use crate::contract::{
     NAMESPACE_NAME_MAX_BYTES, VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE,
@@ -41,8 +42,9 @@ use crate::key::KeyInput;
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, Endpoint,
-    EvictionDefault, ExpirationDefault, GetOutcome, LocalProtectedClient, NamespacePolicy,
-    OverridePolicy, PrivateKey, RetryPolicy, ServerTrust, SetCondition, SetOptions, SetOutcome,
+    EvictionDefault, ExpirationDefault, GetOutcome, KeyFormat, LocalProtectedClient,
+    NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust, SetCondition,
+    SetOptions, SetOutcome,
 };
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
@@ -104,6 +106,9 @@ pub struct FfiConnectOptions {
     pub retry_max_attempts: usize,
     /// Maximum in-flight lanes; zero selects the core default.
     pub max_in_flight: usize,
+    /// Client-local application-key to Item ID mapping profile. Zero selects
+    /// the compatibility `Hash` profile.
+    pub key_format: u32,
 }
 
 /// One borrowed field span for the generic ordered-field native call.
@@ -195,6 +200,7 @@ struct WorkerOptions {
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+    key_format: KeyFormat,
 }
 
 impl FfiResult {
@@ -256,6 +262,7 @@ impl FfiClient {
         timeouts: ClientTimeouts,
         retry: RetryPolicy,
         max_in_flight: usize,
+        key_format: KeyFormat,
     ) -> std::result::Result<Self, String> {
         let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
@@ -276,6 +283,7 @@ impl FfiClient {
             timeouts,
             retry,
             max_in_flight,
+            key_format,
         };
         let worker = thread::Builder::new()
             .name("openkache-client".to_owned())
@@ -503,6 +511,7 @@ fn run_worker(
         timeouts,
         retry,
         max_in_flight,
+        key_format,
     } = options;
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -525,7 +534,8 @@ fn run_worker(
     .compression(compression)
     .timeouts(timeouts)
     .retry_policy(retry)
-    .max_in_flight(max_in_flight);
+    .max_in_flight(max_in_flight)
+    .key_format(key_format);
     if protected {
         builder = builder.encryption(encryption);
     }
@@ -1156,6 +1166,7 @@ pub unsafe extern "C" fn openkache_client_connect(
         request_timeout_ms,
         retry_max_attempts: 0,
         max_in_flight: 0,
+        key_format: 0,
     };
     boxed_result(catch_result(|| connect_options(&options)))
 }
@@ -1213,6 +1224,7 @@ pub unsafe extern "C" fn openkache_client_connect_ex(
         encryption,
         retry_max_attempts,
         max_in_flight,
+        key_format: 0,
         connect_timeout_ms,
         request_timeout_ms,
     };
@@ -1332,6 +1344,12 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
     } else {
         options.max_in_flight
     };
+    let key_format = match FfiKeyFormat::try_from(options.key_format)
+        .map_err(|value| format!("unsupported key format {value}"))?
+    {
+        FfiKeyFormat::Hash => KeyFormat::Hash,
+        FfiKeyFormat::ByteKeyOrHash => KeyFormat::ByteKeyOrHash,
+    };
     FfiClient::connect(
         endpoint,
         certificate,
@@ -1343,6 +1361,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         timeouts,
         retry,
         max_in_flight,
+        key_format,
     )
     .map(FfiResult::connected)
 }

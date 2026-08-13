@@ -149,6 +149,8 @@ export interface Client_Options {
   readonly encryption?: "compact" | "robust"
   /** Logical key representation used by every protected operation. Defaults to `text`. */
   readonly key_type?: Key_Type
+  /** Client-local Item ID mapping profile. Defaults to `hash`. */
+  readonly key_format?: Key_Format
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
   /** Explicit Node-API adapter path, primarily for custom packaging. */
@@ -157,6 +159,7 @@ export interface Client_Options {
 
 /** Logical key representation selected by a formatted client. */
 export type Key_Type = "integer" | "text" | "bytes"
+export type Key_Format = "hash" | "byte_key_or_hash"
 
 /** Native values accepted by a formatted client's logical-key boundary. */
 export type Client_Key = string | Uint8Array | number | bigint
@@ -264,6 +267,7 @@ export class OpenKache_Client {
     const timeouts = options.timeouts ?? {}
     const retry = options.retry ?? {}
     const key_type = options.key_type ?? "text"
+    const key_format = options.key_format ?? "hash"
     const native_options: Native_Client_Options = {
       address: options.address,
       server_name: options.server_name ?? SMITHY_CLIENT_DEFAULT_SERVER_NAME,
@@ -285,6 +289,7 @@ export class OpenKache_Client {
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
       key_type,
+      key_format,
     }
     try {
       const native_module = load_native_module(options.native_path)
