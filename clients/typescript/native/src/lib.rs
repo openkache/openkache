@@ -46,7 +46,7 @@ pub struct NativeClientOptions {
     pub certificate: Uint8Array,
     pub identity: Option<NativeIdentity>,
     #[napi(js_name = "data_protection_key")]
-    pub data_protection_key: Uint8Array,
+    pub data_protection_key: Option<Uint8Array>,
     #[napi(js_name = "compression_enabled")]
     pub compression_enabled: bool,
     #[napi(js_name = "compression_level")]
@@ -695,7 +695,11 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         )));
     }
 
-    let data_protection_key = DataProtectionKey::from_slice(options.data_protection_key.as_ref())
+    let data_protection_key = options
+        .data_protection_key
+        .as_ref()
+        .map(|key| DataProtectionKey::from_slice(key.as_ref()))
+        .transpose()
         .map_err(native_error)?;
     let compression = if options.compression_enabled {
         let defaults = ZstandardOptions::default();
@@ -738,19 +742,30 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .map(|value| parse_usize(value, "max_in_flight", false))
         .transpose()?
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT);
+    if data_protection_key.is_none() && options.encryption.is_some() {
+        return Err(invalid_argument(
+            "encryption requires data_protection_key",
+        ));
+    }
     let encryption = parse_encryption(options.encryption.as_deref())?;
     let key_type = parse_key_type(options.key_type.as_deref())?;
     let key_format = parse_key_format(options.key_format.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
-    let mut builder = ProtectedClient::builder(endpoint, data_protection_key)
+    let protected = data_protection_key.is_some();
+    let mut builder = match data_protection_key {
+        Some(key) => ProtectedClient::builder(endpoint, key),
+        None => ProtectedClient::builder_unprotected(endpoint),
+    }
         .trust_certificate(trusted_certificate)
         .compression(compression)
         .timeouts(timeouts)
         .retry_policy(retry)
         .max_in_flight(max_in_flight)
-        .encryption(encryption)
         .key_type(key_type);
+    if protected {
+        builder = builder.encryption(encryption);
+    }
     builder = builder.key_format(key_format);
     if let Some(identity) = identity {
         builder = builder.client_identity(identity);

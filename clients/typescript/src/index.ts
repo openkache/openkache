@@ -131,8 +131,8 @@ export interface Client_Options {
   readonly address: string
   /** Server or CA certificate trusted for the QUIC connection, encoded as DER or PEM. */
   readonly certificate: Uint8Array
-  /** Exact 32-byte master secret used to derive key-hiding and value-encryption subkeys. */
-  readonly data_protection_key: Uint8Array
+  /** Optional exact 32-byte root used to derive protected Item IDs and values. */
+  readonly data_protection_key?: Uint8Array
   /** TLS server name. Defaults to the shared contract value. */
   readonly server_name?: string
   /** Client certificate and private key required by production mutual TLS. */
@@ -273,7 +273,7 @@ export class OpenKache_Client {
       server_name: options.server_name ?? SMITHY_CLIENT_DEFAULT_SERVER_NAME,
       certificate: options.certificate.slice(),
       identity: owned_identity(options.identity),
-      data_protection_key: options.data_protection_key.slice(),
+      data_protection_key: options.data_protection_key?.slice(),
       compression_enabled: compression.enabled !== false,
       compression_level: compression.level ?? SMITHY_DEFAULT_ZSTANDARD_LEVEL,
       minimum_input_size:
@@ -994,11 +994,12 @@ function validate_options(options: Client_Options): void {
     throw new OpenKache_Error("certificate must be a non-empty Uint8Array")
   }
   if (
-    !(options.data_protection_key instanceof Uint8Array) ||
-    options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES
+    options.data_protection_key !== undefined &&
+    (!(options.data_protection_key instanceof Uint8Array) ||
+      options.data_protection_key.byteLength !== SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES)
   ) {
     throw new OpenKache_Error(
-      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes`,
+      `data_protection_key must contain exactly ${SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes when supplied`,
     )
   }
   if (

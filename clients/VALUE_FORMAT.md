@@ -226,6 +226,12 @@ OpenKache format number. The registry maps the ID to the application payload
 grammar and decoder. The remaining `application_payload` bytes belong to that
 format and MAY be empty. Participants that exchange application-defined values
 MUST configure the same ID-to-format mapping.
+
+The core JSON compatibility API reserves `application_format_id = 0` for
+canonical RFC 8785 JSON. A v1 client that exposes `Value::Json` MUST recognize
+this built-in mapping without requiring an application registry entry; clients
+that do not expose that API MUST reject ID `0` as unknown. Applications MUST
+use a non-zero ID for every other application-defined format.
 Unknown IDs, malformed `vu128` encodings, and payloads rejected by the
 selected application format MUST be rejected.
 
