@@ -44,8 +44,8 @@ export interface Value_Format_Contract {
   readonly robust_context: string
   readonly robust_nonce_bytes: number
   readonly robust_tag_bytes: number
-  readonly serialization_json: number
-  readonly serialization_raw: number
+  readonly serialization_cbor: number
+  readonly serialization_opaque_bytes: number
   readonly value_root_context: string
   readonly max_vu128_bytes: number
   readonly version: number
@@ -859,16 +859,16 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       VALUE_FORMAT_TRAIT_ID,
       1,
     ),
-    serialization_json: integer_member(
+    serialization_cbor: integer_member(
       contract,
-      "serializationJson",
+      "serializationCbor",
       VALUE_FORMAT_TRAIT_ID,
       0,
       0xff,
     ),
-    serialization_raw: integer_member(
+    serialization_opaque_bytes: integer_member(
       contract,
-      "serializationRaw",
+      "serializationOpaqueBytes",
       VALUE_FORMAT_TRAIT_ID,
       0,
       0xff,
@@ -883,8 +883,8 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       contract,
       "maxVu128Bytes",
       VALUE_FORMAT_TRAIT_ID,
-      17,
-      17,
+      9,
+      9,
     ),
   } satisfies Value_Format_Contract
 
@@ -933,8 +933,8 @@ function value_format_contract(value: unknown): Value_Format_Contract {
 
   unique_wire_values(
     [
-      { name: "Raw", value: values.serialization_raw },
-      { name: "Json", value: values.serialization_json },
+      { name: "OpaqueBytes", value: values.serialization_opaque_bytes },
+      { name: "CBOR", value: values.serialization_cbor },
     ],
     "serialization",
   )
@@ -1704,10 +1704,13 @@ pub const VALUE_FORMAT_FORMAT_BYTE_BYTES: usize = ${formatted_decimal(value.form
 pub const VALUE_FORMAT_COMPRESSION_MASK: u8 = ${formatted_byte(value.format_compression_mask)};
 /// Number of bits to shift the value-format encryption identifier.
 pub const VALUE_FORMAT_ENCRYPTION_SHIFT: u8 = ${formatted_byte(value.format_encryption_shift)};
-/// Raw serialized-value identifier.
-pub const VALUE_FORMAT_SERIALIZATION_RAW: u8 = ${formatted_byte(value.serialization_raw)};
-/// Canonical JSON serialized-value identifier.
-pub const VALUE_FORMAT_SERIALIZATION_JSON: u8 = ${formatted_byte(value.serialization_json)};
+/// OpaqueBytes payload-format identifier.
+pub const VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES: u8 = ${formatted_byte(value.serialization_opaque_bytes)};
+/// CBOR payload-format identifier.
+pub const VALUE_FORMAT_PAYLOAD_CBOR: u8 = ${formatted_byte(value.serialization_cbor)};
+// Compatibility aliases retained for generated consumers of the draft API.
+pub const VALUE_FORMAT_SERIALIZATION_RAW: u8 = VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES;
+pub const VALUE_FORMAT_SERIALIZATION_JSON: u8 = VALUE_FORMAT_PAYLOAD_CBOR;
 /// Uncompressed value-format identifier.
 pub const VALUE_FORMAT_COMPRESSION_NONE: u8 = ${formatted_byte(value.compression_none)};
 /// Zstandard value-format identifier.
@@ -1817,6 +1820,10 @@ export function render_c_contract(contract: Client_Contract): string {
     ...ffi.set_conditions.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.key_specs.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
     ...ffi.namespace_descriptor_decode_statuses.map(
       (entry) =>
@@ -1944,8 +1951,8 @@ ${ffi_defines}
 #define OPENKACHE_SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES ${value.format_byte_bytes}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_COMPRESSION_MASK ${formatted_byte(value.format_compression_mask)}u
 #define OPENKACHE_SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT ${formatted_byte(value.format_encryption_shift)}u
-#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_RAW ${formatted_byte(value.serialization_raw)}u
-#define OPENKACHE_SMITHY_VALUE_SERIALIZATION_JSON ${formatted_byte(value.serialization_json)}u
+#define OPENKACHE_SMITHY_VALUE_PAYLOAD_OPAQUE_BYTES ${formatted_byte(value.serialization_opaque_bytes)}u
+#define OPENKACHE_SMITHY_VALUE_PAYLOAD_CBOR ${formatted_byte(value.serialization_cbor)}u
 #define OPENKACHE_SMITHY_VALUE_COMPRESSION_NONE ${formatted_byte(value.compression_none)}u
 #define OPENKACHE_SMITHY_VALUE_COMPRESSION_ZSTANDARD ${formatted_byte(value.compression_zstandard)}u
 #define OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE ${formatted_byte(value.encryption_none)}u
@@ -2114,8 +2121,8 @@ ${csharp_descriptor_offsets}
     internal const int ValueFormatFormatByteBytes = ${formatted_decimal(value.format_byte_bytes)};
     internal const byte ValueFormatCompressionMask = ${formatted_byte(value.format_compression_mask)};
     internal const byte ValueFormatEncryptionShift = ${formatted_byte(value.format_encryption_shift)};
-    internal const byte ValueFormatSerializationRaw = ${formatted_byte(value.serialization_raw)};
-    internal const byte ValueFormatSerializationJson = ${formatted_byte(value.serialization_json)};
+    internal const byte ValueFormatPayloadOpaqueBytes = ${formatted_byte(value.serialization_opaque_bytes)};
+    internal const byte ValueFormatPayloadCbor = ${formatted_byte(value.serialization_cbor)};
     internal const byte ValueFormatCompressionNone = ${formatted_byte(value.compression_none)};
     internal const byte ValueFormatCompressionZstandard = ${formatted_byte(value.compression_zstandard)};
     internal const byte ValueFormatEncryptionNone = ${formatted_byte(value.encryption_none)};
@@ -2955,8 +2962,8 @@ SMITHY_VALUE_FORMAT_MAX_VU128_BYTES = ${value.max_vu128_bytes}
 SMITHY_VALUE_FORMAT_FORMAT_BYTE_BYTES = ${value.format_byte_bytes}
 SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_mask}
 SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
-SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
-SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+SMITHY_VALUE_PAYLOAD_OPAQUE_BYTES = ${value.serialization_opaque_bytes}
+SMITHY_VALUE_PAYLOAD_CBOR = ${value.serialization_cbor}
 SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 SMITHY_VALUE_COMPRESSION_ZSTANDARD = ${value.compression_zstandard}
 SMITHY_VALUE_ENCRYPTION_NONE = ${value.encryption_none}
@@ -3240,8 +3247,8 @@ public enum Smithy_Value_Format: Sendable {
   public static let setIfPresentFlag: UInt8 = ${contract.v1.set_if_present_flag}
   public static let formatCompressionMask: UInt8 = ${value.format_compression_mask}
   public static let formatEncryptionShift: UInt8 = ${value.format_encryption_shift}
-  public static let serializationRaw: UInt8 = ${value.serialization_raw}
-  public static let serializationJson: UInt8 = ${value.serialization_json}
+  public static let payloadOpaqueBytes: UInt8 = ${value.serialization_opaque_bytes}
+  public static let payloadCbor: UInt8 = ${value.serialization_cbor}
   public static let compressionNone: UInt8 = ${value.compression_none}
   public static let compressionZstandard: UInt8 = ${value.compression_zstandard}
   public static let encryptionNone: UInt8 = ${value.encryption_none}
@@ -3302,9 +3309,9 @@ export const SMITHY_VALUE_FORMAT_COMPRESSION_MASK = ${value.format_compression_m
 /** Number of bits to shift the value-format encryption identifier. */
 export const SMITHY_VALUE_FORMAT_ENCRYPTION_SHIFT = ${value.format_encryption_shift}
 /** Raw serialized-value identifier. */
-export const SMITHY_VALUE_SERIALIZATION_RAW = ${value.serialization_raw}
+export const SMITHY_VALUE_PAYLOAD_OPAQUE_BYTES = ${value.serialization_opaque_bytes}
 /** Canonical JSON serialized-value identifier. */
-export const SMITHY_VALUE_SERIALIZATION_JSON = ${value.serialization_json}
+export const SMITHY_VALUE_PAYLOAD_CBOR = ${value.serialization_cbor}
 /** Uncompressed value-format identifier. */
 export const SMITHY_VALUE_COMPRESSION_NONE = ${value.compression_none}
 /** Zstandard value-format identifier. */

@@ -23,7 +23,9 @@ use crate::contract::{
     VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
     VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_COMPRESSION_ZSTANDARD,
     VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES, VALUE_FORMAT_FORMAT_BYTE_BYTES,
+    VALUE_FORMAT_MAX_VU128_BYTES, VALUE_FORMAT_PAYLOAD_CBOR, VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES,
     VALUE_FORMAT_ROBUST_CONTEXT, VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES,
+    VALUE_FORMAT_VERSION, VALUE_FORMAT_VERSION_BYTES,
 };
 use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 
@@ -38,18 +40,17 @@ const RESERVED_MASK: u8 = 0xc0;
 const PROTECTION_UNPROTECTED: u8 = 0;
 const PROTECTION_AES_GCM_SIV: u8 = 1;
 const PROTECTION_AES_SIV_CMAC: u8 = 2;
-const PAYLOAD_OPAQUE_BYTES: u8 = 0;
-const PAYLOAD_CBOR: u8 = 1;
-const PAYLOAD_APPLICATION_DEFINED: u8 = 2;
-const MAX_VU128_BYTES: usize = 9;
+const PAYLOAD_OPAQUE_BYTES: u8 = VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES;
+const PAYLOAD_CBOR: u8 = VALUE_FORMAT_PAYLOAD_CBOR;
+const MAX_VU128_BYTES: usize = VALUE_FORMAT_MAX_VU128_BYTES;
 
 /// Current value-format version.
-pub const VERSION: u64 = 1;
+pub const VERSION: u64 = VALUE_FORMAT_VERSION as u64;
 
 /// Bytes required for an application data protection key.
 pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
-const VERSION_BYTES: &[u8] = &[1];
+const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
 const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
 const NAMESPACE_ID_BYTES: usize = std::mem::size_of::<u64>();
 const BINARY64_SIGNIFICAND_BITS: u32 = 53;
@@ -326,6 +327,9 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     /// Exact application bytes (the v1 `OpaqueBytes` payload format).
+    ///
+    /// `Raw` is retained as the Rust API spelling for backwards compatibility;
+    /// it is encoded with the `OpaqueBytes` payload-format selector.
     Raw(Vec<u8>),
     /// Exact CBOR bytes containing one accepted CBOR data item.
     ///
@@ -585,6 +589,22 @@ impl ValueCodec {
         self.encode_in_namespace_with_profile(namespace_id, item_id, value, self.encryption)
     }
 
+    /// Encodes a logical JSON value as canonical RFC 8785 UTF-8
+    /// `OpaqueBytes`.
+    pub fn encode_json(&self, item_id: ItemId, value: JsonValue) -> Result<ItemValue> {
+        self.encode_json_in_namespace(1, item_id, value)
+    }
+
+    /// Encodes a logical JSON value in a namespace as canonical `OpaqueBytes`.
+    pub fn encode_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: JsonValue,
+    ) -> Result<ItemValue> {
+        self.encode_in_namespace(namespace_id, item_id, Value::Json(value))
+    }
+
     /// Encodes a value using a per-operation protection profile.
     ///
     /// The profile is not persisted on the codec. Protected profiles require
@@ -653,12 +673,12 @@ impl ValueCodec {
         Ok(ItemValue::new(encoded))
     }
 
-    /// Encodes exact application bytes as the standard Raw serialization.
+    /// Encodes exact application bytes as the `OpaqueBytes` payload format.
     ///
     /// # Arguments
     ///
     /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `plaintext` - Exact application bytes to copy into Raw serialization.
+    /// * `plaintext` - Exact application bytes to copy into `OpaqueBytes`.
     ///
     /// # Returns
     ///
@@ -682,12 +702,12 @@ impl ValueCodec {
         self.encode_in_namespace(namespace_id, item_id, Value::Raw(plaintext.to_vec()))
     }
 
-    /// Encodes owned application bytes as the standard Raw serialization.
+    /// Encodes owned application bytes as the `OpaqueBytes` payload format.
     ///
     /// # Arguments
     ///
     /// * `item_id` - Exact item ID bound into authenticated encryption.
-    /// * `plaintext` - Owned application bytes to use as Raw serialization.
+    /// * `plaintext` - Owned application bytes to use as `OpaqueBytes`.
     ///
     /// # Returns
     ///
@@ -738,6 +758,24 @@ impl ValueCodec {
         encoded: ItemValue,
     ) -> Result<Value> {
         self.decode_in_namespace_with_profile(namespace_id, item_id, encoded, self.encryption)
+    }
+
+    /// Decodes and parses canonical JSON stored as `OpaqueBytes`.
+    pub fn decode_json(&self, item_id: ItemId, encoded: ItemValue) -> Result<JsonValue> {
+        self.decode_json_in_namespace(1, item_id, encoded)
+    }
+
+    /// Decodes and parses canonical JSON in a namespace.
+    pub fn decode_json_in_namespace(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+    ) -> Result<JsonValue> {
+        match self.decode_in_namespace(namespace_id, item_id, encoded)? {
+            Value::Raw(payload) => decode_json(&payload),
+            Value::Cbor(_) | Value::Json(_) => Err(Error::ExpectedRawValue),
+        }
     }
 
     /// Decodes a value while requiring the supplied per-operation profile.
@@ -851,7 +889,7 @@ impl ValueCodec {
         Ok(())
     }
 
-    /// Decodes a formatted Raw value and returns its exact application bytes.
+    /// Decodes a formatted `OpaqueBytes` value and returns its exact application bytes.
     ///
     /// # Arguments
     ///
@@ -860,16 +898,16 @@ impl ValueCodec {
     ///
     /// # Returns
     ///
-    /// The exact Raw serialization payload.
+    /// The exact `OpaqueBytes` payload.
     ///
     /// # Errors
     ///
-    /// Returns an error for any value-format failure or a non-Raw serialization.
+    /// Returns an error for any value-format failure or a non-`OpaqueBytes` payload.
     pub fn open(&self, item_id: ItemId, encoded: ItemValue) -> Result<Vec<u8>> {
         self.open_in_namespace(1, item_id, encoded)
     }
 
-    /// Authenticates and opens a Raw value bound to a namespace and Item ID.
+    /// Authenticates and opens an `OpaqueBytes` value bound to a namespace and Item ID.
     pub fn open_in_namespace(
         &self,
         namespace_id: u64,
@@ -878,7 +916,7 @@ impl ValueCodec {
     ) -> Result<Vec<u8>> {
         match self.decode_in_namespace(namespace_id, item_id, encoded)? {
             Value::Raw(bytes) => Ok(bytes),
-            _ => Err(Error::ExpectedRawValue),
+            Value::Cbor(_) | Value::Json(_) => Err(Error::ExpectedRawValue),
         }
     }
 
@@ -1127,8 +1165,8 @@ pub enum Error {
     /// The CBOR payload is malformed or outside the v1 acceptance profile.
     #[error("invalid CBOR payload: {0}")]
     InvalidCbor(String),
-    /// The caller requested Raw bytes from another serialization.
-    #[error("formatted value is not Raw serialization")]
+    /// The caller requested opaque bytes from another payload format.
+    #[error("formatted value is not OpaqueBytes")]
     ExpectedRawValue,
     /// JSON could not be represented by the common logical model.
     #[error("invalid canonical JSON: {0}")]

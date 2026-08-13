@@ -14,6 +14,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
+pub use crate::contract::FfiKeySpec;
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::{
     FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE, FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
@@ -32,6 +33,8 @@ pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
+use crate::key::KeySpace;
+use crate::protocol::SetWireOptions;
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
     Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtectionKey, DeleteOutcome,
@@ -39,6 +42,7 @@ use crate::{
     LocalProtectedClient, NamespacePolicy, OverridePolicy, PrivateKey, RetryPolicy, ServerTrust,
     SetCondition, SetOptions, SetOutcome,
 };
+use openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
 
 /// Opaque result allocated by the native ABI.
@@ -903,7 +907,8 @@ fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, cra
                 serde_json_canonicalizer::to_vec(&value)
                     .map(|payload| FfiResult::success(FfiResultKind::Value, payload))
                     .map_err(|error| crate::value::Error::InvalidJson(error.to_string()))
-            }),
+            })
+            .map_err(Into::into),
         GetOutcome::Found(Value::Cbor(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
         GetOutcome::NotFound => Ok(not_found_result()),
     }
@@ -1301,6 +1306,74 @@ pub unsafe extern "C" fn openkache_client_execute_raw_with_options(
     )
 }
 
+/// Executes one typed protected operation using a logical key and explicit
+/// `FfiKeySpec` representation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    let key_spec = match FfiKeySpec::try_from(key_spec) {
+        Ok(spec) => spec,
+        Err(value) => return boxed_result(FfiResult::error(format!("unsupported key spec {value}"))),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        None,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+    )
+}
+
+/// Executes one typed protected operation with a complete wire SET policy.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed_with_options(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+) -> *mut FfiResult {
+    let key_spec = match FfiKeySpec::try_from(key_spec) {
+        Ok(spec) => spec,
+        Err(value) => return boxed_result(FfiResult::error(format!("unsupported key spec {value}"))),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        Some((set_flags, ttl_ms)),
+        FfiSetCondition::Any as u32,
+        0,
+        0,
+    )
+}
+
 /// Executes one exact-item-ID operation in an explicitly supplied namespace.
 ///
 /// `set_flags` is the complete wire SET flag byte. It is ignored for operations other than SET,
@@ -1547,6 +1620,7 @@ fn execute_entry(
         value_length,
         raw,
         None,
+        None,
         set_condition,
         ttl_enabled,
         ttl_ms,
@@ -1572,6 +1646,7 @@ fn execute_entry_with_flags(
         value,
         value_length,
         raw,
+        None,
         Some((set_flags, ttl_ms)),
         FfiSetCondition::Any as u32,
         0,
@@ -1588,6 +1663,7 @@ fn execute_entry_inner(
     value: *const u8,
     value_length: usize,
     raw: bool,
+    key_spec: Option<FfiKeySpec>,
     complete_flags: Option<(u8, u64)>,
     set_condition: u32,
     ttl_enabled: u8,
@@ -1604,6 +1680,16 @@ fn execute_entry_inner(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
+        let application_key = match key_spec {
+            Some(key_spec) if raw => {
+                return Err("typed key inputs are only valid for protected operations".to_owned());
+            }
+            Some(key_spec) => KeySpace::new(key_spec.into())
+                .resolve_logical_bytes(&application_key)
+                .map_err(|error| error.to_string())?
+                .into_canonical_bytes(),
+            None => application_key,
+        };
         if raw && matches!(operation, FfiOperation::GetJson | FfiOperation::SetJson) {
             return Err("exact item-ID calls do not support formatted JSON operations".to_owned());
         }

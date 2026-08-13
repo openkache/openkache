@@ -1,161 +1,231 @@
-//! Client-owned domain values and request projection.
+//! Client-owned request and domain codecs.
 //!
-//! The neutral protocol crate owns operation identifiers, frame plans, and
-//! reusable codecs. This module owns Rust client semantics and selects the
-//! compact-v1 adapter only for operations that explicitly join that profile.
+//! The public protocol crate only finds opaque frame boundaries.  This module
+//! is the Rust client's semantic adapter: it validates the modeled request
+//! shapes and encodes namespace policy and SET options.
 
 use std::sync::Arc;
 
+use openkache_protocol::compat_v1::{
+    POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED, POLICY_EXPIRATION_OVERRIDE,
+    POLICY_FIXED_TTL, POLICY_FLAGS_BYTES, POLICY_NO_EXPIRY, SET_CONDITION_ANY_BITS,
+    SET_EVICTABLE_BITS, SET_EVICTION_PROTECTED_BITS, SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS,
+    SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS, SET_INHERIT_EXPIRATION_BITS,
+    SET_NO_EXPIRY_BITS,
+};
 use openkache_protocol::{
     ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES,
     NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming, OwnedFrame,
-    WireSegment, decode_planned_fields, encode_varuint, operation_wire_spec,
+    WireSegment, decode_planned_fields, decode_varuint, encode_varuint, operation_wire_spec,
 };
 
-#[path = "protocol_compat_v1.rs"]
-mod compat_v1;
-
-/// Client-side protocol validation failures.
+/// Client-adapter validation errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
-    /// A neutral wire primitive rejected the frame or payload.
-    #[error(transparent)]
-    Wire(#[from] openkache_protocol::ProtocolError),
-    /// A request contains reserved compatibility bits.
+    #[error("unknown opcode 0x{0:02x}")]
+    UnknownOpcode(u8),
+    #[error("unknown status 0x{0:02x}")]
+    UnknownStatus(u8),
+    #[error("frame is too short: expected at least {expected} bytes, got {actual}")]
+    FrameTooShort { expected: usize, actual: usize },
+    #[error("frame length does not match header: expected {expected} bytes, got {actual}")]
+    FrameLength { expected: usize, actual: usize },
+    #[error("frame length overflow")]
+    FrameLengthOverflow,
+    #[error("{context} uses a non-canonical vu128 encoding")]
+    NonCanonicalVaruint { context: &'static str },
+    #[error("{context} exceeds the supported 64-bit vu128 range")]
+    VaruintOverflow { context: &'static str },
+    #[error("value is too large: {size} bytes exceeds {maximum}")]
+    ValueTooLarge { size: usize, maximum: usize },
     #[error("request flags contain unknown bits 0x{0:02x}")]
     UnknownRequestFlags(u8),
-    /// SET combines mutually exclusive existence conditions.
     #[error("if-absent and if-present conditions cannot be combined")]
     ConflictingSetConditions,
-    /// A generated field codec rejected its value.
-    #[error("invalid operation field codec: {0}")]
-    InvalidFieldCodec(String),
-    /// A request does not match its generated or compatibility shape.
-    #[error("{opcode:?} requires request shape ({expected_item_ids} item IDs, {expected_value})")]
-    InvalidRequestShape {
-        /// Operation whose request was invalid.
-        opcode: Opcode,
-        /// Required number of item identifiers.
-        expected_item_ids: usize,
-        /// Required value shape.
-        expected_value: &'static str,
-    },
-    /// SET carries a zero TTL.
-    #[error("SET TTL must be greater than zero milliseconds")]
-    InvalidSetTtl,
-    /// Explicit TTL mode omitted its TTL.
-    #[error("SET TTL is required by ExplicitTtl")]
-    MissingSetTtl,
-    /// A non-TTL expiration mode carried a TTL.
-    #[error("SET TTL is not allowed by this expiration mode")]
-    UnexpectedSetTtl,
-    /// SET flags do not represent one valid option tuple.
-    #[error("SET options are invalid")]
-    InvalidSetOptions,
-    /// A scoped request omitted its namespace ID.
-    #[error("namespace ID is missing")]
-    MissingNamespaceId,
-    /// Namespace IDs must be non-zero.
-    #[error("namespace ID must be a positive non-zero u64")]
-    InvalidNamespaceId,
-    /// A namespace name violates compact-v1 requirements.
-    #[error("namespace name is invalid: {0}")]
-    InvalidNamespaceName(&'static str),
-    /// Namespace creation or update omitted its policy.
-    #[error("namespace policy is missing")]
-    MissingNamespacePolicy,
-    /// A non-creating namespace open carried a policy.
-    #[error("namespace policy is not allowed")]
-    UnexpectedNamespacePolicy,
-    /// Namespace policy bits or TTL are invalid.
-    #[error("namespace policy is invalid: {0}")]
-    InvalidNamespacePolicy(&'static str),
-    /// Namespace revisions must be non-zero.
-    #[error("namespace revision must be positive")]
-    InvalidRevision,
-    /// A generic request uses a response-only or otherwise invalid layout.
+    #[error("invalid optional-values payload: {0}")]
+    InvalidOptionalValues(&'static str),
     #[error("invalid operation field sequence: {0}")]
     InvalidFieldSequence(&'static str),
+    #[error("invalid operation field codec: {0}")]
+    InvalidFieldCodec(&'static str),
+    #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
+    InvalidRequestShape {
+        opcode: Opcode,
+        expected_item_id: usize,
+        expected_value: &'static str,
+    },
+    #[error("SET TTL must be greater than zero milliseconds")]
+    InvalidSetTtl,
+    #[error("SET TTL is required by ExplicitTtl")]
+    MissingSetTtl,
+    #[error("SET TTL is not allowed by this expiration mode")]
+    UnexpectedSetTtl,
+    #[error("SET options are not valid for {opcode:?}")]
+    InvalidSetOptions { opcode: Opcode },
+    #[error("namespace ID is missing")]
+    MissingNamespaceId,
+    #[error("namespace ID must be a positive non-zero u64")]
+    InvalidNamespaceId,
+    #[error("namespace name is invalid: {0}")]
+    InvalidNamespaceName(&'static str),
+    #[error("namespace policy is missing")]
+    MissingNamespacePolicy,
+    #[error("namespace policy is not allowed")]
+    UnexpectedNamespacePolicy,
+    #[error("namespace policy is invalid: {0}")]
+    InvalidNamespacePolicy(&'static str),
+    #[error("namespace revision must be positive")]
+    InvalidRevision,
+}
+
+impl From<openkache_protocol::ProtocolError> for ProtocolError {
+    fn from(error: openkache_protocol::ProtocolError) -> Self {
+        match error {
+            openkache_protocol::ProtocolError::UnknownOpcode(value) => Self::UnknownOpcode(value),
+            openkache_protocol::ProtocolError::UnknownStatus(value) => Self::UnknownStatus(value),
+            openkache_protocol::ProtocolError::FrameTooShort { expected, actual } => {
+                Self::FrameTooShort { expected, actual }
+            }
+            openkache_protocol::ProtocolError::FrameLength { expected, actual } => {
+                Self::FrameLength { expected, actual }
+            }
+            openkache_protocol::ProtocolError::FrameLengthOverflow => Self::FrameLengthOverflow,
+            openkache_protocol::ProtocolError::NonCanonicalVaruint { context } => {
+                Self::NonCanonicalVaruint { context }
+            }
+            openkache_protocol::ProtocolError::VaruintOverflow { context } => {
+                Self::VaruintOverflow { context }
+            }
+            openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
+                Self::ValueTooLarge { size, maximum }
+            }
+            openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
+                Self::InvalidOptionalValues(message)
+            }
+            openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
+                Self::InvalidFieldSequence(message)
+            }
+            openkache_protocol::ProtocolError::InvalidItemIdLength { .. } => {
+                Self::InvalidFieldSequence("item ID length is outside the wire limit")
+            }
+        }
+    }
 }
 
 type Result<T> = std::result::Result<T, ProtocolError>;
 
-/// Condition applied atomically by a SET request.
+const MAX_POLICY_BYTES: usize = POLICY_FLAGS_BYTES + openkache_protocol::MAX_VARUINT_BYTES;
+#[path = "protocol_adapters.rs"]
+mod adapters;
+#[path = "protocol_compat_v1.rs"]
+pub(crate) mod compat_v1;
+#[path = "protocol_generic.rs"]
+pub(crate) mod generic;
+pub(crate) use self::compat_v1::{
+    compact_item_count, uses_compact_item_route, uses_compact_namespace_route,
+};
+pub use self::generic::OperationFields;
+pub(crate) use self::generic::{decode_response_fields_view, validate_operation_field};
+
+/// Builds one protocol-v1 request from the generated operation contract.
+///
+/// The caller supplies only the generic request inputs. Framing selection and
+/// the compact namespace/item/SET projection stay in this adapter so the
+/// client execution surface does not grow a route family for each API.
+pub(crate) fn request_from_contract(
+    operation: Opcode,
+    namespace_id: Option<u64>,
+    item_id: &[u8],
+    value: Vec<u8>,
+    set_options: crate::SetOptions,
+) -> crate::Result<Request> {
+    adapters::request_from_contract(operation, namespace_id, item_id, value, set_options)
+}
+
+/// Builds a request for a generic unary operation from its already encoded
+/// body.
+///
+/// This is the neutral client boundary: callers provide only the opcode and
+/// the operation body. Namespace IDs, item IDs, and SET options belong to the
+/// protocol-v1 compatibility adapter and are intentionally unavailable here;
+/// a compatibility opcode reports that generic unary requests cannot use the
+/// compact protocol-v1 projection.
+pub(crate) fn request_from_unary(operation: Opcode, body: Vec<u8>) -> crate::Result<Request> {
+    adapters::request_from_unary(operation, body)
+}
+
+/// Builds an ordered-field request from values already validated by the
+/// generated descriptor.
+pub(crate) fn request_from_fields(
+    operation: Opcode,
+    fields: Vec<Option<Vec<u8>>>,
+) -> crate::Result<Request> {
+    adapters::request_from_fields(operation, fields)
+}
+
+/// Condition applied atomically by a `SET` request.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SetCondition {
-    /// Store regardless of whether the item exists.
+    /// Store regardless of whether the item ID exists.
     #[default]
     Any,
-    /// Store only when the item does not exist.
+    /// Store only when the item ID does not exist.
     IfAbsent,
-    /// Store only when the item already exists.
+    /// Store only when the item ID already exists.
     IfPresent,
 }
 
 /// Item-level expiration selection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ExpirationMode {
-    /// Resolve the namespace default at the SET linearization point.
+    /// Resolve the namespace's current default at the SET linearization point.
     #[default]
     Inherit,
     /// Store without a TTL deadline.
     NoExpiry,
-    /// Carry a positive TTL in the SET request.
+    /// Carry a positive `ttl_ms` in the SET request.
     ExplicitTtl,
 }
 
 /// Item-level capacity-eviction selection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum EvictionMode {
-    /// Resolve the namespace default at the SET linearization point.
+    /// Resolve the namespace's current default at the SET linearization point.
     #[default]
     Inherit,
     /// Permit selection by the namespace eviction algorithm.
     Evictable,
-    /// Exclude the item from capacity eviction.
+    /// Do not select this item for capacity eviction.
     EvictionProtected,
 }
 
-/// Whether a namespace permits an item-level override.
+/// Whether a namespace permits an item to override its default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverridePolicy {
-    /// Item-level overrides are accepted.
     Allowed,
-    /// Item-level overrides are rejected.
     Disallowed,
 }
 
 /// Namespace expiration default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExpirationDefault {
-    /// Items do not expire by default.
     NoExpiry,
-    /// Items inherit one positive fixed TTL.
-    FixedTtl {
-        /// Default relative TTL in milliseconds.
-        ttl_ms: u64,
-    },
+    FixedTtl { ttl_ms: u64 },
 }
 
 /// Namespace capacity-eviction default.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EvictionDefault {
-    /// Items may be selected for capacity eviction.
     Evictable,
-    /// Items are protected from capacity eviction.
     EvictionProtected,
 }
 
 /// Policy applied to newly written items in one namespace.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamespacePolicy {
-    /// Default expiration applied at SET time.
     pub default_expiration: ExpirationDefault,
-    /// Whether an item may override expiration.
     pub expiration_override: OverridePolicy,
-    /// Default capacity-eviction behavior.
     pub default_eviction: EvictionDefault,
-    /// Whether an item may override eviction behavior.
     pub eviction_override: OverridePolicy,
 }
 
@@ -170,28 +240,16 @@ impl Default for NamespacePolicy {
     }
 }
 
-/// Namespace identity and policy returned by namespace operations.
+/// Namespace identity and policy returned by namespace-management operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamespaceDescriptor {
-    /// Server-assigned namespace identity.
     pub namespace_id: u64,
-    /// Monotonic policy revision.
     pub revision: u64,
-    /// Current namespace policy.
     pub policy: NamespacePolicy,
 }
 
 impl NamespaceDescriptor {
-    /// Encodes one compact-v1 namespace descriptor.
-    ///
-    /// # Returns
-    ///
-    /// The exact compatibility payload.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for zero identifiers or revisions and invalid policy
-    /// values.
+    /// Encodes the descriptor payload returned by namespace-management requests.
     pub fn encode(self) -> Result<Vec<u8>> {
         if self.namespace_id == 0 {
             return Err(ProtocolError::InvalidNamespaceId);
@@ -199,37 +257,22 @@ impl NamespaceDescriptor {
         if self.revision == 0 {
             return Err(ProtocolError::InvalidRevision);
         }
-        let policy = self.policy.encode()?;
         let mut payload =
-            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + policy.len());
+            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
         payload.extend_from_slice(&self.namespace_id.to_be_bytes());
         payload.extend_from_slice(&self.revision.to_be_bytes());
-        payload.extend_from_slice(&policy);
+        payload.extend_from_slice(&self.policy.encode()?);
         Ok(payload)
     }
 
-    /// Decodes one complete compact-v1 namespace descriptor.
-    ///
-    /// # Arguments
-    ///
-    /// * `input` - Exact response payload bytes.
-    ///
-    /// # Returns
-    ///
-    /// The validated descriptor.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for truncation, trailing bytes, zero identifiers or
-    /// revisions, and invalid policy values.
+    /// Decodes one complete namespace descriptor payload.
     pub fn decode(input: &[u8]) -> Result<Self> {
         let fixed = NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
         if input.len() < fixed {
-            return Err(openkache_protocol::ProtocolError::FrameTooShort {
+            return Err(ProtocolError::FrameTooShort {
                 expected: fixed,
                 actual: input.len(),
-            }
-            .into());
+            });
         }
         let namespace_id = read_u64_be(input)?;
         if namespace_id == 0 {
@@ -242,11 +285,10 @@ impl NamespaceDescriptor {
         let (policy, policy_len) = compat_v1::decode_namespace_policy(&input[fixed..])?
             .ok_or(ProtocolError::MissingNamespacePolicy)?;
         if fixed + policy_len != input.len() {
-            return Err(openkache_protocol::ProtocolError::FrameLength {
+            return Err(ProtocolError::FrameLength {
                 expected: fixed + policy_len,
                 actual: input.len(),
-            }
-            .into());
+            });
         }
         Ok(Self {
             namespace_id,
@@ -257,43 +299,58 @@ impl NamespaceDescriptor {
 }
 
 impl NamespacePolicy {
-    /// Encodes the compact-v1 namespace policy.
-    ///
-    /// # Returns
-    ///
-    /// The exact compatibility policy bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a fixed TTL is zero.
+    /// Encodes the namespace policy payload.
     pub fn encode(self) -> Result<Vec<u8>> {
-        compat_v1::encode_namespace_policy(self)
-    }
-
-    #[cfg(feature = "ffi")]
-    pub(crate) fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
-        compat_v1::decode_namespace_policy_parts(flags, ttl_ms)
+        let mut flags = match self.default_expiration {
+            ExpirationDefault::NoExpiry => POLICY_NO_EXPIRY,
+            ExpirationDefault::FixedTtl { ttl_ms } => {
+                if ttl_ms == 0 {
+                    return Err(ProtocolError::InvalidNamespacePolicy(
+                        "fixed namespace TTL must be positive",
+                    ));
+                }
+                POLICY_FIXED_TTL
+            }
+        };
+        if self.expiration_override == OverridePolicy::Allowed {
+            flags |= POLICY_EXPIRATION_OVERRIDE;
+        }
+        if self.default_eviction == EvictionDefault::EvictionProtected {
+            flags |= POLICY_EVICTION_PROTECTED;
+        }
+        if self.eviction_override == OverridePolicy::Allowed {
+            flags |= POLICY_EVICTION_OVERRIDE;
+        }
+        let mut output = Vec::with_capacity(MAX_POLICY_BYTES);
+        output.push(flags);
+        if let ExpirationDefault::FixedTtl { ttl_ms } = self.default_expiration {
+            let (encoded, length) = encode_varuint(ttl_ms);
+            output.extend_from_slice(&encoded[..length]);
+        }
+        Ok(output)
     }
 }
 
-/// Client-side representation of compact-v1 SET policy bits.
+/// Client-side representation of SET policy bits.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct SetWireOptions {
-    pub(crate) condition: SetCondition,
-    pub(crate) expiration_mode: ExpirationMode,
-    pub(crate) ttl_ms: Option<u64>,
-    pub(crate) eviction_mode: EvictionMode,
+pub struct SetWireOptions {
+    pub condition: SetCondition,
+    pub expiration_mode: ExpirationMode,
+    pub ttl_ms: Option<u64>,
+    pub eviction_mode: EvictionMode,
 }
 
 impl SetWireOptions {
-    pub(crate) const NONE: Self = Self {
+    /// The ordinary unconditional SET behavior.
+    pub const NONE: Self = Self {
         condition: SetCondition::Any,
         expiration_mode: ExpirationMode::Inherit,
         ttl_ms: None,
         eviction_mode: EvictionMode::Inherit,
     };
 
-    pub(crate) const fn with_policies(
+    /// Creates options with all wire policy selections.
+    pub const fn with_policies(
         condition: SetCondition,
         expiration_mode: ExpirationMode,
         ttl_ms: Option<u64>,
@@ -307,28 +364,63 @@ impl SetWireOptions {
         }
     }
 
-    #[cfg(feature = "ffi")]
-    pub(crate) fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
-        compat_v1::decode_set_options(flags, ttl_ms)
+    pub(crate) fn flags(self) -> Result<u8> {
+        if self.ttl_ms == Some(0) {
+            return Err(ProtocolError::InvalidSetTtl);
+        }
+        let condition = match self.condition {
+            SetCondition::Any => SET_CONDITION_ANY_BITS,
+            SetCondition::IfAbsent => SET_IF_ABSENT_BITS,
+            SetCondition::IfPresent => SET_IF_PRESENT_BITS,
+        };
+        let expiration = match self.expiration_mode {
+            ExpirationMode::Inherit => {
+                if self.ttl_ms.is_some() {
+                    return Err(ProtocolError::UnexpectedSetTtl);
+                }
+                SET_INHERIT_EXPIRATION_BITS
+            }
+            ExpirationMode::NoExpiry => {
+                if self.ttl_ms.is_some() {
+                    return Err(ProtocolError::UnexpectedSetTtl);
+                }
+                SET_NO_EXPIRY_BITS
+            }
+            ExpirationMode::ExplicitTtl => {
+                if self.ttl_ms.is_none() {
+                    return Err(ProtocolError::MissingSetTtl);
+                }
+                SET_EXPLICIT_TTL_BITS
+            }
+        };
+        let eviction = match self.eviction_mode {
+            EvictionMode::Inherit => SET_INHERIT_EVICTION_BITS,
+            EvictionMode::Evictable => SET_EVICTABLE_BITS,
+            EvictionMode::EvictionProtected => SET_EVICTION_PROTECTED_BITS,
+        };
+        Ok(condition | expiration | eviction)
     }
 }
 
-/// Closed replay decision attached by the client adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A validated request owned by the Rust client adapter.
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum RequestRetryPolicy {
-    /// The operation is safe to replay.
+    /// The request is safe to replay after a connection failure.
     Always,
-    /// The operation must not be replayed automatically.
+    /// The request must not be replayed automatically.
     Never,
 }
 
-impl RequestRetryPolicy {
-    pub(crate) const fn is_safe(self) -> bool {
-        matches!(self, Self::Always)
-    }
-}
-
-fn generated_retry_policy(opcode: Opcode, create_if_missing: bool) -> RequestRetryPolicy {
+/// Applies the Smithy-generated replay declaration to an owned request.
+///
+/// Retry safety is attached when the operation adapter constructs the request;
+/// the transport only consumes this closed policy and never branches on an
+/// operation name or domain-specific mutation. The declaration lives in the
+/// client metadata envelope, outside the normative wire layout.
+pub(crate) fn generated_retry_policy(
+    opcode: Opcode,
+    create_if_missing: bool,
+) -> RequestRetryPolicy {
     use crate::contract::OperationRetryMode;
 
     match crate::contract::operation_client_projection(opcode).map(|value| value.retry_mode) {
@@ -342,21 +434,31 @@ fn generated_retry_policy(opcode: Opcode, create_if_missing: bool) -> RequestRet
     }
 }
 
-/// A validated request owned by the Rust client adapter.
-#[derive(Debug, Eq, PartialEq)]
+impl RequestRetryPolicy {
+    pub(crate) const fn is_safe(self) -> bool {
+        match self {
+            Self::Always => true,
+            Self::Never => false,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct Request {
     pub(crate) opcode: Opcode,
-    namespace_id: Option<u64>,
-    item_ids: Vec<ItemId>,
-    set_options: SetWireOptions,
-    value: Vec<u8>,
-    namespace_name: Option<Vec<u8>>,
-    namespace_policy: Option<NamespacePolicy>,
-    expected_revision: Option<u64>,
+    pub(crate) namespace_id: Option<u64>,
+    pub(crate) item_ids: Vec<ItemId>,
+    pub(crate) set_options: SetWireOptions,
+    pub(crate) value: Vec<u8>,
+    pub(crate) namespace_name: Option<Vec<u8>>,
+    pub(crate) namespace_policy: Option<NamespacePolicy>,
+    pub(crate) expected_revision: Option<u64>,
     pub(crate) create_if_missing: bool,
     pub(crate) retry_policy: RequestRetryPolicy,
 }
 
+/// Owned request pieces ready for a transport write.
+///
 /// Owned request pieces ready for a transport write.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct RequestParts {
@@ -404,8 +506,72 @@ impl RequestAttempt {
     }
 }
 
+impl PartialEq for Request {
+    fn eq(&self, other: &Self) -> bool {
+        self.opcode == other.opcode
+            && self.namespace_id == other.namespace_id
+            && self.item_ids == other.item_ids
+            && self.set_options == other.set_options
+            && self.value == other.value
+            && self.namespace_name == other.namespace_name
+            && self.namespace_policy == other.namespace_policy
+            && self.expected_revision == other.expected_revision
+            && self.create_if_missing == other.create_if_missing
+    }
+}
+
+impl Eq for Request {}
+
 impl Request {
+    #[allow(dead_code)]
     pub(crate) fn new(opcode: Opcode, item_id: Option<ItemId>, value: Vec<u8>) -> Result<Self> {
+        Self::new_with_retry_policy(
+            opcode,
+            item_id,
+            value,
+            generated_retry_policy(opcode, false),
+        )
+    }
+
+    /// Builds a route-less request from an already encoded generic body.
+    ///
+    /// Namespace, item, and SET fields are compatibility-only concerns; new
+    /// APIs use this constructor or the generated field helper instead of
+    /// populating the historical request facade.
+    pub(crate) fn new_generic(opcode: Opcode, value: Vec<u8>) -> Result<Self> {
+        Self::new_generic_with_retry_policy(opcode, value, generated_retry_policy(opcode, false))
+    }
+
+    pub(crate) fn new_generic_with_retry_policy(
+        opcode: Opcode,
+        value: Vec<u8>,
+        retry_policy: RequestRetryPolicy,
+    ) -> Result<Self> {
+        let request = Self {
+            opcode,
+            namespace_id: None,
+            item_ids: Vec::new(),
+            set_options: SetWireOptions::NONE,
+            value,
+            namespace_name: None,
+            namespace_policy: None,
+            expected_revision: None,
+            create_if_missing: false,
+            retry_policy,
+        };
+        request.validate()?;
+        Ok(request)
+    }
+
+    pub(crate) fn new_with_retry_policy(
+        opcode: Opcode,
+        item_id: Option<ItemId>,
+        value: Vec<u8>,
+        retry_policy: RequestRetryPolicy,
+    ) -> Result<Self> {
+        if item_id.is_none() {
+            return Self::new_generic_with_retry_policy(opcode, value, retry_policy);
+        }
         let request = Self {
             opcode,
             namespace_id: None,
@@ -416,10 +582,28 @@ impl Request {
             namespace_policy: None,
             expected_revision: None,
             create_if_missing: false,
-            retry_policy: generated_retry_policy(opcode, false),
+            retry_policy,
         };
         request.validate()?;
         Ok(request)
+    }
+
+    /// Constructs an ordered request after its generated field plan has
+    /// already validated the payload. Keeping this private avoids validating
+    /// and allocating field offsets a second time in the client adapter.
+    fn new_ordered_unchecked(opcode: Opcode, value: Vec<u8>) -> Self {
+        Self {
+            opcode,
+            namespace_id: None,
+            item_ids: Vec::new(),
+            set_options: SetWireOptions::NONE,
+            value,
+            namespace_name: None,
+            namespace_policy: None,
+            expected_revision: None,
+            create_if_missing: false,
+            retry_policy: generated_retry_policy(opcode, false),
+        }
     }
 
     pub(crate) fn new_scoped(
@@ -428,7 +612,13 @@ impl Request {
         item_id: Option<ItemId>,
         value: Vec<u8>,
     ) -> Result<Self> {
-        Self::new_scoped_with_options(opcode, namespace_id, item_id, SetWireOptions::NONE, value)
+        Self::new_scoped_with_retry_policy(
+            opcode,
+            namespace_id,
+            item_id,
+            value,
+            generated_retry_policy(opcode, false),
+        )
     }
 
     pub(crate) fn new_scoped_with_options(
@@ -438,17 +628,84 @@ impl Request {
         set_options: SetWireOptions,
         value: Vec<u8>,
     ) -> Result<Self> {
+        Self::new_scoped_items_with_retry_policy(
+            opcode,
+            namespace_id,
+            item_id.into_iter().collect(),
+            set_options,
+            value,
+            generated_retry_policy(opcode, false),
+        )
+    }
+
+    pub(crate) fn new_scoped_retryable(
+        opcode: Opcode,
+        namespace_id: u64,
+        item_id: Option<ItemId>,
+        value: Vec<u8>,
+    ) -> Result<Self> {
+        Self::new_scoped_with_retry_policy(
+            opcode,
+            namespace_id,
+            item_id,
+            value,
+            generated_retry_policy(opcode, false),
+        )
+    }
+
+    pub(crate) fn new_scoped_with_retry_policy(
+        opcode: Opcode,
+        namespace_id: u64,
+        item_id: Option<ItemId>,
+        value: Vec<u8>,
+        retry_policy: RequestRetryPolicy,
+    ) -> Result<Self> {
+        Self::new_scoped_items_with_retry_policy(
+            opcode,
+            namespace_id,
+            item_id.into_iter().collect(),
+            SetWireOptions::NONE,
+            value,
+            retry_policy,
+        )
+    }
+
+    pub(crate) fn new_scoped_items_with_options(
+        opcode: Opcode,
+        namespace_id: u64,
+        item_ids: Vec<ItemId>,
+        set_options: SetWireOptions,
+        value: Vec<u8>,
+    ) -> Result<Self> {
+        Self::new_scoped_items_with_retry_policy(
+            opcode,
+            namespace_id,
+            item_ids,
+            set_options,
+            value,
+            generated_retry_policy(opcode, false),
+        )
+    }
+
+    pub(crate) fn new_scoped_items_with_retry_policy(
+        opcode: Opcode,
+        namespace_id: u64,
+        item_ids: Vec<ItemId>,
+        set_options: SetWireOptions,
+        value: Vec<u8>,
+        retry_policy: RequestRetryPolicy,
+    ) -> Result<Self> {
         let request = Self {
             opcode,
             namespace_id: Some(namespace_id),
-            item_ids: item_id.into_iter().collect(),
+            item_ids,
             set_options,
             value,
             namespace_name: None,
             namespace_policy: None,
             expected_revision: None,
             create_if_missing: false,
-            retry_policy: generated_retry_policy(opcode, false),
+            retry_policy,
         };
         request.validate()?;
         Ok(request)
@@ -469,6 +726,9 @@ impl Request {
             namespace_policy: policy,
             expected_revision: None,
             create_if_missing,
+            // Replay safety is decided by this typed namespace adapter while
+            // constructing the request. The generic request core does not
+            // inspect `create_if_missing` or any operation-specific field.
             retry_policy: generated_retry_policy(Opcode::NamespaceOpen, create_if_missing),
         };
         request.validate()?;
@@ -514,19 +774,21 @@ impl Request {
     }
 
     pub(crate) fn into_parts(self) -> Result<RequestParts> {
+        // Every constructor validates its generated framing before returning.
+        // Avoid replaying the ordered-field decoder at the transport boundary.
         let prefix = if let Some(prefix) = compat_v1::encode_prefix(&self)? {
             prefix
         } else {
-            let mut prefix = Vec::with_capacity(1 + openkache_protocol::MAX_VARUINT_BYTES);
-            prefix.push(self.opcode as u8);
-            let request = operation_wire_spec(self.opcode).request;
-            match request.framing {
+            let mut prefix = vec![self.opcode as u8];
+            match operation_wire_spec(self.opcode).request.framing {
                 OperationLayoutFraming::Empty => {}
                 OperationLayoutFraming::Opaque => {
                     append_varuint(&mut prefix, self.value.len() as u64);
                 }
                 OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
-                    if request.frame == OperationFramePolicy::LengthDelimited {
+                    if operation_wire_spec(self.opcode).request.frame
+                        == OperationFramePolicy::LengthDelimited
+                    {
                         append_varuint(&mut prefix, self.value.len() as u64);
                     }
                 }
@@ -538,6 +800,7 @@ impl Request {
             }
             prefix
         };
+        validate_value_length(self.value.len())?;
         RequestParts::new([WireSegment::owned(prefix), WireSegment::owned(self.value)])
     }
 
@@ -546,57 +809,83 @@ impl Request {
         if compat_v1::validate_request(self)? {
             return Ok(());
         }
-        if self.namespace_id.is_some()
-            || !self.item_ids.is_empty()
-            || self.set_options != SetWireOptions::NONE
-            || self.namespace_name.is_some()
-            || self.namespace_policy.is_some()
-            || self.expected_revision.is_some()
-            || self.create_if_missing
-        {
-            return Err(invalid_shape(self.opcode, 0, "generic body"));
-        }
-        let request = operation_wire_spec(self.opcode).request;
-        match request.framing {
-            OperationLayoutFraming::Empty if self.value.is_empty() => Ok(()),
-            OperationLayoutFraming::Empty => Err(invalid_shape(self.opcode, 0, "empty body")),
+        match operation_wire_spec(self.opcode).request.framing {
+            OperationLayoutFraming::Empty => {
+                if self.has_non_empty_fields() {
+                    return Err(invalid_shape(self.opcode, 0, "0"));
+                }
+            }
             OperationLayoutFraming::Opaque => {
-                if let Some(field) = request.fields.first() {
+                if self.namespace_id.is_some()
+                    || !self.item_ids.is_empty()
+                    || self.set_options != SetWireOptions::NONE
+                    || self.namespace_name.is_some()
+                    || self.namespace_policy.is_some()
+                    || self.expected_revision.is_some()
+                    || self.create_if_missing
+                {
+                    return Err(invalid_shape(self.opcode, 0, "any"));
+                }
+                if let Some(field) = operation_wire_spec(self.opcode).request.fields.first() {
                     validate_operation_field(field, &self.value)?;
                 }
-                Ok(())
             }
             OperationLayoutFraming::OrderedFields | OperationLayoutFraming::FieldSequence => {
-                if request.fields.len() > MAX_OPERATION_REQUEST_FIELDS {
+                if self.set_options != SetWireOptions::NONE
+                    || self.namespace_name.is_some()
+                    || self.namespace_policy.is_some()
+                    || self.expected_revision.is_some()
+                    || self.create_if_missing
+                {
+                    return Err(invalid_shape(self.opcode, 0, "field sequence"));
+                }
+                let contract = operation_wire_spec(self.opcode);
+                let plan = contract.request.fields;
+                if plan.len() > MAX_OPERATION_REQUEST_FIELDS {
                     return Err(ProtocolError::InvalidFieldSequence(
-                        "generated request field bound is stale",
+                        "generated operation request field bound is stale",
                     ));
                 }
                 let mut offsets = [(usize::MAX, usize::MAX); MAX_OPERATION_REQUEST_FIELDS];
                 decode_planned_fields(
                     &self.value,
-                    request.fields,
-                    request.layout,
-                    &mut offsets[..request.fields.len()],
-                )?;
-                for (index, field) in request.fields.iter().enumerate() {
+                    plan,
+                    contract.request.layout,
+                    &mut offsets[..plan.len()],
+                )
+                .map_err(ProtocolError::from)?;
+                for (field, value) in plan.iter().zip((0..plan.len()).map(|index| {
                     let (start, end) = offsets[index];
-                    if start == usize::MAX {
-                        if field.required {
-                            return Err(ProtocolError::InvalidFieldSequence(
-                                "required request field is missing",
-                            ));
-                        }
-                    } else {
-                        validate_operation_field(field, &self.value[start..end])?;
+                    (start != usize::MAX).then(|| &self.value[start..end])
+                })) {
+                    if field.required && value.is_none() {
+                        return Err(ProtocolError::InvalidFieldSequence(
+                            "required request field is missing",
+                        ));
+                    }
+                    if let Some(value) = value {
+                        validate_operation_field(field, value)?;
                     }
                 }
-                Ok(())
             }
-            OperationLayoutFraming::OptionalValues => Err(ProtocolError::InvalidFieldSequence(
-                "optional-value framing is response-only",
-            )),
+            OperationLayoutFraming::OptionalValues => {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "optional-value framing is response-only",
+                ));
+            }
         }
+        Ok(())
+    }
+
+    fn has_non_empty_fields(&self) -> bool {
+        self.namespace_id.is_some()
+            || !self.item_ids.is_empty()
+            || self.set_options != SetWireOptions::NONE
+            || !self.value.is_empty()
+            || self.namespace_name.is_some()
+            || self.namespace_policy.is_some()
+            || self.expected_revision.is_some()
+            || self.create_if_missing
     }
 
     fn has_non_empty_fields_except_namespace(&self) -> bool {
@@ -619,31 +908,6 @@ impl Request {
     }
 }
 
-fn validate_operation_field(
-    field: &openkache_protocol::OperationFieldPlan,
-    payload: &[u8],
-) -> Result<()> {
-    if field.encoded_width != 0 && payload.len() != field.encoded_width {
-        return Err(ProtocolError::InvalidFieldSequence(
-            "operation field does not match its declared fixed width",
-        ));
-    }
-    openkache_protocol::codec::validate_field_codecs_with_nested_widths(
-        payload,
-        field.codecs,
-        field.nested_codecs,
-        field.nested_widths,
-        field.nested_enum_values,
-        field.nested_union_tags,
-        field.enum_values,
-        field.union_tags,
-        openkache_protocol::wire_codec_kind,
-    )
-    .map_err(|error| {
-        ProtocolError::InvalidFieldCodec(String::from_utf8_lossy(error.message()).into_owned())
-    })
-}
-
 fn append_varuint(output: &mut Vec<u8>, value: u64) {
     let (encoded, length) = encode_varuint(value);
     output.extend_from_slice(&encoded[..length]);
@@ -652,7 +916,7 @@ fn append_varuint(output: &mut Vec<u8>, value: u64) {
 fn read_u64_be(input: &[u8]) -> Result<u64> {
     let bytes: [u8; NAMESPACE_ID_BYTES] = input
         .get(..NAMESPACE_ID_BYTES)
-        .ok_or(openkache_protocol::ProtocolError::FrameTooShort {
+        .ok_or(ProtocolError::FrameTooShort {
             expected: NAMESPACE_ID_BYTES,
             actual: input.len(),
         })?
@@ -663,23 +927,22 @@ fn read_u64_be(input: &[u8]) -> Result<u64> {
 
 fn validate_value_length(value_len: usize) -> Result<()> {
     if value_len > MAX_VALUE_BYTES {
-        return Err(openkache_protocol::ProtocolError::ValueTooLarge {
+        return Err(ProtocolError::ValueTooLarge {
             size: value_len,
             maximum: MAX_VALUE_BYTES,
-        }
-        .into());
+        });
     }
     Ok(())
 }
 
 fn invalid_shape(
     opcode: Opcode,
-    expected_item_ids: usize,
+    expected_item_id: usize,
     expected_value: &'static str,
 ) -> ProtocolError {
     ProtocolError::InvalidRequestShape {
         opcode,
-        expected_item_ids,
+        expected_item_id,
         expected_value,
     }
 }

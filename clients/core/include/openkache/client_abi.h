@@ -113,6 +113,10 @@ typedef enum openkache_client_set_condition {
         OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_PRESENT,
 } openkache_client_set_condition_t;
 
+#define OPENKACHE_CLIENT_KEY_SPEC_TEXT OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT
+#define OPENKACHE_CLIENT_KEY_SPEC_BYTES OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES
+#define OPENKACHE_CLIENT_KEY_SPEC_INTEGER OPENKACHE_SMITHY_FFI_KEY_SPEC_INTEGER
+
 typedef enum openkache_client_encryption {
     OPENKACHE_CLIENT_ENCRYPTION_NONE = OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE,
     OPENKACHE_CLIENT_ENCRYPTION_COMPACT = OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT,
@@ -232,9 +236,9 @@ openkache_client_result_t *openkache_client_execute(
 );
 
 /*
- * Executes exact protocol item-ID operations. GET, SET, and DELETE require
- * exactly OPENKACHE_SMITHY_ITEM_ID_BYTES key bytes and bypass application-key
- * derivation and value protection.
+ * Executes exact protocol item-ID operations. GET, SET, and DELETE accept
+ * zero through OPENKACHE_SMITHY_ITEM_ID_BYTES item-ID bytes and bypass
+ * application-key derivation and value protection.
  */
 openkache_client_result_t *openkache_client_execute_raw(
     const openkache_client_t *client,
@@ -272,6 +276,38 @@ openkache_client_result_t *openkache_client_execute_raw_with_options(
     uint32_t operation,
     const uint8_t *item_id,
     size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms
+);
+
+/*
+ * Executes one protected operation from logical key bytes and an explicit
+ * generated key discriminator (`TEXT`, `BYTES`, or `INTEGER`).
+ */
+openkache_client_result_t *openkache_client_execute_typed(
+    const openkache_client_t *client,
+    uint32_t operation,
+    uint32_t key_spec,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms
+);
+
+/*
+ * Typed-key counterpart to openkache_client_execute_with_options.
+ */
+openkache_client_result_t *openkache_client_execute_typed_with_options(
+    const openkache_client_t *client,
+    uint32_t operation,
+    uint32_t key_spec,
+    const uint8_t *application_key,
+    size_t application_key_length,
     const uint8_t *value,
     size_t value_length,
     uint8_t set_flags,

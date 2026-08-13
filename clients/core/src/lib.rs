@@ -39,7 +39,7 @@ pub use key::{
     CLIENT_ROOT_KEY_BYTES, DATA_PROTECTION_KEY_BYTES, MAX_CANONICAL_KEY_BYTES, MAX_ITEM_ID_BYTES,
     MAX_KEY_INPUT_BYTES,
 };
-pub use openkache_protocol::ITEM_ID_BYTES;
+pub const ITEM_ID_BYTES: usize = MAX_ITEM_ID_BYTES;
 #[cfg(feature = "quic-compio")]
 pub use protected::{LocalProtectedClient, LocalProtectedClientBuilder};
 #[cfg(feature = "quic-quinn")]
@@ -47,7 +47,7 @@ pub use protected::{ProtectedClient, ProtectedClientBuilder};
 pub use protection::DataProtection;
 pub use protocol::{
     EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespaceDescriptor,
-    NamespacePolicy, OverridePolicy, ProtocolError, SetCondition,
+    NamespacePolicy, OperationFields, OverridePolicy, ProtocolError, SetCondition,
 };
 pub use value::ItemValue;
 
@@ -386,15 +386,25 @@ struct RequestFailure {
 
 enum RequestAttempts {
     Once(Option<Request>),
-    Replay(Option<Arc<RequestParts>>),
+    Replay {
+        parts: Option<Arc<RequestParts>>,
+        opcode: Opcode,
+        create_if_missing: bool,
+    },
 }
 
 impl RequestAttempts {
     fn new(request: Request, replayable: bool) -> Result<Self> {
         if replayable {
+            let opcode = request.opcode;
+            let create_if_missing = request.create_if_missing;
             request
                 .into_parts()
-                .map(|parts| Self::Replay(Some(Arc::new(parts))))
+                .map(|parts| Self::Replay {
+                    parts: Some(Arc::new(parts)),
+                    opcode,
+                    create_if_missing,
+                })
                 .map_err(Error::protocol)
         } else {
             Ok(Self::Once(Some(request)))
@@ -404,17 +414,37 @@ impl RequestAttempts {
     fn next(&mut self, final_attempt: bool) -> Option<PendingRequest> {
         match self {
             Self::Once(request) => request.take().map(PendingRequest::Once),
-            Self::Replay(parts) if final_attempt => parts.take().map(PendingRequest::Replay),
-            Self::Replay(parts) => parts
+            Self::Replay {
+                parts,
+                opcode,
+                create_if_missing,
+            } if final_attempt => parts.take().map(|parts| PendingRequest::Replay {
+                parts,
+                opcode: *opcode,
+                create_if_missing: *create_if_missing,
+            }),
+            Self::Replay {
+                parts,
+                opcode,
+                create_if_missing,
+            } => parts
                 .as_ref()
-                .map(|parts| PendingRequest::Replay(Arc::clone(parts))),
+                .map(|parts| PendingRequest::Replay {
+                    parts: Arc::clone(parts),
+                    opcode: *opcode,
+                    create_if_missing: *create_if_missing,
+                }),
         }
     }
 }
 
 enum PendingRequest {
     Once(Request),
-    Replay(Arc<RequestParts>),
+    Replay {
+        parts: Arc<RequestParts>,
+        opcode: Opcode,
+        create_if_missing: bool,
+    },
 }
 
 impl RequestFailure {
@@ -433,6 +463,14 @@ impl RequestFailure {
             error,
             may_have_reached_server: true,
             invalidates_connection,
+        }
+    }
+
+    fn after_response(error: Error) -> Self {
+        Self {
+            error,
+            may_have_reached_server: true,
+            invalidates_connection: false,
         }
     }
 }
@@ -883,14 +921,23 @@ impl<C: ClientConnection> Core<C> {
             .acquire_lane(deadline)
             .await
             .map_err(RequestFailure::before_send)?;
-        let request = match request {
-            PendingRequest::Once(request) => RequestAttempt::Once(
-                request
-                    .into_parts()
-                    .map_err(Error::protocol)
-                    .map_err(RequestFailure::before_send)?,
-            ),
-            PendingRequest::Replay(parts) => RequestAttempt::Replay(parts),
+        let (opcode, create_if_missing, request) = match request {
+            PendingRequest::Once(request) => {
+                let opcode = request.opcode;
+                let create_if_missing = request.create_if_missing;
+                let request = RequestAttempt::Once(
+                    request
+                        .into_parts()
+                        .map_err(Error::protocol)
+                        .map_err(RequestFailure::before_send)?,
+                );
+                (opcode, create_if_missing, request)
+            }
+            PendingRequest::Replay {
+                parts,
+                opcode,
+                create_if_missing,
+            } => (opcode, create_if_missing, RequestAttempt::Replay(parts)),
         };
         let write_timeout = deadline
             .remaining(Operation::RequestWrite)
@@ -907,6 +954,9 @@ impl<C: ClientConnection> Core<C> {
             .into_response()
             .map_err(Error::protocol)
             .map_err(RequestFailure::after_send)?;
+        if let Err(error) = validate_response_contract(opcode, create_if_missing, &response) {
+            return Err(RequestFailure::after_response(error));
+        }
         // Error responses may be emitted while the server is still parsing a request,
         // in which case the server terminates the lane. Retiring every error lane is
         // conservative and remains valid for errors that the server could have
@@ -1684,10 +1734,154 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn validate_response_contract(
+    opcode: Opcode,
+    create_if_missing: bool,
+    response: &Response,
+) -> Result<()> {
+    let operation = operation(opcode);
+    if status_is_error(response.status) {
+        let applicable = match response.status {
+            Status::InvalidRequest
+            | Status::TooLarge
+            | Status::Overloaded
+            | Status::Timeout
+            | Status::Forbidden
+            | Status::InternalError => true,
+            Status::NoCapacity | Status::PolicyConflict => opcode == Opcode::Set,
+            Status::Conflict => {
+                matches!(
+                    opcode,
+                    Opcode::NamespaceUpdatePolicy | Opcode::NamespaceDelete
+                )
+            }
+            Status::NamespaceNotFound => matches!(
+                opcode,
+                Opcode::Get
+                    | Opcode::Set
+                    | Opcode::Delete
+                    | Opcode::Stats
+                    | Opcode::Sync
+                    | Opcode::NamespaceOpen
+                    | Opcode::NamespaceUpdatePolicy
+                    | Opcode::NamespaceDelete
+            ),
+            Status::NamespaceNotEmpty => opcode == Opcode::NamespaceDelete,
+            Status::UnsupportedOpcode => false,
+            Status::Ok
+            | Status::NotFound
+            | Status::Created
+            | Status::Replaced
+            | Status::Deleted
+            | Status::NotStored
+            | Status::Accepted => false,
+        };
+        if !applicable {
+            return Err(Error::UnexpectedResponse {
+                operation,
+                message: format!(
+                    "status {:?} is not applicable to {opcode:?}",
+                    response.status
+                ),
+            });
+        }
+        return Ok(());
+    }
+
+    let invalid_payload = |message: &'static str| {
+        Err(Error::UnexpectedResponse {
+            operation,
+            message: message.into(),
+        })
+    };
+    let descriptor_payload = || {
+        NamespaceDescriptor::decode(&response.payload)
+            .map(|_| ())
+            .map_err(|error| Error::UnexpectedResponse {
+                operation,
+                message: format!("namespace descriptor is invalid: {error}"),
+            })
+    };
+    match (opcode, response.status) {
+        (Opcode::Ping, Status::Ok) if response.payload == b"PONG" => Ok(()),
+        (Opcode::Ping, Status::Ok) => invalid_payload("PING success payload must be PONG"),
+
+        (Opcode::Get, Status::Ok) => Ok(()),
+        (Opcode::Get, Status::NotFound) if response.payload.is_empty() => Ok(()),
+        (Opcode::Get, Status::NotFound) => {
+            invalid_payload("GET NotFound responses must have an empty payload")
+        }
+
+        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored)
+            if response.payload.is_empty() =>
+        {
+            Ok(())
+        }
+        (Opcode::Set, Status::Created | Status::Replaced | Status::NotStored) => {
+            invalid_payload("SET success responses must have an empty payload")
+        }
+
+        (Opcode::Delete, Status::Deleted | Status::NotFound) if response.payload.is_empty() => {
+            Ok(())
+        }
+        (Opcode::Delete, Status::Deleted | Status::NotFound) => {
+            invalid_payload("DELETE domain responses must have an empty payload")
+        }
+
+        (Opcode::Stats, Status::Ok) => validate_stats_payload(&response.payload),
+        (Opcode::Sync, Status::Ok) if response.payload.is_empty() => Ok(()),
+        (Opcode::Sync, Status::Ok) => {
+            invalid_payload("SYNC success responses must have an empty payload")
+        }
+
+        (Opcode::NamespaceOpen, Status::Ok) => descriptor_payload(),
+        (Opcode::NamespaceOpen, Status::Created) if create_if_missing => descriptor_payload(),
+        (Opcode::NamespaceUpdatePolicy, Status::Ok) => descriptor_payload(),
+        (Opcode::NamespaceDelete, Status::Deleted) if response.payload.is_empty() => Ok(()),
+        (Opcode::NamespaceDelete, Status::Deleted) => {
+            invalid_payload("NAMESPACE_DELETE success responses must have an empty payload")
+        }
+        (_, status) => Err(unexpected_status(operation, status)),
+    }
+}
+
 fn unexpected_status(operation: Operation, status: Status) -> Error {
     Error::UnexpectedResponse {
         operation,
         message: format!("unexpected status {status:?}"),
+    }
+}
+
+fn status_is_error(status: Status) -> bool {
+    matches!(
+        status,
+        Status::InvalidRequest
+            | Status::UnsupportedOpcode
+            | Status::TooLarge
+            | Status::Overloaded
+            | Status::Timeout
+            | Status::Forbidden
+            | Status::InternalError
+            | Status::NoCapacity
+            | Status::PolicyConflict
+            | Status::Conflict
+            | Status::NamespaceNotFound
+            | Status::NamespaceNotEmpty
+    )
+}
+
+fn operation(opcode: Opcode) -> Operation {
+    match opcode {
+        Opcode::Ping => Operation::Ping,
+        Opcode::Get => Operation::Get,
+        Opcode::Set => Operation::Set,
+        Opcode::Delete => Operation::Delete,
+        Opcode::Stats => Operation::Stats,
+        Opcode::Sync => Operation::Sync,
+        Opcode::NamespaceOpen => Operation::NamespaceOpen,
+        Opcode::NamespaceUpdatePolicy => Operation::NamespaceUpdatePolicy,
+        Opcode::NamespaceDelete => Operation::NamespaceDelete,
+        _ => Operation::RequestWrite,
     }
 }
 

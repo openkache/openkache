@@ -88,10 +88,10 @@ structure valueFormat {
     formatEncryptionShift: Byte
 
     @required
-    serializationRaw: Byte
+    serializationOpaqueBytes: Byte
 
     @required
-    serializationJson: Byte
+    serializationCbor: Byte
 
     @required
     compressionNone: Byte
@@ -174,12 +174,14 @@ structure valueEnvelope {
 )
 @valueFormat(
     version: 1,
-    maxVu128Bytes: 17,
+    // A value-envelope version is an unsigned 64-bit vu128.  The largest
+    // canonical encoding is nine bytes (the protocol's vu128 limit).
+    maxVu128Bytes: 9,
     formatByteBytes: 1,
     formatCompressionMask: 15,
     formatEncryptionShift: 4,
-    serializationRaw: 0,
-    serializationJson: 1,
+    serializationOpaqueBytes: 0,
+    serializationCbor: 1,
     compressionNone: 0,
     compressionZstandard: 1,
     encryptionNone: 0,
