@@ -247,7 +247,11 @@ export function render_java_operation_metadata(
       .filter((operation) => operation.input_kind === "item_id")
       .map(
         (operation) =>
-          `case OPERATION_${snake_case(operation.name).toUpperCase()} -> ${values.item_id_bytes * operation.request_item_count};`,
+          `case OPERATION_${snake_case(operation.name).toUpperCase()} -> ${
+            operation.request_item_count === 1
+              ? values.item_id_bytes
+              : (values.item_id_bytes + 1) * operation.request_item_count
+          };`,
       ),
     "default -> 0;",
   ].join("\n            ")
@@ -265,7 +269,7 @@ export function render_java_operation_metadata(
         };
     }
 
-    /** Returns the exact item-ID byte span required by the scoped ABI. */
+    /** Returns the maximum item-ID byte span accepted by the scoped ABI. */
     public static int operationItemIdBytes(int operation) {
         return switch (operation) {
             ${item_bytes_clause}
@@ -299,7 +303,11 @@ export function render_kotlin_operation_metadata(
       .filter((operation) => operation.input_kind === "item_id")
       .map(
         (operation) =>
-          `OPERATION_${snake_case(operation.name).toUpperCase()} -> ITEM_ID_BYTES * ${operation.request_item_count}`,
+          `OPERATION_${snake_case(operation.name).toUpperCase()} -> ${
+            operation.request_item_count === 1
+              ? "ITEM_ID_BYTES"
+              : `(ITEM_ID_BYTES + 1) * ${operation.request_item_count}`
+          }`,
       ),
     "else -> 0",
   ].join("\n        ")
@@ -313,7 +321,7 @@ export function render_kotlin_operation_metadata(
         ${item_clause}
     }
 
-    /** Returns the exact item-ID byte span required by the scoped ABI. */
+    /** Returns the maximum item-ID byte span accepted by the scoped ABI. */
     public fun operationItemIdBytes(operation: Int): Int = when (operation) {
         ${item_bytes_clause}
     }
@@ -345,7 +353,11 @@ export function render_dart_operation_metadata(
       .filter((operation) => operation.input_kind === "item_id")
       .map(
         (operation) =>
-          `smithyOperation${pascal_case(snake_case(operation.name))} => smithyItemIdBytes * ${operation.request_item_count},`,
+          `smithyOperation${pascal_case(snake_case(operation.name))} => ${
+            operation.request_item_count === 1
+              ? "smithyItemIdBytes"
+              : `(smithyItemIdBytes + 1) * ${operation.request_item_count}`
+          },`,
       ),
     "_ => 0,",
   ].join("\n  ")
@@ -359,7 +371,7 @@ bool smithyOperationRequiresItemId(int operation) => switch (operation) {
   ${item_clause}
 };
 
-/// Returns the exact item-ID byte span required by the scoped ABI.
+/// Returns the maximum item-ID byte span accepted by the scoped ABI.
 int smithyOperationItemIdBytes(int operation) => switch (operation) {
   ${item_bytes_clause}
 };

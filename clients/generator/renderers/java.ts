@@ -495,15 +495,16 @@ export function render_java_operations(contract: Client_Contract): string {
         int total = 0;
         for (byte[] itemId : itemIds) {
             Objects.requireNonNull(itemId, "item ID");
-            if (itemId.length != SmithyContract.ITEM_ID_BYTES) {
-                throw new OpenKacheClientException("item IDs must contain exactly "
+            if (itemId.length > SmithyContract.ITEM_ID_BYTES) {
+                throw new OpenKacheClientException("item IDs must contain at most "
                     + SmithyContract.ITEM_ID_BYTES + " bytes");
             }
-            total += itemId.length;
+            total += 1 + itemId.length;
         }
         byte[] combined = new byte[total];
         int offset = 0;
         for (byte[] itemId : itemIds) {
+            combined[offset++] = (byte) itemId.length;
             System.arraycopy(itemId, 0, combined, offset, itemId.length);
             offset += itemId.length;
         }

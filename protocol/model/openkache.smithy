@@ -124,11 +124,29 @@ structure WireTrailingField {
     length: String
 }
 
+structure WireValueLengthField {
+    @required
+    field: String
+
+    /// Length prefix used before a later metadata field and the final value body.
+    @required
+    length: String
+}
+
+/// Emits only the one-octet length prefix for a later byte field body.
+structure WireByteLengthPrefixField {
+    @required
+    field: String
+}
+
 union WireRequestStep {
     fixedField: WireFixedField
     packed: WirePacked
     byteLengthField: WireFieldReference
+    byteLengthPrefixField: WireByteLengthPrefixField
+    byteField: WireFieldReference
     varuintField: WireFieldReference
+    valueLengthField: WireValueLengthField
     conditional: WireConditional
     constant: WireConstant
     trailingField: WireTrailingField
@@ -608,7 +626,7 @@ operation ExperimentalMultiResourceMutation {
     compatibilityRequestProjection: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
-        { fixedField: { field: "itemId", bytes: 32 } }
+        { byteLengthField: { field: "itemId" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
@@ -627,8 +645,8 @@ operation Get {
     compatibilityRequestProjection: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
-        { fixedField: { field: "itemIdA", bytes: 32 } },
-        { fixedField: { field: "itemIdB", bytes: 32 } }
+        { byteLengthField: { field: "itemIdA" } },
+        { byteLengthField: { field: "itemIdB" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "optional_values",
@@ -681,7 +699,8 @@ operation Get2 {
                 reservedMask: 192
             }
         },
-        { fixedField: { field: "itemId", bytes: 32 } },
+        { byteLengthPrefixField: { field: "itemId" } },
+        { valueLengthField: { field: "value", length: "varuint" } },
         {
             conditional: {
                 field: "expirationMode",
@@ -691,12 +710,7 @@ operation Get2 {
                 ]
             }
         },
-        {
-            trailingField: {
-                field: "value",
-                length: "varuint"
-            }
-        }
+        { byteField: { field: "itemId" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
@@ -715,7 +729,7 @@ operation Set {
     compatibilityRequestProjection: "item",
     requestWire: [
         { fixedField: { field: "namespaceId", bytes: 8 } },
-        { fixedField: { field: "itemId", bytes: 32 } }
+        { byteLengthField: { field: "itemId" } }
     ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
@@ -979,7 +993,6 @@ structure GetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }
@@ -996,12 +1009,10 @@ structure Get2Input {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemIdA: ItemId
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemIdB: ItemId
 }
@@ -1021,7 +1032,6 @@ structure SetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 
@@ -1056,7 +1066,6 @@ structure DeleteInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }

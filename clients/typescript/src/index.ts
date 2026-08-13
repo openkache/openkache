@@ -948,9 +948,9 @@ function owned_item_id(item_id: Uint8Array): Uint8Array {
     throw new OpenKache_Error("item_id must be a Uint8Array")
   }
   const bytes = item_id.slice()
-  if (bytes.byteLength !== SMITHY_ITEM_ID_BYTES) {
+  if (bytes.byteLength > SMITHY_ITEM_ID_BYTES) {
     throw new OpenKache_Error(
-      `item_id must contain exactly ${SMITHY_ITEM_ID_BYTES} bytes, got ${bytes.byteLength}`,
+      `item_id must contain at most ${SMITHY_ITEM_ID_BYTES} bytes, got ${bytes.byteLength}`,
     )
   }
   return bytes

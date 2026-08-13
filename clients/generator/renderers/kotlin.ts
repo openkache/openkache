@@ -426,12 +426,20 @@ export function render_kotlin_operations(contract: Client_Contract): string {
     operation_uses_item_id_helpers,
   )
     ? `    private fun smithyConcatItemIds(vararg itemIds: ByteArray): ByteArray {
-        itemIds.forEach { itemId ->
-            require(itemId.size == SmithyContract.ITEM_ID_BYTES) {
-                "item IDs must contain exactly \${SmithyContract.ITEM_ID_BYTES} bytes"
+        val total = itemIds.sumOf { itemId ->
+            require(itemId.size <= SmithyContract.ITEM_ID_BYTES) {
+                "item IDs must contain at most \${SmithyContract.ITEM_ID_BYTES} bytes"
             }
+            1 + itemId.size
         }
-        return itemIds.fold(byteArrayOf()) { result, itemId -> result + itemId }
+        val combined = ByteArray(total)
+        var offset = 0
+        itemIds.forEach { itemId ->
+            combined[offset++] = itemId.size.toByte()
+            itemId.copyInto(combined, offset)
+            offset += itemId.size
+        }
+        return combined
     }
 `
     : ""

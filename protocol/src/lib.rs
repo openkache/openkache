@@ -68,10 +68,10 @@ pub mod compat_v1;
 
 /// Generic value-shape codecs shared by server and client adapters.
 pub mod codec;
-/// Compact optional-value field codec shared by descriptor-selected layouts.
-pub mod optional_values;
 /// Generic generated field-layout dispatch.
 pub mod layout;
+/// Compact optional-value field codec shared by descriptor-selected layouts.
+pub mod optional_values;
 /// Operation-neutral request frame delimiting.
 pub mod request;
 /// Operation-neutral response framing and owned response buffers.
@@ -82,7 +82,7 @@ pub use layout::{
     encode_layout_fields, encode_layout_segments, encode_planned_fields,
 };
 pub use optional_values::{
-    OptionalValues, OptionalValuesEncoder, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
+    OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, OptionalValues, OptionalValuesEncoder,
     decode_optional_values, encode_optional_values, optional_value_prefix,
     optional_values_encoded_len, optional_values_encoded_len_from_lengths,
     optional_values_max_encoded_len,
@@ -90,34 +90,65 @@ pub use optional_values::{
 pub use request::{
     OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFrameStep,
     RequestPackedField, RequestWirePackedField, RequestWirePackedValue, RequestWirePlan,
-    RequestWireStep, decode_request_wire_fields, decode_request_wire_prefix_fields,
-    encode_request_wire_fields, encode_request_wire_prefix,
-    decode_request_frame_header, request_frame_header_bytes_needed,
+    RequestWireStep, decode_request_frame_header, decode_request_wire_fields,
+    decode_request_wire_prefix_fields, encode_request_wire_fields, encode_request_wire_prefix,
+    request_frame_header_bytes_needed,
 };
 pub use response::{
     OwnedRange, OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseParts,
     ResponseSegment, SegmentedPayload, SegmentedValue,
 };
 
-/// The exact fixed-size item identifier carried by the wire protocol.
-#[repr(transparent)]
+/// The opaque variable-length item identifier carried by the wire protocol.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ItemId([u8; ITEM_ID_BYTES]);
+pub struct ItemId {
+    len: u8,
+    bytes: [u8; ITEM_ID_BYTES],
+}
 
 impl ItemId {
-    /// Wraps an exact item ID without interpreting its bytes.
+    /// Wraps a legacy 32-byte item ID without interpreting its bytes.
     pub const fn new(bytes: [u8; ITEM_ID_BYTES]) -> Self {
-        Self(bytes)
+        Self {
+            len: ITEM_ID_BYTES as u8,
+            bytes,
+        }
+    }
+
+    /// Copies an opaque item ID of zero through 32 bytes.
+    pub fn from_slice(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > ITEM_ID_BYTES {
+            return Err(ProtocolError::InvalidItemIdLength {
+                expected: ITEM_ID_BYTES,
+                actual: bytes.len(),
+            });
+        }
+        let mut item_id = Self {
+            len: bytes.len() as u8,
+            bytes: [0; ITEM_ID_BYTES],
+        };
+        item_id.bytes[..bytes.len()].copy_from_slice(bytes);
+        Ok(item_id)
+    }
+
+    /// Returns the number of bytes in this item ID.
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Reports whether this item ID is empty.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     /// Returns the complete item ID bytes.
-    pub const fn as_bytes(&self) -> &[u8; ITEM_ID_BYTES] {
-        &self.0
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
     }
 
     /// Consumes the item ID and returns its bytes.
-    pub const fn into_bytes(self) -> [u8; ITEM_ID_BYTES] {
-        self.0
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
     }
 }
 
@@ -603,6 +634,8 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("item ID has {actual} bytes; maximum is {expected}")]
+    InvalidItemIdLength { expected: usize, actual: usize },
     #[error("invalid operation field sequence: {0}")]
     InvalidFieldSequence(&'static str),
 }

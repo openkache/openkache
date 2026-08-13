@@ -155,8 +155,18 @@ function request_wire_step_bound(
         // largest possible field body even when the modeled shape is open.
         add(1 + Math.min(contract.max_value_bytes, 0xff))
         break
+      case "byte_length_prefix_field":
+        add(1)
+        break
+      case "byte_field":
+        add(Math.min(contract.max_value_bytes, 0xff))
+        break
       case "varuint_field":
         add(contract.v1.max_varuint_bytes)
+        break
+      case "value_length_field":
+        add(contract.v1.max_varuint_bytes)
+        add(contract.max_value_bytes)
         break
       case "conditional":
         // A condition selects at most one nested branch. Taking the largest

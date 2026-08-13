@@ -195,16 +195,17 @@ fn exact_request(
     let prefix = openkache_protocol::encode_request_wire_prefix(operation, &borrowed, wire_plan)
         .map_err(|error| crate::Error::protocol(error.to_string()))?;
     drop(borrowed);
-    let trailing_field = wire_plan.steps.last().and_then(|step| match *step {
-        openkache_protocol::RequestWireStep::TrailingField { field } => Some(field),
+    let body_field = wire_plan.steps.iter().find_map(|step| match *step {
+        openkache_protocol::RequestWireStep::ValueLengthField { field }
+        | openkache_protocol::RequestWireStep::TrailingField { field } => Some(field),
         _ => None,
     });
-    let payload = match trailing_field {
+    let payload = match body_field {
         Some(index) => fields
             .get_mut(index)
             .and_then(Option::take)
             .ok_or_else(|| {
-                crate::Error::configuration("fields", "generated trailing request field is missing")
+                crate::Error::configuration("fields", "generated request value field is missing")
             })?,
         None => Vec::new(),
     };

@@ -129,7 +129,7 @@ pub enum ProtocolError {
     NonCanonicalVaruint { context: &'static str },
     #[error("{context} exceeds the supported 64-bit vu128 range")]
     VaruintOverflow { context: &'static str },
-    #[error("{opcode:?} requires a {expected}-byte item ID, received {actual} item ID bytes")]
+    #[error("{opcode:?} item ID has {actual} bytes; maximum is {expected}")]
     InvalidItemIdLength {
         opcode: Opcode,
         expected: usize,
@@ -191,6 +191,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
+            }
+            openkache_protocol::ProtocolError::InvalidItemIdLength { .. } => {
+                Self::InvalidFieldSequence("item ID exceeds the wire length limit")
             }
             openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
                 Self::InvalidFieldSequence(message)

@@ -9,12 +9,21 @@ use aes::{
     cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
 use openkache_protocol::NAMESPACE_ID_BYTES;
+use sha2::{Digest, Sha256};
 
 use crate::StorageKey;
 use crate::protocol::ItemId;
 
 pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> StorageKey {
-    let mut bytes = item_id.into_bytes();
+    let mut identity = Vec::with_capacity(1 + item_id.len());
+    let item_bytes = item_id.as_bytes();
+    // The wire identity is variable length, while the storage engine needs a
+    // fixed-width address. Hash a length-delimited identity so short IDs
+    // cannot alias a padded representation.
+    identity.push(item_bytes.len() as u8);
+    identity.extend_from_slice(item_bytes);
+    let mut bytes = [0_u8; crate::types::STORAGE_KEY_BYTES];
+    bytes.copy_from_slice(Sha256::digest(identity).as_slice());
 
     // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks
     // exactly cover the 32-byte digest buffer while preserving its alignment

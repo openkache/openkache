@@ -35,8 +35,8 @@ pub use config::{
 pub use contract::{ConnectionState, DEFAULT_MAX_IN_FLIGHT};
 pub use key::{
     CLIENT_ROOT_KEY_BYTES, ClientRootKey, DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId,
-    KeyError, KeySpace, KeyType, MAX_KEY_INPUT_BYTES, ResolvedKey, TypedInteger, TypedKey,
-    canonical_key_bytes,
+    KeyError, KeyFormat, KeySpace, KeyType, MAX_ITEM_ID_BYTES, MAX_KEY_INPUT_BYTES, ResolvedKey,
+    TypedInteger, TypedKey, canonical_key_bytes,
 };
 pub use openkache_protocol::{
     FieldSequence, ITEM_ID_BYTES, NAMESPACE_ID_BYTES, Opcode, decode_varuint,
@@ -57,9 +57,8 @@ pub use value::ItemValue;
 /// projections. Generic clients do not import these aliases.
 pub mod compatibility {
     pub use openkache_protocol::compat_v1::{
-        decode_optional_values, encode_optional_values, OptionalValues,
-        OptionalValuesEncoder, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
-        optional_value_prefix,
+        OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, OptionalValues, OptionalValuesEncoder,
+        decode_optional_values, encode_optional_values, optional_value_prefix,
         optional_values_encoded_len, optional_values_encoded_len_from_lengths,
         optional_values_max_encoded_len,
     };
@@ -68,10 +67,9 @@ pub mod compatibility {
 // Temporary source-compatibility surface for generated protocol-v1 clients.
 // New generic clients use the contract/layout APIs above.
 pub use compatibility::{
-    decode_optional_values, encode_optional_values, OptionalValues,
-    OptionalValuesEncoder, OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING,
-    optional_values_encoded_len, optional_values_encoded_len_from_lengths,
-    optional_values_max_encoded_len,
+    OPTIONAL_VALUE_LENGTH_BYTES, OPTIONAL_VALUE_MISSING, OptionalValues, OptionalValuesEncoder,
+    decode_optional_values, encode_optional_values, optional_values_encoded_len,
+    optional_values_encoded_len_from_lengths, optional_values_max_encoded_len,
 };
 
 #[cfg(not(any(feature = "quic-compio", feature = "quic-quinn")))]
@@ -720,7 +718,7 @@ impl<C: ClientConnection> Core<C> {
                     None,
                     Vec::new(),
                 )
-                    .map_err(Error::protocol)?,
+                .map_err(Error::protocol)?,
             )
             .await?;
         expect_status(Operation::Stats, response.status, &[Status::Ok])?;
@@ -908,7 +906,7 @@ impl<C: ClientConnection> Core<C> {
                     expected_revision,
                     policy,
                 )
-                    .map_err(Error::protocol)?,
+                .map_err(Error::protocol)?,
             )
             .await?;
         expect_status(
@@ -1363,7 +1361,7 @@ macro_rules! raw_client_methods {
             /// # Arguments
             ///
             /// * `operation` - Smithy protocol operation to execute.
-            /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
+            /// * `item_id` - Opaque `0..=32`-byte Item ID for item-scoped operations.
             /// * `value` - Raw operation payload, including a storage value or an application
             ///   payload when the generated request shape carries one.
             /// * `set_options` - Conditional and expiration options used by SET.
@@ -1423,7 +1421,7 @@ macro_rules! raw_client_methods {
             ///
             /// * `operation` - Smithy protocol operation to execute.
             /// * `namespace_id` - Positive server-assigned namespace ID.
-            /// * `item_id` - Exact 32-byte item ID for item-scoped operations.
+            /// * `item_id` - Opaque `0..=32`-byte Item ID for item-scoped operations.
             /// * `value` - Raw value or application payload for the operation.
             /// * `set_options` - Conditional and expiration options used by SET.
             ///
@@ -1537,7 +1535,7 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Retrieves exact encoded bytes for a fixed-size item ID.
+            /// Retrieves exact encoded bytes for an opaque variable-length Item ID.
             pub async fn get(&self, item_id: ItemId) -> Result<GetOutcome<ItemValue>> {
                 self.0.get(item_id).await
             }
@@ -1574,12 +1572,12 @@ macro_rules! raw_client_methods {
                     .await
             }
 
-            /// Deletes a fixed-size item ID.
+            /// Deletes an opaque variable-length Item ID.
             pub async fn delete(&self, item_id: ItemId) -> Result<DeleteOutcome> {
                 self.0.delete(item_id).await
             }
 
-            /// Deletes a fixed-size item ID in an explicitly supplied namespace.
+            /// Deletes an opaque variable-length Item ID in an explicitly supplied namespace.
             pub async fn delete_in_namespace(
                 &self,
                 namespace_id: u64,
@@ -1918,10 +1916,7 @@ fn validate_stats_payload(payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_response_contract(
-    opcode: Opcode,
-    response: &Response,
-) -> Result<()> {
+fn validate_response_contract(opcode: Opcode, response: &Response) -> Result<()> {
     let operation = operation(opcode);
     let operation_contract = contract::operation_wire_spec(opcode);
     if response.status.is_error() {
@@ -1986,19 +1981,21 @@ fn validate_response_contract(
             Ok(())
         }
         Some(contract::OperationResponseFraming::FieldSequence) => {
-            protocol::decode_operation_response_fields(opcode, &response.payload)
-                .map_err(|error| Error::UnexpectedResponse {
+            protocol::decode_operation_response_fields(opcode, &response.payload).map_err(
+                |error| Error::UnexpectedResponse {
                     operation,
                     message: format!("structured response payload is invalid: {error}"),
-                })?;
+                },
+            )?;
             Ok(())
         }
         Some(contract::OperationResponseFraming::OptionalValues) => {
-            protocol::decode_operation_response_fields(opcode, &response.payload)
-                .map_err(|error| Error::UnexpectedResponse {
+            protocol::decode_operation_response_fields(opcode, &response.payload).map_err(
+                |error| Error::UnexpectedResponse {
                     operation,
                     message: format!("optional-value response payload is invalid: {error}"),
-                })?;
+                },
+            )?;
             Ok(())
         }
         None => invalid_payload("operation response framing requires an adapter-owned decoder"),

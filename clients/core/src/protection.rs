@@ -2,7 +2,9 @@
 
 use crate::key::{KeyBinding, KeyInput, KeyResolver};
 use crate::value::{Compression, Encryption, ItemValue, Value, ValueCodec};
-use crate::{ClientRootKey, DataProtectionKey, ItemId, KeyType, ResolvedKey, Result, TypedKey};
+use crate::{
+    ClientRootKey, DataProtectionKey, ItemId, KeyFormat, KeyType, ResolvedKey, Result, TypedKey,
+};
 
 /// Reusable keyed transformation shared by language-specific client layers.
 pub struct DataProtection {
@@ -35,13 +37,30 @@ impl DataProtection {
         key_type: KeyType,
         compression: Compression,
     ) -> Result<Self> {
+        Self::with_key_type_and_format(key, key_type, KeyFormat::Hash, compression)
+    }
+
+    /// Creates mandatory protection with an explicit key type and mapping profile.
+    pub fn with_key_type_and_format(
+        key: ClientRootKey,
+        key_type: KeyType,
+        format: KeyFormat,
+        compression: Compression,
+    ) -> Result<Self> {
+        crate::KeySpace::with_format(key_type, format).validate()?;
+        if format == KeyFormat::ByteKeyOrHash {
+            return Err(crate::Error::configuration(
+                "key_format",
+                "ByteKeyOrHash requires unprotected values",
+            ));
+        }
         if key.is_zero() {
             return Err(crate::Error::configuration(
                 "client_root_key",
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let resolver = KeyResolver::new(key, key_type);
+        let resolver = KeyResolver::with_format(key, key_type, format);
         let codec = ValueCodec::protected(resolver.root(), compression)?;
         Ok(Self { resolver, codec })
     }
@@ -51,7 +70,28 @@ impl DataProtection {
     /// The all-zero root still participates in namespace-bound Item ID
     /// derivation. Only value protection is disabled.
     pub fn unprotected(key_type: KeyType, compression: Compression) -> Result<Self> {
-        let resolver = KeyResolver::new(ClientRootKey::zero(), key_type);
+        Self::unprotected_with_format(key_type, KeyFormat::Hash, compression)
+    }
+
+    /// Creates an unprotected client with an explicit mapping profile.
+    pub fn unprotected_with_format(
+        key_type: KeyType,
+        format: KeyFormat,
+        compression: Compression,
+    ) -> Result<Self> {
+        Self::unprotected_with_root(ClientRootKey::zero(), key_type, format, compression)
+    }
+
+    /// Creates an unprotected value codec while retaining the supplied root
+    /// for Item ID derivation.
+    pub(crate) fn unprotected_with_root(
+        key: ClientRootKey,
+        key_type: KeyType,
+        format: KeyFormat,
+        compression: Compression,
+    ) -> Result<Self> {
+        crate::KeySpace::with_format(key_type, format).validate()?;
+        let resolver = KeyResolver::with_format(key, key_type, format);
         let codec = ValueCodec::compressed(compression)?;
         Ok(Self { resolver, codec })
     }
@@ -86,13 +126,37 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
+        Self::with_profile_and_key_type_and_format(
+            key,
+            key_type,
+            KeyFormat::Hash,
+            compression,
+            encryption,
+        )
+    }
+
+    /// Creates protection with an explicit key type, mapping, and encryption profile.
+    pub fn with_profile_and_key_type_and_format(
+        key: ClientRootKey,
+        key_type: KeyType,
+        format: KeyFormat,
+        compression: Compression,
+        encryption: Encryption,
+    ) -> Result<Self> {
+        crate::KeySpace::with_format(key_type, format).validate()?;
+        if format == KeyFormat::ByteKeyOrHash && encryption != Encryption::Unprotected {
+            return Err(crate::Error::configuration(
+                "key_format",
+                "ByteKeyOrHash requires unprotected values",
+            ));
+        }
         if key.is_zero() && encryption != Encryption::Unprotected {
             return Err(crate::Error::configuration(
                 "client_root_key",
                 "must not be all zero when value protection is enabled",
             ));
         }
-        let resolver = KeyResolver::new(key, key_type);
+        let resolver = KeyResolver::with_format(key, key_type, format);
         let codec = ValueCodec::protected_with_profile(resolver.root(), compression, encryption)?;
         Ok(Self { resolver, codec })
     }
@@ -100,6 +164,11 @@ impl DataProtection {
     /// Returns the configured key type.
     pub const fn key_type(&self) -> KeyType {
         self.resolver.key_type()
+    }
+
+    /// Returns the configured client-owned key mapping profile.
+    pub const fn key_format(&self) -> KeyFormat {
+        self.resolver.format()
     }
 
     /// Derives a namespace-bound Item ID for a typed key.
@@ -112,6 +181,24 @@ impl DataProtection {
             .resolver
             .bind_input(namespace_id, KeyInput::typed(key))?
             .item_id)
+    }
+
+    /// Derives a direct byte Item ID under `ByteKeyOrHash`.
+    pub fn byte_key_or_hash_in_namespace(
+        &self,
+        namespace_id: u64,
+        key: impl AsRef<[u8]>,
+    ) -> Result<ItemId> {
+        if self.key_type() != KeyType::Bytes || self.key_format() != KeyFormat::ByteKeyOrHash {
+            return Err(crate::Error::configuration(
+                "key_format",
+                "byte_key_or_hash_in_namespace requires KeyType::Bytes with KeyFormat::ByteKeyOrHash",
+            ));
+        }
+        self.resolver
+            .root()
+            .derive_byte_key_or_hash_in_namespace(namespace_id, key)
+            .map_err(Into::into)
     }
 
     /// Resolves one internal key input at the shared core boundary.

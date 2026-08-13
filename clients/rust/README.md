@@ -9,7 +9,7 @@ Rust applications get high-level request builders while advanced callers can
 use the re-exported raw core types over the same connection.
 
 - `Client` accepts application keys and plaintext values.
-- `RawClient` accepts exact 32-byte item IDs and opaque values.
+- `RawClient` accepts opaque item IDs of up to 32 bytes and opaque values.
 - `LocalClient` and `LocalRawClient` provide equivalent Compio-local layers.
 - `Client` and `RawClient` use Tokio and Quinn and are `Clone + Send + Sync`.
 - `RawClient` and `LocalRawClient` implement the Smithy-generated

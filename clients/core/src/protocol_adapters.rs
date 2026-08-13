@@ -16,13 +16,18 @@ pub(crate) fn decode_response_fields<'a>(
     payload: &'a [u8],
 ) -> super::Result<generic::OperationFields<'a>> {
     let contract = crate::contract::operation_wire_spec(operation);
-    if contract.generic_response_framing().is_some() {
-        return generic::decode_response_fields_view(payload, &contract.response);
+    match contract.generic_response_framing() {
+        Some(crate::contract::OperationResponseFraming::OptionalValues) => {
+            compat_v1::decode_response_fields(operation, payload)
+        }
+        Some(_) => generic::decode_response_fields_view(payload, &contract.response),
+        None => {
+            let _ = operation;
+            Err(super::ProtocolError::InvalidFieldSequence(
+                "operation response framing is not generic",
+            ))
+        }
     }
-    let _ = operation;
-    Err(super::ProtocolError::InvalidFieldSequence(
-        "operation response framing is not generic",
-    ))
 }
 
 fn generic_request_from_contract(

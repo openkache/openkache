@@ -672,7 +672,7 @@ func (h *nativeHandle) executeRaw(
 			Message:   "native library does not support exact-item-ID operations",
 		}
 	}
-	return h.executeNative(ctx, operation, 0, itemID[:], value, options, true)
+	return h.executeNative(ctx, operation, 0, itemID, value, options, true)
 }
 
 func (h *nativeHandle) executeScoped(
@@ -683,7 +683,7 @@ func (h *nativeHandle) executeScoped(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
-	return h.executeScopedBytes(ctx, operation, namespaceID, itemID[:], value, options)
+	return h.executeScopedBytes(ctx, operation, namespaceID, itemID, value, options)
 }
 
 func (h *nativeHandle) executeScopedBytes(

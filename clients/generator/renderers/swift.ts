@@ -851,12 +851,13 @@ private func smithyDecodeF64Array(
     operation_uses_item_id_helpers,
   )
     ? `private func smithyConcatItemIDs(_ itemIDs: [Data]) -> Data {
-  var combined = Data(capacity: itemIDs.count * Smithy_Value_Format.itemIdBytes)
+  var combined = Data()
   for itemID in itemIDs {
     precondition(
-      itemID.count == Smithy_Value_Format.itemIdBytes,
-      "item IDs must contain exactly \(Smithy_Value_Format.itemIdBytes) bytes"
+      itemID.count <= Smithy_Value_Format.itemIdBytes,
+      "item IDs must contain at most \(Smithy_Value_Format.itemIdBytes) bytes"
     )
+    combined.append(UInt8(itemID.count))
     combined.append(itemID)
   }
   return combined

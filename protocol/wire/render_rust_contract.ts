@@ -379,8 +379,14 @@ ${operation_modules.join("\n")}
         }`
         case "byte_length_field":
           return `super::request::RequestWireStep::ByteLengthField { field: ${step.field} }`
+        case "byte_length_prefix_field":
+          return `super::request::RequestWireStep::ByteLengthPrefixField { field: ${step.field} }`
+        case "byte_field":
+          return `super::request::RequestWireStep::ByteField { field: ${step.field} }`
         case "varuint_field":
           return `super::request::RequestWireStep::VarUIntField { field: ${step.field} }`
+        case "value_length_field":
+          return `super::request::RequestWireStep::ValueLengthField { field: ${step.field} }`
         case "conditional":
           return `super::request::RequestWireStep::Conditional {
             field: ${step.field},
@@ -868,7 +874,7 @@ pub const RESPONSE_FIXED_BYTES: usize = ${formatted_decimal(v1.response_fixed_by
 pub const MIN_VARUINT_BYTES: usize = ${formatted_decimal(v1.min_varuint_bytes)};
 /// Maximum bytes in one unsigned \`vu128\` accepted by this protocol.
 pub const MAX_VARUINT_BYTES: usize = ${formatted_decimal(v1.max_varuint_bytes)};
-/// Bytes in every canonical item ID carried by the protocol.
+/// Maximum bytes in a canonical item ID carried by the protocol.
 pub const ITEM_ID_BYTES: usize = ${formatted_decimal(contract.item_id_bytes)};
 /// Absolute value or response payload ceiling representable by protocol v1.
 pub const MAX_VALUE_BYTES: usize = ${formatted_decimal(contract.max_value_bytes)};

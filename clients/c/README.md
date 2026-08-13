@@ -57,7 +57,7 @@ released with `openkache_client_free`.
 `openkache_client_connect_with_options` is a named-field convenience wrapper.
 An empty trust buffer selects system roots. `openkache_client_execute` accepts
 one complete canonical v1 key item and derives its protected Item ID, while
-`openkache_client_execute_raw` requires a 32-byte item ID and sends opaque
+`openkache_client_execute_raw` accepts an item ID of up to 32 bytes and sends opaque
 values unchanged. C callers that construct protected keys directly should use
 the `Integer`, `Text`, and `Bytes` rules in
 [`../KEY_FORMAT.md`](../KEY_FORMAT.md).

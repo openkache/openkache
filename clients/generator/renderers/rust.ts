@@ -799,16 +799,15 @@ fn smithy_decode_f64_array(
     ? `fn smithy_concat_item_ids(
     item_ids: &[&[u8]],
 ) -> std::result::Result<Vec<u8>, Error> {
-    let mut combined = Vec::with_capacity(
-        item_ids.len() * openkache_client_core::ITEM_ID_BYTES,
-    );
+    let mut combined = Vec::new();
     for item_id in item_ids {
-        if item_id.len() != openkache_client_core::ITEM_ID_BYTES {
+        if item_id.len() > openkache_client_core::MAX_ITEM_ID_BYTES {
             return Err(Error::Protocol(format!(
-                "item IDs must contain exactly {} bytes",
-                openkache_client_core::ITEM_ID_BYTES,
+                "item IDs must contain at most {} bytes",
+                openkache_client_core::MAX_ITEM_ID_BYTES,
             )));
         }
+        combined.push(item_id.len() as u8);
         combined.extend_from_slice(item_id);
     }
     Ok(combined)

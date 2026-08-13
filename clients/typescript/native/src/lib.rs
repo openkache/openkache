@@ -418,7 +418,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Retrieves exact bytes for a fixed-size protocol item ID.
+    /// Retrieves exact bytes for an opaque protocol item ID.
     #[napi(js_name = "raw_get")]
     pub async fn raw_get(&self, item_id: Uint8Array) -> Result<Option<Uint8Array>> {
         let item_id = parse_item_id(item_id.as_ref())?;
@@ -455,7 +455,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Stores exact bytes for a fixed-size protocol item ID.
+    /// Stores exact bytes for an opaque protocol item ID.
     #[napi(js_name = "raw_set")]
     pub async fn raw_set(
         &self,
@@ -514,7 +514,7 @@ impl NativeClient {
             .map_err(native_error)
     }
 
-    /// Deletes a fixed-size protocol item ID.
+    /// Deletes an opaque protocol item ID.
     #[napi(js_name = "raw_delete")]
     pub async fn raw_delete(&self, item_id: Uint8Array) -> Result<bool> {
         let item_id = parse_item_id(item_id.as_ref())?;

@@ -109,10 +109,7 @@ fn required_item_id_at(
     let value = input
         .field_at_index(field_index)
         .ok_or(&b"operation requires a valid item ID"[..])?;
-    let bytes = value
-        .try_into()
-        .map_err(|_| &b"operation requires a valid item ID"[..])?;
-    Ok(ItemId::new(bytes))
+    ItemId::from_slice(value).map_err(|_| &b"operation requires a valid item ID"[..])
 }
 
 fn required_item_id_at_role(

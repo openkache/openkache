@@ -26,6 +26,8 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("item ID has {actual} bytes; maximum is {expected}")]
+    InvalidItemIdLength { expected: usize, actual: usize },
     #[error("request flags contain unknown bits 0x{0:02x}")]
     UnknownRequestFlags(u8),
     #[error("if-absent and if-present conditions cannot be combined")]
@@ -84,6 +86,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
+            }
+            openkache_protocol::ProtocolError::InvalidItemIdLength { expected, actual } => {
+                Self::InvalidItemIdLength { expected, actual }
             }
             openkache_protocol::ProtocolError::InvalidFieldSequence(message) => {
                 Self::InvalidFieldSequence(message)

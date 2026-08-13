@@ -15,7 +15,7 @@ use openkache_protocol::compat_v1::{
     SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, SET_RESERVED_MASK,
 };
 use openkache_protocol::{
-    ITEM_ID_BYTES, NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES, ItemId, decode_varuint,
+    NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES, ItemId, decode_varuint,
     encode_varuint,
 };
 use smallvec::SmallVec;
@@ -866,13 +866,17 @@ fn validate_compact_request(request: &CompatibilityRequest) -> Result<()> {
         {
             return Err(invalid_shape(
                 request.opcode,
-                ITEM_ID_BYTES * item_count,
+                openkache_protocol::ITEM_ID_BYTES * item_count,
                 if value_count == 0 { "0" } else { "any" },
             ));
         }
         if value_count == 0 {
             if request.set_options != SetWireOptions::NONE || !request.value.is_empty() {
-                return Err(invalid_shape(request.opcode, ITEM_ID_BYTES, "0"));
+                return Err(invalid_shape(
+                    request.opcode,
+                    openkache_protocol::ITEM_ID_BYTES,
+                    "0",
+                ));
             }
         } else {
             request.set_options.flags()?;
@@ -995,25 +999,43 @@ pub(crate) fn parse_compact_item_ids(
     bytes: &[u8],
     item_count: usize,
 ) -> std::result::Result<Vec<ItemId>, String> {
-    let expected = item_count
-        .checked_mul(ITEM_ID_BYTES)
-        .ok_or_else(|| "item ID count overflows the ABI".to_owned())?;
-    if bytes.len() != expected {
+    if item_count == 0 {
+        return if bytes.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err("operation does not accept an item ID".to_owned())
+        };
+    }
+    if item_count == 1 {
+        return ItemId::from_slice(bytes)
+            .map(|item_id| vec![item_id])
+            .map_err(|error| error.to_string());
+    }
+    let mut cursor = 0;
+    let mut item_ids = Vec::with_capacity(item_count);
+    for _ in 0..item_count {
+        let length = *bytes
+            .get(cursor)
+            .ok_or_else(|| "item ID length is missing".to_owned())?
+            as usize;
+        cursor = cursor
+            .checked_add(1)
+            .ok_or_else(|| "item ID length overflows the ABI".to_owned())?;
+        let end = cursor
+            .checked_add(length)
+            .ok_or_else(|| "item ID length overflows the ABI".to_owned())?;
+        let item = bytes
+            .get(cursor..end)
+            .ok_or_else(|| "item ID bytes are truncated".to_owned())?;
+        item_ids.push(ItemId::from_slice(item).map_err(|error| error.to_string())?);
+        cursor = end;
+    }
+    if cursor != bytes.len() {
         return Err(format!(
-            "expected {expected} bytes for {item_count} item IDs, got {}",
-            bytes.len()
+            "item ID payload has trailing bytes after {item_count} IDs"
         ));
     }
-    (0..item_count)
-        .map(|index| {
-            let bytes = bytes
-                .get(index * ITEM_ID_BYTES..(index + 1) * ITEM_ID_BYTES)
-                .expect("item ID range was validated");
-            Ok(ItemId::new(
-                bytes.try_into().expect("item ID width was validated"),
-            ))
-        })
-        .collect()
+    Ok(item_ids)
 }
 
 /// Validates the payload field carried by a compact protocol-v1 request.

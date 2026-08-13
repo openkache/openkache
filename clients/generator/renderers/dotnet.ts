@@ -968,18 +968,19 @@ export function render_csharp_operations(contract: Client_Contract): string {
         var total = 0;
         foreach (var itemId in itemIds)
         {
-            if (itemId.Length != Protocol.ItemIdBytes)
+            if (itemId.Length > Protocol.ItemIdBytes)
             {
                 throw new OpenKacheException(
                     "PROTOCOL_ERROR",
-                    $"item IDs must contain exactly {Protocol.ItemIdBytes} bytes.");
+                    $"item IDs must contain at most {Protocol.ItemIdBytes} bytes.");
             }
-            total = checked(total + itemId.Length);
+            total = checked(total + 1 + itemId.Length);
         }
         var combined = new byte[total];
         var offset = 0;
         foreach (var itemId in itemIds)
         {
+            combined[offset++] = checked((byte)itemId.Length);
             itemId.CopyTo(combined, offset);
             offset += itemId.Length;
         }
@@ -988,11 +989,11 @@ export function render_csharp_operations(contract: Client_Contract): string {
 
     private static byte[] ValidateItemIds(byte[] itemIds, int itemCount)
     {
-        if (itemIds.Length != checked(Protocol.ItemIdBytes * itemCount))
+        if (itemIds.Length > checked((Protocol.ItemIdBytes + 1) * itemCount))
         {
             throw new OpenKacheException(
                 "PROTOCOL_ERROR",
-                $"item IDs must contain exactly {Protocol.ItemIdBytes * itemCount} bytes.");
+                $"item IDs must contain at most {(Protocol.ItemIdBytes + 1) * itemCount} bytes.");
         }
         return itemIds;
     }

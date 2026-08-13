@@ -5,7 +5,7 @@ use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::{Error, ITEM_ID_BYTES, Result};
+use crate::{Error, Result};
 
 pub(crate) const PROTECTION_KEY_BYTES: usize =
     crate::contract::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
@@ -16,6 +16,22 @@ pub const DATA_PROTECTION_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 pub const CLIENT_ROOT_KEY_BYTES: usize = PROTECTION_KEY_BYTES;
 /// Maximum application key input bytes accepted by every conforming SDK.
 pub const MAX_KEY_INPUT_BYTES: usize = 1_048_576;
+/// Maximum Item ID bytes accepted by the wire protocol.
+pub const MAX_ITEM_ID_BYTES: usize = 32;
+
+/// Client-owned application-key to Item ID mapping profile.
+///
+/// This setting is local to a client. It is never serialized into a wire
+/// frame or interpreted by the server.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[non_exhaustive]
+pub enum KeyFormat {
+    /// Deterministic CBOR followed by namespace-bound BLAKE3 hashing.
+    #[default]
+    Hash,
+    /// Preserve byte keys up to the wire limit and hash longer byte keys.
+    ByteKeyOrHash,
+}
 
 /// The one typed-key variant selected for a formatted keyspace.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -58,12 +74,21 @@ impl KeyType {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct KeySpace {
     key_type: KeyType,
+    format: KeyFormat,
 }
 
 impl KeySpace {
     /// Creates a resolver for one logical key type.
     pub const fn new(key_type: KeyType) -> Self {
-        Self { key_type }
+        Self {
+            key_type,
+            format: KeyFormat::Hash,
+        }
+    }
+
+    /// Creates a key space with an explicit mapping profile.
+    pub const fn with_format(key_type: KeyType, format: KeyFormat) -> Self {
+        Self { key_type, format }
     }
 
     /// Returns the logical key type enforced by this resolver.
@@ -71,15 +96,42 @@ impl KeySpace {
         self.key_type
     }
 
+    /// Returns the configured client-owned mapping profile.
+    pub const fn format(self) -> KeyFormat {
+        self.format
+    }
+
+    /// Validates that the selected mapping profile is compatible with the
+    /// configured logical key type.
+    pub fn validate(self) -> std::result::Result<(), KeyError> {
+        if self.format == KeyFormat::ByteKeyOrHash && self.key_type != KeyType::Bytes {
+            return Err(KeyError::InvalidFormatForKeyType {
+                format: self.format,
+                key_type: self.key_type,
+            });
+        }
+        Ok(())
+    }
+
     /// Resolves one typed logical key and owns its canonical representation.
     pub fn resolve(self, key: impl Into<TypedKey>) -> std::result::Result<ResolvedKey, KeyError> {
+        self.validate()?;
         let key = key.into();
         ensure_key_type(self.key_type, key.key_type())?;
-        ResolvedKey::from_typed(key)
+        match (self.format, key) {
+            (KeyFormat::ByteKeyOrHash, TypedKey::Bytes(bytes)) => {
+                ResolvedKey::from_direct_bytes(bytes)
+            }
+            (_, key) => ResolvedKey::from_typed(key),
+        }
     }
 
     /// Resolves logical bytes using the configured key type.
     pub fn resolve_logical_bytes(self, value: &[u8]) -> std::result::Result<ResolvedKey, KeyError> {
+        self.validate()?;
+        if self.format == KeyFormat::ByteKeyOrHash && self.key_type == KeyType::Bytes {
+            return ResolvedKey::from_direct_bytes(value.to_owned());
+        }
         let key = typed_from_logical_bytes(self.key_type, value)?;
         ResolvedKey::from_typed(key)
     }
@@ -89,9 +141,15 @@ impl KeySpace {
         self,
         canonical_key: &[u8],
     ) -> std::result::Result<ResolvedKey, KeyError> {
-        let key = ResolvedKey::from_canonical(canonical_key)?;
-        ensure_key_type(self.key_type, key.key_type())?;
-        Ok(key)
+        self.validate()?;
+        let typed = TypedKey::decode_canonical(canonical_key)?;
+        ensure_key_type(self.key_type, typed.key_type())?;
+        if self.format == KeyFormat::ByteKeyOrHash {
+            if let TypedKey::Bytes(bytes) = typed {
+                return ResolvedKey::from_direct_bytes(bytes);
+            }
+        }
+        ResolvedKey::from_typed(typed)
     }
 }
 
@@ -118,15 +176,19 @@ pub(crate) struct KeyResolver {
 }
 
 impl KeyResolver {
-    pub(crate) fn new(root: ClientRootKey, key_type: KeyType) -> Self {
+    pub(crate) fn with_format(root: ClientRootKey, key_type: KeyType, format: KeyFormat) -> Self {
         Self {
             root,
-            space: KeySpace::new(key_type),
+            space: KeySpace::with_format(key_type, format),
         }
     }
 
     pub(crate) const fn key_type(&self) -> KeyType {
         self.space.key_type()
+    }
+
+    pub(crate) const fn format(&self) -> KeyFormat {
+        self.space.format()
     }
 
     pub(crate) fn root(&self) -> &ClientRootKey {
@@ -149,7 +211,7 @@ impl KeyResolver {
             KeyInput::ConfiguredLogical(bytes) => self.space.resolve_logical_bytes(&bytes),
             #[cfg(feature = "ffi")]
             KeyInput::TypedLogical { key_type, bytes } => {
-                KeySpace::new(key_type).resolve_logical_bytes(&bytes)
+                KeySpace::with_format(key_type, self.format()).resolve_logical_bytes(&bytes)
             }
             #[cfg(feature = "ffi")]
             KeyInput::CanonicalKey(bytes) => ResolvedKey::from_canonical(&bytes),
@@ -320,17 +382,17 @@ impl TypedInteger {
     /// Returns an error when `magnitude` is larger than the configured key
     /// resource limit.
     pub fn from_parts(negative: bool, magnitude: &[u8]) -> std::result::Result<Self, KeyError> {
+        let first_nonzero = magnitude
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(magnitude.len());
+        let magnitude = magnitude[first_nonzero..].to_vec();
         if magnitude.len() > MAX_KEY_INPUT_BYTES {
             return Err(KeyError::TooLarge {
                 size: magnitude.len(),
                 maximum: MAX_KEY_INPUT_BYTES,
             });
         }
-        let first_nonzero = magnitude
-            .iter()
-            .position(|byte| *byte != 0)
-            .unwrap_or(magnitude.len());
-        let magnitude = magnitude[first_nonzero..].to_vec();
         Ok(Self {
             negative: negative && !magnitude.is_empty(),
             magnitude,
@@ -355,12 +417,6 @@ impl TypedInteger {
         }
         if negative && digits == b"0" {
             return Err(KeyError::InvalidInteger);
-        }
-        if digits.len() > MAX_KEY_INPUT_BYTES {
-            return Err(KeyError::TooLarge {
-                size: digits.len(),
-                maximum: MAX_KEY_INPUT_BYTES,
-            });
         }
         let mut magnitude = Vec::new();
         for digit in digits {
@@ -477,8 +533,30 @@ impl TypedKey {
         }
     }
 
+    /// Returns the key input length measured by the shared contract.
+    pub fn input_len(&self) -> usize {
+        match self {
+            Self::Integer(value) => value.magnitude.len(),
+            Self::Text(value) => value.len(),
+            Self::Bytes(value) => value.len(),
+        }
+    }
+
+    /// Validates the key input length before encoding or hashing.
+    pub fn validate_input_len(&self) -> std::result::Result<(), KeyError> {
+        let size = self.input_len();
+        if size > MAX_KEY_INPUT_BYTES {
+            return Err(KeyError::TooLarge {
+                size,
+                maximum: MAX_KEY_INPUT_BYTES,
+            });
+        }
+        Ok(())
+    }
+
     /// Encodes this key using deterministic CBOR preferred serialization.
     pub fn canonical_bytes(&self) -> std::result::Result<Vec<u8>, KeyError> {
+        self.validate_input_len()?;
         let mut output = Vec::with_capacity(self.estimated_cbor_size());
         match self {
             Self::Integer(value) => value.cbor_bytes(&mut output),
@@ -491,23 +569,11 @@ impl TypedKey {
                 output.extend_from_slice(value);
             }
         }
-        if output.len() > MAX_KEY_INPUT_BYTES {
-            return Err(KeyError::TooLarge {
-                size: output.len(),
-                maximum: MAX_KEY_INPUT_BYTES,
-            });
-        }
         Ok(output)
     }
 
     /// Decodes exactly one canonical v1 key item.
     pub fn decode_canonical(bytes: &[u8]) -> std::result::Result<Self, KeyError> {
-        if bytes.len() > MAX_KEY_INPUT_BYTES {
-            return Err(KeyError::TooLarge {
-                size: bytes.len(),
-                maximum: MAX_KEY_INPUT_BYTES,
-            });
-        }
         let mut cursor = Cursor::new(bytes);
         let key = cursor.parse_key()?;
         if !cursor.is_empty() {
@@ -563,6 +629,7 @@ fn ensure_key_type(expected: KeyType, actual: KeyType) -> std::result::Result<()
 pub struct ResolvedKey {
     key_type: KeyType,
     canonical: Vec<u8>,
+    direct: Option<Vec<u8>>,
 }
 
 impl ResolvedKey {
@@ -573,6 +640,21 @@ impl ResolvedKey {
         Ok(Self {
             key_type: typed.key_type(),
             canonical,
+            direct: None,
+        })
+    }
+
+    fn from_direct_bytes(bytes: Vec<u8>) -> std::result::Result<Self, KeyError> {
+        if bytes.len() > MAX_KEY_INPUT_BYTES {
+            return Err(KeyError::TooLarge {
+                size: bytes.len(),
+                maximum: MAX_KEY_INPUT_BYTES,
+            });
+        }
+        Ok(Self {
+            key_type: KeyType::Bytes,
+            canonical: Vec::new(),
+            direct: Some(bytes),
         })
     }
 
@@ -582,6 +664,7 @@ impl ResolvedKey {
         Ok(Self {
             key_type: typed.key_type(),
             canonical: bytes.to_owned(),
+            direct: None,
         })
     }
 
@@ -599,6 +682,10 @@ impl ResolvedKey {
     /// Consumes this key and returns its canonical bytes.
     pub fn into_canonical_bytes(self) -> Vec<u8> {
         self.canonical
+    }
+
+    fn direct_bytes(&self) -> Option<&[u8]> {
+        self.direct.as_deref()
     }
 }
 
@@ -874,9 +961,9 @@ impl<'a> Cursor<'a> {
 #[non_exhaustive]
 pub enum KeyError {
     /// A key exceeded the common SDK size limit.
-    #[error("canonical key is too large: {size} bytes exceeds {maximum}")]
+    #[error("key input is too large: {size} bytes exceeds {maximum}")]
     TooLarge {
-        /// Actual canonical key byte length.
+        /// Actual measured key-input byte length.
         size: usize,
         /// Maximum accepted byte length.
         maximum: usize,
@@ -888,6 +975,14 @@ pub enum KeyError {
         expected: KeyType,
         /// Supplied key type.
         actual: KeyType,
+    },
+    /// A mapping profile was paired with an incompatible logical key type.
+    #[error("key format {format:?} requires key type bytes, got {key_type:?}")]
+    InvalidFormatForKeyType {
+        /// Selected client-owned mapping profile.
+        format: KeyFormat,
+        /// Configured logical key type.
+        key_type: KeyType,
     },
     /// A canonical key contained bytes after its complete CBOR item.
     #[error("canonical key contains trailing bytes")]
@@ -925,22 +1020,24 @@ pub fn canonical_key_bytes(
         .map(ResolvedKey::into_canonical_bytes)
 }
 
-/// Exact fixed-size item ID sent through the OpenKache protocol.
-#[repr(transparent)]
+/// Opaque variable-length item ID sent through the OpenKache protocol.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ItemId([u8; ITEM_ID_BYTES]);
+pub struct ItemId {
+    len: u8,
+    bytes: [u8; MAX_ITEM_ID_BYTES],
+}
 
 impl ItemId {
-    /// Wraps an exact item ID without hashing it again.
-    pub const fn from_bytes(bytes: [u8; ITEM_ID_BYTES]) -> Self {
-        Self(bytes)
+    /// Wraps a legacy 32-byte item ID without hashing it again.
+    pub fn from_bytes(bytes: impl AsRef<[u8]>) -> Self {
+        Self::from_slice(bytes.as_ref()).expect("item ID exceeds the wire length limit")
     }
 
     /// Copies an exact item ID from a language binding or dynamic buffer.
     ///
     /// # Arguments
     ///
-    /// * `bytes` - Exactly 32 opaque item ID bytes.
+    /// * `bytes` - Zero through 32 opaque item ID bytes.
     ///
     /// # Returns
     ///
@@ -948,32 +1045,43 @@ impl ItemId {
     ///
     /// # Errors
     ///
-    /// Returns an error when `bytes` does not contain exactly 32 bytes.
+    /// Returns an error when `bytes` contains more than 32 bytes.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
-        let exact: &[u8; ITEM_ID_BYTES] = bytes.try_into().map_err(|_| {
-            Error::configuration(
+        if bytes.len() > MAX_ITEM_ID_BYTES {
+            return Err(Error::configuration(
                 "item_id",
                 format!(
-                    "must contain exactly {ITEM_ID_BYTES} bytes, got {}",
+                    "must contain at most {MAX_ITEM_ID_BYTES} bytes, got {}",
                     bytes.len()
                 ),
-            )
-        })?;
-        Ok(Self::from_bytes(*exact))
+            ));
+        }
+        let mut item_id = Self {
+            len: bytes.len() as u8,
+            bytes: [0; MAX_ITEM_ID_BYTES],
+        };
+        item_id.bytes[..bytes.len()].copy_from_slice(bytes);
+        Ok(item_id)
     }
 
     /// Returns the exact wire bytes.
-    pub const fn as_bytes(&self) -> &[u8; ITEM_ID_BYTES] {
-        &self.0
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+
+    /// Returns the exact number of wire bytes in this Item ID.
+    pub const fn len(&self) -> usize {
+        self.len as usize
     }
 
     /// Consumes the item ID and returns its exact wire bytes.
-    pub const fn into_bytes(self) -> [u8; ITEM_ID_BYTES] {
-        self.0
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.as_bytes().to_vec()
     }
 
-    pub(crate) const fn into_protocol(self) -> openkache_protocol::ItemId {
-        openkache_protocol::ItemId::new(self.0)
+    pub(crate) fn into_protocol(self) -> openkache_protocol::ItemId {
+        openkache_protocol::ItemId::from_slice(self.as_bytes())
+            .expect("client ItemId was validated before protocol conversion")
     }
 }
 
@@ -983,8 +1091,8 @@ impl AsRef<[u8]> for ItemId {
     }
 }
 
-impl From<[u8; ITEM_ID_BYTES]> for ItemId {
-    fn from(bytes: [u8; ITEM_ID_BYTES]) -> Self {
+impl From<[u8; MAX_ITEM_ID_BYTES]> for ItemId {
+    fn from(bytes: [u8; MAX_ITEM_ID_BYTES]) -> Self {
         Self::from_bytes(bytes)
     }
 }
@@ -1140,6 +1248,9 @@ impl ClientRootKey {
         if namespace_id == 0 {
             return Err(KeyError::InvalidNamespace);
         }
+        if let Some(direct) = key.direct_bytes() {
+            return Ok(self.byte_key_or_hash(namespace_id, direct));
+        }
         Ok(self.hash_canonical_key(namespace_id, key.canonical_bytes()))
     }
 
@@ -1148,6 +1259,35 @@ impl ClientRootKey {
         hasher.update(&namespace_id.to_be_bytes());
         hasher.update(canonical_key);
         ItemId::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    fn byte_key_or_hash(&self, namespace_id: u64, direct_key: &[u8]) -> ItemId {
+        if direct_key.len() <= MAX_ITEM_ID_BYTES {
+            return ItemId::from_slice(direct_key).expect("direct key length was validated");
+        }
+        let mut hasher = blake3::Hasher::new_keyed(&self.item_id_root);
+        hasher.update(&namespace_id.to_be_bytes());
+        hasher.update(direct_key);
+        ItemId::from_bytes(*hasher.finalize().as_bytes())
+    }
+
+    /// Derives an Item ID with the direct-byte preserve-or-hash profile.
+    pub fn derive_byte_key_or_hash_in_namespace(
+        &self,
+        namespace_id: u64,
+        direct_key: impl AsRef<[u8]>,
+    ) -> std::result::Result<ItemId, KeyError> {
+        if namespace_id == 0 {
+            return Err(KeyError::InvalidNamespace);
+        }
+        let direct_key = direct_key.as_ref();
+        if direct_key.len() > MAX_KEY_INPUT_BYTES {
+            return Err(KeyError::TooLarge {
+                size: direct_key.len(),
+                maximum: MAX_KEY_INPUT_BYTES,
+            });
+        }
+        Ok(self.byte_key_or_hash(namespace_id, direct_key))
     }
 
     /// Legacy byte-key convenience using namespace `1`.

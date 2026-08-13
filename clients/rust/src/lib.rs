@@ -22,7 +22,8 @@ pub use openkache_client_core::{
     AlpnPolicy, Backend, CLIENT_ROOT_KEY_BYTES, Certificate, ClientIdentity, ClientRootKey,
     ClientTimeouts, ConnectionState, DATA_PROTECTION_KEY_BYTES, DataProtection, DataProtectionKey,
     DeleteOutcome, Endpoint, Error, EvictionDefault, EvictionMode, ExpirationDefault, GetOutcome,
-    ITEM_ID_BYTES, ItemId, ItemValue, KeyError, KeyType, MAX_KEY_INPUT_BYTES, NamespaceDescriptor,
+    ITEM_ID_BYTES, ItemId, ItemValue, KeyError, KeyFormat, KeyType, MAX_KEY_INPUT_BYTES,
+    NamespaceDescriptor,
     NamespacePolicy, Operation, OverridePolicy, PrivateKey, Result, RetryPolicy, ServerErrorCode,
     ServerTrust, SetCondition, SetOptions, SetOutcome, TypedInteger, TypedKey, canonical_key_bytes,
     value, value_envelope,
@@ -262,6 +263,12 @@ macro_rules! builder_methods {
             /// this client.
             pub fn key_type(mut self, key_type: KeyType) -> Self {
                 self.inner = self.inner.key_type(key_type);
+                self
+            }
+
+            /// Selects the client-local application-key to Item ID mapping profile.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.inner = self.inner.key_format(key_format);
                 self
             }
 

@@ -63,8 +63,14 @@ function rust_request_layout(contract: Wire_Contract): string {
             }`
           case "byte_length_field":
             return "WireRequestStep::ByteLength"
+          case "byte_length_prefix_field":
+            return `WireRequestStep::ByteLengthPrefix { field: ${step.field} }`
+          case "byte_field":
+            return `WireRequestStep::ByteLengthBody { field: ${step.field} }`
           case "varuint_field":
             return "WireRequestStep::VarUInt"
+          case "value_length_field":
+            return "WireRequestStep::ValueLengthPrefix"
           case "conditional": {
             const expected = mappings.get(step.field)?.get(step.equals)
             if (expected === undefined) {

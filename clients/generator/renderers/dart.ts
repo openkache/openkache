@@ -479,12 +479,15 @@ List<double> _smithyDecodeF64Array(List<int> payload, String operation) {
     operation_uses_item_id_helpers,
   )
     ? `List<int> _smithyConcatItemIds(List<List<int>> itemIds) {
+  final combined = <int>[];
   for (final itemId in itemIds) {
-    if (itemId.length != smithyItemIdBytes) {
-      throw ArgumentError('item IDs must contain exactly \$smithyItemIdBytes bytes');
+    if (itemId.length > smithyItemIdBytes) {
+      throw ArgumentError('item IDs must contain at most \$smithyItemIdBytes bytes');
     }
+    combined.add(itemId.length);
+    combined.addAll(itemId);
   }
-  return <int>[for (final itemId in itemIds) ...itemId];
+  return combined;
 }
 `
     : ""

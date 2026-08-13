@@ -7,7 +7,7 @@ use crate::key::{KeyBinding, KeyInput};
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyType, NamespaceDescriptor,
+    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType, NamespaceDescriptor,
     NamespacePolicy, ResolvedKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
     TypedKey,
 };
@@ -22,6 +22,7 @@ struct ProtectionSettings {
     encryption_explicit: bool,
     key: Option<DataProtectionKey>,
     key_type: KeyType,
+    key_format: KeyFormat,
 }
 
 impl ProtectionSettings {
@@ -40,6 +41,7 @@ impl ProtectionSettings {
             encryption_explicit: false,
             key,
             key_type: KeyType::Bytes,
+            key_format: KeyFormat::Hash,
         }
     }
 
@@ -47,11 +49,17 @@ impl ProtectionSettings {
         let key_type = self.key_type;
         match self.key {
             Some(key) => if self.encryption == Encryption::Unprotected {
-                DataProtection::unprotected(key_type, self.compression)
-            } else {
-                DataProtection::with_profile_and_key_type(
+                DataProtection::unprotected_with_root(
                     key,
                     key_type,
+                    self.key_format,
+                    self.compression,
+                )
+            } else {
+                DataProtection::with_profile_and_key_type_and_format(
+                    key,
+                    key_type,
+                    self.key_format,
                     self.compression,
                     self.encryption,
                 )
@@ -64,7 +72,12 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected(key_type, self.compression).map(Arc::new)
+                DataProtection::unprotected_with_format(
+                    key_type,
+                    self.key_format,
+                    self.compression,
+                )
+                .map(Arc::new)
             }
         }
     }
@@ -163,6 +176,12 @@ macro_rules! protected_builder_methods {
             /// Selects the exact key type accepted by this formatted keyspace.
             pub fn key_type(mut self, key_type: KeyType) -> Self {
                 self.protection.key_type = key_type;
+                self
+            }
+
+            /// Selects the client-local application-key to Item ID mapping profile.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.protection.key_format = key_format;
                 self
             }
         }

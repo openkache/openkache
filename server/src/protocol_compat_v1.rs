@@ -100,7 +100,7 @@ fn request_wire_values(request: &super::Request) -> Result<SmallVec<[Option<Cow<
                 .map(|value| Cow::Owned(value.to_be_bytes().to_vec())),
             "item_id" => item_ids
                 .next()
-                .map(|item_id| Cow::Borrowed(item_id.as_bytes().as_slice())),
+                .map(|item_id| Cow::Borrowed(item_id.as_bytes())),
             "value" => Some(Cow::Borrowed(request.value.as_slice())),
             "name" => request.namespace_name.as_deref().map(Cow::Borrowed),
             "expected_revision" => request
@@ -241,6 +241,10 @@ pub(super) fn decode_header(prefix: &[u8], opcode: Opcode) -> Result<Option<Requ
     decode_set_options(opcode, &fields)?;
     decode_policy(opcode, &fields)?;
     let item_count = field_count(opcode, "item_id");
+    let item_id_len = field_values(opcode, &fields, "item_id")
+        .iter()
+        .map(|value| value.len())
+        .sum::<usize>();
     let has_ttl = field_bytes(opcode, &fields, "ttl_milliseconds", 0).is_some();
     Ok(Some(RequestHeader::compatibility(
         opcode,
@@ -248,6 +252,7 @@ pub(super) fn decode_header(prefix: &[u8], opcode: Opcode) -> Result<Option<Requ
         header.value_len(),
         namespace_id,
         item_count,
+        item_id_len,
         has_ttl,
     )))
 }
@@ -303,15 +308,11 @@ fn decode_request_metadata(frame: &[u8], header: RequestHeader) -> Result<Decode
     let item_ids = field_values(opcode, &fields, "item_id")
         .into_iter()
         .map(|value| {
-            let bytes: [u8; openkache_protocol::ITEM_ID_BYTES] =
-                value
-                    .try_into()
-                    .map_err(|_| ProtocolError::InvalidItemIdLength {
-                        opcode,
-                        expected: openkache_protocol::ITEM_ID_BYTES,
-                        actual: value.len(),
-                    })?;
-            Ok(ItemId::new(bytes))
+            ItemId::from_slice(value).map_err(|_| ProtocolError::InvalidItemIdLength {
+                opcode,
+                expected: openkache_protocol::ITEM_ID_BYTES,
+                actual: value.len(),
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     let namespace_name = field_bytes(opcode, &fields, "name", 0).map(ToOwned::to_owned);

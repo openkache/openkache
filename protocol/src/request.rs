@@ -39,6 +39,9 @@ pub enum RequestFrameStep {
     /// Consume one canonical `vu128` value and treat its value as the opaque
     /// body length.
     ValueLength,
+    /// Consume one canonical `vu128` value length while continuing to decode
+    /// metadata that precedes the deferred body.
+    ValueLengthPrefix,
     /// Consume one canonical `vu128` scalar that belongs to request metadata.
     VarUInt,
     /// Consume and validate one generated packed byte.
@@ -53,6 +56,10 @@ pub enum RequestFrameStep {
     },
     /// Consume one byte length followed by that many bytes.
     ByteLength,
+    /// Consume only a byte length prefix for a later byte body.
+    ByteLengthPrefix { field: usize },
+    /// Consume the body declared by a preceding byte length prefix.
+    ByteLengthBody { field: usize },
 }
 
 /// Generated request metadata used only to delimit one protocol frame.
@@ -92,7 +99,20 @@ pub enum RequestWireStep {
     ByteLengthField {
         field: usize,
     },
+    /// Encodes only the one-octet length prefix for a later byte field body.
+    ByteLengthPrefixField {
+        field: usize,
+    },
+    /// Encodes the body for a preceding byte-length prefix field.
+    ByteField {
+        field: usize,
+    },
     VarUIntField {
+        field: usize,
+    },
+    /// Encodes a canonical `vu128` value length for a body retained after all
+    /// metadata steps. This prefix may be followed by additional metadata.
+    ValueLengthField {
         field: usize,
     },
     Conditional {
@@ -161,8 +181,9 @@ fn decode_request_wire_fields_inner(
             plan.field_count,
         );
     fields.resize(plan.field_count, None);
+    let mut byte_lengths = [None; MAX_REQUEST_WIRE_FIELDS];
     let mut cursor = OPCODE_BYTES;
-    let mut has_trailing_field = false;
+    let mut has_body_length_field = false;
     decode_wire_steps(
         &prefix,
         payload.as_ref(),
@@ -170,17 +191,18 @@ fn decode_request_wire_fields_inner(
         &mut cursor,
         plan.steps,
         &mut fields,
+        &mut byte_lengths,
         true,
-        &mut has_trailing_field,
+        &mut has_body_length_field,
     )?;
     if cursor != prefix.len() {
         return Err(ProtocolError::InvalidFieldSequence(
             "request wire plan did not consume the complete prefix",
         ));
     }
-    if payload.as_ref().is_some_and(|payload| !payload.is_empty()) && !has_trailing_field {
+    if payload.as_ref().is_some_and(|payload| !payload.is_empty()) && !has_body_length_field {
         return Err(ProtocolError::InvalidFieldSequence(
-            "request wire plan does not declare a trailing field",
+            "request wire plan does not declare a value body",
         ));
     }
     Ok(fields)
@@ -193,7 +215,7 @@ pub fn encode_request_wire_fields(
     plan: RequestWirePlan,
 ) -> Result<Vec<u8>> {
     let mut output = encode_request_wire_prefix(opcode, fields, plan)?;
-    if let Some(value) = trailing_wire_value(fields, plan.steps)? {
+    if let Some(value) = body_wire_value(fields, plan.steps)? {
         output.extend_from_slice(value);
     }
     Ok(output)
@@ -212,7 +234,8 @@ pub fn encode_request_wire_prefix(
         ));
     }
     let mut output = vec![opcode as u8];
-    encode_wire_steps(fields, plan.steps, &mut output, true)?;
+    let mut byte_prefixes = [None; MAX_REQUEST_WIRE_FIELDS];
+    encode_wire_steps(fields, plan.steps, &mut output, &mut byte_prefixes, true)?;
     Ok(output)
 }
 
@@ -220,6 +243,7 @@ fn encode_wire_steps(
     fields: &[Option<&[u8]>],
     steps: &[RequestWireStep],
     output: &mut Vec<u8>,
+    byte_prefixes: &mut [Option<usize>],
     allow_trailing: bool,
 ) -> Result<()> {
     for (index, step) in steps.iter().enumerate() {
@@ -267,6 +291,40 @@ fn encode_wire_steps(
                 output.push(length);
                 output.extend_from_slice(value);
             }
+            RequestWireStep::ByteLengthPrefixField { field } => {
+                let value = required_wire_value(fields, field)?;
+                let length = u8::try_from(value.len()).map_err(|_| {
+                    ProtocolError::InvalidFieldSequence(
+                        "byte-length request field exceeds 255 bytes",
+                    )
+                })?;
+                let slot = byte_prefixes.get_mut(field).ok_or(
+                    ProtocolError::InvalidFieldSequence(
+                        "byte-length request field exceeds the generated plan",
+                    ),
+                )?;
+                if slot.replace(value.len()).is_some() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "request wire plan assigns a byte length more than once",
+                    ));
+                }
+                output.push(length);
+            }
+            RequestWireStep::ByteField { field } => {
+                let value = required_wire_value(fields, field)?;
+                let expected = byte_prefixes
+                    .get_mut(field)
+                    .and_then(Option::take)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "byte field has no preceding byte length",
+                    ))?;
+                if expected != value.len() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "byte field length does not match its prefix",
+                    ));
+                }
+                output.extend_from_slice(value);
+            }
             RequestWireStep::VarUIntField { field } => {
                 let value: [u8; 8] = required_wire_value(fields, field)?
                     .try_into()
@@ -278,13 +336,19 @@ fn encode_wire_steps(
                 let (encoded, length) = crate::encode_varuint(u64::from_be_bytes(value));
                 output.extend_from_slice(&encoded[..length]);
             }
+            RequestWireStep::ValueLengthField { field } => {
+                let value = required_wire_value(fields, field)?;
+                validate_value_length(value.len())?;
+                let (encoded, length) = crate::encode_varuint(value.len() as u64);
+                output.extend_from_slice(&encoded[..length]);
+            }
             RequestWireStep::Conditional {
                 field,
                 equals,
                 steps,
             } => {
                 if fields.get(field).and_then(|value| *value) == Some(equals) {
-                    encode_wire_steps(fields, steps, output, false)?;
+                    encode_wire_steps(fields, steps, output, byte_prefixes, false)?;
                 }
             }
             RequestWireStep::Bytes { expected } => output.extend_from_slice(expected),
@@ -304,31 +368,38 @@ fn encode_wire_steps(
     Ok(())
 }
 
-fn trailing_wire_value<'a>(
+fn body_wire_value<'a>(
     fields: &'a [Option<&'a [u8]>],
     steps: &[RequestWireStep],
 ) -> Result<Option<&'a [u8]>> {
-    let mut trailing = None;
+    let mut body = None;
     for step in steps {
         match *step {
-            RequestWireStep::TrailingField { field } => {
-                if trailing.replace(required_wire_value(fields, field)?).is_some() {
+            RequestWireStep::ValueLengthField { field } => {
+                if body.replace(required_wire_value(fields, field)?).is_some() {
                     return Err(ProtocolError::InvalidFieldSequence(
-                        "request wire plan contains multiple trailing fields",
+                        "request wire plan contains multiple value bodies",
+                    ));
+                }
+            }
+            RequestWireStep::TrailingField { field } => {
+                if body.replace(required_wire_value(fields, field)?).is_some() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "request wire plan contains multiple value bodies",
                     ));
                 }
             }
             RequestWireStep::Conditional { steps, .. } => {
-                if trailing_wire_value(fields, steps)?.is_some() {
+                if body_wire_value(fields, steps)?.is_some() {
                     return Err(ProtocolError::InvalidFieldSequence(
-                        "request wire plan nests a trailing field",
+                        "request wire plan nests a value body",
                     ));
                 }
             }
             _ => {}
         }
     }
-    Ok(trailing)
+    Ok(body)
 }
 
 fn required_wire_value<'a>(
@@ -350,8 +421,9 @@ fn decode_wire_steps(
     cursor: &mut usize,
     steps: &[RequestWireStep],
     fields: &mut [Option<OwnedRange>],
+    byte_lengths: &mut [Option<usize>],
     allow_trailing: bool,
-    has_trailing_field: &mut bool,
+    has_body_length_field: &mut bool,
 ) -> Result<()> {
     for (index, step) in steps.iter().enumerate() {
         match *step {
@@ -427,6 +499,48 @@ fn decode_wire_steps(
                 )?;
                 *cursor = end;
             }
+            RequestWireStep::ByteLengthPrefixField { field } => {
+                let length = usize::from(*prefix.as_slice().get(*cursor).ok_or(
+                    ProtocolError::InvalidFieldSequence(
+                        "byte-length request field is missing its length",
+                    ),
+                )?);
+                let slot = byte_lengths.get_mut(field).ok_or(
+                    ProtocolError::InvalidFieldSequence(
+                        "byte-length request field exceeds the generated plan",
+                    ),
+                )?;
+                if slot.replace(length).is_some() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "request wire plan assigns a byte length more than once",
+                    ));
+                }
+                *cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestWireStep::ByteField { field } => {
+                let length = byte_lengths
+                    .get_mut(field)
+                    .and_then(Option::take)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "byte field has no preceding byte length",
+                    ))?;
+                let start = *cursor;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                store_wire_field(
+                    fields,
+                    field,
+                    prefix.clone().slice(start..end).ok_or(
+                        ProtocolError::InvalidFieldSequence(
+                            "byte field exceeds the retained prefix",
+                        ),
+                    )?,
+                )?;
+                *cursor = end;
+            }
             RequestWireStep::VarUIntField { field } => {
                 let (value, encoded_len) = crate::decode_varuint(
                     prefix.as_slice().get(*cursor..).unwrap_or_default(),
@@ -443,6 +557,30 @@ fn decode_wire_steps(
                 *cursor = cursor
                     .checked_add(encoded_len)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestWireStep::ValueLengthField { field } => {
+                let (length, encoded_len) = crate::decode_varuint(
+                    prefix.as_slice().get(*cursor..).unwrap_or_default(),
+                    "request value length",
+                )?
+                .ok_or(ProtocolError::InvalidFieldSequence(
+                    "request value length is incomplete",
+                ))?;
+                let length =
+                    usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                validate_value_length(length)?;
+                if length != trailing_len {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "request value length does not match its payload",
+                    ));
+                }
+                *cursor = cursor
+                    .checked_add(encoded_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                *has_body_length_field = true;
+                if let Some(payload) = payload {
+                    store_wire_field(fields, field, payload.clone())?;
+                }
             }
             RequestWireStep::Conditional {
                 field,
@@ -462,8 +600,9 @@ fn decode_wire_steps(
                         cursor,
                         steps,
                         fields,
+                        byte_lengths,
                         false,
-                        has_trailing_field,
+                        has_body_length_field,
                     )?;
                 }
             }
@@ -479,7 +618,7 @@ fn decode_wire_steps(
                 *cursor = end;
             }
             RequestWireStep::TrailingField { field } => {
-                if !allow_trailing || index + 1 != steps.len() || *has_trailing_field {
+                if !allow_trailing || index + 1 != steps.len() || *has_body_length_field {
                     return Err(ProtocolError::InvalidFieldSequence(
                         "trailing request field must be the final top-level step",
                     ));
@@ -502,7 +641,7 @@ fn decode_wire_steps(
                 *cursor = cursor
                     .checked_add(encoded_len)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
-                *has_trailing_field = true;
+                *has_body_length_field = true;
                 if let Some(payload) = payload {
                     store_wire_field(fields, field, payload.clone())?;
                 }
@@ -679,6 +818,7 @@ fn decode_request_frame_header_progress(
     let mut cursor: usize = 0;
     let mut value_len = 0;
     let mut selectors = [None; MAX_REQUEST_WIRE_FIELDS];
+    let mut byte_lengths = [None; MAX_REQUEST_WIRE_FIELDS];
     for (step_index, step) in layout.steps.iter().enumerate() {
         match *step {
             RequestFrameStep::Fixed { bytes } => {
@@ -702,6 +842,21 @@ fn decode_request_frame_header_progress(
                 value_len = bytes;
             }
             RequestFrameStep::ValueLength => {
+                let (length, encoded_len) =
+                    match decode_varuint_progress(&prefix[cursor..], "request value length")? {
+                        DecodeProgress::Complete(decoded) => decoded,
+                        DecodeProgress::Incomplete { additional } => {
+                            return Ok(DecodeProgress::Incomplete { additional });
+                        }
+                    };
+                value_len =
+                    usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                validate_value_length(value_len)?;
+                cursor = cursor
+                    .checked_add(encoded_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ValueLengthPrefix => {
                 let (length, encoded_len) =
                     match decode_varuint_progress(&prefix[cursor..], "request value length")? {
                         DecodeProgress::Complete(decoded) => decoded,
@@ -758,7 +913,13 @@ fn decode_request_frame_header_progress(
                     ),
                 )?;
                 if selected == expected {
-                    match decode_nested_steps(prefix, &mut cursor, steps, &mut selectors)? {
+                    match decode_nested_steps(
+                        prefix,
+                        &mut cursor,
+                        steps,
+                        &mut selectors,
+                        &mut byte_lengths,
+                    )? {
                         DecodeProgress::Complete(()) => {}
                         DecodeProgress::Incomplete { additional } => {
                             return Ok(DecodeProgress::Incomplete { additional });
@@ -782,6 +943,41 @@ fn decode_request_frame_header_progress(
                 }
                 cursor = end;
             }
+            RequestFrameStep::ByteLengthPrefix { field } => {
+                let Some(&length) = prefix.get(cursor) else {
+                    return Ok(DecodeProgress::Incomplete { additional: 1 });
+                };
+                let slot = byte_lengths.get_mut(field).ok_or(
+                    ProtocolError::InvalidFieldSequence(
+                        "byte-length request field exceeds the generated field bound",
+                    ),
+                )?;
+                if slot.replace(usize::from(length)).is_some() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "request wire plan assigns a byte length more than once",
+                    ));
+                }
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ByteLengthBody { field } => {
+                let length = byte_lengths
+                    .get_mut(field)
+                    .and_then(Option::take)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "byte body has no preceding byte length",
+                    ))?;
+                let end = cursor
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(DecodeProgress::Incomplete {
+                        additional: end - prefix.len(),
+                    });
+                }
+                cursor = end;
+            }
         }
     }
     Ok(DecodeProgress::Complete(RequestFrameHeader {
@@ -796,6 +992,7 @@ fn decode_nested_steps(
     cursor: &mut usize,
     steps: &[RequestFrameStep],
     selectors: &mut [Option<u8>; MAX_REQUEST_WIRE_FIELDS],
+    byte_lengths: &mut [Option<usize>; MAX_REQUEST_WIRE_FIELDS],
 ) -> Result<DecodeProgress<()>> {
     for step in steps {
         match *step {
@@ -859,6 +1056,41 @@ fn decode_nested_steps(
                 }
                 *cursor = end;
             }
+            RequestFrameStep::ByteLengthPrefix { field } => {
+                let Some(&length) = prefix.get(*cursor) else {
+                    return Ok(DecodeProgress::Incomplete { additional: 1 });
+                };
+                let slot = byte_lengths.get_mut(field).ok_or(
+                    ProtocolError::InvalidFieldSequence(
+                        "byte-length request field exceeds the generated field bound",
+                    ),
+                )?;
+                if slot.replace(usize::from(length)).is_some() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "request wire plan assigns a byte length more than once",
+                    ));
+                }
+                *cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ByteLengthBody { field } => {
+                let length = byte_lengths
+                    .get_mut(field)
+                    .and_then(Option::take)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "byte body has no preceding byte length",
+                    ))?;
+                let end = cursor
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(DecodeProgress::Incomplete {
+                        additional: end - prefix.len(),
+                    });
+                }
+                *cursor = end;
+            }
             RequestFrameStep::Conditional {
                 field,
                 expected,
@@ -870,7 +1102,7 @@ fn decode_nested_steps(
                     ),
                 )?;
                 if selected == expected {
-                    match decode_nested_steps(prefix, cursor, steps, selectors)? {
+                    match decode_nested_steps(prefix, cursor, steps, selectors, byte_lengths)? {
                         DecodeProgress::Complete(()) => {}
                         DecodeProgress::Incomplete { additional } => {
                             return Ok(DecodeProgress::Incomplete { additional });
@@ -879,7 +1111,8 @@ fn decode_nested_steps(
                 }
             }
             RequestFrameStep::FixedBody { .. }
-            | RequestFrameStep::ValueLength => {
+            | RequestFrameStep::ValueLength
+            | RequestFrameStep::ValueLengthPrefix => {
                 return Err(ProtocolError::InvalidFieldSequence(
                     "request wire plan nests an invalid framing step",
                 ));

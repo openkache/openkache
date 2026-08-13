@@ -569,11 +569,26 @@ impl ValueCodec {
         };
         let format =
             compression_id | (self.encryption.identifier() << VALUE_FORMAT_ENCRYPTION_SHIFT);
-        let aad = make_aad(namespace_id, item_id, format);
+        if self.encryption != Encryption::Unprotected && item_id.len() != ITEM_ID_BYTES {
+            return Err(Error::ProtectedItemIdLength {
+                actual: item_id.len(),
+                expected: ITEM_ID_BYTES,
+            });
+        }
+        let aad = (self.encryption != Encryption::Unprotected)
+            .then(|| make_aad(namespace_id, item_id, format));
         let body = match self.encryption {
             Encryption::Unprotected => transformed,
-            Encryption::Compact => self.encrypt_compact(item_id, &aad, transformed)?,
-            Encryption::Robust => self.encrypt_robust(item_id, &aad, transformed)?,
+            Encryption::Compact => self.encrypt_compact(
+                item_id,
+                aad.as_ref().expect("protected codec creates AAD"),
+                transformed,
+            )?,
+            Encryption::Robust => self.encrypt_robust(
+                item_id,
+                aad.as_ref().expect("protected codec creates AAD"),
+                transformed,
+            )?,
         };
 
         let encoded_length =
@@ -726,7 +741,14 @@ impl ValueCodec {
         let body_length = encoded.len() - body_offset;
         encoded.copy_within(body_offset.., 0);
         encoded.truncate(body_length);
-        let aad = make_aad(namespace_id, item_id, format);
+        if encryption != Encryption::Unprotected && item_id.len() != ITEM_ID_BYTES {
+            return Err(Error::ProtectedItemIdLength {
+                actual: item_id.len(),
+                expected: ITEM_ID_BYTES,
+            });
+        }
+        let aad = (encryption != Encryption::Unprotected)
+            .then(|| make_aad(namespace_id, item_id, format));
         let transformed = match encryption {
             Encryption::Unprotected => {
                 if encoded.is_empty() {
@@ -738,7 +760,11 @@ impl ValueCodec {
                 if encoded.len() < VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES + 1 {
                     return Err(Error::InvalidEncodedValue("Compact body is truncated"));
                 }
-                self.decrypt_compact(item_id, &aad, encoded)?
+                self.decrypt_compact(
+                    item_id,
+                    aad.as_ref().expect("protected codec creates AAD"),
+                    encoded,
+                )?
             }
             Encryption::Robust => {
                 if encoded.len()
@@ -746,7 +772,11 @@ impl ValueCodec {
                 {
                     return Err(Error::InvalidEncodedValue("Robust body is truncated"));
                 }
-                self.decrypt_robust(item_id, &aad, encoded)?
+                self.decrypt_robust(
+                    item_id,
+                    aad.as_ref().expect("protected codec creates AAD"),
+                    encoded,
+                )?
             }
         };
 
@@ -970,6 +1000,9 @@ pub enum Error {
     /// Authentication failed without exposing a more specific cause.
     #[error("value authentication failed")]
     Authentication,
+    /// The protected value envelope currently binds exactly one 32-byte Item ID.
+    #[error("protected value envelopes require {expected}-byte Item IDs, got {actual}")]
+    ProtectedItemIdLength { actual: usize, expected: usize },
     /// Encrypted input was provided to a codec without a key.
     #[error("encrypted value requires a data protection key")]
     EncryptionKeyRequired,

@@ -912,27 +912,12 @@ fn validate_ffi_operation(
         (FfiInvocation::Protected, FfiInputKind::None) if !input.is_empty() => {
             return Err("operation does not accept an application key".to_owned());
         }
-        (FfiInvocation::Protected, FfiInputKind::ApplicationKey)
-        | (FfiInvocation::Protected, FfiInputKind::ItemId)
-            if input.is_empty() && !typed_key =>
-        {
-            return Err("application key must not be empty".to_owned());
-        }
         (FfiInvocation::Raw, FfiInputKind::None) if !input.is_empty() => {
             return Err("operation does not accept an item_id".to_owned());
         }
         (FfiInvocation::Raw, FfiInputKind::ItemId)
         | (FfiInvocation::Scoped, FfiInputKind::ItemId)
-            if input.len()
-                != crate::ITEM_ID_BYTES * operation_contract.request_item_count as usize =>
-        {
-            return Err(format!(
-                "item_id must contain exactly {} bytes for {} item IDs, got {}",
-                crate::ITEM_ID_BYTES * operation_contract.request_item_count as usize,
-                operation_contract.request_item_count,
-                input.len()
-            ));
-        }
+            => validate_exact_item_id_input(input, operation_contract.request_item_count)?,
         (FfiInvocation::Scoped, FfiInputKind::None) if !input.is_empty() => {
             return Err("operation does not accept an item_id".to_owned());
         }
@@ -948,6 +933,11 @@ fn validate_ffi_operation(
         return Err("SET options require a SET operation".to_owned());
     }
     Ok(())
+}
+
+fn validate_exact_item_id_input(input: &[u8], item_count: usize) -> std::result::Result<(), String> {
+    crate::protocol::compat_v1::parse_compact_item_ids(input, item_count)
+        .map(|_| ())
 }
 
 async fn namespace_open(

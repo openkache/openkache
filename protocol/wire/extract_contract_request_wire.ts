@@ -163,6 +163,23 @@ export function request_wire_plan(
             ? { kind: "byte_length_field", field: field.index }
             : { kind: "varuint_field", field: field.index }
         }
+        case "byteLengthPrefixField":
+        case "byteField": {
+          const name = string_member(value, "field", `${step_location}.${kind}`)
+          const field = resolve_field(name, `${step_location}.${kind}.field`)
+          return kind === "byteLengthPrefixField"
+            ? { kind: "byte_length_prefix_field", field: field.index }
+            : { kind: "byte_field", field: field.index }
+        }
+        case "valueLengthField": {
+          const name = string_member(value, "field", `${step_location}.${kind}`)
+          const field = resolve_field(name, `${step_location}.${kind}.field`)
+          const length = string_member(value, "length", `${step_location}.${kind}`)
+          if (length !== "varuint") {
+            throw new Error(`${step_location}.${kind}.length must be varuint`)
+          }
+          return { kind: "value_length_field", field: field.index, length }
+        }
         case "conditional": {
           const name = string_member(value, "field", `${step_location}.${kind}`)
           const field = resolve_field(name, `${step_location}.${kind}.field`)
@@ -216,9 +233,11 @@ export function request_wire_plan(
     assigned: ReadonlySet<number>,
     packed_values: ReadonlyMap<number, ReadonlySet<string>>,
     allow_trailing: boolean,
+    byte_prefixes: ReadonlySet<number>,
   ): void => {
     const available = new Set(assigned)
     const mappings = new Map(packed_values)
+    const prefixes = new Set(byte_prefixes)
     for (const [index, step] of steps.entries()) {
       const step_location = `${location}[${index}]`
       const assign = (field: number): void => {
@@ -234,7 +253,27 @@ export function request_wire_plan(
         case "fixed_field":
         case "byte_length_field":
         case "varuint_field":
+        case "value_length_field":
           assign(step.field)
+          break
+        case "byte_length_prefix_field":
+          if (prefixes.has(step.field)) {
+            throw new Error(
+              `${step_location} declares a byte-length prefix for ` +
+                `${fields[step.field]?.path.join(".")} more than once`,
+            )
+          }
+          prefixes.add(step.field)
+          break
+        case "byte_field":
+          if (!prefixes.has(step.field)) {
+            throw new Error(
+              `${step_location} byte field must follow a preceding byte-length ` +
+                `prefix for ${fields[step.field]?.path.join(".")}`,
+            )
+          }
+          assign(step.field)
+          prefixes.delete(step.field)
           break
         case "packed":
           for (const field of step.fields) {
@@ -257,6 +296,7 @@ export function request_wire_plan(
             available,
             mappings,
             false,
+            prefixes,
           )
           break
         }
@@ -272,6 +312,11 @@ export function request_wire_plan(
           break
       }
     }
+    if (allow_trailing && prefixes.size !== 0) {
+      throw new Error(
+        `${location} declares a byte-length prefix without a matching byte field`,
+      )
+    }
   }
   validate_steps(
     request_wire,
@@ -279,6 +324,7 @@ export function request_wire_plan(
     new Set(),
     new Map(),
     true,
+    new Set(),
   )
 
   const leaf_fields = fields.filter((field) =>

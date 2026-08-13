@@ -88,8 +88,28 @@ export type Wire_Request_Step =
       readonly field: number
     }
   | {
+      /** Emits only the one-octet prefix for a later byte field body. */
+      readonly kind: "byte_length_prefix_field"
+      readonly field: number
+    }
+  | {
+      /** Emits the body for a preceding byte-length prefix. */
+      readonly kind: "byte_field"
+      readonly field: number
+    }
+  | {
       readonly kind: "varuint_field"
       readonly field: number
+    }
+  | {
+      /**
+       * Encodes the length of a value body that is carried after all request
+       * metadata. Unlike `trailing_field`, this prefix may be followed by
+       * additional metadata fields such as an Item ID.
+       */
+      readonly kind: "value_length_field"
+      readonly field: number
+      readonly length: "varuint"
     }
   | {
       readonly kind: "conditional"

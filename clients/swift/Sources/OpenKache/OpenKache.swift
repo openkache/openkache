@@ -1060,7 +1060,7 @@ public actor OpenKacheRawClient {
         }
     }
 
-    /// Retrieves exact bytes for a 32-byte protocol item ID.
+    /// Retrieves exact bytes for an opaque variable-length protocol item ID.
     public func get(_ itemID: Data) async throws -> Data? {
         try validateItemID(itemID)
         return try await perform { handle in
@@ -1098,7 +1098,7 @@ public actor OpenKacheRawClient {
         }
     }
 
-    /// Deletes a 32-byte protocol item ID.
+    /// Deletes an opaque variable-length protocol item ID.
     public func delete(_ itemID: Data) async throws -> OpenKacheDeleteOutcome {
         try validateItemID(itemID)
         return try await perform { handle in
@@ -1218,9 +1218,6 @@ public actor OpenKacheRawClient {
         evictionMode: Smithy_Eviction_Mode? = nil,
         ttlMilliseconds: UInt64? = nil
     ) async throws -> Smithy_Invocation_Result {
-        if !itemID.isEmpty {
-            try validateItemID(itemID)
-        }
         let (setFlags, ttl) = try smithySetFlags(
             condition: condition,
             expirationMode: expirationMode,
@@ -1331,11 +1328,9 @@ public actor OpenKacheRawClient {
         guard !itemID.isEmpty else {
             return
         }
-        guard itemID.count == Smithy_Value_Format.itemIdBytes
-            || itemID.count == Smithy_Value_Format.itemIdBytes * 2 else {
+        guard itemID.count <= Smithy_Value_Format.itemIdBytes else {
             throw OpenKacheError(
-                "itemID must contain exactly \(Smithy_Value_Format.itemIdBytes) or "
-                    + "\(Smithy_Value_Format.itemIdBytes * 2) bytes"
+                "itemID must contain at most \(Smithy_Value_Format.itemIdBytes) bytes"
             )
         }
     }

@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const NAMESPACE_METADATA_MAGIC: &[u8; 8] = b"OKNSPACE";
-const NAMESPACE_METADATA_VERSION: u32 = 2;
+const NAMESPACE_METADATA_VERSION: u32 = 3;
 const NAMESPACE_METADATA_V1_VERSION: u32 = 1;
+const NAMESPACE_METADATA_V2_VERSION: u32 = 2;
 const NAMESPACE_METADATA_MAX_ENTRIES: u64 = 1_000_000;
 const NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY: u64 = 1_000_000_000;
 const NAMESPACE_METADATA_MAX_DIRTY_WORKERS: u64 = 1_000_000;
@@ -475,6 +476,7 @@ impl NamespaceRegistry {
             let mut items = entry.items.iter().copied().collect::<Vec<_>>();
             items.sort_unstable();
             for item_id in items {
+                bytes.push(item_id.len() as u8);
                 bytes.extend_from_slice(item_id.as_bytes());
             }
             bytes.extend_from_slice(&(entry.dirty_workers.len() as u64).to_be_bytes());
@@ -529,6 +531,7 @@ impl NamespaceRegistry {
         }
         let metadata_version = cursor.u32()?;
         if metadata_version != NAMESPACE_METADATA_VERSION
+            && metadata_version != NAMESPACE_METADATA_V2_VERSION
             && metadata_version != NAMESPACE_METADATA_V1_VERSION
         {
             return Err(cursor.invalid("namespace metadata version is unsupported"));
@@ -561,20 +564,27 @@ impl NamespaceRegistry {
                 return Err(cursor.invalid("namespace metadata policy has trailing bytes"));
             }
             let item_count = cursor.u64()?;
-            if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY
-                || item_count > (cursor.remaining() / openkache_protocol::ITEM_ID_BYTES) as u64
-            {
+            if item_count > NAMESPACE_METADATA_MAX_ITEMS_PER_ENTRY {
                 return Err(cursor.invalid("namespace metadata item list is invalid"));
             }
             let mut items = HashSet::with_capacity(item_count as usize);
             for _ in 0..item_count {
-                let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
-                let item_id =
-                    ItemId::new(item_bytes.try_into().expect("item ID width is fixed"));
+                let item_id = if metadata_version == NAMESPACE_METADATA_VERSION {
+                    let item_len = usize::from(cursor.u8()?);
+                    let item_bytes = cursor.take(item_len)?;
+                    ItemId::from_slice(item_bytes)
+                        .map_err(|_| cursor.invalid("namespace metadata item ID is too long"))?
+                } else {
+                    if cursor.remaining() < openkache_protocol::ITEM_ID_BYTES {
+                        return Err(cursor.invalid("namespace metadata item list is truncated"));
+                    }
+                    let item_bytes = cursor.take(openkache_protocol::ITEM_ID_BYTES)?;
+                    ItemId::new(item_bytes.try_into().expect("item ID width is fixed"))
+                };
                 items.insert(item_id);
             }
             let mut dirty_workers = HashSet::new();
-            if metadata_version >= NAMESPACE_METADATA_VERSION {
+            if metadata_version >= NAMESPACE_METADATA_V2_VERSION {
                 let dirty_worker_count = cursor.u64()?;
                 if dirty_worker_count > NAMESPACE_METADATA_MAX_DIRTY_WORKERS {
                     return Err(

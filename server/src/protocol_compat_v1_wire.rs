@@ -35,7 +35,15 @@ pub(super) fn classify_wire_prefix(opcode: Opcode, prefix: &[u8]) -> Option<Prot
     let plan = contract::request_wire_plan(opcode)?;
     let mut cursor = openkache_protocol::OPCODE_BYTES;
     let mut selectors = [None; MAX_COMPACT_FIELDS];
-    classify_wire_steps(opcode, prefix, &mut cursor, plan.steps, &mut selectors)
+    let mut byte_lengths = [None; MAX_COMPACT_FIELDS];
+    classify_wire_steps(
+        opcode,
+        prefix,
+        &mut cursor,
+        plan.steps,
+        &mut selectors,
+        &mut byte_lengths,
+    )
 }
 
 fn classify_wire_steps(
@@ -44,6 +52,7 @@ fn classify_wire_steps(
     cursor: &mut usize,
     steps: &[RequestWireStep],
     selectors: &mut [Option<&'static [u8]>; MAX_COMPACT_FIELDS],
+    byte_lengths: &mut [Option<usize>; MAX_COMPACT_FIELDS],
 ) -> Option<ProtocolError> {
     for step in steps {
         match *step {
@@ -74,10 +83,27 @@ fn classify_wire_steps(
                 let length = usize::from(*prefix.get(*cursor)?);
                 *cursor = cursor.checked_add(1)?.checked_add(length)?;
             }
+            RequestWireStep::ByteLengthPrefixField { field } => {
+                let length = usize::from(*prefix.get(*cursor)?);
+                *byte_lengths.get_mut(field)? = Some(length);
+                *cursor = cursor.checked_add(1)?;
+            }
+            RequestWireStep::ByteField { field } => {
+                let length = byte_lengths.get_mut(field)?.take()?;
+                *cursor = cursor.checked_add(length)?;
+            }
             RequestWireStep::VarUIntField { .. } => {
                 let (_, encoded_len) = openkache_protocol::decode_varuint(
                     prefix.get(*cursor..).unwrap_or_default(),
                     "request wire integer",
+                )
+                .ok()??;
+                *cursor = cursor.checked_add(encoded_len)?;
+            }
+            RequestWireStep::ValueLengthField { .. } => {
+                let (_, encoded_len) = openkache_protocol::decode_varuint(
+                    prefix.get(*cursor..).unwrap_or_default(),
+                    "request value length",
                 )
                 .ok()??;
                 *cursor = cursor.checked_add(encoded_len)?;
@@ -89,7 +115,14 @@ fn classify_wire_steps(
             } => {
                 if selectors.get(field).copied().flatten() == Some(equals)
                     && let Some(error) =
-                        classify_wire_steps(opcode, prefix, cursor, steps, selectors)
+                        classify_wire_steps(
+                            opcode,
+                            prefix,
+                            cursor,
+                            steps,
+                            selectors,
+                            byte_lengths,
+                        )
                 {
                     return Some(error);
                 }

@@ -66,6 +66,7 @@ export type {
   Wire_Entry,
   Wire_V1_Contract,
 } from "./wire"
+export type { Wire_Compatibility_Contract } from "./compatibility_v1"
 
 /**
  * Reader-facing metadata for the checked-in protocol-v1 specification.
@@ -133,7 +134,7 @@ export function protocol_spec_contract_snapshot_issues(
 export function extract_wire_contract(
   ast: unknown,
   strict_operations = false,
-): Wire_Contract {
+): Wire_Compatibility_Contract {
   return extract_compatibility_wire_contract(ast, strict_operations)
 }
 

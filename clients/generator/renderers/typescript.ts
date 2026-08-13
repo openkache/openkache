@@ -516,14 +516,18 @@ function smithy_decode_f64_array(payload: Uint8Array, operation: number): readon
     operation_uses_item_id_helpers,
   )
     ? `function smithy_concat_item_ids(itemIds: readonly Uint8Array[]): Uint8Array {
+  let size = 0;
   for (const itemId of itemIds) {
-    if (itemId.byteLength !== ${contract.item_id_bytes}) {
-      throw new Error("item IDs must contain exactly ${contract.item_id_bytes} bytes");
+    if (itemId.byteLength > ${contract.item_id_bytes}) {
+      throw new Error("item IDs must contain at most ${contract.item_id_bytes} bytes");
     }
+    size += 1 + itemId.byteLength;
   }
-  const combined = new Uint8Array(itemIds.length * ${contract.item_id_bytes});
+  const combined = new Uint8Array(size);
   let offset = 0;
   for (const itemId of itemIds) {
+    combined[offset] = itemId.byteLength;
+    offset += 1;
     combined.set(itemId, offset);
     offset += itemId.byteLength;
   }

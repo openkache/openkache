@@ -6,7 +6,7 @@
 //! projections.
 
 use super::{ProtocolError, Result};
-use openkache_protocol::{ITEM_ID_BYTES, Opcode};
+use openkache_protocol::Opcode;
 
 /// Metadata decoded only by the compatibility adapter.
 ///
@@ -17,6 +17,7 @@ use openkache_protocol::{ITEM_ID_BYTES, Opcode};
 struct CompatibilityHeaderMetadata {
     namespace_id: Option<u64>,
     item_id_count: usize,
+    item_id_len: usize,
     has_ttl: bool,
 }
 
@@ -45,6 +46,7 @@ impl RequestHeader {
         value_len: usize,
         namespace_id: Option<u64>,
         item_id_count: usize,
+        item_id_len: usize,
         has_ttl: bool,
     ) -> Self {
         Self {
@@ -54,6 +56,7 @@ impl RequestHeader {
             compatibility: Some(CompatibilityHeaderMetadata {
                 namespace_id,
                 item_id_count,
+                item_id_len,
                 has_ttl,
             }),
         }
@@ -69,9 +72,12 @@ impl RequestHeader {
         self.encoded_len
     }
 
-    /// Returns the fixed item ID length for operations carrying an item ID.
+    /// Returns the total opaque item-ID bytes carried by this request.
     pub const fn item_id_len(self) -> usize {
-        ITEM_ID_BYTES * self.item_id_count()
+        match self.compatibility {
+            Some(metadata) => metadata.item_id_len,
+            None => 0,
+        }
     }
 
     /// Returns the number of item IDs carried by this request.
