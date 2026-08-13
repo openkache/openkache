@@ -204,7 +204,7 @@ where
         Some((storage_key, command))
     }
 
-    pub(super) fn take_ready_exclusive(&mut self) -> Option<(StorageKey, T)> {
+    pub(super) fn take_ready_exclusive(&mut self) -> Option<(K, T)> {
         if !self.ready_is_exclusive() {
             return None;
         }
@@ -242,7 +242,7 @@ where
     /// Takes the contiguous prefix compatible with the running reducer.
     pub(super) fn take_collapsible(
         &mut self,
-        storage_key: StorageKey,
+        storage_key: K,
         mut can_collapse: impl FnMut(&T) -> bool,
     ) -> Vec<T> {
         let Some((collapse_group, mut head)) =
@@ -282,7 +282,7 @@ where
         commands
     }
 
-    pub(super) fn finish_running_lane(&mut self, storage_key: StorageKey) {
+    pub(super) fn finish_running_lane(&mut self, storage_key: K) {
         let ready_again = {
             let lane = self
                 .lanes
