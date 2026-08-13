@@ -16,15 +16,11 @@ filegroup(
     name = "generator_inputs",
     srcs = [
         "generate.ts",
-        "wire/extract_contract.ts",
-        "wire/index.ts",
-        "wire/render_rust_contract.ts",
-        "wire/validate_contract.ts",
         "wire.ts",
-        "wire_spec.ts",
-        "wire_types.ts",
     ] + glob([
         "model/**",
+        "*.ts",
+        "wire/*.ts",
     ]),
 )
 
@@ -35,16 +31,12 @@ filegroup(
         "README.md",
         "build.rs",
         "generate.ts",
-        "wire/extract_contract.ts",
-        "wire/index.ts",
-        "wire/render_rust_contract.ts",
-        "wire/validate_contract.ts",
         "wire.ts",
-        "wire_spec.ts",
-        "wire_types.ts",
     ] + glob([
         "model/**",
         "src/**",
+        "*.ts",
+        "wire/*.ts",
     ]),
 )
 
