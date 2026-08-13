@@ -7,13 +7,6 @@
 
 use crate::{decode_varuint, encode_varuint};
 
-/// Reserved length value for required length-delimited container entries.
-///
-/// Optional application fields use [`crate::OptionalValueCodec`] and supply
-/// their own sentinel. This local value is only a fail-closed marker for the
-/// required list/map/union container primitive.
-const LENGTH_DELIMITED_MAX: u32 = u32::MAX;
-
 const INVALID_ENUM: CodecError = CodecError(b"enum value is not declared by its shape");
 const INVALID_LIST: CodecError = CodecError(b"list payload is malformed");
 const INVALID_MAP: CodecError = CodecError(b"map payload is malformed");
@@ -533,7 +526,8 @@ impl<'a> ListCursor<'a> {
         if count > max_entries {
             return Err(TOO_MANY_ENTRIES);
         }
-        if count > payload.len().saturating_sub(cursor) / 4 {
+        // Every element has at least one canonical vu128 length byte.
+        if count > payload.len().saturating_sub(cursor) {
             return Err(INVALID_LIST);
         }
         for _ in 0..count {
@@ -613,7 +607,8 @@ impl<'a> MapCursor<'a> {
         if count > max_entries {
             return Err(TOO_MANY_ENTRIES);
         }
-        if count > payload.len().saturating_sub(cursor) / 8 {
+        // Every map entry has two canonical vu128 length prefixes.
+        if count > payload.len().saturating_sub(cursor) / 2 {
             return Err(INVALID_MAP);
         }
         for _ in 0..count {
@@ -668,7 +663,7 @@ pub fn encode_union(tag: u8, payload: &[u8], allowed_tags: &[u8]) -> Result<Vec<
     }
     let mut output = Vec::with_capacity(
         1usize
-            .saturating_add(std::mem::size_of::<u32>())
+            .saturating_add(crate::MAX_VARUINT_BYTES)
             .saturating_add(payload.len())
             .min(crate::MAX_VALUE_BYTES),
     );
@@ -723,19 +718,17 @@ pub fn transform_packed_f64_be(
 }
 
 fn append_length_delimited(output: &mut Vec<u8>, value: &[u8]) -> Result<(), CodecError> {
-    let length = u32::try_from(value.len()).map_err(|_| TOO_MANY_ENTRIES)?;
-    if length >= LENGTH_DELIMITED_MAX {
-        return Err(TOO_MANY_ENTRIES);
-    }
+    let length = u64::try_from(value.len()).map_err(|_| VALUE_TOO_LARGE)?;
+    let (encoded_length, encoded_length_len) = encode_varuint(length);
     let next_len = output
         .len()
-        .checked_add(std::mem::size_of::<u32>())
+        .checked_add(encoded_length_len)
         .and_then(|length| length.checked_add(value.len()))
         .ok_or(VALUE_TOO_LARGE)?;
     if next_len > crate::MAX_VALUE_BYTES {
         return Err(VALUE_TOO_LARGE);
     }
-    output.extend_from_slice(&length.to_be_bytes());
+    output.extend_from_slice(&encoded_length[..encoded_length_len]);
     output.extend_from_slice(value);
     Ok(())
 }
@@ -753,13 +746,13 @@ fn read_length_delimited(
     cursor: usize,
     error: CodecError,
 ) -> Result<(&[u8], usize), CodecError> {
-    let length_end = cursor.checked_add(4).ok_or(error)?;
-    let bytes = payload.get(cursor..length_end).ok_or(error)?;
-    let length = u32::from_be_bytes(bytes.try_into().expect("length width is fixed"));
-    if length == LENGTH_DELIMITED_MAX {
-        return Err(error);
-    }
-    let value_start = length_end;
+    let (length, encoded_length_len) = decode_varuint(
+        payload.get(cursor..).unwrap_or_default(),
+        "container value length",
+    )
+    .map_err(|_| error)?
+    .ok_or(error)?;
+    let value_start = cursor.checked_add(encoded_length_len).ok_or(error)?;
     let value_end = value_start
         .checked_add(usize::try_from(length).map_err(|_| error)?)
         .ok_or(error)?;
