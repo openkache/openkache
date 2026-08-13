@@ -1,13 +1,9 @@
 package openkache
 
-import (
-	"context"
-	"fmt"
-)
+import "fmt"
 
-// Smithy returns a context-aware adapter implementing the generated Smithy
-// service contract. The adapter is useful when an application shares request
-// models with another OpenKache language binding.
+// Smithy returns a context-aware adapter backed by this client and implementing
+// the generated Smithy service contract.
 func (c *Client) Smithy() SmithyOpenKacheAPI {
 	return smithyClient{client: c}
 }
@@ -18,227 +14,13 @@ type smithyClient struct {
 
 var _ SmithyOpenKacheAPI = smithyClient{}
 
-func (s smithyClient) Ping(ctx context.Context, _ SmithyPingInput) (SmithyPingOutput, error) {
-	return SmithyPingOutput{}, s.client.Ping(ctx)
-}
-
-func (s smithyClient) Get(
-	ctx context.Context,
-	input SmithyGetInput,
-) (SmithyGetOutput, error) {
-	itemID, err := NewItemID(input.ItemID)
-	if err != nil {
-		return SmithyGetOutput{}, err
-	}
-	result, err := s.client.invokeScoped(
-		ctx,
-		SmithyOpcodeGet,
-		input.NamespaceID,
-		itemID,
-		nil,
-		SetOptions{},
-	)
-	if err != nil {
-		return SmithyGetOutput{}, operationError("get", err)
-	}
-	value, found, err := getResult("get", result)
-	if err != nil || !found {
-		return SmithyGetOutput{}, err
-	}
-	return SmithyGetOutput{Value: &value}, nil
-}
-
-func (s smithyClient) Set(
-	ctx context.Context,
-	input SmithySetInput,
-) (SmithySetOutput, error) {
-	itemID, err := NewItemID(input.ItemID)
-	if err != nil {
-		return SmithySetOutput{}, err
-	}
-	options, err := smithySetOptions(input)
-	if err != nil {
-		return SmithySetOutput{}, err
-	}
-	result, err := s.client.invokeScoped(
-		ctx,
-		SmithyOpcodeSet,
-		input.NamespaceID,
-		itemID,
-		input.Value,
-		options,
-	)
-	if err != nil {
-		return SmithySetOutput{}, operationError("set", err)
-	}
-	outcome, err := setResult("set", result)
-	return SmithySetOutput{Outcome: SmithySetOutcome(outcome)}, err
-}
-
-func (s smithyClient) Delete(
-	ctx context.Context,
-	input SmithyDeleteInput,
-) (SmithyDeleteOutput, error) {
-	itemID, err := NewItemID(input.ItemID)
-	if err != nil {
-		return SmithyDeleteOutput{}, err
-	}
-	result, err := s.client.invokeScoped(
-		ctx,
-		SmithyOpcodeDelete,
-		input.NamespaceID,
-		itemID,
-		nil,
-		SetOptions{},
-	)
-	if err != nil {
-		return SmithyDeleteOutput{}, operationError("delete", err)
-	}
-	deleted, err := deleteResult("delete", result)
-	return SmithyDeleteOutput{Deleted: deleted}, err
-}
-
-func (s smithyClient) Stats(
-	ctx context.Context,
-	input SmithyStatsInput,
-) (SmithyStatsOutput, error) {
-	result, err := s.client.invokeScoped(
-		ctx,
-		SmithyOpcodeStats,
-		input.NamespaceID,
-		ItemID{},
-		nil,
-		SetOptions{},
-	)
-	if err != nil {
-		return SmithyStatsOutput{}, operationError("stats", err)
-	}
-	if result.kind != SmithyFFIResultValue {
-		return SmithyStatsOutput{}, unexpectedResult("stats", result.kind)
-	}
-	return SmithyStatsOutput{JSON: string(result.data)}, nil
-}
-
-func (s smithyClient) Sync(
-	ctx context.Context,
-	input SmithySyncInput,
-) (SmithySyncOutput, error) {
-	result, err := s.client.invokeScoped(
-		ctx,
-		SmithyOpcodeSync,
-		input.NamespaceID,
-		ItemID{},
-		nil,
-		SetOptions{},
-	)
-	if err != nil {
-		return SmithySyncOutput{}, operationError("sync", err)
-	}
-	if result.kind != SmithyFFIResultOK {
-		return SmithySyncOutput{}, unexpectedResult("sync", result.kind)
-	}
-	return SmithySyncOutput{}, nil
-}
-
-func (s smithyClient) NamespaceOpen(
-	ctx context.Context,
-	input SmithyNamespaceOpenInput,
-) (SmithyNamespaceOpenOutput, error) {
-	if input.CreateIfMissing && input.Policy == nil {
-		return SmithyNamespaceOpenOutput{}, validationError(
-			"namespace.policy",
-			"is required when create_if_missing is true",
-		)
-	}
-	if !input.CreateIfMissing && input.Policy != nil {
-		return SmithyNamespaceOpenOutput{}, validationError(
-			"namespace.policy",
-			"is only valid when create_if_missing is true",
-		)
-	}
-	policyFlags, ttl, err := smithyNamespacePolicyWire(input.Policy)
-	if err != nil {
-		return SmithyNamespaceOpenOutput{}, err
-	}
-	result, err := s.client.invokeNamespaceOpen(
-		ctx,
-		[]byte(input.Name),
-		input.CreateIfMissing,
-		policyFlags,
-		ttl,
-	)
-	if err != nil {
-		return SmithyNamespaceOpenOutput{}, operationError("namespace open", err)
-	}
-	if result.kind != SmithyFFIResultOK && result.kind != SmithyFFIResultCreated {
-		return SmithyNamespaceOpenOutput{}, unexpectedResult("namespace open", result.kind)
-	}
-	decoded, err := s.client.decodeNamespaceDescriptor(ctx, result.data)
-	if err != nil {
-		return SmithyNamespaceOpenOutput{}, err
-	}
-	return SmithyNamespaceOpenOutput{
-		Descriptor: smithyNamespaceDescriptor(decoded),
-		Created:    result.kind == SmithyFFIResultCreated,
-	}, nil
-}
-
-func (s smithyClient) NamespaceUpdatePolicy(
-	ctx context.Context,
-	input SmithyNamespaceUpdatePolicyInput,
-) (SmithyNamespaceUpdatePolicyOutput, error) {
-	policyFlags, ttl, err := smithyNamespacePolicyWire(&input.Policy)
-	if err != nil {
-		return SmithyNamespaceUpdatePolicyOutput{}, err
-	}
-	result, err := s.client.invokeNamespaceUpdatePolicy(
-		ctx,
-		input.NamespaceID,
-		input.ExpectedRevision,
-		policyFlags,
-		ttl,
-	)
-	if err != nil {
-		return SmithyNamespaceUpdatePolicyOutput{}, operationError(
-			"namespace update policy",
-			err,
-		)
-	}
-	if result.kind != SmithyFFIResultValue {
-		return SmithyNamespaceUpdatePolicyOutput{}, unexpectedResult(
-			"namespace update policy",
-			result.kind,
-		)
-	}
-	decoded, err := s.client.decodeNamespaceDescriptor(ctx, result.data)
-	if err != nil {
-		return SmithyNamespaceUpdatePolicyOutput{}, err
-	}
-	return SmithyNamespaceUpdatePolicyOutput{
-		Descriptor: smithyNamespaceDescriptor(decoded),
-	}, nil
-}
-
-func (s smithyClient) NamespaceDelete(
-	ctx context.Context,
-	input SmithyNamespaceDeleteInput,
-) (SmithyNamespaceDeleteOutput, error) {
-	result, err := s.client.invokeNamespaceDelete(
-		ctx,
-		input.NamespaceID,
-		input.ExpectedRevision,
-	)
-	if err != nil {
-		return SmithyNamespaceDeleteOutput{}, operationError("namespace delete", err)
-	}
-	if result.kind != SmithyFFIResultOK {
-		return SmithyNamespaceDeleteOutput{}, unexpectedResult("namespace delete", result.kind)
-	}
-	return SmithyNamespaceDeleteOutput{}, nil
-}
-
-func smithySetOptions(input SmithySetInput) (SetOptions, error) {
-	if input.ExpirationMode == nil && input.TTLMilliseconds != nil {
+func smithySetOptions(
+	condition *SmithySetCondition,
+	expirationMode *SmithyExpirationMode,
+	ttlMilliseconds *uint64,
+	evictionMode *SmithyEvictionMode,
+) (SetOptions, error) {
+	if expirationMode == nil && ttlMilliseconds != nil {
 		return SetOptions{}, validationError(
 			"set.ttl_milliseconds",
 			fmt.Sprintf(
@@ -248,17 +30,17 @@ func smithySetOptions(input SmithySetInput) (SetOptions, error) {
 		)
 	}
 	options := SetOptions{}
-	if input.Condition != nil {
-		options.Condition = *input.Condition
+	if condition != nil {
+		options.Condition = *condition
 	}
-	if input.ExpirationMode != nil {
-		options.ExpirationMode = *input.ExpirationMode
+	if expirationMode != nil {
+		options.ExpirationMode = *expirationMode
 	}
-	if input.EvictionMode != nil {
-		options.EvictionMode = *input.EvictionMode
+	if evictionMode != nil {
+		options.EvictionMode = *evictionMode
 	}
-	if input.TTLMilliseconds != nil {
-		options.TTLMillis = *input.TTLMilliseconds
+	if ttlMilliseconds != nil {
+		options.TTLMillis = *ttlMilliseconds
 	}
 	if err := validateSetOptions(options); err != nil {
 		return SetOptions{}, err
@@ -267,45 +49,46 @@ func smithySetOptions(input SmithySetInput) (SetOptions, error) {
 }
 
 func smithyNamespacePolicyWire(
-	policy *SmithyNamespacePolicy,
+	defaultExpiration SmithyExpirationDefault,
+	defaultTTLMilliseconds *uint64,
+	expirationOverride SmithyOverridePolicy,
+	defaultEviction SmithyEvictionDefault,
+	evictionOverride SmithyOverridePolicy,
 ) (uint8, uint64, error) {
-	if policy == nil {
-		return 0, 0, nil
-	}
 	var flags uint8 = uint8(SmithyPolicyNoExpiry)
 	var ttl uint64
-	switch policy.DefaultExpiration {
+	switch defaultExpiration {
 	case SmithyExpirationDefaultNoExpiry:
-		if policy.DefaultTtlMilliseconds != nil {
+		if defaultTTLMilliseconds != nil {
 			return 0, 0, validationError(
 				"namespace.policy.default_ttl_milliseconds",
 				"is only valid with FixedTtl expiration",
 			)
 		}
 	case SmithyExpirationDefaultFixedTtl:
-		if policy.DefaultTtlMilliseconds == nil || *policy.DefaultTtlMilliseconds == 0 {
+		if defaultTTLMilliseconds == nil || *defaultTTLMilliseconds == 0 {
 			return 0, 0, validationError(
 				"namespace.policy.default_ttl_milliseconds",
 				"must be greater than zero with FixedTtl expiration",
 			)
 		}
 		flags |= uint8(SmithyPolicyFixedTTL)
-		ttl = *policy.DefaultTtlMilliseconds
+		ttl = *defaultTTLMilliseconds
 	default:
 		return 0, 0, validationError(
 			"namespace.policy.default_expiration",
 			"contains an unknown value",
 		)
 	}
-	if policy.ExpirationOverride == SmithyOverridePolicyAllowed {
+	if expirationOverride == SmithyOverridePolicyAllowed {
 		flags |= uint8(SmithyPolicyExpirationOverride)
-	} else if policy.ExpirationOverride != SmithyOverridePolicyDisallowed {
+	} else if expirationOverride != SmithyOverridePolicyDisallowed {
 		return 0, 0, validationError(
 			"namespace.policy.expiration_override",
 			"contains an unknown value",
 		)
 	}
-	switch policy.DefaultEviction {
+	switch defaultEviction {
 	case SmithyEvictionDefaultEvictable:
 	case SmithyEvictionDefaultEvictionProtected:
 		flags |= uint8(SmithyPolicyEvictionProtected)
@@ -315,9 +98,9 @@ func smithyNamespacePolicyWire(
 			"contains an unknown value",
 		)
 	}
-	if policy.EvictionOverride == SmithyOverridePolicyAllowed {
+	if evictionOverride == SmithyOverridePolicyAllowed {
 		flags |= uint8(SmithyPolicyEvictionOverride)
-	} else if policy.EvictionOverride != SmithyOverridePolicyDisallowed {
+	} else if evictionOverride != SmithyOverridePolicyDisallowed {
 		return 0, 0, validationError(
 			"namespace.policy.eviction_override",
 			"contains an unknown value",

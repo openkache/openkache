@@ -44,8 +44,9 @@ must be explicit.
 
 ## API
 
-`include/openkache/client.h` includes the canonical
-`clients/core/include/openkache/client_abi.h`, which defines an opaque client
+`include/openkache/client.h` includes the compatibility
+`clients/core/include/openkache/client_abi.h`, which consumes the generated
+Smithy ABI header and retains source-compatible aliases for the opaque client
 handle, result ownership rules, operation and outcome discriminators, and
 buffer-based protected and exact-item-ID calls. Result payloads are borrowed until
 `openkache_client_result_free`; copy them before freeing the result. A

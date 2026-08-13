@@ -32,6 +32,13 @@ enum class Set_Condition : std::uint32_t {
     If_Present = OPENKACHE_SMITHY_FFI_SET_CONDITION_IF_PRESENT,
 };
 
+/// Logical key representation accepted by the shared Rust key boundary.
+enum class Key_Spec : std::uint32_t {
+    Text = OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT,
+    Bytes = OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES,
+    Integer = OPENKACHE_SMITHY_FFI_KEY_SPEC_INTEGER,
+};
+
 /// Item-level expiration selection for one SET operation.
 enum class Expiration_Mode : Byte {
     Inherit = OPENKACHE_SMITHY_SET_INHERIT_EXPIRATION_BITS,
@@ -151,6 +158,17 @@ struct Connect_Options {
 /// from the caller's perspective; network work is performed by the dedicated Rust worker.
 class Client {
 public:
+    /// Result returned by the shared Smithy operation boundary.
+    ///
+    /// `kind` is one of the generated `OPENKACHE_SMITHY_FFI_RESULT_*` values, `status` is the
+    /// protocol status byte widened to `std::uint32_t`, and `payload` contains the
+    /// operation-defined response bytes.
+    struct Operation_Result {
+        std::uint32_t kind;
+        std::uint32_t status;
+        Bytes payload;
+    };
+
     Client() noexcept = default;
 
     /// Takes ownership of a native client pointer.
@@ -180,7 +198,9 @@ public:
         const auto* certificate = options.certificate.empty()
             ? nullptr
             : options.certificate.data();
-        const auto* key = options.data_protection_key.data();
+        const auto* key = options.data_protection_key.empty()
+            ? nullptr
+            : options.data_protection_key.data();
         const auto* client_certificate_chain =
             options.client_certificate_chain.empty()
                 ? nullptr
@@ -280,19 +300,65 @@ public:
         }
     }
 
+    /// Executes a generated operation through the protected Smithy ABI boundary.
+    ///
+    /// `operation` must be a generated protocol opcode or native FFI operation identifier.
+    /// Global operations pass empty `key`; item operations pass their application key. Use
+    /// [`execute_raw_operation`] when `key` is already an exact protocol item ID.
+    Operation_Result execute_operation(
+        std::uint32_t operation,
+        std::span<const Byte> key = {},
+        std::span<const Byte> value = {},
+        Set_Options options = {}) const {
+        return execute_typed(operation, Key_Spec::Bytes, key, value, options);
+    }
+
+    /// Executes a generated operation with one logical key specification.
+    ///
+    /// The Rust core owns deterministic CBOR encoding and Item ID derivation;
+    /// this method accepts only the logical key bytes.
+    Operation_Result execute_operation_typed(
+        std::uint32_t operation,
+        Key_Spec key_spec,
+        std::span<const Byte> key,
+        std::span<const Byte> value = {},
+        Set_Options options = {}) const {
+        return execute_typed(operation, key_spec, key, value, options);
+    }
+
+    /// Executes a generated operation through the exact-item-ID Smithy ABI boundary.
+    ///
+    /// Use this for operations whose input contract supplies an exact protocol item ID rather
+    /// than an application key.
+    Operation_Result execute_raw_operation(
+        std::uint32_t operation,
+        std::span<const Byte> item_id = {},
+        std::span<const Byte> value = {},
+        Set_Options options = {}) const {
+        return execute(operation, item_id, value, options, true);
+    }
+
     /// Retrieves a Bytes PortableKey value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            execute_typed(
+                OPENKACHE_SMITHY_OPCODE_GET,
+                Key_Spec::Bytes,
+                key,
+                {},
+                Set_Options{}),
             "GET");
     }
 
     /// Convenience overload for a Text PortableKey.
     std::optional<Bytes> get(std::string_view key) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            execute_typed(
+                OPENKACHE_SMITHY_OPCODE_GET,
+                Key_Spec::Text,
+                as_bytes(key),
+                {},
+                Set_Options{}),
             "GET");
     }
 
@@ -301,9 +367,13 @@ public:
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options = {}) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, value, options),
+            execute_typed(
+                OPENKACHE_SMITHY_OPCODE_SET,
+                Key_Spec::Bytes,
+                key,
+                value,
+                options),
             "SET");
     }
 
@@ -312,24 +382,36 @@ public:
         std::string_view key,
         std::string_view value,
         Set_Options options = {}) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, as_bytes(value), options),
+            execute_typed(
+                OPENKACHE_SMITHY_OPCODE_SET,
+                Key_Spec::Text,
+                as_bytes(key),
+                as_bytes(value),
+                options),
             "SET");
     }
 
     /// Deletes a Bytes PortableKey value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
+            execute_typed(
+                OPENKACHE_SMITHY_OPCODE_DELETE,
+                Key_Spec::Bytes,
+                key,
+                {},
+                Set_Options{}));
     }
 
     /// Convenience overload for a Text PortableKey.
     bool remove(std::string_view key) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
+            execute_typed(
+                OPENKACHE_SMITHY_OPCODE_DELETE,
+                Key_Spec::Text,
+                as_bytes(key),
+                {},
+                Set_Options{}));
     }
 
     /// Retrieves exact bytes for a fixed-size protocol item ID.
@@ -473,11 +555,6 @@ public:
     }
 
 private:
-    struct Operation_Result {
-        std::uint32_t kind;
-        Bytes payload;
-    };
-
     static std::optional<Bytes> get_outcome(
         Operation_Result result,
         const char* operation) {
@@ -524,45 +601,6 @@ private:
             reinterpret_cast<const Byte*>(value.data()),
             value.size(),
         };
-    }
-
-    static Bytes canonical_key_bytes(
-        std::span<const Byte> payload,
-        Byte major) {
-        if (major != 2 && major != 3) {
-            throw Error("OpenKache key type is not supported");
-        }
-        const auto length = payload.size();
-        Bytes encoded;
-        if (length <= 23) {
-            encoded.push_back(static_cast<Byte>((major << 5) | length));
-        } else if (length <= 0xff) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 24),
-                static_cast<Byte>(length),
-            };
-        } else if (length <= 0xffff) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 25),
-                static_cast<Byte>(length >> 8),
-                static_cast<Byte>(length),
-            };
-        } else if (length <= 0xffff'ffffu) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 26),
-                static_cast<Byte>(length >> 24),
-                static_cast<Byte>(length >> 16),
-                static_cast<Byte>(length >> 8),
-                static_cast<Byte>(length),
-            };
-        } else {
-            throw Error("OpenKache key length exceeds canonical CBOR uint32");
-        }
-        if (encoded.size() + payload.size() > (1u << 20)) {
-            throw Error("OpenKache canonical key exceeds 1048576 bytes");
-        }
-        encoded.insert(encoded.end(), payload.begin(), payload.end());
-        return encoded;
     }
 
     static std::pair<Byte, std::uint64_t> namespace_policy_wire(
@@ -659,6 +697,7 @@ private:
             throw Error("OpenKache operation returned a null result");
         }
         const auto kind = result_kind(result);
+        const auto status = openkache_client_result_status(result);
         if (kind == OPENKACHE_SMITHY_FFI_RESULT_ERROR) {
             const auto message = result_payload(result);
             openkache_client_result_free(result);
@@ -675,7 +714,32 @@ private:
             payload.assign(data, data + length);
         }
         openkache_client_result_free(result);
-        return {kind, std::move(payload)};
+        return {kind, status, std::move(payload)};
+    }
+
+    Operation_Result execute_typed(
+        std::uint32_t operation,
+        Key_Spec key_spec,
+        std::span<const Byte> key,
+        std::span<const Byte> value,
+        Set_Options options) const {
+        if (client_ == nullptr) {
+            throw Error("OpenKache client is closed");
+        }
+        const auto [set_flags, ttl_ms] = wire_options(options);
+        const auto* key_data = key.empty() ? nullptr : key.data();
+        const auto* value_data = value.empty() ? nullptr : value.data();
+        auto* result = openkache_client_execute_typed_with_options(
+            client_,
+            operation,
+            static_cast<std::uint32_t>(key_spec),
+            key_data,
+            key.size(),
+            value_data,
+            value.size(),
+            set_flags,
+            ttl_ms);
+        return take_result(result);
     }
 
     Operation_Result execute(

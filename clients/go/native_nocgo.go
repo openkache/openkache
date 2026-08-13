@@ -16,6 +16,7 @@ func connectNative(context.Context, normalizedOptions) (nativeClient, error) {
 func (unavailableNativeClient) execute(
 	context.Context,
 	uint32,
+	uint32,
 	[]byte,
 	[]byte,
 	SetOptions,
@@ -38,6 +39,17 @@ func (unavailableNativeClient) executeScoped(
 	uint32,
 	uint64,
 	ItemID,
+	[]byte,
+	SetOptions,
+) (nativeResult, error) {
+	return nativeResult{}, &Error{Operation: "execute scoped", Message: "native client unavailable"}
+}
+
+func (unavailableNativeClient) executeScopedBytes(
+	context.Context,
+	uint32,
+	uint64,
+	[]byte,
 	[]byte,
 	SetOptions,
 ) (nativeResult, error) {
