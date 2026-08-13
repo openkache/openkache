@@ -228,7 +228,7 @@ where
             return Ok(());
         }
         self.lanes.insert(
-            storage_key,
+            storage_key.clone(),
             KeyLane {
                 state: LaneState::Ready,
                 waiting_head: Some(slot),
