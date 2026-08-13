@@ -257,15 +257,7 @@ impl KeyResolver {
         &self,
         application_key: impl AsRef<[u8]>,
     ) -> std::result::Result<ItemId, KeyError> {
-        let application_key = application_key.as_ref();
-        let key = if self.space.key_type() == KeyType::Bytes
-            && self.space.format() == KeyFormat::ByteKeyOrHash
-        {
-            ResolvedKey::from_direct_bytes(application_key.to_owned())
-        } else {
-            ResolvedKey::from_typed(TypedKey::Bytes(application_key.to_owned()))
-        };
-        let key = key?;
+        let key = self.space.resolve_logical_bytes(application_key.as_ref())?;
         self.root.derive_item_id_for_resolved_key(1, &key)
     }
 

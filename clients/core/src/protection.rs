@@ -370,12 +370,9 @@ impl DataProtection {
         &self,
         application_key: impl AsRef<[u8]>,
     ) -> std::result::Result<ItemId, crate::KeyError> {
-        if self.key_type == KeyType::Bytes && self.key_format == KeyFormat::ByteKeyOrHash {
-            self.key
-                .derive_byte_key_or_hash_in_namespace(1, application_key)
-        } else {
-            self.key.try_derive_item_id(application_key)
-        }
+        let resolved = KeySpace::with_format(self.key_type, self.key_format)
+            .resolve_logical_bytes(application_key.as_ref())?;
+        self.key.derive_item_id_for_resolved_key(1, &resolved)
     }
 
     /// Serializes and protects one core logical value.
