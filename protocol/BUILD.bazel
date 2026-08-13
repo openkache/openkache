@@ -71,6 +71,7 @@ rust_library(
     name = "openkache_protocol",
     srcs = [
         "src/codec.rs",
+        "src/compact.rs",
         "src/lib.rs",
         "src/layout.rs",
         "src/optional_values.rs",

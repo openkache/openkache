@@ -54,6 +54,8 @@ pub mod compat_v1;
 
 /// Generic value-shape codecs shared by server and client adapters.
 pub mod codec;
+/// Operation-neutral compact `vu128` and borrowed value views.
+pub mod compact;
 /// Generic field-layout helpers shared by API-owned codecs.
 pub mod layout;
 /// Configurable fixed-width optional-value codec.
@@ -63,6 +65,10 @@ pub mod request;
 /// Operation-neutral response framing and owned response buffers.
 pub mod response;
 
+pub use compact::{
+    FieldSequenceView, LengthDelimitedView, decode_varuint, decode_vu128, encode_varuint,
+    encode_vu128, read_length_delimited,
+};
 pub use layout::{
     DenseFields, LayoutValue, decode_planned_fields, encode_dense_fields,
     encode_field_sequence_segments, encode_optional_value_segments, encode_planned_fields,
@@ -509,43 +515,6 @@ impl<'a, 'b> FieldGroups<'a, 'b> {
 
 fn validate_field_sequence_payload(payload: &[u8], field_count: usize) -> Result<()> {
     FieldSequence::validate(payload, field_count)
-}
-
-/// Encodes one canonical unsigned 64-bit `vu128`.
-pub fn encode_varuint(value: u64) -> ([u8; MAX_VARUINT_BYTES], usize) {
-    let mut encoded = [0; MAX_VARUINT_BYTES];
-    let length = vu128::encode_u64(&mut encoded, value);
-    (encoded, length)
-}
-
-/// Decodes one canonical unsigned 64-bit `vu128`.
-///
-/// `Ok(None)` means that the prefix is valid but incomplete. The context is
-/// included only in malformed-input diagnostics; it does not assign semantic
-/// meaning to the field.
-pub fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, usize)>> {
-    let Some(&first) = input.first() else {
-        return Ok(None);
-    };
-    let encoded_len = vu128::encoded_len(first);
-    if encoded_len > MAX_VARUINT_BYTES {
-        return Err(ProtocolError::VaruintOverflow { context });
-    }
-    if input.len() < encoded_len {
-        return Ok(None);
-    }
-    let mut encoded = [0; MAX_VARUINT_BYTES];
-    encoded[..encoded_len].copy_from_slice(&input[..encoded_len]);
-    let (value, decoded_len) = vu128::decode_u64(&encoded);
-    if decoded_len != encoded_len {
-        return Err(ProtocolError::NonCanonicalVaruint { context });
-    }
-    let mut canonical = [0; MAX_VARUINT_BYTES];
-    let canonical_len = vu128::encode_u64(&mut canonical, value);
-    if canonical_len != encoded_len || canonical[..canonical_len] != input[..encoded_len] {
-        return Err(ProtocolError::NonCanonicalVaruint { context });
-    }
-    Ok(Some((value, encoded_len)))
 }
 
 fn validate_value_length(value_len: usize) -> Result<()> {
