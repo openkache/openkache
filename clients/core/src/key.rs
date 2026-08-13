@@ -5,7 +5,7 @@ use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::{Error, ITEM_ID_BYTES, Result};
+use crate::{Error, Result};
 
 pub(crate) const PROTECTION_KEY_BYTES: usize =
     crate::contract::VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
@@ -1136,12 +1136,8 @@ impl ItemId {
     }
 
     pub(crate) fn into_protocol(self) -> openkache_protocol::ItemId {
-        // The public protocol crate currently exposes its legacy fixed-width
-        // constructor. The protocol implementation will switch this adapter
-        // to its opaque variable-length constructor when that change lands.
-        let mut bytes = [0_u8; ITEM_ID_BYTES];
-        bytes[..self.len()].copy_from_slice(self.as_bytes());
-        openkache_protocol::ItemId::new(bytes)
+        openkache_protocol::ItemId::from_slice(self.as_bytes())
+            .expect("client ItemId was validated before protocol conversion")
     }
 }
 
