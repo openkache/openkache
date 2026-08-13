@@ -10,25 +10,31 @@ import {
   derive_wire_operation_descriptor,
 } from "../protocol/wire_descriptor"
 import type {
-  Api_Operation_Retry_Mode,
-  Api_Operation_Contract,
-} from "./operation_models"
-import type {
   Wire_Operation_Contract,
 } from "../protocol/wire_types"
+
+/** Retry policies are client invocation concerns, not wire-plan metadata. */
+export const OPERATION_RETRY_MODES = [
+  "always",
+  "never",
+  "when_not_creating",
+] as const
+
+export type Api_Operation_Retry_Mode = (typeof OPERATION_RETRY_MODES)[number]
+
+export interface Operation_Client_Metadata {
+  readonly response_semantics?: string
+  readonly retry_mode?: Api_Operation_Retry_Mode
+  readonly scope?: string
+}
 
 export interface Operation_Client_Projection {
   readonly response_semantics: string
   readonly retry_mode: Api_Operation_Retry_Mode
 }
 
-type Client_Projection_Metadata = Pick<
-  Api_Operation_Contract,
-  "response_semantics" | "retry_mode"
->
-
 export function derive_operation_client_projection(
-  contract: Wire_Operation_Contract & Partial<Client_Projection_Metadata>,
+  contract: Wire_Operation_Contract & Operation_Client_Metadata,
 ): Operation_Client_Projection {
   const response_framing = derive_wire_operation_descriptor(contract).response_framing
   return {
