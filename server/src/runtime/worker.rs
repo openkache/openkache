@@ -31,7 +31,7 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
 }
 
 pub(super) type WorkerResponseSender = CompletionSender<Result<WorkerResponse>>;
-type CompatibilityScheduler = KeyScheduler<KeyedCommand>;
+type CompatibilityScheduler = KeyScheduler<StorageKey, KeyedCommand>;
 
 #[derive(Debug)]
 pub enum BenchmarkOperation {
@@ -762,7 +762,13 @@ fn admit_worker_request(
         WorkerRequest::Keyed {
             storage_key,
             command,
-        } => scheduler.enqueue(storage_key, command),
+        } => scheduler
+            .enqueue(storage_key, command)
+            .map_err(|error| match error {
+                super::scheduler::SchedulerError::Full => {
+                    KvError::Worker("waiting-command slab is full".into())
+                }
+            }),
         request => {
             *barrier = Some(request);
             Ok(())

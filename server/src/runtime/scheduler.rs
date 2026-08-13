@@ -5,8 +5,7 @@
 //! all preparation, reduction, and completion semantics.
 
 use std::collections::{HashMap, VecDeque};
-
-use crate::{Result, StorageKey};
+use std::hash::Hash;
 
 /// Identity for a reducer family.  The token must be non-zero-sized because
 /// pointers to distinct zero-sized statics are allowed to compare equal.
@@ -17,6 +16,11 @@ pub(super) struct CollapseGroup(pub(super) u8);
 pub(super) trait ScheduledTask {
     fn collapse_group(&self) -> &'static CollapseGroup;
     fn is_exclusive(&self) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SchedulerError {
+    Full,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,13 +138,17 @@ struct KeyLane {
 }
 
 /// Fair, bounded scheduler for one worker's keyed requests.
-pub(super) struct KeyScheduler<T: ScheduledTask> {
-    lanes: HashMap<StorageKey, KeyLane>,
-    ready: VecDeque<StorageKey>,
+pub(super) struct KeyScheduler<K, T: ScheduledTask> {
+    lanes: HashMap<K, KeyLane>,
+    ready: VecDeque<K>,
     waiting: WaitingSlab<T>,
 }
 
-impl<T: ScheduledTask> KeyScheduler<T> {
+impl<K, T> KeyScheduler<K, T>
+where
+    K: Eq + Hash + Clone,
+    T: ScheduledTask,
+{
     pub(super) fn with_waiting_capacity(capacity: usize) -> Self {
         Self {
             lanes: HashMap::with_capacity(capacity.saturating_mul(2)),
@@ -157,7 +165,7 @@ impl<T: ScheduledTask> KeyScheduler<T> {
         self.lanes.is_empty()
     }
 
-    pub(super) fn has_waiting(&self, storage_key: &StorageKey) -> bool {
+    pub(super) fn has_waiting(&self, storage_key: &K) -> bool {
         self.lanes
             .get(storage_key)
             .is_some_and(|lane| lane.waiting_head.is_some())
@@ -173,7 +181,7 @@ impl<T: ScheduledTask> KeyScheduler<T> {
     }
 
     /// Removes the next fair command and records its reducer family.
-    pub(super) fn take_ready(&mut self) -> Option<(StorageKey, T)> {
+    pub(super) fn take_ready(&mut self) -> Option<(K, T)> {
         let storage_key = self.ready.pop_front()?;
         let head = self
             .lanes
@@ -203,11 +211,12 @@ impl<T: ScheduledTask> KeyScheduler<T> {
         self.take_ready()
     }
 
-    pub(super) fn enqueue(&mut self, storage_key: StorageKey, command: T) -> Result<()> {
-        let slot = self
-            .waiting
-            .insert(command)
-            .ok_or_else(|| crate::KvError::Worker("waiting-command slab is full".into()))?;
+    pub(super) fn enqueue(
+        &mut self,
+        storage_key: K,
+        command: T,
+    ) -> std::result::Result<(), SchedulerError> {
+        let slot = self.waiting.insert(command).ok_or(SchedulerError::Full)?;
         if let Some(lane) = self.lanes.get_mut(&storage_key) {
             if let Some(tail) = lane.waiting_tail {
                 self.waiting.link(tail, slot);
