@@ -6,12 +6,10 @@ client methods. Every API uses the same explicit implementation boundary.
 
 ## Minimal path
 
-1. Document the operation and its shapes in the protocol model if it is part
-   of the shared draft.
-2. Reserve an opcode only when the operation needs a wire-visible assignment.
-   The transport generator emits the opaque assignment; it does not infer the
-   operation body.
-3. Add an API-owned module that implements:
+1. Write the wire contract first: choose the request/response code values,
+   envelope layout, field order, codecs, validation, and semantic outcomes in
+   the API's own module or contract document.
+2. Add an API-owned module that implements:
 
    - request serialization and deserialization;
    - response serialization and deserialization;
@@ -20,11 +18,11 @@ client methods. Every API uses the same explicit implementation boundary.
    - resource preparation, authorization, and handler behavior;
    - client-facing convenience methods, if the API has a client package.
 
-4. Register the module with the generic server/client transport boundary.
-   Registration supplies an opcode, frame delimiter, request decoder, handler,
-   result projector, and retry/commit policy. The transport sees only those
-   callbacks and opaque bytes.
-5. Use the protocol utilities where they match the contract:
+3. Register the module with the generic server/client transport boundary.
+   Registration supplies opaque request/response code values, a frame
+   delimiter, request decoder, handler, result projector, and retry/commit
+   policy. The transport sees only those callbacks and opaque bytes.
+4. Use the protocol utilities where they match the contract:
 
    - `decode_varuint` / `encode_varuint`;
    - `OpaqueRequestFrame` and `ResponseParts`;
@@ -32,10 +30,11 @@ client methods. Every API uses the same explicit implementation boundary.
    - `DenseFields` for required fixed-width tuples;
    - `OptionalValueCodec` when the API explicitly specifies a fixed-prefix
      optional-value table;
-   - borrowed cursors and segmented response values for large payloads.
+   - segmented response values for large payloads.
 
-There is no generated operation plan to update and no built-in handler table to
-extend. Adding an API should be a local module plus one registration entry.
+There is no generated operation plan or built-in handler table to extend.
+Adding an API should be a local contract/codec module plus one registration
+entry. Adding it must not require editing this generic crate.
 
 ## Choosing a layout
 
@@ -46,7 +45,7 @@ extend. Adding an API should be a local module plus one registration entry.
 | ordered optional or variable fields | `FieldSequence` |
 | required fixed-width tuple | `DenseFields` |
 | explicit fixed-prefix optional table | `OptionalValueCodec` |
-| nested/repeated values | API codec over shared container cursors |
+| nested/repeated values | API-owned codec over its documented container format |
 
 `OptionalValueCodec` is not a built-in operation family. The API supplies both
 the prefix width and the missing sentinel, so present-empty and missing remain

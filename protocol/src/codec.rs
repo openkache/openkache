@@ -73,7 +73,7 @@ pub fn validate_kind(
     enum_values: &[&str],
     union_tags: &[u8],
 ) -> Result<(), CodecError> {
-    if payload.len() > crate::MAX_VALUE_BYTES {
+    if payload.len() > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE);
     }
     match kind {
@@ -383,7 +383,7 @@ fn validate_nested_value<'a>(
 
 /// Decodes one application payload as UTF-8 without allocating.
 pub fn decode_utf8(payload: &[u8]) -> Result<&str, &'static [u8]> {
-    if payload.len() > crate::MAX_VALUE_BYTES {
+    if payload.len() > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE.message());
     }
     std::str::from_utf8(payload).map_err(|_| b"application value must be valid UTF-8" as _)
@@ -454,7 +454,7 @@ pub fn decode_raw_bytes(payload: &[u8]) -> Vec<u8> {
 
 /// Validates one enum value against generated string members.
 pub fn validate_enum_bytes(payload: &[u8], allowed_values: &[&str]) -> Result<(), CodecError> {
-    if payload.len() > crate::MAX_VALUE_BYTES {
+    if payload.len() > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE);
     }
     if allowed_values
@@ -469,7 +469,7 @@ pub fn validate_enum_bytes(payload: &[u8], allowed_values: &[&str]) -> Result<()
 
 /// Validates one enum value represented as already encoded bytes.
 pub fn validate_enum<'a>(payload: &[u8], allowed_values: &[&'a [u8]]) -> Result<(), CodecError> {
-    if payload.len() > crate::MAX_VALUE_BYTES {
+    if payload.len() > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE);
     }
     if allowed_values.iter().any(|candidate| *candidate == payload) {
@@ -517,7 +517,7 @@ pub struct ListCursor<'a> {
 impl<'a> ListCursor<'a> {
     /// Validates one list and returns a cursor over its borrowed elements.
     pub fn new(payload: &'a [u8], max_entries: usize) -> Result<Self, CodecError> {
-        if payload.len() > crate::MAX_VALUE_BYTES {
+        if payload.len() > crate::MAX_PAYLOAD_BYTES {
             return Err(VALUE_TOO_LARGE);
         }
         let (count, mut cursor) = decode_container_count(payload)?;
@@ -598,7 +598,7 @@ pub struct MapCursor<'a> {
 impl<'a> MapCursor<'a> {
     /// Validates one map and returns a cursor over borrowed key/value pairs.
     pub fn new(payload: &'a [u8], max_entries: usize) -> Result<Self, CodecError> {
-        if payload.len() > crate::MAX_VALUE_BYTES {
+        if payload.len() > crate::MAX_PAYLOAD_BYTES {
             return Err(VALUE_TOO_LARGE);
         }
         let (count, mut cursor) = decode_container_count(payload)?;
@@ -665,7 +665,7 @@ pub fn encode_union(tag: u8, payload: &[u8], allowed_tags: &[u8]) -> Result<Vec<
         1usize
             .saturating_add(crate::MAX_VARUINT_BYTES)
             .saturating_add(payload.len())
-            .min(crate::MAX_VALUE_BYTES),
+            .min(crate::MAX_PAYLOAD_BYTES),
     );
     output.push(tag);
     append_length_delimited(&mut output, payload)?;
@@ -674,7 +674,7 @@ pub fn encode_union(tag: u8, payload: &[u8], allowed_tags: &[u8]) -> Result<Vec<
 
 /// Validates a tagged union and returns its active tag.
 pub fn validate_union(payload: &[u8], allowed_tags: &[u8]) -> Result<u8, CodecError> {
-    if payload.len() > crate::MAX_VALUE_BYTES {
+    if payload.len() > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE);
     }
     let Some((&tag, rest)) = payload.split_first() else {
@@ -696,7 +696,7 @@ pub fn transform_packed_f64_be(
     mut transform: impl FnMut(f64) -> Option<f64>,
 ) -> Result<Vec<u8>, &'static [u8]> {
     const F64_BYTES: usize = std::mem::size_of::<f64>();
-    if payload.len() > crate::MAX_VALUE_BYTES {
+    if payload.len() > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE.message());
     }
     if payload.len() % F64_BYTES != 0 {
@@ -725,7 +725,7 @@ fn append_length_delimited(output: &mut Vec<u8>, value: &[u8]) -> Result<(), Cod
         .checked_add(encoded_length_len)
         .and_then(|length| length.checked_add(value.len()))
         .ok_or(VALUE_TOO_LARGE)?;
-    if next_len > crate::MAX_VALUE_BYTES {
+    if next_len > crate::MAX_PAYLOAD_BYTES {
         return Err(VALUE_TOO_LARGE);
     }
     output.extend_from_slice(&encoded_length[..encoded_length_len]);

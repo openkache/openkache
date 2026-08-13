@@ -1,5 +1,5 @@
 {
-  "checksum": "79453d341f482c6a3427543cc32f3cb17091691d5bb290d8c0013b8810ed0801",
+  "checksum": "667552460859594eefa982da19b36f7c94565296c64588fabbf5eb8ec45c68f0",
   "crates": {
     "addr2line 0.25.1": {
       "name": "addr2line",
@@ -17060,10 +17060,6 @@
             {
               "id": "serde_json_canonicalizer 0.3.2",
               "target": "serde_json_canonicalizer"
-            },
-            {
-              "id": "smallvec 1.15.2",
-              "target": "smallvec"
             },
             {
               "id": "thiserror 2.0.19",

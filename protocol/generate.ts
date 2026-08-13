@@ -26,7 +26,7 @@ import {
 } from "./wire_spec"
 
 export { extract_wire_contract, render_rust_wire, smithy_wire_ast } from "./wire"
-export type { Wire_Contract, Wire_Entry, Wire_V1_Contract } from "./wire"
+export type { Wire_Contract, Wire_V1_Contract } from "./wire"
 export {
   render_protocol_spec_contract_snapshot,
   protocol_spec_contract_snapshot_issues,

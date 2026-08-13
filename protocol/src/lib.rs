@@ -4,37 +4,9 @@
 //! their own wire layout and use these operation-neutral framing and value
 //! primitives to implement it.
 
-macro_rules! wire_enum {
-    (
-        $(#[$metadata:meta])*
-        pub enum $name:ident {
-            $($variant:ident = $value:expr),+ $(,)?
-        }
-        unknown => $unknown:ident
-    ) => {
-        $(#[$metadata])*
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        #[repr(u8)]
-        pub enum $name {
-            $($variant = $value),+
-        }
-
-        impl TryFrom<u8> for $name {
-            type Error = ProtocolError;
-
-            fn try_from(value: u8) -> Result<Self> {
-                match value {
-                    $(value if value == Self::$variant as u8 => Ok(Self::$variant),)+
-                    _ => Err(ProtocolError::$unknown(value)),
-                }
-            }
-        }
-    };
-}
-
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
-/// Generic value-shape codecs shared by server and client adapters.
+/// Operation-neutral scalar and container value codecs.
 pub mod codec;
 /// Generic field-layout helpers shared by API-owned codecs.
 pub mod layout;
@@ -63,34 +35,6 @@ pub use response::{
     ResponseSegment,
 };
 
-/// The exact fixed-size item identifier carried by the wire protocol.
-#[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct ItemId([u8; ITEM_ID_BYTES]);
-
-impl ItemId {
-    /// Wraps an exact item ID without interpreting its bytes.
-    pub const fn new(bytes: [u8; ITEM_ID_BYTES]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the complete item ID bytes.
-    pub const fn as_bytes(&self) -> &[u8; ITEM_ID_BYTES] {
-        &self.0
-    }
-
-    /// Consumes the item ID and returns its bytes.
-    pub const fn into_bytes(self) -> [u8; ITEM_ID_BYTES] {
-        self.0
-    }
-}
-
-impl AsRef<[u8]> for ItemId {
-    fn as_ref(&self) -> &[u8] {
-        self.as_bytes()
-    }
-}
-
 /// Encodes an ordered field sequence.
 ///
 /// The payload starts with a compact presence mask, followed by canonical
@@ -100,10 +44,10 @@ impl AsRef<[u8]> for ItemId {
 /// only carries bounded opaque field bytes.
 pub fn encode_field_sequence(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
     let mask_bytes = values.len().saturating_add(7) / 8;
-    if mask_bytes > MAX_VALUE_BYTES {
+    if mask_bytes > MAX_PAYLOAD_BYTES {
         return Err(ProtocolError::ValueTooLarge {
             size: mask_bytes,
-            maximum: MAX_VALUE_BYTES,
+            maximum: MAX_PAYLOAD_BYTES,
         });
     }
     let capacity = field_sequence_encoded_len(values)?;
@@ -132,7 +76,7 @@ fn append_field_sequence(values: &[Option<&[u8]>], payload: &mut Vec<u8>) -> Res
         let Some(value) = value else {
             continue;
         };
-        validate_value_length(value.len())?;
+        validate_payload_length(value.len())?;
         payload[mask_start + index / 8] |= 1 << (index % 8);
         let (encoded, encoded_len) = encode_varuint(
             u64::try_from(value.len()).map_err(|_| ProtocolError::FrameLengthOverflow)?,
@@ -142,7 +86,7 @@ fn append_field_sequence(values: &[Option<&[u8]>], payload: &mut Vec<u8>) -> Res
         }
         payload.extend_from_slice(value);
     }
-    validate_value_length(payload.len())?;
+    validate_payload_length(payload.len())?;
     Ok(())
 }
 
@@ -177,7 +121,7 @@ fn field_sequence_encoded_len_iter(lengths: impl Iterator<Item = Option<usize>>)
         let Some(length) = length else {
             continue;
         };
-        validate_value_length(length)?;
+        validate_payload_length(length)?;
         if let Some(previous_length) = pending_length.replace(length) {
             encoded_len = encoded_len
                 .checked_add(
@@ -197,16 +141,16 @@ fn field_sequence_encoded_len_iter(lengths: impl Iterator<Item = Option<usize>>)
             .ok_or(ProtocolError::FrameLengthOverflow)?;
     }
     let mask_bytes = field_count.saturating_add(7) / 8;
-    if mask_bytes > MAX_VALUE_BYTES {
+    if mask_bytes > MAX_PAYLOAD_BYTES {
         return Err(ProtocolError::ValueTooLarge {
             size: mask_bytes,
-            maximum: MAX_VALUE_BYTES,
+            maximum: MAX_PAYLOAD_BYTES,
         });
     }
     let total = mask_bytes
         .checked_add(encoded_len)
         .ok_or(ProtocolError::FrameLengthOverflow)?;
-    validate_value_length(total)?;
+    validate_payload_length(total)?;
     Ok(total)
 }
 
@@ -251,7 +195,7 @@ impl<'a, 'b> FieldSequence<'a, 'b> {
                 "field sequence is missing its presence mask",
             ));
         }
-        validate_value_length(payload.len())?;
+        validate_payload_length(payload.len())?;
         if mask_bytes > 0 && field_count % 8 != 0 {
             let unused = payload[mask_bytes - 1] & !((1 << (field_count % 8)) - 1);
             if unused != 0 {
@@ -282,7 +226,7 @@ impl<'a, 'b> FieldSequence<'a, 'b> {
                 let length = end
                     .checked_sub(cursor)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
-                validate_value_length(length)?;
+                validate_payload_length(length)?;
                 if let Some(offsets) = offsets.as_deref_mut() {
                     offsets[index] = (cursor, end);
                 }
@@ -306,7 +250,7 @@ impl<'a, 'b> FieldSequence<'a, 'b> {
             cursor = cursor
                 .checked_add(encoded_len)
                 .ok_or(ProtocolError::FrameLengthOverflow)?;
-            validate_value_length(length)?;
+            validate_payload_length(length)?;
             let end = cursor
                 .checked_add(length)
                 .ok_or(ProtocolError::FrameLengthOverflow)?;
@@ -425,7 +369,7 @@ pub fn encode_field_groups(groups: &[&[Option<&[u8]>]]) -> Result<Vec<u8>> {
             .and_then(|length| length.checked_add(group_len))
             .ok_or(ProtocolError::FrameLengthOverflow)?;
     }
-    validate_value_length(encoded_len)?;
+    validate_payload_length(encoded_len)?;
     let mut payload = Vec::with_capacity(encoded_len);
     payload.resize(outer_mask_bytes, 0);
     for (index, group) in groups.iter().enumerate() {
@@ -530,11 +474,11 @@ pub fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64
     Ok(Some((value, encoded_len)))
 }
 
-fn validate_value_length(value_len: usize) -> Result<()> {
-    if value_len > MAX_VALUE_BYTES {
+pub(crate) fn validate_payload_length(payload_len: usize) -> Result<()> {
+    if payload_len > MAX_PAYLOAD_BYTES {
         return Err(ProtocolError::ValueTooLarge {
-            size: value_len,
-            maximum: MAX_VALUE_BYTES,
+            size: payload_len,
+            maximum: MAX_PAYLOAD_BYTES,
         });
     }
     Ok(())
@@ -543,16 +487,14 @@ fn validate_value_length(value_len: usize) -> Result<()> {
 /// Errors that belong to the common wire boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
-    #[error("unknown opcode 0x{0:02x}")]
-    UnknownOpcode(u8),
-    #[error("unknown status 0x{0:02x}")]
-    UnknownStatus(u8),
     #[error("frame is too short: expected at least {expected} bytes, got {actual}")]
     FrameTooShort { expected: usize, actual: usize },
     #[error("frame length does not match header: expected {expected} bytes, got {actual}")]
     FrameLength { expected: usize, actual: usize },
     #[error("frame length overflow")]
     FrameLengthOverflow,
+    #[error("invalid frame layout: {0}")]
+    InvalidFrameLayout(&'static str),
     #[error("{context} uses a non-canonical vu128 encoding")]
     NonCanonicalVaruint { context: &'static str },
     #[error("{context} exceeds the supported 64-bit vu128 range")]

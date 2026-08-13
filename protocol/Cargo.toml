@@ -2,7 +2,7 @@
 name = "openkache-protocol"
 version = "0.1.0"
 edition.workspace = true
-description = "Wire protocol types and codecs for OpenKache"
+description = "Transport framing primitives for OpenKache"
 license = "Apache-2.0"
 
 [dependencies]
