@@ -14,10 +14,7 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "generator_inputs",
-    srcs = [
-        "generate.ts",
-        "wire.ts",
-    ] + glob([
+    srcs = glob([
         "model/**",
         "*.ts",
         "wire/*.ts",
@@ -30,8 +27,6 @@ filegroup(
         "Cargo.toml",
         "README.md",
         "build.rs",
-        "generate.ts",
-        "wire.ts",
     ] + glob([
         "model/**",
         "src/**",
