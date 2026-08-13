@@ -378,7 +378,9 @@ impl DataProtection {
     ) -> Result<Vec<u8>> {
         match self.decode_in_namespace(namespace_id, item_id, encoded)? {
             Value::Raw(bytes) => Ok(bytes),
-            Value::Json(_) => Err(crate::value::Error::ExpectedRawValue.into()),
+            Value::Json(_) | Value::Cbor(_) | Value::ApplicationDefined { .. } => {
+                Err(crate::value::Error::ExpectedRawValue.into())
+            }
         }
     }
 }

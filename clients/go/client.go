@@ -75,6 +75,16 @@ const (
 	EncryptionRobust Encryption = Encryption(SmithyValueEncryptionRobust)
 )
 
+// KeyFormat selects the client-local application-key to Item ID mapping.
+type KeyFormat string
+
+const (
+	// KeyFormatHash applies deterministic canonical-key hashing.
+	KeyFormatHash KeyFormat = "hash"
+	// KeyFormatByteKeyOrHash preserves byte keys up to the wire limit and hashes longer keys.
+	KeyFormatByteKeyOrHash KeyFormat = "byte_key_or_hash"
+)
+
 // TimeoutOptions bounds connection setup and complete request exchanges.
 type TimeoutOptions struct {
 	Connect time.Duration
@@ -106,6 +116,9 @@ type Options struct {
 	// Encryption selects the shared-core value-protection profile. The zero
 	// value selects EncryptionRobust.
 	Encryption Encryption
+	// KeyFormat selects the client-local application-key to Item ID mapping.
+	// The zero value selects KeyFormatHash.
+	KeyFormat KeyFormat
 	// Timeouts bounds native connection and operation work.
 	Timeouts TimeoutOptions
 	// Retry controls response-safe retry attempts.
@@ -127,6 +140,7 @@ type normalizedOptions struct {
 	dataProtectionKey   []byte
 	compression         CompressionOptions
 	encryption          Encryption
+	keyFormat           KeyFormat
 	timeouts            TimeoutOptions
 	retryAttempts       int
 	maxInFlight         int
@@ -199,6 +213,16 @@ func (o Options) normalize() (normalizedOptions, error) {
 	if encryption != EncryptionCompact && encryption != EncryptionRobust {
 		return normalizedOptions{}, validationError("encryption", "must be EncryptionCompact or EncryptionRobust")
 	}
+	keyFormat := o.KeyFormat
+	if keyFormat == "" {
+		keyFormat = KeyFormatHash
+	}
+	if keyFormat != KeyFormatHash && keyFormat != KeyFormatByteKeyOrHash {
+		return normalizedOptions{}, validationError(
+			"key_format",
+			"must be KeyFormatHash or KeyFormatByteKeyOrHash",
+		)
+	}
 
 	retryAttempts := o.Retry.MaxAttempts
 	if retryAttempts == 0 {
@@ -261,6 +285,7 @@ func (o Options) normalize() (normalizedOptions, error) {
 		dataProtectionKey:   append([]byte(nil), o.DataProtectionKey...),
 		compression:         compression,
 		encryption:          encryption,
+		keyFormat:           keyFormat,
 		timeouts:            TimeoutOptions{Connect: connectTimeout, Request: requestTimeout},
 		retryAttempts:       retryAttempts,
 		maxInFlight:         maxInFlight,

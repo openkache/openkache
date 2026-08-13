@@ -261,6 +261,10 @@ impl NativeClient {
             GetOutcome::Found(Value::Raw(_)) => Err(native_error(
                 "stored value uses raw serialization, expected canonical JSON",
             )),
+            GetOutcome::Found(Value::Cbor(_))
+            | GetOutcome::Found(Value::ApplicationDefined { .. }) => Err(native_error(
+                "stored value uses a non-JSON payload format, expected canonical JSON",
+            )),
         }
     }
 

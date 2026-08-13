@@ -7,9 +7,9 @@ use crate::key::{KeyBinding, KeyInput};
 use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
-    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType, NamespaceDescriptor,
-    NamespacePolicy, ResolvedKey, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
-    TypedKey,
+    DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
+    NamespaceDescriptor, NamespacePolicy, ResolvedKey, Result, RetryPolicy, ServerTrust,
+    SetOptions, SetOutcome, TypedKey,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -72,12 +72,8 @@ impl ProtectionSettings {
                         "an encryption profile requires client_root_key",
                     ));
                 }
-                DataProtection::unprotected_with_format(
-                    key_type,
-                    self.key_format,
-                    self.compression,
-                )
-                .map(Arc::new)
+                DataProtection::unprotected_with_format(key_type, self.key_format, self.compression)
+                    .map(Arc::new)
             }
         }
     }
@@ -560,6 +556,10 @@ macro_rules! protected_client_methods {
             match self.get_value_at_item_id(namespace_id, item_id).await? {
                 GetOutcome::Found(Value::Raw(value)) => Ok(GetOutcome::Found(value)),
                 GetOutcome::Found(Value::Json(_)) => {
+                    Err(crate::value::Error::ExpectedRawValue.into())
+                }
+                GetOutcome::Found(Value::Cbor(_))
+                | GetOutcome::Found(Value::ApplicationDefined { .. }) => {
                     Err(crate::value::Error::ExpectedRawValue.into())
                 }
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),

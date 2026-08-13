@@ -926,8 +926,9 @@ fn validate_ffi_operation(
             return Err("operation does not accept an item_id".to_owned());
         }
         (FfiInvocation::Raw, FfiInputKind::ItemId)
-        | (FfiInvocation::Scoped, FfiInputKind::ItemId)
-            => validate_exact_item_id_input(input, operation_contract.request_item_count)?,
+        | (FfiInvocation::Scoped, FfiInputKind::ItemId) => {
+            validate_exact_item_id_input(input, operation_contract.request_item_count)?
+        }
         (FfiInvocation::Scoped, FfiInputKind::None) if !input.is_empty() => {
             return Err("operation does not accept an item_id".to_owned());
         }
@@ -945,9 +946,11 @@ fn validate_ffi_operation(
     Ok(())
 }
 
-fn validate_exact_item_id_input(input: &[u8], item_count: usize) -> std::result::Result<(), String> {
-    crate::protocol::compat_v1::parse_compact_item_ids(input, item_count)
-        .map(|_| ())
+fn validate_exact_item_id_input(
+    input: &[u8],
+    item_count: usize,
+) -> std::result::Result<(), String> {
+    crate::protocol::compat_v1::parse_compact_item_ids(input, item_count).map(|_| ())
 }
 
 async fn namespace_open(
@@ -1097,6 +1100,9 @@ fn json_result(outcome: GetOutcome<Value>) -> std::result::Result<FfiResult, cra
             })
             .map_err(|error| crate::value::Error::InvalidJson(error.to_string()).into()),
         GetOutcome::Found(Value::Raw(_)) => Err(crate::value::Error::ExpectedRawValue.into()),
+        GetOutcome::Found(Value::Cbor(_)) | GetOutcome::Found(Value::ApplicationDefined { .. }) => {
+            Err(crate::value::Error::ExpectedRawValue.into())
+        }
         GetOutcome::NotFound => Ok(FfiResult::success_with_status(
             FfiResultKind::NotFound,
             u32::from(openkache_protocol::Status::NotFound as u8),

@@ -32,7 +32,7 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_RESULT_ERROR,
     SMITHY_FFI_SET_CONDITION_ANY,
 )
-from ._generated.smithy_native_abi import SMITHY_NATIVE_FUNCTIONS
+from ._generated.smithy_native_abi import SMITHY_NATIVE_FUNCTIONS, SmithyNativeConnectOptions
 from ._generated.smithy_native_abi import (
     _CLIENT_POINTER,
     _RESULT_POINTER,
@@ -215,6 +215,7 @@ class NativeClient:
         request_timeout_ms: int,
         max_in_flight: int,
         retry_max_attempts: int,
+        key_format: int = 0,
         native_path: str | os.PathLike[str] | None = None,
     ) -> NativeClient:
         api = _NativeApi(native_path)
@@ -226,7 +227,7 @@ class NativeClient:
             _as_native_buffer(client_private_key),
             _as_native_buffer(data_protection_key),
         ]
-        result = api.connect(
+        options = SmithyNativeConnectOptions(
             buffers[0][1],
             len(address),
             buffers[1][1],
@@ -244,11 +245,13 @@ class NativeClient:
             minimum_input_size,
             minimum_savings,
             encryption,
-            retry_max_attempts,
-            max_in_flight,
             connect_timeout_ms,
             request_timeout_ms,
+            retry_max_attempts,
+            max_in_flight,
+            key_format,
         )
+        result = api.connect_with_options(ctypes.byref(options))
         native_result = api.read_result(result, take_client=True)
         if native_result.kind != SMITHY_FFI_RESULT_CONNECTED or not native_result.client:
             raise NativeError("native client did not return a connected handle")

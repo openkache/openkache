@@ -44,6 +44,8 @@ from ._generated.smithy_contract import (
     SMITHY_FFI_KEY_SPEC_BYTES,
     SMITHY_FFI_KEY_SPEC_INTEGER,
     SMITHY_FFI_KEY_SPEC_TEXT,
+    SMITHY_FFI_KEY_FORMAT_HASH,
+    SMITHY_FFI_KEY_FORMAT_BYTE_KEY_OR_HASH,
     SMITHY_FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
     SMITHY_FFI_NAMESPACE_DEFAULT_EXPIRATION_FIXED_TTL,
     SMITHY_FFI_NAMESPACE_OVERRIDE_ALLOWED,
@@ -148,6 +150,13 @@ class KeyType(StrEnum):
     INTEGER = "integer"
     TEXT = "text"
     BYTES = "bytes"
+
+
+class KeyFormat(StrEnum):
+    """Client-local application-key to Item ID mapping profile."""
+
+    HASH = "hash"
+    BYTE_KEY_OR_HASH = "byte_key_or_hash"
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,9 +401,15 @@ class OpenKacheClient:
     schedules blocking ctypes calls on worker threads.
     """
 
-    def __init__(self, native: _NativeClient, key_type: KeyType) -> None:
+    def __init__(
+        self,
+        native: _NativeClient,
+        key_type: KeyType,
+        key_format: KeyFormat,
+    ) -> None:
         self._native = native
         self._key_type = key_type
+        self._key_format = key_format
         self._closed = False
         self._raw: RawClient | None = None
 
@@ -406,6 +421,7 @@ class OpenKacheClient:
         certificate: bytes | bytearray | memoryview | str | PathLike[str],
         data_protection_key: bytes | bytearray | memoryview | None = None,
         key_type: KeyType | str = KeyType.TEXT,
+        key_format: KeyFormat | str = KeyFormat.HASH,
         server_name: str | None = None,
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
@@ -416,6 +432,14 @@ class OpenKacheClient:
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         selected_key_type = _normalize_key_type(key_type)
+        selected_key_format = _normalize_key_format(key_format)
+        if (
+            selected_key_format is KeyFormat.BYTE_KEY_OR_HASH
+            and selected_key_type is not KeyType.BYTES
+        ):
+            raise OpenKacheValueError(
+                "key_format='byte_key_or_hash' requires key_type='bytes'"
+            )
         try:
             settings = await asyncio.to_thread(
                 _connection_settings,
@@ -429,12 +453,13 @@ class OpenKacheClient:
                 timeouts=timeouts,
                 max_in_flight=max_in_flight,
                 retry_max_attempts=retry_max_attempts,
+                key_format=selected_key_format,
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
         except (NativeError, OSError) as error:
             raise OpenKacheError(str(error)) from error
-        return cls(native, selected_key_type)
+        return cls(native, selected_key_type, selected_key_format)
 
     @classmethod
     def connect_sync(cls, address: str, **kwargs: Any) -> OpenKacheClient:
@@ -885,6 +910,7 @@ def _connection_settings(
     timeouts: ClientTimeouts | None,
     max_in_flight: int,
     retry_max_attempts: int,
+    key_format: KeyFormat,
     native_path: str | PathLike[str] | None,
 ) -> dict[str, Any]:
     native_address, host = _resolve_address(address)
@@ -949,6 +975,11 @@ def _connection_settings(
         "request_timeout_ms": timeouts.request_ms,
         "max_in_flight": max_in_flight,
         "retry_max_attempts": retry_max_attempts,
+        "key_format": (
+            SMITHY_FFI_KEY_FORMAT_HASH
+            if key_format is KeyFormat.HASH
+            else SMITHY_FFI_KEY_FORMAT_BYTE_KEY_OR_HASH
+        ),
         "native_path": native_path,
     }
 
@@ -1025,6 +1056,23 @@ def _normalize_key_type(value: KeyType | str) -> KeyType:
     raise OpenKacheValueError(
         "key_type must be "
         + ", ".join(f"'{member.value}'" for member in KeyType)
+    )
+
+
+def _normalize_key_format(value: KeyFormat | str) -> KeyFormat:
+    if isinstance(value, KeyFormat):
+        return value
+    if isinstance(value, str):
+        try:
+            return KeyFormat(value)
+        except ValueError as error:
+            raise OpenKacheValueError(
+                "key_format must be "
+                + ", ".join(f"'{member.value}'" for member in KeyFormat)
+            ) from error
+    raise OpenKacheValueError(
+        "key_format must be "
+        + ", ".join(f"'{member.value}'" for member in KeyFormat)
     )
 
 

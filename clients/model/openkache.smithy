@@ -193,16 +193,22 @@ structure valueFormat {
     formatByteBytes: Integer
 
     @required
-    formatCompressionMask: Byte
+    protectionMask: Byte
 
     @required
-    formatEncryptionShift: Byte
+    compressionMask: Byte
 
     @required
-    serializationRaw: Byte
+    compressionShift: Byte
 
     @required
-    serializationJson: Byte
+    payloadMask: Byte
+
+    @required
+    payloadShift: Byte
+
+    @required
+    reservedMask: Integer
 
     @required
     compressionNone: Byte
@@ -211,13 +217,22 @@ structure valueFormat {
     compressionZstandard: Byte
 
     @required
-    encryptionNone: Byte
+    protectionUnprotected: Byte
 
     @required
-    encryptionCompact: Byte
+    protectionAesGcmSiv: Byte
 
     @required
-    encryptionRobust: Byte
+    protectionAesSivCmac: Byte
+
+    @required
+    payloadOpaqueBytes: Byte
+
+    @required
+    payloadCbor: Byte
+
+    @required
+    payloadApplicationDefined: Byte
 
     @required
     compactSyntheticIvBytes: Integer
@@ -626,15 +641,20 @@ structure valueEnvelope {
     version: 1,
     maxVu128Bytes: 17,
     formatByteBytes: 1,
-    formatCompressionMask: 15,
-    formatEncryptionShift: 4,
-    serializationRaw: 0,
-    serializationJson: 1,
+    protectionMask: 3,
+    compressionMask: 12,
+    compressionShift: 2,
+    payloadMask: 48,
+    payloadShift: 4,
+    reservedMask: 192,
     compressionNone: 0,
     compressionZstandard: 1,
-    encryptionNone: 0,
-    encryptionCompact: 2,
-    encryptionRobust: 1,
+    protectionUnprotected: 0,
+    protectionAesGcmSiv: 1,
+    protectionAesSivCmac: 2,
+    payloadOpaqueBytes: 0,
+    payloadCbor: 1,
+    payloadApplicationDefined: 2,
     compactSyntheticIvBytes: 16,
     robustNonceBytes: 12,
     robustTagBytes: 16,

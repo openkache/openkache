@@ -252,6 +252,10 @@ const (
 \tSmithyValueEncryptionCompact uint32 = ${value.encryption_compact}
 \t// SmithyValueEncryptionRobust selects randomized AES-GCM-SIV protection.
 \tSmithyValueEncryptionRobust uint32 = ${value.encryption_robust}
+\t// SmithyFFIKeyFormatHash selects canonical key hashing.
+\tSmithyFFIKeyFormatHash uint32 = ${adapter_values.key_format_hash}
+\t// SmithyFFIKeyFormatByteKeyOrHash preserves short byte keys and hashes longer keys.
+\tSmithyFFIKeyFormatByteKeyOrHash uint32 = ${adapter_values.key_format_byte_key_or_hash}
 )
 
 // Smithy operation values carried by the native ABI.

@@ -176,7 +176,7 @@ openkache_client_result *openkache_go_connect(
     uint32_t encryption,
     size_t retry_max_attempts, size_t max_in_flight,
     uint64_t connect_timeout_ms, uint64_t request_timeout_ms,
-    uint8_t use_extended
+    uint8_t use_extended, uint32_t key_format
 ) {
     if (library == NULL) return NULL;
     if (use_extended != 0) {
@@ -191,12 +191,31 @@ openkache_client_result *openkache_go_connect(
             retry_max_attempts, max_in_flight, connect_timeout_ms,
             request_timeout_ms);
     }
-    return library->connect(
-        address, address_length, server_name, server_name_length,
-        certificate, certificate_length, data_protection_key,
-        data_protection_key_length, compression_enabled, compression_level,
-        minimum_input_size, minimum_savings, connect_timeout_ms,
-        request_timeout_ms);
+    return library->connect_with_options(
+        &(openkache_client_connect_options_t){
+            .address = address,
+            .address_length = address_length,
+            .server_name = server_name,
+            .server_name_length = server_name_length,
+            .certificate = certificate,
+            .certificate_length = certificate_length,
+            .client_certificate_chain = identity_certificate_chain,
+            .client_certificate_chain_length = identity_certificate_chain_length,
+            .client_private_key = identity_private_key,
+            .client_private_key_length = identity_private_key_length,
+            .data_protection_key = data_protection_key,
+            .data_protection_key_length = data_protection_key_length,
+            .compression_enabled = compression_enabled,
+            .compression_level = compression_level,
+            .minimum_input_size = minimum_input_size,
+            .minimum_savings = minimum_savings,
+            .encryption = encryption,
+            .connect_timeout_ms = connect_timeout_ms,
+            .request_timeout_ms = request_timeout_ms,
+            .retry_max_attempts = retry_max_attempts,
+            .max_in_flight = max_in_flight,
+            .key_format = key_format,
+        });
 }
 
 openkache_client_result *openkache_go_execute(
@@ -477,7 +496,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 		minimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 	}
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
-	useExtended := hasExtended
+	useExtended := hasExtended && options.keyFormat == KeyFormatHash
 	if !hasExtended &&
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
@@ -516,7 +535,7 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 			C.uint32_t(options.encryption),
 			C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
 			C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
-			C.uint8_t(boolByte(useExtended)),
+			C.uint8_t(boolByte(useExtended)), C.uint32_t(keyFormatCode(options.keyFormat)),
 		)
 		C.free(address)
 		C.free(serverName)
@@ -542,6 +561,13 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func keyFormatCode(format KeyFormat) uint32 {
+	if format == KeyFormatByteKeyOrHash {
+		return SmithyFFIKeyFormatByteKeyOrHash
+	}
+	return SmithyFFIKeyFormatHash
 }
 
 func validateSmithyFFINamespaceDescriptorLayout() error {

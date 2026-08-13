@@ -103,6 +103,12 @@ enum class Encryption : std::uint32_t {
     Robust = OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST,
 };
 
+/// Client-local application-key to Item ID mapping profile.
+enum class Key_Format : std::uint32_t {
+    Hash = OPENKACHE_SMITHY_FFI_KEY_FORMAT_HASH,
+    Byte_Key_Or_Hash = OPENKACHE_SMITHY_FFI_KEY_FORMAT_BYTE_KEY_OR_HASH,
+};
+
 /// Successful SET outcome.
 enum class Set_Outcome {
     Created,
@@ -150,6 +156,7 @@ struct Connect_Options {
         OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS;
     std::size_t retry_max_attempts = OPENKACHE_SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS;
     std::size_t max_in_flight = OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT;
+    Key_Format key_format = Key_Format::Hash;
 };
 
 /// RAII C++ client over the shared core C ABI.
@@ -208,8 +215,7 @@ public:
         const auto* client_private_key = options.client_private_key.empty()
             ? nullptr
             : options.client_private_key.data();
-        openkache_client_result_t* result =
-            openkache_client_connect_ex(
+        openkache_client_connect_options_t native_options{
                 reinterpret_cast<const Byte*>(options.address.data()),
                 options.address.size(),
                 reinterpret_cast<const Byte*>(options.server_name.data()),
@@ -227,10 +233,13 @@ public:
                 options.minimum_input_size,
                 options.minimum_savings,
                 static_cast<std::uint32_t>(options.encryption),
+                options.connect_timeout_ms,
+                options.request_timeout_ms,
                 options.retry_max_attempts,
                 options.max_in_flight,
-                options.connect_timeout_ms,
-                options.request_timeout_ms);
+                static_cast<std::uint32_t>(options.key_format)};
+        openkache_client_result_t* result =
+            openkache_client_connect_with_options(&native_options);
         if (result == nullptr) {
             throw Error("OpenKache connect returned a null result");
         }

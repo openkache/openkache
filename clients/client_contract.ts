@@ -44,21 +44,33 @@ export interface Value_Format_Contract {
   readonly compression_none: number
   readonly compression_zstandard: number
   readonly data_protection_key_bytes: number
-  readonly encryption_compact: number
-  readonly encryption_none: number
-  readonly encryption_robust: number
+  readonly protection_aes_gcm_siv: number
+  readonly protection_aes_siv_cmac: number
+  readonly protection_unprotected: number
   readonly format_byte_bytes: number
-  readonly format_compression_mask: number
-  readonly format_encryption_shift: number
+  readonly compression_mask: number
+  readonly compression_shift: number
+  readonly payload_mask: number
+  readonly payload_shift: number
+  readonly reserved_mask: number
   readonly item_id_root_context: string
   readonly robust_context: string
   readonly robust_nonce_bytes: number
   readonly robust_tag_bytes: number
-  readonly serialization_json: number
-  readonly serialization_raw: number
+  readonly payload_application_defined: number
+  readonly payload_cbor: number
+  readonly payload_opaque_bytes: number
   readonly value_root_context: string
   readonly max_vu128_bytes: number
   readonly version: number
+  /** Compatibility aliases used by older generated adapters. */
+  readonly encryption_compact: number
+  readonly encryption_none: number
+  readonly encryption_robust: number
+  readonly format_compression_mask: number
+  readonly format_encryption_shift: number
+  readonly serialization_json: number
+  readonly serialization_raw: number
 }
 
 /** Legacy metadata envelope retained for the TypeScript adapter migration. */
@@ -1241,21 +1253,18 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       VALUE_FORMAT_TRAIT_ID,
       1,
     ),
-    encryption_compact: integer_member(
-      contract,
-      "encryptionCompact",
-      VALUE_FORMAT_TRAIT_ID,
-      0,
-      0xff,
-    ),
-    encryption_none: integer_member(contract, "encryptionNone", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
-    encryption_robust: integer_member(
-      contract,
-      "encryptionRobust",
-      VALUE_FORMAT_TRAIT_ID,
-      0,
-      0xff,
-    ),
+    protection_aes_gcm_siv:
+      contract.protectionAesGcmSiv === undefined
+        ? integer_member(contract, "encryptionRobust", VALUE_FORMAT_TRAIT_ID, 0, 0x03)
+        : integer_member(contract, "protectionAesGcmSiv", VALUE_FORMAT_TRAIT_ID, 0, 0x03),
+    protection_aes_siv_cmac:
+      contract.protectionAesSivCmac === undefined
+        ? integer_member(contract, "encryptionCompact", VALUE_FORMAT_TRAIT_ID, 0, 0x03)
+        : integer_member(contract, "protectionAesSivCmac", VALUE_FORMAT_TRAIT_ID, 0, 0x03),
+    protection_unprotected:
+      contract.protectionUnprotected === undefined
+        ? integer_member(contract, "encryptionNone", VALUE_FORMAT_TRAIT_ID, 0, 0x03)
+        : integer_member(contract, "protectionUnprotected", VALUE_FORMAT_TRAIT_ID, 0, 0x03),
     format_byte_bytes: integer_member(
       contract,
       "formatByteBytes",
@@ -1263,20 +1272,26 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       1,
       1,
     ),
-    format_compression_mask: integer_member(
-      contract,
-      "formatCompressionMask",
-      VALUE_FORMAT_TRAIT_ID,
-      0,
-      0xff,
-    ),
-    format_encryption_shift: integer_member(
-      contract,
-      "formatEncryptionShift",
-      VALUE_FORMAT_TRAIT_ID,
-      0,
-      7,
-    ),
+    compression_mask:
+      contract.compressionMask === undefined
+        ? 0x0f
+        : integer_member(contract, "compressionMask", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    compression_shift:
+      contract.compressionShift === undefined
+        ? 0
+        : integer_member(contract, "compressionShift", VALUE_FORMAT_TRAIT_ID, 0, 7),
+    payload_mask:
+      contract.payloadMask === undefined
+        ? 0
+        : integer_member(contract, "payloadMask", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    payload_shift:
+      contract.payloadShift === undefined
+        ? 0
+        : integer_member(contract, "payloadShift", VALUE_FORMAT_TRAIT_ID, 0, 7),
+    reserved_mask:
+      contract.reservedMask === undefined
+        ? 0
+        : integer_member(contract, "reservedMask", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
     item_id_root_context: string_member(
       contract,
       "itemIdRootContext",
@@ -1295,20 +1310,18 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       VALUE_FORMAT_TRAIT_ID,
       1,
     ),
-    serialization_json: integer_member(
-      contract,
-      "serializationJson",
-      VALUE_FORMAT_TRAIT_ID,
-      0,
-      0xff,
-    ),
-    serialization_raw: integer_member(
-      contract,
-      "serializationRaw",
-      VALUE_FORMAT_TRAIT_ID,
-      0,
-      0xff,
-    ),
+    payload_application_defined:
+      contract.payloadApplicationDefined === undefined
+        ? 2
+        : integer_member(contract, "payloadApplicationDefined", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    payload_cbor:
+      contract.payloadCbor === undefined
+        ? 1
+        : integer_member(contract, "payloadCbor", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    payload_opaque_bytes:
+      contract.payloadOpaqueBytes === undefined
+        ? integer_member(contract, "serializationRaw", VALUE_FORMAT_TRAIT_ID, 0, 0xff)
+        : integer_member(contract, "payloadOpaqueBytes", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
     value_root_context: string_member(
       contract,
       "valueRootContext",
@@ -1322,6 +1335,32 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       17,
       17,
     ),
+    // Compatibility aliases preserve the generated adapter surface while
+    // the profile-byte selectors use their explicit v1 names above.
+    encryption_compact:
+      contract.encryptionCompact === undefined
+        ? 2
+        : integer_member(contract, "encryptionCompact", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    encryption_none:
+      contract.encryptionNone === undefined
+        ? 0
+        : integer_member(contract, "encryptionNone", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    encryption_robust:
+      contract.encryptionRobust === undefined
+        ? 1
+        : integer_member(contract, "encryptionRobust", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    format_compression_mask:
+      contract.formatCompressionMask === undefined ? 0x0f : 0x0f,
+    format_encryption_shift:
+      contract.formatEncryptionShift === undefined ? 4 : 0,
+    serialization_json:
+      contract.serializationJson === undefined
+        ? 1
+        : integer_member(contract, "serializationJson", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
+    serialization_raw:
+      contract.serializationRaw === undefined
+        ? 0
+        : integer_member(contract, "serializationRaw", VALUE_FORMAT_TRAIT_ID, 0, 0xff),
   } satisfies Value_Format_Contract
 
   for (const [member, actual, expected] of [
@@ -1336,18 +1375,19 @@ function value_format_contract(value: unknown): Value_Format_Contract {
       )
     }
   }
-  if (values.format_compression_mask !== 0x0f) {
-    throw new Error(
-      "value format compression mask must cover exactly the low four format bits",
-    )
-  }
-  if (values.format_encryption_shift !== 4) {
-    throw new Error("value format encryption shift must be exactly four bits")
-  }
-  const format_encryption_mask =
-    values.format_compression_mask << values.format_encryption_shift
-  if (format_encryption_mask !== 0xf0) {
-    throw new Error("value format encryption mask must cover exactly the high four format bits")
+  const has_v1_selectors =
+    contract.protectionMask !== undefined ||
+    contract.compressionMask !== undefined ||
+    contract.payloadMask !== undefined
+  if (
+    has_v1_selectors &&
+    (values.compression_mask !== 0x0c ||
+      values.compression_shift !== 2 ||
+      values.payload_mask !== 0x30 ||
+      values.payload_shift !== 4 ||
+      values.reserved_mask !== 0xc0)
+  ) {
+    throw new Error("value format selector masks and shifts do not match the v1 profile byte")
   }
   const version_bytes = encode_vu128(values.version)
   if (version_bytes.length > values.max_vu128_bytes) {
@@ -1358,21 +1398,22 @@ function value_format_contract(value: unknown): Value_Format_Contract {
   for (const [kind, value] of [
     ["compression", values.compression_none],
     ["compression", values.compression_zstandard],
-    ["encryption", values.encryption_none],
-    ["encryption", values.encryption_compact],
-    ["encryption", values.encryption_robust],
+    ["protection", values.protection_unprotected],
+    ["protection", values.protection_aes_gcm_siv],
+    ["protection", values.protection_aes_siv_cmac],
   ] as const) {
-    if (value > values.format_compression_mask) {
-      throw new Error(`${kind} identifier ${value} does not fit in a format nibble`)
+    if (value > 3) {
+      throw new Error(`${kind} identifier ${value} does not fit in a two-bit selector`)
     }
   }
 
   unique_wire_values(
     [
-      { name: "Raw", value: values.serialization_raw },
-      { name: "Json", value: values.serialization_json },
+      { name: "OpaqueBytes", value: values.payload_opaque_bytes },
+      { name: "CBOR", value: values.payload_cbor },
+      { name: "ApplicationDefined", value: values.payload_application_defined },
     ],
-    "serialization",
+    "payload format",
   )
   unique_wire_values(
     [
@@ -1383,11 +1424,11 @@ function value_format_contract(value: unknown): Value_Format_Contract {
   )
   unique_wire_values(
     [
-      { name: "None", value: values.encryption_none },
-      { name: "Compact", value: values.encryption_compact },
-      { name: "Robust", value: values.encryption_robust },
+      { name: "Unprotected", value: values.protection_unprotected },
+      { name: "AES-256-GCM-SIV", value: values.protection_aes_gcm_siv },
+      { name: "AES-256-SIV-CMAC", value: values.protection_aes_siv_cmac },
     ],
-    "encryption",
+    "protection",
   )
   return values
 }
