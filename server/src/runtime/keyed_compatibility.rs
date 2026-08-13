@@ -16,7 +16,7 @@ use crate::store::{
 use crate::types::StoredItemValue;
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
-use super::scheduler::{CollapseGroup, ScheduledTask};
+use super::scheduler::ScheduledTask;
 use super::storage_task::StorageTask;
 use super::worker::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
 
@@ -50,7 +50,7 @@ pub(super) struct KeyedDescriptor {
     pub(super) collapse: fn(KeyedVisibleState, Vec<StorageCommand>) -> CollapsedLaneBatch,
     /// Identity for one collapse reducer. Different API adapters must not be
     /// reduced into the same batch even when both report collapsible work.
-    pub(super) collapse_group: &'static CollapseGroup,
+    pub(super) collapse_group: u8,
     pub(super) exclusive: bool,
 }
 
@@ -137,8 +137,8 @@ impl StorageCommand {
         self.metadata(cache).collapsible
     }
 
-    pub(super) fn belongs_to_collapse_group(&self, collapse_group: &'static CollapseGroup) -> bool {
-        std::ptr::eq(self.descriptor().collapse_group, collapse_group)
+    pub(super) fn belongs_to_collapse_group(&self, collapse_group: u8) -> bool {
+        self.descriptor().collapse_group == collapse_group
     }
 
     pub(super) fn is_exclusive(&self) -> bool {
@@ -154,7 +154,9 @@ impl StorageCommand {
 }
 
 impl ScheduledTask for StorageCommand {
-    fn collapse_group(&self) -> &'static CollapseGroup {
+    type CollapseGroup = u8;
+
+    fn collapse_group(&self) -> Self::CollapseGroup {
         self.descriptor().collapse_group
     }
 
@@ -221,7 +223,7 @@ static CUSTOM_DESCRIPTOR: KeyedDescriptor = KeyedDescriptor {
     collapsible: never_collapsible,
     prepare: prepare_command,
     collapse: no_collapse,
-    collapse_group: &CUSTOM_COLLAPSE_GROUP,
+    collapse_group: CUSTOM_COLLAPSE_GROUP,
     exclusive: true,
 };
 
@@ -230,7 +232,7 @@ static GET_DESCRIPTOR: KeyedDescriptor = KeyedDescriptor {
     collapsible: always_collapsible,
     prepare: prepare_command,
     collapse: reduce_compatibility_batch,
-    collapse_group: &COMPATIBILITY_COLLAPSE_GROUP,
+    collapse_group: COMPATIBILITY_COLLAPSE_GROUP,
     exclusive: false,
 };
 
@@ -239,7 +241,7 @@ static SET_DESCRIPTOR: KeyedDescriptor = KeyedDescriptor {
     collapsible: set_collapsible,
     prepare: prepare_command,
     collapse: reduce_compatibility_batch,
-    collapse_group: &COMPATIBILITY_COLLAPSE_GROUP,
+    collapse_group: COMPATIBILITY_COLLAPSE_GROUP,
     exclusive: false,
 };
 
@@ -248,12 +250,12 @@ static DELETE_DESCRIPTOR: KeyedDescriptor = KeyedDescriptor {
     collapsible: always_collapsible,
     prepare: prepare_command,
     collapse: reduce_compatibility_batch,
-    collapse_group: &COMPATIBILITY_COLLAPSE_GROUP,
+    collapse_group: COMPATIBILITY_COLLAPSE_GROUP,
     exclusive: false,
 };
 
-static COMPATIBILITY_COLLAPSE_GROUP: CollapseGroup = CollapseGroup(1);
-static CUSTOM_COLLAPSE_GROUP: CollapseGroup = CollapseGroup(2);
+const COMPATIBILITY_COLLAPSE_GROUP: u8 = 1;
+const CUSTOM_COLLAPSE_GROUP: u8 = 2;
 
 fn no_collapse(_base: KeyedVisibleState, _commands: Vec<StorageCommand>) -> CollapsedLaneBatch {
     unreachable!("non-collapsible keyed work cannot be reduced")
