@@ -165,7 +165,9 @@ let result = client
     .await?;
 ```
 
-The raw layer bypasses key derivation and formatted-value processing.
+The raw layer bypasses application-key derivation and the formatted-value
+envelope. The protected client's byte-oriented `get`/`set` methods use the v1
+`OpaqueBytes` payload and therefore still emit and parse the value envelope.
 
 For generated service integrations, use the raw client with the Smithy
 operation types. The generated interface follows protocol item-ID semantics;

@@ -10,7 +10,11 @@ The Rust `value_envelope` module and the TypeScript `set_value`/`get_value`
 compatibility methods use a separate legacy metadata envelope (`OKV1` magic
 prefix plus metadata lengths). That legacy format is not this v1 value format;
 it is retained only for migration compatibility and is not described by the
-grammar below.
+grammar below. APIs named `Raw` in the formatted client layer are compatibility
+spellings for the v1 `OpaqueBytes` payload selector; they still emit and parse
+this value envelope. In contrast, exact Item ID APIs such as the raw clients'
+`get`/`set` operations bypass this envelope and send the caller's item ID and
+opaque value bytes directly.
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHOULD**, **SHOULD NOT**,
 and **MAY** are to be interpreted as described by
@@ -28,15 +32,21 @@ This profile is designed to provide:
 
 This profile does not define:
 
-- key conversion, key derivation, or identity binding;
+- application-key conversion or Item ID derivation;
 - server freshness or CAS;
 - language-native type conversion;
 - application registries for arbitrary payload formats; or
 - transport framing.
 
-The enclosing client profile supplies key material. This document defines the
-value envelope, its authenticated binding to the namespace and exact Item ID,
-and the transforms applied to its payload.
+The enclosing client profile supplies the `client_root_key` and the exact
+namespace and Item ID. This profile defines the value-key schedule derived
+from that root, the value envelope, its authenticated binding to the
+namespace and exact Item ID, and the transforms applied to its payload.
+
+An exact Item ID API is a separate client operation: it accepts an already
+resolved `0..=32`-byte Item ID and an opaque value, and does not apply this
+value envelope. Formatted-key APIs use this profile after the client has
+resolved the Item ID. A server never interprets either representation.
 
 ## 2. Processing model
 
@@ -244,6 +254,7 @@ language-adapter policy; the current adapters use these defaults:
 |---|---:|
 | Rust core, C++, Go, Swift | No |
 | Python, TypeScript | Yes |
+| .NET | Not applicable (exact Item ID API only) |
 
 Callers sharing a workload SHOULD select the same policy. An adapter
 documentation MUST state its default explicitly. An encoder MAY select
@@ -256,8 +267,57 @@ cryptographic protection does not hide that length.
 
 ## 7. Cryptographic protection
 
-The enclosing client profile supplies the key material. This document does not
-define key derivation or identity binding.
+### 7.1 Value-key schedule
+
+The enclosing client profile supplies one `client_root_key` of exactly 32
+bytes. The key is application-managed; this document does not define how it is
+generated, stored, or rotated. A protected operation MUST reject a missing or
+invalid root key. The all-zero root is reserved for an explicitly unprotected
+client profile and MUST NOT be used as protected key material.
+
+For protected values, implementations MUST derive the value keys exactly as
+follows. BLAKE3 `DERIVE_KEY` uses the context strings as UTF-8 bytes and
+returns 32 bytes. The `|` operator denotes byte concatenation without
+delimiters:
+
+```text
+value_root_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 root key",
+    material = client_root_key[32]
+  )
+
+item_material =
+    value_root_key[32]
+  | item_id_length:u8
+  | item_id:item_id_length
+
+compact_mac_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-SIV-CMAC MAC key",
+    material = item_material
+  )
+
+compact_encryption_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-SIV-CMAC encryption key",
+    material = item_material
+  )
+
+robust_key =
+  BLAKE3-DERIVE-KEY(
+    context  = "OpenKache value format v1 AES-256-GCM-SIV key",
+    material = item_material
+  )
+```
+
+`item_id_length` MUST be the exact length of the Item ID, including when it is
+zero; it MUST NOT be replaced by a fixed-width 32-byte buffer. Namespace ID
+is not part of `item_material`; it is authenticated through the AAD below.
+The key schedule is deterministic, but Robust protection remains randomized
+because each write uses a fresh nonce.
+
+### 7.2 Authenticated data
 
 For a protected envelope, the authenticated data MUST include the exact
 encoded `value_envelope_version` bytes and the exact `selector_byte`.
@@ -294,7 +354,7 @@ Protection MUST authenticate before any decompression or payload parsing. An
 authentication failure MUST use one generic error. Any decrypted working
 buffer MUST be zeroized before that error is returned.
 
-### 7.1 AES-256-GCM-SIV
+### 7.3 AES-256-GCM-SIV
 
 ```text
 gcm_siv_body = nonce[12] | ciphertext | tag[16]
@@ -306,7 +366,7 @@ fail if randomness fails and MUST NOT substitute a timestamp, payload, or
 process-local counter. The protection overhead is 28 bytes; the nonce is
 public.
 
-### 7.2 AES-256-SIV-CMAC
+### 7.4 AES-256-SIV-CMAC
 
 RFC 5297 SIV uses independent 32-byte authentication and encryption keys:
 
@@ -323,13 +383,13 @@ Do not split it into multiple S2V components or add a nonce component. The
 protection overhead is 16 bytes. Repeated identical writes with the same key,
 associated data, and payload produce identical protected bodies.
 
-### 7.3 Unprotected
+### 7.5 Unprotected
 
 The transformed body is stored directly. This profile provides no
 confidentiality or authentication; parser bounds and compression validation
 remain mandatory.
 
-### 7.4 Size comparison
+### 7.6 Size comparison
 
 | Protection profile | Envelope header | Protection overhead |
 |---|---:|---:|
@@ -347,8 +407,8 @@ An encoder MUST:
 2. Enforce the expanded payload limit.
 3. Compress the payload only when the selected policy permits.
 4. Encode the value-envelope version and selector byte.
-5. Construct authenticated data from the exact header bytes and external
-   associated data.
+5. Construct the profile-defined AAD, including the exact version and selector
+   bytes and the namespace and Item ID fields.
 6. Apply the selected protection profile.
 7. Enforce the complete envelope limit before returning the bytes.
 

@@ -1177,8 +1177,8 @@ public actor OpenKacheClient {
 
 /// Actor-isolated exact-item-ID client implementing the generated Smithy API.
 ///
-/// Raw values are sent to the server exactly as supplied. They are not
-/// application-key-derived and do not receive the protected value format.
+/// Exact raw values are sent to the server exactly as supplied. They are not
+/// application-key-derived and do not receive the v1 value envelope.
 public actor OpenKacheRawClient {
     private var native: NativeHandle?
 

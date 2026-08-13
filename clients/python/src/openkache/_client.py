@@ -523,7 +523,7 @@ class OpenKacheClient:
         *,
         encryption: Encryption | None = None,
     ) -> bytes | None:
-        """Gets exact decrypted Raw bytes, or ``None`` when absent."""
+        """Gets exact decrypted ``OpaqueBytes`` payload bytes, or ``None``."""
 
         self._assert_open()
         return await self._value_operation(SMITHY_OPCODE_GET, key, encryption=encryption)
@@ -536,7 +536,7 @@ class OpenKacheClient:
         *,
         encryption: Encryption | None = None,
     ) -> SmithySetOutcome:
-        """Stores exact bytes through the core Raw value format."""
+        """Stores exact bytes through the v1 ``OpaqueBytes`` value format."""
 
         self._assert_open()
         return await self._set_operation(

@@ -453,7 +453,7 @@ export class OpenKache_Client {
   }
 
   /**
-   * Retrieves exact decrypted and decompressed bytes without envelope decoding.
+   * Retrieves the exact decrypted and decompressed `OpaqueBytes` payload.
    *
    * @param key - A key matching the configured `key_spec`.
    * @returns Stored bytes, or `undefined` when the key does not exist.
@@ -476,10 +476,11 @@ export class OpenKache_Client {
   }
 
   /**
-   * Stores exact bytes without value-envelope encoding.
+   * Stores exact bytes as the v1 `OpaqueBytes` payload.
    *
    * @param key - A key matching the configured `key_spec`.
-   * @param value - Bytes to compress, encrypt, and store; empty values are supported.
+   * @param value - Exact payload bytes to compress, encrypt, and store in the
+   * v1 value envelope; empty values are supported.
    * @param options - Optional TTL and `if_absent` or `if_present` condition.
    * @returns Whether the operation created, replaced, or did not store the key.
    * @throws {OpenKache_Error} When validation, transport, or storage fails.
