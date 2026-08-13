@@ -746,16 +746,8 @@ fn read_length_delimited(
     cursor: usize,
     error: CodecError,
 ) -> Result<(&[u8], usize), CodecError> {
-    let (length, encoded_length_len) = decode_varuint(
-        payload.get(cursor..).unwrap_or_default(),
-        "container value length",
-    )
-    .map_err(|_| error)?
-    .ok_or(error)?;
-    let value_start = cursor.checked_add(encoded_length_len).ok_or(error)?;
-    let value_end = value_start
-        .checked_add(usize::try_from(length).map_err(|_| error)?)
+    let view = crate::compact::read_length_delimited(payload, cursor)
+        .map_err(|_| error)?
         .ok_or(error)?;
-    let value = payload.get(value_start..value_end).ok_or(error)?;
-    Ok((value, value_end))
+    Ok((view.value, view.next))
 }
