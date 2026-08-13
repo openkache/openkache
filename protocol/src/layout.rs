@@ -116,7 +116,13 @@ pub fn encode_layout_fields(
     }
     match layout {
         OperationFieldLayout::Sequence => encode_field_sequence(values),
-        OperationFieldLayout::OptionalValues => crate::encode_optional_values(values),
+        OperationFieldLayout::OptionalValues => {
+            let codec = crate::OptionalValueCodec::new(
+                crate::OPTIONAL_VALUE_LENGTH_BYTES,
+                u64::from(crate::OPTIONAL_VALUE_MISSING),
+            )?;
+            crate::encode_optional_values(codec, values)
+        }
         OperationFieldLayout::Dense => {
             if values.iter().any(Option::is_none) {
                 return Err(ProtocolError::InvalidFieldSequence(
@@ -155,7 +161,11 @@ pub fn decode_layout_fields(
             crate::FieldSequence::decode_with_required(payload, required, offsets).map(|_| ())
         }
         OperationFieldLayout::OptionalValues => {
-            crate::OptionalValues::decode(payload, required.len(), offsets).map(|_| ())
+            let codec = crate::OptionalValueCodec::new(
+                crate::OPTIONAL_VALUE_LENGTH_BYTES,
+                u64::from(crate::OPTIONAL_VALUE_MISSING),
+            )?;
+            codec.decode(payload, required.len(), offsets).map(|_| ())
         }
         OperationFieldLayout::Dense => {
             if required.iter().any(|r| !r) {
