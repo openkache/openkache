@@ -6,7 +6,7 @@ use std::fmt;
 use aes_gcm_siv::aead::{AeadInOut, KeyInit as _};
 use aes_gcm_siv::{Aes256GcmSiv, Nonce, Tag};
 use aes_siv::siv::Aes256Siv;
-use openkache_protocol::{ITEM_ID_BYTES, MAX_VALUE_BYTES};
+use openkache_protocol::MAX_VALUE_BYTES;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use zeroize::{Zeroize, Zeroizing};
@@ -21,30 +21,37 @@ use crate::contract::{
     DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES, DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
     VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
     VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
-    VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE,
-    VALUE_FORMAT_COMPRESSION_ZSTANDARD, VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES,
-    VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
-    VALUE_FORMAT_ENCRYPTION_SHIFT, VALUE_FORMAT_FORMAT_BYTE_BYTES, VALUE_FORMAT_MAX_VU128_BYTES,
+    VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_COMPRESSION_ZSTANDARD,
+    VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES, VALUE_FORMAT_FORMAT_BYTE_BYTES,
     VALUE_FORMAT_ROBUST_CONTEXT, VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES,
-    VALUE_FORMAT_SERIALIZATION_JSON, VALUE_FORMAT_SERIALIZATION_RAW, VALUE_FORMAT_VERSION,
-    VALUE_FORMAT_VERSION_BYTES,
 };
 use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 
+// The selector layout is part of the value contract. Keep these local until
+// the generated client contract exposes the same names across every binding.
+const PROTECTION_MASK: u8 = 0x03;
+const COMPRESSION_MASK: u8 = 0x0c;
+const COMPRESSION_SHIFT: u8 = 2;
+const PAYLOAD_MASK: u8 = 0x30;
+const PAYLOAD_SHIFT: u8 = 4;
+const RESERVED_MASK: u8 = 0xc0;
+const PROTECTION_UNPROTECTED: u8 = 0;
+const PROTECTION_AES_GCM_SIV: u8 = 1;
+const PROTECTION_AES_SIV_CMAC: u8 = 2;
+const PAYLOAD_OPAQUE_BYTES: u8 = 0;
+const PAYLOAD_CBOR: u8 = 1;
+const PAYLOAD_APPLICATION_DEFINED: u8 = 2;
+const MAX_VU128_BYTES: usize = 9;
+
 /// Current value-format version.
-pub const VERSION: u128 = VALUE_FORMAT_VERSION;
+pub const VERSION: u64 = 1;
 
 /// Bytes required for an application data protection key.
 pub const ENCRYPTION_KEY_BYTES: usize = VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES;
 
-const VERSION_BYTES: &[u8] = VALUE_FORMAT_VERSION_BYTES;
+const VERSION_BYTES: &[u8] = &[1];
 const CONTAINER_HEADER_BYTES: usize = VERSION_BYTES.len() + VALUE_FORMAT_FORMAT_BYTE_BYTES;
 const NAMESPACE_ID_BYTES: usize = std::mem::size_of::<u64>();
-const AAD_BYTES: usize = VALUE_FORMAT_AAD_DOMAIN.len()
-    + NAMESPACE_ID_BYTES
-    + ITEM_ID_BYTES
-    + VERSION_BYTES.len()
-    + VALUE_FORMAT_FORMAT_BYTE_BYTES;
 const BINARY64_SIGNIFICAND_BITS: u32 = 53;
 
 /// Client-owned encoded bytes stored opaquely by the server.
@@ -318,8 +325,13 @@ impl<'de> Visitor<'de> for JsonValueVisitor {
 /// Core-owned logical value supported by the formatted API.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    /// Exact application bytes.
+    /// Exact application bytes (the v1 `OpaqueBytes` payload format).
     Raw(Vec<u8>),
+    /// Exact CBOR bytes containing one accepted CBOR data item.
+    ///
+    /// The bytes are kept as supplied so a caller that needs a particular
+    /// CBOR representation does not incur a decode/re-encode round trip.
+    Cbor(Vec<u8>),
     /// RFC 8785 canonical JSON.
     Json(JsonValue),
 }
@@ -369,9 +381,9 @@ pub enum Encryption {
 impl Encryption {
     const fn identifier(self) -> u8 {
         match self {
-            Self::Unprotected => VALUE_FORMAT_ENCRYPTION_NONE,
-            Self::Compact => VALUE_FORMAT_ENCRYPTION_COMPACT,
-            Self::Robust => VALUE_FORMAT_ENCRYPTION_ROBUST,
+            Self::Unprotected => PROTECTION_UNPROTECTED,
+            Self::Compact => PROTECTION_AES_SIV_CMAC,
+            Self::Robust => PROTECTION_AES_GCM_SIV,
         }
     }
 }
@@ -390,6 +402,11 @@ impl Default for ValueCodec {
 }
 
 impl ValueCodec {
+    /// Returns the configured default protection profile.
+    pub const fn encryption(&self) -> Encryption {
+        self.encryption
+    }
+
     /// Creates an unprotected formatted codec without compression.
     ///
     /// # Returns
@@ -422,6 +439,18 @@ impl ValueCodec {
             compression,
             encryption: Encryption::Unprotected,
             value_root_key: None,
+        })
+    }
+
+    pub(crate) fn compressed_with_key(
+        key: &DataProtectionKey,
+        compression: Compression,
+    ) -> Result<Self> {
+        validate_compression(compression)?;
+        Ok(Self {
+            compression,
+            encryption: Encryption::Unprotected,
+            value_root_key: (!key.is_zero()).then(|| key.value_root_key()),
         })
     }
 
@@ -465,6 +494,9 @@ impl ValueCodec {
     ) -> Result<Self> {
         validate_compression(compression)?;
         if encryption == Encryption::Unprotected {
+            return Err(Error::InvalidEncryptionConfiguration);
+        }
+        if key.is_zero() {
             return Err(Error::InvalidEncryptionConfiguration);
         }
         Ok(Self {
@@ -550,10 +582,25 @@ impl ValueCodec {
         item_id: ItemId,
         value: Value,
     ) -> Result<ItemValue> {
+        self.encode_in_namespace_with_profile(namespace_id, item_id, value, self.encryption)
+    }
+
+    /// Encodes a value using a per-operation protection profile.
+    ///
+    /// The profile is not persisted on the codec. Protected profiles require
+    /// key material; `Unprotected` is always available.
+    pub fn encode_in_namespace_with_profile(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Value,
+        encryption: Encryption,
+    ) -> Result<ItemValue> {
         if namespace_id == 0 {
             return Err(Error::InvalidNamespace);
         }
-        let serialized = serialize_value(value)?;
+        self.validate_profile(encryption)?;
+        let (serialized, payload_id) = self.serialize_value(value)?;
         if serialized.len() > MAX_VALUE_BYTES {
             return Err(Error::DecodedValueTooLarge {
                 size: serialized.len(),
@@ -567,13 +614,23 @@ impl ValueCodec {
         } else {
             VALUE_FORMAT_COMPRESSION_NONE
         };
-        let format =
-            compression_id | (self.encryption.identifier() << VALUE_FORMAT_ENCRYPTION_SHIFT);
-        let aad = make_aad(namespace_id, item_id, format);
-        let body = match self.encryption {
+        let format = encryption.identifier()
+            | (compression_id << COMPRESSION_SHIFT)
+            | (payload_id << PAYLOAD_SHIFT);
+        let aad = (encryption != Encryption::Unprotected)
+            .then(|| make_aad(namespace_id, item_id, format));
+        let body = match encryption {
             Encryption::Unprotected => transformed,
-            Encryption::Compact => self.encrypt_compact(item_id, &aad, transformed)?,
-            Encryption::Robust => self.encrypt_robust(item_id, &aad, transformed)?,
+            Encryption::Compact => self.encrypt_compact(
+                item_id,
+                aad.as_ref().expect("protected codec creates AAD"),
+                transformed,
+            )?,
+            Encryption::Robust => self.encrypt_robust(
+                item_id,
+                aad.as_ref().expect("protected codec creates AAD"),
+                transformed,
+            )?,
         };
 
         let encoded_length =
@@ -663,7 +720,7 @@ impl ValueCodec {
     ///
     /// # Returns
     ///
-    /// The decoded Raw or logical JSON value.
+    /// The decoded opaque, CBOR, application-defined, or logical JSON value.
     ///
     /// # Errors
     ///
@@ -680,9 +737,24 @@ impl ValueCodec {
         item_id: ItemId,
         encoded: ItemValue,
     ) -> Result<Value> {
+        self.decode_in_namespace_with_profile(namespace_id, item_id, encoded, self.encryption)
+    }
+
+    /// Decodes a value while requiring the supplied per-operation profile.
+    ///
+    /// The encoded profile must exactly match `encryption`; no fallback is
+    /// attempted when it differs.
+    pub fn decode_in_namespace_with_profile(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+        expected_encryption: Encryption,
+    ) -> Result<Value> {
         if namespace_id == 0 {
             return Err(Error::InvalidNamespace);
         }
+        self.validate_profile(expected_encryption)?;
         let mut encoded = encoded.into_bytes();
         if encoded.len() > MAX_VALUE_BYTES {
             return Err(Error::EncodedValueTooLarge {
@@ -698,25 +770,32 @@ impl ValueCodec {
         let Some(&format) = encoded.get(version_length) else {
             return Err(Error::InvalidEncodedValue("format byte is truncated"));
         };
-        let compression_id = format & VALUE_FORMAT_COMPRESSION_MASK;
-        let encryption_id = format >> VALUE_FORMAT_ENCRYPTION_SHIFT;
+        if format & RESERVED_MASK != 0 {
+            return Err(Error::InvalidEncodedValue(
+                "profile byte has reserved bits set",
+            ));
+        }
+        let encryption_id = format & PROTECTION_MASK;
+        let compression_id =
+            (format & COMPRESSION_MASK) >> COMPRESSION_SHIFT;
+        let payload_id = (format & PAYLOAD_MASK) >> PAYLOAD_SHIFT;
         let compressed = match compression_id {
             VALUE_FORMAT_COMPRESSION_NONE => false,
             VALUE_FORMAT_COMPRESSION_ZSTANDARD => true,
             identifier => return Err(Error::UnsupportedCompression(identifier)),
         };
         let encryption = match encryption_id {
-            VALUE_FORMAT_ENCRYPTION_NONE => Encryption::Unprotected,
-            VALUE_FORMAT_ENCRYPTION_COMPACT => Encryption::Compact,
-            VALUE_FORMAT_ENCRYPTION_ROBUST => Encryption::Robust,
+            PROTECTION_UNPROTECTED => Encryption::Unprotected,
+            PROTECTION_AES_SIV_CMAC => Encryption::Compact,
+            PROTECTION_AES_GCM_SIV => Encryption::Robust,
             identifier => return Err(Error::UnsupportedEncryption(identifier)),
         };
-        if encryption != self.encryption {
-            return Err(match (self.encryption, encryption) {
+        if encryption != expected_encryption {
+            return Err(match (expected_encryption, encryption) {
                 (Encryption::Unprotected, _) => Error::EncryptionKeyRequired,
                 (_, Encryption::Unprotected) => Error::EncryptionRequired,
                 _ => Error::EncryptionProfileMismatch {
-                    expected: self.encryption,
+                    expected: expected_encryption,
                     actual: encryption,
                 },
             });
@@ -726,27 +805,29 @@ impl ValueCodec {
         let body_length = encoded.len() - body_offset;
         encoded.copy_within(body_offset.., 0);
         encoded.truncate(body_length);
-        let aad = make_aad(namespace_id, item_id, format);
+        let aad = (encryption != Encryption::Unprotected)
+            .then(|| make_aad(namespace_id, item_id, format));
         let transformed = match encryption {
-            Encryption::Unprotected => {
-                if encoded.is_empty() {
-                    return Err(Error::InvalidEncodedValue("serialized body is missing"));
-                }
-                encoded
-            }
+            Encryption::Unprotected => encoded,
             Encryption::Compact => {
-                if encoded.len() < VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES + 1 {
+                if encoded.len() < VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES {
                     return Err(Error::InvalidEncodedValue("Compact body is truncated"));
                 }
-                self.decrypt_compact(item_id, &aad, encoded)?
+                self.decrypt_compact(
+                    item_id,
+                    aad.as_ref().expect("protected codec creates AAD"),
+                    encoded,
+                )?
             }
             Encryption::Robust => {
-                if encoded.len()
-                    < VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES + 1
-                {
+                if encoded.len() < VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES {
                     return Err(Error::InvalidEncodedValue("Robust body is truncated"));
                 }
-                self.decrypt_robust(item_id, &aad, encoded)?
+                self.decrypt_robust(
+                    item_id,
+                    aad.as_ref().expect("protected codec creates AAD"),
+                    encoded,
+                )?
             }
         };
 
@@ -761,7 +842,14 @@ impl ValueCodec {
                 maximum: MAX_VALUE_BYTES,
             });
         }
-        deserialize_value(&serialized)
+        self.deserialize_value(payload_id, &serialized)
+    }
+
+    fn validate_profile(&self, encryption: Encryption) -> Result<()> {
+        if encryption != Encryption::Unprotected && self.value_root_key.is_none() {
+            return Err(Error::EncryptionKeyRequired);
+        }
+        Ok(())
     }
 
     /// Decodes a formatted Raw value and returns its exact application bytes.
@@ -791,7 +879,7 @@ impl ValueCodec {
     ) -> Result<Vec<u8>> {
         match self.decode_in_namespace(namespace_id, item_id, encoded)? {
             Value::Raw(bytes) => Ok(bytes),
-            Value::Json(_) => Err(Error::ExpectedRawValue),
+            _ => Err(Error::ExpectedRawValue),
         }
     }
 
@@ -799,6 +887,30 @@ impl ValueCodec {
         self.value_root_key
             .as_deref()
             .ok_or(Error::EncryptionKeyRequired)
+    }
+
+    fn serialize_value(&self, value: Value) -> Result<(Vec<u8>, u8)> {
+        match value {
+            Value::Raw(bytes) => Ok((bytes, PAYLOAD_OPAQUE_BYTES)),
+            Value::Cbor(bytes) => {
+                validate_cbor_payload(&bytes)?;
+                Ok((bytes, PAYLOAD_CBOR))
+            }
+            Value::Json(_) => Err(Error::UnsupportedPayloadFormat(
+                PAYLOAD_APPLICATION_DEFINED,
+            )),
+        }
+    }
+
+    fn deserialize_value(&self, payload_id: u8, serialized: &[u8]) -> Result<Value> {
+        match payload_id {
+            PAYLOAD_OPAQUE_BYTES => Ok(Value::Raw(serialized.to_vec())),
+            PAYLOAD_CBOR => {
+                validate_cbor_payload(serialized)?;
+                Ok(Value::Cbor(serialized.to_vec()))
+            }
+            identifier => Err(Error::UnsupportedPayloadFormat(identifier)),
+        }
     }
 
     fn encrypt_compact(
@@ -997,16 +1109,19 @@ pub enum Error {
     },
     /// The container version is not implemented.
     #[error("unsupported value-format version {0}")]
-    UnsupportedVersion(u128),
+    UnsupportedVersion(u64),
     /// The compression identifier is reserved or unknown.
     #[error("unsupported value compression identifier {0}")]
     UnsupportedCompression(u8),
     /// The encryption identifier is reserved or unknown.
     #[error("unsupported value encryption identifier {0}")]
     UnsupportedEncryption(u8),
-    /// The serialization identifier is reserved or unknown.
-    #[error("unsupported value serialization identifier {0}")]
-    UnsupportedSerialization(u128),
+    /// The payload-format identifier is reserved or unknown.
+    #[error("unsupported value payload-format identifier {0}")]
+    UnsupportedPayloadFormat(u8),
+    /// The CBOR payload is malformed or outside the v1 acceptance profile.
+    #[error("invalid CBOR payload: {0}")]
+    InvalidCbor(String),
     /// The caller requested Raw bytes from another serialization.
     #[error("formatted value is not Raw serialization")]
     ExpectedRawValue,
@@ -1047,49 +1162,7 @@ fn validate_compression(compression: Compression) -> Result<()> {
     Ok(())
 }
 
-fn serialize_value(value: Value) -> Result<Vec<u8>> {
-    match value {
-        Value::Raw(bytes) => prefix_vu128(VALUE_FORMAT_SERIALIZATION_RAW as u128, bytes),
-        Value::Json(value) => {
-            validate_json_value(&value)?;
-            let payload = serde_json_canonicalizer::to_vec(&value)
-                .map_err(|error| Error::InvalidJson(error.to_string()))?;
-            prefix_vu128(VALUE_FORMAT_SERIALIZATION_JSON as u128, payload)
-        }
-    }
-}
-
-fn deserialize_value(serialized: &[u8]) -> Result<Value> {
-    let (identifier, identifier_length) = decode_vu128(serialized, "serialization identifier")?;
-    let payload = &serialized[identifier_length..];
-    match identifier {
-        value if value == VALUE_FORMAT_SERIALIZATION_RAW as u128 => {
-            Ok(Value::Raw(payload.to_vec()))
-        }
-        value if value == VALUE_FORMAT_SERIALIZATION_JSON as u128 => {
-            decode_json(payload).map(Value::Json)
-        }
-        identifier => Err(Error::UnsupportedSerialization(identifier)),
-    }
-}
-
-fn prefix_vu128(identifier: u128, payload: Vec<u8>) -> Result<Vec<u8>> {
-    let mut encoded_identifier = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
-    let identifier_length = vu128::encode_u128(&mut encoded_identifier, identifier);
-    let total_length =
-        identifier_length
-            .checked_add(payload.len())
-            .ok_or(Error::EncodedValueTooLarge {
-                size: usize::MAX,
-                maximum: MAX_VALUE_BYTES,
-            })?;
-    let mut serialized = Vec::with_capacity(total_length);
-    serialized.extend_from_slice(&encoded_identifier[..identifier_length]);
-    serialized.extend_from_slice(&payload);
-    Ok(serialized)
-}
-
-fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
+fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u64, usize)> {
     let Some(&first) = input.first() else {
         return Err(Error::InvalidVu128 {
             field,
@@ -1097,10 +1170,10 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
         });
     };
     let encoded_length = vu128::encoded_len(first);
-    if encoded_length > VALUE_FORMAT_MAX_VU128_BYTES {
+    if encoded_length > MAX_VU128_BYTES {
         return Err(Error::InvalidVu128 {
             field,
-            reason: "field overflows u128",
+            reason: "field overflows u64",
         });
     }
     if input.len() < encoded_length {
@@ -1109,9 +1182,9 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
             reason: "field is truncated",
         });
     }
-    let mut encoded = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
+    let mut encoded = [0_u8; MAX_VU128_BYTES];
     encoded[..encoded_length].copy_from_slice(&input[..encoded_length]);
-    let (value, decoded_length) = vu128::decode_u128(&encoded);
+    let (value, decoded_length) = vu128::decode_u64(&encoded);
     if decoded_length != encoded_length {
         return Err(Error::InvalidVu128 {
             field,
@@ -1119,8 +1192,8 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
         });
     }
 
-    let mut canonical = [0_u8; VALUE_FORMAT_MAX_VU128_BYTES];
-    let canonical_length = vu128::encode_u128(&mut canonical, value);
+    let mut canonical = [0_u8; MAX_VU128_BYTES];
+    let canonical_length = vu128::encode_u64(&mut canonical, value);
     if canonical_length != encoded_length
         || canonical[..canonical_length] != input[..encoded_length]
     {
@@ -1130,6 +1203,208 @@ fn decode_vu128(input: &[u8], field: &'static str) -> Result<(u128, usize)> {
         });
     }
     Ok((value, encoded_length))
+}
+
+/// Validates one complete CBOR item under the v1 acceptance profile.
+///
+/// This deliberately validates structure without assigning a Rust value to
+/// the item. The CBOR payload is opaque to the common client core and is
+/// returned byte-for-byte after validation.
+fn validate_cbor_payload(payload: &[u8]) -> Result<()> {
+    let end = parse_cbor_item(payload, 0, 0, false)?;
+    if end != payload.len() {
+        return Err(Error::InvalidCbor("trailing bytes after data item".into()));
+    }
+    Ok(())
+}
+
+fn parse_cbor_item(input: &[u8], offset: usize, depth: usize, _map_key: bool) -> Result<usize> {
+    if depth > 128 {
+        return Err(Error::InvalidCbor("nesting depth exceeds 128".into()));
+    }
+    let initial = *input
+        .get(offset)
+        .ok_or_else(|| Error::InvalidCbor("item is truncated".into()))?;
+    let major = initial >> 5;
+    let additional = initial & 0x1f;
+    if additional == 31 {
+        return Err(Error::InvalidCbor(
+            "indefinite-length items are not supported".into(),
+        ));
+    }
+    if major == 7 {
+        let cursor = offset + 1;
+        return match additional {
+            0..=23 => Ok(cursor),
+            24 => cursor
+                .checked_add(1)
+                .filter(|end| *end <= input.len())
+                .ok_or_else(|| Error::InvalidCbor("simple value is truncated".into())),
+            25 | 26 | 27 => {
+                let width = match additional {
+                    25 => 2,
+                    26 => 4,
+                    _ => 8,
+                };
+                cursor
+                    .checked_add(width)
+                    .filter(|end| *end <= input.len())
+                    .ok_or_else(|| Error::InvalidCbor("floating-point value is truncated".into()))
+            }
+            _ => Err(Error::InvalidCbor("reserved simple value".into())),
+        };
+    }
+    let (argument, mut cursor) = cbor_argument(input, offset + 1, additional)?;
+    match major {
+        0 | 1 => Ok(cursor),
+        2 => {
+            cursor = cursor
+                .checked_add(usize::try_from(argument).map_err(|_| {
+                    Error::InvalidCbor("byte string length exceeds platform limits".into())
+                })?)
+                .ok_or_else(|| Error::InvalidCbor("byte string length overflows".into()))?;
+            if cursor > input.len() {
+                return Err(Error::InvalidCbor("byte string is truncated".into()));
+            }
+            Ok(cursor)
+        }
+        3 => {
+            let end = cursor
+                .checked_add(usize::try_from(argument).map_err(|_| {
+                    Error::InvalidCbor("text string length exceeds platform limits".into())
+                })?)
+                .ok_or_else(|| Error::InvalidCbor("text string length overflows".into()))?;
+            if end > input.len() {
+                return Err(Error::InvalidCbor("text string is truncated".into()));
+            }
+            std::str::from_utf8(&input[cursor..end])
+                .map_err(|_| Error::InvalidCbor("text string is not UTF-8".into()))?;
+            Ok(end)
+        }
+        4 => {
+            for _ in 0..argument {
+                cursor = parse_cbor_item(input, cursor, depth + 1, false)?;
+            }
+            Ok(cursor)
+        }
+        5 => {
+            // We cannot resolve arbitrary CBOR keys into a common language
+            // value without reimplementing the full data model. Reject exact
+            // duplicate encodings, and reject a key when it cannot be bounded;
+            // language adapters may apply stricter decoded-key checks.
+            let pair_count = usize::try_from(argument)
+                .map_err(|_| Error::InvalidCbor("map length exceeds platform limits".into()))?;
+            // A malicious map count can be much larger than the remaining
+            // payload. Bound the initial allocation by the bytes available so
+            // malformed input cannot request an unbounded vector before the
+            // first truncated key is detected.
+            let remaining_bytes = input.len().saturating_sub(cursor);
+            let mut key_identities: Vec<Vec<u8>> =
+                Vec::with_capacity(pair_count.min(remaining_bytes));
+            for _ in 0..argument {
+                let key_start = cursor;
+                cursor = parse_cbor_item(input, cursor, depth + 1, true)?;
+                let key = cbor_key_identity(&input[key_start..cursor])?.ok_or_else(|| {
+                    Error::InvalidCbor("map key type cannot be compared in v1".into())
+                })?;
+                if key_identities.iter().any(|previous| *previous == key) {
+                    return Err(Error::InvalidCbor("map contains duplicate keys".into()));
+                }
+                key_identities.push(key);
+                cursor = parse_cbor_item(input, cursor, depth + 1, false)?;
+            }
+            Ok(cursor)
+        }
+        6 => Err(Error::InvalidCbor("tags are not assigned in v1".into())),
+        _ => Err(Error::InvalidCbor("unknown CBOR major type".into())),
+    }
+}
+
+/// Returns a semantic identity for the map-key types whose equality is
+/// unambiguous without constructing a dynamic CBOR value. Complex keys are
+/// rejected by the caller, as required by the v1 acceptance profile when a
+/// decoder cannot determine uniqueness.
+fn cbor_key_identity(key: &[u8]) -> Result<Option<Vec<u8>>> {
+    let initial = *key
+        .first()
+        .ok_or_else(|| Error::InvalidCbor("map key is empty".into()))?;
+    let major = initial >> 5;
+    let additional = initial & 0x1f;
+    if additional == 31 {
+        return Err(Error::InvalidCbor(
+            "indefinite-length map key is not supported".into(),
+        ));
+    }
+    let (argument, cursor) = cbor_argument(key, 1, additional)?;
+    let mut identity = Vec::new();
+    match major {
+        0 | 1 => {
+            identity.push(major);
+            identity.extend_from_slice(&argument.to_be_bytes());
+        }
+        2 | 3 => {
+            let end = cursor
+                .checked_add(usize::try_from(argument).map_err(|_| {
+                    Error::InvalidCbor("map key length exceeds platform limits".into())
+                })?)
+                .ok_or_else(|| Error::InvalidCbor("map key length overflows".into()))?;
+            if end != key.len() {
+                return Err(Error::InvalidCbor("map key has trailing bytes".into()));
+            }
+            if major == 3 {
+                std::str::from_utf8(&key[cursor..end])
+                    .map_err(|_| Error::InvalidCbor("map key is not UTF-8".into()))?;
+            }
+            identity.push(major);
+            identity.extend_from_slice(&key[cursor..end]);
+        }
+        7 if additional <= 23 => {
+            // `false`, `true`, and `null` have stable simple-value identity.
+            identity.extend_from_slice(&[major, additional]);
+        }
+        // Floating point equality (notably NaN) and compound-key equality
+        // require a full CBOR semantic model. Reject them as ambiguous.
+        _ => return Ok(None),
+    }
+    Ok(Some(identity))
+}
+
+fn cbor_argument(input: &[u8], offset: usize, additional: u8) -> Result<(u64, usize)> {
+    match additional {
+        0..=23 => Ok((additional as u64, offset)),
+        24 => Ok((
+            *input
+                .get(offset)
+                .ok_or_else(|| Error::InvalidCbor("argument is truncated".into()))?
+                as u64,
+            offset + 1,
+        )),
+        25 => {
+            let bytes = input
+                .get(offset..offset + 2)
+                .ok_or_else(|| Error::InvalidCbor("argument is truncated".into()))?;
+            Ok((u16::from_be_bytes([bytes[0], bytes[1]]) as u64, offset + 2))
+        }
+        26 => {
+            let bytes = input
+                .get(offset..offset + 4)
+                .ok_or_else(|| Error::InvalidCbor("argument is truncated".into()))?;
+            Ok((
+                u32::from_be_bytes(bytes.try_into().expect("four-byte slice")) as u64,
+                offset + 4,
+            ))
+        }
+        27 => {
+            let bytes = input
+                .get(offset..offset + 8)
+                .ok_or_else(|| Error::InvalidCbor("argument is truncated".into()))?;
+            Ok((
+                u64::from_be_bytes(bytes.try_into().expect("eight-byte slice")),
+                offset + 8,
+            ))
+        }
+        _ => Err(Error::InvalidCbor("reserved additional information".into())),
+    }
 }
 
 fn validate_json_value(value: &JsonValue) -> Result<()> {
@@ -1393,27 +1668,35 @@ fn check_zstandard(operation: &'static str, result: usize) -> Result<()> {
     }
 }
 
-fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> [u8; AAD_BYTES] {
-    let mut aad = [0_u8; AAD_BYTES];
-    let item_id_offset = VALUE_FORMAT_AAD_DOMAIN.len();
-    let namespace_end = item_id_offset + NAMESPACE_ID_BYTES;
-    let version_offset = namespace_end + ITEM_ID_BYTES;
-    let version_end = version_offset + VERSION_BYTES.len();
-    aad[..item_id_offset].copy_from_slice(VALUE_FORMAT_AAD_DOMAIN);
-    aad[item_id_offset..namespace_end].copy_from_slice(&namespace_id.to_be_bytes());
-    aad[namespace_end..version_offset].copy_from_slice(item_id.as_bytes());
-    aad[version_offset..version_end].copy_from_slice(VERSION_BYTES);
-    aad[version_end..version_end + VALUE_FORMAT_FORMAT_BYTE_BYTES]
-        .copy_from_slice(std::slice::from_ref(&format));
+fn make_aad(namespace_id: u64, item_id: ItemId, format: u8) -> Vec<u8> {
+    let id = item_id.as_bytes();
+    let mut aad = Vec::with_capacity(
+        VALUE_FORMAT_AAD_DOMAIN.len()
+            + NAMESPACE_ID_BYTES
+            + 1
+            + id.len()
+            + VERSION_BYTES.len()
+            + VALUE_FORMAT_FORMAT_BYTE_BYTES,
+    );
+    aad.extend_from_slice(VALUE_FORMAT_AAD_DOMAIN);
+    aad.extend_from_slice(&namespace_id.to_be_bytes());
+    aad.push(id.len() as u8);
+    aad.extend_from_slice(id);
+    aad.extend_from_slice(VERSION_BYTES);
+    aad.push(format);
     aad
 }
 
 fn item_id_material(
     value_root_key: &[u8; DATA_PROTECTION_KEY_BYTES],
     item_id: ItemId,
-) -> Zeroizing<[u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]> {
-    let mut material = Zeroizing::new([0_u8; DATA_PROTECTION_KEY_BYTES + ITEM_ID_BYTES]);
-    material[..DATA_PROTECTION_KEY_BYTES].copy_from_slice(value_root_key);
-    material[DATA_PROTECTION_KEY_BYTES..].copy_from_slice(item_id.as_bytes());
+) -> Zeroizing<Vec<u8>> {
+    let id = item_id.as_bytes();
+    let mut material = Zeroizing::new(Vec::with_capacity(
+        DATA_PROTECTION_KEY_BYTES + 1 + id.len(),
+    ));
+    material.extend_from_slice(value_root_key);
+    material.push(id.len() as u8);
+    material.extend_from_slice(id);
     material
 }
