@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Generates the transport-only Rust wire contract from `protocol/model`. */
+/** Generates the server-visible Rust wire contract from `protocol/model`. */
 
 import {
   mkdirSync,
@@ -13,26 +13,69 @@ import { basename, dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 import {
-  extract_wire_contract,
+  extract_wire_contract as extract_generic_wire_contract,
+  render_rust_operation_contract,
   render_rust_wire,
+  render_rust_server_contract,
   smithy_wire_ast,
   type Wire_Contract,
 } from "./wire"
 import {
+  render_rust_compatibility_contract,
+  render_rust_semantic_constants,
+} from "./compatibility_v1_renderer"
+import { extract_compatibility_wire_contract } from "./compatibility_v1"
+import {
   render_protocol_spec_contract_snapshot,
+  render_protocol_spec_operation_table,
   protocol_spec_contract_snapshot_issues,
+  protocol_spec_operation_table_issues,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
+  PROTOCOL_SPEC_OPERATION_TABLE_END,
+  PROTOCOL_SPEC_OPERATION_TABLE_START,
 } from "./wire_spec"
 
-export { extract_wire_contract, render_rust_wire, smithy_wire_ast } from "./wire"
-export type { Wire_Contract, Wire_Entry, Wire_V1_Contract } from "./wire"
+export {
+  render_rust_operation_contract,
+  render_rust_server_contract,
+  render_rust_wire,
+} from "./wire"
+export {
+  render_rust_compatibility_contract,
+  render_rust_semantic_constants,
+} from "./compatibility_v1_renderer"
+export { extract_generic_wire_contract }
 export {
   render_protocol_spec_contract_snapshot,
+  render_protocol_spec_operation_table,
   protocol_spec_contract_snapshot_issues,
+  protocol_spec_operation_table_issues,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
   PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
+  PROTOCOL_SPEC_OPERATION_TABLE_END,
+  PROTOCOL_SPEC_OPERATION_TABLE_START,
 } from "./wire_spec"
+export { smithy_wire_ast } from "./wire"
+export type {
+  Wire_Contract,
+  Wire_Entry,
+  Wire_V1_Contract,
+} from "./wire"
+
+/**
+ * Extracts the checked-in protocol contract with its explicit v1 adapter.
+ *
+ * The public generation entry point remains compatible with existing callers,
+ * while the generic extractor is available from `wire.ts` for future
+ * protocols that provide a different adapter (or no compatibility projection).
+ */
+export function extract_wire_contract(
+  ast: unknown,
+  strict_operations = false,
+): Wire_Contract {
+  return extract_compatibility_wire_contract(ast, strict_operations)
+}
 
 const PROTOCOL_DIRECTORY = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_ROOT = dirname(PROTOCOL_DIRECTORY)
@@ -41,9 +84,15 @@ const GENERATED_OUTPUT_ROOT = resolve(
 )
 const GENERATED_WIRE_OUTPUT = process.env.OPENKACHE_RUST_WIRE_OUTPUT ??
   join(GENERATED_OUTPUT_ROOT, "protocol/generated_local/wire_values.rs")
+const GENERATED_OPERATION_OUTPUT = process.env.OPENKACHE_RUST_OPERATION_OUTPUT ??
+  join(GENERATED_OUTPUT_ROOT, "protocol/generated_local/operation_contract.rs")
+const GENERATED_COMPATIBILITY_OUTPUT = process.env.OPENKACHE_RUST_COMPATIBILITY_OUTPUT ??
+  join(GENERATED_OUTPUT_ROOT, "protocol/generated_local/operation_compatibility.rs")
+const GENERATED_SERVER_OUTPUT = process.env.OPENKACHE_RUST_SERVER_OUTPUT ??
+  join(GENERATED_OUTPUT_ROOT, "server/generated_local/server_contract.rs")
 const SPEC_OUTPUT = join(PROTOCOL_DIRECTORY, "SPEC.md")
 
-/** Returns generated outputs that are missing or differ from their source. */
+/** Returns generated outputs that are missing or differ from the wire contract. */
 export function generated_output_issues(
   outputs: Readonly<Record<string, string>>,
 ): readonly string[] {
@@ -73,6 +122,7 @@ function write_output(output_path: string, content: string, check_only: boolean)
     }
     return
   }
+
   const output_directory = dirname(output_path)
   mkdirSync(output_directory, { recursive: true })
   const temporary_directory = mkdtempSync(join(output_directory, "generate.local."))
@@ -103,8 +153,14 @@ function update_protocol_spec(contract: Wire_Contract): void {
       `\n${rendered}\n` +
       source.slice(end)
   }
-  const updated = replace_section(
+  const with_table = replace_section(
     existing,
+    PROTOCOL_SPEC_OPERATION_TABLE_START,
+    PROTOCOL_SPEC_OPERATION_TABLE_END,
+    render_protocol_spec_operation_table(contract),
+  )
+  const updated = replace_section(
+    with_table,
     PROTOCOL_SPEC_CONTRACT_SNAPSHOT_START,
     PROTOCOL_SPEC_CONTRACT_SNAPSHOT_END,
     render_protocol_spec_contract_snapshot(contract),
@@ -112,40 +168,68 @@ function update_protocol_spec(contract: Wire_Contract): void {
   if (updated !== existing) writeFileSync(SPEC_OUTPUT, updated)
 }
 
-/** Runs the transport-contract generator. */
+/** Runs the protocol wire-contract generator.
+ *
+ * @returns Process exit code.
+ */
 export function main(): number {
   try {
     const target = process.env.OPENKACHE_GENERATION_TARGET
-    if (target !== undefined && target !== "rust-wire") {
+    if (target !== undefined && target !== "rust-wire" && target !== "rust-server") {
       throw new Error(
-        "the protocol generator emits only the transport Rust wire contract; " +
-          "request/response codecs and registrations are handwritten in their API modules",
+        "the protocol entry point emits only Rust wire or server contracts; " +
+          "run `../clients/generate.ts` for client language or ABI outputs",
       )
     }
-    const contract = extract_wire_contract(smithy_wire_ast())
-    const output = render_rust_wire(contract)
+    const contract: Wire_Contract = extract_compatibility_wire_contract(smithy_wire_ast(), true)
     const check_only = process.env.OPENKACHE_GENERATION_CHECK === "1"
+    // Build-script generation must be hermetic: Bazel and Cargo provide only
+    // the declared model/generator inputs, not the checked-in documentation.
+    // Refresh the human-readable SPEC only from an explicit repository-level
+    // generation command.
     if (process.env.OPENKACHE_GENERATION_UPDATE_SPEC === "1") {
       update_protocol_spec(contract)
     }
     if (check_only) {
-      const spec = readFileSync(SPEC_OUTPUT, "utf8")
-      const issues = protocol_spec_contract_snapshot_issues(spec, contract)
-      if (issues.length > 0) {
+      const spec_issues = protocol_spec_operation_table_issues(
+        readFileSync(SPEC_OUTPUT, "utf8"),
+        contract,
+      )
+      const snapshot_issues = protocol_spec_contract_snapshot_issues(
+        readFileSync(SPEC_OUTPUT, "utf8"),
+        contract,
+      )
+      if (spec_issues.length > 0 || snapshot_issues.length > 0) {
         throw new Error(
           "generated protocol documentation is stale:\n" +
-            issues.map((issue) => `  - ${issue}`).join("\n") +
-            "\nUpdate the marked transport contract block in protocol/SPEC.md.",
+            [...spec_issues, ...snapshot_issues]
+              .map((path) => `  - ${path}`)
+              .join("\n") +
+            "\nUpdate the marked generated contract blocks in protocol/SPEC.md.",
         )
       }
     }
-    write_output(GENERATED_WIRE_OUTPUT, output, check_only)
+    if (target === "rust-server") {
+      write_output(GENERATED_SERVER_OUTPUT, render_rust_server_contract(contract), check_only)
+    } else {
+      write_output(GENERATED_WIRE_OUTPUT, render_rust_wire(contract), check_only)
+      write_output(
+        GENERATED_OPERATION_OUTPUT,
+        render_rust_operation_contract(contract, "crate::codec::CodecKind"),
+        check_only,
+      )
+      write_output(
+        GENERATED_COMPATIBILITY_OUTPUT,
+        render_rust_compatibility_contract(contract),
+        check_only,
+      )
+    }
     return 0
   } catch (error) {
     console.error(
       `GENERATION_FAILED: ${error instanceof Error ? error.message : String(error)}\n` +
-        "  Why: the transport contract must be complete and valid.\n" +
-        "  Fix: validate the Smithy model and rerun `./generate.ts`.",
+        "  Why: server framing values must come from a complete, valid wire Smithy contract.\n" +
+        "  Fix: Run `smithy validate model` from the protocol directory, correct the model or generator error, then rerun `./generate.ts`.",
     )
     return 1
   }
