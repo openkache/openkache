@@ -5,8 +5,7 @@
 // imported wholesale into request construction.
 pub use crate::contract::{WireRequestLayout, WireRequestStep, wire_request_layout};
 use openkache_protocol::{
-    MAX_ITEM_ID_BYTES, MAX_VALUE_BYTES, MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES,
-    REQUEST_FIXED_BYTES, RequestFrameHeader,
+    MAX_VALUE_BYTES, MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES, REQUEST_FIXED_BYTES, RequestFrameHeader,
 };
 pub use openkache_protocol::{ItemId, Opcode, Response, Status};
 
@@ -946,8 +945,10 @@ pub enum ProtocolError {
     NonCanonicalVaruint { context: &'static str },
     #[error("{context} exceeds the supported 64-bit vu128 range")]
     VaruintOverflow { context: &'static str },
+    #[error("item ID has {actual} bytes; maximum is {expected}")]
+    InvalidItemIdLength { expected: usize, actual: usize },
     #[error("{opcode:?} requires a {expected}-byte item ID, received {actual} item ID bytes")]
-    InvalidItemIdLength {
+    InvalidRequestItemIdLength {
         opcode: Opcode,
         expected: usize,
         actual: usize,
@@ -1009,6 +1010,9 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::VaruintOverflow { context } => {
                 Self::VaruintOverflow { context }
+            }
+            openkache_protocol::ProtocolError::InvalidItemIdLength { expected, actual } => {
+                Self::InvalidItemIdLength { expected, actual }
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }

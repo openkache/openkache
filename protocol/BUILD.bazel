@@ -59,6 +59,7 @@ rust_library(
     srcs = [
         "src/codec.rs",
         "src/compact.rs",
+        "src/compat_v1.rs",
         "src/lib.rs",
         "src/layout.rs",
         "src/optional_values.rs",

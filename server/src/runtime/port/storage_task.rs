@@ -182,11 +182,14 @@ impl StorageTask {
         self
     }
 
-    pub(super) const fn metadata(&self) -> StorageTaskMetadata {
+    pub(crate) const fn metadata(&self) -> StorageTaskMetadata {
         self.metadata
     }
 
-    pub(super) fn execute(self, context: &mut dyn StorageContext) -> StorageTaskFuture<'_> {
+    pub(crate) fn execute(
+        self,
+        context: &mut dyn StorageContext,
+    ) -> StorageTaskFuture<'_> {
         (self.run)(context)
     }
 }

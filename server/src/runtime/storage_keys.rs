@@ -9,12 +9,26 @@ use aes::{
     cipher::{Block, BlockCipherEncrypt, KeyInit},
 };
 use openkache_protocol::NAMESPACE_ID_BYTES;
+use sha2::{Digest, Sha256};
 
 use crate::StorageKey;
 use crate::protocol::ItemId;
 
+const STORAGE_KEY_DERIVATION_DOMAIN: &[u8] = b"openkache/item-id-storage-key/v1\0";
+
 pub(crate) fn derive_storage_key(server_cipher: &Aes256, item_id: ItemId) -> StorageKey {
-    let mut bytes = item_id.into_bytes();
+    // Hash the length-delimited identity before the fixed-width AES mixing
+    // stage. Without the explicit length, a short ID and the same bytes
+    // followed by zero octets would alias after zero-padding.
+    let mut material =
+        [0u8; STORAGE_KEY_DERIVATION_DOMAIN.len() + 1 + openkache_protocol::MAX_ITEM_ID_BYTES];
+    let domain_end = STORAGE_KEY_DERIVATION_DOMAIN.len();
+    material[..domain_end].copy_from_slice(STORAGE_KEY_DERIVATION_DOMAIN);
+    material[domain_end] = item_id.len() as u8;
+    material[domain_end + 1..domain_end + 1 + item_id.len()].copy_from_slice(item_id.as_bytes());
+    let digest = Sha256::digest(material);
+    let mut bytes = [0u8; crate::types::STORAGE_KEY_BYTES];
+    bytes.copy_from_slice(&digest);
 
     // SAFETY: `Block<Aes256>` is layout-identical to `[u8; 16]`, so two blocks
     // exactly cover the 32-byte digest buffer while preserving its alignment

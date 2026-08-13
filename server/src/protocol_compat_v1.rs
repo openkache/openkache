@@ -194,7 +194,7 @@ pub(super) fn decode_header(
                     return Ok(None);
                 };
                 if usize::from(length) > openkache_protocol::MAX_ITEM_ID_BYTES {
-                    return Err(ProtocolError::InvalidItemIdLength {
+                    return Err(ProtocolError::InvalidRequestItemIdLength {
                         opcode,
                         expected: openkache_protocol::MAX_ITEM_ID_BYTES,
                         actual: usize::from(length),
@@ -416,21 +416,60 @@ pub(super) fn decode_request_metadata(
             "generic operation entered the compatibility metadata adapter",
         ));
     };
-    let item_ids = header
-        .item_id_start()
-        .map(|start| {
-            (0..header.item_id_count())
-                .map(|index| {
-                    let item_start = start + index * openkache_protocol::ITEM_ID_BYTES;
-                    ItemId::new(
-                        frame[item_start..item_start + openkache_protocol::ITEM_ID_BYTES]
-                            .try_into()
-                            .expect("validated item ID range"),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let item_ids = if let Some(start) = header.item_id_start() {
+        let lengths = header.item_id_lengths();
+        let mut cursor = start;
+        let mut item_ids = Vec::with_capacity(header.item_id_count());
+        for index in 0..header.item_id_count() {
+            let length = lengths
+                .get(index)
+                .copied()
+                .map(usize::from)
+                .ok_or(ProtocolError::InvalidFieldSequence(
+                    "item ID metadata count exceeds the encoded length slots",
+                ))?;
+            let (item_start, item_end) = if route == CompactV1RequestRoute::Item {
+                let length = frame.get(cursor).copied().map(usize::from).ok_or(
+                    ProtocolError::FrameTooShort {
+                        expected: cursor + 1,
+                        actual: frame.len(),
+                    },
+                )?;
+                if length != usize::from(lengths[index]) {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "item ID metadata length disagrees with its frame prefix",
+                    ));
+                }
+                let item_start = cursor + 1;
+                let item_end = item_start
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                (item_start, item_end)
+            } else {
+                let item_end = cursor
+                    .checked_add(length)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                (cursor, item_end)
+            };
+            let item_bytes = frame
+                .get(item_start..item_end)
+                .ok_or(ProtocolError::FrameTooShort {
+                    expected: item_end,
+                    actual: frame.len(),
+                })?;
+            item_ids.push(ItemId::from_slice(item_bytes).map_err(|_| {
+                ProtocolError::InvalidRequestItemIdLength {
+                    opcode: header.opcode(),
+                    expected: openkache_protocol::MAX_ITEM_ID_BYTES,
+                    actual: length,
+                }
+            })?);
+            cursor = item_end;
+        }
+        item_ids
+    } else {
+        Vec::new()
+    };
     let namespace_name = if route == CompactV1RequestRoute::NamespaceOpen {
         let name_start = openkache_protocol::OPCODE_BYTES
             + OPEN_FLAGS_BYTES
@@ -535,20 +574,21 @@ pub(super) fn decode_set_header(
         return Ok(None);
     };
     if usize::from(item_id_length) > openkache_protocol::MAX_ITEM_ID_BYTES {
-        return Err(ProtocolError::InvalidItemIdLength {
+        return Err(ProtocolError::InvalidRequestItemIdLength {
             opcode: Opcode::Set,
             expected: openkache_protocol::MAX_ITEM_ID_BYTES,
             actual: usize::from(item_id_length),
         });
     }
-    let item_id_start = item_id_length_offset + 1;
-    let item_id_end = item_id_start
-        .checked_add(usize::from(item_id_length))
-        .ok_or(ProtocolError::FrameLengthOverflow)?;
-    if prefix.len() < item_id_end {
+    let mut cursor = item_id_length_offset + 1;
+    let Some((value_len, value_len_bytes)) =
+        super::decode_varuint(&prefix[cursor..], "SET value length")?
+    else {
         return Ok(None);
-    }
-    let mut cursor = item_id_end;
+    };
+    let value_len = usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+    super::validate_value_length(value_len)?;
+    cursor += value_len_bytes;
     let ttl_ms = if has_ttl {
         let Some((ttl, length)) = super::decode_varuint(&prefix[cursor..], "SET TTL")? else {
             return Ok(None);
@@ -561,18 +601,18 @@ pub(super) fn decode_set_header(
     } else {
         None
     };
-    let Some((value_len, value_len_bytes)) =
-        super::decode_varuint(&prefix[cursor..], "SET value length")?
-    else {
+    let item_id_start = cursor;
+    let item_id_end = item_id_start
+        .checked_add(usize::from(item_id_length))
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
+    if prefix.len() < item_id_end {
         return Ok(None);
-    };
-    let value_len = usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-    super::validate_value_length(value_len)?;
+    }
     let set_options = SetOptions::decode_set_options(flags, ttl_ms)?;
     Ok(Some(RequestHeader::compatibility(
         adapter,
         Opcode::Set,
-        cursor + value_len_bytes,
+        item_id_end,
         value_len,
         Some(namespace_id),
         Some(item_id_start),
@@ -799,7 +839,7 @@ pub(super) fn validate_request(request: &super::Request) -> Result<()> {
         CompactV1RequestRoute::Set => {
             validate_namespace_id(request.namespace_id)?;
             if request.item_ids.len() != 1 {
-                return Err(ProtocolError::InvalidItemIdLength {
+                return Err(ProtocolError::InvalidRequestItemIdLength {
                     opcode: request.opcode,
                     expected: openkache_protocol::ITEM_ID_BYTES,
                     actual: 0,

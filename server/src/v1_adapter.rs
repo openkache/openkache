@@ -69,14 +69,10 @@ impl OperationInputView {
         )
     }
 
-    /// Decodes a fixed-width item identifier at a generated field index.
+    /// Decodes a variable-width opaque item identifier at a generated field index.
     pub(super) fn item_id_at_index(&self, index: usize) -> Option<ItemId> {
-        match self.field_at_index(index) {
-            Some(value) if value.len() == openkache_protocol::ITEM_ID_BYTES => Some(ItemId::new(
-                value.try_into().expect("validated item ID width"),
-            )),
-            _ => None,
-        }
+        self.field_at_index(index)
+            .and_then(|value| ItemId::from_slice(value).ok())
     }
 
     /// Decodes a compatibility-owned unsigned integer field.

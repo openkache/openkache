@@ -25,13 +25,14 @@ pub(crate) mod storage_backend;
 mod storage_keys;
 mod worker;
 mod worker_control;
-pub(super) use adapters::draft_v1_keyed as keyed_compatibility;
+pub(in crate::runtime) use adapters::draft_v1_keyed as keyed_compatibility;
 pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_context, storage_port, storage_task};
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{derive_scoped_storage_key, derive_storage_key};
 pub(crate) use storage_port::*;
 pub(crate) use storage_task::*;
+pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
 #[allow(unused_imports)]
 pub(crate) use worker::*;
 

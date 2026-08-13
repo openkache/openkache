@@ -17,7 +17,7 @@ use super::storage_task::StorageTaskMetadata;
 /// contract. The composition layer supplies the concrete cache adapter,
 /// including any protocol-policy conversion required by the active backend.
 #[allow(dead_code)]
-pub(super) trait StorageBackend {
+pub(in crate::runtime) trait StorageBackend {
     fn get<'a>(
         &'a mut self,
         storage_address: StorageAddress,
@@ -49,14 +49,14 @@ pub(super) trait StorageBackend {
 /// This layer owns task scheduling policy and batch/CAS validation. Concrete
 /// cache objects and wire policy types stay behind [`StorageBackend`].
 #[allow(dead_code)]
-pub(super) struct StorageWorkerContext<'a> {
+pub(in crate::runtime) struct StorageWorkerContext<'a> {
     backend: &'a mut dyn StorageBackend,
     metadata: StorageTaskMetadata,
 }
 
 #[allow(dead_code)]
 impl<'a> StorageWorkerContext<'a> {
-    pub(super) const fn new(
+    pub(in crate::runtime) const fn new(
         backend: &'a mut dyn StorageBackend,
         metadata: StorageTaskMetadata,
     ) -> Self {
