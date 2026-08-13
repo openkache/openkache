@@ -316,20 +316,15 @@ List<int> _smithyEncodeLengthDelimited(List<int> value) {
   if (value.length > ${max_value_bytes}) {
     throw const OpenKacheClientException('container entry exceeds the maximum value size');
   }
-  final length = ByteData(4)..setUint32(0, value.length, Endian.big);
-  return <int>[...length.buffer.asUint8List(), ...value];
+  return <int>[..._smithyEncodeVarUInt(value.length), ...value];
 }
 
 (List<int>, int) _smithyReadLengthDelimited(List<int> payload, int offset, String operation) {
-  if (offset + 4 > payload.length) {
-    throw OpenKacheClientException('\$operation container entry length is truncated');
-  }
-  final length = ByteData.sublistView(Uint8List.fromList(payload), offset, offset + 4)
-      .getUint32(0, Endian.big);
-  if (length == 0xffffffff || length > ${max_value_bytes} || offset + 4 + length > payload.length) {
+  final (length, valueStart) = _smithyDecodeVarUInt(payload, offset, operation);
+  if (length > ${max_value_bytes} || valueStart + length > payload.length) {
     throw OpenKacheClientException('\$operation container entry is malformed');
   }
-  return (payload.sublist(offset + 4, offset + 4 + length), offset + 4 + length);
+  return (payload.sublist(valueStart, valueStart + length), valueStart + length);
 }
 
 List<int> _smithyJoinContainer(Iterable<List<int>> chunks) {
@@ -383,7 +378,7 @@ List<int> _smithyEncodeUnion(List<int> payload, String operation) =>
     _smithyDecodeUnion(payload, operation);
 
 List<int> _smithyDecodeUnion(List<int> payload, String operation) {
-  if (payload.length < 5) throw OpenKacheClientException('\$operation union payload is truncated');
+  if (payload.length < 2) throw OpenKacheClientException('\$operation union payload is truncated');
   final (_, end) = _smithyReadLengthDelimited(payload, 1, operation);
   if (end != payload.length) throw OpenKacheClientException('\$operation union payload has trailing bytes');
   return payload;

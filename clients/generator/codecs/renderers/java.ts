@@ -302,10 +302,11 @@ export function render_java_container_helpers(max_value_bytes: number): string {
         if (value.length > ${max_value_bytes}) {
             throw new OpenKacheClientException("container entry exceeds the maximum value size");
         }
-        ByteBuffer buffer = ByteBuffer.allocate(Math.addExact(Integer.BYTES, value.length))
-            .order(ByteOrder.BIG_ENDIAN);
-        buffer.putInt(value.length).put(value);
-        return buffer.array();
+        byte[] encodedLength = smithyEncodeVarUInt(value.length);
+        byte[] result = new byte[Math.addExact(encodedLength.length, value.length)];
+        System.arraycopy(encodedLength, 0, result, 0, encodedLength.length);
+        System.arraycopy(value, 0, result, encodedLength.length, value.length);
+        return result;
     }
 
     private static byte[] smithyReadLengthDelimited(
@@ -313,18 +314,14 @@ export function render_java_container_helpers(max_value_bytes: number): string {
         int[] cursor,
         String operation
     ) {
-        int start = cursor[0];
-        if (start > payload.length - Integer.BYTES) {
-            throw new OpenKacheClientException(operation + " container entry length is truncated");
-        }
-        int length = ByteBuffer.wrap(payload, start, Integer.BYTES)
-            .order(ByteOrder.BIG_ENDIAN).getInt();
-        if (length < 0 || length == 0xffff_ffff || length > ${max_value_bytes}
-            || length > payload.length - start - Integer.BYTES) {
+        long decodedLength = smithyDecodeVarUInt(payload, cursor, operation);
+        if (decodedLength > Integer.MAX_VALUE || decodedLength > ${max_value_bytes}
+            || decodedLength > payload.length - cursor[0]) {
             throw new OpenKacheClientException(operation + " container entry is malformed");
         }
-        cursor[0] = start + Integer.BYTES + length;
-        return java.util.Arrays.copyOfRange(payload, start + Integer.BYTES, cursor[0]);
+        int valueStart = cursor[0];
+        cursor[0] = Math.addExact(valueStart, (int) decodedLength);
+        return java.util.Arrays.copyOfRange(payload, valueStart, cursor[0]);
     }
 
     private static byte[] smithyJoinContainer(java.util.List<byte[]> chunks) {
@@ -389,7 +386,7 @@ export function render_java_container_helpers(max_value_bytes: number): string {
     }
 
     private static byte[] smithyDecodeUnion(byte[] payload, String operation) {
-        if (payload.length < 5) throw new OpenKacheClientException(operation + " union payload is truncated");
+        if (payload.length < 2) throw new OpenKacheClientException(operation + " union payload is truncated");
         int[] cursor = { 1 };
         smithyReadLengthDelimited(payload, cursor, operation);
         if (cursor[0] != payload.length) throw new OpenKacheClientException(operation + " union payload has trailing bytes");

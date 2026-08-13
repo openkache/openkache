@@ -369,21 +369,22 @@ func smithyEncodeLengthDelimited(value []byte) ([]byte, error) {
 	if len(value) > ${max_value_bytes} {
 		return nil, validationError("container", "entry exceeds the maximum value size")
 	}
-	result := make([]byte, 4+len(value))
-	binary.BigEndian.PutUint32(result, uint32(len(value)))
-	copy(result[4:], value)
+	encodedLength := smithyEncodeVarUInt(uint64(len(value)))
+	result := make([]byte, len(encodedLength)+len(value))
+	copy(result, encodedLength)
+	copy(result[len(encodedLength):], value)
 	return result, nil
 }
 
 func smithyReadLengthDelimited(payload []byte, offset *int, operation string) ([]byte, error) {
-	if *offset > len(payload)-4 {
-		return nil, validationError(operation, "container entry length is truncated")
+	length, err := smithyDecodeVarUInt(payload, offset, operation)
+	if err != nil {
+		return nil, err
 	}
-	length := binary.BigEndian.Uint32(payload[*offset : *offset+4])
-	if length == 0xffffffff || length > ${max_value_bytes} || uint64(*offset)+4+uint64(length) > uint64(len(payload)) {
+	if length > ${max_value_bytes} || length > uint64(len(payload)-*offset) {
 		return nil, validationError(operation, "container entry is malformed")
 	}
-	start := *offset + 4
+	start := *offset
 	*offset = start + int(length)
 	return append([]byte(nil), payload[start:*offset]...), nil
 }
@@ -491,7 +492,7 @@ func smithyEncodeUnion(payload []byte) ([]byte, error) {
 }
 
 func smithyDecodeUnion(payload []byte) ([]byte, error) {
-	if len(payload) < 5 {
+	if len(payload) < 2 {
 		return nil, validationError("union", "payload is truncated")
 	}
 	offset := 1

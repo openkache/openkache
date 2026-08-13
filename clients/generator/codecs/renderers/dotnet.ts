@@ -320,20 +320,20 @@ export function render_csharp_container_helpers(max_value_bytes: number): string
     private static byte[] EncodeLengthDelimited(byte[] value)
     {
         if (value.Length > ${max_value_bytes}) throw new OpenKacheException("PROTOCOL_ERROR", "container entry exceeds the maximum value size.");
-        var result = new byte[checked(4 + value.Length)];
-        BinaryPrimitives.WriteUInt32BigEndian(result, (uint)value.Length);
-        value.CopyTo(result, 4);
+        var encodedLength = EncodeVarUInt((ulong)value.Length);
+        var result = new byte[checked(encodedLength.Length + value.Length)];
+        encodedLength.CopyTo(result, 0);
+        value.CopyTo(result, encodedLength.Length);
         return result;
     }
 
     private static byte[] ReadLengthDelimited(byte[] payload, ref int offset, string operation)
     {
-        if (offset > payload.Length - 4) throw new OpenKacheException("PROTOCOL_ERROR", $"{operation} container entry length is truncated.");
-        var length = BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(offset, 4));
-        if (length == 0xffff_ffff || length > ${max_value_bytes} || length > payload.Length - offset - 4) {
+        var length = DecodeVarUInt(payload, ref offset, operation);
+        if (length > ${max_value_bytes} || length > (ulong)(payload.Length - offset)) {
             throw new OpenKacheException("PROTOCOL_ERROR", $"{operation} container entry is malformed.");
         }
-        var start = offset + 4;
+        var start = offset;
         offset = checked(start + (int)length);
         return payload.AsSpan(start, (int)length).ToArray();
     }
@@ -383,7 +383,7 @@ export function render_csharp_container_helpers(max_value_bytes: number): string
 
     private static byte[] DecodeUnion(byte[] payload, string operation)
     {
-        if (payload.Length < 5) throw new OpenKacheException("PROTOCOL_ERROR", $"{operation} union payload is truncated.");
+        if (payload.Length < 2) throw new OpenKacheException("PROTOCOL_ERROR", $"{operation} union payload is truncated.");
         var offset = 1;
         ReadLengthDelimited(payload, ref offset, operation);
         if (offset != payload.Length) throw new OpenKacheException("PROTOCOL_ERROR", $"{operation} union payload has trailing bytes.");

@@ -285,22 +285,19 @@ private func smithyEncodeLengthDelimited(_ value: Data) throws -> Data {
   guard value.count <= ${max_value_bytes} else {
     throw OpenKacheError("container entry exceeds the maximum value size")
   }
-  var output = Data(UInt32(value.count).bigEndianBytes)
+  var output = smithyEncodeVarUInt(UInt64(value.count))
   output.append(value)
   return output
 }
 
 private func smithyReadLengthDelimited(_ payload: Data, _ offset: inout Int, operation: String) throws -> Data {
   let bytes = [UInt8](payload)
-  guard offset + 4 <= bytes.count else { throw OpenKacheError("\(operation) container entry length is truncated") }
-  let length = UInt32(bytes[offset]) << 24 | UInt32(bytes[offset + 1]) << 16 |
-    UInt32(bytes[offset + 2]) << 8 | UInt32(bytes[offset + 3])
-  guard length != 0xffff_ffff, length <= ${max_value_bytes},
-    offset + 4 + Int(length) <= bytes.count else {
+  let length = try smithyDecodeVarUInt(payload, &offset, operation: operation)
+  guard length <= ${max_value_bytes}, length <= bytes.count - offset else {
     throw OpenKacheError("\(operation) container entry is malformed")
   }
-  let start = offset + 4
-  offset = start + Int(length)
+  let start = offset
+  offset = start + length
   return Data(bytes[start..<offset])
 }
 
@@ -349,7 +346,7 @@ private func smithyEncodeUnion(_ payload: Data, operation: String) throws -> Dat
 }
 
 private func smithyDecodeUnion(_ payload: Data, operation: String) throws -> Data {
-  guard payload.count >= 5 else { throw OpenKacheError("\(operation) union payload is truncated") }
+  guard payload.count >= 2 else { throw OpenKacheError("\(operation) union payload is truncated") }
   var offset = 1
   _ = try smithyReadLengthDelimited(payload, &offset, operation: operation)
   guard offset == payload.count else { throw OpenKacheError("\(operation) union payload has trailing bytes") }

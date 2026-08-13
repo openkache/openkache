@@ -331,11 +331,10 @@ function smithy_encode_length_delimited(value: Uint8Array): Uint8Array {
   if (value.byteLength > ${max_value_bytes}) {
     throw new Error("container entry exceeds the maximum value size");
   }
-  const length = new Uint8Array(4);
-  new DataView(length.buffer).setUint32(0, value.byteLength, false);
-  const result = new Uint8Array(4 + value.byteLength);
-  result.set(length);
-  result.set(value, 4);
+  const encoded_length = smithy_encode_varuint(value.byteLength);
+  const result = new Uint8Array(encoded_length.byteLength + value.byteLength);
+  result.set(encoded_length);
+  result.set(value, encoded_length.byteLength);
   return result;
 }
 
@@ -344,14 +343,11 @@ function smithy_read_length_delimited(
   offset: number,
   operation: number,
 ): readonly [Uint8Array, number] {
-  if (offset + 4 > payload.byteLength) {
-    throw new Error(\`operation \${operation} container entry length is truncated\`);
-  }
-  const length = new DataView(payload.buffer, payload.byteOffset + offset, 4).getUint32(0, false);
-  if (length === 0xffff_ffff || length > ${max_value_bytes} || offset + 4 + length > payload.byteLength) {
+  const [length, value_start] = smithy_decode_varuint(payload, offset, operation);
+  if (length > ${max_value_bytes} || value_start + length > payload.byteLength) {
     throw new Error(\`operation \${operation} container entry is malformed\`);
   }
-  return [payload.slice(offset + 4, offset + 4 + length), offset + 4 + length];
+  return [payload.slice(value_start, value_start + length), value_start + length];
 }
 
 function smithy_encode_list(values: readonly Uint8Array[]): Uint8Array {
@@ -424,7 +420,7 @@ function smithy_encode_union(payload: Uint8Array, operation: number): Uint8Array
 }
 
 function smithy_decode_union(payload: Uint8Array, operation: number): Uint8Array {
-  if (payload.byteLength < 5) {
+  if (payload.byteLength < 2) {
     throw new Error(\`operation \${operation} union payload is truncated\`);
   }
   const [, end] = smithy_read_length_delimited(payload, 1, operation);

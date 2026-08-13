@@ -280,19 +280,17 @@ export function render_kotlin_container_helpers(max_value_bytes: number): string
 
     private fun smithyEncodeLengthDelimited(value: ByteArray): ByteArray {
         require(value.size <= ${max_value_bytes}) { "container entry exceeds the maximum value size" }
-        return ByteBuffer.allocate(4 + value.size).order(ByteOrder.BIG_ENDIAN)
-            .putInt(value.size).put(value).array()
+        return smithyEncodeVarUInt(value.size.toLong()) + value
     }
 
     private fun smithyReadLengthDelimited(payload: ByteArray, cursor: IntArray, operation: String): ByteArray {
-        val start = cursor[0]
-        require(start <= payload.size - 4) { "\$operation container entry length is truncated" }
-        val length = ByteBuffer.wrap(payload, start, 4).order(ByteOrder.BIG_ENDIAN).int
-        require(length >= 0 && length <= ${max_value_bytes} && length <= payload.size - start - 4) {
+        val length = smithyDecodeVarUInt(payload, cursor, operation)
+        require(length <= Int.MAX_VALUE && length <= ${max_value_bytes} && length <= (payload.size - cursor[0]).toLong()) {
             "\$operation container entry is malformed"
         }
-        cursor[0] = start + 4 + length
-        return payload.copyOfRange(start + 4, cursor[0])
+        val valueStart = cursor[0]
+        cursor[0] = valueStart + length.toInt()
+        return payload.copyOfRange(valueStart, cursor[0])
     }
 
     private fun smithyJoinContainer(chunks: List<ByteArray>): ByteArray {
@@ -347,7 +345,7 @@ export function render_kotlin_container_helpers(max_value_bytes: number): string
         smithyDecodeUnion(payload, operation)
 
     private fun smithyDecodeUnion(payload: ByteArray, operation: String): ByteArray {
-        require(payload.size >= 5) { "\$operation union payload is truncated" }
+        require(payload.size >= 2) { "\$operation union payload is truncated" }
         val cursor = intArrayOf(1)
         smithyReadLengthDelimited(payload, cursor, operation)
         require(cursor[0] == payload.size) { "\$operation union payload has trailing bytes" }

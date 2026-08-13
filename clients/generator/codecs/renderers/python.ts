@@ -246,16 +246,14 @@ def _smithy_decode_varuint(payload: bytes, offset: int, operation: int) -> tuple
 def _smithy_encode_length_delimited(value: bytes) -> bytes:
     if len(value) > ${max_value_bytes}:
         raise ValueError("container entry exceeds the maximum value size")
-    return struct.pack(">I", len(value)) + value
+    return _smithy_encode_varuint(len(value)) + value
 
 
 def _smithy_read_length_delimited(payload: bytes, offset: int, operation: int) -> tuple[bytes, int]:
-    if offset + 4 > len(payload):
-        raise ValueError(f"operation {operation} container entry length is truncated")
-    length = struct.unpack(">I", payload[offset:offset + 4])[0]
-    if length == 0xFFFF_FFFF or length > ${max_value_bytes} or offset + 4 + length > len(payload):
+    length, value_start = _smithy_decode_varuint(payload, offset, operation)
+    if length > ${max_value_bytes} or value_start + length > len(payload):
         raise ValueError(f"operation {operation} container entry is malformed")
-    return payload[offset + 4:offset + 4 + length], offset + 4 + length
+    return payload[value_start:value_start + length], value_start + length
 
 
 def _smithy_encode_list(values: list[bytes]) -> bytes:
@@ -300,7 +298,7 @@ def _smithy_encode_union(payload: bytes, operation: int) -> bytes:
 
 
 def _smithy_decode_union(payload: bytes, operation: int) -> bytes:
-    if len(payload) < 5:
+    if len(payload) < 2:
         raise ValueError(f"operation {operation} union payload is truncated")
     _, end = _smithy_read_length_delimited(payload, 1, operation)
     if end != len(payload):
