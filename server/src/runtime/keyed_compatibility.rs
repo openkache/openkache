@@ -16,6 +16,7 @@ use crate::store::{
 use crate::types::StoredItemValue;
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
+use super::scheduler::{CollapseGroup, ScheduledTask};
 use super::storage_task::StorageTask;
 use super::worker::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
 
@@ -35,14 +36,6 @@ pub(super) enum KeyedResponse {
 pub(super) type VisibleState = KeyedVisibleState;
 pub(super) type PreparedJob = KeyedJob;
 pub(super) type CompletedJob = CompletedKeyedJob;
-
-/// Non-zero-sized identity token for one reducer's compatibility group.
-///
-/// The scheduler compares the address of this token, so it must not be a
-/// zero-sized type: distinct `&'static ()` values are allowed to share an
-/// address and would make unrelated reducers appear compatible.
-#[derive(Debug, Eq, PartialEq)]
-pub(super) struct CollapseGroup(u8);
 
 /// One operation's static scheduler metadata and preparation boundary.
 ///
@@ -157,6 +150,16 @@ impl StorageCommand {
             Self::Custom { task, response } => Some((task, response)),
             Self::Get { .. } | Self::Set { .. } | Self::Delete { .. } => None,
         }
+    }
+}
+
+impl ScheduledTask for StorageCommand {
+    fn collapse_group(&self) -> &'static CollapseGroup {
+        self.descriptor().collapse_group
+    }
+
+    fn is_exclusive(&self) -> bool {
+        self.descriptor().exclusive
     }
 }
 

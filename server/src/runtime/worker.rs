@@ -10,6 +10,7 @@ use crate::channel::{AsyncReceiver, TryRecvError};
 use crate::observability::{ObservabilityState, Operation, StorageWorkerId};
 use crate::*;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use openkache_protocol::ItemId;
 
 use super::CoreTask;
 use super::completion::CompletionSender;
@@ -30,6 +31,48 @@ pub(super) async fn run_core_tasks(receiver: AsyncReceiver<CoreTask>) {
 }
 
 pub(super) type WorkerResponseSender = CompletionSender<Result<WorkerResponse>>;
+
+#[derive(Debug)]
+pub enum BenchmarkOperation {
+    Get(ItemId),
+    Set(ItemId, Vec<u8>),
+    Delete(ItemId),
+}
+
+impl BenchmarkOperation {
+    pub(crate) fn item_id(&self) -> ItemId {
+        match self {
+            Self::Get(item_id) | Self::Delete(item_id) | Self::Set(item_id, _) => *item_id,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct BenchmarkBatchStats {
+    pub operations: usize,
+    pub gets: usize,
+    pub hits: usize,
+    pub sets: usize,
+    pub creates: usize,
+    pub replaces: usize,
+    pub deletes: usize,
+    pub deleted: usize,
+    pub latency_ns: Vec<u64>,
+}
+
+impl BenchmarkBatchStats {
+    pub fn merge(&mut self, mut other: Self) {
+        self.operations += other.operations;
+        self.gets += other.gets;
+        self.hits += other.hits;
+        self.sets += other.sets;
+        self.creates += other.creates;
+        self.replaces += other.replaces;
+        self.deletes += other.deletes;
+        self.deleted += other.deleted;
+        self.latency_ns.append(&mut other.latency_ns);
+    }
+}
 
 pub(super) enum WorkerRequest {
     /// Keyed data-plane work routed through the per-key scheduler.
@@ -99,104 +142,6 @@ pub(super) enum BenchmarkResponseKind {
     Get,
     Set,
     Delete,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct SlotId {
-    index: u32,
-    generation: u32,
-}
-
-struct WaitingSlot<T> {
-    generation: u32,
-    value: Option<T>,
-    next: Option<SlotId>,
-}
-
-pub(super) struct WaitingSlab<T> {
-    slots: Vec<WaitingSlot<T>>,
-    free: Vec<u32>,
-    capacity: usize,
-}
-
-impl<T> WaitingSlab<T> {
-    pub(super) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            slots: Vec::with_capacity(capacity),
-            free: Vec::new(),
-            capacity,
-        }
-    }
-
-    pub(super) fn has_capacity(&self) -> bool {
-        self.slots.len() < self.capacity || !self.free.is_empty()
-    }
-
-    pub(super) fn insert(&mut self, value: T) -> Option<SlotId> {
-        let index = if let Some(index) = self.free.pop() {
-            index
-        } else {
-            if self.slots.len() == self.capacity {
-                return None;
-            }
-            let index = u32::try_from(self.slots.len()).ok()?;
-            self.slots.push(WaitingSlot {
-                generation: 0,
-                value: None,
-                next: None,
-            });
-            index
-        };
-        let slot = &mut self.slots[index as usize];
-        debug_assert!(slot.value.is_none());
-        slot.value = Some(value);
-        slot.next = None;
-        Some(SlotId {
-            index,
-            generation: slot.generation,
-        })
-    }
-
-    pub(super) fn link(&mut self, tail: SlotId, next: SlotId) {
-        let slot = self.slot_mut(tail);
-        debug_assert!(slot.next.is_none());
-        slot.next = Some(next);
-    }
-
-    pub(super) fn take(&mut self, id: SlotId) -> (T, Option<SlotId>) {
-        let slot = self.slot_mut(id);
-        let value = slot.value.take().expect("waiting slot contains a command");
-        let next = slot.next.take();
-        slot.generation = slot.generation.wrapping_add(1);
-        self.free.push(id.index);
-        (value, next)
-    }
-
-    fn get(&self, id: SlotId) -> &T {
-        let slot = self
-            .slots
-            .get(id.index as usize)
-            .expect("waiting SlotId index is valid");
-        assert_eq!(
-            slot.generation, id.generation,
-            "waiting SlotId generation is current"
-        );
-        slot.value
-            .as_ref()
-            .expect("waiting slot contains a command")
-    }
-
-    fn slot_mut(&mut self, id: SlotId) -> &mut WaitingSlot<T> {
-        let slot = self
-            .slots
-            .get_mut(id.index as usize)
-            .expect("waiting SlotId index is valid");
-        assert_eq!(
-            slot.generation, id.generation,
-            "waiting SlotId generation is current"
-        );
-        slot
-    }
 }
 
 pub(super) struct DeferredWorkerResponse {

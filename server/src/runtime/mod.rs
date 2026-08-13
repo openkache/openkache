@@ -17,10 +17,10 @@ use crate::protocol::{ItemId, SetOptions};
 use crate::types::StoredItemValue;
 use crate::*;
 
-mod benchmark;
 pub(crate) mod completion;
 mod keyed_compatibility;
 mod network_cache;
+mod scheduler;
 pub(crate) mod storage_backend;
 mod storage_context;
 mod storage_keys;
@@ -28,7 +28,6 @@ mod storage_port;
 mod storage_task;
 mod worker;
 mod worker_control;
-pub use benchmark::*;
 pub(crate) use network_cache::NetworkWorkerCache;
 #[allow(unused_imports)]
 pub(crate) use storage_keys::{derive_scoped_storage_key, derive_storage_key};
