@@ -105,7 +105,7 @@ impl OptionalValueCodec {
                 .and_then(|total| total.checked_add(value.map_or(0, <[u8]>::len)))
                 .ok_or(ProtocolError::FrameLengthOverflow)?;
         }
-        crate::validate_value_length(total)?;
+        crate::validate_payload_length(total)?;
         Ok(total)
     }
 
@@ -133,7 +133,7 @@ impl OptionalValueCodec {
                 "optional-value offset storage is too small",
             ));
         }
-        crate::validate_value_length(payload.len())?;
+        crate::validate_payload_length(payload.len())?;
         let minimum = value_count
             .checked_mul(self.length_bytes)
             .ok_or(ProtocolError::FrameLengthOverflow)?;
@@ -153,7 +153,7 @@ impl OptionalValueCodec {
                 offsets[index] = (usize::MAX, usize::MAX);
                 continue;
             };
-            crate::validate_value_length(length)?;
+            crate::validate_payload_length(length)?;
             let end = cursor
                 .checked_add(length)
                 .ok_or(ProtocolError::FrameLengthOverflow)?;
@@ -189,13 +189,13 @@ pub struct OptionalValuesEncoder {
 impl OptionalValuesEncoder {
     /// Creates an encoder with an API-selected codec.
     pub fn with_codec(codec: OptionalValueCodec, field_count: usize) -> Self {
+        let capacity = field_count
+            .checked_mul(codec.length_bytes())
+            .filter(|capacity| *capacity <= crate::MAX_PAYLOAD_BYTES)
+            .unwrap_or(0);
         Self {
             codec,
-            payload: Vec::with_capacity(
-                field_count
-                    .saturating_mul(codec.length_bytes())
-                    .min(crate::MAX_VALUE_BYTES),
-            ),
+            payload: Vec::with_capacity(capacity),
             expected_fields: field_count,
             written_fields: 0,
         }
@@ -215,7 +215,7 @@ impl OptionalValuesEncoder {
             .checked_add(self.codec.length_bytes())
             .and_then(|length| length.checked_add(value.map_or(0, <[u8]>::len)))
             .ok_or(ProtocolError::FrameLengthOverflow)?;
-        crate::validate_value_length(next_len)?;
+        crate::validate_payload_length(next_len)?;
         self.payload
             .extend_from_slice(&prefix[8 - self.codec.length_bytes()..]);
         if let Some(value) = value {
@@ -285,7 +285,7 @@ pub fn optional_values_encoded_len_from_lengths(
             .and_then(|total| total.checked_add(length.unwrap_or(0)))
             .ok_or(ProtocolError::FrameLengthOverflow)?;
     }
-    crate::validate_value_length(total)?;
+    crate::validate_payload_length(total)?;
     Ok(total)
 }
 
@@ -295,7 +295,8 @@ pub fn optional_values_max_encoded_len(
     value_count: usize,
     max_value_bytes: usize,
 ) -> Option<usize> {
-    value_count.checked_mul(codec.length_bytes().checked_add(max_value_bytes)?)
+    let total = value_count.checked_mul(codec.length_bytes().checked_add(max_value_bytes)?)?;
+    (total <= crate::MAX_PAYLOAD_BYTES).then_some(total)
 }
 
 /// Decodes an owned optional-value sequence.
@@ -304,6 +305,14 @@ pub fn decode_optional_values(
     payload: &[u8],
     value_count: usize,
 ) -> Result<Vec<Option<Vec<u8>>>> {
+    let minimum = value_count
+        .checked_mul(codec.length_bytes())
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
+    if minimum > payload.len() {
+        return Err(ProtocolError::InvalidOptionalValues(
+            "optional-value count exceeds the supplied payload",
+        ));
+    }
     let mut offsets = vec![(usize::MAX, usize::MAX); value_count];
     let view = codec.decode(payload, value_count, &mut offsets)?;
     Ok((0..view.len())

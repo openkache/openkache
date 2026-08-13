@@ -4,7 +4,7 @@
 //! byte steps; it does not know whether a fixed field is a namespace, item ID,
 //! policy flag, or any other domain value.
 
-use crate::{MAX_VALUE_BYTES, OPCODE_BYTES, Opcode, ProtocolError, Result};
+use crate::{MAX_PAYLOAD_BYTES, ProtocolError, REQUEST_CODE_BYTES, Result};
 
 /// One operation-neutral byte-consumption step in a request layout.
 ///
@@ -17,14 +17,14 @@ pub enum RequestFrameStep {
     Fixed { bytes: usize },
     /// Treat the next fixed-width bytes as the body without an outer length.
     ///
-    /// This is the generic fixed-body counterpart to [`ValueLength`].  It is
+    /// This is the generic fixed-body counterpart to [`PayloadLength`].  It is
     /// selected by an API for a dense required tuple, so a future API can use
     /// compact fixed framing without a protocol-specific parser branch. It
     /// MUST be the final step in a layout.
     FixedBody { bytes: usize },
     /// Consume one canonical `vu128` value and treat its value as the opaque
-    /// body length.
-    ValueLength,
+    /// payload length.
+    PayloadLength,
     /// Consume a conditional canonical `vu128`, selected by a previously
     /// decoded byte.
     ConditionalVarUInt {
@@ -56,26 +56,22 @@ pub enum RequestFrameStep {
 /// API-owned request metadata used only to delimit one protocol frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestFrameLayout {
-    /// Ordered byte-consumption steps after the opcode.
-    ///
-    /// The opcode is always consumed by the shared parser and MUST NOT be
-    /// repeated as a `Fixed` step. Conditional selector offsets are absolute
-    /// offsets in the complete frame, including the opcode.
+    /// Ordered byte-consumption steps for this operation.
     pub steps: &'static [RequestFrameStep],
 }
 
 /// Header metadata required to delimit one opaque request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestFrameHeader {
-    opcode: Opcode,
+    code: u8,
     encoded_len: usize,
-    value_len: usize,
+    payload_len: usize,
 }
 
 impl RequestFrameHeader {
-    /// Returns the operation discriminator.
-    pub const fn opcode(self) -> Opcode {
-        self.opcode
+    /// Returns the opaque request code.
+    pub const fn code(self) -> u8 {
+        self.code
     }
 
     /// Returns the number of bytes before the opaque body.
@@ -83,15 +79,15 @@ impl RequestFrameHeader {
         self.encoded_len
     }
 
-    /// Returns the body length carried by a value-bearing layout.
-    pub const fn value_len(self) -> usize {
-        self.value_len
+    /// Returns the payload length carried by the selected layout.
+    pub const fn payload_len(self) -> usize {
+        self.payload_len
     }
 
     /// Returns the complete frame length.
     pub fn frame_len(self) -> Result<usize> {
         self.encoded_len
-            .checked_add(self.value_len)
+            .checked_add(self.payload_len)
             .ok_or(ProtocolError::FrameLengthOverflow)
     }
 }
@@ -99,11 +95,11 @@ impl RequestFrameHeader {
 /// A complete request viewed as an opaque operation call.
 ///
 /// The parser owns only frame delimiting. An API client or server adapter
-/// may inspect [`body`](Self::body) after it has selected the operation's
+/// may inspect [`payload`](Self::payload) after it has selected the operation's
 /// modeled request shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpaqueRequestFrame<'a> {
-    opcode: Opcode,
+    code: u8,
     frame: &'a [u8],
     body_offset: usize,
 }
@@ -127,7 +123,7 @@ impl<'a> OpaqueRequestFrame<'a> {
     /// Decodes one complete request without interpreting its operation body.
     pub fn decode(frame: &'a [u8], layout: RequestFrameLayout) -> Result<Self> {
         let header = Self::decode_header(frame, layout)?.ok_or(ProtocolError::FrameTooShort {
-            expected: OPCODE_BYTES,
+            expected: REQUEST_CODE_BYTES,
             actual: frame.len(),
         })?;
         let expected = header.frame_len()?;
@@ -138,7 +134,7 @@ impl<'a> OpaqueRequestFrame<'a> {
             });
         }
         Ok(Self {
-            opcode: header.opcode,
+            code: header.code,
             frame,
             // `encoded_len` includes every prefix step, including a
             // variable-length body prefix. Keeping the offset from the
@@ -148,13 +144,13 @@ impl<'a> OpaqueRequestFrame<'a> {
         })
     }
 
-    /// Returns the operation discriminator.
-    pub const fn opcode(self) -> Opcode {
-        self.opcode
+    /// Returns the opaque request code.
+    pub const fn code(self) -> u8 {
+        self.code
     }
 
-    /// Returns the opaque operation body after the opcode.
-    pub fn body(self) -> &'a [u8] {
+    /// Returns the opaque request payload after the code and framing prefix.
+    pub fn payload(self) -> &'a [u8] {
         &self.frame[self.body_offset..]
     }
 
@@ -170,13 +166,17 @@ pub fn decode_request_frame_header(
     prefix: &[u8],
     layout: RequestFrameLayout,
 ) -> Result<Option<RequestFrameHeader>> {
-    if prefix.len() < OPCODE_BYTES {
+    let Some(&code_byte) = prefix.first() else {
         return Ok(None);
+    };
+    if REQUEST_CODE_BYTES != 1 {
+        return Err(ProtocolError::InvalidFrameLayout(
+            "opaque request codes wider than one byte are not supported by this v1 parser",
+        ));
     }
-    let opcode_byte = prefix[0];
-    let opcode = Opcode::try_from(opcode_byte)?;
-    let mut cursor: usize = OPCODE_BYTES;
-    let mut value_len = 0;
+    let code = code_byte;
+    let mut cursor: usize = REQUEST_CODE_BYTES;
+    let mut payload_len = 0;
     for (step_index, step) in layout.steps.iter().enumerate() {
         match *step {
             RequestFrameStep::Fixed { bytes } => {
@@ -194,8 +194,8 @@ pub fn decode_request_frame_header(
                         "fixed-body frame step must be last",
                     ));
                 }
-                validate_value_length(bytes)?;
-                value_len = bytes;
+                validate_payload_length(bytes)?;
+                payload_len = bytes;
                 let body_end = cursor
                     .checked_add(bytes)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
@@ -203,22 +203,20 @@ pub fn decode_request_frame_header(
                     return Ok(None);
                 }
             }
-            RequestFrameStep::ValueLength => {
+            RequestFrameStep::PayloadLength => {
                 if step_index + 1 != layout.steps.len() {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "value-length frame step must be last",
+                    return Err(ProtocolError::InvalidFrameLayout(
+                        "payload-length frame step must be last",
                     ));
                 }
-                let Some((length, encoded_len)) = crate::decode_varuint(
-                    prefix.get(cursor..).unwrap_or_default(),
-                    "request value length",
-                )?
+                let Some((length, encoded_len)) =
+                    crate::decode_varuint(&prefix[cursor..], "request payload length")?
                 else {
                     return Ok(None);
                 };
-                value_len =
+                payload_len =
                     usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-                validate_value_length(value_len)?;
+                validate_payload_length(payload_len)?;
                 cursor = cursor
                     .checked_add(encoded_len)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
@@ -232,10 +230,8 @@ pub fn decode_request_frame_header(
                     return Ok(None);
                 };
                 if selector & mask == expected {
-                    let Some((_, encoded_len)) = crate::decode_varuint(
-                        prefix.get(cursor..).unwrap_or_default(),
-                        "request conditional integer",
-                    )?
+                    let Some((_, encoded_len)) =
+                        crate::decode_varuint(&prefix[cursor..], "request conditional integer")?
                     else {
                         return Ok(None);
                     };
@@ -245,18 +241,27 @@ pub fn decode_request_frame_header(
                 }
             }
             RequestFrameStep::ByteLength => {
+                if step_index + 1 != layout.steps.len() {
+                    return Err(ProtocolError::InvalidFrameLayout(
+                        "byte-length frame step must be last",
+                    ));
+                }
                 let Some(&length) = prefix.get(cursor) else {
                     return Ok(None);
                 };
                 let length = usize::from(length);
-                let end = cursor
+                validate_payload_length(length)?;
+                let body_start = cursor
                     .checked_add(1)
-                    .and_then(|end| end.checked_add(length))
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                let end = body_start
+                    .checked_add(length)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
                     return Ok(None);
                 }
-                cursor = end;
+                cursor = body_start;
+                payload_len = length;
             }
             RequestFrameStep::ByteThenVarUInt {
                 prefix_bytes,
@@ -301,9 +306,9 @@ pub fn decode_request_frame_header(
         }
     }
     Ok(Some(RequestFrameHeader {
-        opcode,
+        code,
         encoded_len: cursor,
-        value_len,
+        payload_len,
     }))
 }
 
@@ -313,6 +318,11 @@ fn decode_byte_then_varuint_len(
     mask: u8,
     expected: u8,
 ) -> Result<Option<usize>> {
+    if prefix_bytes == 0 {
+        return Err(ProtocolError::InvalidFrameLayout(
+            "conditional byte prefix must contain at least one byte",
+        ));
+    }
     if input.len() < prefix_bytes {
         return Ok(None);
     }
@@ -336,11 +346,11 @@ fn decode_byte_then_varuint_len(
     ))
 }
 
-fn validate_value_length(value_len: usize) -> Result<()> {
-    if value_len > MAX_VALUE_BYTES {
+fn validate_payload_length(value_len: usize) -> Result<()> {
+    if value_len > MAX_PAYLOAD_BYTES {
         return Err(ProtocolError::ValueTooLarge {
             size: value_len,
-            maximum: MAX_VALUE_BYTES,
+            maximum: MAX_PAYLOAD_BYTES,
         });
     }
     Ok(())

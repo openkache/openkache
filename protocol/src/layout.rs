@@ -4,7 +4,7 @@
 //! module only handles byte-level layouts and lets callers select the exact
 //! primitive for each operation.
 
-use crate::{ProtocolError, ResponseSegment, Result, encode_field_sequence};
+use crate::{ProtocolError, ResponseSegment, Result};
 use smallvec::SmallVec;
 
 const INLINE_FIELDS: usize = 8;
@@ -27,7 +27,7 @@ pub fn encode_dense_fields(values: &[&[u8]], widths: &[usize]) -> Result<Vec<u8>
             .checked_add(*width)
             .ok_or(ProtocolError::FrameLengthOverflow)
     })?;
-    crate::validate_value_length(capacity)?;
+    crate::validate_payload_length(capacity)?;
     let mut output = Vec::with_capacity(capacity);
     for (value, width) in values.iter().zip(widths) {
         if value.len() != *width {
@@ -54,6 +54,7 @@ impl<'a, 'b> DenseFields<'a, 'b> {
         widths: &[usize],
         offsets: &'b mut [(usize, usize)],
     ) -> Result<Self> {
+        crate::validate_payload_length(payload.len())?;
         if offsets.len() < widths.len() {
             return Err(ProtocolError::InvalidFieldSequence(
                 "dense offset storage is too small",
@@ -95,11 +96,6 @@ impl<'a, 'b> DenseFields<'a, 'b> {
     }
 }
 
-/// Encodes a field sequence from API-owned presence decisions.
-pub fn encode_field_sequence_fields(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
-    encode_field_sequence(values)
-}
-
 /// Encodes a field sequence while retaining ownership of value segments.
 pub fn encode_field_sequence_segments<T, F>(
     values: SmallVec<[Option<T>; INLINE_FIELDS]>,
@@ -109,9 +105,12 @@ where
     T: LayoutValue,
     F: FnMut(&mut SmallVec<[ResponseSegment; INLINE_FIELDS]>, T),
 {
+    let mask_len = values.len().saturating_add(7) / 8;
+    crate::validate_payload_length(mask_len)?;
     let mut mask = SmallVec::<[u8; 32]>::new();
-    mask.resize(values.len().saturating_add(7) / 8, 0);
+    mask.resize(mask_len, 0);
     let final_present = values.iter().rposition(Option::is_some);
+    let mut expected_len = mask.len();
     for (index, value) in values.iter().enumerate() {
         if value.is_some() {
             mask[index / 8] |= 1 << (index % 8);
@@ -128,8 +127,25 @@ where
                 .map_err(|_| ProtocolError::FrameLengthOverflow)?;
             let (encoded, encoded_len) = crate::encode_varuint(length);
             segments.push(ResponseSegment::inline(&encoded[..encoded_len]));
+            expected_len = expected_len
+                .checked_add(encoded_len)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
         }
+        expected_len = expected_len
+            .checked_add(value.encoded_len())
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
         append_value(&mut segments, value);
+    }
+    crate::validate_payload_length(expected_len)?;
+    let actual_len = segments.iter().try_fold(0usize, |total, segment| {
+        total
+            .checked_add(segment.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    })?;
+    if actual_len != expected_len {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "segmented field value length does not match its declared length",
+        ));
     }
     Ok(segments)
 }
@@ -146,12 +162,29 @@ where
     F: FnMut(&mut SmallVec<[ResponseSegment; INLINE_FIELDS]>, T),
 {
     let mut segments = SmallVec::new();
+    let mut expected_len = 0usize;
     for value in values {
         let prefix = codec.prefix(value.as_ref().map(LayoutValue::encoded_len))?;
-        segments.push(ResponseSegment::inline(&prefix[..codec.length_bytes()]));
+        let prefix = &prefix[8 - codec.length_bytes()..];
+        expected_len = expected_len
+            .checked_add(prefix.len())
+            .and_then(|total| total.checked_add(value.as_ref().map_or(0, LayoutValue::encoded_len)))
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        segments.push(ResponseSegment::inline(prefix));
         if let Some(value) = value {
             append_value(&mut segments, value);
         }
+    }
+    crate::validate_payload_length(expected_len)?;
+    let actual_len = segments.iter().try_fold(0usize, |total, segment| {
+        total
+            .checked_add(segment.len())
+            .ok_or(ProtocolError::FrameLengthOverflow)
+    })?;
+    if actual_len != expected_len {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "segmented optional value length does not match its declared length",
+        ));
     }
     Ok(segments)
 }

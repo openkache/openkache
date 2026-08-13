@@ -40,9 +40,13 @@ jobs:
           done
           clang --version
 
-      - name: Generate Python Smithy contract
-        working-directory: clients/python
-        run: OPENKACHE_GENERATION_TARGET=python ../../protocol/generate.ts
+      - name: Check protocol transport contract
+        run: |
+          output="${RUNNER_TEMP}/openkache-wire_values.rs"
+          OPENKACHE_RUST_WIRE_OUTPUT="$output" bun protocol/generate.ts
+          OPENKACHE_GENERATION_CHECK=1 \
+            OPENKACHE_RUST_WIRE_OUTPUT="$output" \
+            bun protocol/generate.ts
 
       - name: Check Python package sources
         run: python -m compileall clients/python/src
