@@ -34,6 +34,24 @@ macro_rules! wire_enum {
 
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
+/// Canonical generated operation metadata shared by all adapters.
+pub mod operation {
+    use super::{Opcode, Status};
+    include!(concat!(env!("OUT_DIR"), "/operation_contract.rs"));
+}
+
+pub use operation::{
+    MAX_OPERATION_FIELDS, MAX_OPERATION_REQUEST_FIELDS, OPERATION_CODEC_NAMES,
+    OperationFieldLayout, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
+    OperationLayoutPlan, OperationRequestFraming, OperationResponseFraming, OperationWireSpec,
+    WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES, WireCodecCardinality, WireCodecDescriptor,
+    WireCodecKind, WireCodecLengthEncoding, WireCodecWidth, operation_registry,
+    operation_wire_spec, request_fields, response_fields, wire_codec_kind,
+};
+
+/// Draft-v1 compatibility constants and field projections.
+pub mod compat_v1;
+
 /// Generic value-shape codecs shared by server and client adapters.
 pub mod codec;
 /// Generic field-layout helpers shared by API-owned codecs.
@@ -46,8 +64,8 @@ pub mod request;
 pub mod response;
 
 pub use layout::{
-    DenseFields, LayoutValue, encode_dense_fields, encode_field_sequence_segments,
-    encode_optional_value_segments,
+    DenseFields, LayoutValue, decode_planned_fields, encode_dense_fields,
+    encode_field_sequence_segments, encode_optional_value_segments, encode_planned_fields,
 };
 pub use optional_values::{
     OptionalValueCodec, OptionalValues, OptionalValuesEncoder, decode_optional_values,

@@ -4,7 +4,10 @@
 //! module only handles byte-level layouts and lets callers select the exact
 //! primitive for each operation.
 
-use crate::{ProtocolError, ResponseSegment, Result, encode_field_sequence};
+use crate::{
+    OperationFieldLayout, OperationFieldPlan, ProtocolError, ResponseSegment, Result,
+    encode_field_sequence,
+};
 use smallvec::SmallVec;
 
 const INLINE_FIELDS: usize = 8;
@@ -98,6 +101,103 @@ impl<'a, 'b> DenseFields<'a, 'b> {
 /// Encodes a field sequence from API-owned presence decisions.
 pub fn encode_field_sequence_fields(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
     encode_field_sequence(values)
+}
+
+/// Encodes fields according to generated, operation-neutral layout metadata.
+pub fn encode_layout_fields(
+    values: &[Option<&[u8]>],
+    layout: OperationFieldLayout,
+    widths: &[usize],
+) -> Result<Vec<u8>> {
+    if values.len() != widths.len() {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "field metadata length mismatch",
+        ));
+    }
+    match layout {
+        OperationFieldLayout::Sequence => encode_field_sequence(values),
+        OperationFieldLayout::OptionalValues => crate::encode_optional_values(values),
+        OperationFieldLayout::Dense => {
+            if values.iter().any(Option::is_none) {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "dense field is missing",
+                ));
+            }
+            let refs: SmallVec<[&[u8]; INLINE_FIELDS]> =
+                values.iter().map(|v| v.expect("checked above")).collect();
+            encode_dense_fields(&refs, widths)
+        }
+        OperationFieldLayout::Empty if values.is_empty() => Ok(Vec::new()),
+        OperationFieldLayout::Empty => Err(ProtocolError::InvalidFieldSequence(
+            "empty layout has fields",
+        )),
+        OperationFieldLayout::Opaque => Err(ProtocolError::InvalidFieldSequence(
+            "opaque layout is not field-addressable",
+        )),
+    }
+}
+
+/// Decodes fields according to generated layout metadata into caller-owned offsets.
+pub fn decode_layout_fields(
+    payload: &[u8],
+    layout: OperationFieldLayout,
+    required: &[bool],
+    widths: &[usize],
+    offsets: &mut [(usize, usize)],
+) -> Result<()> {
+    if required.len() != widths.len() || offsets.len() < required.len() {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "field metadata length mismatch",
+        ));
+    }
+    match layout {
+        OperationFieldLayout::Sequence => {
+            crate::FieldSequence::decode_with_required(payload, required, offsets).map(|_| ())
+        }
+        OperationFieldLayout::OptionalValues => {
+            crate::OptionalValues::decode(payload, required.len(), offsets).map(|_| ())
+        }
+        OperationFieldLayout::Dense => {
+            if required.iter().any(|r| !r) {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "dense layout has optional fields",
+                ));
+            }
+            DenseFields::decode(payload, widths, offsets).map(|_| ())
+        }
+        OperationFieldLayout::Empty if required.is_empty() && payload.is_empty() => Ok(()),
+        OperationFieldLayout::Empty => Err(ProtocolError::InvalidFieldSequence(
+            "empty layout has fields",
+        )),
+        OperationFieldLayout::Opaque => Err(ProtocolError::InvalidFieldSequence(
+            "opaque layout is not field-addressable",
+        )),
+    }
+}
+
+pub fn encode_planned_fields(
+    values: &[Option<&[u8]>],
+    plan: &[OperationFieldPlan],
+    layout: OperationFieldLayout,
+) -> Result<Vec<u8>> {
+    if values.len() != plan.len() {
+        return Err(ProtocolError::InvalidFieldSequence(
+            "field values do not match operation plan",
+        ));
+    }
+    let widths: SmallVec<[usize; INLINE_FIELDS]> = plan.iter().map(|f| f.encoded_width).collect();
+    encode_layout_fields(values, layout, &widths)
+}
+
+pub fn decode_planned_fields(
+    payload: &[u8],
+    plan: &[OperationFieldPlan],
+    layout: OperationFieldLayout,
+    offsets: &mut [(usize, usize)],
+) -> Result<()> {
+    let required: SmallVec<[bool; INLINE_FIELDS]> = plan.iter().map(|f| f.required).collect();
+    let widths: SmallVec<[usize; INLINE_FIELDS]> = plan.iter().map(|f| f.encoded_width).collect();
+    decode_layout_fields(payload, layout, &required, &widths, offsets)
 }
 
 /// Encodes a field sequence while retaining ownership of value segments.
