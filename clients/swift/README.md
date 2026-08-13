@@ -6,8 +6,9 @@ not duplicate QUIC framing, TLS validation, retries, key derivation,
 compression, encryption, or value parsing.
 
 `OpenKacheClient` derives protected item IDs from v1 PortableKey values. `String`
-keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
-as canonical deterministic CBOR before crossing the native ABI. Use
+keys use the `Text` type and `Data` keys use the `Bytes` type; the typed native
+ABI carries their logical bytes and the Rust core owns canonical deterministic
+CBOR. Use
 `OpenKacheRawClient` when an integration owns exact protocol item IDs and
 opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
