@@ -16,9 +16,9 @@ use crate::store::{
 use crate::types::StoredItemValue;
 use crate::{KvError, Kvkache, SetOutcome, StorageKey};
 
-use super::scheduler::ScheduledTask;
-use super::storage_task::StorageTask;
-use super::worker::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
+use super::super::scheduler::ScheduledTask;
+use super::super::storage_task::StorageTask;
+use super::super::worker::{DeferredWorkerResponse, WorkerResponse, WorkerResponseSender};
 
 /// API-owned result projection for the compatibility keyed operations.
 ///

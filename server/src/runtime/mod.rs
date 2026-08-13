@@ -17,7 +17,7 @@ use crate::protocol::{ItemId, SetOptions};
 use crate::types::StoredItemValue;
 use crate::*;
 
-mod keyed_compatibility;
+mod adapters;
 mod network_cache;
 mod port;
 mod scheduler;
@@ -25,6 +25,7 @@ pub(crate) mod storage_backend;
 mod storage_keys;
 mod worker;
 mod worker_control;
+pub(super) use adapters::draft_v1_keyed as keyed_compatibility;
 pub(crate) use network_cache::NetworkWorkerCache;
 pub(crate) use port::{completion, storage_context, storage_port, storage_task};
 #[allow(unused_imports)]
