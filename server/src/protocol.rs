@@ -5,8 +5,8 @@
 // imported wholesale into request construction.
 pub use crate::contract::{WireRequestLayout, WireRequestStep, wire_request_layout};
 use openkache_protocol::{
-    ITEM_ID_BYTES, MAX_VALUE_BYTES, MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES, REQUEST_FIXED_BYTES,
-    RequestFrameHeader,
+    MAX_ITEM_ID_BYTES, MAX_VALUE_BYTES, MAX_VARUINT_BYTES, NAMESPACE_ID_BYTES,
+    REQUEST_FIXED_BYTES, RequestFrameHeader,
 };
 pub use openkache_protocol::{ItemId, Opcode, Response, Status};
 
@@ -66,6 +66,7 @@ struct CompatibilityHeaderMetadata {
     namespace_id: Option<u64>,
     item_id_start: Option<usize>,
     item_id_count: usize,
+    item_id_lengths: [u8; 2],
     set_options: SetOptions,
     has_ttl: bool,
 }
@@ -232,6 +233,7 @@ impl RequestHeader {
         namespace_id: Option<u64>,
         item_id_start: Option<usize>,
         item_id_count: usize,
+        item_id_lengths: [u8; 2],
         set_options: SetOptions,
         has_ttl: bool,
     ) -> Self {
@@ -244,6 +246,7 @@ impl RequestHeader {
                 namespace_id,
                 item_id_start,
                 item_id_count,
+                item_id_lengths,
                 set_options,
                 has_ttl,
             }),
@@ -260,9 +263,15 @@ impl RequestHeader {
         self.encoded_len
     }
 
-    /// Returns the fixed item ID length for operations carrying an item ID.
+    /// Returns the total item ID bytes carried by this request.
     pub const fn item_id_len(self) -> usize {
-        ITEM_ID_BYTES * self.item_id_count()
+        let mut length = 0;
+        let mut index = 0;
+        while index < self.item_id_count() && index < self.item_id_lengths().len() {
+            length += self.item_id_lengths()[index] as usize;
+            index += 1;
+        }
+        length
     }
 
     /// Returns the number of item IDs carried by this request.
@@ -270,6 +279,14 @@ impl RequestHeader {
         match self.compatibility {
             Some(metadata) => metadata.item_id_count,
             None => 0,
+        }
+    }
+
+    /// Returns the individual item ID lengths in wire order.
+    pub const fn item_id_lengths(self) -> [u8; 2] {
+        match self.compatibility {
+            Some(metadata) => metadata.item_id_lengths,
+            None => [0; 2],
         }
     }
 

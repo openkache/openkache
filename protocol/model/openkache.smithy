@@ -48,6 +48,114 @@ list OperationStatuses {
     member: String
 }
 
+/// One canonical field-to-bit mapping in a packed request byte.
+structure WirePackedValue {
+    @required
+    value: String
+
+    @required
+    bits: Integer
+}
+
+list WirePackedValues {
+    member: WirePackedValue
+}
+
+/// One modeled field projected into a packed request byte.
+structure WirePackedField {
+    @required
+    field: String
+
+    @required
+    mask: Integer
+
+    @required
+    values: WirePackedValues
+}
+
+list WirePackedFields {
+    member: WirePackedField
+}
+
+structure WireFixedField {
+    @required
+    field: String
+
+    @required
+    bytes: Integer
+}
+
+structure WirePacked {
+    @required
+    fields: WirePackedFields
+
+    reservedMask: Integer
+    constantBits: Integer
+}
+
+structure WireFieldReference {
+    @required
+    field: String
+}
+
+structure WireConditional {
+    @required
+    field: String
+
+    @required
+    equals: String
+
+    @required
+    steps: WireRequestSteps
+}
+
+structure WireConstant {
+    /// An even-length lowercase hexadecimal byte string.
+    @required
+    hex: String
+}
+
+structure WireTrailingField {
+    @required
+    field: String
+
+    /// Length prefix used immediately before the trailing application bytes.
+    @required
+    length: String
+}
+
+structure WireValueLengthField {
+    @required
+    field: String
+
+    /// Length prefix used before a later metadata field and the final value body.
+    @required
+    length: String
+}
+
+/// Emits only the one-octet length prefix for a later byte field body.
+structure WireByteLengthPrefixField {
+    @required
+    field: String
+}
+
+union WireRequestStep {
+    fixedField: WireFixedField
+    packed: WirePacked
+    byteLengthField: WireFieldReference
+    byteLengthPrefixField: WireByteLengthPrefixField
+    byteField: WireFieldReference
+    varuintField: WireFieldReference
+    valueLengthField: WireValueLengthField
+    conditional: WireConditional
+    constant: WireConstant
+    trailingField: WireTrailingField
+}
+
+list WireRequestSteps {
+    member: WireRequestStep
+}
+
 /// Operation framing and status contract shared by wire adapters.
 ///
 /// Client-only members (`scope`, `responseSemantics`, and `retryMode`) are
@@ -63,6 +171,9 @@ structure operationContract {
     /// Optional protocol-v1 compatibility route. Generic operations omit this
     /// member and select only a reusable request framing primitive.
     compactRoute: String
+
+    /// Optional declarative request-wire plan for a compact byte contract.
+    requestWire: WireRequestSteps
 
     /// Generic request framing shared by protocol adapters.
     @required
@@ -506,6 +617,10 @@ operation ExperimentalMultiResourceMutation {
 @operationContract(
     scope: "item",
     compactRoute: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { byteLengthField: { field: "itemId" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     responseSemantics: "value",
@@ -521,6 +636,11 @@ operation Get {
 @operationContract(
     scope: "item",
     compactRoute: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { byteLengthField: { field: "itemIdA" } },
+        { byteLengthField: { field: "itemIdB" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "optional_values",
     responseSemantics: "values",
@@ -536,6 +656,55 @@ operation Get2 {
 @operationContract(
     scope: "item",
     compactRoute: "set",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "condition",
+                        mask: 3,
+                        values: [
+                            { value: "any", bits: 0 },
+                            { value: "if_absent", bits: 1 },
+                            { value: "if_present", bits: 2 }
+                        ]
+                    },
+                    {
+                        field: "expirationMode",
+                        mask: 12,
+                        values: [
+                            { value: "inherit", bits: 0 },
+                            { value: "no_expiry", bits: 4 },
+                            { value: "explicit_ttl", bits: 8 }
+                        ]
+                    },
+                    {
+                        field: "evictionMode",
+                        mask: 48,
+                        values: [
+                            { value: "inherit", bits: 0 },
+                            { value: "evictable", bits: 16 },
+                            { value: "eviction_protected", bits: 32 }
+                        ]
+                    }
+                ],
+                reservedMask: 192
+            }
+        },
+        { byteLengthPrefixField: { field: "itemId" } },
+        { valueLengthField: { field: "value", length: "varuint" } },
+        {
+            conditional: {
+                field: "expirationMode",
+                equals: "explicit_ttl",
+                steps: [
+                    { varuintField: { field: "ttlMilliseconds" } }
+                ]
+            }
+        },
+        { byteField: { field: "itemId" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "set_outcome",
@@ -551,6 +720,10 @@ operation Set {
 @operationContract(
     scope: "item",
     compactRoute: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { byteLengthField: { field: "itemId" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "delete_outcome",
@@ -668,7 +841,6 @@ structure GetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }
@@ -685,12 +857,10 @@ structure Get2Input {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemIdA: ItemId
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemIdB: ItemId
 }
@@ -710,7 +880,6 @@ structure SetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 
@@ -745,7 +914,6 @@ structure DeleteInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }
