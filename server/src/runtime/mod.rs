@@ -32,6 +32,7 @@ pub(crate) use port::{completion, storage_context, storage_port, storage_task};
 pub(crate) use storage_keys::{derive_scoped_storage_key, derive_storage_key};
 pub(crate) use storage_port::*;
 pub(crate) use storage_task::*;
+pub use worker::{BenchmarkBatchStats, BenchmarkOperation};
 #[allow(unused_imports)]
 pub(crate) use worker::*;
 /// Workload and result contracts for driving bounded runtime batches.
