@@ -21,7 +21,6 @@ pub const MAX_ITEM_ID_BYTES: usize = 32;
 /// Compatibility alias for the pre-contract name.
 ///
 /// The limit is measured on logical input bytes, before canonical encoding.
-#[deprecated(note = "use MAX_KEY_INPUT_BYTES")]
 pub const MAX_CANONICAL_KEY_BYTES: usize = MAX_KEY_INPUT_BYTES;
 
 /// Client-owned application-key to Item ID mapping profile.
@@ -567,7 +566,6 @@ impl TypedKey {
     }
 
     /// Compatibility spelling for callers migrating from `PortableKey`.
-    #[deprecated(note = "use key_type")]
     pub const fn spec(&self) -> KeyType {
         self.key_type()
     }
@@ -1380,13 +1378,10 @@ impl ClientRootKey {
 pub type DataProtectionKey = ClientRootKey;
 
 /// Compatibility spelling retained while bindings migrate to [`KeyType`].
-#[deprecated(note = "use KeyType")]
 pub type KeySpec = KeyType;
 /// Compatibility spelling retained while bindings migrate to [`TypedInteger`].
-#[deprecated(note = "use TypedInteger")]
 pub type PortableInteger = TypedInteger;
 /// Compatibility spelling retained while bindings migrate to [`TypedKey`].
-#[deprecated(note = "use TypedKey")]
 pub type PortableKey = TypedKey;
 
 impl TryFrom<&[u8]> for ClientRootKey {
