@@ -617,6 +617,10 @@ operation ExperimentalMultiResourceMutation {
 @operationContract(
     scope: "item",
     compactRoute: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { byteLengthField: { field: "itemId" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "opaque",
     responseSemantics: "value",
@@ -632,6 +636,11 @@ operation Get {
 @operationContract(
     scope: "item",
     compactRoute: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { byteLengthField: { field: "itemIdA" } },
+        { byteLengthField: { field: "itemIdB" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "optional_values",
     responseSemantics: "values",
@@ -647,6 +656,55 @@ operation Get2 {
 @operationContract(
     scope: "item",
     compactRoute: "set",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        {
+            packed: {
+                fields: [
+                    {
+                        field: "condition",
+                        mask: 3,
+                        values: [
+                            { value: "any", bits: 0 },
+                            { value: "if_absent", bits: 1 },
+                            { value: "if_present", bits: 2 }
+                        ]
+                    },
+                    {
+                        field: "expirationMode",
+                        mask: 12,
+                        values: [
+                            { value: "inherit", bits: 0 },
+                            { value: "no_expiry", bits: 4 },
+                            { value: "explicit_ttl", bits: 8 }
+                        ]
+                    },
+                    {
+                        field: "evictionMode",
+                        mask: 48,
+                        values: [
+                            { value: "inherit", bits: 0 },
+                            { value: "evictable", bits: 16 },
+                            { value: "eviction_protected", bits: 32 }
+                        ]
+                    }
+                ],
+                reservedMask: 192
+            }
+        },
+        { byteLengthPrefixField: { field: "itemId" } },
+        { valueLengthField: { field: "value", length: "varuint" } },
+        {
+            conditional: {
+                field: "expirationMode",
+                equals: "explicit_ttl",
+                steps: [
+                    { varuintField: { field: "ttlMilliseconds" } }
+                ]
+            }
+        },
+        { byteField: { field: "itemId" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "set_outcome",
@@ -662,6 +720,10 @@ operation Set {
 @operationContract(
     scope: "item",
     compactRoute: "item",
+    requestWire: [
+        { fixedField: { field: "namespaceId", bytes: 8 } },
+        { byteLengthField: { field: "itemId" } }
+    ],
     requestFraming: "ordered_fields",
     responseFraming: "empty",
     responseSemantics: "delete_outcome",
@@ -779,7 +841,6 @@ structure GetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }
@@ -796,12 +857,10 @@ structure Get2Input {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemIdA: ItemId
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemIdB: ItemId
 }
@@ -821,7 +880,6 @@ structure SetInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 
@@ -856,7 +914,6 @@ structure DeleteInput {
     namespaceId: Long
 
     @required
-    @wireCodec(name: "raw_bytes", width: 32)
     @operationField(role: "item_id")
     itemId: ItemId
 }

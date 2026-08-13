@@ -25,6 +25,9 @@ pub enum RequestFrameStep {
     /// Consume one canonical `vu128` value and treat its value as the opaque
     /// body length.
     ValueLength,
+    /// Consume a canonical `vu128` body length while allowing subsequent
+    /// metadata steps before the deferred body.
+    ValueLengthPrefix,
     /// Consume a conditional canonical `vu128`, selected by a previously
     /// decoded byte.
     ConditionalVarUInt {
@@ -34,6 +37,10 @@ pub enum RequestFrameStep {
     },
     /// Consume one byte length followed by that many bytes.
     ByteLength,
+    /// Consume one byte length and retain it for a later body step.
+    ByteLengthPrefix { slot: usize },
+    /// Consume the body declared by a preceding byte-length prefix.
+    ByteLengthBody { slot: usize },
     /// Consume a fixed prefix and, when the leading byte matches, a canonical
     /// `vu128`.
     ByteThenVarUInt {
@@ -177,6 +184,7 @@ pub fn decode_request_frame_header(
     let opcode = Opcode::try_from(opcode_byte)?;
     let mut cursor: usize = OPCODE_BYTES;
     let mut value_len = 0;
+    let mut byte_lengths = [None; 2];
     for (step_index, step) in layout.steps.iter().enumerate() {
         match *step {
             RequestFrameStep::Fixed { bytes } => {
@@ -204,11 +212,21 @@ pub fn decode_request_frame_header(
                 }
             }
             RequestFrameStep::ValueLength => {
-                if step_index + 1 != layout.steps.len() {
-                    return Err(ProtocolError::InvalidFieldSequence(
-                        "value-length frame step must be last",
-                    ));
-                }
+                let Some((length, encoded_len)) = crate::decode_varuint(
+                    prefix.get(cursor..).unwrap_or_default(),
+                    "request value length",
+                )?
+                else {
+                    return Ok(None);
+                };
+                value_len =
+                    usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+                validate_value_length(value_len)?;
+                cursor = cursor
+                    .checked_add(encoded_len)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ValueLengthPrefix => {
                 let Some((length, encoded_len)) = crate::decode_varuint(
                     prefix.get(cursor..).unwrap_or_default(),
                     "request value length",
@@ -252,6 +270,37 @@ pub fn decode_request_frame_header(
                 let end = cursor
                     .checked_add(1)
                     .and_then(|end| end.checked_add(length))
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(None);
+                }
+                cursor = end;
+            }
+            RequestFrameStep::ByteLengthPrefix { slot } => {
+                let Some(&length) = prefix.get(cursor) else {
+                    return Ok(None);
+                };
+                let slot = byte_lengths.get_mut(slot).ok_or(
+                    ProtocolError::InvalidFieldSequence("byte-length slot is out of range"),
+                )?;
+                if slot.replace(usize::from(length)).is_some() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "byte-length slot is assigned more than once",
+                    ));
+                }
+                cursor = cursor
+                    .checked_add(1)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+            }
+            RequestFrameStep::ByteLengthBody { slot } => {
+                let length = byte_lengths
+                    .get_mut(slot)
+                    .and_then(Option::take)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "byte-length body has no preceding prefix",
+                    ))?;
+                let end = cursor
+                    .checked_add(length)
                     .ok_or(ProtocolError::FrameLengthOverflow)?;
                 if prefix.len() < end {
                     return Ok(None);

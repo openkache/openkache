@@ -114,6 +114,7 @@ pub(super) fn encode_request_prefix(
             put_namespace_id(output, request.namespace_id)?;
             if route == CompactV1RequestRoute::Item {
                 for item_id in &request.item_ids {
+                    output.push(item_id.len() as u8);
                     output.extend_from_slice(item_id.as_bytes());
                 }
             }
@@ -121,23 +122,22 @@ pub(super) fn encode_request_prefix(
         CompactV1RequestRoute::Set => {
             put_namespace_id(output, request.namespace_id)?;
             output.push(request.set_options.flags()?);
-            output.extend_from_slice(
-                request
-                    .item_ids
-                    .first()
-                    .ok_or(ProtocolError::InvalidRequestShape {
-                        opcode: request.opcode,
-                        expected_item_id: openkache_protocol::ITEM_ID_BYTES,
-                        expected_value: "any",
-                    })?
-                    .as_bytes(),
-            );
+            let item_id = request
+                .item_ids
+                .first()
+                .ok_or(ProtocolError::InvalidRequestShape {
+                    opcode: request.opcode,
+                    expected_item_id: openkache_protocol::MAX_ITEM_ID_BYTES,
+                    expected_value: "any",
+                })?;
+            output.push(item_id.len() as u8);
+            let (encoded, length) = super::encode_varuint(request.value.len() as u64);
+            output.extend_from_slice(&encoded[..length]);
             if let Some(ttl_ms) = request.set_options.ttl_ms {
                 let (encoded, length) = super::encode_varuint(ttl_ms);
                 output.extend_from_slice(&encoded[..length]);
             }
-            let (encoded, length) = super::encode_varuint(request.value.len() as u64);
-            output.extend_from_slice(&encoded[..length]);
+            output.extend_from_slice(item_id.as_bytes());
         }
         CompactV1RequestRoute::NamespaceOpen => {
             output.push(if request.create_if_missing {
@@ -200,23 +200,44 @@ pub(super) fn decode_header(
                 contract::OperationFieldDirection::Request,
                 contract::OperationFieldRole::ItemId,
             );
-            let required = openkache_protocol::OPCODE_BYTES
-                + openkache_protocol::NAMESPACE_ID_BYTES
-                + openkache_protocol::ITEM_ID_BYTES
-                    .checked_mul(item_id_count)
-                    .ok_or(ProtocolError::FrameLengthOverflow)?;
-            if prefix.len() < required {
+            let fixed = openkache_protocol::OPCODE_BYTES
+                + openkache_protocol::NAMESPACE_ID_BYTES;
+            if prefix.len() < fixed {
                 return Ok(None);
             }
             let namespace_id = read_namespace_id(&prefix[openkache_protocol::OPCODE_BYTES..])?;
+            let mut cursor = fixed;
+            let mut item_id_lengths = [0; 2];
+            for item_id_length in item_id_lengths.iter_mut().take(item_id_count) {
+                let Some(&length) = prefix.get(cursor) else {
+                    return Ok(None);
+                };
+                if usize::from(length) > openkache_protocol::MAX_ITEM_ID_BYTES {
+                    return Err(ProtocolError::InvalidItemIdLength {
+                        opcode,
+                        expected: openkache_protocol::MAX_ITEM_ID_BYTES,
+                        actual: usize::from(length),
+                    });
+                }
+                cursor += 1;
+                let end = cursor
+                    .checked_add(usize::from(length))
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                if prefix.len() < end {
+                    return Ok(None);
+                }
+                *item_id_length = length;
+                cursor = end;
+            }
             Ok(Some(RequestHeader::compatibility(
                 descriptor,
                 opcode,
-                required,
+                cursor,
                 0,
                 Some(namespace_id),
-                Some(openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES),
+                Some(fixed),
                 item_id_count,
+                item_id_lengths,
                 SetOptions::NONE,
                 false,
             )))
@@ -236,6 +257,7 @@ pub(super) fn decode_header(
                 Some(namespace_id),
                 None,
                 0,
+                [0; 2],
                 SetOptions::NONE,
                 false,
             )))
@@ -293,34 +315,41 @@ pub(super) fn decode_server_request(
 // These tables are the compatibility adapter's only knowledge of the
 // historical namespace/item/SET byte prefixes.
 const COMPACT_V1_ITEM_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES
-            + openkache_protocol::NAMESPACE_ID_BYTES
-            + openkache_protocol::ITEM_ID_BYTES,
-    }],
+    steps: &[
+        WireRequestStep::Fixed {
+            bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
+        },
+        WireRequestStep::ByteLengthPrefix { slot: 0 },
+        WireRequestStep::ByteLengthBody { slot: 0 },
+    ],
 };
 const COMPACT_V1_ITEM_PAIR_LAYOUT: WireRequestLayout = WireRequestLayout {
-    steps: &[WireRequestStep::Fixed {
-        bytes: openkache_protocol::OPCODE_BYTES
-            + openkache_protocol::NAMESPACE_ID_BYTES
-            + openkache_protocol::ITEM_ID_BYTES * 2,
-    }],
+    steps: &[
+        WireRequestStep::Fixed {
+            bytes: openkache_protocol::OPCODE_BYTES + openkache_protocol::NAMESPACE_ID_BYTES,
+        },
+        WireRequestStep::ByteLengthPrefix { slot: 0 },
+        WireRequestStep::ByteLengthBody { slot: 0 },
+        WireRequestStep::ByteLengthPrefix { slot: 1 },
+        WireRequestStep::ByteLengthBody { slot: 1 },
+    ],
 };
 const COMPACT_V1_SET_LAYOUT: WireRequestLayout = WireRequestLayout {
     steps: &[
         WireRequestStep::Fixed {
             bytes: openkache_protocol::OPCODE_BYTES
                 + openkache_protocol::NAMESPACE_ID_BYTES
-                + contract::SET_FLAGS_BYTES
-                + openkache_protocol::ITEM_ID_BYTES,
+                + SET_FLAGS_BYTES,
         },
+        WireRequestStep::ByteLengthPrefix { slot: 0 },
+        WireRequestStep::ValueLengthPrefix,
         WireRequestStep::ConditionalVarUInt {
             selector_offset: openkache_protocol::OPCODE_BYTES
                 + openkache_protocol::NAMESPACE_ID_BYTES,
-            mask: contract::SET_EXPIRATION_MASK,
-            expected: contract::SET_EXPLICIT_TTL_BITS,
+            mask: SET_EXPIRATION_MASK,
+            expected: SET_EXPLICIT_TTL_BITS,
         },
-        WireRequestStep::ValueLength,
+        WireRequestStep::ByteLengthBody { slot: 0 },
     ],
 };
 const COMPACT_V1_NAMESPACE_LAYOUT: WireRequestLayout = WireRequestLayout {
@@ -490,8 +519,7 @@ pub(super) fn decode_set_header(
 ) -> Result<Option<RequestHeader>> {
     let fixed = openkache_protocol::OPCODE_BYTES
         + openkache_protocol::NAMESPACE_ID_BYTES
-        + SET_FLAGS_BYTES
-        + openkache_protocol::ITEM_ID_BYTES;
+        + SET_FLAGS_BYTES;
     if prefix.len() < fixed {
         return Ok(None);
     }
@@ -523,8 +551,25 @@ pub(super) fn decode_set_header(
             opcode: Opcode::Set,
         });
     }
-    let item_id_start = flags_offset + SET_FLAGS_BYTES;
-    let mut cursor = fixed;
+    let item_id_length_offset = fixed;
+    let Some(&item_id_length) = prefix.get(item_id_length_offset) else {
+        return Ok(None);
+    };
+    if usize::from(item_id_length) > openkache_protocol::MAX_ITEM_ID_BYTES {
+        return Err(ProtocolError::InvalidItemIdLength {
+            opcode: Opcode::Set,
+            expected: openkache_protocol::MAX_ITEM_ID_BYTES,
+            actual: usize::from(item_id_length),
+        });
+    }
+    let item_id_start = item_id_length_offset + 1;
+    let item_id_end = item_id_start
+        .checked_add(usize::from(item_id_length))
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
+    if prefix.len() < item_id_end {
+        return Ok(None);
+    }
+    let mut cursor = item_id_end;
     let ttl_ms = if has_ttl {
         let Some((ttl, length)) = super::decode_varuint(&prefix[cursor..], "SET TTL")? else {
             return Ok(None);
@@ -553,6 +598,7 @@ pub(super) fn decode_set_header(
         Some(namespace_id),
         Some(item_id_start),
         1,
+        [item_id_length, 0],
         set_options,
         has_ttl,
     )))
@@ -599,6 +645,7 @@ pub(super) fn decode_namespace_open_header(
         None,
         None,
         0,
+        [0; 2],
         SetOptions::NONE,
         false,
     )))
@@ -632,6 +679,7 @@ pub(super) fn decode_namespace_update_header(
         Some(namespace_id),
         None,
         0,
+        [0; 2],
         SetOptions::NONE,
         false,
     )))
@@ -672,6 +720,7 @@ pub(super) fn decode_namespace_delete_header(
         Some(namespace_id),
         None,
         0,
+        [0; 2],
         SetOptions::NONE,
         false,
     )))
