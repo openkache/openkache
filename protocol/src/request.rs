@@ -56,7 +56,11 @@ pub enum RequestFrameStep {
 /// API-owned request metadata used only to delimit one protocol frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RequestFrameLayout {
-    /// Ordered byte-consumption steps for this operation.
+    /// Ordered byte-consumption steps after the opcode.
+    ///
+    /// The opcode is always consumed by the shared parser and MUST NOT be
+    /// repeated as a `Fixed` step. Conditional selector offsets are absolute
+    /// offsets in the complete frame, including the opcode.
     pub steps: &'static [RequestFrameStep],
 }
 
@@ -94,9 +98,9 @@ impl RequestFrameHeader {
 
 /// A complete request viewed as an opaque operation call.
 ///
-    /// The parser owns only frame delimiting. An API client or server adapter
-    /// may inspect [`body`](Self::body) after it has selected the operation's
-    /// modeled request shape.
+/// The parser owns only frame delimiting. An API client or server adapter
+/// may inspect [`body`](Self::body) after it has selected the operation's
+/// modeled request shape.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OpaqueRequestFrame<'a> {
     opcode: Opcode,
@@ -166,11 +170,12 @@ pub fn decode_request_frame_header(
     prefix: &[u8],
     layout: RequestFrameLayout,
 ) -> Result<Option<RequestFrameHeader>> {
-    let Some(&opcode_byte) = prefix.first() else {
+    if prefix.len() < OPCODE_BYTES {
         return Ok(None);
-    };
+    }
+    let opcode_byte = prefix[0];
     let opcode = Opcode::try_from(opcode_byte)?;
-    let mut cursor: usize = 0;
+    let mut cursor: usize = OPCODE_BYTES;
     let mut value_len = 0;
     for (step_index, step) in layout.steps.iter().enumerate() {
         match *step {
@@ -199,8 +204,15 @@ pub fn decode_request_frame_header(
                 }
             }
             RequestFrameStep::ValueLength => {
-                let Some((length, encoded_len)) =
-                    crate::decode_varuint(&prefix[cursor..], "request value length")?
+                if step_index + 1 != layout.steps.len() {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "value-length frame step must be last",
+                    ));
+                }
+                let Some((length, encoded_len)) = crate::decode_varuint(
+                    prefix.get(cursor..).unwrap_or_default(),
+                    "request value length",
+                )?
                 else {
                     return Ok(None);
                 };
@@ -220,8 +232,10 @@ pub fn decode_request_frame_header(
                     return Ok(None);
                 };
                 if selector & mask == expected {
-                    let Some((_, encoded_len)) =
-                        crate::decode_varuint(&prefix[cursor..], "request conditional integer")?
+                    let Some((_, encoded_len)) = crate::decode_varuint(
+                        prefix.get(cursor..).unwrap_or_default(),
+                        "request conditional integer",
+                    )?
                     else {
                         return Ok(None);
                     };

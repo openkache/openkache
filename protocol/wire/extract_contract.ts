@@ -158,6 +158,16 @@ function wire_v1_contract(value: unknown): Wire_V1_Contract {
     max_varuint_bytes: integer_member(contract, "maxVaruintBytes", "wireContract.v1", 1),
   } satisfies Wire_V1_Contract
   if (v1.alpn.length === 0) throw new Error("wire v1 ALPN must not be empty")
+  if (
+    v1.opcode_bytes !== 1 ||
+    v1.status_bytes !== 1 ||
+    v1.request_fixed_bytes !== 1 ||
+    v1.response_fixed_bytes !== 1
+  ) {
+    throw new Error(
+      "wire v1 currently supports exactly one opcode/status/fixed framing byte",
+    )
+  }
   if (v1.min_varuint_bytes > v1.max_varuint_bytes) {
     throw new Error("wire v1 minimum varuint width exceeds its maximum")
   }
