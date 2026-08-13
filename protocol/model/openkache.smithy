@@ -2,6 +2,14 @@ $version: "2"
 
 namespace openkache.protocol
 
+/// Marks a Smithy Long member whose domain is the complete unsigned 64-bit range.
+///
+/// Smithy's built-in Long is signed, while OpenKache uses fixed-width unsigned
+/// integers for namespace identities, revisions, and TTLs. Client generators
+/// map this trait to each language's unsigned 64-bit type.
+@trait(selector: "member")
+structure unsignedLong {}
+
 /// Values that are visible on the client/server wire.
 @trait(selector: "service")
 structure wireContract {
@@ -37,122 +45,11 @@ structure WireV1 {
     @required
     minVaruintBytes: Integer
 
-    @required
-    namespaceIdBytes: Integer
-
-    @required
-    namespaceRevisionBytes: Integer
-
-    @required
-    namespaceNameLengthBytes: Integer
-
-    @required
-    namespaceNameMaxBytes: Integer
-
-    @required
-    setFlagsBytes: Integer
-
-    @required
-    setConditionMask: Byte
-
-    @required
-    setConditionAnyBits: Byte
-
-    @required
-    setIfAbsentFlag: Byte
-
-    @required
-    setIfPresentFlag: Byte
-
-    @required
-    setConditionReservedBits: Byte
-
-    @required
-    setExpirationMask: Byte
-
-    @required
-    setInheritExpirationBits: Byte
-
-    @required
-    setNoExpiryBits: Byte
-
-    @required
-    setTtlFlag: Byte
-
-    @required
-    setExpirationReservedBits: Byte
-
-    @required
-    setEvictionMask: Byte
-
-    @required
-    setInheritEvictionBits: Byte
-
-    @required
-    setEvictableBits: Byte
-
-    @required
-    setEvictionProtectedBits: Byte
-
-    @required
-    setEvictionReservedBits: Byte
-
-    @required
-    setReservedMask: Integer
-
-    @required
-    openFlagsBytes: Integer
-
-    @required
-    openCreateIfMissingFlag: Byte
-
-    @required
-    openReservedMask: Integer
-
-    @required
-    deleteFlagsBytes: Integer
-
-    @required
-    deleteIfEmptyBits: Byte
-
-    @required
-    deleteModeMask: Byte
-
-    @required
-    deleteReservedMask: Integer
-
-    @required
-    policyFlagsBytes: Integer
-
-    @required
-    policyDefaultExpirationMask: Byte
-
-    @required
-    policyNoExpiryBits: Byte
-
-    @required
-    policyFixedTtlBits: Byte
-
-    @required
-    policyDefaultExpirationReservedBits: Byte
-
-    @required
-    policyExpirationOverrideFlag: Byte
-
-    @required
-    policyEvictionProtectedFlag: Byte
-
-    @required
-    policyEvictionOverrideFlag: Byte
-
-    @required
-    policyReservedMask: Integer
-
-    @required
-    errorStatusMinimum: Integer
 }
 
-/// Numeric operation assignments used by protocol v1 frames.
+/// Numeric operation assignments reserved by the evolving protocol-v1 draft
+/// profile. The transport generator emits only these opaque identifiers; API
+/// modules still own every request/response codec and registration.
 @trait(selector: "enum > member")
 structure wireOpcode {
     @required
@@ -177,44 +74,6 @@ structure wireStatus {
         responseFixedBytes: 1,
         maxVaruintBytes: 9,
         minVaruintBytes: 1,
-        namespaceIdBytes: 8,
-        namespaceRevisionBytes: 8,
-        namespaceNameLengthBytes: 1,
-        namespaceNameMaxBytes: 255,
-        setFlagsBytes: 1,
-        setConditionMask: 3,
-        setConditionAnyBits: 0,
-        setIfAbsentFlag: 1,
-        setIfPresentFlag: 2,
-        setConditionReservedBits: 3,
-        setExpirationMask: 12,
-        setInheritExpirationBits: 0,
-        setNoExpiryBits: 4,
-        setTtlFlag: 8,
-        setExpirationReservedBits: 12,
-        setEvictionMask: 48,
-        setInheritEvictionBits: 0,
-        setEvictableBits: 16,
-        setEvictionProtectedBits: 32,
-        setEvictionReservedBits: 48,
-        setReservedMask: 192,
-        openFlagsBytes: 1,
-        openCreateIfMissingFlag: 1,
-        openReservedMask: 254,
-        deleteFlagsBytes: 1,
-        deleteIfEmptyBits: 0,
-        deleteModeMask: 3,
-        deleteReservedMask: 252,
-        policyFlagsBytes: 1,
-        policyDefaultExpirationMask: 3,
-        policyNoExpiryBits: 0,
-        policyFixedTtlBits: 1,
-        policyDefaultExpirationReservedBits: 3,
-        policyExpirationOverrideFlag: 4,
-        policyEvictionProtectedFlag: 8,
-        policyEvictionOverrideFlag: 16,
-        policyReservedMask: 224,
-        errorStatusMinimum: 128
     }
 )
 service OpenKache {
@@ -248,6 +107,285 @@ enum Opcode {
 
     @wireOpcode(value: 9)
     NAMESPACE_DELETE = "namespace_delete"
+
+    @wireOpcode(value: 10)
+    EXPERIMENTAL_ECHO = "experimental_echo"
+
+    @wireOpcode(value: 11)
+    EXPERIMENTAL_REVERSE = "experimental_reverse"
+
+    @wireOpcode(value: 12)
+    SQUARE_ARRAY = "square_array"
+
+    @wireOpcode(value: 13)
+    GET2 = "get2"
+
+    @wireOpcode(value: 14)
+    EXPERIMENTAL_ACKNOWLEDGE = "experimental_acknowledge"
+
+    @wireOpcode(value: 15)
+    EXPERIMENTAL_DENSE = "experimental_dense"
+
+    @wireOpcode(value: 32)
+    EXPERIMENTAL_STORAGE_READ = "experimental_storage_read"
+
+    @wireOpcode(value: 33)
+    EXPERIMENTAL_PAGE = "experimental_page"
+
+    @wireOpcode(value: 34)
+    EXPERIMENTAL_MULTI_RESOURCE_MUTATION = "experimental_multi_resource_mutation"
+
+}
+
+/// API shape declarations. The transport generator intentionally ignores these
+/// operations; each API module owns its request/response codecs and registration.
+operation Ping {
+    input: PingInput
+    output: PingOutput
+}
+
+operation Get {
+    input: GetInput
+    output: GetOutput
+}
+
+operation Set {
+    input: SetInput
+    output: SetOutput
+}
+
+operation Delete {
+    input: DeleteInput
+    output: DeleteOutput
+}
+
+operation Stats {
+    input: StatsInput
+    output: StatsOutput
+}
+
+operation Sync {
+    input: SyncInput
+    output: SyncOutput
+}
+
+operation NamespaceOpen {
+    input: NamespaceOpenInput
+    output: NamespaceOpenOutput
+}
+
+operation NamespaceUpdatePolicy {
+    input: NamespaceUpdatePolicyInput
+    output: NamespaceUpdatePolicyOutput
+}
+
+operation NamespaceDelete {
+    input: NamespaceDeleteInput
+    output: NamespaceDeleteOutput
+}
+
+
+
+
+
+
+
+
+
+
+blob ItemId
+blob Value
+blob PongPayload
+
+structure PingInput {}
+structure PingOutput {
+    @required
+    payload: PongPayload
+}
+
+structure GetInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    itemId: ItemId
+}
+
+structure GetOutput {
+    value: Value
+}
+
+structure SetInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    itemId: ItemId
+
+    @required
+    value: Value
+    condition: SetCondition
+    expirationMode: ExpirationMode
+    evictionMode: EvictionMode
+
+    @unsignedLong
+    ttlMilliseconds: Long
+}
+
+structure SetOutput {
+    @required
+    outcome: SetOutcome
+}
+
+structure DeleteInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    itemId: ItemId
+}
+
+structure DeleteOutput {
+    @required
+    deleted: Boolean
+}
+
+structure StatsOutput {
+    @required
+    json: String
+}
+
+structure StatsInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+}
+
+structure SyncInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+}
+
+structure SyncOutput {}
+
+structure NamespaceOpenInput {
+    @required
+    name: String
+
+    @required
+    createIfMissing: Boolean
+    policy: NamespacePolicy
+}
+
+structure NamespaceOpenOutput {
+    @required
+    descriptor: NamespaceDescriptor
+
+    @required
+    created: Boolean
+}
+
+structure NamespaceUpdatePolicyInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    expectedRevision: Long
+
+    @required
+    policy: NamespacePolicy
+}
+
+structure NamespaceUpdatePolicyOutput {
+    @required
+    descriptor: NamespaceDescriptor
+}
+
+structure NamespaceDeleteInput {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    expectedRevision: Long
+}
+
+structure NamespaceDeleteOutput {}
+
+structure NamespaceDescriptor {
+    @required
+    @unsignedLong
+    namespaceId: Long
+
+    @required
+    @unsignedLong
+    revision: Long
+
+    @required
+    policy: NamespacePolicy
+}
+
+structure NamespacePolicy {
+    @required
+    defaultExpiration: ExpirationDefault
+
+    @unsignedLong
+    defaultTtlMilliseconds: Long
+
+    @required
+    expirationOverride: OverridePolicy
+
+    @required
+    defaultEviction: EvictionDefault
+
+    @required
+    evictionOverride: OverridePolicy
+}
+
+enum SetCondition {
+    ANY = "any"
+    IF_ABSENT = "if_absent"
+    IF_PRESENT = "if_present"
+}
+
+enum ExpirationMode {
+    INHERIT = "inherit"
+    NO_EXPIRY = "no_expiry"
+    EXPLICIT_TTL = "explicit_ttl"
+}
+
+enum EvictionMode {
+    INHERIT = "inherit"
+    EVICTABLE = "evictable"
+    EVICTION_PROTECTED = "eviction_protected"
+}
+
+enum OverridePolicy {
+    ALLOWED = "allowed"
+    DISALLOWED = "disallowed"
+}
+
+enum ExpirationDefault {
+    NO_EXPIRY = "no_expiry"
+    FIXED_TTL = "fixed_ttl"
+}
+
+enum EvictionDefault {
+    EVICTABLE = "evictable"
+    EVICTION_PROTECTED = "eviction_protected"
+}
+
+enum SetOutcome {
+    CREATED = "created"
+    REPLACED = "replaced"
+    NOT_STORED = "not_stored"
 }
 
 enum Status {
@@ -268,6 +406,9 @@ enum Status {
 
     @wireStatus(value: 5)
     NOT_STORED = "not_stored"
+
+    @wireStatus(value: 6)
+    ACCEPTED = "accepted"
 
     @wireStatus(value: 128)
     INVALID_REQUEST = "invalid_request"

@@ -1,4 +1,8 @@
-//! Binary request and response framing shared by OpenKache clients and servers.
+//! Primitive wire values and framing shared by clients and servers.
+//!
+//! Request and response bodies remain outside this crate. API modules choose
+//! their own wire layout and use these operation-neutral framing and value
+//! primitives to implement it.
 
 macro_rules! wire_enum {
     (
@@ -30,41 +34,42 @@ macro_rules! wire_enum {
 
 include!(concat!(env!("OUT_DIR"), "/wire_values.rs"));
 
-const MAX_POLICY_BYTES: usize = POLICY_FLAGS_BYTES + MAX_VARUINT_BYTES;
-const MAX_REQUEST_PREFIX_BYTES: usize = REQUEST_FIXED_BYTES
-    + NAMESPACE_ID_BYTES
-    + SET_FLAGS_BYTES
-    + ITEM_ID_BYTES
-    + MAX_VARUINT_BYTES
-    + MAX_VARUINT_BYTES;
-const MAX_NAMESPACE_OPEN_PREFIX_BYTES: usize =
-    OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES + NAMESPACE_NAME_MAX_BYTES
-        + MAX_POLICY_BYTES;
+/// Generic value-shape codecs shared by server and client adapters.
+pub mod codec;
+/// Generic field-layout helpers shared by API-owned codecs.
+pub mod layout;
+/// Configurable fixed-width optional-value codec.
+pub mod optional_values;
+/// Operation-neutral request frame delimiting.
+pub mod request;
+/// Operation-neutral response framing and owned response buffers.
+pub mod response;
 
-/// Conservative maximum complete request frame size.
-pub const MAX_REQUEST_FRAME_BYTES: usize =
-    if MAX_REQUEST_PREFIX_BYTES + MAX_VALUE_BYTES > MAX_NAMESPACE_OPEN_PREFIX_BYTES {
-        MAX_REQUEST_PREFIX_BYTES + MAX_VALUE_BYTES
-    } else {
-        MAX_NAMESPACE_OPEN_PREFIX_BYTES
-    };
-/// Conservative maximum complete response frame size.
-pub const MAX_RESPONSE_FRAME_BYTES: usize = STATUS_BYTES + MAX_VARUINT_BYTES + MAX_VALUE_BYTES;
+pub use layout::{
+    DenseFields, LayoutValue, encode_dense_fields, encode_field_sequence_segments,
+    encode_optional_value_segments,
+};
+pub use optional_values::{
+    OptionalValueCodec, OptionalValues, OptionalValuesEncoder, decode_optional_values,
+    encode_optional_values, optional_values_encoded_len, optional_values_encoded_len_from_lengths,
+    optional_values_max_encoded_len,
+};
+pub use request::{
+    OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFrameStep,
+    decode_request_frame_header,
+};
+pub use response::{
+    OwnedRange, OwnedResponseFrame, Response, ResponseFrame, ResponseHeader, ResponseParts,
+    ResponseSegment,
+};
 
-impl Status {
-    /// Returns whether this status represents a server-side error.
-    pub const fn is_error(self) -> bool {
-        (self as u8) >= ERROR_STATUS_MINIMUM
-    }
-}
-
-/// The exact fixed-size item identifier carried by the protocol.
+/// The exact fixed-size item identifier carried by the wire protocol.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ItemId([u8; ITEM_ID_BYTES]);
 
 impl ItemId {
-    /// Wraps an exact 32-byte item ID.
+    /// Wraps an exact item ID without interpreting its bytes.
     pub const fn new(bytes: [u8; ITEM_ID_BYTES]) -> Self {
         Self(bytes)
     }
@@ -86,1306 +91,421 @@ impl AsRef<[u8]> for ItemId {
     }
 }
 
-/// Condition applied atomically by a `SET` request.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum SetCondition {
-    /// Store regardless of whether the item ID exists.
-    #[default]
-    Any,
-    /// Store only when the item ID does not exist.
-    IfAbsent,
-    /// Store only when the item ID already exists.
-    IfPresent,
-}
-
-/// Item-level expiration selection.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ExpirationMode {
-    /// Resolve the namespace's current default at the SET linearization point.
-    #[default]
-    Inherit,
-    /// Store without a TTL deadline.
-    NoExpiry,
-    /// Carry a positive `ttl_ms` in the SET request.
-    ExplicitTtl,
-}
-
-/// Item-level capacity-eviction selection.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum EvictionMode {
-    /// Resolve the namespace's current default at the SET linearization point.
-    #[default]
-    Inherit,
-    /// Permit selection by the namespace eviction algorithm.
-    Evictable,
-    /// Do not select this item for capacity eviction.
-    EvictionProtected,
-}
-
-/// Whether a namespace permits an item to override its default.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OverridePolicy {
-    Allowed,
-    Disallowed,
-}
-
-/// Namespace expiration default.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExpirationDefault {
-    NoExpiry,
-    FixedTtl { ttl_ms: u64 },
-}
-
-/// Namespace capacity-eviction default.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum EvictionDefault {
-    Evictable,
-    EvictionProtected,
-}
-
-/// Policy applied to newly written items in one namespace.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NamespacePolicy {
-    pub default_expiration: ExpirationDefault,
-    pub expiration_override: OverridePolicy,
-    pub default_eviction: EvictionDefault,
-    pub eviction_override: OverridePolicy,
-}
-
-impl Default for NamespacePolicy {
-    fn default() -> Self {
-        Self {
-            default_expiration: ExpirationDefault::NoExpiry,
-            expiration_override: OverridePolicy::Allowed,
-            default_eviction: EvictionDefault::Evictable,
-            eviction_override: OverridePolicy::Allowed,
-        }
+/// Encodes an ordered field sequence.
+///
+/// The payload starts with a compact presence mask, followed by canonical
+/// `vu128` lengths and bytes for every present field before the final present
+/// field. The final present field consumes the remaining bytes. The caller
+/// supplies field order, cardinality, requiredness, and codecs; this primitive
+/// only carries bounded opaque field bytes.
+pub fn encode_field_sequence(values: &[Option<&[u8]>]) -> Result<Vec<u8>> {
+    let mask_bytes = values.len().saturating_add(7) / 8;
+    if mask_bytes > MAX_VALUE_BYTES {
+        return Err(ProtocolError::ValueTooLarge {
+            size: mask_bytes,
+            maximum: MAX_VALUE_BYTES,
+        });
     }
+    let capacity = field_sequence_encoded_len(values)?;
+    let mut payload = Vec::with_capacity(capacity);
+    append_field_sequence(values, &mut payload)?;
+    debug_assert_eq!(payload.len(), capacity);
+    Ok(payload)
 }
 
-/// Namespace identity and policy returned by namespace-management operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NamespaceDescriptor {
-    pub namespace_id: u64,
-    pub revision: u64,
-    pub policy: NamespacePolicy,
-}
-
-impl NamespaceDescriptor {
-    /// Encodes the descriptor payload returned by namespace-management requests.
-    pub fn encode(self) -> Result<Vec<u8>> {
-        if self.namespace_id == 0 {
-            return Err(ProtocolError::InvalidNamespaceId);
-        }
-        if self.revision == 0 {
-            return Err(ProtocolError::InvalidRevision);
-        }
-        let mut payload =
-            Vec::with_capacity(NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES + MAX_POLICY_BYTES);
-        payload.extend_from_slice(&self.namespace_id.to_be_bytes());
-        payload.extend_from_slice(&self.revision.to_be_bytes());
-        payload.extend_from_slice(&self.policy.encode()?);
-        Ok(payload)
-    }
-
-    /// Decodes one complete namespace descriptor payload.
-    pub fn decode(input: &[u8]) -> Result<Self> {
-        let fixed = NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
-        if input.len() < fixed {
-            return Err(ProtocolError::FrameTooShort {
-                expected: fixed,
-                actual: input.len(),
-            });
-        }
-        let namespace_id = read_u64_be(input)?;
-        if namespace_id == 0 {
-            return Err(ProtocolError::InvalidNamespaceId);
-        }
-        let revision = read_u64_be(&input[NAMESPACE_ID_BYTES..])?;
-        if revision == 0 {
-            return Err(ProtocolError::InvalidRevision);
-        }
-        let (policy, policy_len) = decode_namespace_policy(&input[fixed..])?
-            .ok_or(ProtocolError::MissingNamespacePolicy)?;
-        if fixed + policy_len != input.len() {
-            return Err(ProtocolError::FrameLength {
-                expected: fixed + policy_len,
-                actual: input.len(),
-            });
-        }
-        Ok(Self {
-            namespace_id,
-            revision,
-            policy,
-        })
-    }
-}
-
-/// Optional behavior for one `SET` request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SetOptions {
-    /// Atomic existence condition.
-    pub condition: SetCondition,
-    /// Item-level expiration selection.
-    pub expiration_mode: ExpirationMode,
-    /// Relative lifetime in milliseconds when `expiration_mode` is `ExplicitTtl`.
-    pub ttl_ms: Option<u64>,
-    /// Item-level eviction selection.
-    pub eviction_mode: EvictionMode,
-}
-
-impl Default for SetOptions {
-    fn default() -> Self {
-        Self::NONE
-    }
-}
-
-impl SetOptions {
-    /// Creates unconditional `SET` behavior inheriting namespace defaults.
-    pub const NONE: Self = Self {
-        condition: SetCondition::Any,
-        expiration_mode: ExpirationMode::Inherit,
-        ttl_ms: None,
-        eviction_mode: EvictionMode::Inherit,
-    };
-
-    /// Creates options from an existence condition and optional explicit TTL.
-    pub const fn new(condition: SetCondition, ttl_ms: Option<u64>) -> Self {
-        Self {
-            condition,
-            expiration_mode: match ttl_ms {
-                Some(_) => ExpirationMode::ExplicitTtl,
-                None => ExpirationMode::Inherit,
-            },
-            ttl_ms,
-            eviction_mode: EvictionMode::Inherit,
-        }
-    }
-
-    /// Creates options with all item-level policy selections.
-    pub const fn with_policies(
-        condition: SetCondition,
-        expiration_mode: ExpirationMode,
-        ttl_ms: Option<u64>,
-        eviction_mode: EvictionMode,
-    ) -> Self {
-        Self {
-            condition,
-            expiration_mode,
-            ttl_ms,
-            eviction_mode,
-        }
-    }
-
-    fn flags(self) -> Result<u8> {
-        if self.ttl_ms == Some(0) {
-            return Err(ProtocolError::InvalidSetTtl);
-        }
-        let condition = match self.condition {
-            SetCondition::Any => SET_CONDITION_ANY_BITS,
-            SetCondition::IfAbsent => SET_IF_ABSENT_BITS,
-            SetCondition::IfPresent => SET_IF_PRESENT_BITS,
+/// Appends one ordered field sequence to an existing output buffer.
+///
+/// Keeping the append operation private prevents callers from accidentally
+/// treating a nested sequence as a standalone frame while allowing the common
+/// encoder and grouped-field encoder to reuse one exact-size output buffer.
+fn append_field_sequence(values: &[Option<&[u8]>], payload: &mut Vec<u8>) -> Result<()> {
+    let mask_bytes = values.len().saturating_add(7) / 8;
+    let mask_start = payload.len();
+    payload.resize(
+        mask_start
+            .checked_add(mask_bytes)
+            .ok_or(ProtocolError::FrameLengthOverflow)?,
+        0,
+    );
+    let last_present = values.iter().rposition(Option::is_some);
+    for (index, value) in values.iter().enumerate() {
+        let Some(value) = value else {
+            continue;
         };
-        let expiration = match self.expiration_mode {
-            ExpirationMode::Inherit => {
-                if self.ttl_ms.is_some() {
-                    return Err(ProtocolError::UnexpectedSetTtl);
-                }
-                SET_INHERIT_EXPIRATION_BITS
-            }
-            ExpirationMode::NoExpiry => {
-                if self.ttl_ms.is_some() {
-                    return Err(ProtocolError::UnexpectedSetTtl);
-                }
-                SET_NO_EXPIRY_BITS
-            }
-            ExpirationMode::ExplicitTtl => {
-                if self.ttl_ms.is_none() {
-                    return Err(ProtocolError::MissingSetTtl);
-                }
-                SET_EXPLICIT_TTL_BITS
-            }
-        };
-        let eviction = match self.eviction_mode {
-            EvictionMode::Inherit => SET_INHERIT_EVICTION_BITS,
-            EvictionMode::Evictable => SET_EVICTABLE_BITS,
-            EvictionMode::EvictionProtected => SET_EVICTION_PROTECTED_BITS,
-        };
-        Ok(condition | expiration | eviction)
+        validate_value_length(value.len())?;
+        payload[mask_start + index / 8] |= 1 << (index % 8);
+        let (encoded, encoded_len) = encode_varuint(
+            u64::try_from(value.len()).map_err(|_| ProtocolError::FrameLengthOverflow)?,
+        );
+        if Some(index) != last_present {
+            payload.extend_from_slice(&encoded[..encoded_len]);
+        }
+        payload.extend_from_slice(value);
     }
+    validate_value_length(payload.len())?;
+    Ok(())
+}
 
-    /// Decodes the wire SET flags and optional TTL into validated options.
-    ///
-    /// `ttl_ms` is present only when the wire expiration mode carries a TTL.
-    /// The method validates reserved bits, mutually exclusive conditions, and
-    /// the relationship between the expiration mode and TTL field.
-    ///
-    /// # Arguments
-    ///
-    /// * `flags` - The complete one-octet SET flags field.
-    /// * `ttl_ms` - The optional TTL carried after the item ID.
-    ///
-    /// # Returns
-    ///
-    /// The validated SET options.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error when flags are reserved or contradictory, or
-    /// when the TTL does not match the selected expiration mode.
-    pub fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
-        if flags & SET_RESERVED_MASK != 0 {
-            return Err(ProtocolError::UnknownRequestFlags(
-                flags & SET_RESERVED_MASK,
+/// Returns the encoded length of a generic presence-mask field sequence
+/// without allocating the payload.
+///
+/// The returned value is the exact body size for the supplied fields. Every
+/// present field before the final present field pays a canonical `vu128`
+/// length prefix; the final present field consumes the remainder. It is
+/// deliberately independent of operation names and semantic roles so API
+/// modules can use it as a shared size-cost primitive.
+pub fn field_sequence_encoded_len(values: &[Option<&[u8]>]) -> Result<usize> {
+    field_sequence_encoded_len_iter(values.iter().map(|value| value.map(<[u8]>::len)))
+}
+
+/// Computes a field-sequence payload size from lengths alone.
+///
+/// This is the allocation-free cost primitive used by API size planners.
+/// `None` is a missing field; `Some(0)` is a present-empty field.
+pub fn field_sequence_encoded_len_from_lengths(lengths: &[Option<usize>]) -> Result<usize> {
+    field_sequence_encoded_len_iter(lengths.iter().copied())
+}
+
+fn field_sequence_encoded_len_iter(lengths: impl Iterator<Item = Option<usize>>) -> Result<usize> {
+    let mut field_count = 0usize;
+    let mut encoded_len = 0usize;
+    let mut pending_length = None;
+    for length in lengths {
+        field_count = field_count
+            .checked_add(1)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+        let Some(length) = length else {
+            continue;
+        };
+        validate_value_length(length)?;
+        if let Some(previous_length) = pending_length.replace(length) {
+            encoded_len = encoded_len
+                .checked_add(
+                    encode_varuint(
+                        u64::try_from(previous_length)
+                            .map_err(|_| ProtocolError::FrameLengthOverflow)?,
+                    )
+                    .1,
+                )
+                .and_then(|total| total.checked_add(previous_length))
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+        }
+    }
+    if let Some(last_length) = pending_length {
+        encoded_len = encoded_len
+            .checked_add(last_length)
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+    }
+    let mask_bytes = field_count.saturating_add(7) / 8;
+    if mask_bytes > MAX_VALUE_BYTES {
+        return Err(ProtocolError::ValueTooLarge {
+            size: mask_bytes,
+            maximum: MAX_VALUE_BYTES,
+        });
+    }
+    let total = mask_bytes
+        .checked_add(encoded_len)
+        .ok_or(ProtocolError::FrameLengthOverflow)?;
+    validate_value_length(total)?;
+    Ok(total)
+}
+
+/// A zero-copy view over an ordered field sequence.
+///
+/// The cursor validates the presence mask and every present length/entry
+/// boundary once, then returns borrowed field slices without allocating one
+/// buffer per field. Missing fields have a cleared mask bit; present-empty
+/// fields have a canonical zero length and return `Some(&[])`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FieldSequence<'a, 'b> {
+    payload: &'a [u8],
+    offsets: &'b [(usize, usize)],
+    field_count: usize,
+}
+
+impl<'a, 'b> FieldSequence<'a, 'b> {
+    fn validate_entries(
+        payload: &[u8],
+        field_count: usize,
+        required: Option<&[bool]>,
+        mut offsets: Option<&mut [(usize, usize)]>,
+    ) -> Result<()> {
+        if let Some(required) = required {
+            if required.len() != field_count {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "requiredness does not match the modeled field count",
+                ));
+            }
+        }
+        if offsets
+            .as_ref()
+            .is_some_and(|offsets| offsets.len() < field_count)
+        {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "field offset storage is smaller than the modeled field count",
             ));
         }
-        let condition = match flags & SET_CONDITION_MASK {
-            SET_CONDITION_ANY_BITS => SetCondition::Any,
-            SET_IF_ABSENT_BITS => SetCondition::IfAbsent,
-            SET_IF_PRESENT_BITS => SetCondition::IfPresent,
-            _ => return Err(ProtocolError::ConflictingSetConditions),
-        };
-        let expiration_mode = match flags & SET_EXPIRATION_MASK {
-            SET_INHERIT_EXPIRATION_BITS => {
-                if ttl_ms.is_some() {
-                    return Err(ProtocolError::UnexpectedSetTtl);
-                }
-                ExpirationMode::Inherit
-            }
-            SET_NO_EXPIRY_BITS => {
-                if ttl_ms.is_some() {
-                    return Err(ProtocolError::UnexpectedSetTtl);
-                }
-                ExpirationMode::NoExpiry
-            }
-            SET_EXPLICIT_TTL_BITS => {
-                let ttl_ms = ttl_ms.ok_or(ProtocolError::MissingSetTtl)?;
-                if ttl_ms == 0 {
-                    return Err(ProtocolError::InvalidSetTtl);
-                }
-                ExpirationMode::ExplicitTtl
-            }
-            _ => {
-                return Err(ProtocolError::InvalidSetOptions {
-                    opcode: Opcode::Set,
-                });
-            }
-        };
-        if expiration_mode == ExpirationMode::ExplicitTtl && ttl_ms == Some(0) {
-            return Err(ProtocolError::InvalidSetTtl);
+        let mask_bytes = field_count.saturating_add(7) / 8;
+        if payload.len() < mask_bytes {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "field sequence is missing its presence mask",
+            ));
         }
-        let eviction_mode = match flags & SET_EVICTION_MASK {
-            SET_INHERIT_EVICTION_BITS => EvictionMode::Inherit,
-            SET_EVICTABLE_BITS => EvictionMode::Evictable,
-            SET_EVICTION_PROTECTED_BITS => EvictionMode::EvictionProtected,
-            _ => {
-                return Err(ProtocolError::InvalidSetOptions {
-                    opcode: Opcode::Set,
-                });
+        validate_value_length(payload.len())?;
+        if mask_bytes > 0 && field_count % 8 != 0 {
+            let unused = payload[mask_bytes - 1] & !((1 << (field_count % 8)) - 1);
+            if unused != 0 {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "field sequence presence mask has unused bits set",
+                ));
             }
-        };
-        Ok(Self {
-            condition,
-            expiration_mode,
-            ttl_ms,
-            eviction_mode,
-        })
-    }
-}
-
-impl NamespacePolicy {
-    /// Encodes the policy bytes used by namespace-management requests and responses.
-    pub fn encode(self) -> Result<Vec<u8>> {
-        let mut output = Vec::with_capacity(MAX_POLICY_BYTES);
-        let mut flags = match self.default_expiration {
-            ExpirationDefault::NoExpiry => POLICY_NO_EXPIRY,
-            ExpirationDefault::FixedTtl { ttl_ms } => {
-                if ttl_ms == 0 {
-                    return Err(ProtocolError::InvalidNamespacePolicy(
-                        "fixed namespace TTL must be positive",
+        }
+        let last_present = (0..field_count)
+            .rev()
+            .find(|&index| payload[index / 8] & (1 << (index % 8)) != 0);
+        let mut cursor = mask_bytes;
+        for index in 0..field_count {
+            let present = payload[index / 8] & (1 << (index % 8)) != 0;
+            if !present {
+                if required.is_some_and(|required| required[index]) {
+                    return Err(ProtocolError::InvalidFieldSequence(
+                        "required field is missing from the field sequence",
                     ));
                 }
-                POLICY_FIXED_TTL
+                if let Some(offsets) = offsets.as_deref_mut() {
+                    offsets[index] = (usize::MAX, usize::MAX);
+                }
+                continue;
             }
-        };
-        if self.expiration_override == OverridePolicy::Allowed {
-            flags |= POLICY_EXPIRATION_OVERRIDE;
+            if Some(index) == last_present {
+                let end = payload.len();
+                let length = end
+                    .checked_sub(cursor)
+                    .ok_or(ProtocolError::FrameLengthOverflow)?;
+                validate_value_length(length)?;
+                if let Some(offsets) = offsets.as_deref_mut() {
+                    offsets[index] = (cursor, end);
+                }
+                cursor = end;
+                continue;
+            }
+            let Some((length, encoded_len)) = decode_varuint(
+                payload
+                    .get(cursor..)
+                    .ok_or(ProtocolError::InvalidFieldSequence(
+                        "field sequence entry is truncated",
+                    ))?,
+                "field sequence length",
+            )?
+            else {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "field sequence entry is missing its length",
+                ));
+            };
+            let length = usize::try_from(length).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+            cursor = cursor
+                .checked_add(encoded_len)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            validate_value_length(length)?;
+            let end = cursor
+                .checked_add(length)
+                .ok_or(ProtocolError::FrameLengthOverflow)?;
+            if payload.get(cursor..end).is_none() {
+                return Err(ProtocolError::InvalidFieldSequence(
+                    "field sequence entry is truncated",
+                ));
+            }
+            if let Some(offsets) = offsets.as_deref_mut() {
+                offsets[index] = (cursor, end);
+            }
+            cursor = end;
         }
-        if self.default_eviction == EvictionDefault::EvictionProtected {
-            flags |= POLICY_EVICTION_PROTECTED;
-        }
-        if self.eviction_override == OverridePolicy::Allowed {
-            flags |= POLICY_EVICTION_OVERRIDE;
-        }
-        output.push(flags);
-        if let ExpirationDefault::FixedTtl { ttl_ms } = self.default_expiration {
-            let (encoded, length) = encode_varuint(ttl_ms);
-            output.extend_from_slice(&encoded[..length]);
-        }
-        Ok(output)
-    }
-
-    /// Decodes one complete policy from the beginning of `input`.
-    pub fn decode(input: &[u8]) -> Result<Option<(Self, usize)>> {
-        decode_namespace_policy(input)
-    }
-
-    /// Decodes the wire policy flags and optional default TTL.
-    ///
-    /// A TTL is required for `FixedTtl` and forbidden for `NoExpiry`.
-    ///
-    /// # Arguments
-    ///
-    /// * `flags` - The complete one-octet namespace policy flags field.
-    /// * `ttl_ms` - The optional namespace default TTL.
-    ///
-    /// # Returns
-    ///
-    /// The validated namespace policy.
-    ///
-    /// # Errors
-    ///
-    /// Returns a protocol error when flags are reserved or the TTL does not
-    /// match the selected default-expiration mode.
-    pub fn from_wire_parts(flags: u8, ttl_ms: Option<u64>) -> Result<Self> {
-        decode_namespace_policy_parts(flags, ttl_ms)
-    }
-}
-
-/// A validated variable-length request header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RequestHeader {
-    opcode: Opcode,
-    encoded_len: usize,
-    value_len: usize,
-    namespace_id: Option<u64>,
-    item_id_start: Option<usize>,
-    set_options: SetOptions,
-    has_ttl: bool,
-}
-
-impl RequestHeader {
-    /// Returns the decoded operation.
-    pub const fn opcode(self) -> Opcode {
-        self.opcode
-    }
-
-    /// Returns the number of encoded bytes before a SET value.
-    pub const fn encoded_len(self) -> usize {
-        self.encoded_len
-    }
-
-    /// Returns the fixed item ID length for operations carrying an item ID.
-    pub const fn item_id_len(self) -> usize {
-        if self.item_id_start.is_some() {
-            ITEM_ID_BYTES
-        } else {
-            0
-        }
-    }
-
-    /// Returns the opaque SET value length, or zero for other operations.
-    pub const fn value_len(self) -> usize {
-        self.value_len
-    }
-
-    /// Returns the namespace ID carried by this request, when applicable.
-    pub const fn namespace_id(self) -> Option<u64> {
-        self.namespace_id
-    }
-
-    /// Returns whether a TTL varuint follows the SET item ID.
-    pub const fn has_ttl(self) -> bool {
-        self.has_ttl
-    }
-
-    /// Reports the complete frame length once all metadata is available.
-    pub fn frame_len(self, _prefix: &[u8]) -> Result<Option<usize>> {
-        self.encoded_len
-            .checked_add(self.value_len)
-            .map(Some)
-            .ok_or(ProtocolError::FrameLengthOverflow)
-    }
-}
-
-/// A decoded OpenKache request.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Request {
-    pub opcode: Opcode,
-    pub namespace_id: Option<u64>,
-    pub item_id: Option<ItemId>,
-    pub set_options: SetOptions,
-    pub value: Vec<u8>,
-    pub namespace_name: Option<Vec<u8>>,
-    pub namespace_policy: Option<NamespacePolicy>,
-    pub expected_revision: Option<u64>,
-    pub create_if_missing: bool,
-}
-
-impl Request {
-    /// Creates a request for an operation that has no namespace or item fields.
-    pub fn new(opcode: Opcode, item_id: Option<ItemId>, value: Vec<u8>) -> Result<Self> {
-        let request = Self {
-            opcode,
-            namespace_id: None,
-            item_id,
-            set_options: SetOptions::NONE,
-            value,
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: None,
-            create_if_missing: false,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Creates a data-plane request with a namespace ID.
-    pub fn new_scoped(
-        opcode: Opcode,
-        namespace_id: u64,
-        item_id: Option<ItemId>,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        Self::new_scoped_with_options(opcode, namespace_id, item_id, SetOptions::NONE, value)
-    }
-
-    /// Creates a data-plane request with explicit SET options.
-    pub fn new_scoped_with_options(
-        opcode: Opcode,
-        namespace_id: u64,
-        item_id: Option<ItemId>,
-        set_options: SetOptions,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        let request = Self {
-            opcode,
-            namespace_id: Some(namespace_id),
-            item_id,
-            set_options,
-            value,
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: None,
-            create_if_missing: false,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Creates a SET request with explicit options.
-    pub fn new_set(
-        namespace_id: u64,
-        item_id: ItemId,
-        set_options: SetOptions,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        Self::new_scoped_with_options(Opcode::Set, namespace_id, Some(item_id), set_options, value)
-    }
-
-    /// Creates a namespace-open request. An empty name is a valid name.
-    pub fn namespace_open(
-        name: impl AsRef<[u8]>,
-        create_if_missing: bool,
-        policy: Option<NamespacePolicy>,
-    ) -> Result<Self> {
-        let request = Self {
-            opcode: Opcode::NamespaceOpen,
-            namespace_id: None,
-            item_id: None,
-            set_options: SetOptions::NONE,
-            value: Vec::new(),
-            namespace_name: Some(name.as_ref().to_vec()),
-            namespace_policy: policy,
-            expected_revision: None,
-            create_if_missing,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Creates a namespace-policy update request.
-    pub fn namespace_update_policy(
-        namespace_id: u64,
-        expected_revision: u64,
-        policy: NamespacePolicy,
-    ) -> Result<Self> {
-        let request = Self {
-            opcode: Opcode::NamespaceUpdatePolicy,
-            namespace_id: Some(namespace_id),
-            item_id: None,
-            set_options: SetOptions::NONE,
-            value: Vec::new(),
-            namespace_name: None,
-            namespace_policy: Some(policy),
-            expected_revision: Some(expected_revision),
-            create_if_missing: false,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Creates an empty-only namespace-delete request.
-    pub fn namespace_delete(namespace_id: u64, expected_revision: u64) -> Result<Self> {
-        let request = Self {
-            opcode: Opcode::NamespaceDelete,
-            namespace_id: Some(namespace_id),
-            item_id: None,
-            set_options: SetOptions::NONE,
-            value: Vec::new(),
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: Some(expected_revision),
-            create_if_missing: false,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Encodes this request into one complete stream frame.
-    pub fn encode(&self) -> Result<Vec<u8>> {
-        let mut frame = self.encode_prefix()?;
-        frame.extend_from_slice(&self.value);
-        Ok(frame)
-    }
-
-    /// Encodes this request while reusing its value allocation when practical.
-    pub fn into_encoded(mut self) -> Result<Vec<u8>> {
-        let prefix = self.encode_prefix()?;
-        let value_len = self.value.len();
-        self.value.reserve(prefix.len());
-        self.value.resize(prefix.len() + value_len, 0);
-        self.value.copy_within(0..value_len, prefix.len());
-        self.value[..prefix.len()].copy_from_slice(&prefix);
-        Ok(self.value)
-    }
-
-    fn encode_prefix(&self) -> Result<Vec<u8>> {
-        self.validate()?;
-        let mut output = Vec::new();
-        output.push(self.opcode as u8);
-        match self.opcode {
-            Opcode::Ping => {}
-            Opcode::Get | Opcode::Delete | Opcode::Stats | Opcode::Sync => {
-                put_namespace_id(&mut output, self.namespace_id)?;
-                if matches!(self.opcode, Opcode::Get | Opcode::Delete) {
-                    output.extend_from_slice(
-                        self.item_id
-                            .ok_or(ProtocolError::InvalidRequestShape {
-                                opcode: self.opcode,
-                                expected_item_id: ITEM_ID_BYTES,
-                                expected_value: "0",
-                            })?
-                            .as_bytes(),
-                    );
-                }
-            }
-            Opcode::Set => {
-                put_namespace_id(&mut output, self.namespace_id)?;
-                output.push(self.set_options.flags()?);
-                output.extend_from_slice(
-                    self.item_id
-                        .ok_or(ProtocolError::InvalidRequestShape {
-                            opcode: self.opcode,
-                            expected_item_id: ITEM_ID_BYTES,
-                            expected_value: "any",
-                        })?
-                        .as_bytes(),
-                );
-                if let Some(ttl_ms) = self.set_options.ttl_ms {
-                    let (encoded, length) = encode_varuint(ttl_ms);
-                    output.extend_from_slice(&encoded[..length]);
-                }
-                let (encoded, length) = encode_varuint(self.value.len() as u64);
-                output.extend_from_slice(&encoded[..length]);
-            }
-            Opcode::NamespaceOpen => {
-                output.push(if self.create_if_missing {
-                    OPEN_CREATE_IF_MISSING
-                } else {
-                    0
-                });
-                let name =
-                    self.namespace_name
-                        .as_deref()
-                        .ok_or(ProtocolError::InvalidNamespaceName(
-                            "namespace-open name is missing",
-                        ))?;
-                output.push(u8::try_from(name.len()).map_err(|_| {
-                    ProtocolError::InvalidNamespaceName("namespace name exceeds 255 octets")
-                })?);
-                output.extend_from_slice(name);
-                if self.create_if_missing {
-                    output.extend_from_slice(
-                        &self
-                            .namespace_policy
-                            .ok_or(ProtocolError::MissingNamespacePolicy)?
-                            .encode()?,
-                    );
-                }
-            }
-            Opcode::NamespaceUpdatePolicy => {
-                put_namespace_id(&mut output, self.namespace_id)?;
-                put_revision(&mut output, self.expected_revision)?;
-                output.extend_from_slice(
-                    &self
-                        .namespace_policy
-                        .ok_or(ProtocolError::MissingNamespacePolicy)?
-                        .encode()?,
-                );
-            }
-            Opcode::NamespaceDelete => {
-                output.push(DELETE_IF_EMPTY);
-                put_namespace_id(&mut output, self.namespace_id)?;
-                put_revision(&mut output, self.expected_revision)?;
-            }
-        }
-        Ok(output)
-    }
-
-    /// Decodes and validates one complete request frame.
-    pub fn decode(frame: &[u8]) -> Result<Self> {
-        let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: REQUEST_FIXED_BYTES,
-            actual: frame.len(),
-        })?;
-        let expected = header
-            .frame_len(frame)?
-            .ok_or(ProtocolError::FrameTooShort {
-                expected: header.encoded_len,
-                actual: frame.len(),
-            })?;
-        if frame.len() != expected {
-            return Err(ProtocolError::FrameLength {
-                expected,
-                actual: frame.len(),
-            });
-        }
-        let item_id = header.item_id_start.map(|start| {
-            ItemId::new(
-                frame[start..start + ITEM_ID_BYTES]
-                    .try_into()
-                    .expect("validated item ID range"),
-            )
-        });
-        let namespace_name = if header.opcode == Opcode::NamespaceOpen {
-            let name_start = OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES;
-            let name_len_offset = OPCODE_BYTES + OPEN_FLAGS_BYTES;
-            Some(frame[name_start..name_start + usize::from(frame[name_len_offset])].to_vec())
-        } else {
-            None
-        };
-        let (namespace_policy, expected_revision, create_if_missing) = match header.opcode {
-            Opcode::NamespaceOpen => {
-                let flags_offset = OPCODE_BYTES;
-                let name_len_offset = flags_offset + OPEN_FLAGS_BYTES;
-                let name_start = name_len_offset + NAMESPACE_NAME_LENGTH_BYTES;
-                let create = frame[flags_offset] & OPEN_CREATE_IF_MISSING != 0;
-                let policy = if create {
-                    let start = name_start + usize::from(frame[name_len_offset]);
-                    Some(
-                        decode_namespace_policy(&frame[start..])?
-                            .ok_or(ProtocolError::MissingNamespacePolicy)?
-                            .0,
-                    )
-                } else {
-                    None
-                };
-                (policy, None, create)
-            }
-            Opcode::NamespaceUpdatePolicy => {
-                let revision_start = OPCODE_BYTES + NAMESPACE_ID_BYTES;
-                let revision = read_u64_be(&frame[revision_start..])?;
-                let start = revision_start + NAMESPACE_REVISION_BYTES;
-                let policy = Some(
-                    decode_namespace_policy(&frame[start..])?
-                        .ok_or(ProtocolError::MissingNamespacePolicy)?
-                        .0,
-                );
-                (policy, Some(revision), false)
-            }
-            Opcode::NamespaceDelete => (
-                None,
-                Some(read_u64_be(
-                    &frame[OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
-                )?),
-                false,
-            ),
-            _ => (None, None, false),
-        };
-        let ttl_ms = if header.has_ttl {
-            let start = header.item_id_start.expect("SET has an item ID") + ITEM_ID_BYTES;
-            Some(
-                decode_varuint(&frame[start..], "SET TTL")?
-                    .ok_or(ProtocolError::MissingSetTtl)?
-                    .0,
-            )
-        } else {
-            None
-        };
-        let request = Self {
-            opcode: header.opcode,
-            namespace_id: header.namespace_id,
-            item_id,
-            set_options: if header.opcode == Opcode::Set {
-                SetOptions::from_wire_parts(
-                    frame[OPCODE_BYTES + NAMESPACE_ID_BYTES..]
-                        .first()
-                        .copied()
-                        .unwrap(),
-                    ttl_ms,
-                )?
-            } else {
-                SetOptions::NONE
-            },
-            value: frame[header.encoded_len..].to_vec(),
-            namespace_name,
-            namespace_policy,
-            expected_revision,
-            create_if_missing,
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    /// Decodes a request while reusing the frame allocation for its value.
-    pub fn decode_owned(mut frame: Vec<u8>) -> Result<Self> {
-        let header = Self::decode_header(&frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: REQUEST_FIXED_BYTES,
-            actual: frame.len(),
-        })?;
-        let expected = header
-            .frame_len(&frame)?
-            .ok_or(ProtocolError::FrameTooShort {
-                expected: header.encoded_len,
-                actual: frame.len(),
-            })?;
-        if frame.len() != expected {
-            return Err(ProtocolError::FrameLength {
-                expected,
-                actual: frame.len(),
-            });
-        }
-        let mut request = Self::decode(&frame)?;
-        if header.opcode == Opcode::Set {
-            frame.copy_within(header.encoded_len.., 0);
-            frame.truncate(header.value_len);
-            request.value = frame;
-        }
-        Ok(request)
-    }
-
-    /// Decodes a request header when enough metadata bytes are available.
-    pub fn decode_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-        let Some(&opcode_byte) = prefix.first() else {
-            return Ok(None);
-        };
-        let opcode = Opcode::try_from(opcode_byte)?;
-        match opcode {
-            Opcode::Ping => Ok(Some(RequestHeader {
-                opcode,
-                encoded_len: OPCODE_BYTES,
-                value_len: 0,
-                namespace_id: None,
-                item_id_start: None,
-                set_options: SetOptions::NONE,
-                has_ttl: false,
-            })),
-            Opcode::Get | Opcode::Delete => {
-                let required = OPCODE_BYTES + NAMESPACE_ID_BYTES + ITEM_ID_BYTES;
-                if prefix.len() < required {
-                    return Ok(None);
-                }
-                let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
-                Ok(Some(RequestHeader {
-                    opcode,
-                    encoded_len: required,
-                    value_len: 0,
-                    namespace_id: Some(namespace_id),
-                    item_id_start: Some(OPCODE_BYTES + NAMESPACE_ID_BYTES),
-                    set_options: SetOptions::NONE,
-                    has_ttl: false,
-                }))
-            }
-            Opcode::Stats | Opcode::Sync => {
-                let required = OPCODE_BYTES + NAMESPACE_ID_BYTES;
-                if prefix.len() < required {
-                    return Ok(None);
-                }
-                let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
-                Ok(Some(RequestHeader {
-                    opcode,
-                    encoded_len: required,
-                    value_len: 0,
-                    namespace_id: Some(namespace_id),
-                    item_id_start: None,
-                    set_options: SetOptions::NONE,
-                    has_ttl: false,
-                }))
-            }
-            Opcode::Set => decode_set_header(prefix),
-            Opcode::NamespaceOpen => decode_namespace_open_header(prefix),
-            Opcode::NamespaceUpdatePolicy => decode_namespace_update_header(prefix),
-            Opcode::NamespaceDelete => decode_namespace_delete_header(prefix),
-        }
-    }
-
-    /// Reports the complete request frame length once metadata is available.
-    pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
-        Self::decode_header(prefix)?
-            .map(|header| header.frame_len(prefix))
-            .transpose()
-            .map(|value| value.flatten())
-    }
-
-    fn validate(&self) -> Result<()> {
-        validate_value_length(self.value.len())?;
-        match self.opcode {
-            Opcode::Ping => {
-                if self.namespace_id.is_some()
-                    || self.item_id.is_some()
-                    || self.set_options != SetOptions::NONE
-                    || !self.value.is_empty()
-                    || self.namespace_name.is_some()
-                    || self.namespace_policy.is_some()
-                    || self.expected_revision.is_some()
-                    || self.create_if_missing
-                {
-                    return Err(ProtocolError::InvalidRequestShape {
-                        opcode: self.opcode,
-                        expected_item_id: 0,
-                        expected_value: "0",
-                    });
-                }
-            }
-            Opcode::Get | Opcode::Delete => {
-                validate_namespace_id(self.namespace_id)?;
-                if self.item_id.is_none()
-                    || self.set_options != SetOptions::NONE
-                    || !self.value.is_empty()
-                    || self.namespace_name.is_some()
-                    || self.namespace_policy.is_some()
-                    || self.expected_revision.is_some()
-                    || self.create_if_missing
-                {
-                    return Err(ProtocolError::InvalidRequestShape {
-                        opcode: self.opcode,
-                        expected_item_id: ITEM_ID_BYTES,
-                        expected_value: "0",
-                    });
-                }
-            }
-            Opcode::Stats | Opcode::Sync => {
-                validate_namespace_id(self.namespace_id)?;
-                if self.item_id.is_some()
-                    || self.set_options != SetOptions::NONE
-                    || !self.value.is_empty()
-                    || self.namespace_name.is_some()
-                    || self.namespace_policy.is_some()
-                    || self.expected_revision.is_some()
-                    || self.create_if_missing
-                {
-                    return Err(ProtocolError::InvalidRequestShape {
-                        opcode: self.opcode,
-                        expected_item_id: 0,
-                        expected_value: "0",
-                    });
-                }
-            }
-            Opcode::Set => {
-                validate_namespace_id(self.namespace_id)?;
-                if self.item_id.is_none() {
-                    return Err(ProtocolError::InvalidItemIdLength {
-                        opcode: self.opcode,
-                        expected: ITEM_ID_BYTES,
-                        actual: 0,
-                    });
-                }
-                self.set_options.flags()?;
-                if self.namespace_name.is_some()
-                    || self.namespace_policy.is_some()
-                    || self.expected_revision.is_some()
-                    || self.create_if_missing
-                {
-                    return Err(ProtocolError::InvalidSetOptions {
-                        opcode: self.opcode,
-                    });
-                }
-            }
-            Opcode::NamespaceOpen => {
-                let name =
-                    self.namespace_name
-                        .as_deref()
-                        .ok_or(ProtocolError::InvalidNamespaceName(
-                            "namespace name missing",
-                        ))?;
-                validate_namespace_name(name)?;
-                if self.create_if_missing != self.namespace_policy.is_some() {
-                    return Err(if self.create_if_missing {
-                        ProtocolError::MissingNamespacePolicy
-                    } else {
-                        ProtocolError::UnexpectedNamespacePolicy
-                    });
-                }
-                if self.expected_revision.is_some()
-                    || self.namespace_id.is_some()
-                    || self.item_id.is_some()
-                    || self.set_options != SetOptions::NONE
-                    || !self.value.is_empty()
-                {
-                    return Err(ProtocolError::InvalidRequestShape {
-                        opcode: self.opcode,
-                        expected_item_id: 0,
-                        expected_value: "0",
-                    });
-                }
-                if let Some(policy) = self.namespace_policy {
-                    policy.encode()?;
-                }
-            }
-            Opcode::NamespaceUpdatePolicy => {
-                validate_namespace_id(self.namespace_id)?;
-                validate_revision(self.expected_revision)?;
-                self.namespace_policy
-                    .ok_or(ProtocolError::MissingNamespacePolicy)?
-                    .encode()?;
-                if self.item_id.is_some()
-                    || self.set_options != SetOptions::NONE
-                    || !self.value.is_empty()
-                    || self.namespace_name.is_some()
-                    || self.create_if_missing
-                {
-                    return Err(ProtocolError::InvalidRequestShape {
-                        opcode: self.opcode,
-                        expected_item_id: 0,
-                        expected_value: "0",
-                    });
-                }
-            }
-            Opcode::NamespaceDelete => {
-                validate_namespace_id(self.namespace_id)?;
-                validate_revision(self.expected_revision)?;
-                if self.item_id.is_some()
-                    || self.set_options != SetOptions::NONE
-                    || !self.value.is_empty()
-                    || self.namespace_name.is_some()
-                    || self.namespace_policy.is_some()
-                    || self.create_if_missing
-                {
-                    return Err(ProtocolError::InvalidRequestShape {
-                        opcode: self.opcode,
-                        expected_item_id: 0,
-                        expected_value: "0",
-                    });
-                }
-            }
+        if cursor != payload.len() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "field sequence contains trailing bytes",
+            ));
         }
         Ok(())
     }
-}
 
-fn decode_set_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = OPCODE_BYTES + NAMESPACE_ID_BYTES + SET_FLAGS_BYTES + ITEM_ID_BYTES;
-    if prefix.len() < fixed {
-        return Ok(None);
+    /// Validates an ordered field sequence without allocating offset storage.
+    ///
+    /// This is the shape-only counterpart to [`Self::decode`]. It is useful at
+    /// request-construction and frame-validation boundaries that only need to
+    /// reject malformed bytes; a behavior that needs field access can decode
+    /// the same payload once into its own bounded offset storage.
+    pub fn validate(payload: &[u8], field_count: usize) -> Result<()> {
+        Self::validate_entries(payload, field_count, None, None)
     }
-    let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
-    let flags_offset = OPCODE_BYTES + NAMESPACE_ID_BYTES;
-    let flags = prefix[flags_offset];
-    if flags & SET_RESERVED_MASK != 0 {
-        return Err(ProtocolError::UnknownRequestFlags(
-            flags & SET_RESERVED_MASK,
-        ));
+
+    /// Validates an ordered field sequence and caller-supplied requiredness
+    /// without allocating offset storage.
+    pub fn validate_with_required(payload: &[u8], required: &[bool]) -> Result<()> {
+        Self::validate_entries(payload, required.len(), Some(required), None)
     }
-    if flags & SET_CONDITION_MASK == SET_CONDITION_RESERVED_BITS {
-        return Err(ProtocolError::ConflictingSetConditions);
+
+    /// Decodes a field sequence and validates its exact field cardinality.
+    ///
+    /// `offsets` is supplied by the caller so a request handler can keep the
+    /// small index array on its stack while the payload remains borrowed.
+    pub fn decode(
+        payload: &'a [u8],
+        field_count: usize,
+        offsets: &'b mut [(usize, usize)],
+    ) -> Result<Self> {
+        Self::validate_entries(payload, field_count, None, Some(offsets))?;
+        Ok(Self {
+            payload,
+            offsets: &offsets[..field_count],
+            field_count,
+        })
     }
-    let has_ttl = matches!(flags & SET_EXPIRATION_MASK, SET_EXPLICIT_TTL_BITS);
-    if !matches!(
-        flags & SET_EXPIRATION_MASK,
-        SET_INHERIT_EXPIRATION_BITS | SET_NO_EXPIRY_BITS | SET_EXPLICIT_TTL_BITS
-    ) {
-        return Err(ProtocolError::InvalidSetOptions {
-            opcode: Opcode::Set,
-        });
+
+    /// Decodes a field sequence and rejects missing required fields.
+    ///
+    /// Requiredness is supplied by the API rather than inferred from a route.
+    /// Optional fields retain their cleared mask bit
+    /// and remain addressable through [`Self::get`].
+    pub fn decode_with_required(
+        payload: &'a [u8],
+        required: &[bool],
+        offsets: &'b mut [(usize, usize)],
+    ) -> Result<Self> {
+        Self::validate_entries(payload, required.len(), Some(required), Some(offsets))?;
+        Ok(Self {
+            payload,
+            offsets: &offsets[..required.len()],
+            field_count: required.len(),
+        })
     }
-    if !matches!(
-        flags & SET_EVICTION_MASK,
-        SET_INHERIT_EVICTION_BITS | SET_EVICTABLE_BITS | SET_EVICTION_PROTECTED_BITS
-    ) {
-        return Err(ProtocolError::InvalidSetOptions {
-            opcode: Opcode::Set,
-        });
+
+    /// Returns the number of fields represented by this cursor.
+    pub const fn len(self) -> usize {
+        self.field_count
     }
-    let item_id_start = flags_offset + SET_FLAGS_BYTES;
-    let mut cursor = fixed;
-    let ttl_ms = if has_ttl {
-        let Some((ttl, length)) = decode_varuint(&prefix[cursor..], "SET TTL")? else {
-            return Ok(None);
-        };
-        if ttl == 0 {
-            return Err(ProtocolError::InvalidSetTtl);
+
+    /// Returns one borrowed field, or `None` when the modeled field is absent.
+    pub fn get(self, index: usize) -> Option<&'a [u8]> {
+        if index >= self.field_count {
+            return None;
         }
-        cursor += length;
-        Some(ttl)
-    } else {
-        None
-    };
-    let Some((value_len, value_len_bytes)) = decode_varuint(&prefix[cursor..], "SET value length")?
-    else {
-        return Ok(None);
-    };
-    let value_len = usize::try_from(value_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-    validate_value_length(value_len)?;
-    let set_options = SetOptions::from_wire_parts(flags, ttl_ms)?;
-    Ok(Some(RequestHeader {
-        opcode: Opcode::Set,
-        encoded_len: cursor + value_len_bytes,
-        value_len,
-        namespace_id: Some(namespace_id),
-        item_id_start: Some(item_id_start),
-        set_options,
-        has_ttl,
-    }))
-}
-
-fn decode_namespace_open_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = OPCODE_BYTES + OPEN_FLAGS_BYTES + NAMESPACE_NAME_LENGTH_BYTES;
-    if prefix.len() < fixed {
-        return Ok(None);
-    }
-    let flags = prefix[OPCODE_BYTES];
-    if flags & OPEN_RESERVED_MASK != 0 {
-        return Err(ProtocolError::UnknownRequestFlags(
-            flags & OPEN_RESERVED_MASK,
-        ));
-    }
-    let name_len_offset = OPCODE_BYTES + OPEN_FLAGS_BYTES;
-    let name_start = fixed;
-    let name_len = usize::from(prefix[name_len_offset]);
-    let name_end = name_start + name_len;
-    if prefix.len() < name_end {
-        return Ok(None);
-    }
-    validate_namespace_name(&prefix[name_start..name_end])?;
-    let create = flags & OPEN_CREATE_IF_MISSING != 0;
-    let encoded_len = if create {
-        let Some((_, policy_len)) = decode_namespace_policy(&prefix[name_end..])? else {
-            return Ok(None);
-        };
-        name_end + policy_len
-    } else {
-        name_end
-    };
-    Ok(Some(RequestHeader {
-        opcode: Opcode::NamespaceOpen,
-        encoded_len,
-        value_len: 0,
-        namespace_id: None,
-        item_id_start: None,
-        set_options: SetOptions::NONE,
-        has_ttl: false,
-    }))
-}
-
-fn decode_namespace_update_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = OPCODE_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
-    if prefix.len() < fixed {
-        return Ok(None);
-    }
-    let namespace_id = read_namespace_id(&prefix[OPCODE_BYTES..])?;
-    let expected_revision = read_u64_be(&prefix[OPCODE_BYTES + NAMESPACE_ID_BYTES..])?;
-    if expected_revision == 0 {
-        return Err(ProtocolError::InvalidRevision);
-    }
-    let Some((_, policy_len)) = decode_namespace_policy(&prefix[fixed..])? else {
-        return Ok(None);
-    };
-    Ok(Some(RequestHeader {
-        opcode: Opcode::NamespaceUpdatePolicy,
-        encoded_len: fixed + policy_len,
-        value_len: 0,
-        namespace_id: Some(namespace_id),
-        item_id_start: None,
-        set_options: SetOptions::NONE,
-        has_ttl: false,
-    }))
-}
-
-fn decode_namespace_delete_header(prefix: &[u8]) -> Result<Option<RequestHeader>> {
-    let fixed = OPCODE_BYTES + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES + NAMESPACE_REVISION_BYTES;
-    if prefix.len() < fixed {
-        return Ok(None);
-    }
-    let flags_offset = OPCODE_BYTES;
-    if prefix[flags_offset] & DELETE_MODE_MASK != DELETE_IF_EMPTY {
-        return Err(ProtocolError::UnknownRequestFlags(prefix[flags_offset]));
-    }
-    if prefix[flags_offset] & DELETE_RESERVED_MASK != 0 {
-        return Err(ProtocolError::UnknownRequestFlags(
-            prefix[flags_offset] & DELETE_RESERVED_MASK,
-        ));
-    }
-    let namespace_id = read_namespace_id(&prefix[flags_offset + DELETE_FLAGS_BYTES..])?;
-    let expected_revision = read_u64_be(
-        &prefix[flags_offset + DELETE_FLAGS_BYTES + NAMESPACE_ID_BYTES..],
-    )?;
-    if expected_revision == 0 {
-        return Err(ProtocolError::InvalidRevision);
-    }
-    Ok(Some(RequestHeader {
-        opcode: Opcode::NamespaceDelete,
-        encoded_len: fixed,
-        value_len: 0,
-        namespace_id: Some(namespace_id),
-        item_id_start: None,
-        set_options: SetOptions::NONE,
-        has_ttl: false,
-    }))
-}
-
-fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usize)>> {
-    let Some(&flags) = input.first() else {
-        return Ok(None);
-    };
-    let (ttl_ms, encoded_len) = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
-        POLICY_NO_EXPIRY => (None, POLICY_FLAGS_BYTES),
-        POLICY_FIXED_TTL => {
-            let Some((ttl_ms, length)) =
-                decode_varuint(&input[POLICY_FLAGS_BYTES..], "namespace default TTL")?
-            else {
-                return Ok(None);
-            };
-            (Some(ttl_ms), POLICY_FLAGS_BYTES + length)
+        let (start, end) = *self.offsets.get(index)?;
+        if start == usize::MAX {
+            None
+        } else {
+            Some(&self.payload[start..end])
         }
-        _ => {
-            return Err(ProtocolError::InvalidNamespacePolicy(
-                "namespace default expiration is reserved",
+    }
+}
+
+/// Encodes aligned groups of fields as nested field sequences.
+///
+/// The outer sequence preserves group order; each group is itself an ordered
+/// field sequence. This gives batch APIs a generic alignment primitive without
+/// teaching the transport about any operation name.
+pub fn encode_field_groups(groups: &[&[Option<&[u8]>]]) -> Result<Vec<u8>> {
+    // Size the complete nested payload before allocating. The previous
+    // implementation encoded every group into a temporary Vec, collected a
+    // second Vec of references, and then copied those groups into the outer
+    // sequence. Batch-shaped APIs are expected to use this primitive on a
+    // hot path, so keep one output allocation and append each group directly.
+    let outer_mask_bytes = groups.len().saturating_add(7) / 8;
+    let mut encoded_len = outer_mask_bytes;
+    for (index, group) in groups.iter().enumerate() {
+        let group_len = field_sequence_encoded_len(group)?;
+        let prefix_len = if index + 1 < groups.len() {
+            let group_len_u64 =
+                u64::try_from(group_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+            encode_varuint(group_len_u64).1
+        } else {
+            0
+        };
+        encoded_len = encoded_len
+            .checked_add(prefix_len)
+            .and_then(|length| length.checked_add(group_len))
+            .ok_or(ProtocolError::FrameLengthOverflow)?;
+    }
+    validate_value_length(encoded_len)?;
+    let mut payload = Vec::with_capacity(encoded_len);
+    payload.resize(outer_mask_bytes, 0);
+    for (index, group) in groups.iter().enumerate() {
+        let group_len = field_sequence_encoded_len(group)?;
+        payload[index / 8] |= 1 << (index % 8);
+        let (encoded, prefix_len) = if index + 1 < groups.len() {
+            let group_len_u64 =
+                u64::try_from(group_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
+            encode_varuint(group_len_u64)
+        } else {
+            ([0; MAX_VARUINT_BYTES], 0)
+        };
+        payload.extend_from_slice(&encoded[..prefix_len]);
+        append_field_sequence(group, &mut payload)?;
+    }
+    debug_assert_eq!(payload.len(), encoded_len);
+    Ok(payload)
+}
+
+/// A zero-copy view over the outer groups of a nested field sequence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FieldGroups<'a, 'b> {
+    payload: &'a [u8],
+    offsets: &'b [(usize, usize)],
+}
+
+impl<'a, 'b> FieldGroups<'a, 'b> {
+    /// Decodes and validates the exact number of groups and their field
+    /// cardinalities.
+    pub fn decode(
+        payload: &'a [u8],
+        group_widths: &[usize],
+        offsets: &'b mut [(usize, usize)],
+    ) -> Result<Self> {
+        if offsets.len() < group_widths.len() {
+            return Err(ProtocolError::InvalidFieldSequence(
+                "group offset storage is smaller than the modeled group count",
             ));
         }
-    };
-    let policy = decode_namespace_policy_parts(flags, ttl_ms)?;
-    Ok(Some((policy, encoded_len)))
-}
-
-fn decode_namespace_policy_parts(
-    flags: u8,
-    ttl_ms: Option<u64>,
-) -> Result<NamespacePolicy> {
-    if flags & POLICY_RESERVED_MASK != 0 {
-        return Err(ProtocolError::InvalidNamespacePolicy(
-            "namespace policy contains reserved bits",
-        ));
-    }
-    let default_expiration = match flags & POLICY_DEFAULT_EXPIRATION_MASK {
-        POLICY_NO_EXPIRY => {
-            if ttl_ms.is_some() {
-                return Err(ProtocolError::InvalidNamespacePolicy(
-                    "namespace default TTL is only valid with fixed TTL mode",
-                ));
-            }
-            ExpirationDefault::NoExpiry
-        }
-        POLICY_FIXED_TTL => {
-            let ttl_ms = ttl_ms.ok_or(ProtocolError::InvalidNamespacePolicy(
-                "fixed namespace TTL is missing",
+        let outer = FieldSequence::decode(payload, group_widths.len(), offsets)?;
+        for (index, width) in group_widths.iter().enumerate() {
+            let group = outer.get(index).ok_or(ProtocolError::InvalidFieldSequence(
+                "field group is missing",
             ))?;
-            if ttl_ms == 0 {
-                return Err(ProtocolError::InvalidNamespacePolicy(
-                    "fixed namespace TTL must be positive",
-                ));
-            }
-            ExpirationDefault::FixedTtl { ttl_ms }
+            validate_field_sequence_payload(group, *width)?;
         }
-        _ => {
-            return Err(ProtocolError::InvalidNamespacePolicy(
-                "namespace default expiration is reserved",
-            ));
+        Ok(Self {
+            payload,
+            offsets: &offsets[..group_widths.len()],
+        })
+    }
+
+    /// Returns the encoded field-sequence payload for one group.
+    pub fn group_payload(self, index: usize) -> Option<&'a [u8]> {
+        let (start, end) = *self.offsets.get(index)?;
+        if start == usize::MAX {
+            None
+        } else {
+            Some(&self.payload[start..end])
         }
-    };
-    Ok(NamespacePolicy {
-        default_expiration,
-        expiration_override: if flags & POLICY_EXPIRATION_OVERRIDE != 0 {
-            OverridePolicy::Allowed
-        } else {
-            OverridePolicy::Disallowed
-        },
-        default_eviction: if flags & POLICY_EVICTION_PROTECTED != 0 {
-            EvictionDefault::EvictionProtected
-        } else {
-            EvictionDefault::Evictable
-        },
-        eviction_override: if flags & POLICY_EVICTION_OVERRIDE != 0 {
-            OverridePolicy::Allowed
-        } else {
-            OverridePolicy::Disallowed
-        },
-    })
-}
-
-fn validate_namespace_name(name: &[u8]) -> Result<()> {
-    if name.len() > NAMESPACE_NAME_MAX_BYTES {
-        return Err(ProtocolError::InvalidNamespaceName(
-            "namespace name exceeds 255 octets",
-        ));
-    }
-    std::str::from_utf8(name)
-        .map_err(|_| ProtocolError::InvalidNamespaceName("namespace name is not UTF-8"))?;
-    Ok(())
-}
-
-fn validate_namespace_id(namespace_id: Option<u64>) -> Result<u64> {
-    match namespace_id {
-        Some(namespace_id @ 1..) => Ok(namespace_id),
-        Some(0) => Err(ProtocolError::InvalidNamespaceId),
-        None => Err(ProtocolError::MissingNamespaceId),
     }
 }
 
-fn validate_revision(revision: Option<u64>) -> Result<u64> {
-    match revision {
-        Some(revision @ 1..) => Ok(revision),
-        _ => Err(ProtocolError::InvalidRevision),
-    }
+fn validate_field_sequence_payload(payload: &[u8], field_count: usize) -> Result<()> {
+    FieldSequence::validate(payload, field_count)
 }
 
-fn put_namespace_id(output: &mut Vec<u8>, namespace_id: Option<u64>) -> Result<()> {
-    output.extend_from_slice(&validate_namespace_id(namespace_id)?.to_be_bytes());
-    Ok(())
-}
-
-fn put_revision(output: &mut Vec<u8>, revision: Option<u64>) -> Result<()> {
-    output.extend_from_slice(&validate_revision(revision)?.to_be_bytes());
-    Ok(())
-}
-
-fn read_u64_be(input: &[u8]) -> Result<u64> {
-    let bytes: [u8; NAMESPACE_ID_BYTES] = input
-        .get(..NAMESPACE_ID_BYTES)
-        .ok_or(ProtocolError::FrameTooShort {
-            expected: NAMESPACE_ID_BYTES,
-            actual: input.len(),
-        })?
-        .try_into()
-        .expect("slice length checked");
-    Ok(u64::from_be_bytes(bytes))
-}
-
-fn read_namespace_id(input: &[u8]) -> Result<u64> {
-    let value = read_u64_be(input)?;
-    if value == 0 {
-        return Err(ProtocolError::InvalidNamespaceId);
-    }
-    Ok(value)
-}
-
-fn encode_varuint(value: u64) -> ([u8; MAX_VARUINT_BYTES], usize) {
+/// Encodes one canonical unsigned 64-bit `vu128`.
+pub fn encode_varuint(value: u64) -> ([u8; MAX_VARUINT_BYTES], usize) {
     let mut encoded = [0; MAX_VARUINT_BYTES];
     let length = vu128::encode_u64(&mut encoded, value);
     (encoded, length)
 }
 
-fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, usize)>> {
+/// Decodes one canonical unsigned 64-bit `vu128`.
+///
+/// `Ok(None)` means that the prefix is valid but incomplete. The context is
+/// included only in malformed-input diagnostics; it does not assign semantic
+/// meaning to the field.
+pub fn decode_varuint(input: &[u8], context: &'static str) -> Result<Option<(u64, usize)>> {
     let Some(&first) = input.first() else {
         return Ok(None);
     };
@@ -1420,15 +540,13 @@ fn validate_value_length(value_len: usize) -> Result<()> {
     Ok(())
 }
 
-/// Protocol framing and validation errors.
+/// Errors that belong to the common wire boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     #[error("unknown opcode 0x{0:02x}")]
     UnknownOpcode(u8),
     #[error("unknown status 0x{0:02x}")]
     UnknownStatus(u8),
-    #[error("request flags contain unknown bits 0x{0:02x}")]
-    UnknownRequestFlags(u8),
     #[error("frame is too short: expected at least {expected} bytes, got {actual}")]
     FrameTooShort { expected: usize, actual: usize },
     #[error("frame length does not match header: expected {expected} bytes, got {actual}")]
@@ -1439,165 +557,13 @@ pub enum ProtocolError {
     NonCanonicalVaruint { context: &'static str },
     #[error("{context} exceeds the supported 64-bit vu128 range")]
     VaruintOverflow { context: &'static str },
-    #[error("{opcode:?} requires a {expected}-byte item ID, received {actual} item ID bytes")]
-    InvalidItemIdLength {
-        opcode: Opcode,
-        expected: usize,
-        actual: usize,
-    },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
-    #[error("{opcode:?} requires a fixed item/value shape ({expected_item_id}, {expected_value})")]
-    InvalidRequestShape {
-        opcode: Opcode,
-        expected_item_id: usize,
-        expected_value: &'static str,
-    },
-    #[error("if-absent and if-present conditions cannot be combined")]
-    ConflictingSetConditions,
-    #[error("SET TTL must be greater than zero milliseconds")]
-    InvalidSetTtl,
-    #[error("SET TTL is required by ExplicitTtl")]
-    MissingSetTtl,
-    #[error("SET TTL is not allowed by this expiration mode")]
-    UnexpectedSetTtl,
-    #[error("SET options are not valid for {opcode:?}")]
-    InvalidSetOptions { opcode: Opcode },
-    #[error("namespace ID is missing")]
-    MissingNamespaceId,
-    #[error("namespace ID must be a positive non-zero u64")]
-    InvalidNamespaceId,
-    #[error("namespace name is invalid: {0}")]
-    InvalidNamespaceName(&'static str),
-    #[error("namespace policy is missing")]
-    MissingNamespacePolicy,
-    #[error("namespace policy is not allowed")]
-    UnexpectedNamespacePolicy,
-    #[error("namespace policy is invalid: {0}")]
-    InvalidNamespacePolicy(&'static str),
-    #[error("namespace revision must be positive")]
-    InvalidRevision,
+    #[error("invalid optional-value payload: {0}")]
+    InvalidOptionalValues(&'static str),
+    #[error("invalid operation field sequence: {0}")]
+    InvalidFieldSequence(&'static str),
 }
 
-/// Convenience result type for protocol operations.
+/// Convenience result type for common wire operations.
 pub type Result<T> = std::result::Result<T, ProtocolError>;
-
-/// A validated variable-length response header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ResponseHeader {
-    status: Status,
-    encoded_len: usize,
-    payload_len: usize,
-}
-
-impl ResponseHeader {
-    /// Returns the decoded status.
-    pub const fn status(self) -> Status {
-        self.status
-    }
-
-    /// Returns the number of encoded header bytes before the payload.
-    pub const fn encoded_len(self) -> usize {
-        self.encoded_len
-    }
-
-    /// Returns the response payload length.
-    pub const fn payload_len(self) -> usize {
-        self.payload_len
-    }
-
-    /// Returns the complete response frame length.
-    pub fn frame_len(self) -> Result<usize> {
-        self.encoded_len
-            .checked_add(self.payload_len)
-            .ok_or(ProtocolError::FrameLengthOverflow)
-    }
-}
-
-/// A decoded OpenKache response.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Response {
-    pub status: Status,
-    pub payload: Vec<u8>,
-}
-
-impl Response {
-    /// Creates a response after checking the payload limit.
-    pub fn new(status: Status, payload: Vec<u8>) -> Result<Self> {
-        validate_value_length(payload.len())?;
-        Ok(Self { status, payload })
-    }
-
-    /// Encodes this response into one complete stream frame.
-    pub fn encode(&self) -> Result<Vec<u8>> {
-        validate_value_length(self.payload.len())?;
-        let (length, length_bytes) = encode_varuint(self.payload.len() as u64);
-        let mut frame =
-            Vec::with_capacity(RESPONSE_FIXED_BYTES + length_bytes + self.payload.len());
-        frame.push(self.status as u8);
-        frame.extend_from_slice(&length[..length_bytes]);
-        frame.extend_from_slice(&self.payload);
-        Ok(frame)
-    }
-
-    /// Consumes and encodes this response.
-    pub fn into_encoded(self) -> Result<Vec<u8>> {
-        self.encode()
-    }
-
-    /// Decodes a response header when enough bytes are available.
-    pub fn decode_header(prefix: &[u8]) -> Result<Option<ResponseHeader>> {
-        let Some(&status_byte) = prefix.first() else {
-            return Ok(None);
-        };
-        let status = Status::try_from(status_byte)?;
-        let Some((payload_len, encoded_len)) = decode_varuint(
-            prefix
-                .get(RESPONSE_FIXED_BYTES..)
-                .unwrap_or_default(),
-            "response payload length",
-        )?
-        else {
-            return Ok(None);
-        };
-        let payload_len =
-            usize::try_from(payload_len).map_err(|_| ProtocolError::FrameLengthOverflow)?;
-        validate_value_length(payload_len)?;
-        Ok(Some(ResponseHeader {
-            status,
-            encoded_len: RESPONSE_FIXED_BYTES + encoded_len,
-            payload_len,
-        }))
-    }
-
-    /// Reports the complete response frame length once the header is available.
-    pub fn frame_len(prefix: &[u8]) -> Result<Option<usize>> {
-        Self::decode_header(prefix)?
-            .map(ResponseHeader::frame_len)
-            .transpose()
-    }
-
-    /// Decodes and validates one complete response frame.
-    pub fn decode(frame: &[u8]) -> Result<Self> {
-        let header = Self::decode_header(frame)?.ok_or(ProtocolError::FrameTooShort {
-            expected: RESPONSE_FIXED_BYTES + MIN_VARUINT_BYTES,
-            actual: frame.len(),
-        })?;
-        let expected = header.frame_len()?;
-        if frame.len() != expected {
-            return Err(ProtocolError::FrameLength {
-                expected,
-                actual: frame.len(),
-            });
-        }
-        Ok(Self {
-            status: header.status,
-            payload: frame[header.encoded_len..].to_vec(),
-        })
-    }
-
-    /// Decodes a response.
-    pub fn decode_owned(frame: Vec<u8>) -> Result<Self> {
-        Self::decode(&frame)
-    }
-}

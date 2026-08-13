@@ -8,11 +8,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let generator = protocol_directory.join("generate.ts");
     let wire_generator = protocol_directory.join("wire.ts");
     let model = protocol_directory.join("model");
-    let output = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?)
-        .join("wire_values.rs");
+    let output_directory =
+        PathBuf::from(std::env::var_os("OUT_DIR").ok_or("Cargo did not provide OUT_DIR")?);
+    let output = output_directory.join("wire_values.rs");
 
     println!("cargo:rerun-if-changed={}", generator.display());
     println!("cargo:rerun-if-changed={}", wire_generator.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        protocol_directory.join("wire").display()
+    );
+    for dependency in ["wire_types.ts", "wire_spec.ts"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            protocol_directory.join(dependency).display()
+        );
+    }
     println!("cargo:rerun-if-changed={}", model.display());
 
     let bun = std::env::var_os("OPENKACHE_BUN_EXECUTABLE")
