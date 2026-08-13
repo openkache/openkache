@@ -57,8 +57,14 @@ def generate_smithy_contract() -> None:
     environment["OPENKACHE_GENERATION_TARGET"] = "python"
     generated_root = PACKAGE_ROOT / "src" / "openkache" / "_generated"
     environment["OPENKACHE_PYTHON_API_OUTPUT"] = str(generated_root / "smithy_api.py")
+    environment["OPENKACHE_PYTHON_OPERATIONS_OUTPUT"] = str(
+        generated_root / "smithy_operations.py"
+    )
     environment["OPENKACHE_PYTHON_CONTRACT_OUTPUT"] = str(
         generated_root / "smithy_contract.py"
+    )
+    environment["OPENKACHE_PYTHON_NATIVE_ABI_OUTPUT"] = str(
+        generated_root / "smithy_native_abi.py"
     )
     try:
         subprocess.run(
@@ -171,7 +177,13 @@ class sdist(_sdist):
         shutil.copytree(CORE_ROOT, release_root / "core", ignore=source_ignore)
         shutil.copytree(PROTOCOL_ROOT, release_root / "protocol", ignore=source_ignore)
         (release_root / "clients").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(CLIENT_GENERATOR, release_root / "clients" / "generate.ts")
+        for generator_source in CLIENTS_ROOT.glob("*.ts"):
+            shutil.copy2(generator_source, release_root / "clients" / generator_source.name)
+        shutil.copytree(
+            CLIENTS_ROOT / "generator",
+            release_root / "clients" / "generator",
+            ignore=source_ignore,
+        )
         shutil.copytree(
             CLIENT_MODEL_ROOT,
             release_root / "clients" / "model",
