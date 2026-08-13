@@ -44,6 +44,27 @@ _CLIENT_POINTER = ctypes.c_void_p
 _NamespaceDescriptor = SmithyFFINamespaceDescriptor
 
 
+class _ConnectOptions(ctypes.Structure):
+    _fields_ = [
+        ("address", _U8_POINTER), ("address_length", ctypes.c_size_t),
+        ("server_name", _U8_POINTER), ("server_name_length", ctypes.c_size_t),
+        ("certificate", _U8_POINTER), ("certificate_length", ctypes.c_size_t),
+        ("client_certificate_chain", _U8_POINTER),
+        ("client_certificate_chain_length", ctypes.c_size_t),
+        ("client_private_key", _U8_POINTER), ("client_private_key_length", ctypes.c_size_t),
+        ("data_protection_key", _U8_POINTER), ("data_protection_key_length", ctypes.c_size_t),
+        ("compression_enabled", _U8), ("compression_level", ctypes.c_int32),
+        ("minimum_input_size", ctypes.c_size_t), ("minimum_savings", ctypes.c_size_t),
+        ("encryption", ctypes.c_uint32), ("connect_timeout_ms", ctypes.c_uint64),
+        ("request_timeout_ms", ctypes.c_uint64), ("retry_max_attempts", ctypes.c_size_t),
+        ("max_in_flight", ctypes.c_size_t),
+    ]
+
+
+class _ConnectOptionsV2(ctypes.Structure):
+    _fields_ = [("base", _ConnectOptions), ("key_format", ctypes.c_uint32)]
+
+
 if ctypes.sizeof(_NamespaceDescriptor) != SMITHY_FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES:
     raise RuntimeError("native namespace descriptor size does not match the Smithy contract")
 if _NamespaceDescriptor.namespace_id.offset != SMITHY_FFI_NAMESPACE_DESCRIPTOR_NAMESPACE_ID_OFFSET:
@@ -151,6 +172,11 @@ class _NativeApi:
             ),
             _RESULT_POINTER,
         )
+        self.connect_with_options_v2 = self._function(
+            "openkache_client_connect_with_options_v2",
+            (ctypes.POINTER(_ConnectOptionsV2),),
+            _RESULT_POINTER,
+        )
         self.execute = self._function(
             "openkache_client_execute",
             (
@@ -163,6 +189,37 @@ class _NativeApi:
                 ctypes.c_uint32,
                 _U8,
                 ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.execute_typed_with_options = self._function(
+            "openkache_client_execute_typed_with_options",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8,
+                ctypes.c_uint64,
+            ),
+            _RESULT_POINTER,
+        )
+        self.execute_typed_with_options_v2 = self._function(
+            "openkache_client_execute_typed_with_options_v2",
+            (
+                _CLIENT_POINTER,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8_POINTER,
+                ctypes.c_size_t,
+                _U8,
+                ctypes.c_uint64,
+                ctypes.c_uint32,
             ),
             _RESULT_POINTER,
         )
@@ -354,6 +411,7 @@ class NativeClient:
         request_timeout_ms: int,
         max_in_flight: int,
         retry_max_attempts: int,
+        key_format: int = 0,
         native_path: str | os.PathLike[str] | None = None,
     ) -> NativeClient:
         api = _NativeApi(native_path)
@@ -365,29 +423,18 @@ class NativeClient:
             _as_native_buffer(client_private_key),
             _as_native_buffer(data_protection_key),
         ]
-        result = api.connect(
-            buffers[0][1],
-            len(address),
-            buffers[1][1],
-            len(server_name),
-            buffers[2][1],
-            len(certificate),
-            buffers[3][1],
-            len(client_certificate_chain),
-            buffers[4][1],
-            len(client_private_key),
-            buffers[5][1],
-            len(data_protection_key),
-            1 if compression_enabled else 0,
-            compression_level,
-            minimum_input_size,
-            minimum_savings,
-            encryption,
-            retry_max_attempts,
-            max_in_flight,
-            connect_timeout_ms,
-            request_timeout_ms,
+        options = _ConnectOptionsV2(
+            _ConnectOptions(
+                buffers[0][1], len(address), buffers[1][1], len(server_name),
+                buffers[2][1], len(certificate), buffers[3][1], len(client_certificate_chain),
+                buffers[4][1], len(client_private_key), buffers[5][1], len(data_protection_key),
+                1 if compression_enabled else 0, compression_level, minimum_input_size,
+                minimum_savings, encryption, connect_timeout_ms, request_timeout_ms,
+                retry_max_attempts, max_in_flight,
+            ),
+            key_format,
         )
+        result = api.connect_with_options_v2(ctypes.byref(options))
         kind, _, handle = api.read_result(result, take_client=True)
         if kind != SMITHY_FFI_RESULT_CONNECTED or not handle:
             raise NativeError("native client did not return a connected handle")
@@ -409,6 +456,31 @@ class NativeClient:
             value=value,
             condition=condition,
             ttl_ms=ttl_ms,
+        )
+
+    def execute_typed_with_options(
+        self,
+        operation: int,
+        *,
+        key_spec: object,
+        key: bytes = b"",
+        value: bytes = b"",
+        set_flags: int = 0,
+        ttl_ms: int = 0,
+        encryption: int = (1 << 32) - 1,
+    ) -> tuple[int, bytes]:
+        return self._execute_typed_with_options(
+            operation,
+            key_spec=(
+                {"text": 0, "bytes": 1, "integer": 2}.get(
+                    getattr(key_spec, "value", key_spec), -1
+                )
+            ),
+            key=key,
+            value=value,
+            set_flags=set_flags,
+            ttl_ms=ttl_ms,
+            encryption=encryption,
         )
 
     def execute_raw(
@@ -688,6 +760,46 @@ class NativeClient:
             kind, payload, _ = self._api.read_result(result)
             return kind, payload
         finally:
+            with self._lifecycle:
+                self._active_calls -= 1
+                if self._active_calls == 0:
+                    self._lifecycle.notify_all()
+
+    def _execute_typed_with_options(
+        self,
+        operation: int,
+        *,
+        key_spec: int,
+        key: bytes,
+        value: bytes,
+        set_flags: int,
+        ttl_ms: int,
+        encryption: int,
+    ) -> tuple[int, bytes]:
+        key_buffer, key_pointer = _as_native_buffer(key)
+        value_buffer, value_pointer = _as_native_buffer(value)
+        with self._lifecycle:
+            if not self._handle:
+                raise NativeError("client is closed")
+            handle = self._handle
+            self._active_calls += 1
+        try:
+            result = self._api.execute_typed_with_options_v2(
+                handle,
+                operation,
+                key_spec,
+                key_pointer,
+                len(key),
+                value_pointer,
+                len(value),
+                set_flags,
+                ttl_ms,
+                encryption,
+            )
+            kind, payload, _ = self._api.read_result(result)
+            return kind, payload
+        finally:
+            del key_buffer, value_buffer
             with self._lifecycle:
                 self._active_calls -= 1
                 if self._active_calls == 0:

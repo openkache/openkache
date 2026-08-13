@@ -58,8 +58,9 @@ finally:
 v1 `Text` typed keys by default. Select `key_spec=KeySpec.BYTES` or
 `key_spec=KeySpec.INTEGER` when the keyspace uses exact bytes or arbitrary
 precision integers. The selected spec is enforced for every formatted
-operation and the key is converted to canonical deterministic CBOR before the
-native ABI. Empty and NUL-containing keys are valid. JSON numbers
+operation and logical key bytes plus the explicit discriminator are passed to
+the native ABI; the shared core performs canonical encoding (or the configured
+`ByteKeyOrHash` mapping). Empty and NUL-containing keys are valid. JSON numbers
 are finite, and integers
 must be exactly representable as IEEE-754 binary64 values. Python converts a
 native value to a UTF-8 JSON input buffer only to cross the ctypes ABI; the
@@ -111,14 +112,23 @@ result = await client.raw.get(
 - `key_spec` selects `KeySpec.TEXT` (the default), `KeySpec.BYTES`, or
   `KeySpec.INTEGER`. Use the same spec and logical key type in every language
   client that must share entries.
+- `key_format` selects `KeyFormat.HASH` (the default) or
+  `KeyFormat.BYTE_KEY_OR_HASH`; the latter requires `KeySpec.BYTES` and
+  preserves byte keys up to 32 bytes before hashing longer keys.
 - `server_name` defaults to the hostname from `address` and is used for TLS
   verification after DNS resolution.
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private
   key for mutual TLS.
 - `compression`, `encryption`, `timeouts`, `max_in_flight`, and
-  `retry_max_attempts` map directly to shared-core settings. `Encryption.ROBUST`
-  is the default; select `Encryption.COMPACT` only when every client sharing
-  the protected entries uses that profile.
+  `retry_max_attempts` map directly to shared-core settings. When `encryption`
+  is omitted, the shared core selects Robust if a data-protection key is
+  supplied and Unprotected otherwise. An explicit Compact or Robust profile
+  requires a data-protection key; select Compact only when every client
+  sharing the protected entries uses that profile.
+  `Encryption.UNPROTECTED` is valid for a connection without a key and for
+  operation-local overrides; it is rejected as a connection setting when a
+  data-protection key is supplied because the native connection value `0` is
+  the default-profile sentinel.
 - `native_path` or `OPENKACHE_CLIENT_NATIVE` selects a custom native artifact.
 
 Call `close()` when finished; it is idempotent. The client also supports

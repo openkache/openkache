@@ -88,26 +88,28 @@ namespace into both Item ID derivation and value AAD. The Rust API retains
 `DataProtectionKey` as a source-compatible alias; it is not a separate wire
 concept.
 
-`ValueCodec` stores its current metadata inside the opaque value. The packed
-codec layout shown in the pre-freeze value-format specification is the target
-of a separate value-codec migration:
+`ValueCodec` stores its current metadata inside the opaque value. The v1
+container is defined by [`VALUE_FORMAT.md`](../VALUE_FORMAT.md):
 
 ```text
-value_envelope_version:vu128 | flags:u8 | body
+value_envelope_version:vu128 | selector:u8 | body
 
-flags bits 0..1 = encryption identifier
-flags bits 2..3 = compression identifier
-flags bits 4..5 = codec identifier
-flags bits 6..7 = reserved (zero in v1)
+selector bits 0..1 = protection identifier
+selector bits 2..3 = compression identifier
+selector bits 4..5 = payload-format identifier
+selector bits 6..7 = reserved (zero in v1)
 
-body = protect(compress(selected codec payload))
+body = protect(compress(selected payload))
 AES-256-SIV-CMAC body = synthetic_iv[16] | ciphertext
 AES-256-GCM-SIV body = nonce[12] | ciphertext | tag[16]
 ```
 
-For protected profiles, the packed flags and body are authenticated with the
-exact item ID and container header. Neither the wire protocol nor the server
-parses this format.
+Payload format `0` is `OpaqueBytes`; payload format `1` is one definite-length
+CBOR data item. JSON is an API convenience serialized as canonical RFC 8785
+UTF-8 and stored as `OpaqueBytes`. For protected profiles, the exact encoded
+version and selector, namespace ID, and variable-length Item ID are
+authenticated as specified by `VALUE_FORMAT.md`. Neither the wire protocol nor
+the server parses this format.
 
 Use `ProtectedClient` when the core should derive the item ID and transform
 plaintext values:

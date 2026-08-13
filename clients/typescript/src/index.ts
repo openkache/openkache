@@ -84,6 +84,7 @@ const TEXT_ENCODER = new TextEncoder()
 export const MAX_KEY_INPUT_BYTES = 1_048_576
 
 export type Key_Spec = "integer" | "text" | "bytes"
+export type Key_Format = "hash" | "byte_key_or_hash"
 export type Client_Key = string | Uint8Array | number | bigint
 
 interface Client_Lifecycle {
@@ -155,6 +156,8 @@ export interface Client_Options {
   readonly data_protection_key?: Uint8Array
   /** Exact key type selected for this formatted keyspace. Defaults to `text`. */
   readonly key_spec?: Key_Spec
+  /** Client-local mapping profile. Defaults to `hash`. */
+  readonly key_format?: Key_Format
   /** TLS server name. Defaults to the shared contract value. */
   readonly server_name?: string
   /** Client certificate and private key required by production mutual TLS. */
@@ -167,7 +170,12 @@ export interface Client_Options {
   readonly retry?: Retry_Options
   /** Maximum concurrent request lanes on one connection. */
   readonly max_in_flight?: number
-  /** Authenticated value-encryption profile; requires `data_protection_key`. */
+  /**
+   * Authenticated value-encryption profile; requires `data_protection_key`.
+   * When omitted, the shared core uses Robust with a key and Unprotected
+   * without one. Operation-local overrides may additionally select
+   * `unprotected`.
+   */
   readonly encryption?: "compact" | "robust"
   /** Optional Protobuf, FlatBuffers, or application value codecs. */
   readonly value_codecs?: readonly Value_Codec[]
@@ -298,6 +306,7 @@ export class OpenKache_Client {
       max_in_flight: options.max_in_flight ?? SMITHY_DEFAULT_MAX_IN_FLIGHT,
       encryption: options.encryption,
       key_spec: options.key_spec ?? "text",
+      key_format: options.key_format ?? "hash",
     }
     try {
       const native_module = load_native_module(options.native_path)
@@ -380,12 +389,14 @@ export class OpenKache_Client {
    */
   async get<Value = Json_Value>(
     key: Client_Key,
+    encryption?: "unprotected" | "compact" | "robust",
   ): Promise<Value | undefined> {
     this.#assert_open()
     let envelope: Value_Envelope | null
     try {
       envelope = await this.#native_client.get_value(
         owned_key_bytes(key, this.#key_spec),
+        encryption,
       )
     } catch (error) {
       throw as_openkache_error(error)
@@ -413,6 +424,7 @@ export class OpenKache_Client {
     key: Client_Key,
     value: Value,
     options: Set_Options = {},
+    encryption?: "unprotected" | "compact" | "robust",
   ): Promise<Set_Outcome> {
     this.#assert_open()
     validate_set_options(options)
@@ -432,6 +444,7 @@ export class OpenKache_Client {
         options.expiration_mode,
         options.eviction_mode,
         options.ttl_ms,
+        encryption,
       )
       return parse_set_outcome(outcome)
     } catch (error) {
@@ -446,11 +459,15 @@ export class OpenKache_Client {
    * @returns Stored bytes, or `undefined` when the key does not exist.
    * @throws {OpenKache_Error} When the client is closed or the operation fails.
    */
-  async get_raw(key: Client_Key): Promise<Uint8Array | undefined> {
+  async get_raw(
+    key: Client_Key,
+    encryption?: "unprotected" | "compact" | "robust",
+  ): Promise<Uint8Array | undefined> {
     this.#assert_open()
     try {
       const value = await this.#native_client.get(
         owned_key_bytes(key, this.#key_spec),
+        encryption,
       )
       return value === null ? undefined : value
     } catch (error) {
@@ -471,13 +488,14 @@ export class OpenKache_Client {
     key: Client_Key,
     value: Uint8Array,
     options: Set_Options = {},
+    encryption?: "unprotected" | "compact" | "robust",
   ): Promise<Set_Outcome> {
     this.#assert_open()
     validate_set_options(options)
     if (!(value instanceof Uint8Array)) {
       throw new OpenKache_Error("value must be a Uint8Array")
     }
-    return this.#set_owned_bytes(key, owned_raw_value(value), options)
+    return this.#set_owned_bytes(key, owned_raw_value(value), options, encryption)
   }
 
   /**
@@ -490,12 +508,16 @@ export class OpenKache_Client {
    * @returns The canonical JSON value, or `undefined` when absent.
    * @throws {OpenKache_Error} When transport, value validation, or decoding fails.
    */
-  async get_json(key: Client_Key): Promise<Json_Value | undefined> {
+  async get_json(
+    key: Client_Key,
+    encryption?: "unprotected" | "compact" | "robust",
+  ): Promise<Json_Value | undefined> {
     this.#assert_open()
     let result: string | null
     try {
       result = await this.#native_client.get_json(
         owned_key_bytes(key, this.#key_spec),
+        encryption,
       )
     } catch (error) {
       throw as_openkache_error(error)
@@ -521,6 +543,7 @@ export class OpenKache_Client {
     key: Client_Key,
     value: Json_Value,
     options: Set_Options = {},
+    encryption?: "unprotected" | "compact" | "robust",
   ): Promise<Set_Outcome> {
     this.#assert_open()
     validate_set_options(options)
@@ -533,6 +556,7 @@ export class OpenKache_Client {
         options.expiration_mode,
         options.eviction_mode,
         options.ttl_ms,
+        encryption,
       )
       return parse_set_outcome(outcome)
     } catch (error) {
@@ -607,6 +631,7 @@ export class OpenKache_Client {
     key: Client_Key,
     bytes: Uint8Array,
     options: Set_Options,
+    encryption?: "unprotected" | "compact" | "robust",
   ): Promise<Set_Outcome> {
     this.#assert_open()
     try {
@@ -617,6 +642,7 @@ export class OpenKache_Client {
         options.expiration_mode,
         options.eviction_mode,
         options.ttl_ms,
+        encryption,
       )
       return parse_set_outcome(outcome)
     } catch (error) {
@@ -956,14 +982,20 @@ class Raw_Client implements OpenKache_Raw_Client {
   }
 }
 
-function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
+function owned_key_bytes(
+  key: Client_Key,
+  key_spec: Key_Spec,
+): Uint8Array {
   if (key_spec === "text") {
     if (typeof key !== "string") {
       throw new OpenKache_Error("key must be a string for the text key spec")
     }
     assert_valid_unicode_string(key)
     const bytes = TEXT_ENCODER.encode(key)
-    return encode_cbor_bytes_or_text(3, bytes)
+    if (bytes.byteLength > MAX_KEY_INPUT_BYTES) {
+      throw new OpenKache_Error(`key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`)
+    }
+    return bytes
   }
   if (key_spec === "bytes") {
     if (!(key instanceof Uint8Array)) {
@@ -971,7 +1003,10 @@ function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
         "key must be a Uint8Array for the bytes key spec",
       )
     }
-    return encode_cbor_bytes_or_text(2, key)
+    if (key.byteLength > MAX_KEY_INPUT_BYTES) {
+      throw new OpenKache_Error(`key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`)
+    }
+    return key.slice()
   }
   if (typeof key === "number") {
     if (!Number.isSafeInteger(key) || Object.is(key, -0)) {
@@ -979,54 +1014,17 @@ function owned_key_bytes(key: Client_Key, key_spec: Key_Spec): Uint8Array {
         "number keys must be finite safe integers and must not be negative zero",
       )
     }
-    return encode_cbor_integer(BigInt(key))
+    const integer = BigInt(key)
+    validate_integer_key_input(integer)
+    return TEXT_ENCODER.encode(integer.toString())
   }
   if (typeof key === "bigint") {
-    return encode_cbor_integer(key)
+    validate_integer_key_input(key)
+    return TEXT_ENCODER.encode(key.toString())
   }
   throw new OpenKache_Error(
     "key must be a safe integer number or bigint for the integer key spec",
   )
-}
-
-function encode_cbor_bytes_or_text(
-  major: 2 | 3,
-  bytes: Uint8Array,
-): Uint8Array {
-  if (bytes.byteLength > MAX_KEY_INPUT_BYTES) {
-    throw new OpenKache_Error(
-      `key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`,
-    )
-  }
-  const header = encode_cbor_argument(major, bytes.byteLength)
-  const total_length = header.byteLength + bytes.byteLength
-  const output = new Uint8Array(total_length)
-  output.set(header)
-  output.set(bytes, header.byteLength)
-  return output
-}
-
-function encode_cbor_integer(value: bigint): Uint8Array {
-  const input_magnitude = bigint_magnitude(value < 0n ? -value : value)
-  if (input_magnitude.byteLength > MAX_KEY_INPUT_BYTES) {
-    throw new OpenKache_Error(
-      `key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`,
-    )
-  }
-  const negative = value < 0n
-  const transformed = negative ? -value - 1n : value
-  if (transformed <= 0xffff_ffff_ffff_ffffn) {
-    return encode_cbor_bigint_argument(negative ? 1 : 0, transformed)
-  }
-
-  const magnitude = bigint_magnitude(transformed)
-  const tag = new Uint8Array([negative ? 0xc3 : 0xc2])
-  const byte_string = encode_cbor_bytes_or_text(2, magnitude)
-  const total_length = tag.byteLength + byte_string.byteLength
-  const output = new Uint8Array(total_length)
-  output.set(tag)
-  output.set(byte_string, tag.byteLength)
-  return output
 }
 
 function bigint_magnitude(value: bigint): Uint8Array {
@@ -1047,69 +1045,11 @@ function bigint_magnitude(value: bigint): Uint8Array {
   return output
 }
 
-function encode_cbor_argument(major: number, value: number): Uint8Array {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new OpenKache_Error("CBOR argument is outside the supported range")
+function validate_integer_key_input(value: bigint): void {
+  const magnitude = bigint_magnitude(value < 0n ? -value : value)
+  if (magnitude.byteLength > MAX_KEY_INPUT_BYTES) {
+    throw new OpenKache_Error(`key input exceeds ${MAX_KEY_INPUT_BYTES} bytes`)
   }
-  const prefix = major << 5
-  if (value <= 23) return Uint8Array.of(prefix | value)
-  if (value <= 0xff) return Uint8Array.of(prefix | 24, value)
-  if (value <= 0xffff) {
-    return Uint8Array.of(prefix | 25, value >>> 8, value & 0xff)
-  }
-  if (value <= 0xffff_ffff) {
-    return Uint8Array.of(
-      prefix | 26,
-      (value >>> 24) & 0xff,
-      (value >>> 16) & 0xff,
-      (value >>> 8) & 0xff,
-      value & 0xff,
-    )
-  }
-  const output = new Uint8Array(9)
-  output[0] = prefix | 27
-  let remaining = BigInt(value)
-  for (let index = 8; index >= 1; index -= 1) {
-    output[index] = Number(remaining & 0xffn)
-    remaining >>= 8n
-  }
-  return output
-}
-
-function encode_cbor_bigint_argument(major: number, value: bigint): Uint8Array {
-  if (value < 0n || value > 0xffff_ffff_ffff_ffffn) {
-    throw new OpenKache_Error("CBOR integer argument is outside the supported range")
-  }
-  const output = new Uint8Array(value <= 0xffff_ffffn ? 5 : 9)
-  if (value <= 23n) {
-    return Uint8Array.of((major << 5) | Number(value))
-  }
-  if (value <= 0xffn) {
-    return Uint8Array.of((major << 5) | 24, Number(value))
-  }
-  if (value <= 0xffffn) {
-    return Uint8Array.of(
-      (major << 5) | 25,
-      Number((value >> 8n) & 0xffn),
-      Number(value & 0xffn),
-    )
-  }
-  if (value <= 0xffff_ffffn) {
-    return Uint8Array.of(
-      (major << 5) | 26,
-      Number((value >> 24n) & 0xffn),
-      Number((value >> 16n) & 0xffn),
-      Number((value >> 8n) & 0xffn),
-      Number(value & 0xffn),
-    )
-  }
-  output[0] = (major << 5) | 27
-  let remaining = value
-  for (let index = 8; index >= 1; index -= 1) {
-    output[index] = Number(remaining & 0xffn)
-    remaining >>= 8n
-  }
-  return output
 }
 
 function assert_valid_unicode_string(value: string): void {
@@ -1189,6 +1129,23 @@ function validate_options(options: Client_Options): void {
   ) {
     throw new OpenKache_Error(
       `key_spec must be integer, text, or bytes, got ${String(options.key_spec)}`,
+    )
+  }
+  if (
+    options.key_format !== undefined &&
+    options.key_format !== "hash" &&
+    options.key_format !== "byte_key_or_hash"
+  ) {
+    throw new OpenKache_Error(
+      `key_format must be hash or byte_key_or_hash, got ${String(options.key_format)}`,
+    )
+  }
+  if (
+    options.key_format === "byte_key_or_hash" &&
+    (options.key_spec ?? "text") !== "bytes"
+  ) {
+    throw new OpenKache_Error(
+      "key_format byte_key_or_hash requires key_spec bytes",
     )
   }
   if (

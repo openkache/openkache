@@ -77,6 +77,14 @@ const (
 	EncryptionRobust Encryption = Encryption(SmithyValueEncryptionRobust)
 )
 
+// KeyFormat selects the client-local application-key to Item ID mapping.
+type KeyFormat string
+
+const (
+	KeyFormatHash          KeyFormat = "hash"
+	KeyFormatByteKeyOrHash KeyFormat = "byte_key_or_hash"
+)
+
 // TimeoutOptions bounds connection setup and complete request exchanges.
 type TimeoutOptions struct {
 	Connect time.Duration
@@ -106,8 +114,12 @@ type Options struct {
 	// Compression is applied before the core's authenticated encryption.
 	Compression CompressionOptions
 	// Encryption selects the shared-core value-protection profile. The zero
-	// value selects EncryptionRobust.
+	// value means the option was omitted: the shared core selects Robust when
+	// a data-protection key is supplied and Unprotected otherwise. An explicit
+	// authenticated profile requires a data-protection key.
 	Encryption Encryption
+	// KeyFormat selects the client-local key mapping profile.
+	KeyFormat KeyFormat
 	// Timeouts bounds native connection and operation work.
 	Timeouts TimeoutOptions
 	// Retry controls response-safe retry attempts.
@@ -129,6 +141,8 @@ type normalizedOptions struct {
 	dataProtectionKey   []byte
 	compression         CompressionOptions
 	encryption          Encryption
+	encryptionExplicit  bool
+	keyFormat           KeyFormat
 	timeouts            TimeoutOptions
 	retryAttempts       int
 	maxInFlight         int
@@ -195,11 +209,19 @@ func (o Options) normalize() (normalizedOptions, error) {
 	}
 
 	encryption := o.Encryption
+	encryptionExplicit := encryption != 0
 	if encryption == 0 {
 		encryption = EncryptionRobust
 	}
 	if encryption != EncryptionCompact && encryption != EncryptionRobust {
 		return normalizedOptions{}, validationError("encryption", "must be EncryptionCompact or EncryptionRobust")
+	}
+	keyFormat := o.KeyFormat
+	if keyFormat == "" {
+		keyFormat = KeyFormatHash
+	}
+	if keyFormat != KeyFormatHash && keyFormat != KeyFormatByteKeyOrHash {
+		return normalizedOptions{}, validationError("key_format", "must be KeyFormatHash or KeyFormatByteKeyOrHash")
 	}
 
 	retryAttempts := o.Retry.MaxAttempts
@@ -263,6 +285,8 @@ func (o Options) normalize() (normalizedOptions, error) {
 		dataProtectionKey:   append([]byte(nil), o.DataProtectionKey...),
 		compression:         compression,
 		encryption:          encryption,
+		encryptionExplicit:  encryptionExplicit,
+		keyFormat:           keyFormat,
 		timeouts:            TimeoutOptions{Connect: connectTimeout, Request: requestTimeout},
 		retryAttempts:       retryAttempts,
 		maxInFlight:         maxInFlight,
@@ -358,15 +382,8 @@ type ItemID []byte
 
 // NewItemID copies an opaque wire item ID.
 func NewItemID(value []byte) (ItemID, error) {
-	if len(value) > SmithyMaxItemIDBytes {
-		return nil, validationError(
-			"item_id",
-			fmt.Sprintf(
-				"must contain at most %d bytes, got %d",
-				SmithyMaxItemIDBytes,
-				len(value),
-			),
-		)
+	if err := validateItemID(value); err != nil {
+		return nil, err
 	}
 	itemID := make(ItemID, len(value))
 	copy(itemID, value)
@@ -482,6 +499,9 @@ func (c *Client) invokeRaw(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	if err := validateItemID(itemID); err != nil {
+		return nativeResult{}, err
+	}
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.executeRaw(ctx, operation, itemID, value, options)
 	})
@@ -495,6 +515,9 @@ func (c *Client) invokeScoped(
 	value []byte,
 	options SetOptions,
 ) (nativeResult, error) {
+	if err := validateItemID(itemID); err != nil {
+		return nativeResult{}, err
+	}
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.executeScoped(ctx, operation, namespaceID, itemID, value, options)
 	})
@@ -538,6 +561,20 @@ func (c *Client) invokeNamespaceDelete(
 	return c.invokeNative(ctx, func(native nativeClient) (nativeResult, error) {
 		return native.namespaceDelete(ctx, namespaceID, expectedRevision)
 	})
+}
+
+func validateItemID(itemID ItemID) error {
+	if len(itemID) > SmithyMaxItemIDBytes {
+		return validationError(
+			"item_id",
+			fmt.Sprintf(
+				"must contain at most %d bytes, got %d",
+				SmithyMaxItemIDBytes,
+				len(itemID),
+			),
+		)
+	}
+	return nil
 }
 
 func (c *Client) decodeNamespaceDescriptor(
@@ -809,8 +846,8 @@ func (c *Client) Delete(ctx context.Context, key []byte) (bool, error) {
 	return deleteResult("delete", result)
 }
 
-// canonicalBytesKey encodes a Go []byte key as the v1 TypedKey.Bytes value.
-// The native ABI accepts canonical key bytes, not the caller's raw bytes.
+// canonicalBytesKey validates and copies a Go []byte logical Bytes key.
+// The typed native ABI performs canonical encoding inside the shared core.
 func canonicalBytesKey(key []byte) ([]byte, error) {
 	if len(key) > maxKeyInputBytes {
 		return nil, validationError(
@@ -818,49 +855,7 @@ func canonicalBytesKey(key []byte) ([]byte, error) {
 			fmt.Sprintf("key input exceeds %d bytes", maxKeyInputBytes),
 		)
 	}
-	header, err := cborArgument(2, uint64(len(key)))
-	if err != nil {
-		return nil, err
-	}
-	encoded := make([]byte, 0, len(header)+len(key))
-	encoded = append(encoded, header...)
-	encoded = append(encoded, key...)
-	return encoded, nil
-}
-
-func cborArgument(major byte, value uint64) ([]byte, error) {
-	if major > 7 {
-		return nil, validationError("key", "invalid CBOR major type")
-	}
-	prefix := major << 5
-	switch {
-	case value <= 23:
-		return []byte{prefix | byte(value)}, nil
-	case value <= 0xff:
-		return []byte{prefix | 24, byte(value)}, nil
-	case value <= 0xffff:
-		return []byte{prefix | 25, byte(value >> 8), byte(value)}, nil
-	case value <= 0xffff_ffff:
-		return []byte{
-			prefix | 26,
-			byte(value >> 24),
-			byte(value >> 16),
-			byte(value >> 8),
-			byte(value),
-		}, nil
-	default:
-		return []byte{
-			prefix | 27,
-			byte(value >> 56),
-			byte(value >> 48),
-			byte(value >> 40),
-			byte(value >> 32),
-			byte(value >> 24),
-			byte(value >> 16),
-			byte(value >> 8),
-			byte(value),
-		}, nil
-	}
+	return append([]byte(nil), key...), nil
 }
 
 // DeleteItem removes an exact wire item ID.

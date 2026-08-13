@@ -21,15 +21,14 @@ use crate::contract::{
     DEFAULT_ZSTANDARD_MINIMUM_INPUT_BYTES, DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES,
     VALUE_FORMAT_AAD_DOMAIN, VALUE_FORMAT_COMPACT_ENCRYPTION_CONTEXT,
     VALUE_FORMAT_COMPACT_MAC_CONTEXT, VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
-    VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE,
-    VALUE_FORMAT_COMPRESSION_SHIFT, VALUE_FORMAT_COMPRESSION_ZSTANDARD,
-    VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES, VALUE_FORMAT_FORMAT_BYTE_BYTES,
+    VALUE_FORMAT_COMPRESSION_MASK, VALUE_FORMAT_COMPRESSION_NONE, VALUE_FORMAT_COMPRESSION_SHIFT,
+    VALUE_FORMAT_COMPRESSION_ZSTANDARD, VALUE_FORMAT_DATA_PROTECTION_KEY_BYTES,
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
-    VALUE_FORMAT_MAX_VU128_BYTES, VALUE_FORMAT_PAYLOAD_CBOR, VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES,
-    VALUE_FORMAT_PAYLOAD_MASK, VALUE_FORMAT_PAYLOAD_SHIFT, VALUE_FORMAT_PROTECTION_MASK,
-    VALUE_FORMAT_RESERVED_MASK,
-    VALUE_FORMAT_ROBUST_CONTEXT, VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES,
-    VALUE_FORMAT_VERSION, VALUE_FORMAT_VERSION_BYTES,
+    VALUE_FORMAT_FORMAT_BYTE_BYTES, VALUE_FORMAT_MAX_VU128_BYTES, VALUE_FORMAT_PAYLOAD_CBOR,
+    VALUE_FORMAT_PAYLOAD_MASK, VALUE_FORMAT_PAYLOAD_OPAQUE_BYTES, VALUE_FORMAT_PAYLOAD_SHIFT,
+    VALUE_FORMAT_PROTECTION_MASK, VALUE_FORMAT_RESERVED_MASK, VALUE_FORMAT_ROBUST_CONTEXT,
+    VALUE_FORMAT_ROBUST_NONCE_BYTES, VALUE_FORMAT_ROBUST_TAG_BYTES, VALUE_FORMAT_VERSION,
+    VALUE_FORMAT_VERSION_BYTES,
 };
 use crate::{DATA_PROTECTION_KEY_BYTES, DataProtectionKey, ItemId};
 
@@ -593,6 +592,25 @@ impl ValueCodec {
         self.encode_in_namespace_with_profile(namespace_id, item_id, value, self.encryption)
     }
 
+    /// Encodes a logical value with an operation-local protection profile.
+    ///
+    /// The codec's configured default is unchanged. This is the core
+    /// implementation of the value-format contract's per-operation override.
+    pub fn encode_in_namespace_with_optional_profile(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Value,
+        encryption: Option<Encryption>,
+    ) -> Result<ItemValue> {
+        self.encode_in_namespace_with_profile(
+            namespace_id,
+            item_id,
+            value,
+            encryption.unwrap_or(self.encryption),
+        )
+    }
+
     /// Encodes a logical JSON value as canonical RFC 8785 UTF-8
     /// `OpaqueBytes`.
     pub fn encode_json(&self, item_id: ItemId, value: JsonValue) -> Result<ItemValue> {
@@ -647,27 +665,23 @@ impl ValueCodec {
         let protection_overhead = match encryption {
             Encryption::Unprotected => 0,
             Encryption::Compact => VALUE_FORMAT_COMPACT_SYNTHETIC_IV_BYTES,
-            Encryption::Robust => {
-                VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES
-            }
+            Encryption::Robust => VALUE_FORMAT_ROBUST_NONCE_BYTES + VALUE_FORMAT_ROBUST_TAG_BYTES,
         };
-        let body_limit = MAX_VALUE_BYTES
-            .checked_sub(CONTAINER_HEADER_BYTES)
-            .ok_or(Error::EncodedValueTooLarge {
+        let body_limit = MAX_VALUE_BYTES.checked_sub(CONTAINER_HEADER_BYTES).ok_or(
+            Error::EncodedValueTooLarge {
                 size: usize::MAX,
                 maximum: MAX_VALUE_BYTES,
-            })?;
-        let body_length = transformed
-            .len()
-            .checked_add(protection_overhead)
-            .ok_or(Error::EncodedValueTooLarge {
+            },
+        )?;
+        let body_length = transformed.len().checked_add(protection_overhead).ok_or(
+            Error::EncodedValueTooLarge {
                 size: usize::MAX,
                 maximum: MAX_VALUE_BYTES,
-            })?;
+            },
+        )?;
         if body_length > body_limit {
             return Err(Error::EncodedValueTooLarge {
-                size: CONTAINER_HEADER_BYTES
-                    .saturating_add(body_length),
+                size: CONTAINER_HEADER_BYTES.saturating_add(body_length),
                 maximum: MAX_VALUE_BYTES,
             });
         }
@@ -792,6 +806,25 @@ impl ValueCodec {
         encoded: ItemValue,
     ) -> Result<Value> {
         self.decode_in_namespace_with_profile(namespace_id, item_id, encoded, self.encryption)
+    }
+
+    /// Decodes a value while requiring an operation-local protection profile.
+    ///
+    /// The codec's configured default is unchanged. An omitted profile uses
+    /// that default; an explicit profile must match the envelope selector.
+    pub fn decode_in_namespace_with_optional_profile(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+        encryption: Option<Encryption>,
+    ) -> Result<Value> {
+        self.decode_in_namespace_with_profile(
+            namespace_id,
+            item_id,
+            encoded,
+            encryption.unwrap_or(self.encryption),
+        )
     }
 
     /// Decodes and parses canonical JSON stored as `OpaqueBytes`.
@@ -1576,8 +1609,7 @@ fn decode_json(payload: &[u8]) -> Result<JsonValue> {
 /// the `OpaqueBytes` JSON convenience path.
 pub fn canonical_json_bytes(value: &JsonValue) -> Result<Vec<u8>> {
     validate_json_value(value)?;
-    serde_json_canonicalizer::to_vec(value)
-        .map_err(|error| Error::InvalidJson(error.to_string()))
+    serde_json_canonicalizer::to_vec(value).map_err(|error| Error::InvalidJson(error.to_string()))
 }
 
 fn validate_json_integer_tokens(payload: &[u8]) -> Result<()> {

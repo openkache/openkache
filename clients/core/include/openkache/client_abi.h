@@ -116,12 +116,22 @@ typedef enum openkache_client_set_condition {
 #define OPENKACHE_CLIENT_KEY_SPEC_TEXT OPENKACHE_SMITHY_FFI_KEY_SPEC_TEXT
 #define OPENKACHE_CLIENT_KEY_SPEC_BYTES OPENKACHE_SMITHY_FFI_KEY_SPEC_BYTES
 #define OPENKACHE_CLIENT_KEY_SPEC_INTEGER OPENKACHE_SMITHY_FFI_KEY_SPEC_INTEGER
+#define OPENKACHE_CLIENT_KEY_FORMAT_HASH OPENKACHE_SMITHY_FFI_KEY_FORMAT_HASH
+#define OPENKACHE_CLIENT_KEY_FORMAT_BYTE_KEY_OR_HASH \
+    OPENKACHE_SMITHY_FFI_KEY_FORMAT_BYTE_KEY_OR_HASH
 
 typedef enum openkache_client_encryption {
     OPENKACHE_CLIENT_ENCRYPTION_NONE = OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE,
     OPENKACHE_CLIENT_ENCRYPTION_COMPACT = OPENKACHE_SMITHY_VALUE_ENCRYPTION_COMPACT,
     OPENKACHE_CLIENT_ENCRYPTION_ROBUST = OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST,
 } openkache_client_encryption_t;
+
+/*
+ * Operation-local value-profile selector used by versioned execute entry
+ * points. UINT32_MAX means use the connection default; the other values are
+ * the openkache_client_encryption_t discriminators.
+ */
+#define OPENKACHE_CLIENT_ENCRYPTION_DEFAULT UINT32_MAX
 
 typedef struct openkache_client_connect_options {
     const uint8_t *address;
@@ -146,6 +156,11 @@ typedef struct openkache_client_connect_options {
     size_t retry_max_attempts;
     size_t max_in_flight;
 } openkache_client_connect_options_t;
+
+typedef struct openkache_client_connect_options_v2 {
+    openkache_client_connect_options_t base;
+    uint32_t key_format;
+} openkache_client_connect_options_v2_t;
 
 uint32_t openkache_client_abi_version(void);
 
@@ -216,6 +231,10 @@ openkache_client_result_t *openkache_client_connect_with_options(
     const openkache_client_connect_options_t *options
 );
 
+openkache_client_result_t *openkache_client_connect_with_options_v2(
+    const openkache_client_connect_options_v2_t *options
+);
+
 /*
  * Executes one operation. The result payload is borrowed and must be copied
  * before freeing the result. For protected GET, SET, and DELETE operations,
@@ -235,6 +254,19 @@ openkache_client_result_t *openkache_client_execute(
     uint64_t ttl_ms
 );
 
+openkache_client_result_t *openkache_client_execute_v2(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    uint32_t encryption
+);
+
 /*
  * Executes exact protocol item-ID operations. GET, SET, and DELETE accept
  * zero through OPENKACHE_SMITHY_MAX_ITEM_ID_BYTES item-ID bytes and bypass
@@ -252,6 +284,19 @@ openkache_client_result_t *openkache_client_execute_raw(
     uint64_t ttl_ms
 );
 
+openkache_client_result_t *openkache_client_execute_raw_v2(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    uint32_t encryption
+);
+
 /*
  * Executes one protected operation with the complete wire SET policy byte.
  * `set_flags` and `ttl_ms` must be zero for operations other than SET.
@@ -267,6 +312,18 @@ openkache_client_result_t *openkache_client_execute_with_options(
     uint64_t ttl_ms
 );
 
+openkache_client_result_t *openkache_client_execute_with_options_v2(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms,
+    uint32_t encryption
+);
+
 /*
  * Executes one exact-item-ID operation with the complete wire SET policy byte.
  * `set_flags` and `ttl_ms` must be zero for operations other than SET.
@@ -280,6 +337,18 @@ openkache_client_result_t *openkache_client_execute_raw_with_options(
     size_t value_length,
     uint8_t set_flags,
     uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_execute_raw_with_options_v2(
+    const openkache_client_t *client,
+    uint32_t operation,
+    const uint8_t *item_id,
+    size_t item_id_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms,
+    uint32_t encryption
 );
 
 /*
@@ -299,6 +368,20 @@ openkache_client_result_t *openkache_client_execute_typed(
     uint64_t ttl_ms
 );
 
+openkache_client_result_t *openkache_client_execute_typed_v2(
+    const openkache_client_t *client,
+    uint32_t operation,
+    uint32_t key_spec,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint32_t set_condition,
+    uint8_t ttl_enabled,
+    uint64_t ttl_ms,
+    uint32_t encryption
+);
+
 /*
  * Typed-key counterpart to openkache_client_execute_with_options.
  */
@@ -312,6 +395,19 @@ openkache_client_result_t *openkache_client_execute_typed_with_options(
     size_t value_length,
     uint8_t set_flags,
     uint64_t ttl_ms
+);
+
+openkache_client_result_t *openkache_client_execute_typed_with_options_v2(
+    const openkache_client_t *client,
+    uint32_t operation,
+    uint32_t key_spec,
+    const uint8_t *application_key,
+    size_t application_key_length,
+    const uint8_t *value,
+    size_t value_length,
+    uint8_t set_flags,
+    uint64_t ttl_ms,
+    uint32_t encryption
 );
 
 /*

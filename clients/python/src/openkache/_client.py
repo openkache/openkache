@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from decimal import Decimal
 import json
 import math
 import socket
@@ -111,6 +112,7 @@ from ._generated.smithy_contract import (
     SMITHY_SET_IF_PRESENT_BITS,
     SMITHY_MAX_VARUINT_BYTES,
     SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES,
+    SMITHY_VALUE_ENCRYPTION_NONE,
     SMITHY_VALUE_ENCRYPTION_COMPACT,
     SMITHY_VALUE_ENCRYPTION_ROBUST,
 )
@@ -145,6 +147,7 @@ class ConnectionState(StrEnum):
 class Encryption(IntEnum):
     """Authenticated value-encryption profile implemented by the shared core."""
 
+    UNPROTECTED = 0
     COMPACT = SMITHY_VALUE_ENCRYPTION_COMPACT
     ROBUST = SMITHY_VALUE_ENCRYPTION_ROBUST
 
@@ -155,6 +158,13 @@ class KeySpec(StrEnum):
     INTEGER = "integer"
     TEXT = "text"
     BYTES = "bytes"
+
+
+class KeyFormat(StrEnum):
+    """Client-local mapping profile used to derive Item IDs."""
+
+    HASH = "hash"
+    BYTE_KEY_OR_HASH = "byte_key_or_hash"
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,9 +409,12 @@ class OpenKacheClient:
     schedules blocking ctypes calls on worker threads.
     """
 
-    def __init__(self, native: _NativeClient, key_spec: KeySpec) -> None:
+    def __init__(
+        self, native: _NativeClient, key_spec: KeySpec, key_format: KeyFormat
+    ) -> None:
         self._native = native
         self._key_spec = key_spec
+        self._key_format = key_format
         self._closed = False
         self._raw: RawClient | None = None
 
@@ -413,16 +426,22 @@ class OpenKacheClient:
         certificate: bytes | bytearray | memoryview | str | PathLike[str],
         data_protection_key: bytes | bytearray | memoryview | None = None,
         key_spec: KeySpec | str = KeySpec.TEXT,
+        key_format: KeyFormat | str = KeyFormat.HASH,
         server_name: str | None = None,
         identity: ClientIdentity | None = None,
         compression: CompressionOptions | None = None,
-        encryption: Encryption = Encryption.ROBUST,
+        encryption: Encryption | None = None,
         timeouts: ClientTimeouts | None = None,
         max_in_flight: int = SMITHY_DEFAULT_MAX_IN_FLIGHT,
         retry_max_attempts: int = SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS,
         native_path: str | PathLike[str] | None = None,
     ) -> OpenKacheClient:
         selected_key_spec = _normalize_key_spec(key_spec)
+        selected_key_format = _normalize_key_format(key_format)
+        if selected_key_format is KeyFormat.BYTE_KEY_OR_HASH and selected_key_spec is not KeySpec.BYTES:
+            raise OpenKacheValueError(
+                "key_format byte_key_or_hash requires key_spec bytes"
+            )
         try:
             settings = await asyncio.to_thread(
                 _connection_settings,
@@ -436,12 +455,14 @@ class OpenKacheClient:
                 timeouts=timeouts,
                 max_in_flight=max_in_flight,
                 retry_max_attempts=retry_max_attempts,
+                key_spec=selected_key_spec,
+                key_format=selected_key_format,
                 native_path=native_path,
             )
             native = await asyncio.to_thread(_NativeClient.connect, **settings)
         except (NativeError, OSError) as error:
             raise OpenKacheError(str(error)) from error
-        return cls(native, selected_key_spec)
+        return cls(native, selected_key_spec, selected_key_format)
 
     @classmethod
     def connect_sync(cls, address: str, **kwargs: Any) -> OpenKacheClient:
@@ -457,11 +478,18 @@ class OpenKacheClient:
         self._assert_open()
         await self._execute(SMITHY_OPCODE_PING)
 
-    async def get(self, key: str | int | bytes | bytearray | memoryview) -> Any | None:
+    async def get(
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        *,
+        encryption: Encryption | None = None,
+    ) -> Any | None:
         """Gets a JSON value, or ``None`` when the key is absent."""
 
         self._assert_open()
-        payload = await self._value_operation(SMITHY_FFI_OPERATION_GET_JSON, key)
+        payload = await self._value_operation(
+            SMITHY_FFI_OPERATION_GET_JSON, key, encryption=encryption
+        )
         if payload is None:
             return None
         try:
@@ -474,32 +502,49 @@ class OpenKacheClient:
         key: str | int | bytes | bytearray | memoryview,
         value: Any,
         options: SetOptions | None = None,
+        *,
+        encryption: Encryption | None = None,
     ) -> SmithySetOutcome:
         """Canonicalizes, protects, and stores a JSON-compatible value."""
 
         self._assert_open()
         payload = _json_bytes(value)
-        return await self._set_operation(SMITHY_FFI_OPERATION_SET_JSON, key, payload, options)
+        return await self._set_operation(
+            SMITHY_FFI_OPERATION_SET_JSON,
+            key,
+            payload,
+            options,
+            encryption=encryption,
+        )
 
     async def get_raw(
-        self, key: str | int | bytes | bytearray | memoryview
+        self,
+        key: str | int | bytes | bytearray | memoryview,
+        *,
+        encryption: Encryption | None = None,
     ) -> bytes | None:
         """Gets exact decrypted Raw bytes, or ``None`` when absent."""
 
         self._assert_open()
-        return await self._value_operation(SMITHY_OPCODE_GET, key)
+        return await self._value_operation(SMITHY_OPCODE_GET, key, encryption=encryption)
 
     async def set_raw(
         self,
         key: str | int | bytes | bytearray | memoryview,
         value: bytes | bytearray | memoryview,
         options: SetOptions | None = None,
+        *,
+        encryption: Encryption | None = None,
     ) -> SmithySetOutcome:
         """Stores exact bytes through the core Raw value format."""
 
         self._assert_open()
         return await self._set_operation(
-            SMITHY_OPCODE_SET, key, _value_bytes(value), options
+            SMITHY_OPCODE_SET,
+            key,
+            _value_bytes(value),
+            options,
+            encryption=encryption,
         )
 
     async def delete(
@@ -509,6 +554,7 @@ class OpenKacheClient:
         kind, _ = await self._execute(
             SMITHY_OPCODE_DELETE,
             key=_key_bytes(key, self._key_spec),
+            key_spec=self._key_spec,
         )
         return _delete_outcome(kind)
 
@@ -580,17 +626,20 @@ class OpenKacheClient:
         key: bytes = b"",
         value: bytes = b"",
         options: SetOptions | None = None,
+        encryption: Encryption | None = None,
     ) -> tuple[int, bytes]:
         self._assert_open()
         selected = options or SetOptions()
         try:
             return await asyncio.to_thread(
-                self._native.execute_with_options,
+                self._native.execute_typed_with_options,
                 operation,
                 key=key,
+                key_spec=self._key_spec,
                 value=value,
                 set_flags=selected._wire_flags,
                 ttl_ms=selected.ttl_ms or 0,
+                encryption=(1 << 32) - 1 if encryption is None else int(encryption),
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error
@@ -600,10 +649,12 @@ class OpenKacheClient:
         operation: int,
         key: str | int | bytes | bytearray | memoryview,
         operation_name: str = "GET",
+        encryption: Encryption | None = None,
     ) -> bytes | None:
         kind, payload = await self._execute(
             operation,
             key=_key_bytes(key, self._key_spec),
+            encryption=encryption,
         )
         if kind == SMITHY_FFI_RESULT_NOT_FOUND:
             return None
@@ -669,12 +720,14 @@ class OpenKacheClient:
         key: str | int | bytes | bytearray | memoryview,
         value: bytes,
         options: SetOptions | None,
+        encryption: Encryption | None = None,
     ) -> SmithySetOutcome:
         kind, _ = await self._execute(
             operation,
             key=_key_bytes(key, self._key_spec),
             value=value,
             options=options,
+            encryption=encryption,
         )
         return _set_outcome(kind)
 
@@ -844,10 +897,12 @@ def _connection_settings(
     server_name: str | None,
     identity: ClientIdentity | None,
     compression: CompressionOptions | None,
-    encryption: Encryption,
+    encryption: Encryption | None,
     timeouts: ClientTimeouts | None,
     max_in_flight: int,
     retry_max_attempts: int,
+    key_spec: KeySpec,
+    key_format: KeyFormat,
     native_path: str | PathLike[str] | None,
 ) -> dict[str, Any]:
     native_address, host = _resolve_address(address)
@@ -862,10 +917,16 @@ def _connection_settings(
             "data_protection_key must contain exactly "
             f"{SMITHY_VALUE_DATA_PROTECTION_KEY_BYTES} bytes when supplied"
         )
+    if encryption is Encryption.UNPROTECTED and protection_key:
+        raise OpenKacheValueError(
+            "connection-level Encryption.UNPROTECTED is not available with "
+            "data_protection_key; omit encryption for Robust or use the "
+            "operation-local override"
+        )
     compression = compression or CompressionOptions()
     timeouts = timeouts or ClientTimeouts()
-    if not isinstance(encryption, Encryption):
-        raise OpenKacheValueError("encryption must be an Encryption value")
+    if encryption is not None and not isinstance(encryption, Encryption):
+        raise OpenKacheValueError("encryption must be an Encryption value or None")
     _positive_or_zero(
         max_in_flight,
         "max_in_flight",
@@ -896,6 +957,13 @@ def _connection_settings(
         ).encode("utf-8")
     except UnicodeEncodeError as error:
         raise OpenKacheValueError("server_name must contain valid Unicode text") from error
+    # The NONE ABI value is the connection-default sentinel: it selects
+    # Robust when a key is supplied and Unprotected when no key is supplied.
+    # Preserve an explicitly selected authenticated profile without a key so
+    # the shared FFI rejects it instead of silently downgrading.
+    connection_encryption = (
+        SMITHY_VALUE_ENCRYPTION_NONE if encryption is None else encryption
+    )
     return {
         "address": native_address_bytes,
         "server_name": server_name_bytes,
@@ -907,11 +975,13 @@ def _connection_settings(
         "compression_level": compression.level,
         "minimum_input_size": compression.minimum_input_size,
         "minimum_savings": compression.minimum_savings,
-        "encryption": int(encryption),
+        "encryption": int(connection_encryption),
         "connect_timeout_ms": timeouts.connect_ms,
         "request_timeout_ms": timeouts.request_ms,
         "max_in_flight": max_in_flight,
         "retry_max_attempts": retry_max_attempts,
+        "key_spec": key_spec.value,
+        "key_format": 1 if key_format is KeyFormat.BYTE_KEY_OR_HASH else 0,
         "native_path": native_path,
     }
 
@@ -991,6 +1061,23 @@ def _normalize_key_spec(value: KeySpec | str) -> KeySpec:
     )
 
 
+def _normalize_key_format(value: KeyFormat | str) -> KeyFormat:
+    if isinstance(value, KeyFormat):
+        return value
+    if isinstance(value, str):
+        try:
+            return KeyFormat(value)
+        except ValueError as error:
+            raise OpenKacheValueError(
+                "key_format must be "
+                + ", ".join(f"'{member.value}'" for member in KeyFormat)
+            ) from error
+    raise OpenKacheValueError(
+        "key_format must be "
+        + ", ".join(f"'{member.value}'" for member in KeyFormat)
+    )
+
+
 def _key_bytes(
     value: str | int | bytes | bytearray | memoryview,
     key_spec: KeySpec,
@@ -1002,7 +1089,11 @@ def _key_bytes(
             payload = value.encode("utf-8")
         except UnicodeEncodeError as error:
             raise OpenKacheValueError("key must contain valid UTF-8 text") from error
-        return _canonical_cbor_string(3, payload)
+        if len(payload) > _MAX_KEY_INPUT_BYTES:
+            raise OpenKacheValueError(
+                f"key input exceeds {_MAX_KEY_INPUT_BYTES} bytes"
+            )
+        return payload
     if key_spec is KeySpec.BYTES:
         if isinstance(value, (str, int)) or not isinstance(
             value, (bytes, bytearray, memoryview)
@@ -1010,65 +1101,30 @@ def _key_bytes(
             raise OpenKacheValueError(
                 "key must be bytes-like for the bytes key spec"
             )
-        return _canonical_cbor_string(2, _as_bytes(value, "key"))
+        payload = _as_bytes(value, "key")
+        if len(payload) > _MAX_KEY_INPUT_BYTES:
+            raise OpenKacheValueError(
+                f"key input exceeds {_MAX_KEY_INPUT_BYTES} bytes"
+            )
+        return payload
     if isinstance(value, bool) or not isinstance(value, int):
         raise OpenKacheValueError(
             "key must be an integer for the integer key spec"
         )
-    return _canonical_cbor_integer(value)
-
-
-def _canonical_cbor_string(major: int, payload: bytes) -> bytes:
-    """Encode one v1 Text or Bytes key as deterministic preferred CBOR."""
-
-    if len(payload) > _MAX_KEY_INPUT_BYTES:
+    magnitude = abs(value)
+    magnitude_length = 0 if magnitude == 0 else (magnitude.bit_length() + 7) // 8
+    if magnitude_length > _MAX_KEY_INPUT_BYTES:
         raise OpenKacheValueError(
             f"key input exceeds {_MAX_KEY_INPUT_BYTES} bytes"
         )
-    header = _canonical_cbor_argument(major, len(payload))
-    return header + payload
-
-
-def _canonical_cbor_argument(major: int, value: int) -> bytes:
-    if major not in (0, 1, 2, 3) or value < 0:
-        raise OpenKacheValueError("invalid canonical CBOR key argument")
-    prefix = major << 5
-    if value <= 23:
-        return bytes((prefix | value,))
-    if value <= 0xFF:
-        return bytes((prefix | 24, value))
-    if value <= 0xFFFF:
-        return bytes((prefix | 25,)) + value.to_bytes(2, "big")
-    if value <= 0xFFFF_FFFF:
-        return bytes((prefix | 26,)) + value.to_bytes(4, "big")
-    if value <= 0xFFFF_FFFF_FFFF_FFFF:
-        return bytes((prefix | 27,)) + value.to_bytes(8, "big")
-    raise OpenKacheValueError("canonical key length exceeds CBOR uint64")
-
-
-def _canonical_cbor_integer(value: int) -> bytes:
-    """Encode one arbitrary-precision integer as preferred deterministic CBOR."""
-
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise OpenKacheValueError("key must be an integer")
-    input_magnitude = abs(value)
-    input_magnitude_length = (
-        0 if input_magnitude == 0 else (input_magnitude.bit_length() + 7) // 8
-    )
-    if input_magnitude_length > _MAX_KEY_INPUT_BYTES:
-        raise OpenKacheValueError(
-            f"key input exceeds {_MAX_KEY_INPUT_BYTES} bytes"
-        )
-    negative = value < 0
-    transformed = -value - 1 if negative else value
-    if transformed <= 0xFFFF_FFFF_FFFF_FFFF:
-        return _canonical_cbor_argument(1 if negative else 0, transformed)
-
-    magnitude_length = max(1, (transformed.bit_length() + 7) // 8)
-    magnitude = transformed.to_bytes(magnitude_length, "big")
-    tag = b"\xc3" if negative else b"\xc2"
-    encoded = tag + _canonical_cbor_string(2, magnitude)
-    return encoded
+    # Avoid ``str(int)`` here: CPython applies a configurable 4,300-digit
+    # safety limit to integer-to-decimal conversion. The key contract limits
+    # the mathematical magnitude in bytes, not the number of decimal digits,
+    # so valid keys can exceed that interpreter-specific limit.
+    try:
+        return format(Decimal(value), "f").encode("ascii")
+    except (OverflowError, ValueError) as error:
+        raise OpenKacheValueError("integer key cannot be represented") from error
 
 
 def _item_id(value: bytes | bytearray | memoryview) -> bytes:

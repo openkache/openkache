@@ -48,8 +48,10 @@ Rust/C core is the native binary.
 
 Construct `openkache::Connect_Options` with the server address and, when
 protection is wanted, a persistent 32-byte data-protection key, then call
-`openkache::Client::connect`. Omitting the key selects unprotected formatted
-values while retaining Item ID derivation. A DER/PEM trust
+`openkache::Client::connect`. Omitting both the key and `encryption` selects
+unprotected formatted values; omitting only `encryption` selects Robust when
+the key is present. An explicit Compact or Robust profile without a key is
+rejected. A DER/PEM trust
 certificate is optional; an empty buffer uses system roots. `get` returns
 `std::optional<Bytes>`, `set` returns `Set_Outcome`, and `remove` reports
 whether a value existed. `Set_Options` supports conditional writes,
@@ -63,6 +65,15 @@ protection. `namespace_open`, `namespace_update_policy`, and
 optimistic revisions. Transport and validation failures throw
 `openkache::Error`.
 
+`Connect_Options::key_format` selects the client-local application-key mapping.
+`Key_Format::Hash` is the default. `Key_Format::Byte_Key_Or_Hash` applies only
+to byte-span overloads: it preserves byte keys up to the wire Item ID limit and
+hashes longer keys. Calling a `std::string_view` Text overload with that format
+is invalid and throws `openkache::Error`.
+
 The C++ layer does not duplicate protocol or protection logic. Its operation
 and outcome values come from the C ABI, whose Smithy-derived constants live in
 the shared core include directory.
+
+Set `Connect_Options::key_format` to `Key_Format::Byte_Key_Or_Hash` to preserve
+byte keys up to 32 bytes as Item IDs and hash longer byte keys.

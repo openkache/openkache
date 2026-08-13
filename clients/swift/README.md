@@ -6,8 +6,9 @@ not duplicate QUIC framing, TLS validation, retries, key derivation,
 compression, encryption, or value parsing.
 
 `OpenKacheClient` derives protected item IDs from v1 typed-key values. `String`
-keys use the `Text` type and `Data` keys use the `Bytes` type; both are encoded
-as canonical deterministic CBOR before crossing the native ABI. Use
+keys use the `Text` type and `Data` keys use the `Bytes` type; the logical bytes
+and explicit type discriminator cross the native ABI and the shared core
+performs canonical encoding (or the configured `ByteKeyOrHash` mapping). Use
 `OpenKacheRawClient` when an integration owns exact protocol item IDs and
 opaque value bytes; it implements the generated `Smithy_OpenKache_Api`
 contract.
@@ -104,6 +105,14 @@ Keys are exact UTF-8 or binary bytes, including empty and NUL-containing keys.
 Empty values are valid for the protected adapter. Raw item IDs may contain zero
 through `Smithy_Value_Format.maxItemIdBytes` bytes. `dataProtectionKey` must contain
 exactly 32 persistent random bytes.
+When `encryption` is omitted, the shared core selects Robust with a
+`dataProtectionKey` and Unprotected without one. Explicit Compact or Robust
+requires a data-protection key.
+`OpenKacheKeyFormat.byteKeyOrHash` preserves `Data` keys up to the 32-byte Item
+ID limit and hashes longer keys; use it only with byte-key APIs.
+When `encryption` is omitted, the shared core selects Robust when
+`dataProtectionKey` is supplied and Unprotected otherwise. An explicit
+authenticated profile requires a data-protection key.
 `certificate` may be one DER certificate or a PEM chain; omit it to use system
 roots. A numeric address may provide a separate `serverName` for certificate
 verification.

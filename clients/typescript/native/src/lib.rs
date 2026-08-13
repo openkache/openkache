@@ -9,7 +9,7 @@ use napi_derive::napi;
 use openkache_client_core::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use openkache_client_core::{
     Certificate, ClientIdentity, ClientTimeouts, DEFAULT_MAX_IN_FLIGHT, DeleteOutcome, Endpoint,
-    EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeySpec,
+    EvictionDefault, ExpirationDefault, GetOutcome, ItemId, ItemValue, KeyFormat, KeySpec,
     NamespaceDescriptor, NamespacePolicy, OverridePolicy, PrivateKey, ProtectedClient, RetryPolicy,
     SetCondition, SetOptions, SetOutcome,
     contract::{
@@ -66,6 +66,8 @@ pub struct NativeClientOptions {
     pub encryption: Option<String>,
     #[napi(js_name = "key_spec")]
     pub key_spec: Option<String>,
+    #[napi(js_name = "key_format")]
+    pub key_format: Option<String>,
 }
 
 /// Decoded components of the legacy TypeScript metadata envelope.
@@ -112,6 +114,7 @@ pub struct NativeNamespaceOpenOutput {
 #[napi]
 pub struct NativeClient {
     client: RwLock<Option<Arc<ProtectedClient>>>,
+    key_type: KeySpec,
 }
 
 #[napi]
@@ -128,10 +131,15 @@ impl NativeClient {
 
     /// Retrieves exact decoded bytes or `null` when the canonical key is absent.
     #[napi]
-    pub async fn get(&self, key: Uint8Array) -> Result<Option<Uint8Array>> {
+    pub async fn get(
+        &self,
+        key: Uint8Array,
+        encryption: Option<String>,
+    ) -> Result<Option<Uint8Array>> {
+        let encryption = parse_operation_encryption(encryption.as_deref())?;
         let outcome = self
             .active_client()?
-            .get_canonical_key(key.as_ref())
+            .get_logical_key_with_profile(self.key_type, key.as_ref(), encryption)
             .await
             .map_err(native_error)?;
         match outcome {
@@ -158,10 +166,15 @@ impl NativeClient {
     /// Returns an error when the client is closed, transport or value transformation fails, or
     /// the stored bytes are not a supported legacy metadata envelope.
     #[napi(js_name = "get_value")]
-    pub async fn get_value(&self, key: Uint8Array) -> Result<Option<NativeValueEnvelope>> {
+    pub async fn get_value(
+        &self,
+        key: Uint8Array,
+        encryption: Option<String>,
+    ) -> Result<Option<NativeValueEnvelope>> {
+        let encryption = parse_operation_encryption(encryption.as_deref())?;
         let outcome = self
             .active_client()?
-            .get_canonical_key(key.as_ref())
+            .get_logical_key_with_profile(self.key_type, key.as_ref(), encryption)
             .await
             .map_err(native_error)?;
         let GetOutcome::Found(Value::Raw(bytes)) = outcome else {
@@ -189,10 +202,15 @@ impl NativeClient {
     ///
     /// Raw-formatted values are rejected instead of being silently coerced.
     #[napi(js_name = "get_json")]
-    pub async fn get_json(&self, key: Uint8Array) -> Result<Option<String>> {
+    pub async fn get_json(
+        &self,
+        key: Uint8Array,
+        encryption: Option<String>,
+    ) -> Result<Option<String>> {
+        let encryption = parse_operation_encryption(encryption.as_deref())?;
         let outcome = self
             .active_client()?
-            .get_canonical_key(key.as_ref())
+            .get_logical_key_with_profile(self.key_type, key.as_ref(), encryption)
             .await
             .map_err(native_error)?;
         match outcome {
@@ -219,6 +237,7 @@ impl NativeClient {
         expiration_mode: Option<String>,
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
+        encryption: Option<String>,
     ) -> Result<String> {
         self.store(
             key.as_ref(),
@@ -227,6 +246,7 @@ impl NativeClient {
             expiration_mode,
             eviction_mode,
             ttl_ms,
+            encryption,
         )
         .await
     }
@@ -261,6 +281,7 @@ impl NativeClient {
         expiration_mode: Option<String>,
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
+        encryption: Option<String>,
     ) -> Result<String> {
         let value = value_envelope::encode(&encoding, &type_name, payload.as_ref())
             .map_err(native_error)?;
@@ -271,6 +292,7 @@ impl NativeClient {
             expiration_mode,
             eviction_mode,
             ttl_ms,
+            encryption,
         )
         .await
     }
@@ -285,7 +307,9 @@ impl NativeClient {
         expiration_mode: Option<String>,
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
+        encryption: Option<String>,
     ) -> Result<String> {
+        let encryption = parse_operation_encryption(encryption.as_deref())?;
         let value = parse_json_value(value)?;
         let options = parse_set_options(
             condition.as_deref(),
@@ -294,7 +318,13 @@ impl NativeClient {
             ttl_ms,
         )?;
         self.active_client()?
-            .set_canonical_key(key.as_ref(), Value::Json(value), options)
+            .set_logical_key_with_profile(
+                self.key_type,
+                key.as_ref(),
+                Value::Json(value),
+                options,
+                encryption,
+            )
             .await
             .map(map_set_outcome)
             .map_err(native_error)
@@ -304,7 +334,7 @@ impl NativeClient {
     #[napi]
     pub async fn delete(&self, key: Uint8Array) -> Result<bool> {
         self.active_client()?
-            .delete_canonical_key(key.as_ref())
+            .delete_logical_key(self.key_type, key.as_ref())
             .await
             .map(|outcome| outcome == DeleteOutcome::Deleted)
             .map_err(native_error)
@@ -577,7 +607,9 @@ impl NativeClient {
         expiration_mode: Option<String>,
         eviction_mode: Option<String>,
         ttl_ms: Option<f64>,
+        encryption: Option<String>,
     ) -> Result<String> {
+        let encryption = parse_operation_encryption(encryption.as_deref())?;
         let options = parse_set_options(
             condition.as_deref(),
             expiration_mode.as_deref(),
@@ -586,7 +618,7 @@ impl NativeClient {
         )?;
         let client = self.active_client()?;
         client
-            .set_canonical_key(key, Value::Raw(value), options)
+            .set_logical_key_with_profile(self.key_type, key, Value::Raw(value), options, encryption)
             .await
             .map(map_set_outcome)
             .map_err(native_error)
@@ -681,6 +713,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
         .map(parse_encryption)
         .transpose()?;
     let key_spec = parse_key_spec(options.key_spec.as_deref())?;
+    let key_format = parse_key_format(options.key_format.as_deref())?;
     let endpoint = parse_endpoint(&options.address, &options.server_name)?;
     let trusted_certificate = trusted_certificates.remove(0);
     let mut builder = match data_protection_key {
@@ -692,7 +725,8 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     .timeouts(timeouts)
     .retry_policy(retry)
     .max_in_flight(max_in_flight)
-    .key_spec(key_spec);
+    .key_spec(key_spec)
+    .key_format(key_format);
     if let Some(encryption) = encryption {
         builder = builder.encryption(encryption);
     }
@@ -702,6 +736,7 @@ pub async fn connect(options: NativeClientOptions) -> Result<NativeClient> {
     let client = builder.connect().await.map_err(native_error)?;
     Ok(NativeClient {
         client: RwLock::new(Some(Arc::new(client))),
+        key_type: key_spec,
     })
 }
 
@@ -712,6 +747,16 @@ fn parse_key_spec(value: Option<&str>) -> Result<KeySpec> {
         "bytes" => Ok(KeySpec::Bytes),
         other => Err(invalid_argument(format!(
             "key_spec must be integer, text, or bytes, got {other}"
+        ))),
+    }
+}
+
+fn parse_key_format(value: Option<&str>) -> Result<KeyFormat> {
+    match value.unwrap_or("hash") {
+        "hash" => Ok(KeyFormat::Hash),
+        "byte_key_or_hash" => Ok(KeyFormat::ByteKeyOrHash),
+        other => Err(invalid_argument(format!(
+            "key_format must be hash or byte_key_or_hash, got {other}"
         ))),
     }
 }
@@ -1029,6 +1074,18 @@ fn parse_encryption(encryption: &str) -> Result<Encryption> {
         "compact" => Ok(Encryption::Compact),
         value => Err(invalid_argument(format!(
             "encryption must be compact or robust, got {value}"
+        ))),
+    }
+}
+
+fn parse_operation_encryption(value: Option<&str>) -> Result<Option<Encryption>> {
+    match value {
+        None => Ok(None),
+        Some("unprotected") => Ok(Some(Encryption::Unprotected)),
+        Some("compact") => Ok(Some(Encryption::Compact)),
+        Some("robust") => Ok(Some(Encryption::Robust)),
+        Some(other) => Err(invalid_argument(format!(
+            "operation encryption must be unprotected, compact, or robust, got {other}"
         ))),
     }
 }

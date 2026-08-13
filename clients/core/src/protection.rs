@@ -238,13 +238,7 @@ impl DataProtection {
         compression: Compression,
         encryption: Encryption,
     ) -> Result<Self> {
-        Self::with_key_type_and_format_profile(
-            key,
-            key_spec,
-            key_format,
-            compression,
-            encryption,
-        )
+        Self::with_key_type_and_format_profile(key, key_spec, key_format, compression, encryption)
     }
 
     /// Creates an unprotected client with an explicit key mapping profile.
@@ -304,6 +298,38 @@ impl DataProtection {
         self.key
             .derive_item_id_for_resolved_key(namespace_id, &resolved)
             .map_err(Into::into)
+    }
+
+    /// Derives an Item ID from logical key bytes using the configured key type
+    /// and client-local mapping profile. `ByteKeyOrHash` preserves direct
+    /// `Bytes` inputs through the wire Item ID limit; canonical-key inputs
+    /// always use the Hash profile.
+    pub(crate) fn item_id_from_logical_bytes(
+        &self,
+        namespace_id: u64,
+        logical_key: &[u8],
+    ) -> Result<ItemId> {
+        self.item_id_from_logical_bytes_for_type(namespace_id, self.key_type, logical_key)
+    }
+
+    /// Derives an Item ID using an operation-supplied typed-key discriminator.
+    ///
+    /// Native adapters use this when the ABI carries the key type per
+    /// operation rather than baking it into connection options.
+    pub(crate) fn item_id_from_logical_bytes_for_type(
+        &self,
+        namespace_id: u64,
+        key_type: KeyType,
+        logical_key: &[u8],
+    ) -> Result<ItemId> {
+        KeySpace::with_format(key_type, self.key_format)
+            .resolve_logical_bytes(logical_key)
+            .map_err(crate::Error::from)
+            .and_then(|resolved| {
+                self.key
+                    .derive_item_id_for_resolved_key(namespace_id, &resolved)
+                    .map_err(Into::into)
+            })
     }
 
     /// Derives an Item ID from canonical key bytes without applying a configured
@@ -383,15 +409,30 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
+    /// Serializes and protects a value with an optional operation-local
+    /// encryption profile.
+    ///
+    /// `None` selects this protection instance's configured default. An
+    /// explicit profile applies only to this operation and does not mutate
+    /// the instance default.
+    pub fn encode_in_namespace_with_optional_profile(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        value: Value,
+        encryption: Option<Encryption>,
+    ) -> Result<ItemValue> {
+        self.codec
+            .encode_in_namespace_with_optional_profile(namespace_id, item_id, value, encryption)
+            .map_err(Into::into)
+    }
     /// Serializes a logical JSON value as canonical UTF-8 `OpaqueBytes`.
     pub fn encode_json(
         &self,
         item_id: ItemId,
         value: crate::value::JsonValue,
     ) -> Result<ItemValue> {
-        self.codec
-            .encode_json(item_id, value)
-            .map_err(Into::into)
+        self.codec.encode_json(item_id, value).map_err(Into::into)
     }
 
     /// Serializes a logical JSON value and binds its namespace into AAD.
@@ -437,15 +478,31 @@ impl DataProtection {
             .map_err(Into::into)
     }
 
+    /// Authenticates and decodes a value with an optional operation-local
+    /// encryption profile.
+    ///
+    /// `None` selects this protection instance's configured default. An
+    /// explicit profile must match the envelope and does not mutate the
+    /// instance default.
+    pub fn decode_in_namespace_with_optional_profile(
+        &self,
+        namespace_id: u64,
+        item_id: ItemId,
+        encoded: ItemValue,
+        encryption: Option<Encryption>,
+    ) -> Result<Value> {
+        self.codec
+            .decode_in_namespace_with_optional_profile(namespace_id, item_id, encoded, encryption)
+            .map_err(Into::into)
+    }
+
     /// Authenticates and parses canonical JSON stored as `OpaqueBytes`.
     pub fn decode_json(
         &self,
         item_id: ItemId,
         encoded: ItemValue,
     ) -> Result<crate::value::JsonValue> {
-        self.codec
-            .decode_json(item_id, encoded)
-            .map_err(Into::into)
+        self.codec.decode_json(item_id, encoded).map_err(Into::into)
     }
 
     /// Authenticates and parses canonical JSON while binding its namespace.

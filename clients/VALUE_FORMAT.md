@@ -34,9 +34,9 @@ This profile does not define:
 - application registries for arbitrary payload formats; or
 - transport framing.
 
-The enclosing client profile supplies key material and any external associated
-data. This document defines the value envelope and the transforms applied to
-its payload.
+The enclosing client profile supplies key material. This document defines the
+value envelope, its authenticated binding to the namespace and exact Item ID,
+and the transforms applied to its payload.
 
 ## 2. Processing model
 
@@ -125,18 +125,23 @@ normative properties of the selected profile.
 | `1` | `AES-256-GCM-SIV` ([RFC 8452](https://www.rfc-editor.org/rfc/rfc8452)) | Randomized authenticated encryption with a fresh 12-byte nonce per write. |
 | `2` | `AES-256-SIV-CMAC` ([RFC 5297](https://www.rfc-editor.org/rfc/rfc5297)) | Deterministic authenticated encryption with no random nonce. |
 
-The client MUST have an instance-wide default protection profile. Each
-formatted operation MAY specify a protection-profile override. If no override
-is supplied, the operation uses the instance default; an override MUST NOT
-mutate that default. The selected operation profile MUST be represented by
-`protection_id`.
+The shared client core has an instance-wide default protection profile. Each
+formatted operation MAY specify a protection-profile override when its language
+binding exposes that operation-local option. If no override is supplied, the
+operation uses the instance default; an override MUST NOT mutate that default.
+The selected operation profile MUST be represented by `protection_id`.
 
 Without a configured protection key, the default and only valid profile is
 `Unprotected`. With a configured key, the default profile is
-`AES-256-GCM-SIV`; the client MAY explicitly select any supported profile.
-Selecting an authenticated protection profile without its required key MUST
-fail. A decoder MUST reject a value whose protection ID is disallowed by the
-caller's configured profile and MUST NOT silently downgrade or fall back.
+`AES-256-GCM-SIV`. An omitted connection profile therefore means
+`Unprotected` without a key and `AES-256-GCM-SIV` with a key. The client MAY
+explicitly select an authenticated profile where its connection API exposes
+that choice. Selecting an authenticated protection profile without its
+required key MUST fail; a binding MUST preserve that explicit selection so the
+shared core can reject it rather than silently downgrading to `Unprotected`.
+Operation-local APIs MAY additionally select `Unprotected`. A decoder MUST
+reject a value whose protection ID is disallowed by the caller's configured
+profile and MUST NOT silently downgrade or fall back.
 
 ### 4.2 Compression profiles
 
@@ -230,11 +235,20 @@ skippable frame, and no trailing bytes. Decoders MUST reject missing content
 sizes, multiple frames, dictionary requirements, oversized windows, trailing
 bytes, and decompressed output above the payload limit.
 
-The initial SDK policy is Zstd level 1, no compression below 1,024 payload
-bytes, and no compression unless it saves at least 64 bytes. An encoder MAY
-select compression profile `0` when compression is not beneficial. It MUST NOT
-label an uncompressed body as Zstandard.
+The generated client contract supplies Zstd level `1`, a minimum input size of
+`1,024` payload bytes, and a minimum savings threshold of `64` bytes as the
+default settings when compression is enabled. Compression enablement is a
+language-adapter policy; the current adapters use these defaults:
 
+| Adapter | Compression enabled when omitted |
+|---|---:|
+| Rust core, C++, Go, Swift | No |
+| Python, TypeScript | Yes |
+
+Callers sharing a workload SHOULD select the same policy. An adapter
+documentation MUST state its default explicitly. An encoder MAY select
+compression profile `0` when compression is not beneficial. It MUST NOT label
+an uncompressed body as Zstandard.
 When secret data is compressed together with attacker-influenced data,
 compression SHOULD be disabled or the components SHOULD be stored separately.
 Compression can create a side channel through the resulting ciphertext length;
@@ -242,13 +256,13 @@ cryptographic protection does not hide that length.
 
 ## 7. Cryptographic protection
 
-The enclosing client profile supplies the key material and external associated
-data. This document does not define key derivation or identity binding.
+The enclosing client profile supplies the key material. This document does not
+define key derivation or identity binding.
 
 For a protected envelope, the authenticated data MUST include the exact
-encoded `value_envelope_version` bytes and the exact `selector_byte`, in
-addition to
-any external associated data supplied by the enclosing client profile.
+encoded `value_envelope_version` bytes and the exact `selector_byte`.
+This v1 OpenKache profile defines no additional caller-supplied associated-data
+component.
 
 For the OpenKache client profile, that associated data is the following
 unambiguous byte sequence (all concatenated without delimiters):
@@ -277,8 +291,8 @@ envelope_body = Protect(Compress(payload_bytes))
 ```
 
 Protection MUST authenticate before any decompression or payload parsing. An
-authentication failure MUST use one generic error. Unauthenticated plaintext
-MUST be zeroized before that error is returned.
+authentication failure MUST use one generic error. Any decrypted working
+buffer MUST be zeroized before that error is returned.
 
 ### 7.1 AES-256-GCM-SIV
 

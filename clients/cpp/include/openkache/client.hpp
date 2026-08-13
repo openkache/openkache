@@ -99,6 +99,19 @@ enum class Encryption : std::uint32_t {
     Robust = OPENKACHE_SMITHY_VALUE_ENCRYPTION_ROBUST,
 };
 
+/// Client-local application-key to Item ID mapping profile.
+enum class Key_Format : std::uint32_t {
+    Hash = OPENKACHE_CLIENT_KEY_FORMAT_HASH,
+    Byte_Key_Or_Hash = OPENKACHE_CLIENT_KEY_FORMAT_BYTE_KEY_OR_HASH,
+};
+
+/// Logical key type supplied to the typed native ABI.
+enum class Key_Type : std::uint32_t {
+    Text = OPENKACHE_CLIENT_KEY_SPEC_TEXT,
+    Bytes = OPENKACHE_CLIENT_KEY_SPEC_BYTES,
+    Integer = OPENKACHE_CLIENT_KEY_SPEC_INTEGER,
+};
+
 /// Successful SET outcome.
 enum class Set_Outcome {
     Created,
@@ -139,13 +152,17 @@ struct Connect_Options {
     std::size_t minimum_savings = OPENKACHE_SMITHY_DEFAULT_ZSTANDARD_MINIMUM_SAVINGS_BYTES;
     std::vector<Byte> client_certificate_chain;
     std::vector<Byte> client_private_key;
-    Encryption encryption = Encryption::Robust;
+    /// Optional value-protection profile. Omitted selects Robust with a key
+    /// and Unprotected without one; an explicit authenticated profile without
+    /// a key is rejected by the shared core.
+    std::optional<Encryption> encryption;
     std::uint64_t connect_timeout_ms =
         OPENKACHE_SMITHY_DEFAULT_CONNECT_TIMEOUT_MILLISECONDS;
     std::uint64_t request_timeout_ms =
         OPENKACHE_SMITHY_DEFAULT_REQUEST_TIMEOUT_MILLISECONDS;
     std::size_t retry_max_attempts = OPENKACHE_SMITHY_DEFAULT_RETRY_MAX_ATTEMPTS;
     std::size_t max_in_flight = OPENKACHE_SMITHY_DEFAULT_MAX_IN_FLIGHT;
+    Key_Format key_format = Key_Format::Hash;
 };
 
 /// RAII C++ client over the shared core C ABI.
@@ -191,29 +208,23 @@ public:
         const auto* client_private_key = options.client_private_key.empty()
             ? nullptr
             : options.client_private_key.data();
+        openkache_client_connect_options_t native_options{
+            reinterpret_cast<const Byte*>(options.address.data()), options.address.size(),
+            reinterpret_cast<const Byte*>(options.server_name.data()), options.server_name.size(),
+            certificate, options.certificate.size(), client_certificate_chain,
+            options.client_certificate_chain.size(), client_private_key,
+            options.client_private_key.size(), key, options.data_protection_key.size(),
+            static_cast<std::uint8_t>(options.compression_enabled ? 1u : 0u),
+            options.compression_level, options.minimum_input_size, options.minimum_savings,
+            options.encryption.has_value()
+                ? static_cast<std::uint32_t>(*options.encryption)
+                : static_cast<std::uint32_t>(OPENKACHE_SMITHY_VALUE_ENCRYPTION_NONE),
+            options.connect_timeout_ms,
+            options.request_timeout_ms, options.retry_max_attempts, options.max_in_flight};
+        openkache_client_connect_options_v2_t native_options_v2{
+            native_options, static_cast<std::uint32_t>(options.key_format)};
         openkache_client_result_t* result =
-            openkache_client_connect_ex(
-                reinterpret_cast<const Byte*>(options.address.data()),
-                options.address.size(),
-                reinterpret_cast<const Byte*>(options.server_name.data()),
-                options.server_name.size(),
-                certificate,
-                options.certificate.size(),
-                client_certificate_chain,
-                options.client_certificate_chain.size(),
-                client_private_key,
-                options.client_private_key.size(),
-                key,
-                options.data_protection_key.size(),
-                static_cast<std::uint8_t>(options.compression_enabled ? 1u : 0u),
-                options.compression_level,
-                options.minimum_input_size,
-                options.minimum_savings,
-                static_cast<std::uint32_t>(options.encryption),
-                options.retry_max_attempts,
-                options.max_in_flight,
-                options.connect_timeout_ms,
-                options.request_timeout_ms);
+            openkache_client_connect_with_options_v2(&native_options_v2);
         if (result == nullptr) {
             throw Error("OpenKache connect returned a null result");
         }
@@ -285,17 +296,17 @@ public:
 
     /// Retrieves a Bytes typed-key value, or `std::nullopt` when absent.
     std::optional<Bytes> get(std::span<const Byte> key) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
+        validate_key_input(key);
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            execute_typed(OPENKACHE_SMITHY_OPCODE_GET, Key_Type::Bytes, key, {}, Set_Options{}),
             "GET");
     }
 
     /// Convenience overload for a Text typed-key value.
     std::optional<Bytes> get(std::string_view key) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
+        validate_text_key(as_bytes(key));
         return get_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_GET, canonical_key, {}, Set_Options{}),
+            execute_typed(OPENKACHE_SMITHY_OPCODE_GET, Key_Type::Text, as_bytes(key), {}, Set_Options{}),
             "GET");
     }
 
@@ -304,9 +315,9 @@ public:
         std::span<const Byte> key,
         std::span<const Byte> value,
         Set_Options options = {}) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
+        validate_key_input(key);
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, value, options),
+            execute_typed(OPENKACHE_SMITHY_OPCODE_SET, Key_Type::Bytes, key, value, options),
             "SET");
     }
 
@@ -315,28 +326,29 @@ public:
         std::string_view key,
         std::string_view value,
         Set_Options options = {}) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
+        validate_text_key(as_bytes(key));
         return set_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_SET, canonical_key, as_bytes(value), options),
+            execute_typed(OPENKACHE_SMITHY_OPCODE_SET, Key_Type::Text, as_bytes(key), as_bytes(value), options),
             "SET");
     }
 
     /// Deletes a Bytes typed-key value and reports whether it existed.
     bool remove(std::span<const Byte> key) const {
-        const auto canonical_key = canonical_key_bytes(key, 2);
+        validate_key_input(key);
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
+            execute_typed(OPENKACHE_SMITHY_OPCODE_DELETE, Key_Type::Bytes, key, {}, Set_Options{}));
     }
 
     /// Convenience overload for a Text typed-key value.
     bool remove(std::string_view key) const {
-        const auto canonical_key = canonical_key_bytes(as_bytes(key), 3);
+        validate_text_key(as_bytes(key));
         return delete_outcome(
-            execute(OPENKACHE_SMITHY_OPCODE_DELETE, canonical_key, {}, Set_Options{}));
+            execute_typed(OPENKACHE_SMITHY_OPCODE_DELETE, Key_Type::Text, as_bytes(key), {}, Set_Options{}));
     }
 
     /// Retrieves exact bytes for a variable-length protocol item ID.
     std::optional<Bytes> get_raw(std::span<const Byte> item_id) const {
+        validate_item_id(item_id);
         return get_outcome(
             execute(
                 OPENKACHE_SMITHY_OPCODE_GET,
@@ -352,6 +364,7 @@ public:
         std::span<const Byte> item_id,
         std::span<const Byte> value,
         Set_Options options = {}) const {
+        validate_item_id(item_id);
         return set_outcome(
             execute(
                 OPENKACHE_SMITHY_OPCODE_SET,
@@ -364,6 +377,7 @@ public:
 
     /// Deletes a variable-length protocol item ID without application-key derivation.
     bool remove_raw(std::span<const Byte> item_id) const {
+        validate_item_id(item_id);
         return delete_outcome(
             execute(
                 OPENKACHE_SMITHY_OPCODE_DELETE,
@@ -495,6 +509,23 @@ private:
         return std::move(result.payload);
     }
 
+    Operation_Result execute_typed(
+        std::uint32_t operation,
+        Key_Type key_type,
+        std::span<const Byte> key,
+        std::span<const Byte> value,
+        Set_Options options) const {
+        if (client_ == nullptr) {
+            throw Error("OpenKache client is closed");
+        }
+        const auto [set_flags, ttl_ms] = wire_options(options);
+        const auto* key_data = key.empty() ? nullptr : key.data();
+        const auto* value_data = value.empty() ? nullptr : value.data();
+        return take_result(openkache_client_execute_typed_with_options(
+            client_, operation, static_cast<std::uint32_t>(key_type), key_data,
+            key.size(), value_data, value.size(), set_flags, ttl_ms));
+    }
+
     static Set_Outcome set_outcome(
         const Operation_Result& result,
         const char* operation) {
@@ -529,45 +560,60 @@ private:
         };
     }
 
-    static Bytes canonical_key_bytes(
-        std::span<const Byte> payload,
-        Byte major) {
-        if (major != 2 && major != 3) {
-            throw Error("OpenKache key type is not supported");
-        }
-        const auto length = payload.size();
-        if (length > MAX_KEY_INPUT_BYTES) {
+    static void validate_key_input(std::span<const Byte> key) {
+        if (key.size() > MAX_KEY_INPUT_BYTES) {
             throw Error(
                 "OpenKache key input exceeds " +
                 std::to_string(MAX_KEY_INPUT_BYTES) + " bytes");
         }
-        Bytes encoded;
-        if (length <= 23) {
-            encoded.push_back(static_cast<Byte>((major << 5) | length));
-        } else if (length <= 0xff) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 24),
-                static_cast<Byte>(length),
-            };
-        } else if (length <= 0xffff) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 25),
-                static_cast<Byte>(length >> 8),
-                static_cast<Byte>(length),
-            };
-        } else if (length <= 0xffff'ffffu) {
-            encoded = {
-                static_cast<Byte>((major << 5) | 26),
-                static_cast<Byte>(length >> 24),
-                static_cast<Byte>(length >> 16),
-                static_cast<Byte>(length >> 8),
-                static_cast<Byte>(length),
-            };
-        } else {
-            throw Error("OpenKache key length exceeds canonical CBOR uint32");
+    }
+
+    static void validate_text_key(std::span<const Byte> key) {
+        validate_key_input(key);
+        std::size_t index = 0;
+        while (index < key.size()) {
+            const Byte lead = key[index++];
+            std::size_t continuation_count;
+            std::uint32_t code_point;
+            if (lead <= 0x7f) {
+                continue;
+            } else if (lead >= 0xc2 && lead <= 0xdf) {
+                continuation_count = 1;
+                code_point = lead & 0x1f;
+            } else if (lead >= 0xe0 && lead <= 0xef) {
+                continuation_count = 2;
+                code_point = lead & 0x0f;
+            } else if (lead >= 0xf0 && lead <= 0xf4) {
+                continuation_count = 3;
+                code_point = lead & 0x07;
+            } else {
+                throw Error("OpenKache text key must contain valid UTF-8");
+            }
+            if (index + continuation_count > key.size()) {
+                throw Error("OpenKache text key must contain valid UTF-8");
+            }
+            for (std::size_t count = 0; count < continuation_count; ++count) {
+                const Byte continuation = key[index++];
+                if ((continuation & 0xc0) != 0x80) {
+                    throw Error("OpenKache text key must contain valid UTF-8");
+                }
+                code_point = (code_point << 6) | (continuation & 0x3f);
+            }
+            if ((continuation_count == 2 && code_point < 0x800) ||
+                (continuation_count == 3 && code_point < 0x10000) ||
+                code_point > 0x10ffff ||
+                (code_point >= 0xd800 && code_point <= 0xdfff)) {
+                throw Error("OpenKache text key must contain valid UTF-8");
+            }
         }
-        encoded.insert(encoded.end(), payload.begin(), payload.end());
-        return encoded;
+    }
+
+    static void validate_item_id(std::span<const Byte> item_id) {
+        if (item_id.size() > OPENKACHE_SMITHY_ITEM_ID_BYTES) {
+            throw Error(
+                "OpenKache item ID exceeds " +
+                std::to_string(OPENKACHE_SMITHY_ITEM_ID_BYTES) + " bytes");
+        }
     }
 
     static std::pair<Byte, std::uint64_t> namespace_policy_wire(

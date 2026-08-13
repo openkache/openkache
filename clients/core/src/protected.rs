@@ -7,8 +7,8 @@ use crate::value::{Compression, Encryption, Value};
 use crate::{
     AlpnPolicy, Certificate, ClientIdentity, ClientTimeouts, ConnectionState, DataProtection,
     DataProtectionKey, DeleteOutcome, Endpoint, GetOutcome, KeyFormat, KeyType,
-    NamespaceDescriptor, NamespacePolicy, Result, RetryPolicy, ServerTrust, TypedKey,
-    SetOptions, SetOutcome,
+    NamespaceDescriptor, NamespacePolicy, Result, RetryPolicy, ServerTrust, SetOptions, SetOutcome,
+    TypedKey,
 };
 #[cfg(feature = "quic-compio")]
 use crate::{LocalRawClient, LocalRawClientBuilder};
@@ -263,9 +263,22 @@ macro_rules! protected_client_methods {
         /// Returns an error when transport, authentication, decompression, or deserialization
         /// fails.
         pub async fn get_value(&self, key: impl Into<TypedKey>) -> Result<GetOutcome<Value>> {
+            self.get_value_with_profile(key, None).await
+        }
+
+        /// Retrieves and decodes a value with an operation-local protection profile.
+        ///
+        /// `None` uses the client instance default. An explicit profile must match the
+        /// envelope and applies only to this operation.
+        pub async fn get_value_with_profile(
+            &self,
+            key: impl Into<TypedKey>,
+            encryption: Option<Encryption>,
+        ) -> Result<GetOutcome<Value>> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
-            self.get_value_at_item_id(namespace_id, item_id).await
+            self.get_value_at_item_id(namespace_id, item_id, encryption)
+                .await
         }
 
         /// Retrieves a value when the adapter already owns canonical key bytes.
@@ -277,7 +290,63 @@ macro_rules! protected_client_methods {
             let item_id = self
                 .protection
                 .item_id_from_canonical_key(namespace_id, canonical_key.as_ref())?;
-            self.get_value_at_item_id(namespace_id, item_id).await
+            self.get_value_at_item_id(namespace_id, item_id, None).await
+        }
+
+        /// Retrieves a value from logical key bytes using the configured key
+        /// type and mapping profile.
+        ///
+        /// This is intended for language adapters whose native values are
+        /// already represented as UTF-8, decimal integer, or direct byte
+        /// sequences. Unlike `get_canonical_key`, it does not expect a CBOR
+        /// wrapper around the logical key.
+        pub async fn get_logical_key(
+            &self,
+            key_type: KeyType,
+            logical_key: impl AsRef<[u8]>,
+        ) -> Result<GetOutcome<Value>> {
+            self.get_logical_key_with_profile(key_type, logical_key, None)
+                .await
+        }
+
+        /// Retrieves a logical key with an operation-local protection profile.
+        pub async fn get_logical_key_with_profile(
+            &self,
+            key_type: KeyType,
+            logical_key: impl AsRef<[u8]>,
+            encryption: Option<Encryption>,
+        ) -> Result<GetOutcome<Value>> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_from_logical_bytes_for_type(
+                namespace_id,
+                key_type,
+                logical_key.as_ref(),
+            )?;
+            self.get_value_at_item_id(namespace_id, item_id, encryption)
+                .await
+        }
+
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn get_key_for_ffi(
+            &self,
+            key: &[u8],
+            key_type: Option<KeyType>,
+            encryption: Option<Encryption>,
+        ) -> Result<GetOutcome<Value>> {
+            match key_type {
+                Some(key_type) => {
+                    self.get_logical_key_with_profile(key_type, key, encryption)
+                        .await
+                }
+                None => {
+                    let namespace_id = self.raw.ensure_namespace_id().await?;
+                    let item_id = self
+                        .protection
+                        .item_id_from_canonical_key_unchecked(namespace_id, key)?;
+                    self.get_value_at_item_id(namespace_id, item_id, encryption)
+                        .await
+                }
+            }
         }
 
         /// Retrieves a value for canonical key bytes supplied by a low-level
@@ -295,18 +364,24 @@ macro_rules! protected_client_methods {
             let item_id = self
                 .protection
                 .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
-            self.get_value_at_item_id(namespace_id, item_id).await
+            self.get_value_at_item_id(namespace_id, item_id, None).await
         }
 
         async fn get_value_at_item_id(
             &self,
             namespace_id: u64,
             item_id: crate::ItemId,
+            encryption: Option<Encryption>,
         ) -> Result<GetOutcome<Value>> {
             match self.raw.get_in_namespace(namespace_id, item_id).await? {
                 GetOutcome::Found(value) => self
                     .protection
-                    .decode_in_namespace(namespace_id, item_id, value)
+                    .decode_in_namespace_with_optional_profile(
+                        namespace_id,
+                        item_id,
+                        value,
+                        encryption,
+                    )
                     .map(GetOutcome::Found),
                 GetOutcome::NotFound => Ok(GetOutcome::NotFound),
             }
@@ -344,11 +419,28 @@ macro_rules! protected_client_methods {
             value: Value,
             options: SetOptions,
         ) -> Result<SetOutcome> {
+            self.set_value_with_profile(key, value, options, None).await
+        }
+
+        /// Serializes and stores a value with an operation-local protection profile.
+        ///
+        /// `None` uses the client instance default. An explicit profile applies only to this
+        /// operation and does not mutate the client.
+        pub async fn set_value_with_profile(
+            &self,
+            key: impl Into<TypedKey>,
+            value: Value,
+            options: SetOptions,
+            encryption: Option<Encryption>,
+        ) -> Result<SetOutcome> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
             let item_id = self.protection.item_id_in_namespace(namespace_id, key)?;
-            let value = self
-                .protection
-                .encode_in_namespace(namespace_id, item_id, value)?;
+            let value = self.protection.encode_in_namespace_with_optional_profile(
+                namespace_id,
+                item_id,
+                value,
+                encryption,
+            )?;
             self.raw
                 .set_in_namespace(namespace_id, item_id, value, options)
                 .await
@@ -394,6 +486,76 @@ macro_rules! protected_client_methods {
                 .await
         }
 
+        /// Stores a value from logical key bytes using the configured profile.
+        pub async fn set_logical_key(
+            &self,
+            key_type: KeyType,
+            logical_key: impl AsRef<[u8]>,
+            value: Value,
+            options: SetOptions,
+        ) -> Result<SetOutcome> {
+            self.set_logical_key_with_profile(key_type, logical_key, value, options, None)
+                .await
+        }
+
+        /// Stores a logical key with an operation-local protection profile.
+        pub async fn set_logical_key_with_profile(
+            &self,
+            key_type: KeyType,
+            logical_key: impl AsRef<[u8]>,
+            value: Value,
+            options: SetOptions,
+            encryption: Option<Encryption>,
+        ) -> Result<SetOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_from_logical_bytes_for_type(
+                namespace_id,
+                key_type,
+                logical_key.as_ref(),
+            )?;
+            let value = self.protection.encode_in_namespace_with_optional_profile(
+                namespace_id,
+                item_id,
+                value,
+                encryption,
+            )?;
+            self.raw
+                .set_in_namespace(namespace_id, item_id, value, options)
+                .await
+        }
+
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn set_key_for_ffi(
+            &self,
+            key: &[u8],
+            key_type: Option<KeyType>,
+            value: Value,
+            options: SetOptions,
+            encryption: Option<Encryption>,
+        ) -> Result<SetOutcome> {
+            match key_type {
+                Some(key_type) => {
+                    self.set_logical_key_with_profile(key_type, key, value, options, encryption)
+                        .await
+                }
+                None => {
+                    let namespace_id = self.raw.ensure_namespace_id().await?;
+                    let item_id = self
+                        .protection
+                        .item_id_from_canonical_key_unchecked(namespace_id, key)?;
+                    let value = self.protection.encode_in_namespace_with_optional_profile(
+                        namespace_id,
+                        item_id,
+                        value,
+                        encryption,
+                    )?;
+                    self.raw
+                        .set_in_namespace(namespace_id, item_id, value, options)
+                        .await
+                }
+            }
+        }
+
         /// Deletes a value for a typed key.
         pub async fn delete(&self, key: impl Into<TypedKey>) -> Result<DeleteOutcome> {
             let namespace_id = self.raw.ensure_namespace_id().await?;
@@ -425,6 +587,34 @@ macro_rules! protected_client_methods {
                 .protection
                 .item_id_from_canonical_key_unchecked(namespace_id, canonical_key.as_ref())?;
             self.raw.delete_in_namespace(namespace_id, item_id).await
+        }
+
+        /// Deletes a value from logical key bytes using the configured profile.
+        pub async fn delete_logical_key(
+            &self,
+            key_type: KeyType,
+            logical_key: impl AsRef<[u8]>,
+        ) -> Result<DeleteOutcome> {
+            let namespace_id = self.raw.ensure_namespace_id().await?;
+            let item_id = self.protection.item_id_from_logical_bytes_for_type(
+                namespace_id,
+                key_type,
+                logical_key.as_ref(),
+            )?;
+            self.raw.delete_in_namespace(namespace_id, item_id).await
+        }
+
+        #[cfg(feature = "ffi")]
+        pub(crate) async fn delete_key_for_ffi(
+            &self,
+            key: &[u8],
+            key_type: Option<KeyType>,
+            _encryption: Option<Encryption>,
+        ) -> Result<DeleteOutcome> {
+            match key_type {
+                Some(key_type) => self.delete_logical_key(key_type, key).await,
+                None => self.delete_canonical_key_unchecked(key).await,
+            }
         }
 
         /// Returns server statistics as their JSON text.

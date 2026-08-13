@@ -188,7 +188,7 @@ structure valueEnvelope {
     zstandardLevelMax: 22
 )
 @ffiContract(
-    abiVersion: 4
+    abiVersion: 5
 )
 @valueFormat(
     version: 1,
@@ -521,6 +521,15 @@ enum FfiKeySpec {
 
     @ffiValue(value: 2)
     INTEGER = "integer"
+}
+
+/// Native discriminator for the client-local Item ID mapping profile.
+enum FfiKeyFormat {
+    @ffiValue(value: 0)
+    HASH = "hash"
+
+    @ffiValue(value: 1)
+    BYTE_KEY_OR_HASH = "byte_key_or_hash"
 }
 
 enum FfiConnectionState {

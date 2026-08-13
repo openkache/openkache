@@ -28,9 +28,14 @@ typedef openkache_client_result *(*openkache_go_connect_ex_fn)(
     const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
     const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t,
     uint8_t, int32_t, size_t, size_t, uint32_t, size_t, size_t, uint64_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_connect_with_options_v2_fn)(
+    const openkache_client_connect_options_v2_t *);
 typedef openkache_client_result *(*openkache_go_execute_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
+typedef openkache_client_result *(*openkache_go_execute_typed_with_options_fn)(
+    const openkache_client_handle *, uint32_t, uint32_t, const uint8_t *, size_t,
+    const uint8_t *, size_t, uint8_t, uint64_t);
 typedef openkache_client_result *(*openkache_go_execute_raw_fn)(
     const openkache_client_handle *, uint32_t, const uint8_t *, size_t,
     const uint8_t *, size_t, uint32_t, uint8_t, uint64_t);
@@ -66,7 +71,9 @@ typedef struct openkache_go_library {
     openkache_go_abi_fn abi;
     openkache_go_connect_fn connect;
     openkache_go_connect_ex_fn connect_ex;
+    openkache_go_connect_with_options_v2_fn connect_with_options_v2;
     openkache_go_execute_fn execute;
+    openkache_go_execute_typed_with_options_fn execute_typed_with_options;
     openkache_go_execute_raw_fn execute_raw;
     openkache_go_execute_with_options_fn execute_with_options;
     openkache_go_execute_raw_with_options_fn execute_raw_with_options;
@@ -175,7 +182,9 @@ openkache_go_library *openkache_go_library_load(
     OPENKACHE_GO_LOAD(abi, "openkache_client_abi_version");
     OPENKACHE_GO_LOAD(connect, "openkache_client_connect");
     OPENKACHE_GO_LOAD(connect_ex, "openkache_client_connect_ex");
+    OPENKACHE_GO_LOAD(connect_with_options_v2, "openkache_client_connect_with_options_v2");
     OPENKACHE_GO_LOAD(execute, "openkache_client_execute");
+    OPENKACHE_GO_LOAD(execute_typed_with_options, "openkache_client_execute_typed_with_options");
     OPENKACHE_GO_LOAD(execute_raw, "openkache_client_execute_raw");
     OPENKACHE_GO_LOAD(execute_with_options, "openkache_client_execute_with_options");
     OPENKACHE_GO_LOAD(execute_raw_with_options, "openkache_client_execute_raw_with_options");
@@ -194,7 +203,8 @@ openkache_go_library *openkache_go_library_load(
 #undef OPENKACHE_GO_LOAD
 
     if (library->abi == NULL || library->connect == NULL || library->execute == NULL ||
-        library->execute_with_options == NULL || library->execute_raw_with_options == NULL ||
+        library->execute_with_options == NULL || library->execute_typed_with_options == NULL ||
+        library->execute_raw_with_options == NULL || library->connect_with_options_v2 == NULL ||
         library->execute_scoped == NULL || library->namespace_open == NULL ||
         library->namespace_update_policy == NULL || library->namespace_delete == NULL ||
         library->namespace_descriptor_decode == NULL ||
@@ -225,6 +235,14 @@ int openkache_go_has_connect_ex(const openkache_go_library *library) {
     return library != NULL && library->connect_ex != NULL;
 }
 
+openkache_client_result *openkache_go_connect_with_options_v2(
+    const openkache_go_library *library,
+    const openkache_client_connect_options_v2_t *options
+) {
+    if (library == NULL || library->connect_with_options_v2 == NULL) return NULL;
+    return library->connect_with_options_v2(options);
+}
+
 int openkache_go_has_execute_raw(const openkache_go_library *library) {
     return library != NULL && library->execute_raw != NULL;
 }
@@ -252,9 +270,29 @@ openkache_client_result *openkache_go_connect(
     uint32_t encryption,
     size_t retry_max_attempts, size_t max_in_flight,
     uint64_t connect_timeout_ms, uint64_t request_timeout_ms,
-    uint8_t use_extended
+    uint8_t use_extended, uint32_t key_format
 ) {
     if (library == NULL) return NULL;
+    // The legacy flat connect calls have no key-format field. Never silently
+    // fall back to them when the caller selected ByteKeyOrHash: doing so
+    // would address a different Item ID than the configured contract.
+    if (key_format != OPENKACHE_CLIENT_KEY_FORMAT_HASH) {
+        if (library->connect_with_options_v2 == NULL) return NULL;
+        openkache_client_connect_options_t base = {
+            address, address_length, server_name, server_name_length,
+            certificate, certificate_length, identity_certificate_chain,
+            identity_certificate_chain_length, identity_private_key,
+            identity_private_key_length, data_protection_key,
+            data_protection_key_length, compression_enabled, compression_level,
+            minimum_input_size, minimum_savings, encryption,
+            connect_timeout_ms, request_timeout_ms, retry_max_attempts,
+            max_in_flight,
+        };
+        openkache_client_connect_options_v2_t options = {
+            base, key_format,
+        };
+        return library->connect_with_options_v2(&options);
+    }
     if (use_extended != 0) {
         if (library->connect_ex == NULL) return NULL;
         return library->connect_ex(
@@ -315,6 +353,20 @@ openkache_client_result *openkache_go_execute_with_options(
     return library->execute_with_options(
         client, operation, application_key, application_key_length, value,
         value_length, set_flags, ttl_ms);
+}
+
+openkache_client_result *openkache_go_execute_typed_with_options(
+    const openkache_go_library *library,
+    const openkache_client_handle *client,
+    uint32_t operation, uint32_t key_spec,
+    const uint8_t *application_key, size_t application_key_length,
+    const uint8_t *value, size_t value_length,
+    uint8_t set_flags, uint64_t ttl_ms
+) {
+    if (library == NULL || library->execute_typed_with_options == NULL) return NULL;
+    return library->execute_typed_with_options(
+        client, operation, key_spec, application_key, application_key_length,
+        value, value_length, set_flags, ttl_ms);
 }
 
 openkache_client_result *openkache_go_execute_raw_with_options(
@@ -515,12 +567,22 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	if minimumSavings == 0 {
 		minimumSavings = SmithyDefaultZstandardMinimumSavingsBytes
 	}
+	encryption := options.encryption
+	// An omitted encryption option uses the ABI NONE sentinel. With a key the
+	// core resolves NONE to its Robust default; without a key it resolves to
+	// Unprotected. Preserve explicit Compact/Robust values without a key so the
+	// core rejects them instead of silently downgrading.
+	if !options.encryptionExplicit {
+		encryption = Encryption(SmithyValueEncryptionNone)
+	}
 	hasExtended := C.openkache_go_has_connect_ex(library) != 0
-	useExtended := hasExtended
+	useExtended := hasExtended && options.keyFormat == KeyFormatHash
+	requiresProtectedProfile := options.encryptionExplicit &&
+		(len(options.dataProtectionKey) == 0 || options.encryption != EncryptionRobust)
 	if !hasExtended &&
 		(len(options.identityCertificate) != 0 ||
 			len(options.identityPrivateKey) != 0 ||
-			options.encryption != EncryptionRobust ||
+			requiresProtectedProfile ||
 			options.retryAttempts != SmithyDefaultRetryMaxAttempts ||
 			options.maxInFlight != SmithyDefaultMaxInFlight) {
 		C.free(address)
@@ -552,10 +614,10 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 			(*C.uint8_t)(dataProtectionKey), C.size_t(len(options.dataProtectionKey)),
 			C.uint8_t(boolByte(options.compression.Enabled)), C.int32_t(compressionLevel),
 			C.size_t(minimumInputSize), C.size_t(minimumSavings),
-			C.uint32_t(options.encryption),
+			C.uint32_t(encryption),
 			C.size_t(options.retryAttempts), C.size_t(options.maxInFlight),
 			C.uint64_t(connectTimeout), C.uint64_t(requestTimeout),
-			C.uint8_t(boolByte(useExtended)),
+			C.uint8_t(boolByte(useExtended)), C.uint32_t(keyFormatCode(options.keyFormat)),
 		)
 		C.free(address)
 		C.free(serverName)
@@ -581,6 +643,13 @@ func connectNative(ctx context.Context, options normalizedOptions) (nativeClient
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func keyFormatCode(format KeyFormat) uint32 {
+	if format == KeyFormatByteKeyOrHash {
+		return SmithyFFIKeyFormatByteKeyOrHash
+	}
+	return SmithyFFIKeyFormatHash
 }
 
 func validateSmithyFFINamespaceDescriptorLayout() error {
@@ -951,8 +1020,9 @@ func (h *nativeHandle) executeNative(
 				C.uint8_t(flags), C.uint64_t(ttl),
 			)
 		} else {
-			result = C.openkache_go_execute_with_options(
+			result = C.openkache_go_execute_typed_with_options(
 				h.library.ptr, client, C.uint32_t(operation),
+				C.uint32_t(SmithyFFIKeySpecBytes),
 				(*C.uint8_t)(keyMemory), C.size_t(len(key)),
 				(*C.uint8_t)(valueMemory), C.size_t(len(value)),
 				C.uint8_t(flags), C.uint64_t(ttl),

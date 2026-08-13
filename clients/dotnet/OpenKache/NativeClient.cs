@@ -505,7 +505,9 @@ internal sealed class NativeClient : IAsyncDisposable
             CompressionLevel = Protocol.DefaultZstandardLevel,
             MinimumInputSize = (nuint)Protocol.DefaultZstandardMinimumInputBytes,
             MinimumSavings = (nuint)Protocol.DefaultZstandardMinimumSavingsBytes,
-            Encryption = Protocol.ValueFormatEncryptionRobust,
+            // The .NET adapter does not expose a data-protection key. Keep its
+            // connection profile plaintext until callers can provide key material.
+            Encryption = Protocol.ValueFormatEncryptionNone,
             ConnectTimeoutMilliseconds = ToMilliseconds(connectTimeout),
             RequestTimeoutMilliseconds = ToMilliseconds(requestTimeout),
             RetryMaxAttempts = (nuint)Protocol.DefaultRetryMaxAttempts,

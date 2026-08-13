@@ -14,6 +14,8 @@ import type {
   Smithy_Set_Outcome,
 } from "./generated_local/smithy-api.js"
 
+export type Value_Encryption = "unprotected" | "compact" | "robust"
+
 export interface Native_Identity {
   readonly certificate_chain: readonly Uint8Array[]
   readonly private_key: Uint8Array
@@ -35,6 +37,7 @@ export interface Native_Client_Options {
   readonly max_in_flight?: number
   readonly encryption?: "compact" | "robust"
   readonly key_spec?: "integer" | "text" | "bytes"
+  readonly key_format?: "hash" | "byte_key_or_hash"
 }
 
 export type Native_Namespace_Policy = Smithy_Namespace_Policy
@@ -51,9 +54,12 @@ interface Native_Value_Envelope {
 
 export interface Native_Client {
   ping(): Promise<void>
-  get(key: Uint8Array): Promise<Uint8Array | null>
-  get_value(key: Uint8Array): Promise<Native_Value_Envelope | null>
-  get_json(key: Uint8Array): Promise<string | null>
+  get(key: Uint8Array, encryption?: Value_Encryption): Promise<Uint8Array | null>
+  get_value(
+    key: Uint8Array,
+    encryption?: Value_Encryption,
+  ): Promise<Native_Value_Envelope | null>
+  get_json(key: Uint8Array, encryption?: Value_Encryption): Promise<string | null>
   set(
     key: Uint8Array,
     value: Uint8Array,
@@ -61,6 +67,7 @@ export interface Native_Client {
     expiration_mode?: Smithy_Expiration_Mode,
     eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
+    encryption?: Value_Encryption,
   ): Promise<Smithy_Set_Outcome>
   set_value(
     key: Uint8Array,
@@ -71,6 +78,7 @@ export interface Native_Client {
     expiration_mode?: Smithy_Expiration_Mode,
     eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
+    encryption?: Value_Encryption,
   ): Promise<Smithy_Set_Outcome>
   set_json(
     key: Uint8Array,
@@ -79,6 +87,7 @@ export interface Native_Client {
     expiration_mode?: Smithy_Expiration_Mode,
     eviction_mode?: Smithy_Eviction_Mode,
     ttl_ms?: number,
+    encryption?: Value_Encryption,
   ): Promise<Smithy_Set_Outcome>
   delete(key: Uint8Array): Promise<boolean>
   stats(): Promise<string>

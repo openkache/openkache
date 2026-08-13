@@ -416,6 +416,12 @@ macro_rules! builder_methods {
             pub fn key_spec(self, key_spec: KeyType) -> Self {
                 self.key_type(key_spec)
             }
+
+            /// Selects the client-only application-key to Item ID mapping profile.
+            pub fn key_format(mut self, key_format: KeyFormat) -> Self {
+                self.inner = self.inner.key_format(key_format);
+                self
+            }
         }
     };
 }

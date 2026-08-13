@@ -13,8 +13,8 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::KeyFormat;
 pub use crate::contract::FFI_ABI_VERSION as ABI_VERSION;
-pub use crate::contract::FfiKeySpec;
 pub use crate::contract::FfiNamespaceDescriptor;
 pub use crate::contract::{
     FFI_NAMESPACE_DEFAULT_EVICTION_EVICTABLE, FFI_NAMESPACE_DEFAULT_EVICTION_PROTECTED,
@@ -29,11 +29,12 @@ pub use crate::contract::{
     FFI_NAMESPACE_DESCRIPTOR_SIZE_BYTES, FFI_NAMESPACE_OVERRIDE_ALLOWED,
     FFI_NAMESPACE_OVERRIDE_DISALLOWED,
 };
+pub use crate::contract::{FfiKeyFormat, FfiKeySpec};
 pub use crate::contract::{FfiOperation, FfiResultKind, FfiSetCondition};
 use crate::contract::{
     VALUE_FORMAT_ENCRYPTION_COMPACT, VALUE_FORMAT_ENCRYPTION_NONE, VALUE_FORMAT_ENCRYPTION_ROBUST,
 };
-use crate::key::KeySpace;
+use crate::key::KeyType;
 use crate::protocol::SetWireOptions;
 use crate::value::{Compression, Encryption, JsonValue, Value, ZstandardOptions};
 use crate::{
@@ -44,6 +45,8 @@ use crate::{
 };
 use openkache_protocol::compat_v1::NAMESPACE_NAME_MAX_BYTES;
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+/// FFI operation selector meaning "use the connection's configured default".
+pub const FFI_ENCRYPTION_DEFAULT: u32 = u32::MAX;
 
 /// Opaque result allocated by the native ABI.
 pub struct FfiResult {
@@ -88,7 +91,9 @@ pub struct FfiConnectOptions {
     pub minimum_input_size: usize,
     /// Minimum compressed-byte savings required.
     pub minimum_savings: usize,
-    /// Value encryption profile: zero/default or two for Robust, one for Compact.
+    /// Value encryption profile: `NONE` (zero) selects the connection default
+    /// when a key is supplied and Unprotected when no key is supplied;
+    /// `ROBUST` (one) and `COMPACT` (two) select those profiles explicitly.
     pub encryption: u32,
     /// Connection establishment timeout in milliseconds.
     pub connect_timeout_ms: u64,
@@ -98,6 +103,16 @@ pub struct FfiConnectOptions {
     pub retry_max_attempts: usize,
     /// Maximum in-flight lanes; zero selects the core default.
     pub max_in_flight: usize,
+}
+
+/// Versioned extension of [`FfiConnectOptions`] carrying the client-local
+/// Item ID mapping profile. The original options structure and entry point
+/// remain Hash-only for ABI compatibility.
+#[repr(C)]
+pub struct FfiConnectOptionsV2 {
+    pub base: FfiConnectOptions,
+    /// `FfiKeyFormat::Hash` or `FfiKeyFormat::ByteKeyOrHash`.
+    pub key_format: u32,
 }
 
 /// Opaque native handle to a dedicated Rust client worker.
@@ -116,6 +131,8 @@ enum Command {
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
+        key_spec: Option<KeyType>,
+        encryption: Option<Encryption>,
         response: SyncSender<FfiResult>,
     },
     ExecuteScoped {
@@ -160,6 +177,7 @@ struct WorkerOptions {
     timeouts: ClientTimeouts,
     retry: RetryPolicy,
     max_in_flight: usize,
+    key_format: KeyFormat,
 }
 
 impl FfiResult {
@@ -202,6 +220,7 @@ impl FfiClient {
         timeouts: ClientTimeouts,
         retry: RetryPolicy,
         max_in_flight: usize,
+        key_format: KeyFormat,
     ) -> std::result::Result<Self, String> {
         let (commands, receiver) = crossfire::mpsc::bounded_blocking(COMMAND_QUEUE_CAPACITY);
         let (ready_sender, ready_receiver) = sync_channel(1);
@@ -222,6 +241,7 @@ impl FfiClient {
             timeouts,
             retry,
             max_in_flight,
+            key_format,
         };
         let worker = thread::Builder::new()
             .name("openkache-client".to_owned())
@@ -264,6 +284,8 @@ impl FfiClient {
         value: Vec<u8>,
         set_options: SetOptions,
         raw: bool,
+        key_spec: Option<KeyType>,
+        encryption: Option<Encryption>,
     ) -> FfiResult {
         let (response, receiver) = sync_channel(1);
         let Some(deadline) = Instant::now().checked_add(self.request_timeout) else {
@@ -275,6 +297,8 @@ impl FfiClient {
             value,
             set_options,
             raw,
+            key_spec,
+            encryption,
             response,
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -399,6 +423,7 @@ fn run_worker(
         timeouts,
         retry,
         max_in_flight,
+        key_format,
     } = options;
     let runtime = match compio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -421,7 +446,8 @@ fn run_worker(
     .compression(compression)
     .timeouts(timeouts)
     .retry_policy(retry)
-    .max_in_flight(max_in_flight);
+    .max_in_flight(max_in_flight)
+    .key_format(key_format);
     if protected {
         builder = builder.encryption(encryption);
     }
@@ -486,6 +512,8 @@ fn run_worker(
                 value,
                 set_options,
                 raw,
+                key_spec,
+                encryption,
                 response,
             } => {
                 let result = catch_unwind(AssertUnwindSafe(|| {
@@ -496,6 +524,8 @@ fn run_worker(
                         value,
                         set_options,
                         raw,
+                        key_spec,
+                        encryption,
                     ))
                 }))
                 .unwrap_or_else(|_| FfiResult::error("native client worker panicked"));
@@ -600,11 +630,22 @@ async fn execute(
     value: Vec<u8>,
     set_options: SetOptions,
     raw: bool,
+    key_spec: Option<KeyType>,
+    encryption: Option<Encryption>,
 ) -> FfiResult {
     let result = if raw {
         execute_raw(client, operation, application_key, value, set_options).await
     } else {
-        execute_protected(client, operation, application_key, value, set_options).await
+        execute_protected(
+            client,
+            operation,
+            application_key,
+            value,
+            set_options,
+            key_spec,
+            encryption,
+        )
+        .await
     };
     result.unwrap_or_else(|error| FfiResult::error(error.to_string()))
 }
@@ -615,34 +656,44 @@ async fn execute_protected(
     canonical_key: Vec<u8>,
     value: Vec<u8>,
     set_options: SetOptions,
+    key_type: Option<KeyType>,
+    encryption: Option<Encryption>,
 ) -> std::result::Result<FfiResult, crate::Error> {
     match operation {
         FfiOperation::Ping => client.ping().await.map(|_| ok_result()),
         FfiOperation::Get => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
+            .get_key_for_ffi(canonical_key.as_slice(), key_type, encryption)
             .await
             .map(|value| get_result(value, raw_value_result)),
         FfiOperation::GetJson => client
-            .get_canonical_key_unchecked(canonical_key.as_slice())
+            .get_key_for_ffi(canonical_key.as_slice(), key_type, encryption)
             .await
             .and_then(json_result),
         FfiOperation::Set => client
-            .set_canonical_key_unchecked(canonical_key.as_slice(), Value::Raw(value), set_options)
+            .set_key_for_ffi(
+                canonical_key.as_slice(),
+                key_type,
+                Value::Raw(value),
+                set_options,
+                encryption,
+            )
             .await
             .map(set_result),
         FfiOperation::SetJson => match parse_json(&value) {
             Ok(json) => client
-                .set_canonical_key_unchecked(
+                .set_key_for_ffi(
                     canonical_key.as_slice(),
+                    key_type,
                     Value::Json(json),
                     set_options,
+                    encryption,
                 )
                 .await
                 .map(set_result),
             Err(error) => Err(crate::value::Error::InvalidJson(error).into()),
         },
         FfiOperation::Delete => client
-            .delete_canonical_key_unchecked(canonical_key.as_slice())
+            .delete_key_for_ffi(canonical_key.as_slice(), key_type, encryption)
             .await
             .map(delete_result),
         FfiOperation::Stats => client
@@ -979,8 +1030,10 @@ pub unsafe extern "C" fn openkache_client_connect(
 
 /// Connects a native client with the complete shared-core configuration.
 ///
-/// Zero retry and lane limits select shared-core defaults. The Smithy None and
-/// Robust encryption values select Robust; Compact selects Compact.
+/// Zero retry and lane limits select shared-core defaults. With a data
+/// protection key, Smithy `NONE` selects the Robust default; without a key it
+/// selects Unprotected. `ROBUST` and `COMPACT` select those profiles
+/// explicitly, and an authenticated profile without a key is rejected.
 ///
 /// # Safety
 ///
@@ -1060,6 +1113,34 @@ pub unsafe extern "C" fn openkache_client_connect_with_options(
 }
 
 fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult, String> {
+    connect_options_with_format(options, KeyFormat::Hash)
+}
+
+/// Connects using the versioned options extension with a client-local key
+/// mapping profile.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_connect_with_options_v2(
+    options: *const FfiConnectOptionsV2,
+) -> *mut FfiResult {
+    boxed_result(catch_result(|| {
+        let options = unsafe {
+            options
+                .as_ref()
+                .ok_or_else(|| "connect options pointer must not be null".to_owned())?
+        };
+        let key_format = match FfiKeyFormat::try_from(options.key_format) {
+            Ok(FfiKeyFormat::Hash) => KeyFormat::Hash,
+            Ok(FfiKeyFormat::ByteKeyOrHash) => KeyFormat::ByteKeyOrHash,
+            Err(value) => return Err(format!("unsupported key format {value}")),
+        };
+        connect_options_with_format(&options.base, key_format)
+    }))
+}
+
+fn connect_options_with_format(
+    options: &FfiConnectOptions,
+    key_format: KeyFormat,
+) -> std::result::Result<FfiResult, String> {
     let address = copy_utf8(options.address, options.address_length, "address")?;
     let mut endpoint: Endpoint = address
         .parse()
@@ -1087,12 +1168,9 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
     // unprotected when no key is supplied and Robust when a key is supplied.
     // Any explicit authenticated profile without key material must fail rather
     // than silently downgrading to an unprotected codec.
-    if data_protection_key.is_none()
-        && options.encryption != VALUE_FORMAT_ENCRYPTION_NONE as u32
-    {
+    if data_protection_key.is_none() && options.encryption != VALUE_FORMAT_ENCRYPTION_NONE as u32 {
         return Err(
-            "an authenticated value-encryption profile requires a data protection key"
-                .to_owned(),
+            "an authenticated value-encryption profile requires a data protection key".to_owned(),
         );
     }
     let client_certificate_chain = copy_bytes(
@@ -1172,6 +1250,7 @@ fn connect_options(options: &FfiConnectOptions) -> std::result::Result<FfiResult
         timeouts,
         retry,
         max_in_flight,
+        key_format,
     )
     .map(FfiResult::connected)
 }
@@ -1216,6 +1295,38 @@ pub unsafe extern "C" fn openkache_client_execute(
     )
 }
 
+/// Versioned protected operation entry point with an operation-local value protection profile.
+///
+/// `encryption` uses [`FFI_ENCRYPTION_DEFAULT`] for the connection default, or one of the
+/// `OPENKACHE_CLIENT_ENCRYPTION_*` values for an explicit profile.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_v2(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+    encryption: u32,
+) -> *mut FfiResult {
+    execute_entry_with_encryption(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+        encryption,
+        false,
+    )
+}
+
 /// Executes one exact-item-ID operation without application-key derivation or
 /// value protection.
 ///
@@ -1248,6 +1359,35 @@ pub unsafe extern "C" fn openkache_client_execute_raw(
         set_condition,
         ttl_enabled,
         ttl_ms,
+        true,
+    )
+}
+
+/// Versioned exact-item-ID entry point. Operation-local encryption is invalid for raw calls.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_raw_v2(
+    client: *const FfiClient,
+    operation: u32,
+    item_id: *const u8,
+    item_id_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+    encryption: u32,
+) -> *mut FfiResult {
+    execute_entry_with_encryption(
+        client,
+        operation,
+        item_id,
+        item_id_length,
+        value,
+        value_length,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+        encryption,
         true,
     )
 }
@@ -1286,6 +1426,33 @@ pub unsafe extern "C" fn openkache_client_execute_with_options(
     )
 }
 
+/// Versioned protected operation entry point with complete SET policy and local value profile.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_with_options_v2(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+    encryption: u32,
+) -> *mut FfiResult {
+    execute_entry_with_flags_and_encryption(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        set_flags,
+        ttl_ms,
+        encryption,
+        false,
+    )
+}
+
 /// Executes one exact-item-ID operation with the complete wire SET policy byte.
 ///
 /// # Safety
@@ -1317,6 +1484,33 @@ pub unsafe extern "C" fn openkache_client_execute_raw_with_options(
     )
 }
 
+/// Versioned exact-item-ID operation entry point. Operation-local encryption is invalid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_raw_with_options_v2(
+    client: *const FfiClient,
+    operation: u32,
+    item_id: *const u8,
+    item_id_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+    encryption: u32,
+) -> *mut FfiResult {
+    execute_entry_with_flags_and_encryption(
+        client,
+        operation,
+        item_id,
+        item_id_length,
+        value,
+        value_length,
+        set_flags,
+        ttl_ms,
+        encryption,
+        true,
+    )
+}
+
 /// Executes one typed protected operation using a logical key and explicit
 /// `FfiKeySpec` representation.
 #[unsafe(no_mangle)]
@@ -1334,7 +1528,9 @@ pub unsafe extern "C" fn openkache_client_execute_typed(
 ) -> *mut FfiResult {
     let key_spec = match FfiKeySpec::try_from(key_spec) {
         Ok(spec) => spec,
-        Err(value) => return boxed_result(FfiResult::error(format!("unsupported key spec {value}"))),
+        Err(value) => {
+            return boxed_result(FfiResult::error(format!("unsupported key spec {value}")));
+        }
     };
     execute_entry_inner(
         client,
@@ -1346,6 +1542,49 @@ pub unsafe extern "C" fn openkache_client_execute_typed(
         false,
         Some(key_spec),
         None,
+        None,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+    )
+}
+
+/// Versioned typed protected operation with an operation-local value profile.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed_v2(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+    encryption: u32,
+) -> *mut FfiResult {
+    let key_spec = match FfiKeySpec::try_from(key_spec) {
+        Ok(spec) => spec,
+        Err(value) => {
+            return boxed_result(FfiResult::error(format!("unsupported key spec {value}")));
+        }
+    };
+    let encryption = match operation_encryption(encryption) {
+        Ok(encryption) => encryption,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        None,
+        encryption,
         set_condition,
         ttl_enabled,
         ttl_ms,
@@ -1367,7 +1606,9 @@ pub unsafe extern "C" fn openkache_client_execute_typed_with_options(
 ) -> *mut FfiResult {
     let key_spec = match FfiKeySpec::try_from(key_spec) {
         Ok(spec) => spec,
-        Err(value) => return boxed_result(FfiResult::error(format!("unsupported key spec {value}"))),
+        Err(value) => {
+            return boxed_result(FfiResult::error(format!("unsupported key spec {value}")));
+        }
     };
     execute_entry_inner(
         client,
@@ -1379,6 +1620,48 @@ pub unsafe extern "C" fn openkache_client_execute_typed_with_options(
         false,
         Some(key_spec),
         Some((set_flags, ttl_ms)),
+        None,
+        FfiSetCondition::Any as u32,
+        0,
+        0,
+    )
+}
+
+/// Versioned typed protected operation with complete SET policy and local value profile.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn openkache_client_execute_typed_with_options_v2(
+    client: *const FfiClient,
+    operation: u32,
+    key_spec: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+    encryption: u32,
+) -> *mut FfiResult {
+    let key_spec = match FfiKeySpec::try_from(key_spec) {
+        Ok(spec) => spec,
+        Err(value) => {
+            return boxed_result(FfiResult::error(format!("unsupported key spec {value}")));
+        }
+    };
+    let encryption = match operation_encryption(encryption) {
+        Ok(encryption) => encryption,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        false,
+        Some(key_spec),
+        Some((set_flags, ttl_ms)),
+        encryption,
         FfiSetCondition::Any as u32,
         0,
         0,
@@ -1632,6 +1915,7 @@ fn execute_entry(
         raw,
         None,
         None,
+        None,
         set_condition,
         ttl_enabled,
         ttl_ms,
@@ -1659,10 +1943,90 @@ fn execute_entry_with_flags(
         raw,
         None,
         Some((set_flags, ttl_ms)),
+        None,
         FfiSetCondition::Any as u32,
         0,
         0,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_entry_with_encryption(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_condition: u32,
+    ttl_enabled: u8,
+    ttl_ms: u64,
+    encryption: u32,
+    raw: bool,
+) -> *mut FfiResult {
+    let encryption = match operation_encryption(encryption) {
+        Ok(encryption) => encryption,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        raw,
+        None,
+        None,
+        encryption,
+        set_condition,
+        ttl_enabled,
+        ttl_ms,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_entry_with_flags_and_encryption(
+    client: *const FfiClient,
+    operation: u32,
+    application_key: *const u8,
+    application_key_length: usize,
+    value: *const u8,
+    value_length: usize,
+    set_flags: u8,
+    ttl_ms: u64,
+    encryption: u32,
+    raw: bool,
+) -> *mut FfiResult {
+    let encryption = match operation_encryption(encryption) {
+        Ok(encryption) => encryption,
+        Err(error) => return boxed_result(FfiResult::error(error)),
+    };
+    execute_entry_inner(
+        client,
+        operation,
+        application_key,
+        application_key_length,
+        value,
+        value_length,
+        raw,
+        None,
+        Some((set_flags, ttl_ms)),
+        encryption,
+        FfiSetCondition::Any as u32,
+        0,
+        0,
+    )
+}
+
+fn operation_encryption(value: u32) -> std::result::Result<Option<Encryption>, String> {
+    match value {
+        FFI_ENCRYPTION_DEFAULT => Ok(None),
+        value if value == VALUE_FORMAT_ENCRYPTION_NONE as u32 => Ok(Some(Encryption::Unprotected)),
+        value if value == VALUE_FORMAT_ENCRYPTION_COMPACT as u32 => Ok(Some(Encryption::Compact)),
+        value if value == VALUE_FORMAT_ENCRYPTION_ROBUST as u32 => Ok(Some(Encryption::Robust)),
+        value => Err(format!("unsupported operation encryption profile {value}")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1676,6 +2040,7 @@ fn execute_entry_inner(
     raw: bool,
     key_spec: Option<FfiKeySpec>,
     complete_flags: Option<(u8, u64)>,
+    encryption: Option<Encryption>,
     set_condition: u32,
     ttl_enabled: u8,
     ttl_ms: u64,
@@ -1691,24 +2056,23 @@ fn execute_entry_inner(
         let value = copy_bytes(value, value_length, "value")?;
         let operation = FfiOperation::try_from(operation)
             .map_err(|operation| format!("unsupported operation {operation}"))?;
+        if raw && encryption.is_some() {
+            return Err("operation encryption profile requires a protected operation".to_owned());
+        }
         let application_key = match key_spec {
             Some(_) if raw => {
                 return Err("typed key inputs are only valid for protected operations".to_owned());
             }
-            Some(key_spec) => KeySpace::new(key_spec.into())
-                .resolve_logical_bytes(&application_key)
-                .map_err(|error| error.to_string())?
-                .into_canonical_bytes(),
+            Some(_) => application_key,
             None if raw => application_key,
-            None
-                if matches!(
-                    operation,
-                    FfiOperation::Get
-                        | FfiOperation::GetJson
-                        | FfiOperation::Set
-                        | FfiOperation::SetJson
-                        | FfiOperation::Delete
-                ) =>
+            None if matches!(
+                operation,
+                FfiOperation::Get
+                    | FfiOperation::GetJson
+                    | FfiOperation::Set
+                    | FfiOperation::SetJson
+                    | FfiOperation::Delete
+            ) =>
             {
                 crate::ResolvedKey::from_canonical(&application_key)
                     .map_err(|error| error.to_string())?
@@ -1789,7 +2153,15 @@ fn execute_entry_inner(
             {
                 Err("SET options require a SET operation".to_owned())
             }
-            _ => Ok(client.execute(operation, application_key, value, set_options, raw)),
+            _ => Ok(client.execute(
+                operation,
+                application_key,
+                value,
+                set_options,
+                raw,
+                key_spec.map(Into::into),
+                encryption,
+            )),
         }
     }))
 }

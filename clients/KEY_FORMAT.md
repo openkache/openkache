@@ -38,8 +38,9 @@ Item ID. It uses the following terms:
   `canonical_key_bytes` is the API and ABI identifier for these bytes.
 - **Item ID:** The final opaque identifier carried by the protocol.
 
-`KeyType` selects the one typed-key variant accepted by a client-side
-configuration. It is not a wire-protocol namespace.
+`KeyType` selects the one typed-key variant accepted by a typed-key operation.
+An adapter MAY select it globally at connection time or per operation. It is
+not a wire-protocol namespace.
 
 The specification defines three distinct client-side conversion paths:
 
@@ -92,13 +93,14 @@ Objects, arrays, maps, booleans, nulls, decimal values, and custom objects are
 not valid typed keys. JSON, reflection, stringification, and implicit coercion
 MUST NOT be used.
 
-The typed key `Bytes` is CBOR-encoded and then included in the `Hash` input. It
-is not the `OpaqueBytes` value format and is not a direct byte key or an Item
-ID.
+Under the `Hash` profile, the typed key `Bytes` is CBOR-encoded and then
+included in the hash input. Under `ByteKeyOrHash`, a `Bytes` operation instead
+uses its logical bytes directly and preserves short values as Item IDs. It is
+not the `OpaqueBytes` value format.
 
 ### 2.2 Typed-key type selection
 
-Every typed-key configuration MUST declare exactly one `KeyType`:
+Every typed-key operation MUST select exactly one `KeyType`:
 
 ```text
 KeyType::Integer
@@ -113,6 +115,10 @@ fixed-width integer variants.
 `ByteKeyOrHash` is permitted only when the configured type is `KeyType::Bytes`.
 It is a mapping policy, not a fourth typed-key type.
 
+Bindings use different names for this same discriminator. `KeyType` is the
+normative contract term; Rust uses `KeyType`, Python and TypeScript use
+`KeySpec`, the C ABI uses `FfiKeySpec`, and C++ uses `Key_Type`.
+
 ### 2.3 Language binding requirements
 
 | Binding | `Text` | `Bytes` | `Integer` | Floating-point |
@@ -120,7 +126,7 @@ It is a mapping policy, not a fourth typed-key type.
 | JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §3.2; otherwise reject |
 | Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
 | Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
-| C | caller supplies a canonical Text item | caller supplies a canonical Bytes item | caller supplies a canonical integer item | binary float types rejected |
+| C | typed ABI passes logical UTF-8 bytes with `FfiKeySpec::Text` | typed ABI passes logical bytes with `FfiKeySpec::Bytes` | typed ABI passes logical integer bytes with `FfiKeySpec::Integer` | binary float types rejected |
 | C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the convenience API | `float`, `double` rejected |
 | Go | not exposed by the convenience API | `[]byte` → `Bytes` | not exposed by the convenience API | `float32`, `float64` rejected |
 | Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
@@ -140,8 +146,9 @@ The legacy shared C ABI `openkache_client_execute` uses
 item; that ABI does not infer whether arbitrary bytes represent `Text`, `Bytes`,
 or an integer. The typed ABI entry points (`openkache_client_execute_typed*`)
 instead take logical key bytes plus an explicit `FfiKeySpec`; language adapters
-MUST use those entry points for native typed values. Exact Item ID operations
-remain separate and accept opaque Item IDs directly.
+MUST use those entry points for native typed values. The core performs the
+canonical encoding after receiving the logical bytes and discriminator. Exact
+Item ID operations remain separate and accept opaque Item IDs directly.
 
 ## 3. Canonical key encoding
 

@@ -143,6 +143,7 @@ export interface Ffi_Entry extends Wire_Entry {
 export interface Ffi_Contract {
   readonly abi_version: number
   readonly connection_states: readonly Ffi_Entry[]
+  readonly key_formats: readonly Ffi_Entry[]
   readonly key_specs: readonly Ffi_Entry[]
   readonly namespace_default_evictions: readonly Ffi_Entry[]
   readonly namespace_default_expirations: readonly Ffi_Entry[]
@@ -206,6 +207,7 @@ const FFI_ENUMS = {
   connection_states: { name: "FfiConnectionState", kind: "FFI connection state" },
   set_conditions: { name: "FfiSetCondition", kind: "FFI SET condition" },
   key_specs: { name: "FfiKeySpec", kind: "FFI key specification" },
+  key_formats: { name: "FfiKeyFormat", kind: "FFI key format" },
   namespace_descriptor_decode_statuses: {
     name: "FfiNamespaceDescriptorDecodeStatus",
     kind: "FFI namespace descriptor decode status",
@@ -727,6 +729,12 @@ function ffi_contract(
       namespace,
       FFI_ENUMS.key_specs.name,
       FFI_ENUMS.key_specs.kind,
+    ),
+    key_formats: ffi_enum_entries(
+      shapes,
+      namespace,
+      FFI_ENUMS.key_formats.name,
+      FFI_ENUMS.key_formats.kind,
     ),
     namespace_default_evictions: ffi_enum_entries(
       shapes,
@@ -1599,6 +1607,13 @@ pub const FFI_CONNECTION_STATE_${snake_case(entry.name).toUpperCase()}: u32 = ${
 pub const FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
     )
     .join("\n")
+  const ffi_key_formats = ffi.key_formats
+    .map(
+      (entry) =>
+        `/// Native FFI key-format identifier for ${entry.name}.
+pub const FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()}: u32 = ${formatted_decimal(entry.value)};`,
+    )
+    .join("\n")
   const ffi_set_conditions = ffi.set_conditions
     .map(
       (entry) =>
@@ -1707,6 +1722,7 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_key_specs}
+${ffi_key_formats}
 ${ffi_set_conditions}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
@@ -1745,6 +1761,13 @@ ${rust_ffi_enum(
   "Native FFI typed-key identifiers shared by every language adapter.",
   "Native FFI typed-key",
   ffi.key_specs,
+)}
+
+${rust_ffi_enum(
+  "FfiKeyFormat",
+  "Native FFI key-format identifiers shared by every language adapter.",
+  "Native FFI key format",
+  ffi.key_formats,
 )}
 
 ${rust_ffi_enum(
@@ -1891,6 +1914,10 @@ export function render_c_contract(contract: Client_Contract): string {
     ...ffi.key_specs.map(
       (entry) =>
         `#define OPENKACHE_SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
+    ),
+    ...ffi.key_formats.map(
+      (entry) =>
+        `#define OPENKACHE_SMITHY_FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()} ${c_unsigned_literal(entry.value)}`,
     ),
     ...ffi.namespace_descriptor_decode_statuses.map(
       (entry) =>
@@ -2391,6 +2418,18 @@ ${contract.ffi.set_conditions
       `export const SMITHY_FFI_SET_CONDITION_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
   )
   .join("\n")}
+${contract.ffi.key_specs
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.key_formats
+  .map(
+    (entry) =>
+      `export const SMITHY_FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
 ${contract.ffi.namespace_descriptor_decode_statuses
   .map(
     (entry) =>
@@ -2672,6 +2711,20 @@ ${contract.ffi.set_conditions
     (entry) =>
       `\t// SmithyFFISetCondition${go_ffi_name(entry.name)} is the native ABI SET condition for ${entry.name}.
 \tSmithyFFISetCondition${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.key_specs
+  .map(
+    (entry) =>
+      `\t// SmithyFFIKeySpec${go_ffi_name(entry.name)} identifies the native typed-key representation ${entry.name}.
+\tSmithyFFIKeySpec${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.key_formats
+  .map(
+    (entry) =>
+      `\t// SmithyFFIKeyFormat${go_ffi_name(entry.name)} identifies the client-local mapping profile ${entry.name}.
+\tSmithyFFIKeyFormat${go_ffi_name(entry.name)} uint32 = ${entry.value}`,
   )
   .join("\n")}
 ${contract.ffi.connection_states
@@ -3031,6 +3084,18 @@ ${ffi_operations}
 ${ffi_result_kinds}
 ${ffi_connection_states}
 ${ffi_set_conditions}
+${contract.ffi.key_specs
+  .map(
+    (entry) =>
+      `SMITHY_FFI_KEY_SPEC_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
+${contract.ffi.key_formats
+  .map(
+    (entry) =>
+      `SMITHY_FFI_KEY_FORMAT_${snake_case(entry.name).toUpperCase()} = ${entry.value}`,
+  )
+  .join("\n")}
 ${ffi_namespace_descriptor_decode_statuses}
 ${ffi_namespace_default_expirations}
 ${ffi_namespace_default_evictions}
@@ -3221,6 +3286,8 @@ ${assignments}
     ["operation", ffi.operations],
     ["result", ffi.result_kinds],
     ["setCondition", ffi.set_conditions],
+    ["keySpec", ffi.key_specs],
+    ["keyFormat", ffi.key_formats],
     ["namespaceDescriptorDecode", ffi.namespace_descriptor_decode_statuses],
     ["namespaceDefaultExpiration", ffi.namespace_default_expirations],
     ["namespaceDefaultEviction", ffi.namespace_default_evictions],
