@@ -353,7 +353,11 @@ openkache_client_result_t *openkache_client_execute_raw_with_options_v2(
 
 /*
  * Executes one protected operation from logical key bytes and an explicit
- * generated key discriminator (`TEXT`, `BYTES`, or `INTEGER`).
+ * generated key discriminator (`TEXT`, `BYTES`, or `INTEGER`). The logical
+ * key bytes are length-delimited: TEXT is UTF-8, BYTES is exact application
+ * bytes, and INTEGER is canonical signed decimal ASCII (optional `-`, no
+ * leading zeroes except `0`, and no `-0`). The core performs canonical CBOR
+ * encoding and Item ID derivation after validating this representation.
  */
 openkache_client_result_t *openkache_client_execute_typed(
     const openkache_client_t *client,

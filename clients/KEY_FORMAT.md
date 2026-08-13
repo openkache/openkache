@@ -108,9 +108,11 @@ KeyType::Text
 KeyType::Bytes
 ```
 
-Every typed key MUST match the configured `KeyType`. A type mismatch MUST be
-rejected before encoding or hashing. `KeyType` adds no wire field and has no
-fixed-width integer variants.
+Every typed key MUST match the `KeyType` selected for that operation. A type
+mismatch MUST be rejected before encoding or hashing. `KeyType` adds no wire
+field and has no fixed-width integer variants. When a connection-level
+`KeyType` is configured, it is the default operation selection; a typed ABI
+operation MAY supply its own explicit discriminator.
 
 `ByteKeyOrHash` is permitted only when the configured type is `KeyType::Bytes`.
 It is a mapping policy, not a fourth typed-key type.
@@ -126,7 +128,7 @@ normative contract term; Rust uses `KeyType`, Python and TypeScript use
 | JavaScript / TypeScript | `string` → UTF-8 | `Uint8Array`, `Buffer` | `bigint` | safe integer-valued `number` → `Integer` under §3.2; otherwise reject |
 | Python | `str` → UTF-8 | `bytes`, buffer types | `int` | `float` rejected |
 | Rust | `String`, `&str` → UTF-8 | `&[u8]`, `Vec<u8>` | signed/unsigned integer types | `f32`, `f64` rejected |
-| C | typed ABI passes logical UTF-8 bytes with `FfiKeySpec::Text` | typed ABI passes logical bytes with `FfiKeySpec::Bytes` | typed ABI passes logical integer bytes with `FfiKeySpec::Integer` | binary float types rejected |
+| C | typed ABI passes logical UTF-8 bytes with `FfiKeySpec::Text` | typed ABI passes logical bytes with `FfiKeySpec::Bytes` | typed ABI passes canonical signed decimal ASCII bytes with `FfiKeySpec::Integer` | binary float types rejected |
 | C++ | `string_view` convenience overload | `span`/byte string view convenience overload | not exposed by the convenience API | `float`, `double` rejected |
 | Go | not exposed by the convenience API | `[]byte` → `Bytes` | not exposed by the convenience API | `float32`, `float64` rejected |
 | Java / Kotlin | package scaffold | package scaffold | package scaffold | package scaffold |
@@ -138,7 +140,14 @@ All text bindings MUST reject strings that cannot encode to valid UTF-8,
 including unpaired surrogates. Text and direct byte-key inputs are
 length-delimited; neither representation is NUL-terminated. In particular, C
 bindings MUST pass an explicit buffer length and MUST NOT use a NUL-terminated
-C string as the key representation.
+C string as the key representation. For `FfiKeySpec::Integer`, the logical
+bytes MUST be the UTF-8 encoding of a canonical signed decimal integer:
+optional leading `-`, one or more ASCII decimal digits, no leading zeroes
+unless the value is exactly `0`, and no `-0`. Whitespace, a leading `+`,
+non-ASCII digits, and other numeric spellings MUST be rejected. The decimal
+text is an ABI transport representation only; the resulting key identity is
+the mathematical integer and is encoded using the canonical CBOR integer
+rules in §3.1.
 
 The legacy shared C ABI `openkache_client_execute` uses
 `canonical_key_bytes` as its canonical-key operation input. Its
