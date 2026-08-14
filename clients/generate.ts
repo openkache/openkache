@@ -1146,13 +1146,6 @@ export function extract_client_contract(ast: unknown): Client_Contract {
       )
     }
   }
-  for (const opcode of wire.opcodes) {
-    if (!api_operation_names.has(opcode.name)) {
-      throw new Error(
-        `wire opcode ${opcode.name} has no matching client operation`,
-      )
-    }
-  }
   const ffi = ffi_contract(ffi_trait, shapes, client_namespace)
   const opcode_values = new Set(wire.opcodes.map((entry) => entry.value))
   for (const entry of ffi.operations) {
