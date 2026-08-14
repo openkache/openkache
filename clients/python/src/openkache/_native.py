@@ -17,6 +17,7 @@ from ._generated.smithy_contract import (
     SmithyFFINamespaceDescriptor,
     SMITHY_FFI_ABI_VERSION,
     SMITHY_FFI_CONNECTION_STATE_CLOSED,
+    SMITHY_FFI_ENCRYPTION_DEFAULT,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_DECODE_OK,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EXPIRATION_OFFSET,
     SMITHY_FFI_NAMESPACE_DESCRIPTOR_DEFAULT_EVICTION_OFFSET,
@@ -467,7 +468,7 @@ class NativeClient:
         value: bytes = b"",
         set_flags: int = 0,
         ttl_ms: int = 0,
-        encryption: int = (1 << 32) - 1,
+        encryption: int = SMITHY_FFI_ENCRYPTION_DEFAULT,
     ) -> tuple[int, bytes]:
         return self._execute_typed_with_options(
             operation,

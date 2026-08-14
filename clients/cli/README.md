@@ -85,6 +85,9 @@ export OPENKACHE_ADDRESS='cache.example.com:4433'
 openkache-cli get greeting
 ```
 
+The CLI does not expose a compression option and uses the shared client's
+default, which leaves compression disabled.
+
 Available environment variables are `OPENKACHE_ADDRESS`,
 `OPENKACHE_SERVER_NAME`, `OPENKACHE_CERTIFICATE`,
 `OPENKACHE_CLIENT_CERTIFICATE`, `OPENKACHE_CLIENT_KEY`,

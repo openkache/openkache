@@ -92,7 +92,10 @@ Use `client.Smithy()` when an application needs the generated
 - `Identity` optionally supplies a DER/PEM client certificate chain and private
   key for mutual TLS.
 - `Compression`, `Timeouts`, `Retry`, and `MaxInFlight` map directly to core
-  settings; zero values select documented core defaults.
+  settings. Go's zero-value `CompressionOptions` leaves compression disabled;
+  set `Enabled: true` to enable Zstandard, with zero level and thresholds
+  selecting the shared defaults (level `1`, minimum input `1,024` bytes, and
+  minimum savings `64` bytes).
 - When `EncryptionExplicit` is false (the default), the shared core selects
   randomized AES-256-GCM-SIV (Robust) when `ClientRootKey` is supplied and
   leaves values Unprotected otherwise. Set `EncryptionExplicit: true` with

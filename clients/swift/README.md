@@ -105,6 +105,9 @@ Keys are exact UTF-8 or binary bytes, including empty and NUL-containing keys.
 Empty values are valid for the protected adapter. Raw item IDs may contain zero
 through `Smithy_Value_Format.maxItemIdBytes` bytes. `clientRootKey` must contain
 exactly 32 persistent random bytes.
+Compression is disabled by default (`OpenKacheCompression.disabled`). Pass
+`OpenKacheCompression.zstandard()` to enable Zstandard with the shared defaults:
+level `1`, minimum input `1,024` bytes, and minimum savings `64` bytes.
 When `encryption` is omitted, the shared core selects Robust with a
 `clientRootKey` and Unprotected without one. Use `.unprotected` to explicitly
 disable value protection while retaining root-key-bound Item IDs. Explicit

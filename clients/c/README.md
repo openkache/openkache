@@ -74,6 +74,11 @@ Namespace results carry the canonical descriptor payload; use
 `openkache_client_namespace_descriptor_decode` to obtain a typed descriptor
 without reimplementing the wire parser in the application.
 
+The C ABI does not infer compression settings: pass
+`compression_enabled = 0` to disable compression, or pass `1` to enable
+Zstandard. Zero-valued level and threshold fields select the shared defaults
+(level `1`, minimum input `1,024` bytes, and minimum savings `64` bytes).
+
 Operation and value-format constants in the generated
 `openkache/smithy_contract.h` are sourced at build/package time from the client
 model [`../model/openkache.smithy`](../model/openkache.smithy) and wire model

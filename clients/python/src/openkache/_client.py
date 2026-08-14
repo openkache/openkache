@@ -639,7 +639,11 @@ class OpenKacheClient:
                 value=value,
                 set_flags=selected._wire_flags,
                 ttl_ms=selected.ttl_ms or 0,
-                encryption=(1 << 32) - 1 if encryption is None else int(encryption),
+                encryption=(
+                    SMITHY_FFI_ENCRYPTION_DEFAULT
+                    if encryption is None
+                    else int(encryption)
+                ),
             )
         except NativeError as error:
             raise OpenKacheError(str(error)) from error

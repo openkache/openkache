@@ -184,7 +184,10 @@ let result = <_ as OpenKacheApi>::get(client.raw(), GetInput {
 ## Configuration and lifecycle
 
 The builder configures explicit trust, mutual TLS, request deadlines, retries
-for response-safe operations, `max_in_flight`, and compression.
+for response-safe operations, `max_in_flight`, and compression. Compression is
+disabled by default; call `.compression(Compression::Zstandard(...))` to
+enable Zstandard with the shared defaults (level `1`, minimum input `1,024`
+bytes, and minimum savings `64` bytes).
 
 One client maintains one QUIC connection and lazily opens reusable bidirectional
 stream lanes up to `max_in_flight`. One request is active on each lane.

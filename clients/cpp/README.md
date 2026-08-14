@@ -65,6 +65,11 @@ protection. `namespace_open`, `namespace_update_policy`, and
 optimistic revisions. Transport and validation failures throw
 `openkache::Error`.
 
+Compression is disabled by default
+(`Connect_Options::compression_enabled = false`). Set it to `true` to enable
+Zstandard; zero-valued level and thresholds select the shared defaults (level
+`1`, minimum input `1,024` bytes, and minimum savings `64` bytes).
+
 `Connect_Options::key_format` selects the client-local application-key mapping.
 `Key_Format::Hash` is the default. `Key_Format::Byte_Key_Or_Hash` applies only
 to byte-span overloads: it preserves byte keys up to the wire Item ID limit and

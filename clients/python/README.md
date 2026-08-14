@@ -120,7 +120,10 @@ result = await client.raw.get(
 - `identity` accepts a `ClientIdentity` with a PEM/DER client chain and private
   key for mutual TLS.
 - `compression`, `encryption`, `timeouts`, `max_in_flight`, and
-  `retry_max_attempts` map directly to shared-core settings. When `encryption`
+  `retry_max_attempts` map directly to shared-core settings. When `compression`
+  is omitted, Python enables Zstandard with the shared defaults (level `1`,
+  minimum input `1,024` bytes, and minimum savings `64` bytes); pass
+  `CompressionOptions(enabled=False)` to disable it. When `encryption`
   is omitted, the shared core selects Robust if a client root key is
   supplied and Unprotected otherwise. An explicit Compact or Robust profile
   requires a client root key; select Compact only when every client

@@ -126,7 +126,9 @@ The runtime-neutral codec layer is available from
   must use the same key. When omitted, Item IDs are still derived but values
   are stored unprotected.
 - `compression` controls Zstandard level, minimum input size, and required
-  savings.
+  savings. When omitted, TypeScript enables Zstandard with the shared
+  defaults (level `1`, minimum input `1,024` bytes, and minimum savings
+  `64` bytes); set `enabled: false` to disable it.
 - `timeouts.connect_ms` and `timeouts.request_ms` bound connection and complete
   request operations.
 - `retry.max_attempts` controls retries for response-safe operations.

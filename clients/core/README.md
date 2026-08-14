@@ -126,6 +126,9 @@ client.set(b"application-key", b"value".to_vec(), Default::default()).await?;
 trust and derive the TLS server name from the host. Builders accept a
 pre-resolved endpoint, explicit trust roots, mutual TLS identity, deadlines,
 retry attempts, compression policy, and `max_in_flight`.
+`ValueCodec::default()` and the protected-client builders leave compression
+disabled; callers can select Zstandard with the shared defaults (level `1`,
+minimum input `1,024` bytes, and minimum savings `64` bytes).
 
 `Endpoint` requires a positive port. A pre-resolved socket address also
 requires an explicit certificate server name because the network destination
