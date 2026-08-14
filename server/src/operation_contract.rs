@@ -16,9 +16,13 @@ pub(super) use crate::contract::{
     MAX_OPERATION_REQUEST_FIELDS, OperationFieldPlan, OperationFramePolicy, OperationLayoutFraming,
     OperationStatus, OperationWireSpec, WIRE_CODEC_DESCRIPTORS, WIRE_CODEC_NAMES,
     WireCodecCardinality, WireCodecDescriptor, WireCodecKind, WireCodecLengthEncoding,
-    WireCodecWidth, operation_registry, operation_wire_spec, request_fields, wire_codec_kind,
+    WireCodecWidth, operation_registry, operation_wire_spec, wire_codec_kind,
     wire_request_layout,
 };
+// Future generated generic bindings consume field indexes through this neutral
+// facade even when the currently registered generic API has no fields.
+#[allow(unused_imports)]
+pub(super) use crate::contract::request_fields;
 
 pub(super) const MAX_FIELDS: usize = crate::contract::MAX_OPERATION_FIELDS;
 
