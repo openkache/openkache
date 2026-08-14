@@ -1,26 +1,27 @@
 //! Compact draft-v1 projection owned by the Rust client.
 
-use openkache_protocol::ITEM_ID_BYTES;
 use openkache_protocol::compat_v1::{
-    DELETE_IF_EMPTY, NAMESPACE_NAME_MAX_BYTES, OPEN_CREATE_IF_MISSING, OperationCompactV1Route,
-    OperationFieldDirection, OperationFieldRole, POLICY_DEFAULT_EXPIRATION_MASK,
-    POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED, POLICY_EXPIRATION_OVERRIDE,
-    POLICY_FIXED_TTL, POLICY_FLAGS_BYTES, POLICY_NO_EXPIRY, POLICY_RESERVED_MASK,
-    SET_CONDITION_ANY_BITS, SET_EVICTABLE_BITS, SET_EVICTION_PROTECTED_BITS, SET_EXPLICIT_TTL_BITS,
-    SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
-    SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS, operation_field_count, route_for_opcode,
+    operation_field_count, route_for_opcode, OperationCompactV1Route, OperationFieldDirection,
+    OperationFieldRole, DELETE_IF_EMPTY, NAMESPACE_NAME_MAX_BYTES, OPEN_CREATE_IF_MISSING,
+    POLICY_DEFAULT_EXPIRATION_MASK, POLICY_EVICTION_OVERRIDE, POLICY_EVICTION_PROTECTED,
+    POLICY_EXPIRATION_OVERRIDE, POLICY_FIXED_TTL, POLICY_FLAGS_BYTES, POLICY_NO_EXPIRY,
+    POLICY_RESERVED_MASK, SET_CONDITION_ANY_BITS, SET_EVICTABLE_BITS, SET_EVICTION_PROTECTED_BITS,
+    SET_EXPLICIT_TTL_BITS, SET_IF_ABSENT_BITS, SET_IF_PRESENT_BITS, SET_INHERIT_EVICTION_BITS,
+    SET_INHERIT_EXPIRATION_BITS, SET_NO_EXPIRY_BITS,
 };
 #[cfg(feature = "ffi")]
 use openkache_protocol::compat_v1::{
     SET_CONDITION_MASK, SET_EVICTION_MASK, SET_EXPIRATION_MASK, SET_RESERVED_MASK,
 };
+use openkache_protocol::ITEM_ID_BYTES;
 
 use super::{
-    DraftV1Request, EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode,
-    NamespacePolicy, OverridePolicy, ProtocolError, Result, SetCondition, SetWireOptions,
-    append_varuint, invalid_shape, validate_operation_field, validate_value_length,
+    invalid_shape, validate_operation_field, validate_value_length, DraftV1Request,
+    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
+    OverridePolicy, ProtocolError, Result, SetCondition, SetWireOptions,
 };
-use crate::request::{INLINE_REQUEST_PREFIX_BYTES, RequestPrefix};
+use crate::request::{RequestParts, RequestPrefix, INLINE_REQUEST_PREFIX_BYTES};
+use openkache_protocol::WireSegment;
 
 const MAX_SINGLE_ITEM_PREFIX_BYTES: usize = 1
     + openkache_protocol::NAMESPACE_ID_BYTES
@@ -71,6 +72,12 @@ pub(super) fn decode_set_options(flags: u8, ttl_ms: Option<u64>) -> Result<SetWi
 }
 
 pub(super) fn encode_namespace_policy(policy: NamespacePolicy) -> Result<Vec<u8>> {
+    let mut output = RequestPrefix::new();
+    append_namespace_policy(&mut output, policy)?;
+    Ok(output.as_slice().to_vec())
+}
+
+fn append_namespace_policy(output: &mut RequestPrefix, policy: NamespacePolicy) -> Result<()> {
     let mut flags = match policy.default_expiration {
         ExpirationDefault::NoExpiry => POLICY_NO_EXPIRY,
         ExpirationDefault::FixedTtl { ttl_ms } if ttl_ms > 0 => POLICY_FIXED_TTL,
@@ -89,12 +96,11 @@ pub(super) fn encode_namespace_policy(policy: NamespacePolicy) -> Result<Vec<u8>
     if policy.eviction_override == OverridePolicy::Allowed {
         flags |= POLICY_EVICTION_OVERRIDE;
     }
-    let mut output = Vec::with_capacity(POLICY_FLAGS_BYTES + openkache_protocol::MAX_VARUINT_BYTES);
     output.push(flags);
     if let ExpirationDefault::FixedTtl { ttl_ms } = policy.default_expiration {
-        append_varuint(&mut output, ttl_ms);
+        output.append_varuint(ttl_ms);
     }
-    Ok(output)
+    Ok(())
 }
 
 pub(super) fn decode_namespace_policy(input: &[u8]) -> Result<Option<(NamespacePolicy, usize)>> {
@@ -178,7 +184,7 @@ pub(super) fn decode_namespace_policy_parts(
     })
 }
 
-pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<RequestPrefix>> {
+pub(super) fn encode_request(request: DraftV1Request) -> Result<Option<RequestParts>> {
     let Some(route) = route_for_opcode(request.opcode) else {
         return Ok(None);
     };
@@ -222,25 +228,37 @@ pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<RequestPr
             output.push(u8::try_from(name.len()).map_err(|_| {
                 ProtocolError::InvalidNamespaceName("namespace name exceeds 255 octets")
             })?);
-            output.extend_from_slice(name);
+            let name = request
+                .namespace_name
+                .ok_or(ProtocolError::InvalidNamespaceName(
+                    "namespace-open name is missing",
+                ))?;
+            let mut policy = RequestPrefix::new();
             if request.create_if_missing {
-                output.extend_from_slice(
-                    &request
+                append_namespace_policy(
+                    &mut policy,
+                    request
                         .namespace_policy
-                        .ok_or(ProtocolError::MissingNamespacePolicy)?
-                        .encode()?,
-                );
+                        .ok_or(ProtocolError::MissingNamespacePolicy)?,
+                )?;
             }
+            return Ok(Some(RequestParts::new(
+                output,
+                [
+                    WireSegment::owned(name),
+                    WireSegment::inline(policy.as_slice()),
+                ],
+            )?));
         }
         OperationCompactV1Route::NamespaceUpdatePolicy => {
             append_namespace_id(&mut output, request.namespace_id)?;
             append_revision(&mut output, request.expected_revision)?;
-            output.extend_from_slice(
-                &request
+            append_namespace_policy(
+                &mut output,
+                request
                     .namespace_policy
-                    .ok_or(ProtocolError::MissingNamespacePolicy)?
-                    .encode()?,
-            );
+                    .ok_or(ProtocolError::MissingNamespacePolicy)?,
+            )?;
         }
         OperationCompactV1Route::NamespaceDelete => {
             output.push(DELETE_IF_EMPTY);
@@ -248,7 +266,10 @@ pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<RequestPr
             append_revision(&mut output, request.expected_revision)?;
         }
     }
-    Ok(Some(output))
+    Ok(Some(RequestParts::new(
+        output,
+        [WireSegment::owned(request.value)],
+    )?))
 }
 
 pub(super) fn validate_request(request: &DraftV1Request) -> Result<bool> {

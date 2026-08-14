@@ -1,13 +1,13 @@
 //! Draft-v1 request construction owned by the Rust client adapter.
 
 use openkache_protocol::compat_v1::MAX_COMPATIBILITY_REQUEST_ITEM_IDS;
-use openkache_protocol::{ItemId, Opcode, WireSegment};
+use openkache_protocol::{ItemId, Opcode};
 
 use crate::request::{RequestBuilder, RequestParts, RequestRetryPolicy};
 
 use super::{
-    NamespacePolicy, Result, SetWireOptions, compat_v1, generated_retry_policy, invalid_shape,
-    validate_value_length,
+    compat_v1, generated_retry_policy, invalid_shape, validate_value_length, NamespacePolicy,
+    Result, SetWireOptions,
 };
 
 const _: () = assert!(MAX_COMPATIBILITY_REQUEST_ITEM_IDS > 0);
@@ -65,7 +65,7 @@ impl DraftV1Request {
     }
 
     pub(crate) fn namespace_open(
-        name: impl AsRef<[u8]>,
+        name: Vec<u8>,
         create_if_missing: bool,
         policy: Option<NamespacePolicy>,
     ) -> Result<Self> {
@@ -75,7 +75,7 @@ impl DraftV1Request {
             item_ids: [None; MAX_COMPATIBILITY_REQUEST_ITEM_IDS],
             set_options: SetWireOptions::NONE,
             value: Vec::new(),
-            namespace_name: Some(name.as_ref().to_vec()),
+            namespace_name: Some(name),
             namespace_policy: policy,
             expected_revision: None,
             create_if_missing,
@@ -124,9 +124,10 @@ impl DraftV1Request {
     }
 
     fn into_parts(self) -> Result<RequestParts> {
-        let prefix = compat_v1::encode_prefix(&self)?
-            .ok_or_else(|| invalid_shape(self.opcode, self.item_id_count(), "draft-v1 request"))?;
-        Ok(RequestParts::new(prefix, [WireSegment::owned(self.value)])?)
+        let item_count = self.item_id_count();
+        let opcode = self.opcode;
+        compat_v1::encode_request(self)?
+            .ok_or_else(|| invalid_shape(opcode, item_count, "draft-v1 request"))
     }
 
     fn validate(&self) -> Result<()> {
