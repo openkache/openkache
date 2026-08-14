@@ -194,8 +194,9 @@ client.close().await?;
 ```
 
 `connection_state()` is a best-effort snapshot. `close()` is idempotent and
-permanent for that client. Automatic retry and ambiguous mutation outcomes
-follow the [wire protocol rules](../../protocol/SPEC.md#retry-and-outcome-rules).
+permanent for that client. Automatic retry is a client policy; ambiguous
+mutation outcomes follow the
+[wire protocol rules](../../protocol/SPEC.md#outcome-and-replay-rules).
 
 ## Core components
 

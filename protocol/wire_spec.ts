@@ -10,7 +10,6 @@ import {
 } from "./wire"
 import {
   derive_wire_compatibility_response_semantics,
-  derive_wire_compatibility_retry_mode,
   derive_wire_compatibility_scope,
 } from "./compatibility_v1"
 
@@ -66,17 +65,19 @@ export function render_protocol_spec_operation_table(contract: Wire_Contract): s
       }
     }
     if (operation.contract.request_wire !== undefined) {
-      return `opcode + ${operation.contract.request_wire.map(step_layout).join(" + ")}`
+      return `opcode + request ID + ${
+        operation.contract.request_wire.map(step_layout).join(" + ")
+      }`
     }
     switch (descriptor.request_framing) {
       case "empty":
-        return "opcode only"
+        return "opcode + request ID"
       case "opaque":
-        return "opcode + value_len + value"
+        return "opcode + request ID + value_len + value"
       case "ordered_fields":
         return descriptor.request_frame === "fixed_body"
-          ? "opcode + fixed-width dense body"
-          : "opcode + field_sequence_len + ordered field sequence"
+          ? "opcode + request ID + fixed-width dense body"
+          : "opcode + request ID + field_sequence_len + ordered field sequence"
     }
   }
   const response_payload = (operation: Wire_Operation): string => {
@@ -188,19 +189,17 @@ export function render_protocol_spec_contract_snapshot(
         .join("; ")
   const operation_scope = (operation: Wire_Operation): string =>
     derive_wire_compatibility_scope(operation.contract)
-  const operation_retry_mode = (operation: Wire_Operation): string =>
-    derive_wire_compatibility_retry_mode(operation.contract)
   const operation_semantics = (operation: Wire_Operation): string =>
     derive_wire_compatibility_response_semantics(operation.contract) ?? "-"
   const rows = operations
     .map((operation) => {
       const operation_contract = operation.contract
       const opcode = opcode_for(operation)
-      return `| \`${opcode.value.toString(16).padStart(2, "0").toUpperCase()}\` | \`${wire_name(operation.name).toUpperCase()}\` | \`${operation_scope(operation)}\` | \`${operation_retry_mode(operation)}\` | \`${operation_semantics(operation)}\` | \`${operation_contract.success_statuses.join(",")}\` | \`${operation_contract.error_statuses.join(",")}\` | \`${plan(operation_contract.request_plan ?? [])}\` | \`${plan(operation_contract.response_plan ?? [])}\` |`
+      return `| \`${opcode.value.toString(16).padStart(2, "0").toUpperCase()}\` | \`${wire_name(operation.name).toUpperCase()}\` | \`${operation_scope(operation)}\` | \`${operation_semantics(operation)}\` | \`${operation_contract.success_statuses.join(",")}\` | \`${operation_contract.error_statuses.join(",")}\` | \`${plan(operation_contract.request_plan ?? [])}\` | \`${plan(operation_contract.response_plan ?? [])}\` |`
     })
     .join("\n")
-  return `| Opcode | Name | Scope | Retry | Semantics | Success statuses | Error statuses | Request plan | Response plan |
-|---|---|---|---|---|---|---|---|---|
+  return `| Opcode | Name | Scope | Semantics | Success statuses | Error statuses | Request plan | Response plan |
+|---|---|---|---|---|---|---|---|
 ${rows}`
 }
 

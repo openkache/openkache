@@ -33,7 +33,7 @@ adapter depends on this core directly.
 - The [value-format specification](../VALUE_FORMAT.md) defines formatted value
   bytes and algorithms.
 - The [wire protocol specification](../../protocol/SPEC.md) defines framing,
-  operations, limits, and retry ambiguity.
+  operations, limits, and ambiguous operation outcomes.
 - This README covers core crate usage, configuration, and source layout.
 
 This README intentionally does not specify protected-value bytes. Consult the

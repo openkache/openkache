@@ -13,7 +13,7 @@ Shared client topics are documented here:
 | SDK inventory, implementation status, and binding boundaries | This README |
 | Formatted key input, conversion, and namespace-bound Item ID derivation | [Key format](KEY_FORMAT.md) |
 | Formatted value bytes, compression, and application-level protection | [Value format](VALUE_FORMAT.md) |
-| QUIC framing, operations, limits, and retry ambiguity | [Wire protocol](../protocol/SPEC.md) |
+| QUIC framing, operations, limits, and ambiguous outcomes | [Wire protocol](../protocol/SPEC.md) |
 | Language API, build, packaging, and runtime configuration | The implemented package's README |
 
 Package documentation links to these references instead of restating shared
