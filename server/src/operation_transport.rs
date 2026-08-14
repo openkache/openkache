@@ -243,7 +243,7 @@ fn segmented_response_fields(
 fn operation_value_segment(value: OperationValue) -> ResponseSegment {
     match value {
         OperationValue::Inline(value) => ResponseSegment::Inline(value),
-        OperationValue::Owned(value) => ResponseSegment::Payload(value),
+        OperationValue::Owned(value) => ResponseSegment::Owned(value),
     }
 }
 

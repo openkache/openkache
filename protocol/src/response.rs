@@ -5,76 +5,14 @@
 //! semantics; callers pass the borrowed payload to the API codec that owns
 //! those semantics.
 
-use std::ops::Range;
-
 use smallvec::SmallVec;
 
 use crate::{
-    MAX_VARUINT_BYTES, MIN_VARUINT_BYTES, ProtocolError, RESPONSE_FIXED_BYTES, Result, Status,
-    decode_varuint, encode_varuint, validate_value_length,
+    MAX_VARUINT_BYTES, MIN_VARUINT_BYTES, ProtocolError, RESPONSE_FIXED_BYTES, ResponseSegment,
+    Result, Status, decode_varuint, encode_varuint, validate_value_length,
 };
 
 const _: () = assert!(RESPONSE_FIXED_BYTES + MAX_VARUINT_BYTES <= 32);
-
-/// An owned buffer with a logical byte range.
-///
-/// Keeping the range beside its allocation lets request and response paths
-/// transfer payload ownership without shifting bytes to offset zero.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OwnedRange {
-    buffer: Vec<u8>,
-    range: Range<usize>,
-}
-
-impl OwnedRange {
-    /// Retains a validated logical range of an owned buffer.
-    pub fn new(buffer: Vec<u8>, range: Range<usize>) -> Option<Self> {
-        (range.start <= range.end && range.end <= buffer.len()).then_some(Self { buffer, range })
-    }
-
-    /// Owns one complete buffer.
-    pub fn whole(buffer: Vec<u8>) -> Self {
-        let end = buffer.len();
-        Self {
-            buffer,
-            range: 0..end,
-        }
-    }
-
-    /// Returns the visible bytes.
-    pub fn as_slice(&self) -> &[u8] {
-        self.buffer
-            .get(self.range.clone())
-            .expect("owned byte range remains within its buffer")
-    }
-
-    /// Returns the visible byte count.
-    pub fn len(&self) -> usize {
-        self.range.len()
-    }
-
-    /// Returns whether the visible range is empty.
-    pub fn is_empty(&self) -> bool {
-        self.range.is_empty()
-    }
-
-    /// Recovers the buffer and logical range without copying.
-    pub fn into_parts(self) -> (Vec<u8>, Range<usize>) {
-        (self.buffer, self.range)
-    }
-}
-
-impl From<Vec<u8>> for OwnedRange {
-    fn from(buffer: Vec<u8>) -> Self {
-        Self::whole(buffer)
-    }
-}
-
-impl AsRef<[u8]> for OwnedRange {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
 
 /// Metadata required to delimit one response with an opaque payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -303,49 +241,6 @@ impl ResponseHeaderBytes {
     }
 }
 
-/// One owned response-body segment.
-///
-/// Small framing prefixes stay inline while application/storage payloads keep
-/// their original allocation and logical range.
-#[derive(Debug, Eq, PartialEq)]
-pub enum ResponseSegment {
-    /// Framing bytes stored inline without a heap allocation.
-    Inline(SmallVec<[u8; 32]>),
-    /// An ownership-preserving application or storage payload.
-    Payload(OwnedRange),
-}
-
-impl ResponseSegment {
-    /// Returns the visible wire bytes.
-    pub fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Inline(bytes) => bytes,
-            Self::Payload(bytes) => bytes.as_slice(),
-        }
-    }
-
-    /// Returns the visible byte count.
-    pub fn len(&self) -> usize {
-        self.as_slice().len()
-    }
-
-    /// Returns whether the segment is empty.
-    pub fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
-    }
-
-    /// Copies small framing bytes into inline storage.
-    pub fn inline(bytes: &[u8]) -> Self {
-        Self::Inline(SmallVec::from_slice(bytes))
-    }
-}
-
-impl From<OwnedRange> for ResponseSegment {
-    fn from(value: OwnedRange) -> Self {
-        Self::Payload(value)
-    }
-}
-
 impl ResponseParts {
     /// Encodes a response header over ownership-preserving body segments.
     pub fn segmented<I, T>(status: Status, segments: I) -> Result<Self>
@@ -422,7 +317,7 @@ impl ResponseParts {
         let mut segments = SmallVec::with_capacity(segment_count);
         segments.push(ResponseSegment::Inline(self.header));
         if !self.payload.is_empty() {
-            segments.push(ResponseSegment::Payload(self.payload.into()));
+            segments.push(ResponseSegment::Owned(self.payload.into()));
         }
         segments.extend(self.segments);
         segments
