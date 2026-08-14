@@ -5,15 +5,19 @@
 //! compact-v1 adapter only for operations that explicitly join that profile.
 
 use openkache_protocol::{
-    ItemId, MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES,
-    NAMESPACE_REVISION_BYTES, Opcode, OperationFramePolicy, OperationLayoutFraming, WireSegment,
-    decode_planned_fields, encode_varuint, operation_wire_spec,
+    MAX_OPERATION_REQUEST_FIELDS, MAX_VALUE_BYTES, NAMESPACE_ID_BYTES, NAMESPACE_REVISION_BYTES,
+    Opcode, OperationFramePolicy, OperationLayoutFraming, WireSegment, decode_planned_fields,
+    encode_varuint, operation_wire_spec,
 };
 
 use crate::request::{RequestBuilder, RequestParts, RequestRetryPolicy};
 
 #[path = "protocol_compat_v1.rs"]
 mod compat_v1;
+#[path = "protocol_draft_v1_request.rs"]
+mod draft_v1_request;
+
+pub(crate) use draft_v1_request::DraftV1Request;
 
 /// Client-side protocol validation failures.
 #[derive(Debug, thiserror::Error)]
@@ -419,165 +423,6 @@ impl GenericRequest {
 }
 
 impl RequestBuilder for GenericRequest {
-    fn retry_policy(&self) -> RequestRetryPolicy {
-        self.retry_policy
-    }
-
-    fn into_parts(self) -> crate::Result<RequestParts> {
-        Self::into_parts(self).map_err(crate::Error::protocol)
-    }
-}
-
-/// A validated draft-v1 request owned by the Rust client adapter.
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) struct Request {
-    pub(crate) opcode: Opcode,
-    namespace_id: Option<u64>,
-    item_ids: Vec<ItemId>,
-    set_options: SetWireOptions,
-    value: Vec<u8>,
-    namespace_name: Option<Vec<u8>>,
-    namespace_policy: Option<NamespacePolicy>,
-    expected_revision: Option<u64>,
-    pub(crate) create_if_missing: bool,
-    pub(crate) retry_policy: RequestRetryPolicy,
-}
-
-impl Request {
-    pub(crate) fn new_scoped(
-        opcode: Opcode,
-        namespace_id: u64,
-        item_id: Option<ItemId>,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        Self::new_scoped_with_options(opcode, namespace_id, item_id, SetWireOptions::NONE, value)
-    }
-
-    pub(crate) fn new_scoped_with_options(
-        opcode: Opcode,
-        namespace_id: u64,
-        item_id: Option<ItemId>,
-        set_options: SetWireOptions,
-        value: Vec<u8>,
-    ) -> Result<Self> {
-        let request = Self {
-            opcode,
-            namespace_id: Some(namespace_id),
-            item_ids: item_id.into_iter().collect(),
-            set_options,
-            value,
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: None,
-            create_if_missing: false,
-            retry_policy: generated_retry_policy(opcode, false),
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    pub(crate) fn namespace_open(
-        name: impl AsRef<[u8]>,
-        create_if_missing: bool,
-        policy: Option<NamespacePolicy>,
-    ) -> Result<Self> {
-        let request = Self {
-            opcode: Opcode::NamespaceOpen,
-            namespace_id: None,
-            item_ids: Vec::new(),
-            set_options: SetWireOptions::NONE,
-            value: Vec::new(),
-            namespace_name: Some(name.as_ref().to_vec()),
-            namespace_policy: policy,
-            expected_revision: None,
-            create_if_missing,
-            retry_policy: generated_retry_policy(Opcode::NamespaceOpen, create_if_missing),
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    pub(crate) fn namespace_update_policy(
-        namespace_id: u64,
-        expected_revision: u64,
-        policy: NamespacePolicy,
-    ) -> Result<Self> {
-        let request = Self {
-            opcode: Opcode::NamespaceUpdatePolicy,
-            namespace_id: Some(namespace_id),
-            item_ids: Vec::new(),
-            set_options: SetWireOptions::NONE,
-            value: Vec::new(),
-            namespace_name: None,
-            namespace_policy: Some(policy),
-            expected_revision: Some(expected_revision),
-            create_if_missing: false,
-            retry_policy: generated_retry_policy(Opcode::NamespaceUpdatePolicy, false),
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    pub(crate) fn namespace_delete(namespace_id: u64, expected_revision: u64) -> Result<Self> {
-        let request = Self {
-            opcode: Opcode::NamespaceDelete,
-            namespace_id: Some(namespace_id),
-            item_ids: Vec::new(),
-            set_options: SetWireOptions::NONE,
-            value: Vec::new(),
-            namespace_name: None,
-            namespace_policy: None,
-            expected_revision: Some(expected_revision),
-            create_if_missing: false,
-            retry_policy: generated_retry_policy(Opcode::NamespaceDelete, false),
-        };
-        request.validate()?;
-        Ok(request)
-    }
-
-    fn into_parts(self) -> Result<RequestParts> {
-        let prefix = compat_v1::encode_prefix(&self)?
-            .ok_or_else(|| invalid_shape(self.opcode, self.item_ids.len(), "draft-v1 request"))?;
-        Ok(RequestParts::new([
-            WireSegment::owned(prefix),
-            WireSegment::owned(self.value),
-        ])?)
-    }
-
-    fn validate(&self) -> Result<()> {
-        validate_value_length(self.value.len())?;
-        if compat_v1::validate_request(self)? {
-            Ok(())
-        } else {
-            Err(invalid_shape(
-                self.opcode,
-                self.item_ids.len(),
-                "draft-v1 request",
-            ))
-        }
-    }
-
-    fn has_non_empty_fields_except_namespace(&self) -> bool {
-        !self.item_ids.is_empty()
-            || self.set_options != SetWireOptions::NONE
-            || !self.value.is_empty()
-            || self.namespace_name.is_some()
-            || self.namespace_policy.is_some()
-            || self.expected_revision.is_some()
-            || self.create_if_missing
-    }
-
-    fn has_non_empty_fields_except_namespace_revision(&self) -> bool {
-        !self.item_ids.is_empty()
-            || self.set_options != SetWireOptions::NONE
-            || !self.value.is_empty()
-            || self.namespace_name.is_some()
-            || self.namespace_policy.is_some()
-            || self.create_if_missing
-    }
-}
-
-impl RequestBuilder for Request {
     fn retry_policy(&self) -> RequestRetryPolicy {
         self.retry_policy
     }

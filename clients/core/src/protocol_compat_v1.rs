@@ -16,9 +16,9 @@ use openkache_protocol::compat_v1::{
 };
 
 use super::{
-    EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode, NamespacePolicy,
-    OverridePolicy, ProtocolError, Request, Result, SetCondition, SetWireOptions, append_varuint,
-    invalid_shape, validate_operation_field, validate_value_length,
+    DraftV1Request, EvictionDefault, EvictionMode, ExpirationDefault, ExpirationMode,
+    NamespacePolicy, OverridePolicy, ProtocolError, Result, SetCondition, SetWireOptions,
+    append_varuint, invalid_shape, validate_operation_field, validate_value_length,
 };
 
 #[cfg(feature = "ffi")]
@@ -170,7 +170,7 @@ pub(super) fn decode_namespace_policy_parts(
     })
 }
 
-pub(super) fn encode_prefix(request: &Request) -> Result<Option<Vec<u8>>> {
+pub(super) fn encode_prefix(request: &DraftV1Request) -> Result<Option<Vec<u8>>> {
     let Some(route) = route_for_opcode(request.opcode) else {
         return Ok(None);
     };
@@ -248,7 +248,7 @@ pub(super) fn encode_prefix(request: &Request) -> Result<Option<Vec<u8>>> {
     Ok(Some(output))
 }
 
-pub(super) fn validate_request(request: &Request) -> Result<bool> {
+pub(super) fn validate_request(request: &DraftV1Request) -> Result<bool> {
     let Some(route) = route_for_opcode(request.opcode) else {
         return Ok(false);
     };
