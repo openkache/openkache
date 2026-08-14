@@ -992,6 +992,10 @@ pub enum ProtocolError {
     },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("request packed byte at offset {offset} violates its bit contract")]
+    InvalidRequestPackedBits { offset: usize },
+    #[error("request constant does not match at offset {offset}")]
+    RequestConstantMismatch { offset: usize },
     #[error("optional-value payload is invalid: {0}")]
     InvalidOptionalValues(&'static str),
     #[error("operation field sequence is invalid: {0}")]
@@ -1050,6 +1054,12 @@ impl From<openkache_protocol::ProtocolError> for ProtocolError {
             }
             openkache_protocol::ProtocolError::ValueTooLarge { size, maximum } => {
                 Self::ValueTooLarge { size, maximum }
+            }
+            openkache_protocol::ProtocolError::InvalidRequestPackedBits { offset } => {
+                Self::InvalidRequestPackedBits { offset }
+            }
+            openkache_protocol::ProtocolError::RequestConstantMismatch { offset } => {
+                Self::RequestConstantMismatch { offset }
             }
             openkache_protocol::ProtocolError::InvalidOptionalValues(message) => {
                 Self::InvalidOptionalValues(message)

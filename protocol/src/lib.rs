@@ -88,7 +88,8 @@ pub use optional_values::{
     optional_values_max_encoded_len,
 };
 pub use request::{
-    OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFrameStep,
+    OpaqueRequestFrame, RequestFrameHeader, RequestFrameLayout, RequestFramePackedField,
+    RequestFrameStep,
     decode_request_frame_header,
 };
 pub use response::{
@@ -555,6 +556,10 @@ pub enum ProtocolError {
     VaruintOverflow { context: &'static str },
     #[error("value is too large: {size} bytes exceeds {maximum}")]
     ValueTooLarge { size: usize, maximum: usize },
+    #[error("request packed byte at offset {offset} violates its bit contract")]
+    InvalidRequestPackedBits { offset: usize },
+    #[error("request constant does not match at offset {offset}")]
+    RequestConstantMismatch { offset: usize },
     #[error("invalid optional-value payload: {0}")]
     InvalidOptionalValues(&'static str),
     #[error("invalid operation field sequence: {0}")]
