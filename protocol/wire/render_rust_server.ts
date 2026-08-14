@@ -18,13 +18,11 @@ function rust_request_layout(contract: Wire_Contract): string {
   if (operations === undefined) return ""
   const step_expression = (operation: Wire_Operation): string => {
     const descriptor = derive_wire_operation_descriptor(operation.contract)
-    const fixed = (bytes: string): string =>
-      `WireRequestStep::Fixed { bytes: ${bytes} }`
     switch (descriptor.request_framing) {
       case "empty":
-        return `[${fixed("OPCODE_BYTES")}]`
+        return "[]"
       case "opaque":
-        return `[${fixed("OPCODE_BYTES")}, WireRequestStep::ValueLength]`
+        return "[WireRequestStep::ValueLength]"
       case "ordered_fields":
         if (descriptor.request_frame === "fixed_body") {
           const width = fixed_plan_width(operation.contract.request_plan)
@@ -33,9 +31,9 @@ function rust_request_layout(contract: Wire_Contract): string {
               `operation ${operation.name} selected fixed request framing without an exact width`,
             )
           }
-          return `[${fixed("OPCODE_BYTES")}, WireRequestStep::FixedBody { bytes: ${formatted_decimal(width)} }]`
+          return `[WireRequestStep::FixedBody { bytes: ${formatted_decimal(width)} }]`
         }
-        return `[${fixed("OPCODE_BYTES")}, WireRequestStep::ValueLength]`
+        return "[WireRequestStep::ValueLength]"
       default:
         return `[]`
     }
@@ -80,7 +78,7 @@ export function render_rust_server_contract(contract: Wire_Contract): string {
     .join("\n")
   return `// Generated from the OpenKache Smithy operation contract. Do not edit.
 
-use openkache_protocol::{OPCODE_BYTES, Opcode, Status};
+use openkache_protocol::{Opcode, Status};
 // The server consumes only the canonical wire projection.  Keep the
 // Client-result/retry and execution-scope metadata belongs to the respective
 // adapters; it is intentionally absent from this server contract surface.
