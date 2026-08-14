@@ -1,34 +1,38 @@
-//! API binding registrations.
+//! API module composition.
 //!
-//! The generic registry module validates and looks up these entries, while
-//! this module owns the API-specific function pointers. Keeping the table out
-//! of the registry foundation makes the composition boundary explicit. Every
-//! `handler` field uses one generic `OperationHandler` future boundary; this
-//! table never introduces a transport- or protocol-specific handler family.
+//! API-owned modules contribute request projection and behavior together.
+//! This composition root builds their dense catalogs in one step, while the
+//! transport and executor consume only their respective projections.
 
 use std::sync::{Arc, Mutex};
 
 use openkache_protocol::Opcode;
 
-use super::operation_api::{OperationCatalog, ServerOperationRegistration};
+use super::operation_api::{ServerComposition, ServerOperationRegistration};
 use super::{
     NamespaceRegistry, NetworkWorkerCache, ObservabilityState,
     operation_capabilities::{CapabilityCatalog, CapabilityRegistry},
     operation_compatibility_bindings as compatibility, operation_generic_bindings as generic,
 };
 
-/// Composition-root operation catalog assembled from API-owned modules.
-pub(super) const SERVER_OPERATIONS: OperationCatalog = OperationCatalog::new()
+/// Composition-root catalogs assembled from API-owned modules.
+pub(super) const SERVER_COMPOSITION: ServerComposition = ServerComposition::new()
     .register_module(generic::API)
     .register_module(compatibility::API);
 
 pub(super) fn server_operation(opcode: Opcode) -> Option<&'static ServerOperationRegistration> {
-    SERVER_OPERATIONS.get(opcode)
+    SERVER_COMPOSITION.operation(opcode)
 }
 
 pub(super) fn registered_operations() -> impl Iterator<Item = &'static ServerOperationRegistration>
 {
-    SERVER_OPERATIONS.iter()
+    SERVER_COMPOSITION.operations()
+}
+
+pub(super) const fn request_descriptor(
+    opcode: Opcode,
+) -> &'static crate::protocol::RequestDescriptor {
+    SERVER_COMPOSITION.request_descriptor(opcode)
 }
 
 /// Installs the capabilities owned by the currently registered API modules.

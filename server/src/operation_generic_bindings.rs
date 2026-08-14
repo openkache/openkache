@@ -431,7 +431,7 @@ immediate_handler!(reverse_handler_async, reverse_handler);
 immediate_handler!(square_array_handler_async, square_array_handler);
 immediate_handler!(page_handler_async, page_handler);
 
-pub(super) const API: ApiModule = ApiModule::new(&[
+pub(super) const API: ApiModule = ApiModule::new(crate::protocol::generic_request_descriptor(), &[
     operation_api::RegistrationBuilder::generic(Opcode::Ping, ping_handler_async)
         .read_only()
         .build(),

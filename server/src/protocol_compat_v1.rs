@@ -17,16 +17,15 @@ use contract::{
 };
 
 use super::{
-    ItemId, NamespacePolicy, Opcode, ProtocolError, RequestDescriptor, RequestDescriptorModule,
-    RequestHeader, Result, SetOptions, WireRequestLayout, WireRequestStep, WireResult,
-    wire_request_layout,
+    ItemId, NamespacePolicy, Opcode, ProtocolError, RequestDescriptor, RequestHeader, Result,
+    SetOptions, WireRequestLayout, WireRequestStep, WireResult, wire_request_layout,
 };
 
 #[path = "protocol_compat_v1_policy.rs"]
 mod policy;
 pub(crate) use policy::decode_namespace_policy;
 
-const REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
+pub(super) const REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
     "draft-v1",
     request_frame_layout,
     decode_header,
@@ -36,19 +35,6 @@ const REQUEST_DESCRIPTOR: RequestDescriptor = RequestDescriptor::new(
     decode_owned_request,
     decode_server_request,
 );
-
-pub(super) const fn request_descriptor_module() -> RequestDescriptorModule {
-    let mut module = RequestDescriptorModule::new();
-    let mut index = 0;
-    while index < Opcode::COUNT {
-        let opcode = Opcode::ALL[index];
-        if openkache_protocol::compat_v1::route_for_opcode(opcode).is_some() {
-            module = module.register(opcode, &REQUEST_DESCRIPTOR);
-        }
-        index += 1;
-    }
-    module
-}
 
 /// Compact request layouts owned by the protocol-v1 compatibility adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

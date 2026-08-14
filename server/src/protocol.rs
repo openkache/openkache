@@ -167,82 +167,13 @@ pub(crate) trait RequestDescriptorProvider: Send + Sync {
     fn descriptor(&self, opcode: Opcode) -> &'static RequestDescriptor;
 }
 
-/// One API module's sparse request-descriptor contribution.
-#[derive(Clone, Copy)]
-pub(super) struct RequestDescriptorModule {
-    entries: [Option<&'static RequestDescriptor>; Opcode::COUNT],
+pub(crate) const fn generic_request_descriptor() -> &'static RequestDescriptor {
+    &generic::REQUEST_DESCRIPTOR
 }
 
-impl RequestDescriptorModule {
-    pub(super) const fn new() -> Self {
-        Self {
-            entries: [None; Opcode::COUNT],
-        }
-    }
-
-    pub(super) const fn register(
-        mut self,
-        opcode: Opcode,
-        descriptor: &'static RequestDescriptor,
-    ) -> Self {
-        let slot = opcode.index();
-        if self.entries[slot].is_some() {
-            panic!("duplicate request descriptor in API module");
-        }
-        self.entries[slot] = Some(descriptor);
-        self
-    }
+pub(crate) const fn compatibility_request_descriptor() -> &'static RequestDescriptor {
+    &compat_v1::REQUEST_DESCRIPTOR
 }
-
-/// Dense opcode-indexed request catalog assembled by the composition root.
-#[derive(Clone, Copy)]
-struct RequestDescriptorCatalog {
-    entries: [Option<&'static RequestDescriptor>; Opcode::COUNT],
-}
-
-impl RequestDescriptorCatalog {
-    const fn new() -> Self {
-        Self {
-            entries: [None; Opcode::COUNT],
-        }
-    }
-
-    const fn register_module(mut self, module: RequestDescriptorModule) -> Self {
-        let mut index = 0;
-        while index < Opcode::COUNT {
-            if let Some(descriptor) = module.entries[index] {
-                if self.entries[index].is_some() {
-                    panic!("duplicate request descriptor across API modules");
-                }
-                self.entries[index] = Some(descriptor);
-            }
-            index += 1;
-        }
-        self
-    }
-
-    const fn with_fallback(mut self, descriptor: &'static RequestDescriptor) -> Self {
-        let mut index = 0;
-        while index < Opcode::COUNT {
-            if self.entries[index].is_none() {
-                self.entries[index] = Some(descriptor);
-            }
-            index += 1;
-        }
-        self
-    }
-
-    const fn get(&self, opcode: Opcode) -> &'static RequestDescriptor {
-        match self.entries[opcode.index()] {
-            Some(descriptor) => descriptor,
-            None => panic!("modeled operation has no request descriptor"),
-        }
-    }
-}
-
-const REQUEST_DESCRIPTOR_CATALOG: RequestDescriptorCatalog = RequestDescriptorCatalog::new()
-    .register_module(compat_v1::request_descriptor_module())
-    .with_fallback(&generic::REQUEST_DESCRIPTOR);
 
 /// Composed provider used by the public server protocol facade.
 #[derive(Clone, Copy, Debug, Default)]
@@ -250,7 +181,7 @@ pub(crate) struct ComposedRequestDescriptorProvider;
 
 impl RequestDescriptorProvider for ComposedRequestDescriptorProvider {
     fn descriptor(&self, opcode: Opcode) -> &'static RequestDescriptor {
-        REQUEST_DESCRIPTOR_CATALOG.get(opcode)
+        crate::server::request_descriptor(opcode)
     }
 }
 

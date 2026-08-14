@@ -524,7 +524,9 @@ pub(super) fn handles(opcode: Opcode) -> bool {
         .any(|registration| registration.opcode == opcode)
 }
 
-pub(super) const API: ApiModule = ApiModule::new(&[
+pub(super) const API: ApiModule = ApiModule::new(
+    crate::protocol::compatibility_request_descriptor(),
+    &[
     RegistrationBuilder::with_decoder(
         Opcode::Get,
         super::v1_adapter::adapt_request,
@@ -606,4 +608,5 @@ pub(super) const API: ApiModule = ApiModule::new(&[
     .authorize(operation_handlers::authorization_none)
     .read_only()
     .build(),
-]);
+    ],
+);
