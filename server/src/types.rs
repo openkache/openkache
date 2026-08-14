@@ -1,5 +1,6 @@
 //! Shared byte-oriented types used across the KV cache.
 
+use std::hash::{Hash, Hasher};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -327,7 +328,7 @@ impl AsRef<[u8]> for StoredItemValue {
 
 /// Canonical 32-byte server-derived key consumed by routing, indexes, and storage.
 #[repr(transparent)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct StorageKey([u8; STORAGE_KEY_BYTES]);
 
 impl StorageKey {
@@ -352,6 +353,14 @@ impl StorageKey {
     /// Consumes the wrapper and returns the complete fixed-size storage key bytes.
     pub const fn into_bytes(self) -> [u8; STORAGE_KEY_BYTES] {
         self.0
+    }
+}
+
+impl Hash for StorageKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // The recoverable domain prefix is intentionally excluded from every
+        // storage distribution path; this digest word owns routing entropy.
+        state.write_u64(self.routing_hash());
     }
 }
 
