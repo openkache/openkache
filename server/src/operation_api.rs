@@ -19,6 +19,7 @@ use super::operation_contract as contract;
 use super::operation_contract::OperationStatus;
 use super::operation_handlers::{AuthorizationFn, OperationInputView};
 use super::operation_registry::OperationHandler;
+use crate::protocol::RequestDescriptor;
 
 /// Downcasts one API-owned capability without exposing the catalog's
 /// type-erasure details to a binding.
@@ -367,22 +368,89 @@ impl RegistrationBuilder {
 
 /// A self-contained API module contribution.
 ///
-/// The module owns a registration slice and the composition root erases only
-/// the module boundary when it builds the dense opcode catalog. Keeping this
-/// as a first-class value makes adding an API a single module registration
-/// instead of coordinating multiple global tables.
+/// The module owns one request projection and its behavior registrations. The
+/// composition root erases only this boundary when it builds the dense
+/// catalogs. Keeping both projections in one value makes adding an API a
+/// single module registration instead of coordinating global tables.
 #[derive(Clone, Copy)]
 pub(super) struct ApiModule {
+    request_descriptor: &'static RequestDescriptor,
     operations: &'static [ServerOperationRegistration],
 }
 
 impl ApiModule {
-    pub(super) const fn new(operations: &'static [ServerOperationRegistration]) -> Self {
-        Self { operations }
+    pub(super) const fn new(
+        request_descriptor: &'static RequestDescriptor,
+        operations: &'static [ServerOperationRegistration],
+    ) -> Self {
+        Self {
+            request_descriptor,
+            operations,
+        }
+    }
+
+    pub(super) const fn request_descriptor(self) -> &'static RequestDescriptor {
+        self.request_descriptor
     }
 
     pub(super) const fn operations(self) -> &'static [ServerOperationRegistration] {
         self.operations
+    }
+}
+
+/// Server catalogs assembled together from API-owned module contributions.
+///
+/// Registering one module installs both its behavior and request projection,
+/// so an operation cannot be added to only one hot-path lookup table.
+pub(super) struct ServerComposition {
+    operations: OperationCatalog,
+    request_descriptors: [Option<&'static RequestDescriptor>; Opcode::COUNT],
+}
+
+impl ServerComposition {
+    pub(super) const fn new() -> Self {
+        Self {
+            operations: OperationCatalog::new(),
+            request_descriptors: [None; Opcode::COUNT],
+        }
+    }
+
+    pub(super) const fn register_module(mut self, module: ApiModule) -> Self {
+        let registrations = module.operations();
+        let mut index = 0;
+        while index < registrations.len() {
+            let slot = registrations[index].opcode.index();
+            if self.request_descriptors[slot].is_some() {
+                panic!("duplicate request descriptor across API modules");
+            }
+            self.request_descriptors[slot] = Some(module.request_descriptor());
+            index += 1;
+        }
+        self.operations = self.operations.register_module(module);
+        self
+    }
+
+    pub(super) fn operation(
+        &'static self,
+        opcode: Opcode,
+    ) -> Option<&'static ServerOperationRegistration> {
+        self.operations.get(opcode)
+    }
+
+    pub(super) fn operations(
+        &'static self,
+    ) -> impl Iterator<Item = &'static ServerOperationRegistration> {
+        self.operations.iter()
+    }
+
+    pub(super) const fn request_descriptor(
+        &'static self,
+        opcode: Opcode,
+    ) -> &'static RequestDescriptor {
+        match self.request_descriptors[opcode.index()] {
+            Some(descriptor) => descriptor,
+            None => panic!("modeled operation has no request descriptor"),
+        }
     }
 }
 
@@ -396,13 +464,13 @@ pub(super) struct OperationCatalog {
 }
 
 impl OperationCatalog {
-    pub(super) const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             entries: [None; Opcode::COUNT],
         }
     }
 
-    pub(super) const fn register(mut self, registrations: &[ServerOperationRegistration]) -> Self {
+    const fn register(mut self, registrations: &[ServerOperationRegistration]) -> Self {
         let mut index = 0;
         while index < registrations.len() {
             let registration = registrations[index];
@@ -416,18 +484,18 @@ impl OperationCatalog {
         self
     }
 
-    pub(super) const fn register_module(self, module: ApiModule) -> Self {
+    const fn register_module(self, module: ApiModule) -> Self {
         self.register(module.operations())
     }
 
-    pub(super) fn get(
+    fn get(
         &'static self,
         opcode: Opcode,
     ) -> Option<&'static ServerOperationRegistration> {
         self.entries[opcode.index()].as_ref()
     }
 
-    pub(super) fn iter(
+    fn iter(
         &'static self,
     ) -> impl Iterator<Item = &'static ServerOperationRegistration> {
         self.entries.iter().filter_map(Option::as_ref)

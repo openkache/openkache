@@ -83,6 +83,12 @@ pub use operation_capabilities::{
     CapabilityCatalog, CapabilityEntry, CapabilityList, CapabilityRegistry, EmptyCapabilityCatalog,
 };
 
+pub(crate) const fn request_descriptor(
+    opcode: openkache_protocol::Opcode,
+) -> &'static crate::protocol::RequestDescriptor {
+    operation_registrations::request_descriptor(opcode)
+}
+
 #[path = "network_roles.rs"]
 mod network_roles;
 #[allow(unused_imports)]
